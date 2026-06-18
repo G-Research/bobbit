@@ -56,6 +56,21 @@ describe("buildVerificationFailureMessage", () => {
 		assert.match(message, /step="Signoff"/);
 	});
 
+	it("omits skipped later-phase steps from failed-step inspect commands", () => {
+		const message = buildVerificationFailureMessage("ready-to-merge", [
+			{ name: "Unit tests", type: "command", passed: false, output: "unit output" },
+			{ name: "Code review", type: "llm-review", passed: false, skipped: true, output: "Skipped — earlier phase failed" },
+			{ name: "QA", type: "agent-qa", passed: false, skipped: true, output: "Skipped — earlier phase failed" },
+		]);
+
+		assert.match(message, /\*\*Failed gate:\*\* `ready-to-merge` — `Unit tests`/);
+		assert.match(message, /step="Unit tests"/);
+		assert.doesNotMatch(message, /\*\*Failed step:\*\* `Code review`/);
+		assert.doesNotMatch(message, /\*\*Failed step:\*\* `QA`/);
+		assert.doesNotMatch(message, /step="Code review"/);
+		assert.doesNotMatch(message, /step="QA"/);
+	});
+
 	it("omits long failed-step output entirely instead of truncating it", () => {
 		const output = `START\n${"x".repeat(610)}\nTAIL`;
 		const message = buildVerificationFailureMessage("execution", [
