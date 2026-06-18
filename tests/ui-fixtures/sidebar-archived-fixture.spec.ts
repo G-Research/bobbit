@@ -72,12 +72,15 @@ function expectIncreasing(indexes: number[], label: string): void {
 }
 
 async function setShowArchived(page: Page, checked: boolean): Promise<void> {
-	await page.getByTestId("sidebar-filters-button").click();
-	await page.getByTestId("sidebar-filter-archived").locator("input").evaluate((input, value) => {
-		const checkbox = input as HTMLInputElement;
-		if (checkbox.checked !== value) checkbox.click();
-	}, checked);
+	const isOpen = await page.evaluate(() => (window as any).bobbitState.filtersPopoverOpen === true);
+	if (!isOpen) await page.getByTestId("sidebar-filters-button").click();
+	const checkbox = page.getByTestId("sidebar-filter-archived").locator("input");
+	await expect(checkbox).toBeVisible({ timeout: 5_000 });
+
+	const current = await page.evaluate(() => (window as any).bobbitState.showArchived === true);
+	if (current !== checked) await checkbox.click();
 	await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(checked);
+	await expect(checkbox).toBeChecked({ checked });
 }
 
 test.describe("Sidebar archived deterministic fixture", () => {
