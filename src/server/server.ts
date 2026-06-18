@@ -9947,9 +9947,11 @@ async function handleApiRoute(
 			preExistingAgentSessionFile: destJsonl,
 			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
-			// the archived source worktree/branch remain provenance only.
+			// the archived source worktree/branch remain provenance only. Non-sandboxed
+			// continues use the normal project worktree-pool claim/fallback path; sandboxed
+			// continues keep bypassing the host-side pool because container worktrees are isolated.
 			awaitWorktreeSetup: !!worktreeOpts,
-			bypassWorktreePool: !!worktreeOpts,
+			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
