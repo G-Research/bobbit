@@ -3,10 +3,11 @@ import { doRenderApp, setSelectedWorkflowId } from "../../src/app/render.js";
 import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type Project } from "../../src/app/state.js";
 import { clearProposalDismissed, isProposalDismissed, markProposalDismissed } from "../../src/app/proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, type ProposalType } from "../../src/app/proposal-registry.js";
-import { addAnnotation, clearAllAnnotations } from "../../src/ui/components/review/AnnotationStore.js";
+import { resetProposalAnnCount } from "../../src/app/proposal-panels.js";
+import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, getAnnotations, getDocumentAnnotationCount, isReviewSubmitted } from "../../src/ui/components/review/AnnotationStore.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
-type ReviewDoc = { title: string; markdown: string };
+type ReviewDoc = { title: string; markdown: string; source?: any };
 
 type ProposalFixture = {
 	type: ProposalType;
@@ -30,6 +31,8 @@ const SESSION_ID = "proposal-review-fixture-session";
 const PROJECT_ID = "proposal-review-fixture-project";
 const PROJECT_ROOT = "/tmp/proposal-review-fixture";
 const PROPOSAL_STORE_KEY = `bobbit-proposal-review-fixture-proposals-${SESSION_ID}`;
+const REVIEW_STORE_KEY = `bobbit-proposal-review-fixture-reviews-${SESSION_ID}`;
+const REVIEW_SUBMITTED_KEY = `bobbit-proposal-review-fixture-review-submitted-${SESSION_ID}`;
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -63,7 +66,19 @@ export const PROPOSAL_FIXTURES: ProposalFixture[] = [
 			root_path: "/tmp/parity-project",
 			build_command: "echo parity",
 			test_command: "echo parity-test",
-			components: [{ name: "core", repo: ".", commands: { build: "echo build-core" } }],
+			components: [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "echo build-web" },
+					config: {
+						qa_start_command: "PORT=$PORT NODE_ENV=test npm start",
+						qa_health_check: "http://127.0.0.1:$PORT/health",
+						qa_max_duration_minutes: "10",
+					},
+				},
+				{ name: "api", repo: "api", commands: { test: "npm test" } },
+			],
 		},
 		partial: { name: "Parity Project", root_path: "/tmp/parity-project", build_command: "echo parity-edited" },
 	},
@@ -79,13 +94,16 @@ export const PROPOSAL_FIXTURES: ProposalFixture[] = [
 	},
 	{
 		type: "staff",
-		initial: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "" },
-		partial: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "" },
+		initial: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder" },
+		partial: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "", role: "coder" },
 	},
 ];
 
 let fetchLog: FetchLogEntry[] = [];
 let promptLog: string[] = [];
+let staffCreateGate: Promise<void> | null = null;
+let releaseStaffCreateGate: (() => void) | null = null;
+let staffCreateFailureStatus = 0;
 
 class FixtureWebSocket {
 	static CONNECTING = 0;
@@ -151,6 +169,44 @@ function clearPersistedProposals(): void {
 	try { localStorage.removeItem(PROPOSAL_STORE_KEY); } catch { /* ignore */ }
 }
 
+function clearPersistedReviews(): void {
+	try {
+		localStorage.removeItem(REVIEW_STORE_KEY);
+		localStorage.removeItem(REVIEW_SUBMITTED_KEY);
+	} catch { /* ignore */ }
+}
+
+function persistedReviewSubmitted(): boolean {
+	try { return localStorage.getItem(REVIEW_SUBMITTED_KEY) === "true"; } catch { return false; }
+}
+
+function setPersistedReviewSubmitted(submitted: boolean): void {
+	try {
+		if (submitted) localStorage.setItem(REVIEW_SUBMITTED_KEY, "true");
+		else localStorage.removeItem(REVIEW_SUBMITTED_KEY);
+	} catch { /* ignore */ }
+}
+
+function persistReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}): void {
+	try {
+		localStorage.setItem(REVIEW_STORE_KEY, JSON.stringify({ docs, annotations }));
+	} catch {
+		/* ignore quota errors */
+	}
+}
+
+function readPersistedReviews(): { docs: ReviewDoc[]; annotations: Record<string, any[]> } | null {
+	try {
+		const raw = localStorage.getItem(REVIEW_STORE_KEY);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw);
+		if (!parsed || !Array.isArray(parsed.docs)) return null;
+		return { docs: parsed.docs, annotations: parsed.annotations || {} };
+	} catch {
+		return null;
+	}
+}
+
 function persistProposalSlot(type: ProposalType, slot: StoredProposal): void {
 	const store = readPersistedProposals();
 	store[type] = { ...slot, fields: cloneFields(slot.fields) };
@@ -177,12 +233,23 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url.startsWith("/api/projects")) return response({ projects: [PROJECT] });
 	if (url.startsWith("/api/workflows")) return response({ workflows: [{ id: "general", name: "General", description: "General workflow", gates: [] }] });
 	if (url === "/api/tools") return response({ tools: [] });
-	if (url === "/api/roles") return response({ roles: [] });
-	if (url.startsWith("/api/staff")) return method === "POST"
-		? response({ id: "fixture-staff", ...(body || {}) }, 201)
-		: response({ staff: [] });
-	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: false });
-	if (url.includes("/review/submitted")) return response({ submitted: false });
+	if (url === "/api/roles") return response({ roles: [
+		{ name: "coder", label: "Coder", promptTemplate: "Coder role", accessory: "none", createdAt: 1, updatedAt: 1 },
+		{ name: "architect", label: "Architect", promptTemplate: "Architect role", accessory: "none", createdAt: 1, updatedAt: 1 },
+	] });
+	if (url.startsWith("/api/staff")) {
+		if (method === "POST") {
+			if (staffCreateGate) await staffCreateGate;
+			if (staffCreateFailureStatus > 0) return response({ error: "role not found" }, staffCreateFailureStatus);
+			return response({ id: "fixture-staff", currentSessionId: null, ...(body || {}) }, 201);
+		}
+		return response({ staff: [] });
+	}
+	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: persistedReviewSubmitted() });
+	if (url.includes("/review/submitted")) {
+		if (method === "PUT") setPersistedReviewSubmitted(!!body?.submitted);
+		return response({ submitted: persistedReviewSubmitted() });
+	}
 	if (url.includes("/proposal/") || url.includes("/draft")) return response({ ok: true });
 	if (url === "/api/sandbox-status") return response({ available: false, configured: false });
 	return response({ ok: true });
@@ -208,8 +275,16 @@ function resetState(options: ResetOptions = {}): void {
 	const clearPersisted = options.clearPersisted ?? true;
 	fetchLog = [];
 	promptLog = [];
+	staffCreateGate = null;
+	releaseStaffCreateGate = null;
+	staffCreateFailureStatus = 0;
 	clearAllAnnotations(SESSION_ID);
-	if (clearPersisted) clearPersistedProposals();
+	if (clearPersisted) clearReviewSubmitted(SESSION_ID);
+	for (const type of ["goal", "role", "staff"] as const) resetProposalAnnCount(type);
+	if (clearPersisted) {
+		clearPersistedProposals();
+		clearPersistedReviews();
+	}
 	if (clearDismissals) {
 		for (const type of PROPOSAL_FIXTURES.map((f) => f.type)) clearProposalDismissed(SESSION_ID, type);
 	}
@@ -248,6 +323,8 @@ function resetState(options: ResetOptions = {}): void {
 		staffPreviewPrompt: "",
 		staffPreviewTriggers: "[]",
 		staffPreviewCwd: "",
+		staffPreviewCwdEdited: false,
+		staffPreviewNameEdited: false,
 		staffPreviewWorktree: true,
 		isPreviewSession: false,
 		previewPanelTab: "chat",
@@ -350,16 +427,27 @@ function activeSlot(type: ProposalType): Record<string, unknown> | null {
 	return slot ? JSON.parse(JSON.stringify(slot.fields)) : null;
 }
 
-function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}): void {
-	state.reviewDocuments = new Map(docs.map((doc) => [doc.title, doc]));
-	state.reviewActiveTab = docs[0]?.title ?? "";
-	state.reviewPanelOpen = docs.length > 0;
+function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}, opts: { persist?: boolean } = {}): void {
+	const normalizedDocs = docs.map((doc) => ({
+		...doc,
+		source: doc.source || { kind: "markdown-review", sessionId: SESSION_ID },
+	}));
+	state.reviewDocuments = new Map(normalizedDocs.map((doc) => [doc.title, doc]));
+	state.reviewActiveTab = normalizedDocs[0]?.title ?? "";
+	state.reviewPanelOpen = normalizedDocs.length > 0;
 	state.previewPanelActiveTab = "review";
 	state.previewPanelTab = "review";
 	for (const [title, anns] of Object.entries(annotations)) {
 		for (const ann of anns) addAnnotation(SESSION_ID, title, ann);
 	}
+	if (opts.persist) persistReviewDocs(normalizedDocs, annotations);
 	renderApp();
+}
+
+function rehydratePersistedReviews(): void {
+	const persisted = readPersistedReviews();
+	if (!persisted || persistedReviewSubmitted() || isReviewSubmitted(SESSION_ID)) return;
+	setReviewDocs(persisted.docs, persisted.annotations, { persist: false });
 }
 
 setRenderApp(doRenderApp);
@@ -378,6 +466,7 @@ document.addEventListener("proposal-open", (event) => {
 (window as any).__resetProposalReviewFixture = (options?: ResetOptions) => { resetState(options); doRenderApp(); };
 (window as any).__rehydrateProposalReviewFixture = () => {
 	resetState({ clearDismissals: false, clearPersisted: false, hydrateProposals: true });
+	rehydratePersistedReviews();
 	doRenderApp();
 };
 (window as any).__emitProposalFixture = (type: ProposalType, fields: Record<string, unknown>, opts?: { rev?: number; ignoreDismissal?: boolean }) => emitProposal(type, fields, opts || {});
@@ -401,7 +490,19 @@ document.addEventListener("proposal-open", (event) => {
 	open: state.reviewPanelOpen,
 	active: state.reviewActiveTab,
 	titles: [...state.reviewDocuments.keys()],
+	submitted: isReviewSubmitted(SESSION_ID) || persistedReviewSubmitted(),
 });
+(window as any).__getReviewAnnotationCount = (title: string) => getDocumentAnnotationCount(SESSION_ID, title);
+(window as any).__getReviewAnnotations = (title: string) => getAnnotations(SESSION_ID, title).map((ann) => ({ ...ann }));
+(window as any).__holdNextStaffCreate = (status = 404) => {
+	staffCreateFailureStatus = status;
+	staffCreateGate = new Promise<void>((resolve) => { releaseStaffCreateGate = resolve; });
+};
+(window as any).__releaseStaffCreate = () => {
+	releaseStaffCreateGate?.();
+	releaseStaffCreateGate = null;
+	staffCreateGate = null;
+};
 (window as any).__getProposalReviewFetchLog = () => fetchLog.slice();
 (window as any).__getProposalReviewPromptLog = () => promptLog.slice();
 (window as any).__proposalReviewReady = true;
