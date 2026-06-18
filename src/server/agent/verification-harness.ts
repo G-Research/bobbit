@@ -2322,10 +2322,9 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group active steps by phase (default 0), execute phases sequentially.
-			// Within a phase, command steps are serialized to avoid test-suite
-			// contention; non-command steps still run in parallel. Skipped optional
-			// steps are excluded.
+			// Active steps are grouped by phase (default 0), and phases execute sequentially.
+			// All steps within a phase run concurrently by default. Skipped optional steps
+			// are excluded.
 			const phaseGroups = groupStepsByPhase(activeSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
