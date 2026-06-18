@@ -19,6 +19,8 @@ export interface HookCtx {
 	goalId?: string;
 	roleName?: string;
 	prompt?: string;
+	userText?: string;
+	assistantText?: string;
 	turn?: { index: number };
 	budget: { maxTokens: number };
 	config: Record<string, unknown>;

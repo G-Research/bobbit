@@ -164,7 +164,10 @@ export interface QueueEntry {
 
 export const QUEUE_KEY = "retain-queue";
 export const LAST_ERROR_KEY = "last-error";
-export const CONFIG_KEY = "config";
+// Must match src/server/agent/pack-contributions.ts::providerConfigStoreKey("memory").
+// The host overlays this key over provider yaml defaults and evaluates
+// activation.requiresConfig against it before bridge injection.
+export const CONFIG_KEY = "provider-config:memory";
 export const QUEUE_CAP = 100;
 
 export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {

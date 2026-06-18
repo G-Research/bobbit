@@ -24,10 +24,10 @@
  * Hindsight is unreachable — so the manual suite stays green on machines without
  * a local Hindsight.
  *
- *   npm run build && npx playwright test --config playwright-manual.config.ts \
- *     --grep "hindsight-external"
+ *   npm run build && node --import tsx --test tests/manual-integration/hindsight-external.test.ts
  */
-import { test, expect } from "@playwright/test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
 const BASE_URL = (process.env.HINDSIGHT_URL ?? "http://localhost:8888").replace(/\/+$/, "");
 const NAMESPACE = process.env.HINDSIGHT_NS ?? "default";
@@ -77,14 +77,10 @@ async function hindsightReachable(): Promise<boolean> {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-test.describe.configure({ mode: "serial" });
-
-test.describe("hindsight-external (real local Hindsight)", () => {
-	test("ensureBank → retain → recall round-trips, tolerating async extraction", async () => {
-		test.setTimeout(120_000);
-
+describe("hindsight-external (real local Hindsight)", () => {
+	test("ensureBank → retain → recall round-trips, tolerating async extraction", { timeout: 120_000 }, async (t) => {
 		if (!(await hindsightReachable())) {
-			test.skip(true, `Hindsight not reachable at ${BASE_URL} (set HINDSIGHT_URL to run)`);
+			t.skip(`Hindsight not reachable at ${BASE_URL} (set HINDSIGHT_URL to run)`);
 			return;
 		}
 
@@ -100,7 +96,7 @@ test.describe("hindsight-external (real local Hindsight)", () => {
 			headers: authHeaders({ "Content-Type": "application/json" }),
 			body: JSON.stringify({}),
 		});
-		expect(ensure.ok, `ensureBank failed: ${ensure.status} ${JSON.stringify(ensure.body)}`).toBeTruthy();
+		assert.equal(ensure.ok, true, `ensureBank failed: ${ensure.status} ${JSON.stringify(ensure.body)}`);
 
 		// 2. retain — POST …/memories with item-level tags. Use sync extraction
 		//    (async:false) so the fact is committed before we begin polling; recall
@@ -111,8 +107,8 @@ test.describe("hindsight-external (real local Hindsight)", () => {
 			body: JSON.stringify({ items: [{ content, tags }], async: false }),
 			timeoutMs: 60_000,
 		});
-		expect(retain.ok, `retain failed: ${retain.status} ${JSON.stringify(retain.body)}`).toBeTruthy();
-		expect(retain.body?.bank_id).toBe(BANK);
+		assert.equal(retain.ok, true, `retain failed: ${retain.status} ${JSON.stringify(retain.body)}`);
+		assert.equal(retain.body?.bank_id, BANK);
 
 		// 3. recall — POST …/memories/recall, polling up to ~30s for the marker to
 		//    surface (Hindsight's extraction/indexing is eventually-consistent).
@@ -133,10 +129,11 @@ test.describe("hindsight-external (real local Hindsight)", () => {
 			if (!found) await sleep(1_500);
 		}
 
-		expect(
+		assert.equal(
 			found,
+			true,
 			`recall did not surface marker ${marker} within 30s; last results: ${JSON.stringify(lastResults).slice(0, 800)}`,
-		).toBeTruthy();
+		);
 
 		// 4. Best-effort cleanup so the dedicated IT bank does not accumulate facts
 		//    across runs. Failure here must not fail the test.

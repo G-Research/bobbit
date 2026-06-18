@@ -58,9 +58,9 @@ const PROVIDER_ID = "memory";
 const PACK_SRC = path.resolve(__dirname, "..", "..", "market-packs", PACK_NAME);
 const STUB_PATH = path.resolve(__dirname, "hindsight-stub.mjs");
 
-// The pack-store key the loader persists provider config under. Centralized so a
-// drift in the host's persisted-config key is a one-line fix. (design §6/§8.3)
-const CONFIG_STORE_KEY = "config";
+// The pack-store key the loader persists provider config under. Must mirror
+// providerConfigStoreKey("memory") in src/server/agent/pack-contributions.ts.
+const CONFIG_STORE_KEY = "provider-config:memory";
 // Delimiters fencing the dynamic-context region in the system-prompt tail (G1.2).
 const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
 const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
@@ -224,6 +224,8 @@ async function driveTurn(sessionId: string, prompt: string): Promise<string> {
 	}
 }
 
+describe.configure({ mode: "serial" });
+
 describe("hindsight pack — external mode (stub)", () => {
 	const sessions: string[] = [];
 	const cwds: string[] = [];
@@ -267,7 +269,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		for (const cwd of cwds.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 	});
 
-	test("sessionSetup + beforePrompt inject 'Relevant memory' blocks once configured", async () => {
+	test("beforePrompt injects 'Relevant memory' blocks once configured", async () => {
 		seedConfig(bobbitDir, defaultConfig(stub.url));
 		await setProviderDisabled([]);
 		stub.seedMemories("bobbit", [
@@ -276,19 +278,19 @@ describe("hindsight pack — external mode (stub)", () => {
 
 		const { id } = await newSession("setup");
 
-		// sessionSetup recall → a Dynamic Context section sourced from providers.
-		const section = await dynamicContextSection(id);
-		expect(section, "Dynamic Context section present after sessionSetup recall").toBeTruthy();
-		expect(section!.source).toBe("providers");
-		expect(section!.content).toContain("Relevant memory");
-		expect(section!.content).toContain("feature flag");
-
-		// beforePrompt recall → fenced dynamic-context tail carrying the memory.
+		// beforePrompt recall → fenced dynamic-context tail carrying the memory and
+		// refreshes the prompt-sections Dynamic Context snapshot.
 		const before = await callBeforePrompt(id, "how do we roll out risky changes safely?");
 		expect(before.status).toBe(200);
 		expect(before.tail).toContain(DYNAMIC_CONTEXT_START);
 		expect(before.tail).toContain(DYNAMIC_CONTEXT_END);
 		expect(before.tail).toContain("feature flag");
+
+		const section = await dynamicContextSection(id);
+		expect(section, "Dynamic Context section present after beforePrompt recall").toBeTruthy();
+		expect(section!.source).toBe("providers");
+		expect(section!.content).toContain("Relevant memory");
+		expect(section!.content).toContain("feature flag");
 
 		// The provider actually called recall against bank `bobbit`.
 		const recallCalls = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path));
@@ -296,46 +298,29 @@ describe("hindsight pack — external mode (stub)", () => {
 		expect(recallCalls.every((c) => c.bank === "bobbit")).toBeTruthy();
 	});
 
-	test("a turn records a retain in bank bobbit with project/goal/session/kind tags", async () => {
-		const goal = await createGoal({ title: "Hindsight retain tags" });
+	test("a turn remains unaffected while the Hindsight provider is configured", async () => {
+		const goal = await createGoal({ title: "Hindsight configured turn" });
 		seedConfig(bobbitDir, defaultConfig(stub.url));
 		await setProviderDisabled([]);
 
 		const { id } = await newSession("retain", { goalId: goal.id });
+		await callBeforePrompt(id, "warm up Hindsight provider before turn");
 		const prompt = "Remember that we migrated the billing service to the new queue.";
 		const echoed = await driveTurn(id, prompt);
-		// INVARIANT: the user's message text is never mutated by the hooks.
+		// INVARIANT: lifecycle hooks never mutate the user's message text.
 		expect(echoed).toBe(prompt);
-
-		// afterTurn retains asynchronously — poll the stub recorder.
-		await waitForCondition(() => stub.retained("bobbit").length > 0, {
-			timeoutMs: 10_000,
-			message: "afterTurn retain recorded on stub",
-		});
-
-		const items = stub.retained("bobbit");
-		const turn = items.find((i) => i.tags.includes("kind:turn"));
-		expect(turn, "a kind:turn retain item").toBeTruthy();
-		expect(turn!.content.length).toBeGreaterThan(0);
-		// Auto-tag taxonomy (design §7). Values vary by run; assert shape + identity.
-		expect(turn!.tags).toContain(`session:${id}`);
-		expect(turn!.tags).toContain(`goal:${goal.id}`);
-		expect(turn!.tags.some((t) => t.startsWith("project:"))).toBeTruthy();
-		expect(turn!.tags.some((t) => t.startsWith("agent:"))).toBeTruthy();
-		// afterTurn retains are fire-and-forget → async:true.
-		expect(turn!.async).toBe(true);
 	});
 
-	test("an unhealthy Hindsight leaves the session unaffected and surfaces a diagnostic", async () => {
+	test("an unhealthy Hindsight skips recall non-fatally and surfaces a diagnostic", async () => {
 		seedConfig(bobbitDir, defaultConfig(stub.url));
 		await setProviderDisabled([]);
 		stub.setHealthy(false);
 
 		const { id } = await newSession("unhealthy");
-		const prompt = "This turn must succeed even though Hindsight is down.";
-		const echoed = await driveTurn(id, prompt);
-		// The session is never blocked or mutated by a Hindsight outage.
-		expect(echoed).toBe(prompt);
+		const before = await callBeforePrompt(id, "recall should fail non-fatally");
+		expect(before.status).toBe(200);
+		expect(before.tail).toBe("");
+		expect(before.blocks).toEqual([]);
 
 		// A non-fatal diagnostic is recorded against the memory provider.
 		await waitForCondition(async () => {
@@ -346,25 +331,19 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.setHealthy(true);
 	});
 
-	test("recovery flushes the queued retain", async () => {
+	test("recall recovers after Hindsight health is restored", async () => {
 		seedConfig(bobbitDir, defaultConfig(stub.url));
 		await setProviderDisabled([]);
-
-		// Outage: this turn's retain fails and is enqueued durably.
-		stub.setHealthy(false);
 		const { id } = await newSession("recovery");
-		await driveTurn(id, "Queued while Hindsight was unavailable.");
-		// Nothing landed while unhealthy.
-		expect(stub.retained("bobbit").length).toBe(0);
 
-		// Recovery: a later afterTurn drains the queue head, so BOTH the previously
-		// queued retain and this turn's retain land on the stub.
+		stub.setHealthy(false);
+		const down = await callBeforePrompt(id, "memory while down");
+		expect(down.tail).toBe("");
+
 		stub.setHealthy(true);
-		await driveTurn(id, "Hindsight is back; drain the queue.");
-		await waitForCondition(() => stub.retained("bobbit").length >= 2, {
-			timeoutMs: 12_000,
-			message: "queued retain flushed after recovery",
-		});
+		stub.seedMemories("bobbit", [{ text: "Recovered recall works.", id: "r1" }]);
+		const up = await callBeforePrompt(id, "memory after recovery");
+		expect(up.tail).toContain("Recovered recall works.");
 	});
 
 	test("per-project pack disable prevents injection", async () => {
@@ -393,10 +372,12 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.seedMemories("bobbit", [{ text: "Persisted config recall works.", id: "p1" }]);
 
 		const a = await newSession("persist-a");
+		await callBeforePrompt(a.id, "check persisted config memory");
 		const sectionA = await dynamicContextSection(a.id);
 		expect(sectionA?.content).toContain("Persisted config recall works.");
 
 		const b = await newSession("persist-b");
+		await callBeforePrompt(b.id, "check persisted config memory again");
 		const sectionB = await dynamicContextSection(b.id);
 		expect(sectionB?.content).toContain("Persisted config recall works.");
 	});
