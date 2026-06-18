@@ -17,7 +17,7 @@ import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
-import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -206,6 +206,11 @@ export interface SessionSetupPlan {
 	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
 	 */
 	preExistingAgentSessionFile?: string;
+	/**
+	 * Continue/Fork rehydration: archived/provenance cwd values that may appear in
+	 * runtime-only transcript system metadata and should be rewritten to plan.cwd.
+	 */
+	preExistingAgentSessionOldCwds?: string[];
 }
 
 /**
@@ -1039,10 +1044,20 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { agentSessionFile: correctPath });
 		}
 
+		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		if (plan.preExistingAgentSessionOldCwds?.length) {
+			await rebaseAgentTranscriptCwdMetadataFile(
+				transcriptFsCtx,
+				plan.preExistingAgentSessionFile,
+				ctx.sandboxManager,
+				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
+			);
+		}
+
 		// Un-poison any blank-text user messages in the cloned transcript before
 		// the agent rehydrates from it (best-effort, non-fatal).
 		await sanitizeAgentTranscriptFile(
-			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			transcriptFsCtx,
 			plan.preExistingAgentSessionFile,
 			ctx.sandboxManager,
 		);
@@ -1061,8 +1076,10 @@ export async function executeWorktreeAsync(
 	// a kill (crash, taskkill, OS shutdown) in the gap between idle and the
 	// post-spawn fire-and-forget persist archives the session on next boot,
 	// because restoreOneSession() refuses to restore a session whose persisted
-	// agentSessionFile is empty. See tests/manual-integration/restart-minimal.spec.ts.
-	if (ctx.persistSessionMetadata) {
+	// agentSessionFile is empty. Pre-existing cloned transcripts are already
+	// recorded above; avoid get_state rewriting their runtime metadata. See
+	// tests/manual-integration/restart-minimal.spec.ts.
+	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
 	}
@@ -1163,8 +1180,17 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
+		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		if (plan.preExistingAgentSessionOldCwds?.length) {
+			await rebaseAgentTranscriptCwdMetadataFile(
+				transcriptFsCtx,
+				plan.preExistingAgentSessionFile,
+				ctx.sandboxManager,
+				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
+			);
+		}
 		await sanitizeAgentTranscriptFile(
-			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			transcriptFsCtx,
 			plan.preExistingAgentSessionFile,
 			ctx.sandboxManager,
 		);
@@ -1183,9 +1209,10 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	ctx.sessions.set(session.id, session);
 
 	// Persist agentSessionFile BEFORE flipping status to idle so the session
-	// survives a hard kill in the post-spawn window. See worktree path for
-	// the full rationale.
-	if (ctx.persistSessionMetadata) {
+	// survives a hard kill in the post-spawn window. Pre-existing cloned
+	// transcripts are already recorded; avoid get_state rewriting their runtime
+	// metadata. See worktree path for the full rationale.
+	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
 	}

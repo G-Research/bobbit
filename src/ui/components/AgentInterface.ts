@@ -1091,17 +1091,17 @@ export class AgentInterface extends LitElement {
 					this._updateAndPin();
 					break;
 				case "message_end":
-					// When a message finishes, sync the streaming container
-					// with the current streamingMessage state.  If the agent
-					// cleared streamingMessage (e.g. message without tool calls),
-					// we clear the container so the finalized message only
-					// appears in message-list.  If streamingMessage is still set
-					// (deferred tool-call message), the container keeps it.
+					// When a message finishes, sync the streaming container with
+					// the current streamingMessage state. If the agent cleared
+					// streamingMessage (e.g. message without tool calls), clear the
+					// container so the finalized message only appears in
+					// message-list. If streamingMessage is set, push it into the
+					// container now: some tool-only messages (notably parked
+					// `bash_bg wait`) arrive as a final `message_end` without a
+					// prior `message_update`.
 					if (this._streamingContainer) {
 						const sm = this.session?.state.streamingMessage;
-						if (!sm) {
-							this._streamingContainer.setMessage(null, true);
-						}
+						this._streamingContainer.setMessage(sm || null, true);
 					}
 					this._updateAndPin();
 					break;

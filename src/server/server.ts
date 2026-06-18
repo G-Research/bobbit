@@ -9853,11 +9853,29 @@ async function handleApiRoute(
 		const wantWorktree = !!ps.worktreePath;
 		let worktreeOpts: { repoPath: string } | undefined;
 		if (wantWorktree) {
+			let projectIsGitRepo = false;
 			try {
-				if (await isGitRepo(projCwd)) {
-					worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-				}
-			} catch { /* ignore — no worktree */ }
+				projectIsGitRepo = await isGitRepo(projCwd);
+			} catch (err) {
+				jsonError(500, err, {
+					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
+				});
+				return;
+			}
+			if (!projectIsGitRepo) {
+				json({
+					error: "failed to resolve current project repository for fresh continue worktree creation: project root is not a git repository",
+				}, 500);
+				return;
+			}
+			try {
+				worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch (err) {
+				jsonError(500, err, {
+					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
+				});
+				return;
+			}
 		}
 
 		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
@@ -9900,12 +9918,19 @@ async function handleApiRoute(
 		}
 
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
+			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
 			sessionId: newSessionId,
 			projectId: ps.projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			preExistingAgentSessionOldCwds: oldTranscriptCwds,
+			// Continue must surface fresh worktree/base-ref setup failures synchronously;
+			// the archived source worktree/branch remain provenance only.
+			awaitWorktreeSetup: !!worktreeOpts,
+			bypassWorktreePool: !!worktreeOpts,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
@@ -9936,7 +9961,11 @@ async function handleApiRoute(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
 		} catch (err) {
-			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			const failedRecord = sessionManager.getPersistedSession(newSessionId);
+			cleanupFailedContinue(failedRecord?.agentSessionFile || destJsonl, newSessionId, bobbitStateDir());
+			if (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl) {
+				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			}
 			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
