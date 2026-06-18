@@ -192,6 +192,54 @@ test.describe("goal_plan_propose", () => {
 	});
 });
 
+test.describe("remaining children tool success outputs", () => {
+	test("goal_plan_status renders plan summary, rows, child chips, and plan tab action", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_plan_status", document.getElementById("container"), {},
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_plan_status", isError: false, content: [{ type: "text", text: JSON.stringify({
+					steps: [{ phase: "do", title: "Build API", spec: "Implement endpoint", planId: "p-api", childGoalId: "goal-child-1", childState: "running" }],
+					frozen: true,
+					replanCount: 2,
+				}) }], timestamp: 0 },
+				false, { goalId: "goal-parent" });
+		});
+		await expect(page.locator("#container")).toContainText("Plan — 1 steps");
+		await expect(page.locator("#container")).toContainText("frozen");
+		await expect(page.locator("#container")).toContainText("replanCount=2");
+		await expect(page.locator('[data-testid="children-plan-step-row"]')).toHaveCount(1);
+		await expect(page.locator('[data-testid="children-plan-open-tab"]')).toBeVisible();
+		await expect(page.locator("children-goal-state-pill")).toHaveAttribute("goal-id", "goal-child-1");
+	});
+
+	test("goal_pause and goal_resume render affected counts and cascade chip", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_pause", document.getElementById("container"), { cascade: true },
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_pause", isError: false, content: [{ type: "text", text: JSON.stringify({ paused: 2 }) }], timestamp: 0 }, false);
+		});
+		await expect(page.locator("#container")).toContainText("Paused 2 goals");
+		await expect(page.locator("#container")).toContainText("cascade");
+
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_resume", document.getElementById("container"), {},
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_resume", isError: false, content: [{ type: "text", text: JSON.stringify({ resumed: 1 }) }], timestamp: 0 }, false);
+		});
+		await expect(page.locator("#container")).toContainText("Resumed 1 goal");
+	});
+
+	test("goal_archive_child renders fallback count, child chip, cascade, and manual-merge badge", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_archive_child", document.getElementById("container"), { childGoalId: "goal-archive-1", cascade: true, mergedManually: true },
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_archive_child", isError: false, content: [{ type: "text", text: "{}" }], timestamp: 0 }, false);
+		});
+		await expect(page.locator("#container")).toContainText("Archived 1 goal");
+		await expect(page.locator("#container")).toContainText("cascade");
+		await expect(page.locator("#container")).toContainText("merged manually");
+	});
+});
+
 test.describe("feature flag off → falls through to DefaultRenderer", () => {
 	test("goal_spawn_child renders raw JSON code-block when flag off", async ({ page }) => {
 		await gotoAndWait(page);

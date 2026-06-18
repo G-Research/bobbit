@@ -1,5 +1,7 @@
 /**
- * Sidebar keyboard navigation contract.
+ * Sidebar keyboard navigation representative real-app smoke.
+ * The exhaustive visible-row/order/wrap/archive matrix lives in the file://
+ * fixture at tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts.
  */
 import { test, expect, type Page } from "../gateway-harness.js";
 import {
@@ -12,7 +14,6 @@ import {
 	waitForHealth,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
-import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -143,6 +144,23 @@ async function waitForShortcutsReady(page: Page): Promise<void> {
 	}).toBe(true);
 }
 
+function expectedHashForNavId(navId: string | null): string | null {
+	if (!navId) return null;
+	const sep = navId.indexOf(":");
+	if (sep < 0) return null;
+	const kind = navId.slice(0, sep);
+	const id = navId.slice(sep + 1);
+	switch (kind) {
+		case "session": return `#/session/${id}`;
+		case "goal": return `#/goal/${id}`;
+		case "project": return `#/settings/${id}/general`;
+		case "staff-header": return "#/staff";
+		case "ungrouped-header":
+		case "archived-header": return "#/";
+		default: return null;
+	}
+}
+
 async function waitForActiveNavId(page: Page, expected: string | null): Promise<void> {
 	const deadline = Date.now() + 10_000;
 	let latest: ActiveNavSnapshot | null = null;
@@ -155,23 +173,20 @@ async function waitForActiveNavId(page: Page, expected: string | null): Promise<
 	throw new Error(`${MARK}: expected active nav ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
 }
 
-// Deterministic settle: gate on the concrete presence/absence of the specific
-// nav-id rows the caller cares about, then require the full DOM order to be
-// stable before it is used as the expected keyboard cycle. This prevents the
-// archived-toggle tests from sampling an intermediate render and then walking
-// a stale order.
-async function waitForNavRows(
-	page: Page,
-	requiredIds: string[],
-	absentIds: string[] = [],
-): Promise<string[]> {
-	for (const id of requiredIds) {
-		await expect(page.locator(`[data-nav-id="${id}"]`), `${MARK}: nav row ${id} must render`).toHaveCount(1, { timeout: 10_000 });
+async function waitForNavSettled(page: Page, expected: string | null): Promise<void> {
+	const expectedHash = expectedHashForNavId(expected);
+	const expectedSessionId = expected?.startsWith("session:") ? expected.slice("session:".length) : null;
+	const deadline = Date.now() + 10_000;
+	let latest: ActiveNavSnapshot | null = null;
+	while (Date.now() < deadline) {
+		await nextFrame(page);
+		latest = await activeNavSnapshot(page);
+		const contractActiveIsSettled = latest.activeIds.length <= 1;
+		const routeIsSettled = !expectedHash || latest.hash === expectedHash;
+		const sessionIsSettled = !expectedSessionId || latest.selectedSessionId === expectedSessionId;
+		if (contractActiveIsSettled && latest.id === expected && routeIsSettled && sessionIsSettled) return;
 	}
-	for (const id of absentIds) {
-		await expect(page.locator(`[data-nav-id="${id}"]`), `${MARK}: nav row ${id} must be absent`).toHaveCount(0, { timeout: 10_000 });
-	}
-	return waitForStableNavOrder(page, requiredIds, absentIds);
+	throw new Error(`${MARK}: expected settled nav ${JSON.stringify(expected)} hash=${JSON.stringify(expectedHash)}; latest=${JSON.stringify(latest)}`);
 }
 
 async function resetNavStart(page: Page): Promise<void> {
@@ -190,107 +205,73 @@ async function resetNavStart(page: Page): Promise<void> {
 	await waitForActiveNavId(page, null);
 }
 
-async function walkDown(page: Page, steps: number, expectedOrder?: string[]): Promise<Array<string | null>> {
+async function walkDown(page: Page, steps: number, expectedOrder: string[]): Promise<Array<string | null>> {
 	const visited: Array<string | null> = [];
 	for (let i = 0; i < steps; i++) {
+		const expected = expectedOrder[i % expectedOrder.length];
 		await pressCtrlArrow(page, "ArrowDown");
-		if (expectedOrder?.length) {
-			await waitForActiveNavId(page, expectedOrder[i % expectedOrder.length]);
-		} else {
-			await nextFrame(page);
-		}
+		await waitForNavSettled(page, expected);
 		visited.push(await activeNavId(page));
 	}
 	return visited;
 }
 
+async function walkDownRange(page: Page, expectedOrder: string[], from: number, toInclusive: number): Promise<void> {
+	for (let i = from; i <= toInclusive; i++) {
+		const expected = expectedOrder[i % expectedOrder.length];
+		await pressCtrlArrow(page, "ArrowDown");
+		await waitForNavSettled(page, expected);
+	}
+}
+
 test.describe("Sidebar keyboard navigation contract", () => {
-	let projectA: { id: string; rootPath: string; name: string } | undefined;
-	let projectB: { id: string; rootPath: string; name: string } | undefined;
+	let project: { id: string; rootPath: string; name: string } | undefined;
 	const createdSessionIds: string[] = [];
-	const liveGoalIds: string[] = [];
+	let liveGoalId: string | undefined;
 	const createdGoalIds: string[] = [];
-	let archivedGoalId: string | undefined;
 
 	test.beforeAll(async () => {
 		await waitForHealth();
 		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-		projectA = await registerProject(`navkb-alpha-${stamp}`);
-		projectB = await registerProject(`navkb-bravo-${stamp}`);
+		project = await registerProject(`navkb-alpha-${stamp}`);
 
-		const goalA = await createGoal({
+		const goal = await createGoal({
 			title: `KBNavGoalA-${stamp}`,
-			projectId: projectA.id,
+			projectId: project.id,
 			worktree: false,
 			cwd: nonGitCwd(),
 		});
-		liveGoalIds.push(goalA.id);
-		createdGoalIds.push(goalA.id);
-		createdSessionIds.push(await createSession({ projectId: projectA.id, goalId: goalA.id }));
-		createdSessionIds.push(await createSession({ projectId: projectA.id }));
-
-		const goalB = await createGoal({
-			title: `KBNavGoalB-${stamp}`,
-			projectId: projectB.id,
-			worktree: false,
-			cwd: nonGitCwd(),
-		});
-		liveGoalIds.push(goalB.id);
-		createdGoalIds.push(goalB.id);
-		createdSessionIds.push(await createSession({ projectId: projectB.id, goalId: goalB.id }));
-
-		const archivedGoal = await createGoal({
-			title: `KBNavArchived-${stamp}`,
-			projectId: projectB.id,
-			worktree: false,
-			cwd: nonGitCwd(),
-		});
-		archivedGoalId = archivedGoal.id;
-		createdGoalIds.push(archivedGoalId);
-		await deleteGoal(archivedGoalId);
-		await expect.poll(async () => {
-			const resp = await apiFetch(`/api/goals?archived=true&projectId=${encodeURIComponent(projectB!.id)}&limit=50`);
-			if (!resp.ok) return false;
-			const body = await resp.json();
-			return Array.isArray(body.goals) && body.goals.some((g: { id?: string }) => g.id === archivedGoalId);
-		}, { timeout: 5_000 }).toBe(true);
+		liveGoalId = goal.id;
+		createdGoalIds.push(goal.id);
+		createdSessionIds.push(await createSession({ projectId: project.id, goalId: goal.id }));
+		createdSessionIds.push(await createSession({ projectId: project.id }));
 	});
 
 	test.afterAll(async () => {
-		for (const g of createdGoalIds) await deleteGoal(g).catch(() => {});
 		for (const s of createdSessionIds) await deleteSession(s).catch(() => {});
-		if (projectA) await apiFetch(`/api/projects/${projectA.id}`, { method: "DELETE" }).catch(() => {});
-		if (projectB) await apiFetch(`/api/projects/${projectB.id}`, { method: "DELETE" }).catch(() => {});
+		for (const g of createdGoalIds) await deleteGoal(g).catch(() => {});
+		if (project) await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	// Build the canonical set of nav ids the sidebar must always render for the
-	// fixture projects/goals/sessions created in beforeAll.
 	function buildRequiredNavIds(): string[] {
 		return [
-			`project:${projectA!.id}`,
-			`project:${projectB!.id}`,
-			...liveGoalIds.map((id) => `goal:${id}`),
+			`project:${project!.id}`,
+			`goal:${liveGoalId}`,
 			...createdSessionIds.map((id) => `session:${id}`),
 		];
 	}
 
-	// Open the app with a deterministic Show-Archived seed and wait until the
-	// keyboard-shortcut layer + sidebar are live. Each test below gets a fresh
-	// browser context, so seeding localStorage here fully isolates its starting
-	// filter state (no cross-test leakage). This was previously one 60s mega-test
-	// that tipped over its budget under Chromium contention; splitting it gives
-	// each scenario its own 30s budget while preserving every assertion.
-	async function openSidebar(page: Page, showArchived: boolean): Promise<void> {
-		await page.addInitScript((sa) => {
-			localStorage.setItem("bobbit-show-archived", sa ? "true" : "false");
-		}, showArchived);
+	async function openSidebar(page: Page): Promise<void> {
+		await page.addInitScript(() => {
+			localStorage.setItem("bobbit-show-archived", "false");
+		});
 		await openApp(page);
 		await waitForShortcutsReady(page);
 		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
 	}
 
-	test("visible row IDs cover every kind and Ctrl+Arrow wraps at both ends", async ({ page }) => {
-		await openSidebar(page, false);
+	test("real app Ctrl+Arrow journey walks rows, wraps, and routes goal/session destinations", async ({ page }) => {
+		await openSidebar(page);
 		const domOrder = await waitForStableNavOrder(page, buildRequiredNavIds());
 		expect(domOrder.length, `${MARK}: sidebar must emit data-nav-id rows`).toBeGreaterThan(3);
 		const kinds = new Set(domOrder.map((id) => id.split(":")[0]));
@@ -303,190 +284,26 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		expect(visitedDown.slice(0, domOrder.length), `${MARK}: Ctrl+ArrowDown must visit rows in DOM order`).toEqual(domOrder);
 		expect(visitedDown[domOrder.length], `${MARK}: Ctrl+ArrowDown must wrap to first row`).toBe(domOrder[0]);
 
-		await resetNavStart(page);
-		await pressCtrlArrow(page, "ArrowDown");
-		await waitForActiveNavId(page, domOrder[0]);
-		expect(await activeNavId(page), `${MARK}: first Ctrl+ArrowDown should land on first DOM row`).toBe(domOrder[0]);
 		await pressCtrlArrow(page, "ArrowUp");
-		await waitForActiveNavId(page, domOrder[domOrder.length - 1]);
+		await waitForNavSettled(page, domOrder[domOrder.length - 1]);
 		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowUp from first row must wrap to last`).toBe(domOrder[domOrder.length - 1]);
-	});
 
-	test("search filtering restricts the keyboard cycle to matching rows", async ({ page }) => {
-		await openSidebar(page, false);
-		await waitForStableNavOrder(page, buildRequiredNavIds());
-
-		// The search box debounces input by 200ms before publishing to
-		// state.searchQuery (ui/components/SearchBox.ts); under contention a single
-		// fill's debounced dispatch can be dropped, so re-issue until it applies.
-		const searchInput = page.locator("input[data-search]");
-		await expect.poll(async () => {
-			await searchInput.fill("KBNavGoalA");
-			return page.evaluate(() => (window as any).bobbitState?.searchQuery ?? "");
-		}, { timeout: 10_000, intervals: [250, 400, 700, 1000] }).toBe("KBNavGoalA");
-		const filtered = await waitForStableNavOrder(page, [`goal:${liveGoalIds[0]}`]);
-		expect(filtered.length, `${MARK}: search must still render at least one nav row`).toBeGreaterThan(0);
+		const goalEntry = `goal:${liveGoalId}`;
+		const goalIndex = domOrder.indexOf(goalEntry);
+		expect(goalIndex, `${MARK}: sidebar must include live goal row`).toBeGreaterThanOrEqual(0);
 		await resetNavStart(page);
-		const visitedFiltered = new Set((await walkDown(page, filtered.length + 2, filtered)).filter((id): id is string => !!id));
-		for (const v of visitedFiltered) {
-			expect(filtered.includes(v), `${MARK}: Ctrl+ArrowDown under search visited filtered-out row ${v}`).toBe(true);
-		}
-		await expect.poll(async () => {
-			await searchInput.fill("");
-			return page.evaluate(() => (window as any).bobbitState?.searchQuery ?? "");
-		}, { timeout: 10_000, intervals: [250, 400, 700, 1000] }).toBe("");
-	});
+		await walkDownRange(page, domOrder, 0, goalIndex);
+		const goalSnapshot = await activeNavSnapshot(page);
+		expect(goalSnapshot.id, `${MARK}: goal row must be active before asserting route`).toBe(goalEntry);
+		expect(goalSnapshot.hash, `${MARK}: landing on goal header must route to goal dashboard`).toBe(`#/goal/${liveGoalId}`);
 
-	test("Ctrl+Arrow collapses and expands a project while keeping the active row", async ({ page }) => {
-		await openSidebar(page, false);
-		const beforeCollapse = await waitForStableNavOrder(page, buildRequiredNavIds());
-		const projectNavId = `project:${projectA!.id}`;
-		const headerLocator = page.locator(`[data-nav-id="${projectNavId}"]`);
-		expect(await headerLocator.count(), `${MARK}: Project A header must have data-nav-id`).toBeGreaterThan(0);
-		const collapseBtn = headerLocator.locator(
-			"button[title*='Collapse' i], button[aria-label*='Collapse' i], [data-action='collapse']",
-		).first();
-		const projAIdx = beforeCollapse.indexOf(projectNavId);
-		let nextProjIdx = beforeCollapse.length;
-		for (let i = projAIdx + 1; i < beforeCollapse.length; i++) {
-			if (beforeCollapse[i].startsWith("project:")) { nextProjIdx = i; break; }
-		}
-		const projectAChildren = beforeCollapse.slice(projAIdx + 1, nextProjIdx);
-		if (await collapseBtn.count()) await collapseBtn.click();
-		else await headerLocator.first().click();
-
-		const afterCollapse = await waitForStableNavOrder(page, [projectNavId], projectAChildren);
-		for (const child of projectAChildren) {
-			expect(afterCollapse.includes(child), `${MARK}: collapsing ${projectNavId} must remove child ${child}`).toBe(false);
-		}
-
-		await resetNavStart(page);
-		let landed = false;
-		for (let i = 0; i < afterCollapse.length + 1; i++) {
-			await pressCtrlArrow(page, "ArrowDown");
-			await nextFrame(page);
-			if ((await activeNavId(page)) === projectNavId) { landed = true; break; }
-		}
-		expect(landed, `${MARK}: must land active row on project header`).toBe(true);
-
-		await pressCtrlArrow(page, "ArrowRight");
-		await waitForActiveNavId(page, projectNavId);
-		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowRight must not move active row`).toBe(projectNavId);
-		const afterExpand = await waitForStableNavOrder(page, projectAChildren);
-		expect(afterExpand.length, `${MARK}: Ctrl+ArrowRight on collapsed project must expand children`).toBeGreaterThan(afterCollapse.length);
-
-		await pressCtrlArrow(page, "ArrowLeft");
-		await waitForActiveNavId(page, projectNavId);
-		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowLeft must not move active row`).toBe(projectNavId);
-		expect((await waitForStableNavOrder(page, [projectNavId], projectAChildren)).length, `${MARK}: Ctrl+ArrowLeft on expanded project must collapse`).toBeLessThan(afterExpand.length);
-	});
-
-	test("landing on a goal header routes to its goal dashboard", async ({ page }) => {
-		await openSidebar(page, false);
-		const domForGoal = await waitForStableNavOrder(page, buildRequiredNavIds());
-		const goalEntry = domForGoal.find((id) => id.startsWith("goal:"));
-		expect(goalEntry, `${MARK}: sidebar must include a goal row in nav order`).toBeTruthy();
-		const goalId = goalEntry!.split(":")[1];
-		await resetNavStart(page);
-		let landed = false;
-		for (let i = 0; i < domForGoal.length + 1; i++) {
-			await pressCtrlArrow(page, "ArrowDown");
-			await nextFrame(page);
-			if ((await activeNavId(page)) === goalEntry) { landed = true; break; }
-		}
-		expect(landed, `${MARK}: Ctrl+ArrowDown must land on goal header`).toBe(true);
-		const hash = await page.evaluate(() => window.location.hash);
-		expect(hash, `${MARK}: landing on goal header must route to goal dashboard`).toContain(goalId);
-		expect(hash).toMatch(/#\/goal\//);
-	});
-
-	test("archived rows join the keyboard cycle only when Show Archived is on", async ({ page }) => {
-		await openSidebar(page, false);
-
-		const projectBNavId = `project:${projectB!.id}`;
-		const liveGoalBNavId = `goal:${liveGoalIds[1]}`;
-		const archHeaderNavId = `archived-header:${projectB!.id}`;
-		const archGoalNavId = `goal:${archivedGoalId}`;
-
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-			{ timeout: 5_000 },
-		).toBe(false);
-
-		// OFF: archived rows are absent from the DOM nav set, and therefore from
-		// the keyboard cycle — the "visible row IDs ... Ctrl+Arrow wraps" test
-		// already proves cycle membership == DOM nav order, so DOM absence is a
-		// sufficient (and cheaper) proof than re-walking the whole cycle here.
-		const offIds = await waitForNavRows(page, [projectBNavId, liveGoalBNavId], [archHeaderNavId, archGoalNavId]);
-		expect(offIds.includes(archHeaderNavId), `${MARK}: archived header hidden when Show Archived is off`).toBe(false);
-		expect(offIds.includes(archGoalNavId), `${MARK}: archived goal hidden when Show Archived is off`).toBe(false);
-
-		// Toggle Show Archived ON.
-		await expect(filtersButton(page), `${MARK}: filters button must be reachable`).toBeVisible({ timeout: 5_000 });
-		await clickShowArchivedToggle(page);
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-			{ timeout: 5_000 },
-		).toBe(true);
-
-		// ON: archived rows are present and reachable via the keyboard cycle.
-		// One full walk (down the settled order) confirms they were genuinely
-		// added to the cycle — the single keyboard assertion this test needs.
-		const onIds = await waitForNavRows(page, [archHeaderNavId, archGoalNavId]);
-		expect(onIds.includes(archHeaderNavId), `${MARK}: archived header in DOM when Show Archived is on`).toBe(true);
-		expect(onIds.includes(archGoalNavId), `${MARK}: archived goal in DOM when Show Archived is on`).toBe(true);
-		await resetNavStart(page);
-		const visitedOn = new Set((await walkDown(page, onIds.length, onIds)).filter((id): id is string => !!id));
-		expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
-		expect(visitedOn.has(archGoalNavId), `${MARK}: archived goal visited when Show Archived is on`).toBe(true);
-	});
-
-	test("Show Archived persists across reload and can be turned back off", async ({ page }) => {
-		await openSidebar(page, true);
-
-		const projectBNavId = `project:${projectB!.id}`;
-		const liveGoalBNavId = `goal:${liveGoalIds[1]}`;
-		const archHeaderNavId = `archived-header:${projectB!.id}`;
-		const archGoalNavId = `goal:${archivedGoalId}`;
-
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-			{ timeout: 5_000 },
-		).toBe(true);
-		// Pre-reload: archived rows present in the DOM nav set (cycle membership ==
-		// DOM order is proven by the wrap test, so DOM presence is sufficient here).
-		await waitForNavRows(page, [archHeaderNavId, archGoalNavId]);
-
-		// Reload: Show Archived must hydrate from localStorage.
-		await page.reload();
-		await waitForShortcutsReady(page);
-		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
-		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("true");
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-			{ timeout: 5_000 },
-		).toBe(true);
-
-		// Deterministic hydrated signal: the specific archived rows rendered after
-		// reload. One full keyboard walk confirms the persisted rows remain
-		// reachable in the cycle — the persistence guarantee this test exists for.
-		const reloadedIds = await waitForNavRows(page, [archHeaderNavId, archGoalNavId]);
-		expect(reloadedIds.includes(archHeaderNavId), `${MARK}: archived header remains in DOM after reload`).toBe(true);
-		expect(reloadedIds.includes(archGoalNavId), `${MARK}: archived goal remains in DOM after reload`).toBe(true);
-		await resetNavStart(page);
-		const visitedAfterReload = new Set((await walkDown(page, reloadedIds.length, reloadedIds)).filter((id): id is string => !!id));
-		expect(visitedAfterReload.has(archHeaderNavId), `${MARK}: archived header remains in cycle after reload`).toBe(true);
-		expect(visitedAfterReload.has(archGoalNavId), `${MARK}: archived goal remains in cycle after reload`).toBe(true);
-
-		// Turn Show Archived back off — archived rows leave the DOM (and the cycle).
-		await clickShowArchivedToggle(page);
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-			{ timeout: 5_000 },
-		).toBe(false);
-		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("false");
-		const offIdsAgain = await waitForNavRows(page, [projectBNavId, liveGoalBNavId], [archHeaderNavId, archGoalNavId]);
-		expect(offIdsAgain.includes(archHeaderNavId), `${MARK}: archived header removed from cycle`).toBe(false);
-		expect(offIdsAgain.includes(archGoalNavId), `${MARK}: archived goal removed from cycle`).toBe(false);
+		const nextSessionIndex = domOrder.findIndex((id, idx) => idx > goalIndex && id.startsWith("session:"));
+		expect(nextSessionIndex, `${MARK}: goal journey must expose a following session row`).toBeGreaterThan(goalIndex);
+		const nextSession = domOrder[nextSessionIndex];
+		await walkDownRange(page, domOrder, goalIndex + 1, nextSessionIndex);
+		const sessionId = nextSession.split(":")[1];
+		const sessionSnapshot = await activeNavSnapshot(page);
+		expect(sessionSnapshot.hash, `${MARK}: landing on session row must route to session`).toContain(`#/session/${sessionId}`);
+		expect(sessionSnapshot.selectedSessionId, `${MARK}: landing on session row must select session`).toBe(sessionId);
 	});
 });
