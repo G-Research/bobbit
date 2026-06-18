@@ -90,23 +90,52 @@ async function scrollMetrics(page: Page): Promise<{ distance: number; overflow: 
 	}, SCROLL_SEL);
 }
 
-async function expectLatestSelectorPinned(page: Page, selector: string, label: string): Promise<void> {
-	const probe = await page.evaluate(({ scrollSel, msgSel }) => {
+async function latestPinProbe(page: Page, selector: string): Promise<
+	| { ok: false; error: string }
+	| {
+		ok: boolean;
+		distance: number;
+		belowFold: number;
+		scrollTop: number;
+		scrollHeight: number;
+		clientHeight: number;
+		lastHeight: number;
+	}
+> {
+	return await page.evaluate(({ scrollSel, msgSel, tailPx }) => {
 		const el = document.querySelector(scrollSel) as HTMLElement | null;
 		const msgs = Array.from(document.querySelectorAll(msgSel)) as HTMLElement[];
-		if (!el || msgs.length === 0) return { error: "missing scroll container or message" } as const;
+		if (!el || msgs.length === 0) return { ok: false, error: "missing scroll container or message" } as const;
 		const last = msgs[msgs.length - 1];
 		const er = el.getBoundingClientRect();
 		const lr = last.getBoundingClientRect();
+		const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+		const belowFold = lr.bottom - er.bottom;
 		return {
-			distance: el.scrollHeight - el.scrollTop - el.clientHeight,
-			belowFold: lr.bottom - er.bottom,
+			ok: distance <= tailPx && belowFold <= tailPx,
+			distance,
+			belowFold,
 			scrollTop: el.scrollTop,
 			scrollHeight: el.scrollHeight,
 			clientHeight: el.clientHeight,
 			lastHeight: lr.height,
 		} as const;
-	}, { scrollSel: SCROLL_SEL, msgSel: selector });
+	}, { scrollSel: SCROLL_SEL, msgSel: selector, tailPx: TAIL_PX });
+}
+
+async function expectLatestSelectorPinned(page: Page, selector: string, label: string): Promise<void> {
+	await expect.poll(async () => {
+		const probe = await latestPinProbe(page, selector);
+		if ("error" in probe) return probe.error;
+		if (probe.ok) return "pinned";
+		return `dist=${Math.round(probe.distance)} below=${Math.round(probe.belowFold)} ` +
+			`scrollTop=${Math.round(probe.scrollTop)} scrollHeight=${probe.scrollHeight}`;
+	}, {
+		message: `${label}: latest message should settle pinned to the scroll viewport`,
+		timeout: 5_000,
+	}).toBe("pinned");
+
+	const probe = await latestPinProbe(page, selector);
 	if ("error" in probe) throw new Error(probe.error);
 	expect(
 		probe.distance,
