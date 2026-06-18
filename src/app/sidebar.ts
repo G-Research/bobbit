@@ -32,7 +32,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState, fetchProjects, saveProjectOrder } from "./api.js";
+import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession } from "./render-helpers.js";
@@ -1077,25 +1077,13 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 export function clearArchivedBySearch(): void { _archivedBySearch = false; }
 let _archivedBySearch = false;
 
-/** Ensure archived data is loaded and the section is visible for search filtering.
- *
- *  Sessions and goals are gated independently: archived sessions can land in
- *  `state.archivedSessions` via `refreshSessions`' `archivedDelegates` field
- *  without the dedicated archived endpoints having been hit. Gating the goals
- *  fetch on `archivedSessions.length === 0` therefore caused a real bug — if
- *  any archived delegate session preceded the search, the goals fetch would be
- *  skipped and search inside an Archived subsection would surface nothing. */
-function _ensureArchivedForSearch(): void {
+/** Ensure archived is visible for search without loading unfiltered archived pages. */
+function _ensureArchivedForSearch(query: string): void {
 	if (!state.showArchived) {
 		state.showArchived = true;
 		_archivedBySearch = true;
 	}
-	if (!archivedSessionsLoaded()) {
-		fetchArchivedSessions();
-	}
-	if (!archivedGoalsLoaded()) {
-		fetchArchivedGoalsPaginated();
-	}
+	scheduleArchivedRemoteSearch(query);
 }
 
 /** If archived was auto-opened by search, close it. */
@@ -1108,21 +1096,43 @@ function _revertArchivedIfSearchOpened(): void {
 	}
 }
 
-function _handleSearchInput(query: string): void {
+export function handleSidebarSearchInput(query: string): void {
 	state.searchQuery = query;
 	if (!query.trim()) {
+		clearArchivedSearchState();
 		_revertArchivedIfSearchOpened();
 		renderApp();
 		return;
 	}
-	_ensureArchivedForSearch();
+	_ensureArchivedForSearch(query);
 	renderApp();
 }
 
-function _handleSearchClear(): void {
+export function handleSidebarSearchClear(): void {
 	state.searchQuery = "";
+	clearArchivedSearchState();
 	_revertArchivedIfSearchOpened();
 	renderApp();
+}
+
+export function renderArchivedSearchControls(): TemplateResult | string {
+	const queryActive = !!state.searchQuery.trim();
+	if (!state.showArchived || !queryActive) return "";
+	const loading = state.archivedSearchGoalsLoading || state.archivedSearchSessionsLoading;
+	const hasMore = state.archivedSearchGoalsHasMore || state.archivedSearchSessionsHasMore;
+	if (!loading && !hasMore) return "";
+	return html`
+		<div class="border-t border-border/30 my-1 mx-2"></div>
+		<div class="flex flex-col gap-0.5 px-2">
+			${loading ? html`<div class="text-muted-foreground py-1" style="font-size: 0.75em;">Searching archived…</div>` : ""}
+			${state.archivedSearchGoalsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1 disabled:opacity-60 disabled:no-underline" ?disabled=${state.archivedSearchGoalsLoading} @click=${() => { fetchArchivedSearchGoalsPaginated(50, state.archivedSearchGoalsCursor ?? undefined); }}>Load more matching archived goals…</button>
+			` : ""}
+			${state.archivedSearchSessionsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1 disabled:opacity-60 disabled:no-underline" ?disabled=${state.archivedSearchSessionsLoading} @click=${() => { fetchArchivedSearchSessionsPaginated(50, state.archivedSearchSessionsCursor ?? undefined); }}>Load more matching archived sessions…</button>
+			` : ""}
+		</div>
+	`;
 }
 
 function _handleFullSearchClick(query: string): void {
@@ -1539,8 +1549,8 @@ export function renderSidebar() {
 				<search-box
 					.query=${state.searchQuery}
 					.showControls=${!!state.searchQuery}
-					@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
-					@search-clear=${() => { _handleSearchClear(); }}
+					@search-input=${(e: CustomEvent) => { handleSidebarSearchInput(e.detail.query); }}
+					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
 				></search-box>
 				<search-status-dot></search-status-dot>
@@ -1663,6 +1673,7 @@ export function renderSidebar() {
 								`;
 							})}
 
+							${renderArchivedSearchControls()}
 							${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5 px-2">
