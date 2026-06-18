@@ -35,8 +35,16 @@ test("resolveCommandStepTimeoutSec gives component unit commands a longer defaul
 	assert.equal(resolveCommandStepTimeoutSec(freeformCommandStep), 300);
 });
 
-test("runVerificationPhaseSteps runs same-phase command steps concurrently", async () => {
+test("runVerificationPhaseSteps ignores legacy same-phase command serialization options", async () => {
 	type PhaseStep = { step: Pick<VerifyStep, "name" | "type">; index: number };
+	type LegacyRunVerificationPhaseSteps = <T extends PhaseStep, R>(
+		phaseSteps: readonly T[],
+		runStep: (phaseStep: T) => Promise<R>,
+		options: {
+			shouldSerialize: (args: { step: T["step"]; phaseStep: T }) => boolean;
+		},
+	) => Promise<R[]>;
+	const runWithLegacyOptions = runVerificationPhaseSteps as unknown as LegacyRunVerificationPhaseSteps;
 	const phaseSteps: PhaseStep[] = [
 		{ step: { name: "check", type: "command" }, index: 0 },
 		{ step: { name: "unit", type: "command" }, index: 1 },
@@ -47,7 +55,7 @@ test("runVerificationPhaseSteps runs same-phase command steps concurrently", asy
 	const starts: string[] = [];
 	const finishes: string[] = [];
 
-	const results = await runVerificationPhaseSteps(
+	const results = await runWithLegacyOptions(
 		phaseSteps,
 		async ({ step, index }) => {
 			starts.push(step.name);
@@ -60,9 +68,10 @@ test("runVerificationPhaseSteps runs same-phase command steps concurrently", asy
 			finishes.push(step.name);
 			return { index, name: step.name };
 		},
+		{ shouldSerialize: ({ step }) => step.type === "command" },
 	);
 
-	assert.equal(maxActiveCommands, 2, "same-phase command steps should run concurrently");
+	assert.equal(maxActiveCommands, 2, "legacy command serialization options should not serialize same-phase commands");
 	assert.deepEqual(starts, ["check", "unit"]);
 	assert.deepEqual(finishes.sort(), ["check", "unit"]);
 	assert.deepEqual(results.map(r => r.index), [0, 1]);
