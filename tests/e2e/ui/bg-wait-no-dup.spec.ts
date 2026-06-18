@@ -25,7 +25,16 @@
 import { test, expect } from "../gateway-harness.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
-test.describe("bash_bg.wait — no dual-render when message_end has no id", () => {
+async function countBashBgCards(page: any): Promise<number> {
+	return page.evaluate(() => {
+		const ai = document.querySelector("agent-interface");
+		if (!ai) return -1;
+		return Array.from(ai.querySelectorAll("span"))
+			.filter((s) => s.textContent?.trim() === "bash_bg").length;
+	});
+}
+
+test.describe("bash_bg.wait live rendering regressions", () => {
 	test("exactly one bash_bg card renders during a parked wait", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
@@ -46,12 +55,7 @@ test.describe("bash_bg.wait — no dual-render when message_end has no id", () =
 		);
 
 		// Sample once after the toolCall card appears.
-		const before = await page.evaluate(() => {
-			const ai = document.querySelector("agent-interface");
-			if (!ai) return -1;
-			return Array.from(ai.querySelectorAll("span"))
-				.filter((s) => s.textContent?.trim() === "bash_bg").length;
-		});
+		const before = await countBashBgCards(page);
 		expect(before).toBe(1);
 
 		// Re-sample after the live-timer ticks at least once. The buggy code
@@ -67,12 +71,7 @@ test.describe("bash_bg.wait — no dual-render when message_end has no id", () =
 			null,
 			{ timeout: 4_000 },
 		);
-		const after = await page.evaluate(() => {
-			const ai = document.querySelector("agent-interface");
-			if (!ai) return -1;
-			return Array.from(ai.querySelectorAll("span"))
-				.filter((s) => s.textContent?.trim() === "bash_bg").length;
-		});
+		const after = await countBashBgCards(page);
 		expect(after).toBe(1);
 
 		// The reducer entry MUST carry the synthetic id so the filter's
@@ -98,5 +97,24 @@ test.describe("bash_bg.wait — no dual-render when message_end has no id", () =
 		// from the first toolCall id. The mock emits no `msg.id` so we must
 		// land on the synthetic.
 		expect(reducerCheck.id).toBe(`synth:tc:${reducerCheck.toolCallId}`);
+	});
+
+	test("renders exactly one parked wait card when tool call arrives as message_end only", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		// Trigger a final assistant tool-call message without a preceding
+		// message_update. Buggy production hides this row from MessageList via
+		// streamingMessageId but never populates StreamingMessageContainer, so
+		// the bash_bg card stays invisible until refresh/snapshot/agent_end.
+		await sendMessage(page, "BG_WAIT_END_ONLY:15000 park the wait");
+
+		await expect.poll(
+			() => countBashBgCards(page),
+			{
+				message: "expected exactly one bash_bg card for message_end-only parked wait before the wait completes",
+				timeout: 5_000,
+			},
+		).toBe(1);
 	});
 });
