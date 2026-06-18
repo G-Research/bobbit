@@ -37,6 +37,10 @@ export interface ActionHandlerCtx {
 	toolUseId: string;
 	/** The tool name (== :tool). */
 	tool: string;
+	/** The calling session's project id, when it resolves to one. Lets a route
+	 *  handler scope to the real project (e.g. a `project:<id>` recall tag filter)
+	 *  instead of fabricating one. Absent for global/server-scope sessions. */
+	projectId?: string;
 	/** The session working dir — the worker's `process.cwd()` for tool parity (a
 	 *  tool/MCP server runs rooted at the session worktree). Populated by the endpoint
 	 *  from the persisted session. Absent for sessions with no resolvable cwd (the

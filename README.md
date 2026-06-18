@@ -135,6 +135,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
 | [Nested Sub-Goals](docs/nested-goals.md) | Goals that spawn child goals — teams, depth caps, roll-up, governance |
 | [Marketplace](docs/marketplace.md) | Pack-based install of roles, tools, and skills |
+| [Agent Memory (Hindsight)](docs/hindsight-memory.md) | Built-in, dormant-by-default memory provider backed by Hindsight |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 
 **Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)

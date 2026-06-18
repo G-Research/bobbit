@@ -26,6 +26,12 @@ export interface PackStore {
 	get<T = unknown>(packId: string, key: string): Promise<T | null>;
 	put<T = unknown>(packId: string, key: string, value: T): Promise<void>;
 	list(packId: string, prefix?: string): Promise<string[]>;
+	/** Synchronous read of a single key (atomic-rename writes make the final file
+	 *  safe to read sync). Provider config-gated ACTIVATION feeds the synchronous
+	 *  session-setup bridge-injection decision, so it cannot await; this is the
+	 *  bridge between the async store and that sync read path. Returns null on miss
+	 *  or unreadable/corrupt envelope (never throws for a missing file). */
+	getSync<T = unknown>(packId: string, key: string): T | null;
 }
 
 /** Per-pack persistence quotas (Fix C). Enforced in `put` with a clear rejection
@@ -354,6 +360,29 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 					throw err;
 				}
 			});
+		},
+
+		getSync<T = unknown>(packId: string, key: string): T | null {
+			let file: string;
+			try {
+				({ file } = resolveFile(packId, key));
+			} catch {
+				return null; // invalid packId/key → treat as miss (never throw on read)
+			}
+			let raw: string;
+			try {
+				raw = fs.readFileSync(file, "utf8");
+			} catch {
+				return null; // missing file
+			}
+			let env: StoreEnvelope<T>;
+			try {
+				env = JSON.parse(raw) as StoreEnvelope<T>;
+			} catch {
+				return null; // corrupt JSON — async get() quarantines; sync path just misses
+			}
+			if (!env || typeof env !== "object" || !("value" in env)) return null;
+			return env.value;
 		},
 
 		async list(packId: string, prefix?: string): Promise<string[]> {

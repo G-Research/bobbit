@@ -69,7 +69,12 @@ async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus:
 			resp.request().method() === "PUT" &&
 			resp.status() === expectedStatus,
 	);
-	await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
+	// Wait for the Save button to be present and enabled before clicking so the
+	// click cannot land on a disabled/re-rendering button under browser load.
+	const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
+	await expect(saveButton).toBeVisible({ timeout: 10_000 });
+	await expect(saveButton).toBeEnabled({ timeout: 10_000 });
+	await saveButton.click();
 	await savePromise;
 	await expect(page.locator("button").filter({ hasText: /^Saving\.\.\.$/ })).toHaveCount(0, { timeout: 10_000 });
 }
@@ -114,6 +119,11 @@ test.describe("Settings → Base Ref field", () => {
 	});
 
 	test("renders validation errors and clears stale inline errors", async ({ page }) => {
+		// This test drives four project navigations plus four git-backed
+		// validation saves in one browser context; under parallel E2E load the
+		// default 30s budget is too tight. Give it headroom rather than relying
+		// on Playwright's retry to mask a slow-but-correct run.
+		test.setTimeout(90_000);
 		const projectIds: string[] = [];
 		try {
 			const tagDir = uniqueProjectDir("tag");

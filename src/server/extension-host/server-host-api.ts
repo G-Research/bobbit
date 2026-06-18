@@ -158,6 +158,12 @@ export interface CreateServerHostApiOptions {
 	/** Slice B1 — the process-singleton pack store. When present, `ctx.host.store`
 	 *  delegates to it scoped to the closure `packId`. */
 	packStore?: PackStore;
+	/** Host-owned notification fired AFTER a successful `host.store.put`, with the
+	 *  written key. The gateway uses it to drop activation-derived caches when a
+	 *  pack persists provider config (key `provider-config:*`), so a dormant
+	 *  provider activates without a restart. Pure side-channel: it never alters the
+	 *  store result and a throw is swallowed by the caller. */
+	onStoreWrite?: (key: string) => void;
 	/** Read the BOUND (own) session's raw transcript JSONL (Slice B2). Injected by
 	 *  the gateway so `session.read*` can map rows through the contract adapter.
 	 *  Own-session by construction — there is no parameter for another session. When
@@ -176,6 +182,14 @@ export interface CreateServerHostApiOptions {
 	 *  gateway as `sessionManager.getSession(id)?.status`. Absent in non-gateway
 	 *  contexts → status reports "preparing". */
 	readChildStatus?: (sessionId: string) => string | undefined;
+	/** Least-privilege capability mask (EP provider hooks). When supplied, the host
+	 *  reports ONLY the capabilities set `true` here and DENIES the rest — each
+	 *  masked-off namespace throws a clear "not available" error rather than
+	 *  silently delegating. A provider host is built with `{ store: true }` so the
+	 *  worker tier gets `capabilities.store === true` while `session`/`agents` stay
+	 *  false AND unavailable. Omitted ⇒ the full implemented capability set
+	 *  (store/session/agents all true) — the existing route/action host behaviour. */
+	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean };
 }
 
 /**
@@ -210,7 +224,14 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// SUB-GOAL C: `agents` is IMPLEMENTED — flip the flag. The namespace closes over
 	// the bound owner session id + the injected OrchestrationCore and exposes ONLY
 	// the six poll-based verbs scoped to this session's `host-agents` children.
-	const flags = { session: true, store: true, agents: true };
+	// Least-privilege mask (EP provider hooks): when supplied, report ONLY the
+	// capabilities it sets true; otherwise the full implemented set. The masked-off
+	// namespaces are additionally replaced with throwing stubs below so a denied
+	// capability is unavailable, not merely flagged false.
+	const mask = opts.capabilityMask;
+	const flags = mask
+		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true }
+		: { session: true, store: true, agents: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -222,9 +243,16 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		if (!packStore) throw new Error("host.store backend unavailable");
 		return packStore;
 	};
+	const onStoreWrite = opts.onStoreWrite;
 	const store: ServerHostStoreApi = {
 		get: (key) => requireStore().get(packId, key),
-		put: (key, value) => requireStore().put(packId, key, value),
+		put: async (key, value) => {
+			await requireStore().put(packId, key, value);
+			// Host-owned side-channel: notify the gateway of the write so it can drop
+			// activation caches (e.g. provider-config writes). Never let it affect the
+			// put result.
+			try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+		},
 		list: (prefix) => requireStore().list(packId, prefix),
 	};
 
@@ -329,5 +357,26 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		},
 	};
 
-	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session, agents };
+	return {
+		version: HOST_API_VERSION,
+		contractVersion: HOST_CONTRACT_VERSION,
+		capabilities,
+		store: flags.store ? store : denyNamespace("store", store),
+		session: flags.session ? session : denyNamespace("session", session),
+		agents: flags.agents ? agents : denyNamespace("agents", agents),
+	};
+}
+
+/** Replace a masked-off capability namespace with a same-shape object whose every
+ *  method throws a clear "not available" error — least-privilege defence-in-depth
+ *  so a denied capability cannot be invoked even by a hand-crafted host call (the
+ *  capability flag is already `false`). */
+function denyNamespace<T extends object>(ns: string, impl: T): T {
+	const out: Record<string, unknown> = {};
+	for (const key of Object.keys(impl as Record<string, unknown>)) {
+		out[key] = () => {
+			throw new Error(`host.${ns} capability is not available in this context`);
+		};
+	}
+	return out as T;
 }

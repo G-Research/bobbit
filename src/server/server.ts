@@ -52,7 +52,10 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions } from "./agent/pack-contributions.js";
+import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { ContextTraceStore } from "./agent/context-trace-store.js";
+import { fenceBlock } from "./agent/context-blocks.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -64,7 +67,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
@@ -1214,7 +1217,43 @@ export function createGateway(config: GatewayConfig) {
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
+		// Config-gated provider activation + effective-config overlay: read the
+		// provider's PERSISTED flat config (written by the pack's `config` route to
+		// the pack-scoped store under providerConfigStoreKey) synchronously, so a
+		// provider declaring `activation.requiresConfig` stays dormant until it is
+		// configured. packId scopes the store; scope/project are accepted for parity
+		// with the activation lookups (provider config is pack-global in external mode).
+		(_scope, _projectId, packId, providerId) => {
+			if (!packId) return undefined;
+			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
+			return persisted && typeof persisted === "object" ? persisted : undefined;
+		},
 	);
+	sessionManager.lifecycleHub = new LifecycleHub({
+		registry: packContributionRegistry,
+		moduleHost,
+		trace: new ContextTraceStore(bobbitStateDir()),
+		// Least-privilege, store-only host for provider hooks (capabilities.store ===
+		// true; session/agents denied) — gives a provider its own pack-scoped durable
+		// store via the same parent-authorized path routes use.
+		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+			sessionId,
+			packId,
+			contributionId: "",
+			packStore: getPackStore(),
+			capabilityMask: { store: true, session: false, agents: false },
+		}),
+		gatewayInfo: () => {
+			try {
+				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				return { baseUrl, token };
+			} catch {
+				return { baseUrl: "", token: "" };
+			}
+		},
+	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
@@ -2544,6 +2583,14 @@ async function handleApiRoute(
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
 	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
+	// Host-owned activation-cache invalidation: a pack persisting provider config
+	// (key `provider-config:*`) must drop the activation-filtered provider index so
+	// a dormant provider (e.g. Hindsight gaining an externalUrl) activates WITHOUT a
+	// gateway restart. Wired into every pack store-write path (route `host.store`
+	// puts + the `/api/ext/store/:op` endpoint). Non-config keys are ignored.
+	const notePackStoreWrite = (key: unknown): void => {
+		if (typeof key === "string" && key.startsWith(PROVIDER_CONFIG_KEY_PREFIX)) invalidateResolverCaches();
+	};
 	// pack-schema-v1 §6.6: scoped-endpoint authorization for a PACK-BOUND surface
 	// token (no carrier tool). The token validation already proved installed +
 	// active + own-session via the pack-contribution registry, so allowedTools is
@@ -4216,6 +4263,144 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Provider per-turn lifecycle hooks (EP G1.4) ──
+	// These endpoints are called only by the Bobbit-generated provider-bridge pi
+	// extension (before-prompt / before-compact) and the context-trace inspector.
+	// They inherit the admin-bearer gate enforced before handleApiRoute, exactly
+	// like POST /api/sessions/:id/tool-grant-request above. afterTurn /
+	// sessionShutdown are gateway-internal dispatches and intentionally have NO
+	// public endpoint.
+	//
+	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
+	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
+	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
+	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
+
+	// Resolve a session's lifecycle dispatch context from live or persisted state.
+	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
+	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
+		const live = sessionManager.getSession(id);
+		const persisted = sessionManager.getPersistedSession(id);
+		if (!live && !persisted) return undefined;
+		const projectId = live?.projectId ?? persisted?.projectId;
+		return {
+			sessionId: id,
+			projectId,
+			scope: projectId ? "project" : "global",
+			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
+			goalId: live?.goalId ?? persisted?.goalId,
+			roleName: live?.role ?? persisted?.role,
+		};
+	};
+
+	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
+	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
+	if (beforePromptMatch && req.method === "POST") {
+		const sessionId = beforePromptMatch[1];
+		const body = await readBody(req).catch(() => ({} as any));
+		if (body && body.prompt !== undefined && typeof body.prompt !== "string") {
+			json({ error: "prompt must be a string" }, 400);
+			return;
+		}
+		const base = resolveHookCtx(sessionId);
+		if (!base) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const hub = sessionManager.lifecycleHub;
+		if (!hub) {
+			json({ tail: "", blocks: [] });
+			return;
+		}
+		try {
+			const turnIndex = body?.turn?.index;
+			const { blocks } = await hub.dispatch("beforePrompt", {
+				...base,
+				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
+				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
+			});
+			const tail = blocks.length
+				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
+				: "";
+			// Best-effort: refresh the persisted prompt-sections snapshot so the
+			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			try {
+				const parts = sessionManager.getPromptParts(sessionId);
+				if (parts) {
+					parts.dynamicContext = blocks;
+					persistPromptSections(sessionId, parts);
+				}
+			} catch (err) {
+				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
+			}
+			json({
+				tail,
+				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
+			});
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/provider-hooks/before-compact — notify providers before compaction.
+	const beforeCompactMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-compact$/);
+	if (beforeCompactMatch && req.method === "POST") {
+		const sessionId = beforeCompactMatch[1];
+		// The bridge forwards the about-to-be-lost span (and optionally a precomputed
+		// summary) from the pi session_before_compact payload. Validate both as strings
+		// so a malformed body is rejected rather than silently dispatched empty.
+		const body = await readBody(req).catch(() => ({} as any));
+		if (body && body.span !== undefined && typeof body.span !== "string") {
+			json({ error: "span must be a string" }, 400);
+			return;
+		}
+		if (body && body.summary !== undefined && typeof body.summary !== "string") {
+			json({ error: "summary must be a string" }, 400);
+			return;
+		}
+		const base = resolveHookCtx(sessionId);
+		if (!base) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const hub = sessionManager.lifecycleHub;
+		if (!hub) {
+			json({});
+			return;
+		}
+		try {
+			await hub.dispatch("beforeCompact", {
+				...base,
+				span: typeof body?.span === "string" ? body.span : undefined,
+				summary: typeof body?.summary === "string" ? body.summary : undefined,
+			});
+			json({});
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
+	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
+	if (contextTraceMatch && req.method === "GET") {
+		const sessionId = contextTraceMatch[1];
+		let limit: number | undefined;
+		const rawLimit = url.searchParams.get("limit");
+		if (rawLimit !== null) {
+			const n = Number.parseInt(rawLimit, 10);
+			if (Number.isFinite(n) && n > 0) limit = Math.min(n, 1000);
+		}
+		try {
+			const entries = new ContextTraceStore(bobbitStateDir()).readTrace(sessionId, limit);
+			json({ entries });
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/restart — restart a live session's agent process by id.
 	const restartMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
 	if (restartMatch && req.method === "POST") {
@@ -5759,6 +5944,8 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// Drop activation caches when an action persists provider config (host-owned).
+			onStoreWrite: notePackStoreWrite,
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -5945,6 +6132,8 @@ async function handleApiRoute(
 				result = await withStoreTimeout(packStore.get(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "put") {
 				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value), undefined, `store ${op}`);
+				// Host-owned: a direct provider-config write must drop activation caches too.
+				notePackStoreWrite(key);
 				result = { ok: true };
 			} else {
 				result = await withStoreTimeout(packStore.list(ident.packId, typeof prefix === "string" ? prefix : undefined), undefined, `store ${op}`);
@@ -6132,6 +6321,8 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// Drop activation caches when a route persists provider config (host-owned).
+			onStoreWrite: notePackStoreWrite,
 		});
 		const start = Date.now();
 		try {
@@ -6143,7 +6334,7 @@ async function handleApiRoute(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, workingDir: routeWorkingDir },
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir },
 				{ method, query, body: init.body },
 			);
 			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
@@ -6684,7 +6875,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6712,7 +6903,7 @@ async function handleApiRoute(
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
 			} catch { /* metadata is optional; listName is the stable key */ }
-			return {
+			const baseCatalogue = {
 				roles: [...c.roles],
 				tools: concreteTools.tools,
 				skills: [...c.skills],
@@ -6723,6 +6914,20 @@ async function handleApiRoute(
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never
 				// from the runtime-filtered /api/tools or /api/ext/contributions.
+				descriptions,
+			};
+			if ((entry.manifest.schema ?? 1) < 2) return baseCatalogue;
+			return {
+				roles: baseCatalogue.roles,
+				tools: baseCatalogue.tools,
+				skills: baseCatalogue.skills,
+				entrypoints: baseCatalogue.entrypoints,
+				providers: [...(c.providers ?? [])],
+				hooks: [...(c.hooks ?? [])],
+				mcp: [...(c.mcp ?? [])],
+				piExtensions: [...(c.piExtensions ?? [])],
+				runtimes: [...(c.runtimes ?? [])],
+				workflows: [...(c.workflows ?? [])],
 				descriptions,
 			};
 		};
@@ -6755,7 +6960,7 @@ async function handleApiRoute(
 			// catalogue (drop refs for entities the pack does not declare).
 			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
 			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -6765,6 +6970,12 @@ async function handleApiRoute(
 				tools: normaliseKind("tools", new Set(catalogue.tools)),
 				skills: normaliseKind("skills", new Set(catalogue.skills)),
 				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
+				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
+				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
+				mcp: normaliseKind("mcp", new Set(catalogue.mcp ?? [])),
+				piExtensions: normaliseKind("piExtensions", new Set(catalogue.piExtensions ?? [])),
+				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
