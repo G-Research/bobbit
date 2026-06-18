@@ -52,6 +52,14 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
+import {
+	PackRuntimeSupervisor,
+	encodePackRuntimeId,
+	decodePackRuntimeId,
+	PackRuntimeNotFoundError,
+	PackRuntimeBadRequestError,
+	type PackRuntimeStatus,
+} from "./runtimes/index.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
@@ -934,40 +942,17 @@ export interface GatewayConfig {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Pack managed-runtime supervisor seam (P2 — see docs design "P2
-// PackRuntimeSupervisor + REST"). The concrete supervisor plus its encode/decode
-// helpers live in ./runtimes/pack-runtime-supervisor.ts (built in parallel under
-// the same design doc). To keep this REST wiring independently compilable and
-// testable, the routes depend ONLY on the structural seam below: production loads
-// the real supervisor via a dynamic import in start(); tests inject a fake via
-// registerPackRuntimeSupervisorFactory(). At merge, the local types + the
-// encode/decode helpers should be reconciled with the supervisor module's
-// exported symbols (single source of truth).
-export type PackRuntimeStatusState =
-	| "docker-unavailable"
-	| "stopped"
-	| "starting"
-	| "running"
-	| "unhealthy";
+// PackRuntimeSupervisor + REST"). The concrete Docker-backed supervisor + its
+// id encode/decode helpers + error classes live in ./runtimes (imported above).
+// The REST routes depend on the structural seam below so test harnesses can
+// inject a fully-mocked supervisor (no Docker daemon) via
+// registerPackRuntimeSupervisorFactory(); production builds the real
+// PackRuntimeSupervisor in start().
 
-export interface PackRuntimeStatus {
-	id: string;
-	packId: string;
-	packName?: string;
-	runtimeId: string;
-	title?: string;
-	description?: string;
-	status: PackRuntimeStatusState;
-	mode?: string;
-	composeProject: string;
-	services?: Array<{ name: string; state?: string; health?: string }>;
-	message?: string;
-}
-
-/** The structural contract the REST routes depend on. The concrete
- *  PackRuntimeSupervisor implements a superset of this (see design §"Public API").
- *  Unknown-runtime resolution failures MUST surface as an Error whose
- *  `.code === "PACK_RUNTIME_NOT_FOUND"` (→ 404); malformed mode/tail/etc. as
- *  `.code === "PACK_RUNTIME_BAD_REQUEST"` (→ 400). Anything else → 500. */
+/** The structural contract the REST routes depend on (the concrete
+ *  PackRuntimeSupervisor implements a superset). Unknown-runtime failures surface
+ *  as {@link PackRuntimeNotFoundError} (→ 404); malformed id/mode/tail as
+ *  {@link PackRuntimeBadRequestError} (→ 400); anything else → 500. */
 export interface PackRuntimeSupervisorLike {
 	list(projectId?: string): Promise<PackRuntimeStatus[]>;
 	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
@@ -991,36 +976,10 @@ let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
  * Register an alternative pack-runtime-supervisor factory. Called by test
  * harnesses to inject a fully-mocked supervisor (no Docker daemon) so the
  * /api/pack-runtimes/* routes can be exercised end-to-end. Pass `null` to clear.
- * When unset, production loads the real PackRuntimeSupervisor in start().
+ * When unset, production builds the real PackRuntimeSupervisor in start().
  */
 export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {
 	_packRuntimeSupervisorFactory = factory;
-}
-
-/** URL-safe, reversible encoding of a `{packId, runtimeId}` pair into one path
- *  segment (base64url → no `/`, `+`, or `=`). Mirror of the supervisor's intended
- *  helper; kept local so the REST layer compiles + round-trips independently.
- *  Reconcile with the supervisor's exported helper at merge. */
-export function encodePackRuntimeId(packId: string, runtimeId: string): string {
-	return Buffer.from(`${packId}\n${runtimeId}`, "utf8").toString("base64url");
-}
-
-/** Inverse of {@link encodePackRuntimeId}. Returns null for malformed ids
- *  (not base64url, or missing the packId/runtimeId separator) → caller maps to 400. */
-export function decodePackRuntimeId(id: string): { packId: string; runtimeId: string } | null {
-	if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
-	let decoded: string;
-	try {
-		decoded = Buffer.from(id, "base64url").toString("utf8");
-	} catch {
-		return null;
-	}
-	const idx = decoded.indexOf("\n");
-	if (idx < 0) return null;
-	const packId = decoded.slice(0, idx);
-	const runtimeId = decoded.slice(idx + 1);
-	if (!packId || !runtimeId) return null;
-	return { packId, runtimeId };
 }
 
 export function createGateway(config: GatewayConfig) {
@@ -1629,10 +1588,12 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			// P2: lazily honour a pack-runtime-supervisor factory registered AFTER
-			// gateway start (in-process test harnesses register one per spec).
-			if (!packRuntimeSupervisor && _packRuntimeSupervisorFactory) {
-				packRuntimeSupervisor = _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd });
+			// P2: a registered pack-runtime-supervisor factory is authoritative — in-
+			// process test harnesses register a (mocked) one AFTER gateway start, so it
+			// must override the real supervisor built in start(). No-op in production
+			// (factory stays null).
+			if (_packRuntimeSupervisorFactory) {
+				packRuntimeSupervisor = _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? packRuntimeSupervisor;
 			}
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
@@ -2058,21 +2019,15 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
-			// P2: load the real pack-runtime supervisor unless a test factory already
-			// supplied one. Dynamic import so this branch compiles before the
-			// supervisor module is merged; on failure the routes return 503.
+			// P2: build the real pack-runtime supervisor unless a test factory already
+			// supplied a (mocked) one. All Docker execution is encapsulated in the
+			// supervisor; rendered env files live under the server state dir.
 			if (!packRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
 				try {
-					// Variable specifier: deferred to runtime so this branch compiles
-					// before the supervisor module is merged. At merge, replace with a
-					// static `import { PackRuntimeSupervisor } from "./runtimes/..."`.
-					const supervisorModulePath = "./runtimes/pack-runtime-supervisor.js";
-					const mod = await import(supervisorModulePath) as {
-						PackRuntimeSupervisor?: new (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike;
-					};
-					if (mod.PackRuntimeSupervisor) {
-						packRuntimeSupervisor = new mod.PackRuntimeSupervisor({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd });
-					}
+					packRuntimeSupervisor = new PackRuntimeSupervisor({
+						registry: packContributionRegistry,
+						runtimeDataDir: path.join(stateDir, "pack-runtimes"),
+					});
 				} catch (err) {
 					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
 				}
@@ -5998,27 +5953,29 @@ async function handleApiRoute(
 			return;
 		}
 		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		const decoded = decodePackRuntimeId(decodeURIComponent(packRuntimeMatch[1]));
-		if (!decoded) { json({ error: "malformed runtime id" }, 400); return; }
-		const { packId, runtimeId } = decoded;
-		const projectId = url.searchParams.get("projectId") || undefined;
 
-		// Map supervisor failures to status codes: NOT_FOUND → 404, BAD_REQUEST → 400.
+		// Map supervisor failures to status codes: NotFound → 404, BadRequest → 400.
 		const handleErr = (err: unknown): void => {
-			const code = (err as { code?: unknown })?.code;
-			if (code === "PACK_RUNTIME_NOT_FOUND") { jsonError(404, err); return; }
-			if (code === "PACK_RUNTIME_BAD_REQUEST") { jsonError(400, err); return; }
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
 			jsonError(500, err);
 		};
 
+		// Decode the URL-safe id (raw path segment — decodePackRuntimeId percent-
+		// decodes the halves itself). Malformed → PackRuntimeBadRequestError → 400.
+		let packId: string;
+		let runtimeId: string;
+		try {
+			({ packId, runtimeId } = decodePackRuntimeId(packRuntimeMatch[1]));
+		} catch (err) { handleErr(err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+
 		if (action === "logs") {
-			let tail: number | undefined;
+			// Tail validation/clamping is owned by the supervisor (clampTail): a
+			// non-numeric tail throws PackRuntimeBadRequestError → 400; out-of-range
+			// values are clamped. Pass the raw query value through.
 			const rawTail = url.searchParams.get("tail");
-			if (rawTail !== null && rawTail !== "") {
-				const n = Number(rawTail);
-				if (!Number.isInteger(n) || n <= 0) { json({ error: "malformed tail" }, 400); return; }
-				tail = n;
-			}
+			const tail = rawTail !== null && rawTail !== "" ? (Number(rawTail) as number) : undefined;
 			try {
 				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
 				json({ logs });

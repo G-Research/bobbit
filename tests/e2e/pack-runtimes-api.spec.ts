@@ -17,6 +17,11 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch } from "./e2e-setup.js";
+import {
+	clampTail,
+	encodePackRuntimeId,
+	PackRuntimeNotFoundError,
+} from "../../dist/server/runtimes/index.js";
 
 // ---------------------------------------------------------------------------
 // Fake supervisor (no Docker). One known runtime: demo-pack:web.
@@ -37,9 +42,7 @@ const KNOWN = { packId: "demo-pack", runtimeId: "web", packName: "Demo Pack" };
 const KNOWN_PROJECT = "bobbit-pack-demo-pack-testsuffix";
 
 function notFound(): Error {
-	const e = new Error("no such pack runtime") as Error & { code: string };
-	e.code = "PACK_RUNTIME_NOT_FOUND";
-	return e;
+	return new PackRuntimeNotFoundError("no such pack runtime");
 }
 
 function isKnown(packId: string, runtimeId: string): boolean {
@@ -85,16 +88,19 @@ const fakeSupervisor = {
 		return baseStatus("running", opts?.mode ?? "default");
 	},
 	async logs(packId: string, runtimeId: string, opts?: { tail?: number }) {
+		// Mirror the real supervisor: tail validation/clamping is the supervisor's
+		// responsibility (a non-numeric tail throws → REST maps to 400). Validate
+		// BEFORE recording the call so the malformed-tail case shows no log read.
+		const tail = clampTail(opts?.tail);
 		calls.push({ op: "logs", packId, runtimeId, opts });
 		if (!isKnown(packId, runtimeId)) throw notFound();
-		return `web | started\nweb | tail=${opts?.tail ?? "none"}`;
+		return `web | started\nweb | tail=${tail}`;
 	},
 };
 
-// Mirror server.ts encodePackRuntimeId so tests construct ids without importing
-// from dist (kept in lock-step; the route re-derives ids on every response).
+// The real, merged URL-safe id encoding (encodeURIComponent(packId):runtimeId).
 function encodeId(packId: string, runtimeId: string): string {
-	return Buffer.from(`${packId}\n${runtimeId}`, "utf8").toString("base64url");
+	return encodePackRuntimeId(packId, runtimeId);
 }
 
 test.describe("Pack runtimes REST API", () => {
@@ -192,10 +198,18 @@ test.describe("Pack runtimes REST API", () => {
 		expect(calls.some((c) => c.op === "start")).toBe(false);
 	});
 
-	test("malformed tail → 400 (no supervisor call)", async () => {
+	test("non-numeric tail → 400 (no log read)", async () => {
 		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
-		const res = await apiFetch(`/api/pack-runtimes/${id}/logs?tail=-5`);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/logs?tail=abc`);
 		expect(res.status).toBe(400);
 		expect(calls.some((c) => c.op === "logs")).toBe(false);
+	});
+
+	test("out-of-range tail is clamped, not rejected", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/logs?tail=-5`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.logs).toContain("tail=1"); // clampTail(-5) → 1
 	});
 });
