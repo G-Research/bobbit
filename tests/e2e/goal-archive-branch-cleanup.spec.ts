@@ -70,6 +70,86 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		}
 	});
 
+	function formatWarnArgs(args: unknown[]): string {
+		return args.map(arg => {
+			if (arg instanceof Error) return arg.stack || arg.message;
+			if (typeof arg === "string") return arg;
+			try { return JSON.stringify(arg); } catch { return String(arg); }
+		}).join(" ");
+	}
+
+	test("archiving a goal whose remote branch is already absent succeeds without a missing-ref warning", async () => {
+		const goalResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "missing-remote-ref-cleanup-test",
+				cwd: workRepo,
+				projectId,
+				team: true,
+				worktree: true,
+			}),
+		});
+		expect(goalResp.status).toBe(201);
+		const created = await goalResp.json();
+		const goalId: string = created.id;
+
+		const readyGoal = await pollUntil(async () => {
+			const r = await apiFetch(`/api/goals/${goalId}`);
+			if (!r.ok) return null;
+			const g = await r.json();
+			if (g.setupStatus === "error") {
+				throw new Error(`Goal setup errored: ${JSON.stringify(g)}`);
+			}
+			return g.setupStatus === "ready" && g.branch ? g : null;
+		}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready with branch` });
+
+		const branch: string = readyGoal.branch;
+
+		const lsBefore = await pollUntil(async () => {
+			const { stdout } = await execFileAsync(
+				"git", ["ls-remote", "--heads", bareRepo, branch],
+				{ encoding: "utf-8" },
+			);
+			return stdout.includes(branch) ? stdout : null;
+		}, { timeoutMs: 30_000, intervalMs: 500, label: `goal branch ${branch} pushed to origin` });
+		expect(lsBefore, `branch ${branch} should have been pushed`).toContain(branch);
+
+		execFileSync("git", ["-C", workRepo, "push", "origin", "--delete", branch]);
+		const { stdout: lsAfterPredelete } = await execFileAsync(
+			"git", ["ls-remote", "--heads", bareRepo, branch],
+			{ encoding: "utf-8" },
+		);
+		expect(lsAfterPredelete, `branch ${branch} should have been pre-deleted from origin`).not.toContain(branch);
+
+		const originalWarn = console.warn;
+		const warnings: string[] = [];
+		console.warn = (...args: unknown[]) => {
+			warnings.push(formatWarnArgs(args));
+			originalWarn(...args);
+		};
+		try {
+			const del = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
+			expect(del.status).toBe(200);
+
+			let missingRefWarning: string | undefined;
+			try {
+				missingRefWarning = await pollUntil(() => warnings.find(w =>
+					w.includes(`[api] Failed to delete remote branch ${branch}`)
+					&& /remote ref does not exist/i.test(w),
+				), { timeoutMs: 5_000, intervalMs: 100, label: "missing remote-ref delete warning" });
+			} catch {
+				// Expected after the fix: the missing remote ref is treated as an idempotent no-op.
+			}
+
+			expect(
+				missingRefWarning,
+				`Missing remote-ref delete should be treated as a no-op without console.warn. Warnings:\n${warnings.join("\n")}`,
+			).toBeUndefined();
+		} finally {
+			console.warn = originalWarn;
+		}
+	});
+
 	test("archiving a team goal deletes all per-role remote branches", async () => {
 		// Create a team goal in the cloned project (cwd = workRepo).
 		const goalResp = await apiFetch("/api/goals", {
