@@ -34,6 +34,29 @@ function sampleMetric(overrides = {}) {
 	};
 }
 
+function sampleFullMetric(overrides = {}) {
+	return {
+		schemaVersion: 1,
+		metricName: "e2e-full",
+		kind: "e2e-full",
+		createdAt: new Date().toISOString(),
+		status: "passed",
+		exitCode: 0,
+		durationMs: 620_000,
+		cpu: { estimatedCpuMs: 4_900_000, averageCpuPercent: 790, peakCpuPercent: 1200 },
+		memory: { peakRssBytes: 2 * 1024 * 1024 * 1024 },
+		tests: {
+			total: 1200,
+			passed: 1200,
+			failed: 0,
+			skipped: 0,
+			nonSkipped: 1200,
+			durationMs: 1_700_000,
+		},
+		...overrides,
+	};
+}
+
 function sampleBrowserMetric(overrides = {}) {
 	return {
 		schemaVersion: 1,
@@ -143,6 +166,10 @@ try {
 	const baselineCoveragePath = baselineMetricFile("coverage", baselineDir);
 	const baselineBrowserPath = baselineMetricFile("e2e-browser", baselineDir);
 	const scopedCurrentPath = metricFile("coverage", scopedCurrentDir);
+	const fullSuiteBaselineDir = join(root, "full-suite-baseline");
+	const fullSuiteCurrentDir = join(root, "full-suite-current");
+	const fullSuiteOverBudgetDir = join(root, "full-suite-over-budget-current");
+	const baselineFullPath = baselineMetricFile("e2e-full", fullSuiteBaselineDir);
 	writeJson(join(baselineDir, "thresholds.json"), {
 		retainedSmokeFiles: ["scripts/metrics/check.mjs"],
 		retainedSmokeCoverage: [
@@ -205,6 +232,24 @@ try {
 		cpu: { estimatedCpuMs: 300_000, averageCpuPercent: 100, peakCpuPercent: 200 },
 		memory: { peakRssBytes: 2 * 1024 * 1024 * 1024 },
 	}));
+	writeJson(join(fullSuiteBaselineDir, "thresholds.json"), {
+		metricBudgets: {
+			"e2e-full": {
+				maxDurationMs: 700_000,
+				maxEstimatedCpuMs: 2_500_000,
+				useAbsoluteBudgetForExplicitDecrease: true,
+			},
+		},
+	});
+	writeJson(baselineFullPath, sampleFullMetric());
+	writeJson(metricFile("e2e-full", fullSuiteCurrentDir), sampleFullMetric({
+		durationMs: 619_000,
+		cpu: { estimatedCpuMs: 1_800_000, averageCpuPercent: 290, peakCpuPercent: 800 },
+	}));
+	writeJson(metricFile("e2e-full", fullSuiteOverBudgetDir), sampleFullMetric({
+		durationMs: 710_000,
+		cpu: { estimatedCpuMs: 2_600_000, averageCpuPercent: 366, peakCpuPercent: 900 },
+	}));
 
 	const pass = runCheck(currentDir);
 	if ((pass.status ?? 1) !== 0) throw new Error("expected metrics:check to pass for non-regressing current metrics");
@@ -220,6 +265,12 @@ try {
 
 	const scopedBrowserAbsoluteBudgetFail = runScopedCheck(baselineBrowserPath, metricFile("e2e-browser", badBudgetCurrentDir), ["--no-coverage", "--min-runtime-decrease", "0.40", "--min-cpu-decrease", "0.40"]);
 	if ((scopedBrowserAbsoluteBudgetFail.status ?? 0) === 0) throw new Error("expected e2e-browser explicit decrease check to fail when absolute budgets are exceeded");
+
+	const scopedFullSuiteAbsoluteBudgetPass = runScopedCheck(baselineFullPath, metricFile("e2e-full", fullSuiteCurrentDir), ["--no-coverage", "--min-runtime-decrease", "0.25", "--min-cpu-decrease", "0.25"]);
+	if ((scopedFullSuiteAbsoluteBudgetPass.status ?? 1) !== 0) throw new Error("expected e2e-full explicit decrease check to pass under generic absolute budgets even when runtime decrease is below target");
+
+	const scopedFullSuiteAbsoluteBudgetFail = runScopedCheck(baselineFullPath, metricFile("e2e-full", fullSuiteOverBudgetDir), ["--no-coverage", "--min-runtime-decrease", "0.25", "--min-cpu-decrease", "0.25"]);
+	if ((scopedFullSuiteAbsoluteBudgetFail.status ?? 0) === 0) throw new Error("expected e2e-full explicit decrease check to fail when generic absolute budgets are exceeded");
 
 	const fail = runCheck(badCurrentDir);
 	if ((fail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for coverage regression");
