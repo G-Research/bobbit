@@ -50,7 +50,7 @@ node scripts/metrics/check.mjs \
   --min-cpu-decrease 0.30
 ```
 
-Checks a focused migration slice against an explicit runtime/CPU decrease target. Use the slice that matches the migrated area: renderer, scroll, or sidebar.
+Checks a focused migration slice against an explicit runtime/CPU decrease target. Use the slice that matches the migrated area: renderer, scroll, or sidebar. Explicit decrease flags remain enforced unless that metric's `browserE2eBudget.metricBudgets.<metric>.useAbsoluteBudgetForExplicitDecrease` is true and the relevant absolute `maxDurationMs` / `maxEstimatedCpuMs` budget is set; the whole `e2e-browser` project uses that opt-out because post-migration budgets, not stale whole-project percentage drops, are the guardrail.
 
 ## Interpreting thresholds
 
@@ -60,6 +60,7 @@ Checks a focused migration slice against an explicit runtime/CPU decrease target
 - Full-suite metrics are intentionally conservative because API and unrelated browser work can mask an area-specific change.
 - CPU/runtime improvements should be read with the slice and browser-project metrics first, then full-suite metrics. Re-run in the same branch/environment when a single sample is noisy.
 - Browser E2E and slice budgets are anchored to accepted post-migration current-state limits (`maxTestCount`, `maxDurationMs`, and `maxEstimatedCpuMs`) rather than stale pre-migration baselines.
+- For metrics that set `useAbsoluteBudgetForExplicitDecrease`, explicit `--min-runtime-decrease` / `--min-cpu-decrease` checks use those absolute post-migration budgets instead of legacy percentage drops; keep this scoped to whole-project browser metrics where slice metrics carry the migrated-area improvement signal.
 - Retained full-stack smoke files are machine-checked via `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json`; deleting, renaming, or skipping one requires updating the coverage map and thresholds in the same reviewed change.
 - Update baselines only after the coverage migration is intentional, replacement coverage exists, retained smokes are documented, and the new metrics are accepted. Never update baselines just to hide a regression.
 

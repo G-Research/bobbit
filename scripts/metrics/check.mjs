@@ -195,6 +195,23 @@ function metricBudgetFor(metricName, budget) {
 		: budget;
 }
 
+function browserBudgetForMetric(metricName) {
+	const budget = thresholds.browserE2eBudget;
+	if (!budget?.enabled) return null;
+	const normalizedMetricName = normalizeMetricName(metricName);
+	const metricNames = Array.isArray(budget.metrics) ? budget.metrics.map((name) => normalizeMetricName(name)) : [];
+	if (metricNames.length > 0 && !metricNames.includes(normalizedMetricName)) return null;
+	return metricBudgetFor(normalizedMetricName, budget);
+}
+
+function usesAbsoluteBudgetForExplicitDecrease(metricName, kind) {
+	const metricBudget = browserBudgetForMetric(metricName);
+	if (metricBudget?.useAbsoluteBudgetForExplicitDecrease !== true) return false;
+	if (kind === "runtime") return Number.isFinite(metricBudget.maxDurationMs);
+	if (kind === "cpu") return Number.isFinite(metricBudget.maxEstimatedCpuMs);
+	return false;
+}
+
 function compareLegacyBrowserTestCount(label, baselineCount, currentCount, budget) {
 	if (baselineCount == null || currentCount == null) return [];
 	const additive = Number.isFinite(budget.maxTestCountIncrease) ? budget.maxTestCountIncrease : 0;
@@ -206,15 +223,13 @@ function compareLegacyBrowserTestCount(label, baselineCount, currentCount, budge
 }
 
 function compareBrowserBudget(label, metricName, baseline, current) {
-	const budget = thresholds.browserE2eBudget;
-	if (!budget?.enabled) return [];
-	const metricNames = Array.isArray(budget.metrics) ? budget.metrics.map((name) => normalizeMetricName(name)) : [];
-	if (metricNames.length > 0 && !metricNames.includes(metricName)) return [];
-	const metricBudget = metricBudgetFor(metricName, budget);
+	const metricBudget = browserBudgetForMetric(metricName);
+	if (!metricBudget) return [];
 	const failures = [];
 	const baselineCount = testCount(baseline);
 	const currentCount = testCount(current);
-	if (scopedComparison) return compareLegacyBrowserTestCount(label, baselineCount, currentCount, metricBudget);
+	const useAbsoluteBudgetForExplicitDecrease = metricBudget.useAbsoluteBudgetForExplicitDecrease === true && (cli.minRuntimeDecrease != null || cli.minCpuDecrease != null);
+	if (scopedComparison && !useAbsoluteBudgetForExplicitDecrease) return compareLegacyBrowserTestCount(label, baselineCount, currentCount, metricBudget);
 	if (Number.isFinite(metricBudget.maxTestCount)) {
 		if (currentCount != null && currentCount > metricBudget.maxTestCount) {
 			failures.push(`${label}: browser E2E test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
@@ -381,13 +396,15 @@ function compareMetric({ baselinePath, currentPath, label }) {
 	failures.push(...compareCoverage(label, baseline, current));
 	failures.push(...compareBrowserBudget(label, metricName, baseline, current));
 	if (cli.minRuntimeDecrease != null) {
-		failures.push(...compareMinDecrease({
-			label: `${label}: runtime`,
-			baseline: baseline.durationMs,
-			current: current.durationMs,
-			minDecrease: cli.minRuntimeDecrease,
-			format: fmtMs,
-		}));
+		if (!usesAbsoluteBudgetForExplicitDecrease(metricName, "runtime")) {
+			failures.push(...compareMinDecrease({
+				label: `${label}: runtime`,
+				baseline: baseline.durationMs,
+				current: current.durationMs,
+				minDecrease: cli.minRuntimeDecrease,
+				format: fmtMs,
+			}));
+		}
 	} else if (!scopedComparison) {
 		failures.push(...compareNumeric({
 			label: `${label}: runtime`,
@@ -399,13 +416,15 @@ function compareMetric({ baselinePath, currentPath, label }) {
 		}));
 	}
 	if (cli.minCpuDecrease != null) {
-		failures.push(...compareMinDecrease({
-			label: `${label}: estimated CPU`,
-			baseline: baseline.cpu?.estimatedCpuMs,
-			current: current.cpu?.estimatedCpuMs,
-			minDecrease: cli.minCpuDecrease,
-			format: fmtMs,
-		}));
+		if (!usesAbsoluteBudgetForExplicitDecrease(metricName, "cpu")) {
+			failures.push(...compareMinDecrease({
+				label: `${label}: estimated CPU`,
+				baseline: baseline.cpu?.estimatedCpuMs,
+				current: current.cpu?.estimatedCpuMs,
+				minDecrease: cli.minCpuDecrease,
+				format: fmtMs,
+			}));
+		}
 	} else if (!scopedComparison) {
 		failures.push(...compareNumeric({
 			label: `${label}: estimated CPU`,
