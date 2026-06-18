@@ -111,6 +111,8 @@ Success returns `200`:
 
 Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, reattaches clients, and switches the new process back to the existing transcript file. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
 
+For normal role-derived sessions, restart recomputes allowed tools from the current role/tool/group/MCP policy cascade instead of reusing the previous live allow-list. This is why an MCP group changed from `never` to `ask` or `allow` takes effect after `Refresh agent`. Persisted session allow-list constraints and live `session-only` / `one-time` grants are still carried across where appropriate, and explicit role-level `never` policies still take precedence over group defaults.
+
 Stable error codes:
 
 | Status | Code | Meaning |
