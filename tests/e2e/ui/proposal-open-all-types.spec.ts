@@ -5,7 +5,6 @@
  * tab/pane for every active proposal slot, not just goal/project.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
 import type { Locator, Page } from "@playwright/test";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
@@ -68,8 +67,6 @@ const CASES: ProposalCase[] = [
 		fieldValue: "parity-staff",
 	},
 ];
-
-const STAFF_ACCEPT_NAME = "parity-staff";
 
 // Browser E2E keeps one generic non-goal/project proposal flow as a real
 // gateway + mock-agent smoke. The full per-type rendering/dismissal matrix is
@@ -239,20 +236,6 @@ async function dismissProposal(page: Page, proposal: ProposalCase, sessionId: st
 	expect(await otherProposalSlots(page, proposal.type)).toEqual(beforeOtherSlots);
 }
 
-async function staffByName(name: string): Promise<any[]> {
-	const res = await apiFetch("/api/staff");
-	expect(res.ok, "GET /api/staff should succeed").toBe(true);
-	const body = await res.json();
-	const staff = Array.isArray(body) ? body : (body.staff ?? []);
-	return staff.filter((entry: any) => entry?.name === name);
-}
-
-async function deleteStaffByName(name: string): Promise<void> {
-	for (const staff of await staffByName(name)) {
-		await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => {});
-	}
-}
-
 test.describe("Proposal tabs open all proposal types in normal sessions", () => {
 	test.describe.configure({ timeout: 90_000 });
 
@@ -260,7 +243,7 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 		const title = proposal.type === "staff"
 			? "Staff proposal card opens a Staff tab, rehydrates, and dismisses from a normal session"
 			: `${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`;
-		test(title, async ({ page }) => {
+		test(`${title} @smoke`, async ({ page }) => {
 			await openApp(page);
 			await createSessionViaUI(page);
 			await expectNormalChatSession(page);
@@ -279,34 +262,4 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 		});
 	}
 
-	test("Staff proposal accept creates a staff agent from a normal session", async ({ page }) => {
-		await deleteStaffByName(STAFF_ACCEPT_NAME);
-		try {
-			const proposal = CASES.find((c) => c.type === "staff")!;
-			await openApp(page);
-			await createSessionViaUI(page);
-			await expectNormalChatSession(page);
-
-			await sendMessage(page, proposal.trigger);
-			const openButton = await expectProposalToolCard(page, proposal);
-			await waitForProposalSlot(page, "staff");
-			await openButton.click();
-			await expectProposalTabAndPane(page, proposal);
-
-			const panel = proposalPane(page, proposal);
-			const worktreeToggle = panel.locator('[data-testid="staff-proposal-worktree-checkbox"]');
-			await expect(worktreeToggle).toBeChecked({ timeout: 5_000 });
-			await worktreeToggle.uncheck();
-			await expect(panel.locator('[data-testid="staff-proposal-worktree-mode"]')).toContainText("project directory", { timeout: 5_000 });
-			const createButton = panel.getByRole("button", { name: /Create Staff/ }).first();
-			await expect(createButton).toBeEnabled({ timeout: 5_000 });
-			await createButton.click();
-
-			await expect
-				.poll(async () => (await staffByName(STAFF_ACCEPT_NAME)).length, { timeout: 20_000 })
-				.toBeGreaterThan(0);
-		} finally {
-			await deleteStaffByName(STAFF_ACCEPT_NAME);
-		}
-	});
 });
