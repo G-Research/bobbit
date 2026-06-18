@@ -19,7 +19,7 @@ The split-suite metrics make browser E2E cost visible while preserving coverage 
 | `npm run metrics:baseline` | Captures branch-local baselines and refreshes the coverage map. | `docs/testing-metrics/baseline-*.json` |
 | `npm run metrics:check` | Compares committed baselines with current artifacts. | comparison output only |
 
-Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`, including accepted post-migration browser budgets, the retained-smoke file list, retained-smoke runnable coverage requirements, and required title regexes for documented retained behaviors.
+Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`. The committed defaults keep retained-smoke file, runnable-coverage, and required-title guardrails enabled, but do not enforce browser/full-suite/slice runtime, CPU, or test-count budgets by default.
 
 ## E2E single-run rule
 
@@ -31,7 +31,7 @@ For gate validation, prefer `npm run metrics:e2e:all`. It runs the existing E2E 
 npm run metrics:check
 ```
 
-Compares every committed baseline under `docs/testing-metrics/` with current artifacts under `.profiles/metrics/`, applies regression thresholds, enforces absolute browser E2E/slice budgets, and verifies retained smoke files listed in `thresholds.json` still exist and have non-skipped tests in the browser metric report.
+Compares every committed baseline under `docs/testing-metrics/` with current artifacts under `.profiles/metrics/`, applies coverage/runtime regression thresholds, and verifies retained smoke files listed in `thresholds.json` still exist with non-skipped required behavior titles in the browser metric report. Absolute browser/full-suite/slice budgets are opt-in and run only when supplied in thresholds for dedicated test-suite refactor work.
 
 ```bash
 node scripts/metrics/check.mjs \
@@ -50,7 +50,7 @@ node scripts/metrics/check.mjs \
   --min-cpu-decrease 0.30
 ```
 
-Checks a focused migration slice against an explicit runtime/CPU decrease target. Use the slice that matches the migrated area: renderer, scroll, or sidebar. Explicit decrease flags remain enforced unless that metric has `useAbsoluteBudgetForExplicitDecrease` with the relevant absolute `maxDurationMs` / `maxEstimatedCpuMs` budget set in `metricBudgets.<metric>` or `browserE2eBudget.metricBudgets.<metric>`; whole-suite/project aggregates use that opt-out only when post-migration budgets are the stronger guardrail than stale percentage drops.
+Checks a focused migration slice against an explicit runtime/CPU decrease target. Use the slice that matches the migrated area: renderer, scroll, or sidebar. Explicit decrease flags remain enforced unless the opt-in thresholds for that metric set `useAbsoluteBudgetForExplicitDecrease` with the relevant absolute `maxDurationMs` / `maxEstimatedCpuMs` budget in `metricBudgets.<metric>` or `browserE2eBudget.metricBudgets.<metric>`.
 
 ## Interpreting thresholds
 
@@ -59,9 +59,9 @@ Checks a focused migration slice against an explicit runtime/CPU decrease target
 - Browser-project metrics show spawned-gateway cost after all browser rows in the project interact with each other.
 - Full-suite metrics are intentionally conservative because API and unrelated browser work can mask an area-specific change.
 - CPU/runtime improvements should be read with the slice and browser-project metrics first, then full-suite metrics. Re-run in the same branch/environment when a single sample is noisy.
-- Browser E2E, slice, and approved aggregate budgets are anchored to accepted post-migration current-state limits (`maxTestCount`, `maxDurationMs`, and `maxEstimatedCpuMs`) rather than stale pre-migration baselines.
-- For metrics that set `useAbsoluteBudgetForExplicitDecrease`, explicit `--min-runtime-decrease` / `--min-cpu-decrease` checks use those absolute post-migration budgets instead of legacy percentage drops; keep this scoped to metrics where slice/project metrics carry the migrated-area improvement signal and aggregate wall time includes unrelated work or contention.
-- Retained full-stack smoke files are machine-checked via `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json`; deleting, renaming, skipping one, or removing a required retained behavior title requires updating the coverage map and thresholds in the same reviewed change.
+- Absolute metric budgets (`maxTestCount`, `maxDurationMs`, `maxEstimatedCpuMs`, and `maxPeakRssBytes`) are opt-in for dedicated test-suite refactor goals. Standard app feature development should not have to adjust global browser/full-suite/slice budgets when legitimate E2E coverage or runtime changes.
+- To opt in, provide branch-local thresholds with `browserE2eBudget.enabled: true` and/or `metricBudgets.<metric>` entries, then run `metrics:check` with those thresholds. For metrics that set `useAbsoluteBudgetForExplicitDecrease`, explicit `--min-runtime-decrease` / `--min-cpu-decrease` checks use absolute post-migration budgets instead of legacy percentage drops.
+- Retained full-stack smoke files are machine-checked by default via `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json`; deleting, renaming, skipping one, or removing a required retained behavior title requires updating the coverage map and thresholds in the same reviewed change.
 - Update baselines only after the coverage migration is intentional, replacement coverage exists, retained smokes are documented, and the new metrics are accepted. Never update baselines just to hide a regression.
 
 ## Coverage-map update rules

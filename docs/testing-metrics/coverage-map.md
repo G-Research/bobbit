@@ -1,6 +1,6 @@
 # Split UI E2E coverage map
 
-Update this map whenever browser E2E coverage moves to cheaper layers. Baseline metric files are committed as `docs/testing-metrics/baseline-<name>.json`; current runtime metrics remain unprefixed under `.profiles/metrics/<name>.json`. See [README.md](README.md) for metric commands, comparison examples, and baseline rules.
+Update this map whenever browser E2E coverage moves to cheaper layers. Baseline metric files are committed as `docs/testing-metrics/baseline-<name>.json`; current runtime metrics remain unprefixed under `.profiles/metrics/<name>.json`. Committed thresholds guard retained full-stack smokes by default; browser/full-suite/slice budgets are opt-in for dedicated test-suite refactor goals. See [README.md](README.md) for metric commands, comparison examples, and baseline rules.
 
 ## Migration coverage map
 

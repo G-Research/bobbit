@@ -34,56 +34,6 @@
     "tests/e2e/ui/search-result-navigation.spec.ts",
     "tests/e2e/ui/sidebar-actions-menu.spec.ts"
   ],
-  "browserE2eBudget": {
-    "enabled": true,
-    "metrics": [
-      "e2e-browser",
-      "slice-renderer",
-      "slice-scroll",
-      "slice-sidebar"
-    ],
-    "metricBudgets": {
-      "e2e-browser": {
-        "maxTestCount": 388,
-        "maxDurationMs": 1200000,
-        "maxEstimatedCpuMs": 1600000,
-        "useAbsoluteBudgetForExplicitDecrease": true
-      },
-      "slice-renderer": {
-        "maxTestCount": 115,
-        "maxDurationMs": 90000,
-        "maxEstimatedCpuMs": 250000
-      },
-      "slice-scroll": {
-        "maxTestCount": 6,
-        "maxDurationMs": 45000,
-        "maxEstimatedCpuMs": 90000
-      },
-      "slice-sidebar": {
-        "maxTestCount": 40,
-        "maxDurationMs": 40000,
-        "maxEstimatedCpuMs": 120000
-      }
-    },
-    "maxTestCountIncrease": 0,
-    "maxTestCountIncreaseRatio": 0,
-    "runtimeMaxIncreaseRatio": 1.5,
-    "runtimeMaxIncreaseMs": 120000,
-    "cpuMaxIncreaseRatio": 1.75,
-    "cpuMaxIncreaseMs": 240000
-  },
-  "browserImprovement": {
-    "enabled": false,
-    "targetRuntimeDropPct": 40,
-    "targetCpuDropPct": 40
-  },
-  "metricBudgets": {
-    "e2e-full": {
-      "maxDurationMs": 700000,
-      "maxEstimatedCpuMs": 2500000,
-      "useAbsoluteBudgetForExplicitDecrease": true
-    }
-  },
   "retainedSmokeCoverage": [
     {
       "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
