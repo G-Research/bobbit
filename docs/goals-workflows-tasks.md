@@ -30,6 +30,8 @@ Goal creation never assumes a workflow named `"general"` exists. The default-wor
 2. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
 3. **No workflows at all** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
 
+These defaults are final goal-creation and user-side acceptance safety nets. They do **not** relax proposal seed validation for agents: when project workflows are resolvable and non-empty, `propose_goal` must name an explicit workflow ID (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
+
 No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
 #### Goal creation in a zero-workflow project
@@ -58,16 +60,19 @@ Validation now happens **at seed time**, the moment the proposal is written. The
 
 Rejections are structured `400` JSON so the agent can self-correct:
 
-- **`UNKNOWN_WORKFLOW`** — `workflow` is explicitly named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
-- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step. When `workflow` is omitted, `options` are validated against the project's default (first) workflow, consistent with [Default workflow resolution](#default-workflow-resolution).
+- **`MISSING_WORKFLOW`** — `workflow` is omitted or blank while the session has resolvable, non-empty project workflows. The body carries `availableWorkflows: [{id, name}]` and a `message` instructing the agent to re-call `propose_goal` with one of those IDs.
+- **`UNKNOWN_WORKFLOW`** — `workflow` is named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
+- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step.
 
-**Validation is skipped** (no error) when:
+**Validation is skipped** (no error) only when there is genuinely nothing to validate against:
 
-- The session has no resolvable `projectId` — workflows can't be resolved, so there is nothing to check.
-- The project has **zero workflows** — the empty-workflows state is preserved (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)); the UI dropdown supplies a default.
-- `workflow` is **empty or omitted** — not an error; the UI dropdown supplies the default, so only explicitly-named unknown IDs are rejected.
+- The session has no resolvable `projectId`, so project workflows can't be found.
+- Workflow resolution itself is unavailable for the session/project context.
+- The resolved workflow list is empty, preserving the zero-workflow state (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)).
 
-On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
+The proposal panel and final user-side Accept flow may still display or normalize to a safe valid workflow after workflows load. That UI fallback protects manual acceptance from stale or phantom selections; it is not a default the agent may rely on. Agent-side `propose_goal` seed validation must include an explicit valid `workflow` whenever project workflows are resolvable and non-empty.
+
+On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the missing/available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
 
 #### Phantom workflow IDs in the proposal panel
 
