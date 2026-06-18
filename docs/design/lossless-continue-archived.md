@@ -24,19 +24,23 @@ from it the same way `restoreSession()` does.
 
 ## Out of scope
 
-Per goal spec §7 / §non-requirements: worktree, cwd, and branch are still
-fresh per the existing logic. The cloned JSONL will reference paths from the
-old worktree — that's expected and matches restart-resume conceptually.
-`restoreSession`, live-session restart, and the agent CLI's JSONL reader are
-unchanged.
+Per goal spec §7 / §non-requirements: worktree, cwd, and branch remain
+fresh runtime state. The archived `worktreePath` and `branch` are provenance
+only: Continue uses them to know the source was worktree-backed, but never
+stats, repairs, revives, reuses, or checks them out. The cloned JSONL may
+still reference paths from the old worktree — that's expected and matches
+restart-resume conceptually. `restoreSession`, live-session restart, and the
+agent CLI's JSONL reader are unchanged.
 
-## Endpoint flow (post-change)
+## Endpoint flow (current)
 
-`POST /api/sessions/:archivedId/continue` (`src/server/server.ts:5435`):
+`POST /api/sessions/:archivedId/continue` (`src/server/server.ts`):
 
 1. Resolve `ps = sessionManager.getPersistedSession(archivedId)`. Same
    guards as today: 404 if missing, 409 if not archived, 422 if
-   goal/delegate/team/assistant, 410 if project unregistered.
+   goal/delegate/team, 410 if project unregistered. Assistant sessions are
+   allowed and carry over `assistantType`, role, accessory, and proposal
+   drafts.
 2. **Resolve source JSONL path.** Use `ps.agentSessionFile`. If empty
    (legacy persisted sessions), fall through to
    `sessionManager.recoverSessionFile(ps)` — the same private helper
@@ -79,29 +83,43 @@ unchanged.
    *today*, but we add it as a defensive forward-compat copy guarded by
    `fs.existsSync` so a future on-disk cache lands lossless without code
    changes.
-6. **Build createSession opts** — same `worktreeOpts`, `role`,
-   `projectId`, `sandboxed`, `skipAutoModel` shape as today, but
-   **without** `seedContext` and `seedContextSourceId`. Add a new
-   `preExistingAgentSessionFile?: string` opt (see §"createSession
-   plumbing" below).
-7. **Create the session.** `sessionManager.createSession(...)` runs the
-   normal pipeline. The pipeline persists `agentSessionFile = ""`
-   (`session-setup.ts:461`), then on first `spawnAgent` either creates a
-   new JSONL or — when `preExistingAgentSessionFile` is set — issues
-   `{type: "switch_session", sessionPath}` so the CLI loads the cloned
-   transcript before the user's first prompt. (Alternative: persist
-   `agentSessionFile` directly *before* spawn, see §"createSession
-   plumbing".)
-8. **Title.** Unchanged: `Continued: <source title>` with
-   `markGenerated: true` (`server.ts:5519`).
-9. **Model restore.** Unchanged best-effort fire-and-forget at
-   `server.ts:5522-5544`.
-10. **Cleanup on failure.** If `createSession` throws after the JSONL was
-    copied, unlink the destination JSONL (and the tool-content dir if
-    copied). The persisted-session-row half-state cannot occur because
-    `persistOnce` runs inside `executePlan` *after* spawn succeeds — so
-    failures before that leave no row.
-11. Return `{id, cwd, status, title}` with `201`. Same shape as today.
+6. **Resolve fresh worktree intent from current project state.** If the
+   source has `ps.worktreePath`, treat it only as provenance that the source
+   was worktree-backed. Do **not** stat, repair, revive, reuse, or check out
+   the archived `worktreePath` or `branch`. Instead, verify the current
+   registered project root is a git repo and derive `worktreeOpts.repoPath`
+   from `getRepoRoot(proj.rootPath)`. Failures here return a current-project
+   fresh-worktree error, not a source archived-worktree error.
+7. **Build createSession opts** — `sessionId`, `projectId`, `sandboxed`,
+   `worktreeOpts`, `role`, `assistantType`, `preExistingAgentSessionFile`,
+   and model pinning, but **without** `seedContext` or
+   `seedContextSourceId`. For worktree-backed continues, set
+   `awaitWorktreeSetup: true` and `bypassWorktreePool: true` so the POST
+   waits for a new on-demand worktree and reports invalid current repo/base
+   ref failures synchronously.
+8. **Create the session.** `sessionManager.createSession(...)` runs the
+   session setup pipeline. Non-worktree continues spawn directly from the
+   project root. Worktree-backed continues create a fresh
+   `session/<new-id8>` branch/worktree from the current project repo/base ref
+   — never from the archived source branch. `executeWorktreeAsync` rebases
+   the cloned JSONL to the final worktree-cwd slug path, persists that path,
+   then issues `{type: "switch_session", sessionPath}` so the CLI loads the
+   cloned transcript before the user's first prompt.
+9. **Title.** Unchanged: `Continued: <source title>` with
+   `markGenerated: true`.
+10. **Model restore.** The model is pinned at spawn time when the source
+    persisted a provider/model, then persisted on the new session for future
+    restore.
+11. **Cleanup on failure.** If `createSession` or fresh worktree setup throws
+    after the JSONL, proposal drafts, or tool-content cache were copied, call
+    `cleanupFailedContinue(...)` for the original clone path and, if setup
+    already rebased `agentSessionFile`, the rebased path too. Cleanup removes
+    the cloned transcript plus copied proposal/tool-content directories. A
+    worktree setup failure may leave an archived failure row for evidence via
+    `handleSetupFailure`, but it must not leave copied continue artifacts.
+12. Return `{id, cwd, status, title, assistantType}` with `201` only after
+    fresh setup succeeds. For worktree-backed continues, `cwd` is the new
+    worktree path.
 
 ## New JSONL path computation
 
@@ -114,14 +132,12 @@ unchanged.
     `2026-04-03T15-15-12-009Z`
   - The parser uses `^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)`.
 
-The new session's `cwd` is `proj.rootPath` (or worktree path once
-allocated). For worktree-backed sessions, the cwd is finalised inside the
-pipeline; we use the **planned** cwd that `createSession` will end up with —
-which is `proj.rootPath` for non-worktree, or the per-branch container path
-the pool will produce. Simpler: defer path computation until *inside*
-`createSession`, by passing the source path through opts and letting
-`session-setup.ts` compute the destination after `plan.cwd` is final
-(see §"createSession plumbing").
+The continue handler can only know `proj.rootPath` at request time, so it
+pre-computes the initial clone path with the project-root cwd and passes it as
+`preExistingAgentSessionFile`. Non-worktree sessions keep that path.
+Worktree-backed sessions get a fresh `session/<new-id8>` worktree from the
+current project repo/base ref; once `plan.cwd` is final, `executeWorktreeAsync`
+rebases the clone into the worktree-cwd slug directory before `switch_session`.
 
 ## Worktree-cwd slug invariant (follow-up correction)
 
@@ -231,46 +247,39 @@ host-side `fs.cpSync` is fine for both.
 
 ## `createSession` plumbing
 
-Today `createSession` accepts `seedContext` and `seedContextSourceId`
-opts (`session-manager.ts:2587`, threaded through to
-`session-setup.ts:117-118` and `system-prompt.ts:201-203`). After this
-change Continue-Archived no longer sets them. Grep for other callers:
-
-```bash
-grep -rn "seedContext" src/
-```
-
-Confirmed callers: only `server.ts:5491-5492` (the continue endpoint).
-The fields are therefore safe to **delete entirely** from
-`createSession` opts, `SessionSetupPlan`, `PromptParts`, and the
-prompt-section logic in `system-prompt.ts:358-363, 484-492`.
-
-In their place we add **one new opt** to `createSession`:
+The old `seedContext` / `seedContextSourceId` path has been removed from
+Continue-Archived. The endpoint now passes one transcript-adoption option to
+`createSession`:
 
 ```ts
 preExistingAgentSessionFile?: string;
 ```
 
-Plumbed through `SessionSetupPlan` to `spawnAgent` in
-`session-setup.ts`. When set:
+Plumbed through `SessionSetupPlan` to `spawnAgent` and
+`executeWorktreeAsync` in `session-setup.ts`. When set:
 
-1. Before spawn, the destination path is finalised (using `plan.cwd`)
-   and the source `.jsonl` is copied via `sessionFileCopy`. This is
-   **inside** `executePlan` so cleanup-on-throw can unlink the
-   destination cleanly.
-2. After `rpcClient.start()` succeeds and *before* the existing
-   `persistSessionMetadata` call (`session-setup.ts:790`), we issue
-   `{type: "switch_session", sessionPath: <newPath>}` against the new
-   bridge — same RPC the restart path uses
-   (`session-manager.ts:2545-2551`). On failure: `rpcClient.stop()`,
-   unlink the cloned JSONL, throw — caller in `server.ts` translates
-   to 500.
-3. `persistSessionMetadata` then writes the `agentSessionFile` field
-   from `getState()` as usual — which by now points at the cloned
-   path the agent CLI just adopted.
+1. The continue handler has already copied the source `.jsonl` to the initial
+   destination path. `persistOnce` writes that path to the new
+   `PersistedSession.agentSessionFile` before spawn, so a hard kill before
+   spawn does not lose the clone.
+2. For non-worktree sessions, `spawnAgent` starts in `proj.rootPath`,
+   sanitizes the cloned transcript best-effort, and issues
+   `{type: "switch_session", sessionPath}` immediately after
+   `rpcClient.start()`.
+3. For worktree-backed continues, `createSession` creates branch
+   `session/<new-id8>` from the current project repo/base ref. The continue
+   endpoint sets `awaitWorktreeSetup` and `bypassWorktreePool`, so this is an
+   on-demand fresh setup and failures are thrown back to the POST. After the
+   worktree cwd is known, `executeWorktreeAsync` rebases the cloned JSONL from
+   the project-root slug path to the final worktree-cwd slug path, updates
+   `agentSessionFile`, sanitizes, and issues `switch_session`.
+4. On `switch_session` or setup failure, the RPC client is stopped or setup
+   failure handling archives the failed row for evidence; the endpoint cleanup
+   removes the cloned JSONL plus copied proposal/tool-content directories.
 
-This keeps the new session in lockstep with the restart-resume flow:
-no special "seeded session" code path, no system-prompt injection.
+This keeps the new session in lockstep with the restart-resume flow: no
+special "seeded session" code path, no system-prompt injection, no dependency
+on the archived source worktree or branch.
 
 ## Code to delete vs keep in `continue-archived.ts`
 
@@ -335,21 +344,24 @@ Content-Type entirely.
 
 ## Error paths
 
-| Condition | Status | Body |
+| Condition | Status | Body / cleanup |
 | --- | --- | --- |
 | Source session not found | 404 | `{error:"session not found"}` (existing) |
 | Source not archived | 409 | (existing) |
-| goal/delegate/team/assistant source | 422 | (existing) |
-| Project unregistered | 410 | (existing) |
-| Source `.jsonl` missing AND `recoverSessionFile` returns null | 404 | `{error:"archived transcript missing or empty"}` |
+| goal/delegate/team source | 422 | (existing); assistant sources are accepted |
+| Project unregistered | 410 | `{error:"source project no longer registered"}` |
+| Source `.jsonl` missing, empty, and `recoverSessionFile` cannot resolve it | 404 | `{error:"archived transcript missing or empty"}` |
+| Source was worktree-backed, but the current project root cannot be inspected or is not a git repo | 500 | `{error:"failed to resolve current project repository for fresh continue worktree creation: <msg>"}`. This is a current-project error; the archived `worktreePath`/`branch` are not checked. |
 | Sandbox cross-realm copy | 422 | `{error:"cross-realm continue not supported"}` |
-| JSONL copy failure | 500 | `{error:"failed to clone session file: <msg>"}` — destination unlinked, no session row created |
-| `switch_session` failure post-spawn | 500 | `{error:"failed to load source transcript: <msg>"}` — destination unlinked, agent stopped, partial session row removed via `sessionStore.delete(id)` |
-| `createSession` failure pre-spawn | 500 | `{error:"failed to create session: <msg>"}` — destination unlinked |
+| JSONL copy failure | 500 | `{error:"failed to clone session file: <msg>"}` — `cleanupFailedContinue` unlinks the destination clone and removes copied proposal/tool-content dirs if any were created; no new session row has been created yet. |
+| Fresh worktree/base-ref/create-session failure | 500 | `{error:"failed to create session: <msg>"}` — reports the current project/base/worktree setup failure synchronously because worktree-backed continues set `awaitWorktreeSetup` and `bypassWorktreePool`. Cleanup removes the original cloned JSONL, any rebased `agentSessionFile`, and copied proposal/tool-content dirs. The archived source worktree/branch are not repaired or reused. |
+| `switch_session` failure after spawn | 500 | `{error:"failed to create session: switch_session failed: <msg>"}` — agent startup is stopped/failed by setup handling; cleanup removes the cloned transcript plus copied proposal/tool-content dirs. |
 
 Cleanup helper: `cleanupFailedContinue(destPath, newSessionId, stateDir)`
-unlinks dest JSONL + tool-content dir. Wrap the new endpoint body in
-try/catch around step 4-onwards.
+unlinks the cloned JSONL and removes both `<stateDir>/tool-content/<newId>/`
+and `<stateDir>/proposal-drafts/<newId>/`. The continue handler calls it for
+the precomputed clone path and, when worktree setup has already rebased the
+session file, the persisted rebased `agentSessionFile` path as well.
 
 ## Title behavior
 
@@ -431,29 +443,35 @@ no Docker):
   resume tests): no changes expected. Lossless continue is a *new*
   call site that exercises the same `switch_session` path
   restart-resume already covers.
-- Add a `tests/manual-integration/continue-archived-sandboxed.spec.ts`
-  smoke test that continues an archived sandboxed session and asserts
-  the cloned `.jsonl` is reachable inside the container.
+- `tests/e2e/continue-archived-worktree-stale-source.spec.ts`: archived
+  `worktreePath`/`branch` may be missing; Continue still creates a fresh
+  `session/<new-id8>` branch/worktree from the current project repo/base ref.
+- `tests/e2e/continue-archived-worktree-invalid-base.spec.ts`: invalid
+  current project repo/base-ref failures are returned synchronously as fresh
+  worktree creation errors, not archived source worktree errors.
+- `tests/e2e/continue-archived-worktree.spec.ts`: worktree-backed continues
+  rebase the cloned JSONL to the final worktree-cwd slug path before
+  `switch_session`.
 
 ## File-by-file change summary
 
 | File | Change |
 | --- | --- |
-| `src/server/agent/continue-archived.ts` | Replace contents: delete `buildSeedContext`, `formatFullTranscript`, `summarizeTranscript`, `truncateStringToBudget`, `renderBlock`, `renderMessagesAsText`, `callNamingModel`, `NamingModelOptions`, `SEED_TOTAL_BUDGET`, `SUMMARY_INPUT_BUDGET`. Export `copyToolContentDirIfPresent`. |
-| `src/server/agent/agent-session-path.ts` (new) | Export `formatAgentSessionFilePath(cwd, createdAtMs, sessionId): string` and refactor `recoverSessionFile` to import its parser side. |
-| `src/server/agent/session-manager.ts` | Promote `recoverSessionFile` to public (or expose `resolveAgentSessionFile`). Drop `seedContext` / `seedContextSourceId` from `createSession` opts (line 2587), `store.put` calls (lines 2682-2683, 2736-2737). Add `preExistingAgentSessionFile?: string` opt. Optionally remove `getNamingModelOptions` if no other caller. |
+| `src/server/agent/continue-archived.ts` | Replace contents: delete transcript-stringification helpers and export `copyToolContentDirIfPresent`, `copyProposalDirIfPresent`, and `cleanupFailedContinue`. Cleanup removes cloned transcript artefacts plus copied proposal/tool-content directories. |
+| `src/server/agent/agent-session-path.ts` | Export `formatAgentSessionFilePath(cwd, createdAtMs, sessionId): string` and keep it aligned with `recoverSessionFile`'s parser. |
+| `src/server/agent/session-manager.ts` | Expose `recoverSessionFile`, drop `seedContext` / `seedContextSourceId` from create-session plumbing, add `preExistingAgentSessionFile`, `awaitWorktreeSetup`, and `bypassWorktreePool` opts. Worktree sessions use fresh `session/<id8>` branches; awaited setup throws failures back to the caller. |
 | `src/server/agent/session-fs.ts` | Add `sessionFileCopy(srcCtx, srcPath, dstCtx, dstPath, mgr)` with the four-row dispatch matrix; cross-realm rows throw a typed `CrossRealmCopyError`. |
-| `src/server/agent/session-setup.ts` | Drop `seedContext` / `seedContextSourceId` from `SessionSetupPlan` (lines 117-118) and the `assemblePrompt` call (lines 384-385). Add `preExistingAgentSessionFile?: string` to `SessionSetupPlan`. In `executePlan`/`spawnAgent`: if set, copy via `sessionFileCopy` before spawn (with cleanup on throw), then issue `switch_session` after `rpcClient.start()` succeeds, *before* `persistSessionMetadata`. |
-| `src/server/agent/system-prompt.ts` | Delete `seedContext` / `seedContextSource` from `PromptParts` (lines 201-203). Remove the prompt-section emission at lines 358-363 and 484-492. |
-| `src/server/server.ts` | Rewrite `POST /api/sessions/:archivedId/continue` (lines 5435-5547): remove `mode` body parsing, remove `getArchivedMessages` + `buildSeedContext` calls, remove `seedContext` / `seedContextSourceId` from `createOpts`. Resolve source path via `recoverSessionFile`, compute dest path, set `preExistingAgentSessionFile` in `createOpts`, call `copyToolContentDirIfPresent` after `createSession` returns. Wrap in try/catch with cleanup helper. Map `CrossRealmCopyError` → 422. |
+| `src/server/agent/session-setup.ts` | Add `preExistingAgentSessionFile` to `SessionSetupPlan`; persist the clone path before spawn; for worktree-backed continues, rebase the clone to the final worktree-cwd slug path, update `agentSessionFile`, then issue `switch_session`. |
+| `src/server/agent/system-prompt.ts` | Delete `seedContext` / `seedContextSource` from `PromptParts` and remove the prior-transcript prompt section. |
+| `src/server/server.ts` | Rewrite `POST /api/sessions/:archivedId/continue`: ignore legacy `mode`, resolve/copy the source JSONL, copy proposal/tool-content caches, derive worktree support from the current project repo, set `preExistingAgentSessionFile`, and for worktree-backed continues set `awaitWorktreeSetup`/`bypassWorktreePool`. Map `CrossRealmCopyError` to 422 and cleanup cloned artefacts on create-session or fresh-worktree failure. |
 | `src/ui/components/ContinueSessionChooser.ts` | Collapse to confirm-only: drop `_mode`, `transcriptBytes`, the radiogroup, the warning block. Drop `estimateTranscriptBytes` export. `_confirm` emits empty `detail`. |
 | `src/ui/components/AgentInterface.ts` (and any chooser caller) | Drop `transcriptBytes` binding and `mode` from the POST body. |
 | `tests/e2e/continue-archived.spec.ts` | See §"Modified existing tests". |
 | `tests/e2e/ui/continue-archived.spec.ts` | See §"Modified existing tests". |
 | `tests/continue-archived-clone.test.ts` (new) | Path formatter + non-sandboxed copy unit tests. |
-| `tests/sandbox-manager-copy.test.ts` (new, Docker-gated) | Same-project sandboxed copy + cross-realm rejection. |
-| `tests/manual-integration/continue-archived-sandboxed.spec.ts` (new) | Smoke test for sandboxed lossless continue. |
-| `tests/e2e/test-utils/no-new-sleeps.baseline.json` | Recompute baseline after the test rewrites land. |
+| `tests/e2e/continue-archived-worktree-stale-source.spec.ts` | Stale archived `worktreePath`/`branch` regression. |
+| `tests/e2e/continue-archived-worktree-invalid-base.spec.ts` | Invalid current project repo/base-ref synchronous failure regression. |
+| `tests/e2e/continue-archived-worktree.spec.ts` | Worktree-cwd JSONL rebase regression. |
 
 ## Open questions
 
