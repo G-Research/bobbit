@@ -5,7 +5,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, connectWs, agentEndPredicate, registerProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,8 +85,23 @@ function findClonedJsonl(slugDir: string, sessionId: string): string | null {
 	}
 }
 
+function readRuntimeCwds(jsonlPath: string): string[] {
+	const cwds: string[] = [];
+	for (const line of readFileSync(jsonlPath, "utf8").split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (parsed?.type === "system" && typeof parsed.cwd === "string") cwds.push(parsed.cwd);
+		} catch {
+			// Ignore malformed transcript lines; the mock agent does the same.
+		}
+	}
+	return cwds;
+}
+
 test.describe("Continue-Archived stale worktree source", () => {
-	test("succeeds with a fresh session branch/worktree after source path and branch are deleted (api)", async () => {
+	test("succeeds with a fresh session branch/worktree after source path and branch are deleted (api)", async ({ gateway }) => {
 		const baseDir = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-stale-source-${process.pid}-${Date.now()}`;
 		const repoPath = join(baseDir, "repo");
 		let projectId: string | undefined;
@@ -121,6 +136,18 @@ test.describe("Continue-Archived stale worktree source", () => {
 			const proposalMarker = `STALE_SOURCE_CONTINUE_PROPOSAL_${Date.now()}`;
 			await sendPromptAndWait(srcId, `${transcriptMarker} hello from stale source`);
 
+			const sessionsDir = globalAgentSessionsDir();
+			const sourceJsonl = await pollUntil<string>(() => {
+				const file = gateway.sessionManager.getPersistedSession(srcId!)?.agentSessionFile;
+				return file && existsSync(file) ? file : "";
+			}, {
+				timeoutMs: 10_000,
+				intervalMs: 100,
+				label: "source session jsonl exists",
+			});
+			appendFileSync(sourceJsonl, `${JSON.stringify({ type: "system", subtype: "init", cwd: srcRec.worktreePath })}\n`);
+			expect(readRuntimeCwds(sourceJsonl), "source transcript should contain stale runtime cwd metadata before archive").toContain(srcRec.worktreePath);
+
 			const seedProposal = await apiFetch(`/api/sessions/${srcId}/proposal/role/seed`, {
 				method: "POST",
 				body: JSON.stringify({
@@ -135,6 +162,19 @@ test.describe("Continue-Archived stale worktree source", () => {
 
 			const archiveResp = await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" });
 			expect(archiveResp.ok).toBe(true);
+
+			const archivedSourceJsonl = await pollUntil<string>(() => {
+				const file = gateway.sessionManager.getPersistedSession(srcId!)?.agentSessionFile;
+				return file && existsSync(file) ? file : "";
+			}, {
+				timeoutMs: 10_000,
+				intervalMs: 100,
+				label: "archived source session jsonl exists",
+			});
+			if (!readRuntimeCwds(archivedSourceJsonl).includes(srcRec.worktreePath)) {
+				appendFileSync(archivedSourceJsonl, `${JSON.stringify({ type: "system", subtype: "init", cwd: srcRec.worktreePath })}\n`);
+			}
+			expect(readRuntimeCwds(archivedSourceJsonl), "archived source transcript should retain stale runtime cwd metadata").toContain(srcRec.worktreePath);
 
 			removeWorktreeIfPresent(repoPath, srcRec.worktreePath);
 			deleteBranchIfPresent(repoPath, srcRec.branch);
@@ -172,7 +212,6 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(existsSync(srcRec.worktreePath), "continue must not recreate the deleted source worktree").toBe(false);
 			expect(branchExists(repoPath, srcRec.branch), "continue must not recreate the deleted source branch").toBe(false);
 
-			const sessionsDir = globalAgentSessionsDir();
 			const projSlugDir = join(sessionsDir, `--${slugifyCwd(repoPath)}--`);
 			const wtSlugDir = join(sessionsDir, `--${slugifyCwd(newRec.worktreePath)}--`);
 			const clonedAtProj = findClonedJsonl(projSlugDir, newId);
@@ -181,6 +220,9 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(clonedAtProj, "cloned .jsonl must not live under the project-root slug").toBeNull();
 			expect(clonedAtWt, "cloned .jsonl must live under the new worktree-cwd slug").toBeTruthy();
 			expect(readFileSync(clonedAtWt!, "utf8"), "cloned transcript should include the source marker").toContain(transcriptMarker);
+			const clonedRuntimeCwds = readRuntimeCwds(clonedAtWt!);
+			expect(clonedRuntimeCwds, "continued runtime cwd metadata should be rebased off the deleted source worktree").not.toContain(srcRec.worktreePath);
+			expect(clonedRuntimeCwds, "continued runtime cwd metadata should reference the fresh worktree cwd").toContain(newRec.worktreePath);
 
 			const proposalResp = await apiFetch(`/api/sessions/${newId}/proposal/role`);
 			const proposalBody = await proposalResp.text();

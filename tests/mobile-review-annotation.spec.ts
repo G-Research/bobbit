@@ -98,6 +98,27 @@ test.describe("Mobile review annotation — floating button", () => {
 
 		await expect(page.locator("#floating-btn")).not.toBeVisible();
 	});
+
+	test("floating button X clamps within the mobile review viewport", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		await setupMobile(page);
+
+		await selectText(page);
+		await page.evaluate(() => {
+			(window as any)._mockSelectionRect = { left: -200, top: 40, right: -160, bottom: 60, width: 40, height: 20 };
+			(window as any).flushMobileSelection();
+		});
+		await expect(page.locator("#floating-btn")).toBeVisible();
+		let left = await page.locator("#floating-btn").evaluate((el: HTMLElement) => Number.parseFloat(el.style.left));
+		expect(left).toBe(4);
+
+		await page.evaluate(() => {
+			(window as any)._mockSelectionRect = { left: 900, top: 40, right: 940, bottom: 60, width: 40, height: 20 };
+			(window as any).flushMobileSelection();
+		});
+		left = await page.locator("#floating-btn").evaluate((el: HTMLElement) => Number.parseFloat(el.style.left));
+		expect(left).toBe(255); // review-doc width (375) - 120 button reserve
+	});
 });
 
 test.describe("Mobile review annotation — bottom sheet", () => {
@@ -118,6 +139,23 @@ test.describe("Mobile review annotation — bottom sheet", () => {
 		const quote = page.locator("#sheet-quote");
 		const quoteText = await quote.textContent();
 		expect(quoteText!.length).toBeGreaterThan(0);
+	});
+
+	test("bottom sheet docks to the viewport bottom with full-width geometry", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		await setupMobile(page);
+		await selectText(page);
+		await page.evaluate(() => (window as any).flushMobileSelection());
+		await page.locator("#floating-btn").click();
+
+		const rect = await page.locator("#sheet-popover").evaluate((el: HTMLElement) => {
+			const r = el.getBoundingClientRect();
+			return { left: r.left, right: r.right, bottom: r.bottom, width: r.width, innerWidth: window.innerWidth, innerHeight: window.innerHeight };
+		});
+		expect(rect.left).toBe(0);
+		expect(rect.right).toBe(rect.innerWidth);
+		expect(rect.width).toBe(rect.innerWidth);
+		expect(rect.bottom).toBe(rect.innerHeight);
 	});
 
 	test("comment submission stores annotation in sessionStorage", async ({ page }) => {

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "metricName": "coverage",
+  "kind": "coverage",
+  "createdAt": "2026-06-17T22:17:10.354Z",
+  "startedAt": "2026-06-17T22:12:40.556Z",
+  "status": "passed",
+  "exitCode": 0,
+  "signal": null,
+  "command": {
+    "command": "npm.cmd",
+    "args": [
+      "run",
+      "test:coverage"
+    ],
+    "cwd": "."
+  },
+  "durationMs": 269788,
+  "cpu": {
+    "estimatedCpuMs": 352234,
+    "averageCpuPercent": 142.2,
+    "peakCpuPercent": 628.66,
+    "sampleMs": 1000
+  },
+  "memory": {
+    "peakRssBytes": 2179993600
+  },
+  "coverage": {
+    "lines": {
+      "covered": 4318,
+      "total": 8090,
+      "pct": 53.37
+    },
+    "functions": {
+      "covered": 161,
+      "total": 368,
+      "pct": 43.75
+    },
+    "branches": {
+      "covered": 485,
+      "total": 628,
+      "pct": 77.23
+    }
+  }
+}

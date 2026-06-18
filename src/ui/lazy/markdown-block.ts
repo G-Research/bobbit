@@ -1,9 +1,9 @@
 // Lazy loader for the heavy <markdown-block> custom element.
 //
-// The element is registered as a side-effect of importing
-// `@mariozechner/mini-lit/dist/MarkdownBlock.js`, which transitively
-// pulls in KaTeX, marked, highlight.js — together ~150 kB gzipped.
-// Importing it eagerly anywhere forces that graph into the main chunk.
+// The Bobbit-owned implementation lives in `safe-markdown-block.ts` and
+// imports KaTeX, marked, highlight.js (via <code-block>) — together a large
+// dependency graph. Importing it eagerly anywhere forces that graph into the
+// main chunk.
 //
 // Call `ensureMarkdownBlock()` from any renderer or component that
 // emits a `<markdown-block>` tag (in `render()` or the constructor).
@@ -17,5 +17,5 @@ let loaded = false;
 export function ensureMarkdownBlock(): void {
 	if (loaded) return;
 	loaded = true;
-	import("@mariozechner/mini-lit/dist/MarkdownBlock.js");
+	import("./safe-markdown-block.js");
 }

@@ -139,13 +139,13 @@ let loaded = false;
 export function ensureMarkdownBlock(): void {
   if (loaded) return;
   loaded = true;
-  import("@mariozechner/mini-lit/dist/MarkdownBlock.js");
+  import("./safe-markdown-block.js");
 }
 ```
 
-Replace every static `import "@mariozechner/mini-lit/dist/MarkdownBlock.js";` with a call to `ensureMarkdownBlock()` inside the renderer/component's `render()` (or constructor for components). The custom-element upgrade is asynchronous-tolerant: lit re-renders the host on connection, and unknown-element nodes upgrade in place when the definition lands. Worst-case visual: a single ~50 ms flash of unstyled markdown text on first encounter — acceptable.
+Replace every static upstream MarkdownBlock import with a call to `ensureMarkdownBlock()` inside the renderer/component's `render()` (or constructor for components). The custom-element upgrade is asynchronous-tolerant: lit re-renders the host on connection, and unknown-element nodes upgrade in place when the definition lands. Worst-case visual: a single ~50 ms flash of unstyled markdown text on first encounter — acceptable.
 
-KaTeX comes in transitively via MarkdownBlock; deferring MarkdownBlock defers KaTeX automatically. KaTeX font woff/woff2/ttf assets are emitted as separate URLs already and will be lazy-fetched on first math render.
+KaTeX comes in transitively via Bobbit's safe markdown block; deferring that element defers KaTeX automatically. The local wrapper is intentional: it preserves code/inline-code dollar signs, keeps math rendering outside code, and applies Bobbit's link sanitizer consistently across markdown surfaces. See [../internals.md — Markdown rendering invariant](../internals.md#markdown-rendering-invariant). KaTeX font woff/woff2/ttf assets are emitted as separate URLs already and will be lazy-fetched on first math render.
 
 #### 2b. pdfjs-dist / docx-preview
 

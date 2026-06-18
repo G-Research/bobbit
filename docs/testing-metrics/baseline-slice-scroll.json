@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "metricName": "slice-scroll",
+  "kind": "e2e-browser-slice",
+  "createdAt": "2026-06-17T22:38:21.810Z",
+  "startedAt": "2026-06-17T22:36:43.565Z",
+  "status": "passed",
+  "exitCode": 0,
+  "signal": null,
+  "command": {
+    "command": "C:\\Program Files\\nodejs\\node.exe",
+    "args": [
+      "scripts/run-playwright-e2e.mjs",
+      "--project",
+      "browser",
+      "--reporter=json",
+      "tests/e2e/ui/jump-to-last-prompt.spec.ts",
+      "tests/e2e/ui/mobile-review-commenting.spec.ts",
+      "tests/e2e/ui/pill-overflow-promotion.spec.ts",
+      "tests/e2e/ui/tail-chat-real-stream.spec.ts",
+      "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
+      "tests/e2e/ui/tail-chat-user-scroll-up.spec.ts"
+    ],
+    "cwd": "."
+  },
+  "durationMs": 98243,
+  "cpu": {
+    "estimatedCpuMs": 97297,
+    "averageCpuPercent": 112.24,
+    "peakCpuPercent": 458.81,
+    "sampleMs": 1000
+  },
+  "memory": {
+    "peakRssBytes": 3551637504
+  },
+  "slice": "scroll",
+  "files": [
+    "tests/e2e/ui/jump-to-last-prompt.spec.ts",
+    "tests/e2e/ui/mobile-review-commenting.spec.ts",
+    "tests/e2e/ui/pill-overflow-promotion.spec.ts",
+    "tests/e2e/ui/tail-chat-real-stream.spec.ts",
+    "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
+    "tests/e2e/ui/tail-chat-user-scroll-up.spec.ts"
+  ],
+  "tests": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "durationMs": 132027,
+    "projects": {
+      "browser": {
+        "total": 14,
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "durationMs": 132027
+      }
+    }
+  }
+}

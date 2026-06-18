@@ -798,7 +798,7 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 
 **Why split settings from runtime state**: Users reopening an archived session usually want to resume the task, not resurrect the exact environment. The old worktree may be gone, the sandbox container may have been pruned, and the branch may be merged or abandoned. Continue-Archived gives them the same tools (model, role, sandbox/worktree flags) in a fresh runtime, with the prior conversation available as context only.
 
-For worktree-backed archived sessions, the archived `worktreePath` is provenance only: it says the source had worktree mode enabled. Continue never stats, repairs, revives, or reuses that path, and it never checks out the archived `branch`. The new session creates a fresh `session/<new-id8>` branch and worktree from the currently registered project repository and configured base ref.
+For worktree-backed archived sessions, the archived `worktreePath` is provenance only: it says the source had worktree mode enabled. Continue never stats, repairs, revives, or reuses that path, and it never checks out the archived `branch`. The new session creates a fresh `session/<new-id8>` branch and worktree from the currently registered project repository and configured base ref. Archived cwd/worktree values may be used only as old values to replace in runtime-only transcript metadata.
 
 **What is copied:**
 
@@ -817,7 +817,7 @@ For worktree-backed archived sessions, the archived `worktreePath` is provenance
 
 **Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted — the new session inherits `assistantType`, `role`, and `accessory`, and the source's proposal-draft directory is cloned into the new session's slot so the resumed agent picks up the in-progress draft. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the assistant-continue flow.
 
-**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
+**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Conversation and user-visible transcript content remain lossless, with no byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata inside the JSONL, such as `system`/`init` cwd or session-path records, may be rebased so the clone can load in the fresh runtime. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
@@ -830,9 +830,9 @@ For worktree-backed archived sessions, the archived `worktreePath` is provenance
    Other copy failures unlink the destination and return **500** with cleanup.
 4. Best-effort `copyToolContentDirIfPresent(srcId, dstId, stateDir)` recursively copies `<stateDir>/tool-content/<srcId>/` if present. The directory does not exist on disk today - `GET /api/sessions/:id/tool-content/:mi/:bi` reads through `rpcClient.getMessages()` from the JSONL - but the helper is shipped as defensive forward-compat for any future on-disk cache.
 5. Build `createSession` opts with `preExistingAgentSessionFile: <destPath>`. The `seedContext` / `seedContextSourceId` opts have been removed entirely - they had no other callers. If the archived source was worktree-backed, the handler derives `worktreeOpts` from the current project repo (`proj.rootPath` → `getRepoRoot`) and sets `awaitWorktreeSetup`/`bypassWorktreePool` so fresh-worktree failures are returned synchronously.
-6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. Worktree-backed continues allocate a new `session/<new-id8>` branch/worktree from the current project base ref; the archived source `worktreePath` and `branch` are not inputs to this allocation. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` - the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
+6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. Worktree-backed continues allocate a new `session/<new-id8>` branch/worktree from the current project base ref; the archived source `worktreePath` and `branch` are not inputs to this allocation. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline rebases eligible runtime-only cwd metadata, then issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` - the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
 
-**Worktree-cwd slug rebase**: Step 2 computes `destJsonl` against `proj.rootPath` because that's the only `cwd` known at request time. For worktree-backed sources, however, the agent CLI boots with `cwd = offsetCwd` (the per-branch worktree container), and `formatAgentSessionFilePath` embeds a `slugify(cwd)` segment in the path - so a clone left under the project-root slug-dir is invisible to the agent CLI and `switch_session` fails. To bridge this, `executeWorktreeAsync` in `src/server/agent/session-setup.ts` rebases the cloned `.jsonl` after `plan.cwd` is finalised to the worktree path and before `switch_session` is issued: it re-derives the correct path via `formatAgentSessionFilePath(plan.cwd, Date.now(), session.id)`, moves the file (host-side `fs.promises.rename` with a `copyFile + unlink` cross-device fallback for non-sandboxed sessions; container-side `sessionFileCopy + sessionFileDelete` for sandboxed sessions), `mkdir { recursive: true }`s the target dir, and updates both `plan.preExistingAgentSessionFile` and the persisted `agentSessionFile` field so a hard kill in the post-spawn window restores the right path. The rebase only fires on the worktree branch when `plan.preExistingAgentSessionFile` is set; the non-worktree continue path is untouched. Regression tests: `tests/e2e/continue-archived-worktree.spec.ts` and `tests/e2e/continue-archived-worktree-stale-source.spec.ts`.
+**Worktree-cwd slug rebase**: Step 2 computes `destJsonl` against `proj.rootPath` because that's the only `cwd` known at request time. For worktree-backed sources, however, the agent CLI boots with `cwd = offsetCwd` (the per-branch worktree container), and `formatAgentSessionFilePath` embeds a `slugify(cwd)` segment in the path - so a clone left under the project-root slug-dir is invisible to the agent CLI and `switch_session` fails. To bridge this, `executeWorktreeAsync` in `src/server/agent/session-setup.ts` rebases the cloned `.jsonl` after `plan.cwd` is finalised to the worktree path and before `switch_session` is issued: it re-derives the correct path via `formatAgentSessionFilePath(plan.cwd, Date.now(), session.id)`, moves the file (host-side `fs.promises.rename` with a `copyFile + unlink` cross-device fallback for non-sandboxed sessions; container-side `sessionFileCopy + sessionFileDelete` for sandboxed sessions), `mkdir { recursive: true }`s the target dir, and updates both `plan.preExistingAgentSessionFile` and the persisted `agentSessionFile` field so a hard kill in the post-spawn window restores the right path. After the move and before `switch_session`, `rebaseAgentTranscriptCwdMetadataFile` may rewrite runtime-only Pi cwd/session metadata. Today that means top-level `cwd` on `system`/`init` records is rewritten from archived `ps.cwd`/`ps.worktreePath` values to the fresh `plan.cwd`; message content is not inspected or rewritten. The rebase only fires on the worktree branch when `plan.preExistingAgentSessionFile` is set; the non-worktree continue path is untouched. Regression tests: `tests/e2e/continue-archived-worktree.spec.ts` and `tests/e2e/continue-archived-worktree-stale-source.spec.ts`.
 
 **Fresh worktree failure reporting**: If the source was worktree-backed and the current project repo/base ref is invalid, Continue returns the fresh-create failure from the current project setup path. The error should mention the current repo/base/worktree problem, not the archived source `worktreePath` or `branch`, because those archived fields are not dependencies. Regression test: `tests/e2e/continue-archived-worktree-invalid-base.spec.ts`.
 
@@ -846,6 +846,7 @@ For worktree-backed archived sessions, the archived `worktreePath` is provenance
 - `src/server/server.ts` - `POST /api/sessions/:archivedId/continue` handler (scope gate, copy, session creation, cleanup-on-failure).
 - `src/server/agent/session-manager.ts` - `recoverSessionFile` is public; `createSession` opts carry `preExistingAgentSessionFile?: string` (no `seedContext` plumbing).
 - `src/server/agent/session-setup.ts` - `SessionSetupPlan.preExistingAgentSessionFile`; both `spawnAgent` and `executeWorktreeAsync` issue `switch_session` after `rpcClient.start()` succeeds, before `persistSessionMetadata`. `persistOnce` writes the path up front.
+- `src/server/agent/transcript-sanitizer.ts` - runtime-only cwd metadata rebase plus blank user-message sanitizer at the rehydration boundary.
 - `src/server/agent/system-prompt.ts` - `seedContext` / `seedContextSource` and the `## Prior Session Transcript` section have been removed from `PromptParts`.
 - `src/ui/components/AgentInterface.ts` - footer renderer, keyed by `[data-continue-archived-footer]`.
 - `src/ui/components/ContinueSessionChooser.ts` - confirm-only modal (no mode radio, no large-transcript warning, empty POST body).
@@ -2656,6 +2657,59 @@ Several endpoints hold an HTTP request open for minutes while they wait for a se
 - `GET /api/sessions/:id/bg-processes/:pid/wait` — blocks on `BgProcessManager.waitForExit`; the response logic lives in `src/server/agent/bg-wait-response.ts::streamBgWaitResponse` (`heartbeatMs` is injectable for tests). Here the head flush is **lazy** — driven by the first heartbeat tick rather than written eagerly — specifically so the not-found case can still return a real `404`: `waitForExit` resolves `null` synchronously for an unknown pid, long before the first tick, so no bytes have been written and the status can still be set. A real pending wait flushes the `200`/chunked head on the first 60 s tick, well inside undici's timeout. See [debugging.md — `bash_bg wait` returns `fetch failed`](debugging.md#bash_bg-wait-returns-fetch-failed-on-long-running-processes).
 
 The bg-wait endpoint was the second consumer and originally shipped without the heartbeat (it post-dated the session `/wait` fix), which is why `bash_bg wait` on a ≥300 s process threw `fetch failed` until `streamBgWaitResponse` brought it in line. Regression coverage: `tests/bg-wait-response.test.ts` pins the mechanism (head flushed, heartbeat on tick, terminal JSON parses, `404` preserved) in milliseconds with an injected interval — never on a real ~300 s wall clock.
+
+---
+
+## Markdown rendering invariant
+
+Bobbit renders user- and agent-authored markdown through the global `<markdown-block>` custom element. The element is used in chat messages, proposal previews, goal dashboards, staff prompts, skill chips, thinking blocks, gate/verification outputs, and markdown artifacts. Because these surfaces can display untrusted model output, source snippets, and math in the same document, markdown rendering is a UI security and correctness boundary rather than a cosmetic helper.
+
+### Owned implementation
+
+`src/ui/lazy/markdown-block.ts` is the only public loader. It dynamically imports Bobbit's `src/ui/lazy/safe-markdown-block.ts`, which defines the `<markdown-block>` element. Bobbit owns this implementation instead of importing `@mariozechner/mini-lit/dist/MarkdownBlock.js` directly for three reasons:
+
+- **Correctness for code.** Markdown code spans and fenced code must be parsed as code before math handling sees dollar signs. The upstream implementation's custom code preservation and dollar-math path regressed on TypeScript template literals such as `` `^${foo}$` ``, causing trailing markdown to break. The local renderer lets `marked` own code tokenization and renders fenced code through `<code-block>` with encoded source.
+- **One sanitizer policy.** Link handling is centralized so every markdown surface applies the same href allow-list and obfuscation normalization.
+- **Lazy loading stays intact.** KaTeX, marked, highlight.js, and `<code-block>` remain out of the main UI chunk until a markdown surface is encountered.
+
+Consumers must not import the upstream MarkdownBlock module directly. A direct import bypasses Bobbit's code/math guarantees, href policy, and bundle boundary.
+
+### Registration contract
+
+Any component or renderer that emits `<markdown-block>` must call `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts` in `connectedCallback()`, the constructor, or the first `render()` path before returning the template. The helper is idempotent: the first call starts the dynamic import, later calls are no-ops, and existing unknown `<markdown-block>` nodes upgrade in place when the custom element definition lands.
+
+Do not rely on another page or earlier component having registered the element. That creates navigation-order bugs where markdown appears as raw text until an unrelated surface triggers the lazy import. The debugging entry for this symptom is [debugging.md — Markdown not rendering in chat / proposal panel](debugging.md#markdown-not-rendering-in-chat--proposal-panel).
+
+### Code and math guarantees
+
+`<markdown-block>` preserves literal dollar signs and backticks inside code:
+
+- Fenced code keeps source text such as ``const x = `^${foo}$`;`` exactly as code content.
+- Inline code keeps source text such as `` `^${foo}$` `` literally.
+- Dollar signs inside fenced or inline code are never treated as KaTeX delimiters.
+- Template-literal backticks inside fenced code do not terminate markdown parsing.
+
+Math still renders through KaTeX outside code for these delimiters:
+
+- inline dollar math: `$x$`
+- display dollar math: `$$...$$`
+- inline LaTeX math: `\(...\)`
+- display LaTeX math: `\[...\]`
+
+If KaTeX rejects an expression, the renderer falls back to escaped text for that expression rather than letting raw HTML through.
+
+### Link href policy
+
+Markdown links are allowed only when their normalized href is safe for a new browser tab:
+
+- allowed: `http:`, `https:`, `mailto:`, relative paths, root-relative paths, and same-document anchors (`#section`)
+- rejected: protocol-relative URLs (`//host/path`) and every other explicit scheme, including `javascript:`, `data:`, `vbscript:`, and `file:`
+
+Before scheme allow-listing, the sanitizer decodes HTML character references and removes ASCII control characters and whitespace from the scheme candidate. This catches browser-equivalent obfuscations such as `&#106;avascript:`, `jav&#x61;script:`, and `java&#10;script:`. Rejected links render as escaped link text, not as `<a>` elements. Allowed links receive `target="_blank"` and `rel="noopener noreferrer"`.
+
+### Regression coverage
+
+`tests/markdown-dollar-template.spec.ts` is the pinning browser/file fixture. It covers the minimal TypeScript template-literal repro, inline-code dollar preservation, supported math delimiters outside code, and href sanitizer cases including entity/control-obfuscated schemes. Add new markdown safety regressions there unless they require a full application route.
 
 ---
 

@@ -9,6 +9,7 @@ import type { ToolRenderer, ToolRenderResult, ToolRenderContext } from "../types
 import { DefaultRenderer } from "./DefaultRenderer.js";
 import { isSubgoalsEnabled } from "../../../app/subgoals-flag.js";
 import { getResult, truncate, goalIdChip, resolveGoalId } from "./children-renderer-helpers.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import "../../../ui/components/ExpandableSection.js";
 
 const fallback = new DefaultRenderer("goal_plan_status");
@@ -23,6 +24,7 @@ function ensureLazyPill(): void {
 export class GoalPlanStatusRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean, ctx?: ToolRenderContext): ToolRenderResult {
 		if (!isSubgoalsEnabled()) return fallback.render(params, result, isStreaming);
+		ensureMarkdownBlock();
 		ensureLazyPill();
 
 		const state = getToolState(result, isStreaming);

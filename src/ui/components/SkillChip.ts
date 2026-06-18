@@ -2,6 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { ChevronDown, ChevronRight, Sparkles } from "lucide";
+import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 
 /**
  * The data the chip needs to render. Mirrors the server-side SkillExpansion
@@ -42,6 +43,7 @@ export class SkillChip extends LitElement {
 	}
 
 	override connectedCallback(): void {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		if (this.block) {
 			this.style.display = "block";
