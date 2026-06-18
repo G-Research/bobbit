@@ -9853,11 +9853,29 @@ async function handleApiRoute(
 		const wantWorktree = !!ps.worktreePath;
 		let worktreeOpts: { repoPath: string } | undefined;
 		if (wantWorktree) {
+			let projectIsGitRepo = false;
 			try {
-				if (await isGitRepo(projCwd)) {
-					worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-				}
-			} catch { /* ignore — no worktree */ }
+				projectIsGitRepo = await isGitRepo(projCwd);
+			} catch (err) {
+				jsonError(500, err, {
+					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
+				});
+				return;
+			}
+			if (!projectIsGitRepo) {
+				json({
+					error: "failed to resolve current project repository for fresh continue worktree creation: project root is not a git repository",
+				}, 500);
+				return;
+			}
+			try {
+				worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch (err) {
+				jsonError(500, err, {
+					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
+				});
+				return;
+			}
 		}
 
 		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
