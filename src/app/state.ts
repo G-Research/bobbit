@@ -369,6 +369,17 @@ export const state = {
 	archivedSessionsHasMore: false,
 	archivedSessionsTotal: 0,
 
+	// Pagination/loading for archived search results. Kept separate from normal archive pagination.
+	archivedSearchQuery: "",
+	archivedSearchGoalsCursor: null as number | null,
+	archivedSearchGoalsHasMore: false,
+	archivedSearchGoalsTotal: 0,
+	archivedSearchGoalsLoading: false,
+	archivedSearchSessionsCursor: null as number | null,
+	archivedSearchSessionsHasMore: false,
+	archivedSearchSessionsTotal: 0,
+	archivedSearchSessionsLoading: false,
+
 
 	// Unified assistant state
 	assistantType: null as string | null,
