@@ -62,8 +62,9 @@ The continue endpoint lives in the server REST route for
 3. Resolve fresh worktree intent from current project state.
    - If the archived source had `worktreePath`, continue treats that only as
      evidence that the source was worktree-backed.
-   - The endpoint checks the current registered project root and derives the
-     repo root from that project.
+   - The endpoint uses the same worktree-support resolver as normal session
+     creation, so single-repo and multi-repo projects make the same capability
+     decision in both flows.
    - Failures are reported as fresh current-project worktree creation errors,
      not archived-source worktree errors.
 4. Generate a new session id and initial destination `.jsonl` path with
@@ -80,12 +81,15 @@ The continue endpoint lives in the server REST route for
 7. Create the new session with `preExistingAgentSessionFile`.
    - No `seedContext` is generated.
    - No prior-transcript prompt section is injected.
-   - Worktree-backed continues set `awaitWorktreeSetup` and
-     `bypassWorktreePool` so fresh setup failures are returned synchronously.
+   - Worktree-backed continues set `awaitWorktreeSetup` so fresh setup
+     failures are returned synchronously.
+   - Non-sandboxed worktree-backed continues use the normal worktree-pool
+     claim path first. Sandboxed continues explicitly bypass the host-side pool
+     because their worktrees are created inside the project sandbox container.
 8. Rehydrate the agent from the cloned `.jsonl`.
    - Non-worktree sessions switch directly to the cloned file.
-   - Worktree-backed sessions first create a fresh worktree, then rebase the
-     cloned file into the final worktree-cwd slug directory.
+   - Worktree-backed sessions first claim or create a fresh worktree, then
+     rebase the cloned file into the final worktree-cwd slug directory.
    - After the file is in that final slug path and before `switch_session`, the
      setup pipeline rebases runtime-only Pi cwd metadata from archived
      cwd/worktree values to the fresh session cwd.
@@ -126,22 +130,43 @@ user-visible text are never inspected or rewritten.
 
 ## Worktree behavior
 
-Worktree-backed continue uses the current project repo and creates a fresh
-`session/<new-id8>` branch/worktree. The archived branch name is never used as a
-base ref and the archived worktree path is never inspected. Archived cwd values
-are provenance only and may be used only to identify runtime metadata that must
-point at the fresh cwd before rehydration.
+Worktree-backed continue uses the current project configuration and creates a
+fresh `session/<new-id8>` branch/worktree. The archived branch name is never used
+as a base ref and the archived worktree path is never inspected. Archived cwd
+values are provenance only and may be used only to identify runtime metadata that
+must point at the fresh cwd before rehydration.
+
+For non-sandboxed sessions, Continue-Archived now follows the same allocation
+path as `POST /api/sessions`:
+
+1. Ask the project worktree pool to claim a ready entry for `session/<new-id8>`.
+2. If the pool is empty, returns `null`, or `claim()` throws, log the claim
+   failure and fall back to cold worktree creation.
+3. Cold creation uses the normal single-repo or multi-repo session pipeline,
+   including the project's configured base ref, worktree root, and component
+   setup hooks.
+
+The pool claim/fallback decision is not part of the archived source's
+provenance. A continued session may claim a prewarmed `pool/_pool-*` entry, or it
+may create a new worktree from scratch; both outcomes still produce a fresh
+`session/<new-id8>` branch/worktree owned by the new session.
+
+Sandboxed continues are the explicit exception: they bypass the host-side pool
+and keep using sandbox worktree creation. Host pool entries are not reachable
+inside the container, and mixing host and sandbox worktree state would break the
+copy/cleanup boundaries.
 
 This keeps continue robust after normal cleanup operations:
 
 - deleted archived worktree directories
 - pruned archived branches
-- cleaned worktree pool entries
+- cleaned or empty worktree pool entries
 - stale persisted `worktreePath` values
 
-If the current project root is not a usable git repo, continue returns an
-actionable fresh-worktree error. The error is about the current project/base ref
-because that is the only runtime dependency for the new worktree.
+If the current project does not support worktrees, or cold fallback creation
+fails after an empty/failed pool claim, continue returns an actionable
+fresh-worktree error. The error is about the current project/base ref because
+that is the only runtime dependency for the new worktree.
 
 ## Sandbox and copy behavior
 
@@ -205,8 +230,9 @@ diagnostics, but the cloned continue artifacts are removed.
 | Goal, delegate, or team source | `422` | `goal, delegate, or team sessions cannot be continued` |
 | Project no longer registered | `410` | `source project no longer registered` |
 | Source transcript missing or empty | `404` | `archived transcript missing or empty` |
-| Current project repo cannot be inspected | `500` | Fresh worktree creation error for the current project |
-| Current project root is not a git repo | `500` | Fresh worktree creation error for the current project |
+| Current project worktree support cannot be resolved | `500` | Fresh worktree creation error for the current project |
+| Worktree pool is empty, returns `null`, or claim throws | n/a | Not an API error; continue falls back to cold `createWorktree` / `createWorktreeSet` |
+| Cold worktree creation fails after pool fallback | `500` | Fresh worktree creation error for the current project |
 | Cross-realm transcript copy | `422` | `cross-realm continue not supported` |
 | Transcript clone fails | `500` | `failed to clone session file: <message>` |
 | Fresh worktree or create-session fails | `500` | `failed to create session: <message>` with copied artifacts cleaned up |
@@ -240,6 +266,13 @@ implementation details:
 
 - stale archived `worktreePath` / `branch` still creates a fresh session
   worktree from the current project repo/base ref
+- non-sandboxed worktree-backed continues claim a ready worktree-pool entry
+  when one is available
+- empty pool, `claim()` returning `null`, or `claim()` throwing falls back to
+  cold `createWorktree` / `createWorktreeSet`
+- sandboxed continues bypass the host-side worktree pool explicitly
+- single-repo and multi-repo worktree capability use the same resolver as normal
+  session creation
 - invalid current project repo/base-ref returns a synchronous fresh-worktree
   creation error
 - worktree-backed continues rebase the cloned JSONL to the final worktree-cwd
