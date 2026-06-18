@@ -20,6 +20,7 @@ import {
 	type PackContributions,
 	type PanelContribution,
 	type EntrypointContribution,
+	type RuntimeContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -86,6 +87,12 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined {
 		return this.getPack(projectId, packId)?.entrypoints.find((e) => e.id === entrypointId);
+	}
+
+	/** Resolve a managed-runtime descriptor within a pack (P1 runtime manifest).
+	 *  Class-level convenience accessor; not part of {@link PackContributionResolver}. */
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
+		return this.getPack(projectId, packId)?.runtimes.find((r) => r.id === runtimeId);
 	}
 
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean {

@@ -1,0 +1,98 @@
+# Hindsight runtime manifest (P1 — pure descriptor, no Docker execution).
+#
+# Consumed by the runtime manifest parser/validator (src/server/runtime/manifest.ts)
+# and the pure helper utilities (src/server/runtime/helpers.ts). This file only
+# DECLARES the runtime; it never runs anything. Every field below maps directly
+# onto the parser schema (RuntimeManifest): env refs are exactly one of
+# secret|generate|port|value, port specs use `container`, and generated secrets
+# are declared with `generate: true`.
+id: hindsight
+title: Hindsight
+description: >-
+  Managed Hindsight stack — API + web UI backed by Postgres. Supports a fully
+  managed Postgres (bind-mounted data dir) or an external/operator-supplied
+  Postgres via a connection URL.
+
+# Compose template lives one directory up, inside the same pack root. The parser
+# resolves this relative to THIS manifest file and rejects any path that escapes
+# the pack root.
+composeFile: ../runtime/compose.yaml
+
+# Secrets that are generated-and-persisted (idempotently) by the runtime helpers
+# via SecretsStore. These are NOT user-supplied; the LLM API key (below) is the
+# only user-configured secret and is wired through an env `secret:` ref instead.
+secrets:
+  # Managed Postgres password — generated once and persisted via SecretsStore.
+  - key: HINDSIGHT_DB_PASSWORD
+    generate: true
+  # Hindsight API session/encryption secret — generated once and persisted.
+  - key: HINDSIGHT_API_SECRET
+    generate: true
+
+# Host ports allocated via bind :0, persisted, and re-validated on boot by the
+# runtime helpers. `container` is the informational container-side port.
+ports:
+  - key: HINDSIGHT_WEB_PORT
+    container: 3000
+  - key: HINDSIGHT_API_PORT
+    container: 8080
+
+# Base environment shared by all modes. Each value is exactly one ref kind:
+#   secret:   resolve from a USER-CONFIGURED secret (never generated)
+#   generate: resolve from a GENERATED+persisted secret (idempotent)
+#   port:     resolve from an allocated host port
+#   value:    literal, with ${var} / ${var:-default} placeholder substitution
+env:
+  # LLM API key MUST come from a configured user secret — not generated.
+  HINDSIGHT_API_LLM_API_KEY:
+    secret: HINDSIGHT_API_LLM_API_KEY
+  # API session/encryption secret — generated + persisted.
+  HINDSIGHT_API_SECRET:
+    generate: HINDSIGHT_API_SECRET
+  HINDSIGHT_WEB_PORT:
+    port: HINDSIGHT_WEB_PORT
+  HINDSIGHT_API_PORT:
+    port: HINDSIGHT_API_PORT
+
+# Mode-specific argument construction. `managed-postgres` includes the `db`
+# service. `external-postgres` omits `db` and injects a configured connection URL.
+modes:
+  managed-postgres:
+    title: Managed Postgres
+    # Fully managed Postgres. Includes the `db` service with a bind-mounted data
+    # directory; the API connects to it over the compose network.
+    services:
+      - api
+      - web
+      - db
+    env:
+      # Generated + persisted managed Postgres password.
+      HINDSIGHT_DB_PASSWORD:
+        generate: HINDSIGHT_DB_PASSWORD
+      # Managed data directory for the bind-mounted Postgres volume. Defaults to
+      # ~/.hindsight when `dataDir` is not supplied.
+      HINDSIGHT_DATA_DIR:
+        value: ${dataDir:-~/.hindsight}
+      # Managed DB connection string assembled from the GENERATED password and
+      # the in-compose `db` service hostname. The ${HINDSIGHT_DB_PASSWORD}
+      # placeholder is resolved from the generated secret of the same key.
+      HINDSIGHT_API_DATABASE_URL:
+        value: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
+
+  external-postgres:
+    title: External Postgres
+    # Operator-supplied Postgres. Omits the managed `db` service; the API uses
+    # the externally provided HINDSIGHT_API_DATABASE_URL.
+    services:
+      - api
+      - web
+      - db
+    omitServices:
+      - db
+    requireEnv:
+      - HINDSIGHT_API_DATABASE_URL
+    env:
+      # Required external connection URL, configured as a user secret. No `db`
+      # service is started in this mode.
+      HINDSIGHT_API_DATABASE_URL:
+        secret: HINDSIGHT_API_DATABASE_URL
