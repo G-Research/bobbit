@@ -39,8 +39,19 @@ Retained spawned-gateway browser E2E should prove integration wiring that fixtur
 - Staff/search integration: `tests/e2e/ui/sidebar-staff-loading.spec.ts`, `search-e2e.spec.ts`, and `search-result-navigation.spec.ts`.
 - Session+goal action-menu integration: `tests/e2e/ui/sidebar-actions-menu.spec.ts`.
 
+## Coverage-map update rules
+
+When moving browser E2E rows to cheaper layers:
+
+1. Add or identify fixture/API/unit coverage before deleting or skipping spawned-gateway browser rows.
+2. Update this map in the same change: list the retired browser matrix, replacement coverage, and retained full-stack smoke.
+3. Keep retained browser E2E to integration journeys: real routing, persistence, WebSocket/server wiring, cross-client behavior, or real browser layout that fixtures cannot represent.
+4. Measure the relevant slice before the full E2E validation step.
+5. Use `metrics:e2e:all` for final split-suite validation instead of rerunning full E2E through multiple commands.
+
 ## Baseline metric files
 
+<!-- baseline-metric-files:start -->
 - `baseline-coverage.json`
 - `baseline-e2e-api-realpush.json`
 - `baseline-e2e-api.json`
@@ -53,3 +64,4 @@ Retained spawned-gateway browser E2E should prove integration wiring that fixtur
 - `baseline-unit-node.json`
 
 Thresholds: `thresholds.json`.
+<!-- baseline-metric-files:end -->

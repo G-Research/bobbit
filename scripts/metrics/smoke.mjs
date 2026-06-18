@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { baselineMetricFile, metricFile, writeJson } from "./lib.mjs";
@@ -71,6 +71,52 @@ function runScopedCheck(baselinePath, currentPath, extraArgs = []) {
 	], { stdio: "inherit" });
 }
 
+function runCoverageMapOnly() {
+	return spawnSync(process.execPath, ["scripts/metrics/baseline.mjs", "--coverage-map-only"], {
+		stdio: "inherit",
+		env: { ...process.env, BOBBIT_METRICS_BASELINE_DIR: baselineDir },
+	});
+}
+
+function assertCoverageMapSmoke() {
+	const coverageMapPath = join(baselineDir, "coverage-map.md");
+	writeFileSync(coverageMapPath, `# Split UI E2E coverage map
+
+## Retained full-stack smoke inventory
+
+KEEP-SMOKE-SENTINEL
+
+## Coverage-map update rules
+
+KEEP-RULE-SENTINEL
+
+## Baseline metric files
+
+<!-- baseline-metric-files:start -->
+- stale-pre-migration-row
+
+Thresholds: stale-thresholds.json.
+<!-- baseline-metric-files:end -->
+`);
+	const result = runCoverageMapOnly();
+	if ((result.status ?? 1) !== 0) throw new Error("expected coverage-map-only baseline refresh to pass");
+	const updated = readFileSync(coverageMapPath, "utf8");
+	for (const expected of [
+		"KEEP-SMOKE-SENTINEL",
+		"KEEP-RULE-SENTINEL",
+		"<!-- baseline-metric-files:start -->",
+		"<!-- baseline-metric-files:end -->",
+		"`baseline-coverage.json`",
+		"`baseline-e2e-browser.json`",
+		"Thresholds: `thresholds.json`.",
+	]) {
+		if (!updated.includes(expected)) throw new Error(`coverage-map smoke missing ${expected}`);
+	}
+	for (const stale of ["stale-pre-migration-row", "stale-thresholds.json", "tail-chat-user-scroll-up.spec.ts", "later sidebar gate should add"]) {
+		if (updated.includes(stale)) throw new Error(`coverage-map smoke retained stale text: ${stale}`);
+	}
+}
+
 try {
 	const baselineCoveragePath = baselineMetricFile("coverage", baselineDir);
 	const baselineBrowserPath = baselineMetricFile("e2e-browser", baselineDir);
@@ -114,6 +160,8 @@ try {
 
 	const budgetFail = runCheck(badBudgetCurrentDir);
 	if ((budgetFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for browser E2E test-count growth");
+
+	assertCoverageMapSmoke();
 
 	console.log("[metrics:smoke] passed");
 } finally {
