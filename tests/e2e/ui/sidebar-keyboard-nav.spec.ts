@@ -144,6 +144,23 @@ async function waitForShortcutsReady(page: Page): Promise<void> {
 	}).toBe(true);
 }
 
+function expectedHashForNavId(navId: string | null): string | null {
+	if (!navId) return null;
+	const sep = navId.indexOf(":");
+	if (sep < 0) return null;
+	const kind = navId.slice(0, sep);
+	const id = navId.slice(sep + 1);
+	switch (kind) {
+		case "session": return `#/session/${id}`;
+		case "goal": return `#/goal/${id}`;
+		case "project": return `#/settings/${id}/general`;
+		case "staff-header": return "#/staff";
+		case "ungrouped-header":
+		case "archived-header": return "#/";
+		default: return null;
+	}
+}
+
 async function waitForActiveNavId(page: Page, expected: string | null): Promise<void> {
 	const deadline = Date.now() + 10_000;
 	let latest: ActiveNavSnapshot | null = null;
@@ -154,6 +171,22 @@ async function waitForActiveNavId(page: Page, expected: string | null): Promise<
 		if (contractActiveIsSettled && latest.id === expected) return;
 	}
 	throw new Error(`${MARK}: expected active nav ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
+}
+
+async function waitForNavSettled(page: Page, expected: string | null): Promise<void> {
+	const expectedHash = expectedHashForNavId(expected);
+	const expectedSessionId = expected?.startsWith("session:") ? expected.slice("session:".length) : null;
+	const deadline = Date.now() + 10_000;
+	let latest: ActiveNavSnapshot | null = null;
+	while (Date.now() < deadline) {
+		await nextFrame(page);
+		latest = await activeNavSnapshot(page);
+		const contractActiveIsSettled = latest.activeIds.length <= 1;
+		const routeIsSettled = !expectedHash || latest.hash === expectedHash;
+		const sessionIsSettled = !expectedSessionId || latest.selectedSessionId === expectedSessionId;
+		if (contractActiveIsSettled && latest.id === expected && routeIsSettled && sessionIsSettled) return;
+	}
+	throw new Error(`${MARK}: expected settled nav ${JSON.stringify(expected)} hash=${JSON.stringify(expectedHash)}; latest=${JSON.stringify(latest)}`);
 }
 
 async function resetNavStart(page: Page): Promise<void> {
@@ -175,11 +208,20 @@ async function resetNavStart(page: Page): Promise<void> {
 async function walkDown(page: Page, steps: number, expectedOrder: string[]): Promise<Array<string | null>> {
 	const visited: Array<string | null> = [];
 	for (let i = 0; i < steps; i++) {
+		const expected = expectedOrder[i % expectedOrder.length];
 		await pressCtrlArrow(page, "ArrowDown");
-		await waitForActiveNavId(page, expectedOrder[i % expectedOrder.length]);
+		await waitForNavSettled(page, expected);
 		visited.push(await activeNavId(page));
 	}
 	return visited;
+}
+
+async function walkDownRange(page: Page, expectedOrder: string[], from: number, toInclusive: number): Promise<void> {
+	for (let i = from; i <= toInclusive; i++) {
+		const expected = expectedOrder[i % expectedOrder.length];
+		await pressCtrlArrow(page, "ArrowDown");
+		await waitForNavSettled(page, expected);
+	}
 }
 
 test.describe("Sidebar keyboard navigation contract", () => {
@@ -243,22 +285,23 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		expect(visitedDown[domOrder.length], `${MARK}: Ctrl+ArrowDown must wrap to first row`).toBe(domOrder[0]);
 
 		await pressCtrlArrow(page, "ArrowUp");
-		await waitForActiveNavId(page, domOrder[domOrder.length - 1]);
+		await waitForNavSettled(page, domOrder[domOrder.length - 1]);
 		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowUp from first row must wrap to last`).toBe(domOrder[domOrder.length - 1]);
 
 		const goalEntry = `goal:${liveGoalId}`;
 		const goalIndex = domOrder.indexOf(goalEntry);
 		expect(goalIndex, `${MARK}: sidebar must include live goal row`).toBeGreaterThanOrEqual(0);
 		await resetNavStart(page);
-		for (let i = 0; i <= goalIndex; i++) await pressCtrlArrow(page, "ArrowDown");
-		await waitForActiveNavId(page, goalEntry);
-		expect((await activeNavSnapshot(page)).hash, `${MARK}: landing on goal header must route to goal dashboard`).toContain(`#/goal/${liveGoalId}`);
+		await walkDownRange(page, domOrder, 0, goalIndex);
+		const goalSnapshot = await activeNavSnapshot(page);
+		expect(goalSnapshot.id, `${MARK}: goal row must be active before asserting route`).toBe(goalEntry);
+		expect(goalSnapshot.hash, `${MARK}: landing on goal header must route to goal dashboard`).toBe(`#/goal/${liveGoalId}`);
 
-		const nextSession = domOrder.slice(goalIndex + 1).find((id) => id.startsWith("session:"));
-		expect(nextSession, `${MARK}: goal journey must expose a following session row`).toBeTruthy();
-		while ((await activeNavId(page)) !== nextSession) await pressCtrlArrow(page, "ArrowDown");
-		await waitForActiveNavId(page, nextSession!);
-		const sessionId = nextSession!.split(":")[1];
+		const nextSessionIndex = domOrder.findIndex((id, idx) => idx > goalIndex && id.startsWith("session:"));
+		expect(nextSessionIndex, `${MARK}: goal journey must expose a following session row`).toBeGreaterThan(goalIndex);
+		const nextSession = domOrder[nextSessionIndex];
+		await walkDownRange(page, domOrder, goalIndex + 1, nextSessionIndex);
+		const sessionId = nextSession.split(":")[1];
 		const sessionSnapshot = await activeNavSnapshot(page);
 		expect(sessionSnapshot.hash, `${MARK}: landing on session row must route to session`).toContain(`#/session/${sessionId}`);
 		expect(sessionSnapshot.selectedSessionId, `${MARK}: landing on session row must select session`).toBe(sessionId);
