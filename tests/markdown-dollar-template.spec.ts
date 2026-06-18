@@ -6,6 +6,7 @@ const FIXTURE = path.resolve("tests/fixtures/markdown-dollar-template.html");
 const BUNDLE = path.resolve("tests/fixtures/markdown-dollar-template-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/markdown-dollar-template-entry.ts");
 const MARKDOWN_SRC = path.resolve("src/ui/lazy/markdown-block.ts");
+const SAFE_MARKDOWN_SRC = path.resolve("src/ui/lazy/safe-markdown-block.ts");
 
 const TEST_PAGE = `file://${FIXTURE}`;
 
@@ -24,7 +25,7 @@ const REPRO_MARKDOWN = [
 const INLINE_CODE_MARKDOWN = "inline code: `^${foo}$`";
 
 test.beforeAll(() => {
-	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, MARKDOWN_SRC] });
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, MARKDOWN_SRC, SAFE_MARKDOWN_SRC] });
 });
 
 type MarkdownSnapshot = {
