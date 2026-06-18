@@ -4049,6 +4049,30 @@ async function handleApiRoute(
 		return result;
 	}
 
+	function normalizedArchivedQuery(value: string | null): string {
+		return (value || "").trim().toLowerCase();
+	}
+
+	function archivedSessionMatchesQuery(session: any, query: string): boolean {
+		if (!query) return true;
+		return String(session?.title || "").toLowerCase().includes(query)
+			|| String(session?.role || "").toLowerCase().includes(query);
+	}
+
+	function isArchivedQueryChildSession(session: any): boolean {
+		return !!(session?.parentSessionId || session?.delegateOf);
+	}
+
+	function archivedGoalMatchesQuery(goal: PersistedGoal, sessions: any[], query: string): boolean {
+		if (!query) return true;
+		if (String(goal.title || "").toLowerCase().includes(query)) return true;
+		return sessions.some(s =>
+			(s?.goalId === goal.id || s?.teamGoalId === goal.id)
+			&& !isArchivedQueryChildSession(s)
+			&& archivedSessionMatchesQuery(s, query),
+		);
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = projectContextManager.getSessionGeneration();
@@ -4071,6 +4095,7 @@ async function handleApiRoute(
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Collect archived sessions across all project contexts
 			const allArchived: typeof sessions = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -4081,10 +4106,11 @@ async function handleApiRoute(
 			}
 			// Sort by archivedAt descending
 			allArchived.sort((a: any, b: any) => ((b as any).archivedAt ?? 0) - ((a as any).archivedAt ?? 0));
-			// Apply projectId filter if present
-			const filteredArchived = filterProjectId
+			// Apply projectId and query filters before pagination.
+			const filteredArchived = (filterProjectId
 				? allArchived.filter((s: any) => s.projectId === filterProjectId)
-				: allArchived;
+				: allArchived
+			).filter((s: any) => archivedSessionMatchesQuery(s, archivedQuery));
 
 			// Collect ALL archived sessions for BFS enrichment (not just delegates)
 			const allArchivedForBfs: typeof sessions = [];
@@ -4785,11 +4811,23 @@ async function handleApiRoute(
 			const afterParam = url.searchParams.get("after");
 			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Aggregate archived goals across all project contexts
 			let allArchived: PersistedGoal[] = [];
+			const sessionsForGoalQuery: any[] = [];
+			for (const liveSession of sessionManager.listSessions()) {
+				if (filterProjectId && liveSession.projectId !== filterProjectId) continue;
+				sessionsForGoalQuery.push(liveSession);
+			}
 			for (const ctx of projectContextManager.visible()) {
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
+				for (const s of ctx.sessionStore.getArchived()) {
+					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+				}
+			}
+			if (archivedQuery) {
+				allArchived = allArchived.filter(g => archivedGoalMatchesQuery(g, sessionsForGoalQuery, archivedQuery));
 			}
 			allArchived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
 			const total = allArchived.length;
