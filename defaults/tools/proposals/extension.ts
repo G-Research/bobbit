@@ -120,7 +120,7 @@ export default function (pi: ExtensionAPI) {
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
-			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix. Required when this session's project has workflows; omitted/blank returns MISSING_WORKFLOW with valid IDs." })),
+			workflow: Type.Optional(Type.String({ description: "Workflow ID. Required when project workflows exist." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 			parentGoalId: Type.Optional(Type.String({ description: "Subgoal parent ID; team leads auto-fill only when child spawn is allowed." })),
 			subgoalsAllowed: Type.Optional(Type.Boolean({ description: "Allow the team-lead to spawn sub-goals. Default off." })),
