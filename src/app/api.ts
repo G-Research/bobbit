@@ -2992,11 +2992,15 @@ export function getPackRuntimeCapabilities(opts: { packId: string; runtimeId: st
  *  effect an explicit PURGE (down -v + runtime-state removal); without them this
  *  is the uninstall-grade down that preserves bind-mounted data. */
 export function downPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<MarketResult<{ status: string }>> {
+	// `projectId` goes on the query string (the server's down route reads it from
+	// the query, not the JSON body); only `volumes`/`removeState` ride the body.
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
 	const body: Record<string, unknown> = {};
-	if (opts.projectId) body.projectId = opts.projectId;
 	if (opts.volumes) body.volumes = true;
 	if (opts.removeState) body.removeState = true;
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/down`, jsonInit("POST", body));
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/down${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
 }
 
 /** POST explicit purge for a pack runtime: `down -v` + runtime-state removal

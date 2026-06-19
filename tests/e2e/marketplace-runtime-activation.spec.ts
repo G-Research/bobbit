@@ -74,7 +74,7 @@ function writeMeta(packDir: string, packName: string): void {
 
 /** A schema-v2 pack declaring a managed runtime (startPolicy: on-enable) and a
  *  memory provider carrying the deployment `mode` (drives the start plan). */
-function writeRuntimePack(root: string, packName: string, mode: "external" | "managed" | "managed-external-postgres"): string {
+function writeRuntimePack(root: string, packName: string, mode: "external" | "managed" | "managed-external-postgres", opts: { extraProviderConfig?: string[] } = {}): string {
 	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
@@ -104,6 +104,7 @@ function writeRuntimePack(root: string, packName: string, mode: "external" | "ma
 		`  mode: { type: enum, values: [external, managed, managed-external-postgres], default: ${mode} }`,
 		"  externalUrl: { type: string, optional: true }",
 		"  dataDir: { type: string, default: ~/.hindsight }",
+		...(opts.extraProviderConfig ?? []),
 	].join("\n") + "\n", "utf-8");
 	// Minimal but realistic runtime descriptor (raw manifest is carried verbatim;
 	// the activation hook only reads startPolicy + forwards to the supervisor).
@@ -162,6 +163,29 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 			const body = await enable.json();
 			expect(Array.isArray(body.runtimes)).toBe(true);
 			expect(body.runtimes[0].status).toBe("running");
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("managed mode forwards the provider llmApiKey onto the runtime HINDSIGHT_API_LLM_API_KEY secret (finding #1)", async ({ gateway }) => {
+		const packName = `rt-llmkey-${Date.now()}`;
+		// The managed Hindsight runtime requires HINDSIGHT_API_LLM_API_KEY (a user-
+		// configured secret env ref). The provider exposes it via the `llmApiKey`
+		// deployment-config field; the activation start plan must remap it onto the
+		// runtime env key so the supervisor's config overlay can satisfy it.
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed", {
+			extraProviderConfig: ["  llmApiKey: { type: string, default: test-llm-key }"],
+		});
+		try {
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			calls.length = 0;
+			const enable = await setDisabledRuntimes(packName, []);
+			expect(enable.status).toBe(200);
+			const startCalls = calls.filter((c) => c.op === "start");
+			expect(startCalls.length).toBe(1);
+			const config = startCalls[0].opts?.config as Record<string, unknown> | undefined;
+			expect(config?.HINDSIGHT_API_LLM_API_KEY).toBe("test-llm-key");
 		} finally {
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}

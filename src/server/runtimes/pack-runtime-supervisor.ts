@@ -761,9 +761,14 @@ export class PackRuntimeSupervisor {
 		contribution: RuntimeContribution,
 		composeProject: string,
 	): void {
-		// 1. Rendered .env file + its (now-empty) compose-project dir.
+		// 1. Rendered .env file + persisted config sidecar + the (now-empty) dir.
 		try {
 			fs.rmSync(this._envFilePath(composeProject, runtimeId), { force: true });
+		} catch {
+			/* best effort */
+		}
+		try {
+			fs.rmSync(this._runtimeConfigPath(composeProject, runtimeId), { force: true });
 		} catch {
 			/* best effort */
 		}
@@ -860,6 +865,12 @@ export class PackRuntimeSupervisor {
 		});
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
+		// Persist the effective mode + config overlay used for THIS start so later
+		// read/control commands (status/stop/logs/down) can rebuild the SAME compose
+		// env. Without this, a runtime started with config-only secrets/placeholders
+		// (e.g. an LLM key or external DB URL supplied via deployment config, not the
+		// global secret store) would fail to re-resolve its env on control/teardown.
+		this._persistRuntimeConfig(composeProject, runtimeId, modeKey, opts.config);
 
 		const target: ComposeTarget = {
 			composeProject,
@@ -1035,6 +1046,58 @@ export class PackRuntimeSupervisor {
 		return path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.env`);
 	}
 
+	/**
+	 * Sidecar path persisting the effective mode + config overlay used at start.
+	 * Lives beside the rendered `.env` file (one per compose project) and is
+	 * removed by the purge path ({@link _removeRuntimeState}).
+	 */
+	private _runtimeConfigPath(composeProject: string, runtimeId: string): string {
+		return path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.config.json`);
+	}
+
+	/**
+	 * Persist the effective start `mode` + config overlay (0600, same posture as the
+	 * rendered env file) so later read/control commands rebuild the SAME compose env.
+	 * Best-effort: a write failure degrades to the prior no-overlay behaviour rather
+	 * than failing the start.
+	 */
+	private _persistRuntimeConfig(
+		composeProject: string,
+		runtimeId: string,
+		mode: string,
+		config?: Record<string, unknown>,
+	): void {
+		try {
+			const file = this._runtimeConfigPath(composeProject, runtimeId);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, `${JSON.stringify({ mode, config: config ?? {} })}\n`, { mode: 0o600 });
+			fs.chmodSync(file, 0o600);
+		} catch {
+			/* best effort — control commands fall back to no overlay */
+		}
+	}
+
+	/** Load the persisted start mode + config overlay (best-effort; `{}` on miss). */
+	private _loadRuntimeConfig(
+		composeProject: string,
+		runtimeId: string,
+	): { mode?: string; config?: Record<string, unknown> } {
+		try {
+			const file = this._runtimeConfigPath(composeProject, runtimeId);
+			if (!fs.existsSync(file)) return {};
+			const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+			const out: { mode?: string; config?: Record<string, unknown> } = {};
+			if (typeof raw.mode === "string" && raw.mode.length > 0) out.mode = raw.mode;
+			if (raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)) {
+				out.config = raw.config as Record<string, unknown>;
+			}
+			return out;
+		} catch {
+			return {};
+		}
+	}
+
 	/** Base `docker compose` args carrying the project + `-f`/`--env-file`. */
 	private _composeArgs(target: ComposeTarget, ...rest: string[]): string[] {
 		return [
@@ -1067,14 +1130,31 @@ export class PackRuntimeSupervisor {
 	): Promise<{ target: ComposeTarget; services: string[] }> {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
+		// Reuse the mode + config overlay persisted at start so read/control commands
+		// rebuild the SAME compose env: config-only secrets/placeholders (LLM key,
+		// external DB URL, dataDir) re-resolve instead of throwing on teardown. A
+		// persisted mode that no longer exists after an updatePack falls back to the
+		// default mode.
+		const persisted = this._loadRuntimeConfig(composeProject, runtimeId);
+		let mode = persisted.mode;
+		if (mode) {
+			let modes: Record<string, unknown> | undefined;
+			try {
+				modes = this._resolveManifest(contribution).modes as Record<string, unknown> | undefined;
+			} catch {
+				modes = undefined;
+			}
+			if (!modes || !modes[mode]) mode = undefined;
+		}
 		// Read/control paths MUST reuse persisted port allocations as-is. While the
 		// runtime is running its host ports are bound, so a revalidating allocation
 		// (`allocateHostPort`) would find them un-bindable, rotate to fresh ports, and
 		// rewrite ports.json + the env file — desyncing the persisted port from the
 		// live container and breaking the NEXT restart. `reusePersisted: true` keeps
 		// the stored port without a bindability probe.
-		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, undefined, {
+		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, mode, {
 			reusePersisted: true,
+			configOverlay: persisted.config,
 		});
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 		return {

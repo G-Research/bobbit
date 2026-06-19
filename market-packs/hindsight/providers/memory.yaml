@@ -25,6 +25,11 @@ config:
   # External Postgres connection URL for managed-external-postgres mode. Maps onto
   # the runtime env HINDSIGHT_API_DATABASE_URL; unused in external/managed modes.
   externalDatabaseUrl: { type: secret, optional: true }
+  # LLM API key the MANAGED Hindsight API uses for embeddings/summaries. Maps onto
+  # the runtime env HINDSIGHT_API_LLM_API_KEY (the runtime's only user-configured
+  # secret). Required to start a managed mode; unused in external mode. A value set
+  # directly in the global secret store under HINDSIGHT_API_LLM_API_KEY also works.
+  llmApiKey: { type: secret, optional: true }
   # Host bind-mount path for the fully managed Postgres data (managed mode).
   dataDir: { type: string, default: ~/.hindsight }
   bank: { type: string, default: bobbit }
