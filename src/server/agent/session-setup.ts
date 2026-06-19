@@ -40,6 +40,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -686,6 +687,18 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
+	}
+
+	// Generate and add the provider-bridge extension (per-turn beforePrompt /
+	// beforeCompact hooks) ONLY when at least one enabled provider for this
+	// session's project declares those hooks. When no provider is interested the
+	// bridge is never written or passed to pi — preserving zero overhead and
+	// keeping spawn args byte-identical to the no-provider baseline.
+	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId)) {
+		const bridgePath = writeProviderBridgeExtension(plan.id);
+		if (bridgePath) {
+			plan.bridgeOptions.args.push("--extension", bridgePath);
+		}
 	}
 }
 

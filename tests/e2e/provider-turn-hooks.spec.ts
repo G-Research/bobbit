@@ -1,0 +1,291 @@
+/**
+ * API E2E — per-turn provider hooks (Extension Platform G1.4).
+ *
+ * Exercises the gateway surfaces that wire provider lifecycle hooks for a turn:
+ *   - POST /api/sessions/:id/provider-hooks/before-prompt  (beforePrompt dispatch
+ *     + system-prompt-tail synthesis; the production provider-bridge pi extension
+ *     calls this — here the test plays the bridge because the E2E mock agent does
+ *     not load pi extensions).
+ *   - GET  /api/sessions/:id/context-trace                 (per-turn diagnostics).
+ *   - afterTurn        — fired server-side from the agent_end lifecycle seam.
+ *   - sessionShutdown  — fired server-side from the archive seam.
+ *
+ * Fixture-pack install pattern mirrors provider-session-setup.spec.ts: the
+ * provider-demo pack is layered as a SERVER-SCOPE market pack on top of the real
+ * built-in band (NOT via BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling
+ * specs sharing the worker-scoped in-process gateway).
+ *
+ * NON-NEGOTIABLE invariant pinned here: the user's message text is never mutated
+ * by the per-turn hooks — recall lands only in the system-prompt tail. The turn
+ * echoes back the exact submitted bytes.
+ */
+import { test, expect } from "./in-process-harness.js";
+import {
+	apiFetch,
+	createSession,
+	deleteSession,
+	connectWs,
+	agentEndPredicate,
+	messageEndPredicate,
+	waitForCondition,
+	assertStaysFalse,
+} from "./e2e-setup.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
+const PACK_NAME = "provider-demo";
+
+// Delimiters that fence the Bobbit dynamic-context region in the system-prompt
+// tail. These are the design's idempotency markers — pinned here so a drift in
+// the delimiter format is caught by E2E as well as the codegen unit test.
+const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
+const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
+
+interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
+interface TraceEntry { ts: number; hook: string; sessionId: string; providers: TraceProviderRow[] }
+
+function writeMeta(packDir: string): void {
+	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: e2e",
+		"sourceRef: local",
+		"commit: test",
+		`packName: ${PACK_NAME}`,
+		"version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'",
+		"updatedAt: '2026-01-01T00:00:00.000Z'",
+		"scope: server",
+	].join("\n") + "\n", "utf-8");
+}
+
+function installPack(bobbitDir: string): string {
+	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+	fs.rmSync(packDir, { recursive: true, force: true });
+	fs.cpSync(fixturePackDir, packDir, { recursive: true });
+	writeMeta(packDir);
+	return packDir;
+}
+
+async function setProviderDisabled(providers: string[]): Promise<void> {
+	const resp = await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: { providers } }),
+	});
+	expect(resp.status).toBe(200);
+}
+
+interface BeforePromptResult { status: number; tail: string; blocks: Array<Record<string, unknown>> }
+
+async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
+		method: "POST",
+		body: JSON.stringify({ prompt }),
+	});
+	const body = resp.status === 200 ? await resp.json() : {};
+	return {
+		status: resp.status,
+		tail: typeof body.tail === "string" ? body.tail : "",
+		blocks: Array.isArray(body.blocks) ? body.blocks : [],
+	};
+}
+
+async function readContextTrace(sessionId: string, limit?: number): Promise<TraceEntry[]> {
+	const qs = typeof limit === "number" ? `?limit=${limit}` : "";
+	const resp = await apiFetch(`/api/sessions/${sessionId}/context-trace${qs}`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	// Tolerate either a bare array or a wrapped { trace | entries } shape.
+	if (Array.isArray(body)) return body as TraceEntry[];
+	if (Array.isArray(body?.trace)) return body.trace as TraceEntry[];
+	if (Array.isArray(body?.entries)) return body.entries as TraceEntry[];
+	return [];
+}
+
+function readLog(cwd: string): string[] {
+	const logPath = path.join(cwd, ".provider-demo-log");
+	if (!fs.existsSync(logPath)) return [];
+	return fs.readFileSync(logPath, "utf-8").trim().split(/\r?\n/).filter(Boolean);
+}
+
+async function driveTurn(sessionId: string, prompt: string): Promise<string> {
+	const conn = await connectWs(sessionId);
+	try {
+		const userEnd = conn.waitFor(messageEndPredicate("user"));
+		conn.send({ type: "prompt", text: prompt });
+		const echoed = await userEnd;
+		await conn.waitFor(agentEndPredicate(), 15_000);
+		const content = echoed.data.message.content;
+		const text = Array.isArray(content)
+			? content.find((c: any) => c.type === "text")?.text
+			: content;
+		return text ?? "";
+	} finally {
+		conn.close();
+	}
+}
+
+test.describe("provider per-turn hooks", () => {
+	const sessions: string[] = [];
+	const cwds: string[] = [];
+	let packDir: string;
+
+	function freshCwd(label: string): string {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `provider-turn-${label}-`));
+		cwds.push(cwd);
+		return cwd;
+	}
+
+	async function newSession(label: string): Promise<{ id: string; cwd: string }> {
+		const cwd = freshCwd(label);
+		const id = await createSession({ cwd });
+		sessions.push(id);
+		return { id, cwd };
+	}
+
+	test.beforeAll(async ({ gateway }) => {
+		packDir = installPack(gateway.bobbitDir);
+		await setProviderDisabled([]);
+	});
+
+	test.afterAll(async () => {
+		await setProviderDisabled([]).catch(() => {});
+		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+	});
+
+	test.afterEach(async () => {
+		// Disable everything so the next test starts from a known-quiet baseline
+		// and no provider hook fires during teardown deletes.
+		await setProviderDisabled(["demo", "boom", "slow"]).catch(() => {});
+		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
+		for (const cwd of cwds.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	test("beforePrompt injects a delimited system-prompt tail, then afterTurn fires; both appear in the context trace", async () => {
+		// demo + boom enabled; slow disabled so the happy path stays deterministic.
+		await setProviderDisabled(["slow"]);
+		const { id, cwd } = await newSession("happy");
+
+		// sessionSetup is dispatched at creation.
+		expect(readLog(cwd)).toEqual(["sessionSetup"]);
+
+		const promptText = "Summarize the quarterly metrics";
+		const before = await callBeforePrompt(id, promptText);
+		expect(before.status).toBe(200);
+
+		// The tail is a single delimited dynamic-context region carrying the demo
+		// block — and it must NOT leak into the user's message text.
+		expect(before.tail).toContain(DYNAMIC_CONTEXT_START);
+		expect(before.tail).toContain(DYNAMIC_CONTEXT_END);
+		expect(before.tail).toContain(`DEMO_BEFORE_PROMPT ${promptText}`);
+
+		// Metadata-only block summary (no raw content field leaked).
+		const demoBlock = before.blocks.find((b) => b.id === "demo:turn");
+		expect(demoBlock).toBeTruthy();
+		expect(demoBlock!.providerId).toBe("demo");
+		expect(demoBlock!.title).toBe("Demo turn");
+		expect(typeof demoBlock!.tokenEstimate).toBe("number");
+		expect("content" in demoBlock!).toBe(false);
+
+		// Drive the actual turn — afterTurn is dispatched server-side on agent_end.
+		const echoed = await driveTurn(id, promptText);
+
+		// INVARIANT: user message text is byte-identical to what was submitted.
+		expect(echoed).toBe(promptText);
+
+		// afterTurn lands asynchronously after agent_end; poll for it.
+		await waitForCondition(() => readLog(cwd).includes("afterTurn"), {
+			timeoutMs: 10_000, message: "afterTurn logged",
+		});
+		expect(readLog(cwd)).toEqual(["sessionSetup", "beforePrompt", "afterTurn"]);
+
+		// Context trace lists both dispatches with per-provider timing rows.
+		const trace = await readContextTrace(id);
+		const bp = trace.find((e) => e.hook === "beforePrompt");
+		const at = trace.find((e) => e.hook === "afterTurn");
+		expect(bp, "beforePrompt trace entry").toBeTruthy();
+		expect(at, "afterTurn trace entry").toBeTruthy();
+		const bpDemo = bp!.providers.find((p) => p.id === "demo");
+		expect(bpDemo, "demo timing row on beforePrompt").toBeTruthy();
+		expect(typeof bpDemo!.ms).toBe("number");
+		expect(bpDemo!.blocks).toBe(1);
+		expect(at!.providers.some((p) => p.id === "demo")).toBe(true);
+	});
+
+	test("context-trace honours the limit query param", async () => {
+		await setProviderDisabled(["slow"]);
+		const { id } = await newSession("limit");
+		// Generate several beforePrompt dispatches (each appends one trace entry).
+		for (let i = 0; i < 3; i++) await callBeforePrompt(id, `turn ${i}`);
+
+		const limited = await readContextTrace(id, 2);
+		expect(limited.length).toBeLessThanOrEqual(2);
+		// The most-recent entries are returned; the last is a beforePrompt.
+		expect(limited.at(-1)!.hook).toBe("beforePrompt");
+	});
+
+	test("disabling the provider is a kill switch — no hook fires for the next turn", async () => {
+		await setProviderDisabled(["demo", "boom", "slow"]);
+		const { id, cwd } = await newSession("disabled");
+
+		// No sessionSetup ran, so no log file exists at all.
+		expect(fs.existsSync(path.join(cwd, ".provider-demo-log"))).toBe(false);
+
+		const before = await callBeforePrompt(id, "anything");
+		expect(before.status).toBe(200);
+		expect(before.tail).toBe("");
+		expect(before.blocks).toEqual([]);
+
+		await driveTurn(id, "anything");
+
+		// No provider hook may write a log line for the disabled pack — assert the
+		// log file stays absent across a window (catches any erroneous async
+		// afterTurn dispatch the moment it fires).
+		await assertStaysFalse(() => fs.existsSync(path.join(cwd, ".provider-demo-log")), {
+			durationMs: 500, message: "disabled provider wrote a hook log",
+		});
+	});
+
+	test("a hanging provider is bounded by its timeout — endpoint returns an empty tail with a timeout trace row", async () => {
+		// Only the slow (hanging) provider is enabled.
+		await setProviderDisabled(["demo", "boom"]);
+		const { id } = await newSession("hang");
+
+		const t0 = Date.now();
+		const before = await callBeforePrompt(id, "hangs");
+		const elapsed = Date.now() - t0;
+
+		expect(before.status).toBe(200);
+		expect(before.tail).toBe("");
+		// slow.yaml budget.timeoutMs is 300ms; the endpoint must respond well
+		// within a few seconds rather than the provider's 30s sleep.
+		expect(elapsed).toBeLessThan(5_000);
+
+		const trace = await readContextTrace(id);
+		const bp = trace.find((e) => e.hook === "beforePrompt");
+		expect(bp, "beforePrompt trace entry").toBeTruthy();
+		const slowRow = bp!.providers.find((p) => p.id === "slow");
+		expect(slowRow, "slow timing row").toBeTruthy();
+		expect(slowRow!.error ?? "").toMatch(/timeout/i);
+	});
+
+	test("archiving a session dispatches sessionShutdown", async () => {
+		await setProviderDisabled(["slow"]);
+		const { id, cwd } = await newSession("shutdown");
+		expect(readLog(cwd)).toEqual(["sessionSetup"]);
+
+		await deleteSession(id);
+		// Don't let afterEach try to delete it again.
+		const idx = sessions.indexOf(id);
+		if (idx >= 0) sessions.splice(idx, 1);
+
+		await waitForCondition(() => readLog(cwd).includes("sessionShutdown"), {
+			timeoutMs: 10_000, message: "sessionShutdown logged",
+		});
+
+		const trace = await readContextTrace(id);
+		expect(trace.some((e) => e.hook === "sessionShutdown")).toBe(true);
+	});
+});

@@ -62,6 +62,17 @@ export class LifecycleHub {
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 	}
 
+	/**
+	 * True when at least one active (activation-filtered) provider for the
+	 * project declares one of the given hooks. Used by session setup to decide
+	 * whether the per-turn provider-bridge extension is warranted; keeps provider
+	 * activation filtering centralized in the registry.
+	 */
+	hasProvidersForHooks(projectId: string | undefined, hooks: readonly LifecycleHook[]): boolean {
+		const wanted = new Set<string>(hooks);
+		return this.registry.listProviders(projectId).some((p) => p.hooks.some((h) => wanted.has(h)));
+	}
+
 	async dispatch(
 		hook: LifecycleHook,
 		base: Omit<HookCtx, "budget" | "config" | "gateway">,
