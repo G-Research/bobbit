@@ -4092,7 +4092,15 @@ export class SessionManager {
 		const restoredFiltered = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
-		const restoredAllowedTools = restoredFiltered.length > 0 ? restoredFiltered : undefined;
+		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+		// distinction. `effectiveAllowed` is `[]` ONLY for a genuinely
+		// unrestricted session (role-less / no toolManager) — that resolves to
+		// `undefined` (all tools). When there WAS an allowlist that
+		// `bobbit.disabledTools` removed entirely, `restoredFiltered` is `[]`
+		// and must stay `[]` (NO tools) — never collapse it to `undefined`,
+		// which would re-grant every tool on restart.
+		const restoredAllowedTools: EffectiveTool[] | undefined =
+			effectiveAllowed.length > 0 ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
@@ -5802,6 +5810,14 @@ export class SessionManager {
 		const effectiveAllowed = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
+		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
+		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
+		// role HAD an allowlist that `bobbit.disabledTools` removed entirely,
+		// `effectiveAllowed` is `[]` and must stay `[]` (NO tools) — never
+		// collapse it to `undefined`, which would re-grant every tool on respawn.
+		const respawnAllowed: EffectiveTool[] | undefined =
+			effectiveAllowedRaw.length > 0 ? effectiveAllowed : undefined;
 		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
 		// Resolve the role prompt through the shared helper so placeholder
@@ -5855,7 +5871,9 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
+		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
+		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 

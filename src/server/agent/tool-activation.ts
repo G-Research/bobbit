@@ -941,8 +941,13 @@ export function writeMcpProxyExtensions(
 		return cachedPaths.slice();
 	}
 
-	// Determine if we're filtering
-	const filtering = allowedTools && allowedTools.length > 0;
+	// Determine if we're filtering. The unrestricted (`undefined`) vs explicit
+	// empty-allowlist (`[]`) distinction MUST be preserved: `undefined` means
+	// "no restriction — emit every server", while `[]` means "an allowlist that
+	// happens to permit nothing" (e.g. a restricted session whose entire allowlist
+	// was removed by `bobbit.disabledTools`). Collapsing `[]` into the unrestricted
+	// branch would silently widen a locked-down session to ALL MCP servers.
+	const filtering = allowedTools !== undefined;
 	const allowedSet = filtering
 		? new Set(allowedTools!.map(t => t.toLowerCase()))
 		: undefined;
@@ -1075,7 +1080,14 @@ export function writeMcpProxyExtensions(
  * Given a role's allowedTools list and a ToolManager, compute the CLI args needed
  * to activate exactly those tools.
  *
- * If allowedTools is empty or undefined, all tools are enabled (all builtins + all bobbit extensions).
+ * The unrestricted vs explicitly-empty distinction is load-bearing:
+ *   - `allowedTools === undefined` ⇒ UNRESTRICTED — enable all builtins + all
+ *     bobbit extensions (the team-lead / role-less default).
+ *   - `allowedTools === []`        ⇒ EXPLICIT EMPTY ALLOWLIST — register NO
+ *     tools. This is what a restricted session resolves to when its entire
+ *     allowlist is removed by `bobbit.disabledTools`; it must NEVER widen back
+ *     to all tools.
+ *   - non-empty array             ⇒ exactly those tools.
  * Always adds `--no-extensions` so Bobbit has complete control over extension loading.
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
@@ -1095,12 +1107,20 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
-		// Register all six file builtins, no bobbit extensions — but still honour
+		// Register the file builtins (no bobbit extensions) — but still honour
 		// `bobbit.disabledTools` so a goal-metadata disablement applies to fallback
 		// builtins (incl. built-in file tools), matching the resolved path below.
-		console.warn("[tool-activation] No ToolManager provided — using fallback (all base tools, no extensions)");
+		//
+		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+		// distinction here too: an explicit allowlist registers only the file
+		// builtins it names (and `[]` therefore registers none), so a restricted
+		// session whose allowlist was fully filtered does not fall back to all
+		// six builtins.
+		console.warn("[tool-activation] No ToolManager provided — using fallback (no extensions)");
+		const unrestricted = allowedTools === undefined;
 		for (const name of FILE_TOOL_BUILTIN_NAMES) {
-			if (disabledTools && disabledTools.has(name.toLowerCase())) continue;
+			if (disabledTools && disabledTools.has(name)) continue;
+			if (!unrestricted && !allowedTools!.some(t => t.name.toLowerCase() === name)) continue;
 			builtinsToRegister.add(name);
 		}
 		env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");
@@ -1151,12 +1171,14 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 		}
 	};
 
-	if (!allowedTools || allowedTools.length === 0) {
-		// No restrictions — enable all builtins (sans bash) and all bobbit extensions.
+	if (allowedTools === undefined) {
+		// Unrestricted — enable all builtins (sans bash) and all bobbit extensions.
 		const allEntries: { kind: "yaml"; name: string }[] = [];
 		for (const [name] of providers) allEntries.push({ kind: "yaml", name });
 		collect(allEntries);
 	} else {
+		// Explicit allowlist (possibly empty ⇒ register no tools). Must NOT fall
+		// through to the unrestricted branch when empty.
 		collect(allowedTools);
 	}
 

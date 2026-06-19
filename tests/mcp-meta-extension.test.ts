@@ -263,6 +263,35 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		assert.match(code, /Type\.Literal\("snap"\)/);
 	});
 
+	it("undefined allowlist emits servers; [] (explicit empty) emits none", (t) => {
+		setIsolatedBobbit(t);
+
+		const infos = [
+			{
+				name: "mcp__playwright__click",
+				serverName: "playwright",
+				mcpToolName: "click",
+				group: "MCP: playwright",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mgr = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => [],
+		} as any;
+
+		// undefined ⇒ unrestricted ⇒ the server's meta-tool extension is emitted.
+		const unrestricted = writeMcpProxyExtensions(mgr);
+		assert.equal(unrestricted.length, 1, "undefined allowlist emits the server extension");
+
+		// [] ⇒ explicit empty allowlist ⇒ NO MCP extension may be emitted. A
+		// restricted session whose MCP allowlist was fully removed by
+		// `bobbit.disabledTools` must not widen back to every MCP server.
+		const none = writeMcpProxyExtensions(mgr, []);
+		assert.equal(none.length, 0, "explicit empty allowlist must emit no MCP extensions");
+	});
+
 	it("error-state stub still lands at <server>.ts (no sub knowledge)", (t) => {
 		setIsolatedBobbit(t);
 

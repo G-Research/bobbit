@@ -150,3 +150,43 @@ describe("disabledToolsForGoal — effective-goal metadata resolution (respawn/r
 		assert.equal(manager.disabledToolsForGoal(undefined), undefined);
 	});
 });
+
+describe("buildToolActivationArgs — fully-filtered allowlist must NOT widen to all tools", () => {
+	function seedGoal(manager: any, goal: Record<string, unknown>) {
+		const store = manager._testGoalManager.getGoalStore();
+		store.put({
+			cwd: tmpRoot, state: "in-progress", spec: "", title: "g",
+			createdAt: Date.now(), updatedAt: Date.now(), ...goal,
+		});
+	}
+
+	// The restore / respawn / force-abort paths all route through
+	// buildToolActivationArgs. When a RESTRICTED allowlist is entirely removed by
+	// `bobbit.disabledTools`, the result must be NO tools — never a silent
+	// widening back to every tool. (No toolManager here ⇒ the fallback path,
+	// which now honours the undefined-vs-[] distinction too.)
+	it("a restricted allowlist whose every tool is disabled yields NO tools", () => {
+		const manager = makeManager();
+		manager.lifecycleHub = undefined;
+		seedGoal(manager, { id: "g-strip", metadata: { "bobbit.disabledTools": ["read", "write"] } });
+
+		const restricted = [
+			{ kind: "yaml" as const, name: "read" },
+			{ kind: "yaml" as const, name: "write" },
+		];
+		const { env } = manager.buildToolActivationArgs("s-strip", restricted, undefined, tmpRoot, "p", "g-strip");
+		assert.equal(env.BOBBIT_BUILTIN_TOOLS, "", "fully-disabled restricted allowlist must register no tools");
+	});
+
+	it("an unrestricted (undefined) session under the same goal keeps its non-disabled tools", () => {
+		const manager = makeManager();
+		manager.lifecycleHub = undefined;
+		seedGoal(manager, { id: "g-strip2", metadata: { "bobbit.disabledTools": ["read", "write"] } });
+
+		const { env } = manager.buildToolActivationArgs("s-open", undefined, undefined, tmpRoot, "p", "g-strip2");
+		const builtins = env.BOBBIT_BUILTIN_TOOLS.split(",").filter(Boolean);
+		assert.ok(builtins.length > 0, "unrestricted session must still get tools");
+		assert.ok(!builtins.includes("read"), "disabled tool must still be dropped");
+		assert.ok(!builtins.includes("write"));
+	});
+});

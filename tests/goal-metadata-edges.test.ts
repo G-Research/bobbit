@@ -97,6 +97,58 @@ describe("computeToolActivationArgs — bobbit.disabledTools", () => {
 	});
 });
 
+// ── 1b. tool-activation: a restricted allowlist fully removed by disabledTools
+//        must resolve to NO tools, never ALL tools. This is the empty-allowlist
+//        widening bug: `undefined` (unrestricted) and `[]` (explicit empty) had
+//        been conflated, so filtering a restricted session down to nothing
+//        silently re-granted every tool. ─────────────────────────────────────
+
+describe("computeToolActivationArgs — fully-filtered allowlist (undefined vs [])", () => {
+	it("undefined ⇒ unrestricted (all tools), [] ⇒ no tools", () => {
+		const tm = mockToolManager(standardProviders());
+		const unrestricted = computeToolActivationArgs(undefined, tm);
+		const none = computeToolActivationArgs([], tm);
+
+		// Unrestricted registers every file builtin + functional extensions.
+		assert.equal(unrestricted.env.BOBBIT_BUILTIN_TOOLS, "edit,read,write");
+		assert.ok(extPaths(unrestricted.args).some(p => p.includes("/web/")));
+
+		// Explicit empty allowlist registers nothing functional.
+		assert.equal(none.env.BOBBIT_BUILTIN_TOOLS, "");
+		assert.ok(!extPaths(none.args).some(p => p.includes("/web/")));
+		assert.ok(!extPaths(none.args).some(p => p.includes("/browser/")));
+		assert.notDeepEqual(none.env, unrestricted.env);
+	});
+
+	it("a restricted allowlist whose every tool is disabled resolves to no tools (NOT all)", () => {
+		const tm = mockToolManager(standardProviders());
+		// Simulate the session-setup edge: a role permits {read, write}, but the
+		// goal disables BOTH. The caller filters first (producing []), then passes
+		// the result through. The disabled set is also forwarded for defense.
+		const allowlist = yamlTools("read", "write");
+		const disabled = new Set(["read", "write"]);
+		const filtered = allowlist.filter(t => !disabled.has(t.name.toLowerCase())); // []
+		assert.equal(filtered.length, 0);
+
+		const result = computeToolActivationArgs(filtered, tm, undefined, undefined, disabled);
+		assert.equal(result.env.BOBBIT_BUILTIN_TOOLS, "", "no builtins — must not widen to all tools");
+		assert.ok(!extPaths(result.args).some(p => p.includes("/web/")));
+		assert.ok(!extPaths(result.args).some(p => p.includes("/browser/")));
+	});
+
+	it("no-toolManager fallback: [] registers no builtins; undefined registers all", () => {
+		const all = computeToolActivationArgs(undefined, undefined);
+		const none = computeToolActivationArgs([], undefined);
+		assert.equal(all.env.BOBBIT_BUILTIN_TOOLS, "edit,find,grep,ls,read,write");
+		assert.equal(none.env.BOBBIT_BUILTIN_TOOLS, "", "explicit empty allowlist must not fall back to all builtins");
+	});
+
+	it("no-toolManager fallback: a non-empty allowlist registers only its named file builtins", () => {
+		const result = computeToolActivationArgs(yamlTools("read", "grep"), undefined);
+		assert.equal(result.env.BOBBIT_BUILTIN_TOOLS, "grep,read");
+	});
+});
+
 describe("writeToolGuardExtension — disabled tools forced to never", () => {
 	let tmp: string;
 	beforeEach(() => { tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-disabled-"))); process.env.BOBBIT_DIR = tmp; });
