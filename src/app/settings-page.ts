@@ -44,7 +44,8 @@ import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./b
 import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
-import { openOAuthDialog } from "./dialogs.js";
+import { openOAuthDialog, confirmAction } from "./dialogs.js";
+import "../ui/components/ProviderKeyInput.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
@@ -2147,9 +2148,31 @@ export function renderModelsTab() {
 					</div>
 				` : ""}
 			</div>
+
+			<!-- Provider API Keys (API-key fallback, distinct from Account OAuth) -->
+			<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="provider-keys-section">
+				<h3 class="text-sm font-semibold text-foreground">Provider API Keys</h3>
+				<p class="text-sm text-muted-foreground">
+					Optional. Use a provider API key when you are not using account login
+					(e.g. a Google AI Studio key for Gemini). Keys are stored locally. For
+					Google or Anthropic account login, use <span class="text-foreground">Settings → Account</span> instead.
+				</p>
+				<div class="flex flex-col gap-4">
+					${PROVIDER_KEY_PROVIDERS.map((p) => html`
+						<div data-testid="provider-key-input-${p}">
+							<provider-key-input .provider=${p}></provider-key-input>
+						</div>
+					`)}
+				</div>
+			</div>
 		</div>
 	`;
 }
+
+// Providers offered in the Models-tab "Provider API Keys" fallback section. Plain
+// `google` is the Google AI Studio / Gemini Developer API-key provider (distinct
+// from the `google-gemini-cli` account OAuth flow in Settings → Account).
+const PROVIDER_KEY_PROVIDERS = ["google", "anthropic", "openai"] as const;
 
 /** Human-readable labels for known project config keys. */
 const PROJECT_KEY_LABELS: Record<string, string> = {
@@ -2880,7 +2903,11 @@ function renderDirectoriesTab() {
 
 // ── Account tab state ──
 
-type AccountProviderId = "anthropic" | "openai-codex";
+// Canonical Google account OAuth provider id is `google-gemini-cli`. Plain
+// `google` is reserved for the Google AI Studio / Gemini Developer API-key
+// provider rendered in Settings → Models → Provider API Keys; it is NEVER an
+// Account-tab OAuth id. See docs/design/google-oauth-settings-ux.md.
+type AccountProviderId = "anthropic" | "openai-codex" | "google-gemini-cli";
 
 const ACCOUNT_PROVIDERS: Array<{
 	id: AccountProviderId;
@@ -2900,11 +2927,36 @@ const ACCOUNT_PROVIDERS: Array<{
 		description: "OAuth credentials used by agent sessions to access ChatGPT subscription GPT models through the OpenAI Codex provider.",
 		authenticatedLabel: "Authenticated",
 	},
+	{
+		id: "google-gemini-cli",
+		title: "Google OAuth",
+		description: "OAuth credentials used by agent sessions to access Gemini models through your Google account. Re-authenticate to refresh expired tokens or switch accounts.",
+		authenticatedLabel: "Authenticated",
+	},
 ];
 
 let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
 let accountLoading = false;
 let accountReauthing: AccountProviderId | null = null;
+// Provider whose logout request is in flight (disables that row's Log out button).
+let accountLoggingOut: AccountProviderId | null = null;
+// Per-provider transient logout error, rendered inline in the row.
+const accountLogoutError: Partial<Record<AccountProviderId, boolean>> = {};
+
+/** Test-only: seed account status + reset transient flags so fixtures can drive
+ *  the Account tab without hitting the network. Mirrors `__testResetModelsTab`. */
+export function __testResetAccountTab(opts: {
+	// Seed a status map directly to bypass the network. Omit to leave status
+	// `null` so `renderAccountTab()` runs `loadAccountStatus()` (exercises the
+	// GET /api/oauth/status fetch path used by reload persistence).
+	status?: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null;
+} = {}): void {
+	accountStatus = opts.status === undefined ? null : opts.status;
+	accountLoading = false;
+	accountReauthing = null;
+	accountLoggingOut = null;
+	for (const k of Object.keys(accountLogoutError)) delete accountLogoutError[k as AccountProviderId];
+}
 
 function loadAccountStatus(): void {
 	if (accountLoading) return;
@@ -2945,7 +2997,43 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	}
 }
 
-function renderAccountTab() {
+const ACCOUNT_LOGOUT_LABELS: Record<AccountProviderId, string> = {
+	anthropic: "Anthropic",
+	"openai-codex": "OpenAI",
+	"google-gemini-cli": "Google",
+};
+
+async function handleAccountLogout(provider: AccountProviderId): Promise<void> {
+	const label = ACCOUNT_LOGOUT_LABELS[provider] ?? provider;
+	const confirmed = await confirmAction(
+		`Log out of ${label}?`,
+		`Agent sessions will lose access to ${label} models until you log in again.`,
+		"Log out",
+		true,
+	);
+	if (!confirmed) return;
+	delete accountLogoutError[provider];
+	accountLoggingOut = provider;
+	renderApp();
+	try {
+		// Provider-partitioned logout: the server deletes only this canonical
+		// provider's credential and never echoes token material.
+		const res = await gatewayFetch("/api/oauth/logout", {
+			method: "POST",
+			body: JSON.stringify({ provider }),
+		});
+		if (!res.ok) throw new Error("logout failed");
+		accountStatus = null;
+		loadAccountStatus();
+	} catch {
+		accountLogoutError[provider] = true;
+	} finally {
+		accountLoggingOut = null;
+		renderApp();
+	}
+}
+
+export function renderAccountTab() {
 	if (!accountStatus && !accountLoading) loadAccountStatus();
 
 	if (accountLoading && !accountStatus) {
@@ -2953,7 +3041,7 @@ function renderAccountTab() {
 	}
 
 	return html`
-		<div class="flex flex-col gap-4">
+		<div class="flex flex-col gap-4" data-testid="account-tab">
 			${ACCOUNT_PROVIDERS.map((provider) => {
 				const status = accountStatus?.[provider.id];
 				const authenticated = status?.authenticated ?? false;
@@ -2961,9 +3049,11 @@ function renderAccountTab() {
 				const expiresDate = expires ? new Date(expires) : null;
 				const isExpired = expires ? Date.now() > expires : false;
 				const isReauthing = accountReauthing === provider.id;
+				const isLoggingOut = accountLoggingOut === provider.id;
+				const isGoogle = provider.id === "google-gemini-cli";
 
 				return html`
-					<div class="flex flex-col gap-4">
+					<div class="flex flex-col gap-4" data-testid="account-row-${provider.id}">
 						<div class="flex flex-col gap-1.5">
 							<h3 class="text-sm font-semibold text-foreground">${provider.title}</h3>
 							<p class="text-xs text-muted-foreground">${provider.description}</p>
@@ -2973,29 +3063,63 @@ function renderAccountTab() {
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium text-foreground">Status:</span>
 								${authenticated
-									? html`<span class="text-sm text-green-600 dark:text-green-400">${provider.authenticatedLabel}</span>`
-									: html`<span class="text-sm text-destructive">${isExpired ? "Expired" : "Not authenticated"}</span>`}
+									? html`<span class="text-sm text-green-600 dark:text-green-400" data-testid="account-status-${provider.id}">${provider.authenticatedLabel}</span>`
+									: html`<span class="text-sm text-destructive" data-testid="account-status-${provider.id}">${isExpired ? "Expired" : "Not authenticated"}</span>`}
 							</div>
 							${expiresDate
 								? html`<div class="flex items-center gap-2">
 									<span class="text-sm font-medium text-foreground">Expires:</span>
-									<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}">${expiresDate.toLocaleString()}</span>
+									<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}" data-testid="account-expires-${provider.id}">${expiresDate.toLocaleString()}</span>
 								</div>`
 								: ""}
 						</div>
 
-						<div>
-							${Button({
+						${isGoogle
+							? html`<p class="text-xs text-muted-foreground" data-testid="account-${provider.id}-limit-note">
+								<span class="font-medium">ℹ Note:</span> Google account login authorizes Gemini models exposed by
+								Google's official model API. Models tied to a consumer Gemini app subscription may not be
+								available this way. If a model stays locked after login, use a Google AI Studio API key under
+								Models → Provider API Keys.
+							</p>`
+							: ""}
+
+						<div class="flex items-center gap-2">
+							<span data-testid="account-auth-btn-${provider.id}">${Button({
 								variant: authenticated ? "outline" : "default",
 								size: "sm",
 								// Disable every provider's auth button while ANY provider is mid-flow
 								// to prevent concurrent OAuth attempts from clobbering each other's
 								// pendingFlows entries. Cleared in handleReauthenticate's finally block.
-								disabled: accountReauthing !== null,
+								disabled: accountReauthing !== null || accountLoggingOut !== null,
 								onClick: () => handleReauthenticate(provider.id),
 								children: isReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
-							})}
+							})}</span>
+							${authenticated
+								? html`<span data-testid="account-logout-btn-${provider.id}">${Button({
+									variant: "outline",
+									size: "sm",
+									className: "border border-destructive text-destructive hover:bg-destructive/10",
+									disabled: accountReauthing !== null || accountLoggingOut !== null,
+									onClick: () => handleAccountLogout(provider.id),
+									children: isLoggingOut ? "Logging out..." : "Log out",
+								})}</span>`
+								: ""}
 						</div>
+						${accountLogoutError[provider.id]
+							? html`<p class="text-xs text-destructive" data-testid="account-logout-error-${provider.id}">Failed to log out — try again.</p>`
+							: ""}
+
+						${isGoogle
+							? html`<p class="text-xs text-muted-foreground">
+								Looking for an API key instead?
+								<button
+									type="button"
+									data-testid="account-apikey-link-${provider.id}"
+									class="text-foreground underline underline-offset-2 hover:text-foreground/80"
+									@click=${() => setActiveSettingsTab("models")}
+								>Go to Models → Provider API Keys.</button>
+							</p>`
+							: ""}
 					</div>
 				`;
 			})}

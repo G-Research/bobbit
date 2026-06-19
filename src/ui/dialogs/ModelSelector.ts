@@ -369,7 +369,7 @@ export class ModelSelector extends DialogBase {
 										this.selectedIndex = index;
 									}
 								}}
-								title=${hasKey ? "" : i18n("API key required — set up in Settings > Providers")}
+								title=${hasKey ? "" : "API key or account login required — set up in Settings → Account, or add a key under Settings → Models."}
 							>
 								<div class="flex items-center justify-between gap-2 mb-1">
 									<div class="flex items-center gap-2 flex-1 min-w-0">
@@ -377,7 +377,7 @@ export class ModelSelector extends DialogBase {
 										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
 									</div>
 									<div class="flex items-center gap-1.5">
-										${!hasKey ? html`<span class="text-muted-foreground" title=${i18n("API key required")}>${icon(KeyRound, "sm")}</span>` : ""}
+										${!hasKey ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
 										${Badge(provider, "outline")}
 									</div>
 								</div>
