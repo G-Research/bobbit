@@ -187,7 +187,7 @@ test("copy link fallback uses legacy execCommand without surfacing a modal", asy
 	await expectNoPopover(page);
 	await expect(page.locator("copy-link-fallback-dialog")).toHaveCount(0);
 	await expect.poll(() => page.evaluate(() => (window as any).__sidebarActionsExecCopies)).toContain(
-		await page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, ids.session),
+		await page.evaluate((id) => `${location.protocol}//${location.host}/session/${id}`, ids.session),
 	);
 
 	await openMenu(page, "goal", ids.goal);
