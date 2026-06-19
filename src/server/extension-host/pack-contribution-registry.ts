@@ -108,6 +108,44 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).byId.get(packId);
 	}
 
+	/**
+	 * A single pack's RAW (activation-UNFILTERED) contributions, or undefined when
+	 * the pack is not installed. Unlike {@link getPack}, this does NOT drop dormant
+	 * providers (those whose `activation` gate is unsatisfied), disabled entrypoints,
+	 * or disabled runtimes — it returns exactly what `loadPackContributions` parses
+	 * from disk for the WINNING pack entry (highest precedence per packId).
+	 *
+	 * Used by the managed-runtime REST surface (`/api/pack-runtimes/:id/{capabilities,
+	 * start,restart}`) to CLASSIFY the deployment mode/config from a pack whose
+	 * provider is still dormant — e.g. Hindsight's external-mode `memory` provider,
+	 * which only activates once `externalUrl` is configured. Reading the
+	 * activation-filtered `getPack` there would misclassify fresh/default Hindsight as
+	 * provider-less and disclose / start the Docker default mode instead of the
+	 * external (no-Docker) setup path. Actual runtime availability (disabled-runtime
+	 * filtering) stays enforced by the supervisor's activation-filtered registry
+	 * lookups, NOT by this method. Providers carry their SCHEMA-DEFAULT flat config
+	 * (`config`); callers overlay persisted store config themselves.
+	 */
+	getRawPack(projectId: string | undefined, packId: string): PackContributions | undefined {
+		const entries = this.enumerate(projectId);
+		let winning: PackEntry | undefined;
+		for (const e of entries) {
+			if (!e.manifest) continue;
+			if (packIdFromRoot(e.path) !== packId) continue;
+			winning = e; // last wins (highest precedence)
+		}
+		if (!winning?.manifest) return undefined;
+		try {
+			return loadPackContributions(winning.path, winning.manifest);
+		} catch (err) {
+			if (err instanceof PackContributionError) {
+				console.error(`[pack-contributions] rejecting pack at ${winning.path}: ${err.message}`);
+				return undefined;
+			}
+			throw err;
+		}
+	}
+
 	getPanel(projectId: string | undefined, packId: string, panelId: string): PanelContribution | undefined {
 		return this.getPack(projectId, packId)?.panels.find((p) => p.id === panelId);
 	}

@@ -267,4 +267,60 @@ describe("pack-runtimes start/restart derives + remaps the saved deployment conf
 		expect(startCall!.opts?.mode).toBe("managed-postgres");
 		expect(startCall!.opts?.config?.HINDSIGHT_API_LLM_API_KEY).toBe("sk-explicit");
 	});
+
+	// ── Fresh/default Hindsight: DORMANT external-mode provider ──────────────
+	// With NO persisted provider config, the `memory` provider keeps its schema
+	// default `mode: external` AND stays dormant (its activation requires
+	// externalUrl, which is unset). The activation-filtered registry therefore
+	// DROPS the provider — so the runtime REST/capabilities surface must classify
+	// the deployment mode from the RAW pack contributions (getRawPack), NOT the
+	// active-provider list. Reading the active list misclassifies fresh Hindsight
+	// as provider-less, disclosing/starting the Docker default mode instead of the
+	// external (no-Docker) setup path. These pin the raw-derivation fix.
+
+	test("fresh/default Hindsight (dormant external provider) → capabilities discloses external/no-Docker setup", async () => {
+		seedConfig(bobbitDir, null); // no persisted config ⇒ provider dormant (needs externalUrl)
+		await setPackActivation(ALL_ENABLED);
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/capabilities`);
+		const data = await res.json().catch(() => ({}));
+		expect(res.status, JSON.stringify(data)).toBe(200);
+		// External (no-Docker) setup path — not the Docker default-mode disclosure.
+		expect(data.mode).toBe("external");
+		expect(data.dockerRequired).toBe(false);
+		expect(data.services).toEqual([]);
+		expect(data.ports).toEqual([]);
+	});
+
+	test("fresh/default Hindsight + start with no body mode → 409, never starts Docker", async () => {
+		seedConfig(bobbitDir, null);
+		await setPackActivation(ALL_ENABLED);
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/start`, { method: "POST" });
+		const body = await res.json().catch(() => ({}));
+		expect(res.status, JSON.stringify(body)).toBe(409);
+		expect(body.mode).toBe("external");
+		expect(body.started).toBe(false);
+		expect(calls.find((c) => c.op === "start"), "dormant external provider must not start Docker").toBeFalsy();
+	});
+
+	test("fresh/default Hindsight + restart with no body mode → 409, never restarts Docker", async () => {
+		seedConfig(bobbitDir, null);
+		await setPackActivation(ALL_ENABLED);
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/restart`, { method: "POST" });
+		const body = await res.json().catch(() => ({}));
+		expect(res.status, JSON.stringify(body)).toBe(409);
+		expect(calls.find((c) => c.op === "restart"), "dormant external provider must not restart Docker").toBeFalsy();
+	});
+
+	test("fresh/default Hindsight + explicit managed body mode → still starts the managed stack", async () => {
+		seedConfig(bobbitDir, null);
+		await setPackActivation(ALL_ENABLED);
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/start`, {
+			method: "POST",
+			body: JSON.stringify({ mode: "managed-postgres" }),
+		});
+		expect(res.status, await res.text().catch(() => "")).toBe(200);
+		const startCall = calls.find((c) => c.op === "start");
+		expect(startCall, "an explicit managed mode overrides the dormant external default").toBeTruthy();
+		expect(startCall!.opts?.mode).toBe("managed-postgres");
+	});
 });

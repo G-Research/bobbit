@@ -6174,10 +6174,17 @@ async function handleApiRoute(
 		// config), so the consent disclosure reflects custom settings — most importantly
 		// a custom `dataDir` bind path — rather than schema defaults that would diverge
 		// from what activation actually mounts.
+		//
+		// Read RAW (activation-UNFILTERED) contributions, NOT `getPack` — the latter
+		// drops a provider whose activation gate is still unsatisfied (e.g. Hindsight's
+		// external-mode `memory` provider before `externalUrl` is set), which would
+		// misclassify fresh/default Hindsight as provider-less and disclose the Docker
+		// default mode instead of the external (no-Docker) setup path. Mirrors the
+		// activation path's raw `loadPackContributions` derivation.
 		const deploymentConfig: Record<string, unknown> = {};
 		let hasDeploymentSurface = false;
 		{
-			const pack = packContributionRegistry.getPack(projectId, packId);
+			const pack = packContributionRegistry.getRawPack(projectId, packId);
 			for (const p of pack?.providers ?? []) {
 				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
@@ -6346,7 +6353,13 @@ async function handleApiRoute(
 			const deploymentConfig: Record<string, unknown> = {};
 			let hasDeploymentSurface = false;
 			{
-				const pack = packContributionRegistry.getPack(projectId, packId);
+				// RAW (activation-UNFILTERED) contributions — NOT `getPack`. A dormant
+				// provider (e.g. Hindsight's external-mode `memory` provider before
+				// `externalUrl` is configured) is dropped from `getPack().providers`,
+				// which would hide the deployment surface and let the no-surface fallback
+				// start Docker in the runtime's default (managed) mode. Reading raw keeps
+				// the external-mode guard below in force for fresh/default Hindsight.
+				const pack = packContributionRegistry.getRawPack(projectId, packId);
 				for (const p of pack?.providers ?? []) {
 					const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));

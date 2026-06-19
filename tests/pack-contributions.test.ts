@@ -531,6 +531,39 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(externalUnset.listProviders(undefined).map((p) => p.id), []);
 	});
 
+	it("getRawPack returns a DORMANT provider that getPack/listProviders drop (deployment-surface classification)", () => {
+		const root = packRoot("raw-dormant", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// Fresh/default: external mode, no externalUrl → provider DORMANT.
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		// Activation-filtered views drop it (matches the Hindsight external-default case).
+		assert.deepEqual(reg.getPack(undefined, "memory-pack")!.providers.map((p) => p.id), []);
+		assert.deepEqual(reg.listProviders(undefined).map((p) => p.id), []);
+		// RAW view keeps the dormant provider WITH its schema-default flat config, so the
+		// runtime REST/capabilities surface can classify the external deployment mode.
+		const raw = reg.getRawPack(undefined, "memory-pack");
+		assert.deepEqual(raw!.providers.map((p) => p.id), ["memory"]);
+		assert.equal(raw!.providers[0].config?.mode, "external");
+		// Unknown packId → undefined (mirrors getPack).
+		assert.equal(reg.getRawPack(undefined, "no-such-pack"), undefined);
+	});
+
 	it("config overlay: store override wins over the schema default for an unconditional provider", () => {
 		const root = packRoot("cfg-overlay", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
