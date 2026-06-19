@@ -11,6 +11,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import type {
 	RuntimeEnvRef,
@@ -189,6 +190,22 @@ export function substitutePlaceholders(input: string, vars: Record<string, strin
 	});
 }
 
+/**
+ * Expand a leading `~` / `~/` to the real home directory. Docker Compose does NOT
+ * expand `~` in `.env` values or bind-mount sources — a literal `~/.hindsight`
+ * would be treated as a path RELATIVE to the compose project dir (landing junk
+ * data under the pack root), so any home-relative path destined for compose env /
+ * bind mounts MUST be expanded to an absolute home path first. A value that does
+ * not begin with `~` (a DB URL, an absolute path, …) is returned unchanged.
+ */
+export function expandTilde(value: string, home: string = os.homedir()): string {
+	if (value === "~") return home;
+	if (value.startsWith("~/") || value.startsWith("~\\")) {
+		return path.join(home, value.slice(2));
+	}
+	return value;
+}
+
 // ── Env resolution + mode-specific invocation ────────────────────────────────
 
 /** Context supplying resolved values for env refs + placeholders. */
@@ -227,11 +244,15 @@ function resolveEnvValue(
 	ctx: RuntimeResolveContext,
 	vars: Record<string, string>,
 ): string {
+	// Literal/value-ref strings may carry a home-relative path (e.g. the default
+	// managed data dir `${dataDir:-~/.hindsight}`). Expand a leading `~` to an
+	// absolute home path so the rendered env / compose bind mount never sees a
+	// literal `~`. Secret/generate/port refs are opaque tokens and never expanded.
 	if (typeof value === "string") {
-		return substitutePlaceholders(value, vars);
+		return expandTilde(substitutePlaceholders(value, vars));
 	}
 	const ref = value as RuntimeEnvRef;
-	if (ref.value !== undefined) return substitutePlaceholders(ref.value, vars);
+	if (ref.value !== undefined) return expandTilde(substitutePlaceholders(ref.value, vars));
 	if (ref.secret !== undefined) {
 		const v = ctx.secrets?.[ref.secret];
 		if (v === undefined) throw new Error(`runtime env: missing configured secret '${ref.secret}'`);
