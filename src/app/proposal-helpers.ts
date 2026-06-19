@@ -256,6 +256,55 @@ export function deleteProposalDraft(sessionId: string, type: ProposalType): void
 	});
 }
 
+// ---- Per-goal metadata editor helpers ----
+//
+// The goal creation/proposal form exposes a simple key/value metadata editor.
+// Internally it stores ordered `[key, value]` string rows for direct
+// <input> round-tripping; at submit they collapse into a `Record<string,
+// unknown>` (blank keys dropped, values JSON-parsed when possible, else kept
+// as raw strings). Shared by proposal-panels.ts (editor + submit) and
+// session-manager.ts (proposal-mirror seeding) so both convert identically.
+
+export type MetadataRow = [string, string];
+
+/** Parse a single metadata value string: JSON when it parses (numbers,
+ *  booleans, arrays, objects, quoted strings), otherwise the raw string. A
+ *  blank/whitespace value is kept as its raw string. */
+function parseMetadataValue(raw: string): unknown {
+	const trimmed = raw.trim();
+	if (trimmed === "") return raw;
+	try {
+		return JSON.parse(trimmed) as unknown;
+	} catch {
+		return raw;
+	}
+}
+
+/** Convert a metadata object into ordered editor rows. String values are shown
+ *  verbatim; everything else is JSON-stringified so it round-trips through a
+ *  text input. Non-object input yields no rows. */
+export function metadataObjectToRows(meta: unknown): MetadataRow[] {
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return [];
+	return Object.entries(meta as Record<string, unknown>).map(
+		([k, v]): MetadataRow => [k, typeof v === "string" ? v : JSON.stringify(v)],
+	);
+}
+
+/** Build a metadata object from editor rows. Blank keys are dropped; values are
+ *  JSON-parsed when possible, otherwise kept as the raw string. Returns
+ *  `undefined` when no usable rows remain so callers send no `metadata`. */
+export function metadataRowsToObject(
+	rows: ReadonlyArray<MetadataRow>,
+): Record<string, unknown> | undefined {
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of rows) {
+		const key = k.trim();
+		if (key === "") continue;
+		out[key] = parseMetadataValue(v);
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Test-only helper. Cancels every pending debounced save without flushing. */
 export function _cancelAllPendingProposalDraftSaves(): void {
 	for (const k of Object.keys(debounceTimers) as ProposalType[]) {
