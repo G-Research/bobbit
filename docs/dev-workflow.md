@@ -290,6 +290,13 @@ When you list `git branch` in a Bobbit-managed repo you'll see several namespace
 
 The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted state on every server start — orphaned pool entries and renamed-but-unpersisted worktrees are cleaned up automatically. See [internals.md — Session worktrees](internals.md#session-worktrees) for the full lifecycle.
 
+**Worktree setup hooks (per-component and per-goal).** When a goal worktree is provisioned (whether freshly created or claimed from the pool), Bobbit runs setup commands on the host before the team starts:
+
+1. Each component's project-level `worktree_setup_command` (non-fatal on failure — the worktree is still used).
+2. The goal's optional **per-goal `worktreeSetupCommand`**, set at goal-creation time and run once after component setup. This one is **fatal on failure** (`setupStatus: "error"`, no auto-start) so a goal never silently starts mis-configured. The per-command timeout resolves per-goal override → project `worktree_setup_timeout_ms` → 120000 ms.
+
+Both hooks run **non-sandboxed on the host** — set them only for trusted commands. Full reference (injected env vars, timeout resolution, pool-claim behaviour, A/B-testing use case, and the global-boot-config caveat): [goals-workflows-tasks.md — Per-goal worktree setup hook](goals-workflows-tasks.md#per-goal-worktree-setup-hook).
+
 **Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`) or, for local-only repos with commits, local `HEAD`. Fresh `git init` repos with unborn `HEAD` fall back to no-worktree until an initial commit is made; pool prefill skips them with the same actionable warning. A configured `base_ref` is still honored in unborn repos, while a stale configured ref fails loudly rather than silently falling back. The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: it pushes explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
 
 ### Worktree-stash hazard — never `git stash` inside a session worktree

@@ -415,6 +415,8 @@ const goalDraft = createDraftManager({
 		previewCwdEdited: state.previewCwdEdited,
 		hasReceivedProposal: state.assistantHasProposal,
 		goalAssistantTab: state.assistantTab,
+		previewWorktreeSetupCommand: state.previewWorktreeSetupCommand,
+		previewWorktreeSetupTimeoutMs: state.previewWorktreeSetupTimeoutMs,
 	}),
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
@@ -469,6 +471,8 @@ const goalDraft = createDraftManager({
 			state.previewSpecEdited = false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
 			state.assistantHasProposal = false;
+			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
+			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
 		} else {
 			state.previewTitle = draft.previewTitle ?? "";
 			state.previewSpec = draft.previewSpec ?? "";
@@ -478,6 +482,8 @@ const goalDraft = createDraftManager({
 			state.previewSpecEdited = draft.previewSpecEdited ?? false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
 			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
+			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
 		}
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
 	},
@@ -501,14 +507,34 @@ export function deleteGoalDraft(sessionId: string): void { goalDraft.delete(sess
  * next fast-path restore is correct. Returns true if a slot for this session was
  * reconciled.
  */
+/**
+ * Mirror the optional per-goal worktree-setup fields from a proposal/slot into
+ * the legacy form-mirror state (stored as strings for direct <input>/<textarea>
+ * round-tripping). Shared by all goal-proposal mirror paths so a propose_goal-
+ * seeded assistant proposal carries `worktreeSetupCommand` /
+ * `worktreeSetupTimeoutMs` through acceptance, not just title/spec/cwd/workflow.
+ */
+function mirrorGoalSetupFields(src: { worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown }): void {
+	if (typeof src.worktreeSetupCommand === "string") {
+		state.previewWorktreeSetupCommand = src.worktreeSetupCommand;
+	}
+	const t = src.worktreeSetupTimeoutMs;
+	if (typeof t === "number" && Number.isFinite(t)) {
+		state.previewWorktreeSetupTimeoutMs = String(t);
+	} else if (typeof t === "string" && t.trim() !== "") {
+		state.previewWorktreeSetupTimeoutMs = t.trim();
+	}
+}
+
 function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
 	const goalSlot = state.activeProposals.goal;
 	if (!goalSlot || goalSlot.sessionId !== sessionId) return false;
-	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string };
+	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown };
 	if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 	if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 	if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 	if (g.workflow) setSelectedWorkflowId(g.workflow);
+	mirrorGoalSetupFields(g);
 	state.assistantHasProposal = true;
 	if (state.assistantTab === "chat" && !isDesktop()) state.assistantTab = "preview";
 	saveGoalDraft(sessionId);
@@ -1109,6 +1135,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
+		state.previewWorktreeSetupCommand = "";
+		state.previewWorktreeSetupTimeoutMs = "";
 		// Restore previewProjectId from the session record on fast-path switch-back.
 		// The draft-restore on the slow path has a matching fallback at ~line 1488;
 		// without this, clicking "Create Goal" in the proposal form after switching
@@ -1549,6 +1577,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 					if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
 					if (proposal.workflow) setSelectedWorkflowId(proposal.workflow);
+					mirrorGoalSetupFields(proposal);
 				}
 				state.assistantHasProposal = true;
 				if (state.assistantTab === "chat" && !isDesktop()) {
@@ -1792,11 +1821,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// callback so in-progress user edits are never clobbered. Runs on every
 			// non-dismissed goal proposal (first-emit, revision, edit, rehydrate).
 			if (type === "goal" && state.assistantType === "goal") {
-				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string };
+				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string; worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown };
 				if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 				if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 				if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 				if (g.workflow) setSelectedWorkflowId(g.workflow);
+				mirrorGoalSetupFields(g);
 				saveGoalDraft(sessionId);
 			}
 			renderApp();
@@ -2188,6 +2218,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewTitle = "";
 					state.previewCwd = "";
 					state.previewSpec = "";
+					state.previewWorktreeSetupCommand = "";
+					state.previewWorktreeSetupTimeoutMs = "";
 					state.previewTitleEdited = false;
 					state.previewCwdEdited = false;
 					state.previewSpecEdited = false;
