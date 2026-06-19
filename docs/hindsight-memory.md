@@ -118,9 +118,16 @@ context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>
 - `all` (default) — recall across the whole `bobbit` bank with **no project filter**. This is the
   cross-project value: a query like "how did we configure X?" can surface a memory from any
   project.
-- `project` — add a `project:<projectId>` tag filter (`tags_match: "any"`, so untagged org-wide
-  memories still surface). The filter is applied **only when configured**; the default never
-  narrows.
+- `project` — add a `project:<projectId>` tag filter with `tags_match: "any"`. **`"any"` means
+  "OR, *includes* untagged"**: the recall returns memories tagged for this project **plus**
+  untagged / org-wide memories, while **excluding** memories tagged for *other* projects. (The
+  stricter `"any_strict"` — "OR, *excludes* untagged" — is deliberately **not** used, so a project
+  scope never hides global knowledge.) The filter is applied **only when configured** and only when
+  the session has a real project id; the default `all` never narrows.
+
+Recall, `reflect`, and the agent tools all route this scope→tag decision through one shared
+`recallTagFilter(scope, projectId)` helper (`market-packs/hindsight/src/shared.ts`, exporting
+`PROJECT_RECALL_TAGS_MATCH = "any"`), so every read path resolves project scope identically.
 
 The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
 correctness never depends on once-per-session in-memory state (provider workers are per-hook and
@@ -175,9 +182,9 @@ list) rather than erroring.
 |---|---|
 | `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides to the pack store, return the new effective config. |
 | `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueDepth` is the retry-queue length. |
-| `recall` | `{ query, scope? }` → resolves bank + tags and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
-| `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with merged auto-tags (`kind:manual`); returns `{ ok }`. |
-| `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
+| `recall` | `{ query, scope? }` → resolves bank + tags (via `recallTagFilter`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
+| `retain` | `{ content, tags?, sync?, scope? }` → `ensureBank` + `client.retain` with merged auto-tags; `scope: project` (with a real project id) adds a `project:<id>` tag. The `kind:manual` marker is spread **last** so user/scope tags can't override it. Returns `{ ok }`. |
+| `reflect` | `{ prompt, scope? }` → `client.reflect` with the same `recallTagFilter` scope mapping as `recall`; returns `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
 ## Agent tools
@@ -228,15 +235,18 @@ All three tools accept `scope: project | all`. **Scope is a tag filter on the si
 (`config.bank`, default `bobbit`) — never a different bank.** When `scope` is omitted, the pack's
 configured [`recallScope`](#configuration-keys) applies.
 
-- `recall` — `project` adds a `project:<id>` tag filter with `tags_match: "any"` (so untagged
-  org-wide memories still surface); `all` adds no project filter. The project tag is only added when
-  the session has a **real project id** — a global/server-scope session fabricates no placeholder
-  tag.
+- `recall` — `project` adds a `project:<id>` tag filter with `tags_match: "any"` (project-tagged
+  **plus** untagged/global, excluding other projects — see
+  [Recall scope](#bank--tag-taxonomy)); `all` adds no project filter. The project tag is only added
+  when the session has a **real project id** — a global/server-scope session fabricates no
+  placeholder tag.
 - `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the
   auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags`
-  are additive and never change the bank.
-- `reflect` — `scope` is accepted for API symmetry; reflection runs over the resolved shared bank
-  and creates no extra banks.
+  are additive and never change the bank. The `kind:manual` provenance marker is spread **last**, so
+  a user-supplied `tags: { kind: "..." }` can never override it.
+- `reflect` — `scope` maps to the **same** `recallTagFilter` as `recall`: `project` (with a real
+  project id) reflects over project-tagged plus untagged/global memories; `all` (or no project id)
+  reflects over the whole shared bank. It still creates no extra banks.
 
 A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the
 scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's
@@ -298,9 +308,12 @@ rehydrates cleanly. It never mutates config on mount — mount kicks read-only `
   `{ configured, healthy, mode }` — **Dormant** (not configured), **Connected** (`--positive`),
   **Unreachable** (external + unhealthy, `--negative`), or **Starting** (managed + not-yet-healthy,
   `--warning`). It shows mode/bank/namespace/recallScope/auto-toggles, the **retry-queue counter**
-  (`queueDepth`), `lastError` as a muted diagnostic when present, and a **logs link** affordance
-  (managed modes only — points at the marketplace runtime view; the panel never starts/stops
-  Docker). A **Refresh** button re-polls `status`; while a managed mode is configured-but-not-yet
+  (`queueDepth`), `lastError` as a muted diagnostic when present, and a **real inline logs view**
+  (managed modes only). The logs affordance toggles an inline panel that fetches `GET
+  /api/pack-runtimes/:id/logs?tail=` — the **server admin runtime-logs route**, not a pack route
+  (the same surface the built-in background-process pill reads). It is strictly **read-only** (only
+  ever a GET); the panel never starts/stops Docker — all config/status/recall data still flows
+  through the pack routes. A **Refresh** button re-polls `status`; while a managed mode is configured-but-not-yet
   healthy the panel runs a bounded health poll so the badge flips to Connected when the runtime
   comes up. Recent-retains data is **not** invented — P2 `status` exposes only `queueDepth` +
   `lastError`, so that is what the card shows.

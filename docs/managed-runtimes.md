@@ -372,7 +372,12 @@ The two modes differ only in how the database is provided:
 
 - **`managed-postgres`** — includes the `db` service. The data directory is a
   host **bind mount** that defaults to `${dataDir:-~/.hindsight}` (the
-  `dataDir` var, or `~/.hindsight` when unset). The connection string is built
+  `dataDir` var, or `~/.hindsight` when unset). A leading `~` / `~/` in the
+  resolved value is **expanded to the absolute home directory** by the env
+  resolver (`expandTilde` in `helpers.ts`) before it reaches the env file:
+  Docker Compose does **not** expand `~` in `.env` values or bind-mount sources,
+  so an unexpanded `~/.hindsight` would otherwise create a literal `~`-named
+  directory next to the project. The connection string is built
   from the **generated** password and the in-compose `db` hostname via a
   `value` ref:
   `HINDSIGHT_API_DATABASE_URL: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight`
@@ -439,16 +444,37 @@ returns immediately without touching Docker again, and if Docker is unavailable
 it returns the `docker-unavailable` status verbatim rather than falling through
 to a noisier `start`. Otherwise it delegates to a **deduplicated** start.
 
-**Concurrent starts collapse to one `compose up`.** A `_startInFlight` map keyed
-by `projectId\0packId\0runtimeId\0mode` holds the in-flight start promise; later
-callers for the same key await the same promise, and the entry is cleared on
-settle so a subsequent call can retry. This mirrors `sandbox-manager.ts`'s
-`_ensureInFlight` discipline and prevents a burst of UI calls from racing
-multiple `up -d` invocations. The selected `mode` is part of the key on purpose:
-two explicit `start` calls requesting *different* modes must not collapse onto
-the first request's promise (which would silently ignore the second mode), while
-mode-agnostic `ensureRuntime` callers pass the same (usually `undefined`) mode
-and still share one key.
+**Concurrent starts collapse to one `compose up`, keyed by runtime identity.**
+A `_startInFlight` map keyed by the **runtime identity alone**
+(`packId\0runtimeId`) holds the in-flight start promise; later callers for the
+same key await the same promise, and the entry is cleared on settle so a
+subsequent call can retry. This mirrors `sandbox-manager.ts`'s `_ensureInFlight`
+discipline and prevents a burst of UI calls from racing multiple `up -d`
+invocations.
+
+The key deliberately **omits both `projectId` and `mode`**, because a runtime
+identity owns **one** rendered `.env` file and **one** compose project, and
+*neither is project-scoped* (`composeProjectFor`/`_envFilePath` are derived from
+pack + runtime + server suffix only). Including `projectId` would let two starts
+for the same pack/runtime from different project scopes bypass the guard and race
+two `compose up`s clobbering one env file; including `mode` would let two
+different-mode starts each `renderRuntimeEnvFile` to the same path and race.
+Instead the in-flight **mode is tracked alongside the promise**: a concurrent
+start requesting the **same** mode shares the promise (one `compose up`), while a
+concurrent start requesting a **conflicting** mode is **rejected** with
+`PackRuntimeBadRequestError` (rather than silently collapsing onto the first
+mode's promise) so the race is impossible and the caller learns its mode was not
+honoured. Mode-agnostic `ensureRuntime` callers pass the same (usually
+`undefined`) mode and still share one key.
+
+**Idempotent fast-path via a `_started` set.** A per-instance `Set` of runtime
+keys the supervisor has brought up to `running` drives `start`'s fast-path: a
+repeat `start` of a still-running runtime must not re-render the invocation,
+`compose up` again, or rotate its host port. The set is cleared on `stop`/`down`
+(the runtime is no longer up) and is per-instance (not disk-backed) so it never
+leaks across the unit fixtures' shared data dir. After a server restart the flag
+is empty, so the first post-restart `start` falls back to the `reusePersisted`
+port path (no rotation) rather than the in-memory shortcut.
 
 **Startup health polling.** After `up -d`, `start` polls every `pollIntervalMs`
 (default 1 s) until the runtime is ready or `startupTimeoutMs` (default 60 s)
@@ -688,8 +714,51 @@ managed-external-postgres → { start: true,  mode: external-postgres }
 ```
 
 `start: false` for `external` is what makes the external path a pure *setup*
-flow: disable, uninstall, and the consent card all branch on it to avoid forcing
-a managed compose invocation that an external setup never configured.
+flow: the **start** path and the consent card branch on it to avoid forcing a
+managed compose invocation that an external setup never configured. (The
+*teardown* path no longer branches on it — see
+[Disable / uninstall / purge](#disable--uninstall--purge-semantics) — so a
+managed→external reconfiguration can never leak containers.)
+
+### Deployment-surface classification (raw vs activation-filtered contributions)
+
+Deciding *which* deployment surface a pack exposes — and therefore which mode to
+disclose/start — must read the pack's **raw, activation-unfiltered**
+contributions, not the runtime-filtered ones. The capabilities / start / restart
+REST routes (and the marketplace activation path) build their `deploymentConfig`
++ `hasDeploymentSurface` from `PackContributionRegistry.getRawPack(projectId,
+packId)`, which returns the winning pack's contributions **without** dropping
+config-gated providers.
+
+**Why raw?** Hindsight's memory provider is **dormant until `externalUrl` is
+configured** (its `requiresConfig` gate). The activation-filtered `getPack`
+therefore omits the provider on a fresh/default install, which would misclassify
+Hindsight as a *provider-less* pack and disclose/start the Docker default mode
+instead of the **external (no-Docker) setup path**. Reading the raw pack keeps
+the dormant provider visible so a fresh Hindsight is correctly classified as
+`external`.
+
+A provider "carries a deployment mode" (`providerCarriesDeploymentMode`) when its
+effective config has a non-empty `mode` **or** its `activation.activeWhenConfig`
+declares a `mode` key. `hasDeploymentSurface` is the OR of that across the pack's
+raw providers.
+
+**No-deployment-surface fallback.** A pack with **no** provider — or whose only
+provider carries no deployment mode (a runtime-only pack) — has no
+external/managed concept, so `resolveRuntimeStartPlan({})` defaulting to
+`external`/no-start would wrongly suppress its `on-enable` runtime. Both the REST
+start path and marketplace activation apply the same fallback: when
+`!hasDeploymentSurface`, the `on-enable` runtime starts in the **runtime's
+default mode** rather than being gated by the external-default plan. This keeps
+activation and `/api/pack-runtimes/:id/start` from diverging.
+
+**Availability filtering stays activation-aware.** Raw contributions are used
+*only* to classify the deployment surface. Actual runtime *availability* — a
+runtime explicitly disabled via `pack_activation` (`DisabledRefs.runtimes`) — is
+still enforced by the supervisor's **activation-filtered** registry lookups
+(`getPack`/`getRuntime`), so a disabled runtime is absent from `list`/`status`
+and cannot be started. See
+[marketplace.md → activation controls](marketplace.md#activation-controls).
 
 ### Activation policy — `startPolicy: on-enable`
 
@@ -771,12 +840,21 @@ operations:
   all namespaced by `packRuntimePersistKey`). Even purge **never** deletes the
   bind-mounted data dir — that is the user's data, removed only by them.
 
-**External mode skips every managed side effect.** Because
-`resolveRuntimeStartPlan` returns `start: false` for `external`, disable and
-uninstall short-circuit before calling `stop` / `down`. Calling them would force
-the supervisor to resolve a *managed* invocation (which requires
-`HINDSIGHT_API_LLM_API_KEY`) that an external setup never configured, 502-ing the
-operation. Skipping keeps the external no-Docker path always operable.
+**Teardown is unconditional — it never gates on the current saved deployment
+mode.** Disable and uninstall call `stop` / `down` for **every** runtime
+contribution regardless of the pack's current `config.mode`. This is a
+deliberate **leak guard**: a runtime started in a managed mode and *later*
+reconfigured to `external` would otherwise — if teardown branched on
+`resolveRuntimeStartPlan(currentConfig).start` — skip teardown and leak its
+still-running containers. The teardown verbs are safe to call unconditionally
+because `stop` / `down` are **read-only / minimal / idempotent**: they never
+resolve start-only inputs (e.g. `HINDSIGHT_API_LLM_API_KEY`), reuse an
+already-rendered `.env` only when one exists, and map a missing Docker install to
+a `docker-unavailable` *status* rather than throwing. So calling them for an
+external-only, never-started runtime is a harmless no-op (`compose down`/`stop` on
+an absent project exits 0). Note `resolveRuntimeStartPlan`'s `start: false` for
+`external` still governs *starting* (an external setup never triggers a managed
+`compose up`); only the *teardown* path was decoupled from it.
 
 **Side effects run before activation is persisted.** In the marketplace
 activation `PUT`, the Docker start/stop runs *before* the new activation state is
@@ -787,8 +865,9 @@ tolerated (nothing to start/stop on a Docker-less host; the provider is
 defensive), so it persists and is reported rather than treated as a hard failure.
 These branches are pinned across `tests/e2e/marketplace-runtime-activation.spec.ts`
 (enable-failure → 502 + no persist, stop-failure → 502, docker-unavailable
-tolerated, external disable/uninstall skip the side effect, managed uninstall
-tears down without volumes, purge runs `down -v` + state removal).
+tolerated, **disable/uninstall tear down unconditionally** — including a runtime
+started managed then reconfigured to `external` — managed uninstall tears down
+without volumes, purge runs `down -v` + state removal).
 
 ### Secrets & config mapping
 
@@ -830,10 +909,20 @@ safe to render pre-consent. It discloses, per design §8:
 
 For **external** mode the route returns the descriptor/trust copy but **no**
 services/ports/volume and `dockerRequired: false`, so the UI shows no-Docker
-setup guidance instead of a Docker start disclosure. Coverage:
-`tests/marketplace-runtime-consent.spec.ts` (managed discloses
+setup guidance instead of a Docker start disclosure.
+
+**The disclosure is refetched on every marketplace (re)load.** The Market UI
+caches the capability disclosure per `scope`/`packId`/`runtimeId`/`projectId` —
+but that key cannot encode the pack's current config revision, so a stale
+`external` disclosure could be shown right before an enable after the user
+switched the mode to `managed`. To prevent disclosing the wrong mode at the
+moment of consent, `invalidateRuntimeCapabilities()` (`src/app/marketplace-page.ts`)
+drops the whole disclosure cache on every marketplace view (re)load, so the
+consent card always refetches against current server config before the enable
+toggle. Coverage: `tests/marketplace-runtime-consent.spec.ts` (managed discloses
 services/ports/volume/trust; external shows setup guidance; missing summary falls
-back to static copy; master-toggle counts include the `runtimes` array).
+back to static copy; the UI refetch drops a stale disclosure; master-toggle
+counts include the `runtimes` array).
 
 ### `updatePack` and data survival
 
