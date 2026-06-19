@@ -1,7 +1,7 @@
 name: propose_goal
 description: "Submit goal proposal with title, spec, workflow"
 summary: "Propose a goal for user review"
-params: [title, spec, cwd?, workflow?, options?, parentGoalId?, subgoalsAllowed?, maxNestingDepth?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, inlineWorkflow?]
+params: [title, spec, cwd?, workflow?, options?, parentGoalId?, subgoalsAllowed?, maxNestingDepth?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, inlineWorkflow?, worktreeSetupCommand?, worktreeSetupTimeoutMs?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -57,6 +57,20 @@ docs: >-
   on a per-spawn basis by passing their own `inlineRoles` (merged on top —
   child entries with the same name win) or `inlineWorkflow` / `workflowId`
   (replaces the inherited workflow entirely for that child).
+
+  PER-GOAL WORKTREE SETUP HOOK (`worktreeSetupCommand`, `worktreeSetupTimeoutMs`):
+  an optional host command run ONCE during this goal's worktree provisioning,
+  after any per-component worktree_setup_command hooks complete (so installed
+  dependencies are available). Use it to inject goal-specific setup — seed data,
+  enable a flag, warm a cache, build an index — without changing project config.
+  It runs on the HOST (non-sandboxed), same trust model as the project-level
+  worktree_setup_command; only set it for commands you trust. The command's cwd
+  is the goal's resolved working directory and it receives the inherited process
+  env plus SOURCE_REPO, BOBBIT_GOAL_ID, BOBBIT_GOAL_BRANCH, and
+  BOBBIT_WORKTREE_PATH. A failure marks the goal's setup as errored (the team
+  does not auto-start). `worktreeSetupTimeoutMs` is an optional integer > 0
+  overriding the per-goal setup timeout; omit it to use the project default,
+  else 120000 ms.
 
   DECISION GUIDE for the agent: ask "will any goal OTHER than this one need
   this role/workflow?". If yes → permanent (propose_role / propose_project).

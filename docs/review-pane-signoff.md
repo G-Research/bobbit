@@ -98,18 +98,30 @@ Feedback composition is deterministic:
 
 Verification sign-off approvals with no comments may omit `feedback`; the endpoint only needs `signalId`, `stepName`, and `decision: "pass"` to resolve the step.
 
-## Persistence and cleanup
+## Persistence, replay, and cleanup
 
 Sign-off review contexts persist per session in browser storage so a widget-opened sign-off review survives reloads and navigation until the user submits, dismisses, or closes it. The persisted context includes the review document, markdown, title, and source payload.
 
 Inline annotations persist through the review annotation store and are scoped by session and document title. Final comments are local drafts in the pane; submit before leaving the page if the final comment is the only rejection feedback.
+
+### Live reopen vs historical replay
+
+A `review_open` result can arrive through two paths: a fresh live event from the active agent, or historical replay/hydration while restoring chat state. The review pane intentionally treats those paths differently.
+
+- A fresh live `review_open` from the active session always opens or selects the review workspace tab, even after the previous review was approved, rejected, or otherwise submitted. The live path clears the session's submitted-review marker before opening the document so the revised review is visible immediately.
+- Historical replay and hydration still suppress submitted reviews. This prevents a page reload or reconnect from resurrecting a review the user already completed.
+- Background, cached, or non-selected sessions must not mutate active review state. Their replayed or live tool results are ignored until the session becomes active.
+
+Document opening still goes through the shared review document helpers, preserving `replace: false`, same-title replacement, persisted review documents, and side-panel workspace tab behavior.
+
+Regression coverage for this invariant lives in `tests/e2e/ui/review-pane.spec.ts`: it opens a review, rejects with feedback, verifies the tab closes, emits a revised live `review_open`, and asserts the `Review: Test Document` tab reopens with revised markdown. Fixture and unit coverage continue to own reload suppression and active-session guard behavior.
 
 Cleanup expectations:
 
 - Successful approve/reject removes the review document, clears persisted sign-off context, clears annotations for that document, and refreshes gate status for verification sign-offs.
 - Dismiss closes the current review surface and clears persisted sign-off contexts without submitting a decision.
 - Closing a tab or dismissing with unsent inline/final comments prompts before discarding them.
-- Arbitrary markdown reviews keep the existing submitted-review behavior so replayed `review_open` tool results do not reopen a review the user already submitted or dismissed.
+- Arbitrary markdown reviews keep submitted-review replay suppression so historical `review_open` tool results do not reopen a review the user already submitted or dismissed.
 
 ## Security and sanitization
 

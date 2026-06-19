@@ -81,12 +81,15 @@ test.describe("Preview panel fixture", () => {
 		const initialSrc = await iframe.getAttribute("src");
 		expect(initialSrc).not.toContain("/api/preview/render");
 
-		const openLink = page.locator('a[title="Open preview in new tab"]').first();
+		const openLinks = page.locator('a[title="Open preview in new tab"]');
+		await expect(openLinks).toHaveCount(1);
+		const openLink = openLinks.first();
 		await expect(openLink).toBeVisible({ timeout: 5_000 });
 		await expect(openLink).toHaveAttribute("href", `/preview/${SESSION_A}/report.html`);
 		await expect(openLink).toHaveAttribute("target", "_blank");
 		await expect(openLink).toHaveAttribute("rel", /noopener.*noreferrer|noreferrer.*noopener/);
 		expect(await openLink.getAttribute("href")).not.toMatch(/[?#]mtime=/);
+		await expect(page.getByTestId("side-panel-popout"), "preview tab should not render the generic side-panel popout").toHaveCount(0);
 
 		const refresh = page.locator('button[title="Refresh preview"]').first();
 		await expect(refresh).toBeVisible();

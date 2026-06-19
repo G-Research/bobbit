@@ -38,18 +38,17 @@ import { state } from "../../src/app/state.js";
 	docCount: state.reviewDocuments.size,
 	docTitles: [...state.reviewDocuments.keys()],
 });
-(window as any).__deliverReviewToolResult = (a: any, action: string, payload: any, isLive = true) => {
-	// Build a live tool-result-shaped message that matches what the review tool
-	// extension produces — a content block whose text is a JSON envelope. Replays
-	// only reopen when the server workspace already has a matching review tab.
-	const json = JSON.stringify({ action, ...payload });
-	const msg = {
-		role: "toolResult",
-		content: [
-			{ type: "text", text: "(tool ack)" },
-			{ type: "text", text: json },
-		],
-	};
+(window as any).__deliverReviewToolResult = (a: any, action: string, payload: any, isLive = true, shape = "json-text") => {
+	// Build live tool-result-shaped messages. Replays only reopen when the server
+	// workspace already has a matching review tab.
+	const envelope = { action, ...payload };
+	const json = JSON.stringify(envelope);
+	const content = shape === "structured"
+		? [{ type: "text", text: "(tool ack)" }, envelope]
+		: shape === "nested-tool-result"
+			? [{ type: "tool_result", content: [{ type: "text", text: "(tool ack)" }, envelope] }]
+			: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
+	const msg = { role: "toolResult", content };
 	(a as any)._checkReviewToolResult(msg, isLive);
 };
 
