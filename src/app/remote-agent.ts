@@ -2867,6 +2867,16 @@ export class RemoteAgent {
 				const displaySuccess = trigger === "overflow" ? true : success;
 				const nowMs = Date.now();
 				const startedAtMs = this._compactionStartedAt;
+				// The server stamps a `compactionId` on the (successful) end event,
+				// shared with the sidecar entry it just wrote. Carrying it on the
+				// live `compact_active` card lets MessageList mount the
+				// <bobbit-pre-compaction-history> affordance in-session — no reload
+				// needed. The reducer dedups the server's spliced sidecar synthetic
+				// against this card by matching compactionId (live card wins).
+				const compactionId: string | undefined =
+					typeof (event as any).compactionId === "string" && (event as any).compactionId.length > 0
+						? (event as any).compactionId
+						: undefined;
 				const payload: CompactionSummaryPayload = {
 					schemaVersion: 1,
 					trigger,
@@ -2879,6 +2889,7 @@ export class RemoteAgent {
 					tokensAfter: null,
 					reductionPct: null,
 					error: displaySuccess ? undefined : (errMsg || undefined),
+					compactionId,
 				};
 				this._compactionStartedAt = null;
 				// On hard compaction failure clear the stale flag immediately — no
@@ -2895,6 +2906,14 @@ export class RemoteAgent {
 					// Queue this card for tokens-after amendment on the next clean
 					// assistant `message_end` carrying usage.
 					this._pendingCompactionAmend = payload;
+					// When the min-visible-duration floor defers this transition into a
+					// setTimeout, no agent event follows to drive a re-render (the
+					// `compaction_end` emit below already fired synchronously, before
+					// this runs). Emit a generic `render` so AgentInterface repaints the
+					// card from in-progress → complete and reconciles the deduped
+					// single-card state. Without this the in-flight card stays visible
+					// alongside the persisted snapshot card.
+					this.emit({ type: "render" } as any);
 				};
 				if (elapsedSinceStart < COMPACT_CARD_MIN_DURATION) {
 					setTimeout(transitionCard, COMPACT_CARD_MIN_DURATION - elapsedSinceStart);

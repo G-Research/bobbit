@@ -50,11 +50,14 @@ export interface CompactionSummaryPayload {
 	startedAt?: string;
 	/** Total compaction duration, ms. Set only on terminal payloads. */
 	durationMs?: number;
-	/** Sidecar entry id when this payload was reconstructed from a server-
-	 *  side `compaction-sidecar/<sessionId>.jsonl` row. Present means the
-	 *  pre-compaction history endpoint can be queried with this id. Absent
-	 *  on live in-flight payloads (which use the stable `compact_active`
-	 *  id and have no sidecar row yet). */
+	/** Sidecar entry id, shared across the sidecar row, the broadcast
+	 *  `compaction_end` event, and the live `compact_active` card. Present
+	 *  means the pre-compaction history endpoint can be queried with this id,
+	 *  so MessageList mounts the <bobbit-pre-compaction-history> affordance.
+	 *  Stamped on the TERMINAL live payload (the server attaches it to the
+	 *  successful end event, by which point the sidecar row exists) and on
+	 *  reload-spliced persisted payloads. Absent on the in-progress payload
+	 *  (no sidecar row yet) and on failed compactions (no orphan boundary). */
 	compactionId?: string;
 }
 
