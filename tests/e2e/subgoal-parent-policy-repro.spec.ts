@@ -202,13 +202,132 @@ test.describe("Sub-goal creation: parent-disabled is distinct + policy is editab
 			false,
 		);
 		try {
-			// Bare bearer token, no team-lead secret → orchestration class denies.
+			// Bare bearer token, no team-lead secret, no human cookie → the
+			// operator class (subgoal-only body) still denies a bare bearer.
 			const resp = await rawApiFetch(`/api/goals/${parentId}/policy`, {
 				method: "PATCH",
 				body: JSON.stringify({ subgoalsAllowed: true }),
 			});
 			expect(resp.status).toBe(403);
 			// The parent must remain disabled.
+			const after = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(after.subgoalsAllowed).toBe(false);
+		} finally {
+			await deleteGoal(parentId);
+		}
+	});
+});
+
+/**
+ * NARROWED POLICY AUTHZ (this task) — `PATCH /api/goals/:id/policy` is now
+ * split by body shape:
+ *
+ *   - OPERATOR class when the body carries EXCLUSIVELY the per-goal sub-goal
+ *     opt-in fields (`subgoalsAllowed` / `maxNestingDepth`). These are the
+ *     human-dashboard settings; a verified `bobbit_session` cookie authorizes
+ *     them (else a team-lead match). This is what lets the human UI turn on
+ *     sub-goals for an existing parent without the team-lead secret.
+ *
+ *   - ORCHESTRATION class when the body carries ANY of `divergencePolicy` /
+ *     `maxConcurrentChildren` (even mixed with subgoal fields). These remain
+ *     team-lead-only; the cookie does NOT bypass.
+ *
+ * `apiFetch` auto-injects the gateway-minted human cookie for `/policy` (it is
+ * harmless for the orchestration class — the cookie can't authorize it). The
+ * deny / team-lead paths use `rawApiFetch` with explicit headers.
+ */
+test.describe("PATCH /policy — narrowed operator vs orchestration auth", () => {
+	test.afterEach(async () => {
+		await setSubgoalsEnabled(true);
+	});
+
+	test("operator (human cookie) CAN patch subgoal-only fields without the team-lead secret", async () => {
+		await setSubgoalsEnabled(true);
+		const parentId = await createParent(
+			`op-cookie ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			false,
+		);
+		try {
+			// apiFetch auto-injects the human cookie for /policy; no team-lead
+			// secret is supplied. Operator class accepts the cookie.
+			const resp = await apiFetch(`/api/goals/${parentId}/policy`, {
+				method: "PATCH",
+				body: JSON.stringify({ subgoalsAllowed: true, maxNestingDepth: 2 }),
+			});
+			expect(resp.status).toBe(200);
+			const after = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(after.subgoalsAllowed).toBe(true);
+			expect(after.maxNestingDepth).toBe(2);
+		} finally {
+			await deleteGoal(parentId);
+		}
+	});
+
+	test("bare bearer (no cookie, no secret) CANNOT patch subgoal-only fields", async () => {
+		await setSubgoalsEnabled(true);
+		const parentId = await createParent(
+			`op-bare ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			false,
+		);
+		try {
+			const resp = await rawApiFetch(`/api/goals/${parentId}/policy`, {
+				method: "PATCH",
+				body: JSON.stringify({ subgoalsAllowed: true }),
+			});
+			expect(resp.status).toBe(403);
+			const after = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(after.subgoalsAllowed).toBe(false);
+		} finally {
+			await deleteGoal(parentId);
+		}
+	});
+
+	test("orchestration fields (divergencePolicy / maxConcurrentChildren) stay team-lead-only — cookie does NOT bypass", async () => {
+		await setSubgoalsEnabled(true);
+		const parentId = await createParent(
+			`orch-cookie ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			true,
+		);
+		try {
+			// Human cookie (auto-injected by apiFetch) must NOT authorize an
+			// orchestration-class policy change.
+			const denied = await apiFetch(`/api/goals/${parentId}/policy`, {
+				method: "PATCH",
+				body: JSON.stringify({ divergencePolicy: "autonomous" }),
+			});
+			expect(denied.status).toBe(403);
+
+			// The team-lead secret authorizes it.
+			const headers = seedTeamLeadHeader(gw, parentId);
+			const ok = await rawApiFetch(`/api/goals/${parentId}/policy`, {
+				method: "PATCH",
+				headers: { "X-Bobbit-Session-Secret": headers["X-Bobbit-Session-Secret"] },
+				body: JSON.stringify({ divergencePolicy: "autonomous", maxConcurrentChildren: 2 }),
+			});
+			expect(ok.status).toBe(200);
+			const after = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(after.divergencePolicy).toBe("autonomous");
+			expect(after.maxConcurrentChildren).toBe(2);
+		} finally {
+			await deleteGoal(parentId);
+		}
+	});
+
+	test("MIXED body (subgoal + orchestration field) is classified orchestration — cookie does NOT bypass", async () => {
+		await setSubgoalsEnabled(true);
+		const parentId = await createParent(
+			`mixed ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			false,
+		);
+		try {
+			// A cookie-only caller must not piggyback an orchestration field
+			// (maxConcurrentChildren) behind a sub-goal toggle.
+			const denied = await apiFetch(`/api/goals/${parentId}/policy`, {
+				method: "PATCH",
+				body: JSON.stringify({ subgoalsAllowed: true, maxConcurrentChildren: 4 }),
+			});
+			expect(denied.status).toBe(403);
+			// Nothing changed.
 			const after = await (await apiFetch(`/api/goals/${parentId}`)).json();
 			expect(after.subgoalsAllowed).toBe(false);
 		} finally {

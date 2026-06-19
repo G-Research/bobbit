@@ -1332,18 +1332,38 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
-	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren.
+	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren
+	// (orchestration, team-lead-only) and/or subgoalsAllowed / maxNestingDepth
+	// (operator — verified human cookie OR team-lead; see split authz below).
 	const policyMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/policy$/);
 	if (policyMatch && req.method === "PATCH") {
 		if (!requireSubgoalsEnabled()) return true;
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: policy is an ORCHESTRATION verb — team-lead-only, the cookie does
-		// NOT bypass.
-		if (!authorizeTeamLeadOrReject(id, "orchestration")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
+		// S1 (split authz): the per-goal sub-goal opt-in fields
+		// (`subgoalsAllowed` / `maxNestingDepth`) are HUMAN-OPERATOR settings the
+		// goal dashboard drives — they only relax/tighten this goal's own
+		// child-hosting eligibility and can never spawn, plan, integrate, or
+		// resize live concurrency. They are therefore OPERATOR-class: a verified
+		// human cookie is accepted (else team-lead match). The orchestration
+		// fields (`divergencePolicy` / `maxConcurrentChildren`) remain
+		// ORCHESTRATION-class (team-lead-only, cookie does NOT bypass). A body
+		// that mixes in ANY orchestration field is classified as orchestration —
+		// the stricter class wins so the cookie can't pigg-back an orchestration
+		// change behind a sub-goal toggle.
+		const hasOrchestrationField =
+			body.divergencePolicy !== undefined || body.maxConcurrentChildren !== undefined;
+		const hasOperatorField =
+			body.subgoalsAllowed !== undefined || body.maxNestingDepth !== undefined;
+		if (!hasOrchestrationField && !hasOperatorField) {
+			json({ error: "No recognized policy fields", code: "NO_POLICY_FIELDS" }, 400);
+			return true;
+		}
+		const mutationClass: ChildrenMutationClass = hasOrchestrationField ? "orchestration" : "operator";
+		if (!authorizeTeamLeadOrReject(id, mutationClass)) return true;
 		const goalManager = getGoalManagerForGoal(id);
 		const updates: {
 			divergencePolicy?: "strict" | "balanced" | "autonomous";
