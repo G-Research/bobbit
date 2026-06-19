@@ -167,6 +167,10 @@ function wireGoalManagerResolvers(
 		const c = deps.projectContextManager.getOrCreate(pid);
 		return c?.projectConfigStore.get("base_ref") || undefined;
 	});
+	ctx.goalManager.setWorktreeSetupTimeoutResolver((pid: string) => {
+		const c = deps.projectContextManager.getOrCreate(pid);
+		return c?.projectConfigStore.get("worktree_setup_timeout_ms") || undefined;
+	});
 	ctx.goalManager.setLiveSessionResolver(() => collectVisibleSessionWorktreeReferences(deps.projectContextManager));
 }
 
@@ -5091,6 +5095,20 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
+			// Per-goal worktree setup hook (optional). Accept camelCase or snake_case.
+			// Command: trimmed, passed only when non-empty. Timeout: number or numeric
+			// string, passed only when a finite positive integer.
+			let worktreeSetupCommand: string | undefined;
+			{
+				const raw = body.worktreeSetupCommand ?? body.worktree_setup_command;
+				if (typeof raw === "string" && raw.trim()) worktreeSetupCommand = raw.trim();
+			}
+			let worktreeSetupTimeoutMs: number | undefined;
+			{
+				const raw = body.worktreeSetupTimeoutMs ?? body.worktree_setup_timeout_ms;
+				const n = typeof raw === "number" ? raw : (typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN);
+				if (Number.isFinite(n) && n > 0) worktreeSetupTimeoutMs = Math.floor(n);
+			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
@@ -5321,6 +5339,8 @@ async function handleApiRoute(
 				maxNestingDepth: effMaxNestingDepth,
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
+				worktreeSetupCommand,
+				worktreeSetupTimeoutMs,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
