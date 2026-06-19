@@ -30,7 +30,7 @@ import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
@@ -738,6 +738,10 @@ export class WorktreePool {
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
 						});
+						if (set.worktrees.length === 0) {
+							console.warn(`[worktree-pool] Skipping pre-build ${branchName}: no worktree-able repo with a resolved HEAD`);
+							break;
+						}
 						container = set.container;
 						entry = {
 							branchName,
@@ -792,7 +796,11 @@ export class WorktreePool {
 					console.log(`[worktree-pool] Ready${multi ? " (multi-repo)" : ""}: ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
 				} catch (err) {
 					if (counters) counters.failures++;
-					console.error(`[worktree-pool] Failed to pre-build ${branchName}:`, err);
+					if (isUnresolvedHeadWorktreeError(err)) {
+						console.warn(`[worktree-pool] Skipping pre-build ${branchName}: ${err.message}`);
+					} else {
+						console.error(`[worktree-pool] Failed to pre-build ${branchName}:`, err);
+					}
 					break;
 				}
 			}

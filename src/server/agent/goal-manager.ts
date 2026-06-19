@@ -257,7 +257,8 @@ export class GoalManager {
 		// and to no-worktree when that also fails (never throws).
 		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
-		const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd);
+		const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
+		const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef });
 		if (support.supported) repoPath = support.repoPath;
 
 		// Compute worktree path and branch (but don't create yet)

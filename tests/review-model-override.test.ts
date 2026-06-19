@@ -143,3 +143,24 @@ describe("applyModelString skipSetModel — spawn-pinned read-back", () => {
 		);
 	});
 });
+
+describe("applyModelString — session-selectability guard", () => {
+	it("rejects a not-session-selectable provider before calling setModel", async () => {
+		const rpc = makeRpc({
+			async setModel() { throw new Error("setModel must NOT be called for an unrunnable model"); },
+		});
+
+		await assert.rejects(
+			applyModelString(rpc, "google-gemini-cli/gemini-2.5-pro", { contextLabel: "default.sessionModel" }),
+			/not session-selectable/i,
+			"models the agent runtime can't run must be rejected at the binding choke point",
+		);
+		assert.equal(rpc.setModelCalls.length, 0, "setModel must not run for a not-session-selectable model");
+	});
+
+	it("still binds a normal session-selectable model", async () => {
+		const rpc = makeRpc();
+		await applyModelString(rpc, "google/gemini-2.5-pro");
+		assert.deepEqual(rpc.setModelCalls, [["google", "gemini-2.5-pro"]]);
+	});
+});

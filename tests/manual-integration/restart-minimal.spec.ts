@@ -210,10 +210,12 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	await page.waitForSelector("textarea", { timeout: 30_000 });
 	const sidebar = page.locator('[data-testid="sidebar-expanded"]');
 	await sidebar.waitFor({ timeout: 15_000 });
-	const sessionRow = sidebar.locator(`[data-session-id="${wtId}"]`);
-	await sessionRow.waitFor({ timeout: 10_000 });
+	const sessionRow = sidebar.locator(`[data-session-id="${wtId}"]`).first();
+	await expect(sessionRow).toBeVisible({ timeout: 10_000 });
 	await sessionRow.hover();
-	await sessionRow.locator('button[title="Modify"]').click();
+	const renameBtn = sessionRow.getByRole("button", { name: "Modify", exact: true });
+	await expect(renameBtn).toBeVisible({ timeout: 5_000 });
+	await renameBtn.click();
 	const titleInput = page.locator('input[placeholder="Session title…"]').first();
 	await titleInput.waitFor({ timeout: 5_000 });
 	await titleInput.fill("Renamed Pool Worktree");

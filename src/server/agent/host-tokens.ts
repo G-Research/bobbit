@@ -31,6 +31,16 @@ const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKey
 		envKeys: ["GEMINI_API_KEY"],
 	},
 	{
+		// Google account OAuth path (Gemini Code Assist). `GOOGLE_CLOUD_ACCESS_TOKEN`
+		// is the env var the Gemini CLI / google-auth honor for a pre-acquired Bearer
+		// token (paired with GOOGLE_GENAI_USE_GCA=1). Distinct from the API-key `google`
+		// provider above so the two never collide.
+		envVar: "GOOGLE_CLOUD_ACCESS_TOKEN",
+		label: "Google (Gemini Code Assist OAuth)",
+		provider: "google-gemini-cli",
+		envKeys: ["GOOGLE_CLOUD_ACCESS_TOKEN"],
+	},
+	{
 		envVar: "XAI_API_KEY",
 		label: "xAI / Grok",
 		provider: "xai",
@@ -59,6 +69,8 @@ const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKey
 /** Well-known non-provider tokens that users may want in sandboxes */
 export const SANDBOX_AGENT_AUTH_RELATIVE_PATH = path.join("sandbox-agent-auth", "auth.json");
 export const OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS = new Set(["OPENAI_API_KEY", "OPENAI_CODEX_AUTH"]);
+/** Sandbox-token policy keys that opt a sandbox into the Google account (Gemini Code Assist) OAuth credential. */
+export const GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS = new Set(["GOOGLE_CLOUD_ACCESS_TOKEN"]);
 
 const TOOL_TOKENS: { envVar: string; label: string; detect: () => boolean }[] = [
 	{
@@ -135,6 +147,24 @@ function sanitizeCodexCredential(value: unknown): Record<string, any> | undefine
 	return sanitized;
 }
 
+function isUsableGoogleOAuthCredential(value: unknown): value is Record<string, any> {
+	return isCredentialObject(value) && value.type === "oauth" && typeof value.access === "string" && !!value.access;
+}
+
+/**
+ * Sanitize the stored `google-gemini-cli` (Google account / Gemini Code Assist) OAuth
+ * credential down to exactly the fields a sandboxed agent needs to use and refresh a
+ * Bearer token. Never copies `email`/profile/scope/account display metadata into the
+ * sandbox-visible auth.json. Returns undefined for absent or API-key-only values.
+ */
+function sanitizeGoogleCredential(value: unknown): Record<string, any> | undefined {
+	if (!isUsableGoogleOAuthCredential(value)) return undefined;
+	const sanitized: Record<string, any> = { type: "oauth", access: value.access };
+	if (typeof value.refresh === "string" && value.refresh) sanitized.refresh = value.refresh;
+	if (typeof value.expires === "number") sanitized.expires = value.expires;
+	return sanitized;
+}
+
 function sanitizeAuthScope(scope?: string): string | undefined {
 	if (!scope) return undefined;
 	const safe = scope.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^\.+$/, "_");
@@ -151,54 +181,85 @@ export function sandboxAgentAuthPath(scope?: string): string {
 export interface SandboxAgentAuthOptions {
 	prefs?: PreferencesStore | null;
 	includeCodexAuth?: boolean;
+	/** Opt the sandbox into the Google account (Gemini Code Assist) OAuth credential. */
+	includeGoogleAuth?: boolean;
 	/** Separate files prevent one project's authorized mount from feeding another project's denied mount. */
 	scope?: string;
 }
 
 function normalizeSandboxAgentAuthOptions(options?: PreferencesStore | SandboxAgentAuthOptions | null): SandboxAgentAuthOptions {
 	if (!options || typeof (options as any).get === "function") {
-		return { prefs: options as PreferencesStore | null | undefined, includeCodexAuth: false };
+		return { prefs: options as PreferencesStore | null | undefined, includeCodexAuth: false, includeGoogleAuth: false };
 	}
 	return options as SandboxAgentAuthOptions;
 }
 
-/**
- * Build the minimal auth.json content a sandboxed pi-coding-agent needs for
- * ChatGPT / OpenAI Codex OAuth. Returns an empty object unless sandbox token
- * policy explicitly allows OpenAI/Codex credentials for this sandbox.
- */
-export function buildSandboxAgentAuthJson(options?: PreferencesStore | SandboxAgentAuthOptions | null): Record<string, any> {
-	const { prefs, includeCodexAuth = false } = normalizeSandboxAgentAuthOptions(options);
-	const auth: Record<string, any> = {};
-	if (!includeCodexAuth) return auth;
-
+/** Resolve the sanitized OpenAI Codex credential for the sandbox (prefs key → host auth.json oauth/api_key → legacy `openai` oauth). */
+function resolveSandboxCodexCredential(prefs?: PreferencesStore | null): Record<string, any> | undefined {
 	const storedCodexKey = prefs?.get("providerKey.openai-codex") as string | undefined;
-	if (storedCodexKey) {
-		auth["openai-codex"] = { type: "api_key", key: storedCodexKey };
-		return auth;
-	}
+	if (storedCodexKey) return { type: "api_key", key: storedCodexKey };
 
 	const hostAuth = readHostAuthJson();
-	if (!hostAuth) return auth;
+	if (!hostAuth) return undefined;
 
 	const codex = sanitizeCodexCredential(hostAuth["openai-codex"]);
-	if (codex) {
-		auth["openai-codex"] = codex;
-		return auth;
-	}
+	if (codex) return codex;
 
 	// Older installs may have ChatGPT OAuth under `openai`. Only OAuth is a
 	// Codex-compatible credential; OpenAI API keys continue to flow via env vars.
 	const openai = hostAuth.openai;
-	const legacyCodex = isCredentialObject(openai) && openai.type === "oauth"
+	return isCredentialObject(openai) && openai.type === "oauth"
 		? sanitizeCodexCredential(openai)
 		: undefined;
-	if (legacyCodex) auth["openai-codex"] = legacyCodex;
+}
+
+/** Resolve the sanitized Google account (Gemini Code Assist) OAuth credential for the sandbox. */
+function resolveSandboxGoogleCredential(): Record<string, any> | undefined {
+	const hostAuth = readHostAuthJson();
+	if (!hostAuth) return undefined;
+	return sanitizeGoogleCredential(hostAuth["google-gemini-cli"]);
+}
+
+/**
+ * Build the minimal auth.json content a sandboxed pi-coding-agent needs for
+ * provider OAuth. Returns an empty object unless sandbox token policy explicitly
+ * opts the sandbox into a provider's credentials. Codex and Google are independent,
+ * provider-isolated entries: opting into one never includes the other.
+ */
+export function buildSandboxAgentAuthJson(options?: PreferencesStore | SandboxAgentAuthOptions | null): Record<string, any> {
+	const { prefs, includeCodexAuth = false, includeGoogleAuth = false } = normalizeSandboxAgentAuthOptions(options);
+	const auth: Record<string, any> = {};
+
+	if (includeCodexAuth) {
+		const codex = resolveSandboxCodexCredential(prefs);
+		if (codex) auth["openai-codex"] = codex;
+	}
+
+	if (includeGoogleAuth) {
+		const google = resolveSandboxGoogleCredential();
+		if (google) auth["google-gemini-cli"] = google;
+	}
+
 	return auth;
 }
 
 export function sandboxTokenPolicyAllowsCodexAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
 	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
+}
+
+export function sandboxTokenPolicyAllowsGoogleAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
+	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
+}
+
+export function resolveSandboxAgentAuthPolicy(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): { includeCodexAuth: boolean; includeGoogleAuth: boolean } {
+	const list = entries || [];
+	return {
+		// Preserve legacy Codex behavior: projects without an explicit sandbox_tokens
+		// policy still receive the host Codex auth file when available.
+		includeCodexAuth: list.length === 0 || sandboxTokenPolicyAllowsCodexAuth(list),
+		// Google OAuth carries a Google refresh token; require explicit opt-in.
+		includeGoogleAuth: sandboxTokenPolicyAllowsGoogleAuth(list),
+	};
 }
 
 export function ensureSandboxAgentAuthFile(options?: PreferencesStore | SandboxAgentAuthOptions | null): string {
@@ -265,7 +326,12 @@ export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore |
 		return process.env["ANTHROPIC_API_KEY"];
 	}
 
-	// Check auth.json for provider tokens
+	// Check auth.json for provider tokens.
+	// For the Google account OAuth path (GOOGLE_CLOUD_ACCESS_TOKEN → provider
+	// `google-gemini-cli`) this returns the stored `oauth.access` synchronously.
+	// It may be expired; the sandbox refreshes it using the refresh token that
+	// rides along in the sanitized sandbox auth.json. Gateway-side fresh refresh
+	// is the responsibility of the async OAuth refresh helper, not this sync path.
 	const providerForEnv = PROVIDER_TOKENS.find(t => t.envVar === envVar);
 	if (providerForEnv) {
 		// Check preferences store

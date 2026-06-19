@@ -259,38 +259,11 @@ export function resolveCommandStepTimeoutSec(step: Pick<VerifyStep, "type" | "co
 	return isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;
 }
 
-/** Command steps are the expensive OS-level work; keep them serialized within
- * a phase so frozen workflows don't run full unit/E2E suites concurrently.
- * Non-command steps keep the legacy parallel behavior.
- */
-export function shouldSerializeVerificationStepWithinPhase(step: Pick<VerifyStep, "type">): boolean {
-	return step.type === "command";
-}
-
 export async function runVerificationPhaseSteps<T, R>(
 	phaseSteps: readonly T[],
 	runStep: (phaseStep: T) => Promise<R>,
-	options: { shouldSerialize?: (phaseStep: T) => boolean } = {},
 ): Promise<R[]> {
-	const shouldSerialize = options.shouldSerialize ?? (() => false);
-	const parallelSteps: Array<{ phaseStep: T; order: number }> = [];
-	const serializedSteps: Array<{ phaseStep: T; order: number }> = [];
-	phaseSteps.forEach((phaseStep, order) => {
-		if (shouldSerialize(phaseStep)) serializedSteps.push({ phaseStep, order });
-		else parallelSteps.push({ phaseStep, order });
-	});
-
-	const results = new Array<R>(phaseSteps.length);
-	const parallelPromise = Promise.all(parallelSteps.map(async ({ phaseStep, order }) => {
-		results[order] = await runStep(phaseStep);
-	}));
-	const serializedPromise = (async () => {
-		for (const { phaseStep, order } of serializedSteps) {
-			results[order] = await runStep(phaseStep);
-		}
-	})();
-	await Promise.all([parallelPromise, serializedPromise]);
-	return results;
+	return Promise.all(phaseSteps.map(phaseStep => runStep(phaseStep)));
 }
 
 export interface VerificationPushSafetyVars {
@@ -2322,10 +2295,9 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group active steps by phase (default 0), execute phases sequentially.
-			// Within a phase, command steps are serialized to avoid test-suite
-			// contention; non-command steps still run in parallel. Skipped optional
-			// steps are excluded.
+			// Active steps are grouped by phase (default 0), and phases execute sequentially.
+			// All steps within a phase run concurrently by default. Skipped optional steps
+			// are excluded.
 			const phaseGroups = groupStepsByPhase(activeSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
@@ -2419,8 +2391,8 @@ export class VerificationHarness {
 					phase, stepIndices,
 				});
 
-				// Run safe work in parallel, but serialize command steps in this
-				// phase to avoid harness-induced full-suite contention.
+				// Run every step in this phase concurrently. Sequencing is expressed
+				// only by assigning steps to different phase numbers.
 				const phaseResults = await runVerificationPhaseSteps(
 					phaseSteps,
 					async ({ step, index }) => {
@@ -2769,7 +2741,6 @@ export class VerificationHarness {
 						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
 					},
-					{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 				);
 
 				// Store phase results
