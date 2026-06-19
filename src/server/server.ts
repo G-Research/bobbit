@@ -309,7 +309,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
@@ -2079,6 +2079,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 
 				const sandboxTokenEntries = cfg.getSandboxTokens();
+				const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
 				return {
 					projectId,
 					projectDir,
@@ -2088,8 +2089,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
-					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
-					sandboxAgentAuthGoogleAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
+					sandboxAgentAuthAllowed: sandboxAuthPolicy.includeCodexAuth,
+					sandboxAgentAuthGoogleAllowed: sandboxAuthPolicy.includeGoogleAuth,
 					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,

@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 import { getOAuthProvider, OPENAI_CODEX_BROWSER_LOGIN_METHOD, type OAuthCredentials } from "@earendil-works/pi-ai/oauth";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
+import { redactSensitive } from "./redact.js";
 
 // Anthropic OAuth constants (same as in @earendil-works/pi-ai)
 const CLIENT_ID = Buffer.from("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", "base64").toString();
@@ -110,21 +111,6 @@ export function stopFlowCleanup(): void {
 		clearInterval(flowCleanupTimer);
 		flowCleanupTimer = undefined;
 	}
-}
-
-/**
- * Mask anything that looks like a JWT (three dot-separated base64url segments)
- * or a long bearer-shaped token in a free-form log/error string. Best-effort:
- * we redact aggressively rather than risk leaking access tokens via stderr.
- */
-function redactSensitive(s: string): string {
-	if (typeof s !== "string" || !s) return s;
-	let out = s;
-	// JWT-ish: aaa.bbb.ccc with base64url segments.
-	out = out.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "<redacted-jwt>");
-	// Long bearer-shaped tokens (32+ url-safe chars).
-	out = out.replace(/[A-Za-z0-9_-]{32,}/g, "<redacted-token>");
-	return out;
 }
 
 function getAuthJsonPath(): string {

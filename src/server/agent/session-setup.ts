@@ -775,7 +775,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
 			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
+			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
@@ -972,7 +972,7 @@ export async function executeWorktreeAsync(
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
 			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
+			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
