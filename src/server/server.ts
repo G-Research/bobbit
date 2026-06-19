@@ -6022,14 +6022,21 @@ async function handleApiRoute(
 		// postgres). The caller may pass an explicit mode; absent that, resolve the
 		// EFFECTIVE deployment mode from the pack's provider config so the external
 		// (no-Docker) setup path is reachable even when the UI does not know the mode.
-		const deploymentMode = requestedMode ?? ((): string => {
+		// Build the EFFECTIVE deployment config the SAME way the activation path does
+		// (each provider's flat schema defaults overlaid with its persisted store
+		// config), so the consent disclosure reflects custom settings — most importantly
+		// a custom `dataDir` bind path — rather than schema defaults that would diverge
+		// from what activation actually mounts.
+		const deploymentConfig: Record<string, unknown> = {};
+		{
 			const pack = packContributionRegistry.getPack(projectId, packId);
 			for (const p of pack?.providers ?? []) {
-				const m = p.config?.mode;
-				if (typeof m === "string" && m.length > 0) return m;
+				Object.assign(deploymentConfig, p.config ?? {});
+				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
 			}
-			return "external";
-		})();
+		}
+		const deploymentMode = requestedMode ?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0 ? deploymentConfig.mode : "external");
 		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
 		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
 			managed: "managed-postgres",
@@ -6045,7 +6052,7 @@ async function handleApiRoute(
 				return;
 			}
 			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
-			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode });
+			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
 			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
 		} catch (err) {
 			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
@@ -7209,11 +7216,20 @@ async function handleApiRoute(
 					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
 					if (rtCtx && rtCtx.runtimes.length > 0) {
 						const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
-						for (const rc of rtCtx.runtimes) {
-							try {
-								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
-							} catch (err) {
-								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+						// Only managed deployment modes have a Docker stack to tear down. The
+						// external (non-Docker) mode (plan.start === false) never created one and
+						// has no managed compose env — calling down would force the supervisor to
+						// resolve a managed invocation (requiring HINDSIGHT_API_LLM_API_KEY) that an
+						// external setup never configured, failing the uninstall before Docker is
+						// even consulted. Skip it so external no-Docker uninstall always proceeds.
+						const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
+						if (plan.start) {
+							for (const rc of rtCtx.runtimes) {
+								try {
+									await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
+								} catch (err) {
+									teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+								}
 							}
 						}
 					}
@@ -7451,9 +7467,17 @@ async function handleApiRoute(
 									}
 								}
 							} else if (!wasDisabled && nowDisabled) {
-								// enabled → disabled: stop (idempotent — no-op if not running).
-								const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
-								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+								// enabled → disabled: stop the managed container (idempotent — no-op
+								// if not running). The external (non-Docker) deployment mode
+								// (plan.start === false) never started a container and has no managed
+								// compose env, so skip the side effect entirely: calling stop would
+								// force the supervisor to resolve a managed invocation (requiring
+								// HINDSIGHT_API_LLM_API_KEY) that an external setup never configured,
+								// which would 502 and block persisting the disable.
+								if (plan.start) {
+									const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
+									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+								}
 							}
 						} catch (err) {
 							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
