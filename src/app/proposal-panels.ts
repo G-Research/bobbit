@@ -58,7 +58,12 @@ import {
 } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { parentHostEligibility, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
+import {
+	parentHostEligibility,
+	effectiveMaxNestingDepthOf,
+	nestingDepthOf,
+	resolveDepthControl,
+} from "./subgoal-eligibility.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
@@ -586,18 +591,41 @@ function parseSetupTimeoutMs(raw: string): number | undefined {
 	return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
-/** Compute a goal's depth (1-based) by walking parentGoalId links. */
-function computeGoalDepth(goalId: string, goals: ReadonlyArray<{ id: string; parentGoalId?: string }>): number {
-	let depth = 1;
-	let cur: { id: string; parentGoalId?: string } | undefined = goals.find(g => g.id === goalId);
-	const seen = new Set<string>();
-	while (cur?.parentGoalId && !seen.has(cur.id)) {
-		seen.add(cur.id);
-		cur = goals.find(g => g.id === cur!.parentGoalId);
-		depth++;
-		if (depth >= 20) break;
+/**
+ * Resolve the per-goal sub-goal submission fields (allow + max-depth) from the
+ * proposal form state, mirroring EXACTLY what `renderSubgoalsToggle` displays
+ * via the shared `resolveDepthControl`. This is the chokepoint that fixes the
+ * stale-payload bug: the stepper clamps the displayed value into the parent's
+ * valid band, so the payload must carry that same clamped value — never the raw
+ * `_proposalMaxNestingDepth` the user last typed before switching parents.
+ *
+ * - `maxNestingDepth` is forwarded only when the user touched the control
+ *   (configuredValue !== null) and the goal can actually host children; an
+ *   untouched control stays unset so the server default stands.
+ * - When the goal sits at the inherited cap (no room below), sub-goals are
+ *   forced off — matching the disabled toggle in the UI.
+ */
+function proposalSubgoalSubmission(opts: {
+	subgoalsEnabled: boolean;
+	parentGoalId: string | undefined;
+	systemCap: number;
+	allowedValue: boolean | null;
+	configuredValue: number | null;
+}): { subgoalsAllowed: boolean | undefined; maxNestingDepth: number | undefined; allowsChildren: boolean } {
+	if (!opts.subgoalsEnabled) {
+		return { subgoalsAllowed: undefined, maxNestingDepth: undefined, allowsChildren: false };
 	}
-	return depth;
+	const parent = opts.parentGoalId ? state.goals.find(g => g.id === opts.parentGoalId) : undefined;
+	const proposedDepth = parent ? nestingDepthOf(parent.id, state.goals) + 1 : 1;
+	const inheritedCap = parent
+		? effectiveMaxNestingDepthOf(parent as any, state.goals as any)
+		: opts.systemCap;
+	const ctl = resolveDepthControl(proposedDepth, inheritedCap, opts.configuredValue);
+	const subgoalsAllowed = ctl.atGlobalCap ? false : (opts.allowedValue ?? false);
+	const maxNestingDepth = !ctl.atGlobalCap && opts.configuredValue !== null
+		? ctl.depthValue
+		: undefined;
+	return { subgoalsAllowed, maxNestingDepth, allowsChildren: subgoalsAllowed === true };
 }
 
 // ── Shared sub-goal UI fragments ────────────────────────────────────────────
@@ -674,31 +702,24 @@ function renderSubgoalBreadcrumb(config: GoalFormConfig): TemplateResult | strin
 /** Allow-subgoals toggle + max-depth control. */
 function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 	if (!(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange)) return "";
-	const systemCap = config.maxNestingDepth ?? 3;
 	// Depth of the goal being proposed (top-level = 1; a child of a depth-N
 	// goal is depth N+1). "Max depth" is the ABSOLUTE deepest nesting level
-	// allowed in this tree (matching the server's `maxNestingDepth`), so it is
-	// bounded below by `proposedDepth + 1` (it must leave at least one level
-	// for children) and above by the inherited system cap.
-	const proposedDepth = config.parentGoalId ? computeGoalDepth(config.parentGoalId, state.goals) + 1 : 1;
-	const minDepth = proposedDepth + 1;             // need ≥1 level below to host children
-	// Inherited absolute cap: a child goal can never widen past its parent's
+	// allowed in this tree (matching the server's `maxNestingDepth`).
+	//
+	// The inherited absolute cap: a child goal can never widen past its parent's
 	// EFFECTIVE cap (system ∩ parent.own ∩ … up the tree) — only a top-level
 	// goal gets the full system cap. Mirrors the server clamp in
-	// nested-goal-routes.ts so the control never offers a range the server will
-	// reject (the previous `maxDepth = systemCap` ignored the parent's cap, so a
-	// parent capped at 2 still let the child be configured at 3).
+	// nested-goal-routes.ts. `resolveDepthControl` is the SINGLE source of truth
+	// for this math, shared with `proposalMaxNestingDepthSubmission` so the value
+	// shown and the value submitted can never diverge (the stale-payload bug).
+	const proposedDepth = config.parentGoalId ? nestingDepthOf(config.parentGoalId, state.goals) + 1 : 1;
 	const selectedParent = config.parentGoalId ? state.goals.find(g => g.id === config.parentGoalId) : undefined;
-	const maxDepth = selectedParent ? effectiveMaxNestingDepthOf(selectedParent as any, state.goals as any) : systemCap;
-	const atGlobalCap = minDepth > maxDepth;        // no room for any sub-goals
-	const depthFixed = !atGlobalCap && minDepth === maxDepth; // exactly one value fits
+	const inheritedCap = selectedParent
+		? effectiveMaxNestingDepthOf(selectedParent as any, state.goals as any)
+		: (config.maxNestingDepth ?? 3);
+	const { minDepth, maxDepth, atGlobalCap, depthFixed, depthValue, levelsBelow } =
+		resolveDepthControl(proposedDepth, inheritedCap, config.maxNestingDepthValue);
 	const allowed = !atGlobalCap && (config.subgoalsAllowedValue ?? false);
-	// Default (untouched) = full inherited cap → a top-level goal shows the
-	// system cap (e.g. 3). A configured value is clamped into the valid band.
-	const depthValue = atGlobalCap
-		? maxDepth
-		: Math.min(maxDepth, Math.max(minDepth, config.maxNestingDepthValue ?? maxDepth));
-	const levelsBelow = Math.max(0, depthValue - proposedDepth);
 	const infoPanel = (text: string, testid: string) => html`
 		<div class="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] leading-snug text-muted-foreground" data-testid=${testid}>${text}</div>
 	`;
@@ -3057,25 +3078,30 @@ function goalProposalPanel() {
 		let goal;
 		try {
 			try {
-				// Per-goal sub-goals default to OFF: an untouched (null) value is
-				// submitted as false so the team-lead cannot nest unless the user
-				// explicitly opts in.
-				const subgoalsAllowedField = subgoalsEnabled
-					? (_proposalSubgoalsAllowed ?? false)
-					: undefined;
-				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
-					? _proposalMaxNestingDepth
-					: undefined;
 				// Parent goal is meaningful only while the system Subgoals feature is
 				// enabled. A stale/auto-filled parentGoalId from a team-lead proposal
 				// must not be submitted while the Sub-goals tab is hidden/off; accepting
 				// that proposal should create a top-level goal.
 				const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
+				// Per-goal sub-goals default to OFF. The submitted allow + max-depth
+				// MUST mirror the displayed stepper exactly (shared resolveDepthControl),
+				// so a value clamped up by the selected parent's cap is the value sent —
+				// never the raw `_proposalMaxNestingDepth` the user typed before
+				// switching parents (the stale-payload bug).
+				const subgoalSubmission = proposalSubgoalSubmission({
+					subgoalsEnabled,
+					parentGoalId: parentGoalIdField,
+					systemCap: maxNestingDepth,
+					allowedValue: _proposalSubgoalsAllowed,
+					configuredValue: _proposalMaxNestingDepth,
+				});
+				const subgoalsAllowedField = subgoalSubmission.subgoalsAllowed;
+				const maxNestingDepthField = subgoalSubmission.maxNestingDepth;
 				// Root-only orchestration. Only forwarded for a top-level goal
 				// (no parent) that allows subgoals, and only when the user
 				// actually picked a value (null = inherit server default).
 				const isRootProposal = !parentGoalIdField;
-				const allowsChildren = subgoalsEnabled && (_proposalSubgoalsAllowed ?? false);
+				const allowsChildren = subgoalSubmission.allowsChildren;
 				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
 					? _proposalDivergencePolicy
 					: undefined;
@@ -3239,7 +3265,7 @@ function goalProposalPanel() {
 			if (!_proposalTitle.trim() || _proposalSaving) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
 			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
-				const pDepth = computeGoalDepth(_proposalParentGoalId, state.goals);
+				const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
 				if (pDepth + 1 > maxNestingDepth) return true;
 			}
 			return false;

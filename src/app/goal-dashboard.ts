@@ -18,7 +18,7 @@ import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.
 import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-visibility.js";
 import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
 import { isLegacyUnattributableTreeCostRow, LEGACY_TREE_COST_ROW_TOOLTIP } from "./tree-cost-legacy.js";
-import { isSubgoalsEnabled } from "./subgoals-flag.js";
+import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
 import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 import { ensureGitStatusWidget } from "./lazy-widgets.js";
@@ -2293,8 +2293,20 @@ function renderTabBar(): TemplateResult {
 		// Show the Children tab whenever the goal already has children OR it can
 		// host them (so the existing-goal Sub-goals settings control is always
 		// reachable for a goal that was created with sub-goals off — the dead-end
-		// fix). `canHostChildren` = there's nesting headroom below this goal.
-		const canHostChildren = nestingDepthOf(currentGoal.id, state.goals) < effectiveMaxNestingDepthOf(currentGoal as any, state.goals as any);
+		// fix). `canHostChildren` = there's nesting headroom below this goal under
+		// the INHERITED cap (system ∩ ancestor overrides) — deliberately NOT this
+		// goal's OWN `maxNestingDepth` override, because that override is exactly
+		// what the settings control lets the user widen. Folding it in here would
+		// hide the control whenever a stale/too-low own cap is persisted, which is
+		// itself a dead-end. Mirrors `renderSubgoalSettings`'s `inheritedCap`.
+		const parentIdForCap = currentGoal.parentGoalId;
+		const parentForCap = parentIdForCap
+			? state.goals.find(g => g.id === parentIdForCap)
+			: undefined;
+		const inheritedHostCap = parentForCap
+			? effectiveMaxNestingDepthOf(parentForCap as any, state.goals as any)
+			: getSystemMaxNestingDepth();
+		const canHostChildren = nestingDepthOf(currentGoal.id, state.goals) < inheritedHostCap;
 		if (shouldShowChildrenTab(currentGoal as any, liveChildCount > 0 || archivedChildCount > 0 || canHostChildren)) {
 			tabs.push({
 				id: "children",

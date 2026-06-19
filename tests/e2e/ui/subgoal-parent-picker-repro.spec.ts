@@ -59,6 +59,14 @@ async function createParent(title: string, subgoalsAllowed: boolean, maxNestingD
 	return body.id as string;
 }
 
+/** Find a created goal by title via the goals feed (shape-tolerant). */
+async function findGoalByTitle(title: string): Promise<any | undefined> {
+	const resp = await apiFetch("/api/goals");
+	const data = await resp.json();
+	const goals = (data.goals || data) as any[];
+	return goals.find((g) => g.title === title);
+}
+
 test.describe("Parent-Goal picker host-eligibility hint", () => {
 	test("an ineligible (sub-goals off) parent is marked before submit; an eligible one is not", async ({ page }) => {
 		await setSubgoalsEnabled(true);
@@ -187,6 +195,68 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 			await expect(maxDepth).toHaveValue("3");
 		} finally {
 			await deleteGoal(cappedId).catch(() => {});
+			await setMaxNestingDepth(null);
+			await setSubgoalsEnabled(true);
+		}
+	});
+
+	// FIX #1 (stale payload) — the submit payload must carry the SAME clamped
+	// value the stepper shows, not the raw value the user typed before switching
+	// parents. Repro: set depth 2 while top-level (valid), then attach under a
+	// parent that pushes minDepth to 3; the stepper visibly clamps to 3. RED on
+	// the previous tree (handleCreateGoal forwarded the stale `2`), so the
+	// created goal stored maxNestingDepth 2 and could not actually host children.
+	test("submitting forwards the clamped displayed max-depth, not the stale typed value", async ({ page }) => {
+		await setSubgoalsEnabled(true);
+		await setMaxNestingDepth(4); // ample headroom so 2 is initially valid.
+		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const parentTitle = `picker-clamp-parent ${stamp}`;
+		const parentId = await createParent(parentTitle, true); // no depth override → effective cap 4
+		let createdId: string | undefined;
+		try {
+			await openApp(page);
+			await createSessionViaUI(page);
+			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await expect(titleInput).toBeVisible({ timeout: 20_000 });
+			await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+			const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']");
+			await expect(subgoalsTab).toBeVisible({ timeout: 10_000 });
+			await subgoalsTab.click();
+
+			// Turn on "Allow sub-goals on this goal" while still top-level.
+			const toggle = page.locator("[data-testid='goal-form-subgoals-toggle']");
+			await expect(toggle).toBeVisible({ timeout: 10_000 });
+			await toggle.check();
+
+			// Set a LOW max-depth that is valid for a top-level goal (min 2, cap 4).
+			const maxDepth = page.locator("[data-testid='goal-form-max-depth']");
+			await expect(maxDepth).toBeVisible({ timeout: 10_000 });
+			await maxDepth.fill("2");
+			await maxDepth.press("Tab");
+			await expect(maxDepth).toHaveValue("2");
+
+			// Now attach under the parent. The new goal moves to depth 2 → minDepth
+			// 3, so the stepper must visibly clamp the displayed value UP to 3.
+			const picker = page.locator("[data-testid='goal-form-parent-picker']");
+			await expect(picker).toBeVisible({ timeout: 10_000 });
+			await picker.selectOption(parentId);
+			await expect(maxDepth).toHaveValue("3", { timeout: 10_000 });
+
+			// Submit and assert the PERSISTED goal carries the displayed value (3),
+			// not the stale typed value (2).
+			await page.locator("[data-testid='proposal-primary-submit'] button").click();
+
+			await expect.poll(async () => {
+				const g = await findGoalByTitle("E2E Test Goal");
+				createdId = g?.id;
+				return g ? { depth: g.maxNestingDepth, allowed: g.subgoalsAllowed, parent: g.parentGoalId } : undefined;
+			}, { timeout: 15_000 }).toEqual({ depth: 3, allowed: true, parent: parentId });
+		} finally {
+			if (createdId) await deleteGoal(createdId).catch(() => {});
+			await deleteGoal(parentId).catch(() => {});
 			await setMaxNestingDepth(null);
 			await setSubgoalsEnabled(true);
 		}

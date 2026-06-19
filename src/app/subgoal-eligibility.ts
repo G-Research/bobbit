@@ -78,6 +78,57 @@ export function effectiveMaxNestingDepthOf(
 	return cap;
 }
 
+/** Resolved state for a "Max nesting depth" stepper. */
+export interface DepthControlState {
+	/** Depth of the goal whose control this is (top-level = 1). */
+	goalDepth: number;
+	/** Lowest value that still leaves room for ≥1 level of children. */
+	minDepth: number;
+	/** Inherited absolute ceiling (system ∩ every ancestor override). */
+	maxDepth: number;
+	/** True when the goal already sits at the cap — it can host no children. */
+	atGlobalCap: boolean;
+	/** True when exactly one value fits, so the stepper is locked. */
+	depthFixed: boolean;
+	/** The value to DISPLAY *and* SUBMIT — the configured override clamped into
+	 *  [minDepth, maxDepth] (or the full cap when untouched). Display and payload
+	 *  read this same number so they can never disagree. */
+	depthValue: number;
+	/** Levels of sub-goals allowed below this goal (depthValue − goalDepth). */
+	levelsBelow: number;
+}
+
+/**
+ * Single source of truth for the "Max nesting depth" stepper math, shared by
+ * the goal-proposal panel and the existing-goal Sub-goals settings so the value
+ * the UI shows can never diverge from the value it submits/persists.
+ *
+ * The server clamp (`PATCH /policy`, goal creation) remains authoritative; this
+ * only mirrors it so the UI never shows a value the payload won't carry.
+ *
+ * @param goalDepth     depth of the goal whose control this is (top-level = 1).
+ * @param inheritedCap  effective absolute ceiling (caller derives via
+ *                      `effectiveMaxNestingDepthOf` for a child, or the system
+ *                      cap for a root).
+ * @param configuredValue the goal's own override; `null`/`undefined` = untouched
+ *                      (inherit), which displays as the full cap.
+ */
+export function resolveDepthControl(
+	goalDepth: number,
+	inheritedCap: number,
+	configuredValue: number | null | undefined,
+): DepthControlState {
+	const minDepth = goalDepth + 1;
+	const maxDepth = inheritedCap;
+	const atGlobalCap = minDepth > maxDepth;
+	const depthFixed = !atGlobalCap && minDepth === maxDepth;
+	const depthValue = atGlobalCap
+		? maxDepth
+		: Math.min(maxDepth, Math.max(minDepth, configuredValue ?? maxDepth));
+	const levelsBelow = Math.max(0, depthValue - goalDepth);
+	return { goalDepth, minDepth, maxDepth, atGlobalCap, depthFixed, depthValue, levelsBelow };
+}
+
 export type ParentEligibility =
 	| { eligible: true }
 	| { eligible: false; reason: "subgoals-off" | "at-cap"; suffix: string; hint: string };
