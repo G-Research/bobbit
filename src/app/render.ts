@@ -2345,7 +2345,7 @@ export function doRenderApp(): void {
 	`;
 
 	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
-		${tab.kind === "preview" && state.previewPanelEntry ? previewControlButtons(tab) : ""}
+		${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? previewControlButtons(tab) : ""}
 	`;
 
 	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {

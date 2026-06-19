@@ -192,7 +192,19 @@ closed the preview tab before restart, the persisted workspace has no preview
 tab, so reload/reconnect/bootstrap must leave the side panel closed until a new
 explicit `preview_open` / mount event or historical-card **Open** action occurs.
 
-Pinned by `tests/e2e/ui/preview-durable-restart.spec.ts`.
+The preview header follows the same restore source as the iframe. Its controls
+are visible when the active workspace tab has preview metadata, even if the
+transient preview mirrors have not been repopulated yet. This keeps direct
+navigation/reload behavior consistent: the restored iframe, **Open preview in new
+tab**, and **Refresh preview** all appear immediately from the persisted tab. The
+new-tab action uses the tab-derived preview URL, so live and artifact-backed tabs
+open the same URL the iframe is showing. Refresh remains a local cache-buster: it
+bumps the preview mtime used in the iframe URL, but it does not create a tab or
+revive one the user closed.
+
+Pinned by `tests/e2e/ui/preview-durable-restart.spec.ts`, including the
+regression that the refresh button is visible immediately after restoring an
+active preview tab.
 
 ## Per-session mount
 
