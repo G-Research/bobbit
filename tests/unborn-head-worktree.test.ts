@@ -34,6 +34,30 @@ async function makeCommittedRepo(): Promise<{ root: string; repo: string }> {
 	return out;
 }
 
+async function makeUnbornRepoWithFetchedOriginMain(): Promise<{ root: string; repo: string; mainSha: string }> {
+	const root = makeTmpDir("bobbit-unborn-head-base-ref-");
+	const seed = path.join(root, "seed");
+	const origin = path.join(root, "origin.git");
+	const repo = path.join(root, "repo");
+
+	await initRepo(seed);
+	await execFile("git", ["checkout", "-b", "main"], { cwd: seed });
+	fs.writeFileSync(path.join(seed, "README.md"), "origin main\n");
+	await execFile("git", ["add", "README.md"], { cwd: seed });
+	await execFile("git", ["commit", "-m", "origin main"], { cwd: seed });
+	const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: seed });
+	const mainSha = stdout.trim();
+
+	await execFile("git", ["init", "--bare", origin], { cwd: root });
+	await execFile("git", ["remote", "add", "origin", origin], { cwd: seed });
+	await execFile("git", ["push", "origin", "main"], { cwd: seed });
+
+	await initRepo(repo);
+	await execFile("git", ["remote", "add", "origin", origin], { cwd: repo });
+	await execFile("git", ["fetch", "origin", "main"], { cwd: repo });
+	return { root, repo, mainSha };
+}
+
 function rmRoot(root: string): void {
 	try {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -98,6 +122,41 @@ describe("unborn HEAD worktree fallback regressions", () => {
 						/fatal:\s*invalid reference:?\s*HEAD/i,
 						`raw git invalid-reference stderr must not be the primary worktree error; got:\n${message}`,
 					);
+					return true;
+				},
+			);
+		} finally {
+			rmRoot(root);
+		}
+	});
+
+	it("allows an unborn repo to use a valid configured base_ref instead of requiring local HEAD", async () => {
+		const { root, repo, mainSha } = await makeUnbornRepoWithFetchedOriginMain();
+		try {
+			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo, undefined, { configuredBaseRef: "origin/main" });
+			assert.equal(support.supported, true);
+			assert.equal(path.normalize(support.repoPath ?? ""), path.normalize(repo));
+
+			const result = await createWorktree(repo, "session/configured-base", { skipPush: true, configuredBaseRef: "origin/main" });
+			const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: result.worktreePath });
+			assert.equal(stdout.trim(), mainSha, "configured base_ref should drive the worktree start point");
+		} finally {
+			rmRoot(root);
+		}
+	});
+
+	it("surfaces stale configured base_ref errors for unborn repos instead of falling back to no-worktree", async () => {
+		const { root, repo } = await makeUnbornRepo();
+		try {
+			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo, undefined, { configuredBaseRef: "origin/missing" });
+			assert.equal(support.supported, true, "support checks must let createWorktree surface the configured-base error");
+
+			await assert.rejects(
+				() => createWorktree(repo, "session/stale-configured-base", { skipPush: true, configuredBaseRef: "origin/missing" }),
+				(err: unknown) => {
+					const message = err instanceof Error ? err.message : String(err);
+					assert.match(message, /base_ref 'origin\/missing' no longer exists/i);
+					assert.doesNotMatch(message, /(initial commit|unborn|unresolved HEAD|invalid reference:?\s*HEAD)/i);
 					return true;
 				},
 			);
