@@ -17,6 +17,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
+import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -173,6 +174,18 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		} catch (err) {
 			console.error("[model-registry] Failed to load built-in providers:", err);
 		}
+
+		// 1b. Google account (Code Assist / OAuth) Gemini models. These reach
+		// cloudcode-pa.googleapis.com directly from the gateway host, so they share
+		// the same direct-egress visibility semantics as built-in providers and are
+		// only emitted when an account credential is present.
+		try {
+			for (const m of getGoogleCodeAssistModels()) {
+				results.push({ ...m, authenticated: detectProviderAuth(m.provider, prefs) });
+			}
+		} catch (err) {
+			console.error("[model-registry] Failed to load Google Code Assist models:", err);
+		}
 	}
 
 	// 2. AI Gateway models (if configured)
@@ -235,6 +248,19 @@ const ENV_MAP: Record<string, string> = {
 	"mistral": "MISTRAL_API_KEY",
 };
 
+/**
+ * Providers whose `auth.json` credentials are genuine OAuth/account tokens.
+ * Only these may be authenticated via `hasOAuthCredentials()` — this prevents a
+ * generic OAuth credential (e.g. `auth.json["google-gemini-cli"]`) from making
+ * API-key-only providers like `google` (Gemini Developer API) look usable.
+ * Single source of truth for OAuth-capable provider detection.
+ */
+const OAUTH_AUTHENTICATED_PROVIDERS = new Set(["anthropic", "openai-codex", "google-gemini-cli"]);
+
+export function isOAuthCapableProvider(provider: string): boolean {
+	return OAUTH_AUTHENTICATED_PROVIDERS.has(provider);
+}
+
 function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean {
 	// Check provider key in preferences (migrated from IndexedDB)
 	const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
@@ -244,8 +270,9 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 	const envVar = ENV_MAP[provider];
 	if (envVar && process.env[envVar]) return true;
 
-	// Check OAuth credentials (auth.json)
-	if (hasOAuthCredentials(provider)) return true;
+	// Check OAuth credentials (auth.json) — only for OAuth-capable providers so a
+	// google-gemini-cli account token can't authenticate API-key-only `google`.
+	if (OAUTH_AUTHENTICATED_PROVIDERS.has(provider) && hasOAuthCredentials(provider)) return true;
 
 	return false;
 }

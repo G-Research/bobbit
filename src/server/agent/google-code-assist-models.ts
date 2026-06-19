@@ -1,0 +1,64 @@
+/**
+ * Account-backed Gemini model list for the `google-gemini-cli` (Code Assist / OAuth)
+ * provider. Metadata is derived from pi-ai's built-in `google` catalog so context
+ * windows / costs stay in sync, but the models are re-emitted under provider
+ * `google-gemini-cli` with `api: "google-code-assist"` so the runtime routes them to
+ * the Code Assist Bearer adapter instead of the API-key Gemini Developer API.
+ *
+ * Models are only emitted when a Google account credential is present (see
+ * `hasGoogleCodeAssistCredential`), so the selector is not cluttered with
+ * non-functional account models for users who never log in with Google.
+ *
+ * Design: docs/design/google-oauth-model-auth.md §4.5.
+ */
+
+import { getModels } from "@earendil-works/pi-ai";
+
+import type { ApiModel } from "./model-registry.js";
+import {
+	GOOGLE_CODE_ASSIST_API,
+	GOOGLE_GEMINI_CLI_PROVIDER,
+	hasGoogleCodeAssistCredential,
+} from "./google-code-assist.js";
+
+/**
+ * Gemini ids the Code Assist API serves. Restricted to first-party `gemini-*`
+ * models (Gemma and Vertex-only variants are excluded). A model is included only
+ * when pi-ai's `google` catalog also carries it, so we never emit a stale id.
+ */
+function isCodeAssistEligible(id: string): boolean {
+	const s = id.toLowerCase();
+	return s.startsWith("gemini-") && !s.includes("customtools");
+}
+
+export function getGoogleCodeAssistModels(): ApiModel[] {
+	if (!hasGoogleCodeAssistCredential()) return [];
+
+	let base: Array<Record<string, any>> = [];
+	try {
+		base = getModels("google" as any) as unknown as Array<Record<string, any>>;
+	} catch {
+		return [];
+	}
+
+	const models: ApiModel[] = [];
+	for (const m of base) {
+		if (!isCodeAssistEligible(String(m.id))) continue;
+		models.push({
+			id: m.id,
+			name: `${m.name || m.id} (Google account)`,
+			provider: GOOGLE_GEMINI_CLI_PROVIDER,
+			api: GOOGLE_CODE_ASSIST_API,
+			baseUrl: "https://cloudcode-pa.googleapis.com",
+			contextWindow: m.contextWindow || 1_048_576,
+			maxTokens: m.maxTokens || 65_536,
+			reasoning: !!m.reasoning,
+			...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
+			input: (m.input || ["text"]) as ("text" | "image")[],
+			cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// `authenticated` is set by the registry via detectProviderAuth.
+			authenticated: false,
+		});
+	}
+	return models;
+}
