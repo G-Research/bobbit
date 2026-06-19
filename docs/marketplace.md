@@ -432,15 +432,16 @@ Field rules and defaults:
 - **`budget`** — `{ maxTokens, timeoutMs }`. Defaults `{ maxTokens: 1600, timeoutMs: 1500 }`;
   `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The budget exists
   so the (future) dispatch tier can bound how much a provider may contribute and how long it
-  may run — defined now, enforced when dispatch lands.
-- **`runtime?`** / **`config?`** — optional pass-through fields for the future dispatch tier.
+  may run.
+- **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
-**Authoring a provider has no runtime effect in production yet.** The loader validates them and
-the registry indexes them. The dispatch core — the `LifecycleHub` that runs a provider's `hook`
-on the worker tier and applies its `budget` — now exists ([docs/lifecycle-hub.md](lifecycle-hub.md)),
-but **no session path calls it yet** (session-setup wiring is G1.3, per-turn `beforePrompt` is
-G1.4). So today authoring a provider gets you validation, catalogue listing, and activation
-toggles, and nothing observable beyond that.
+**The `sessionSetup` hook is wired; the rest of the dispatch is not.** The loader validates
+providers and the registry indexes them, and the `LifecycleHub` that runs a provider's `hook` on
+the worker tier and applies its `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)) is now called
+during session setup: a provider that declares `sessionSetup` and is installed + active + enabled
+for the session's scope contributes a **Dynamic Context** prompt section. The per-turn
+`beforePrompt` dispatch is still pending (G1.4), and **no built-in production provider ships yet**
+(G1.6) — so an out-of-the-box install contributes nothing until you add a provider pack.
 
 #### Why providers are pack-scoped, *not* name-merged
 

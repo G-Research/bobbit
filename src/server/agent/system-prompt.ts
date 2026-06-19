@@ -7,6 +7,7 @@ import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
+import { type ContextBlock, fenceBlock } from "./context-blocks.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -338,6 +339,8 @@ export interface PromptParts {
 	/** Optional override for the skills-catalog byte budget (clamped to [MIN, MAX]).
 	 *  When undefined, `SKILLS_CATALOG_BUDGET` is used. */
 	skillsCatalogBudget?: number;
+	/** Fresh provider-supplied context blocks appended as the final, lowest-authority prompt section. */
+	dynamicContext?: ContextBlock[];
 }
 
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -520,6 +523,11 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(parts.workflowContext.trim());
 	}
 
+	// 8. Dynamic Context (provider-supplied, freshest/lowest-authority tail)
+	if (parts.dynamicContext?.length) {
+		sections.push("## Dynamic Context\n\n" + parts.dynamicContext.map(fenceBlock).join("\n\n"));
+	}
+
 	if (sections.length === 0) return undefined;
 
 	const combined = sections.join("\n\n---\n\n") + "\n";
@@ -642,6 +650,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 8. Workflow context
 	if (parts.workflowContext?.trim()) {
 		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
+	}
+
+	// 9. Dynamic Context (provider-supplied, freshest/lowest-authority tail)
+	if (parts.dynamicContext?.length) {
+		const content = parts.dynamicContext.map(fenceBlock).join("\n\n");
+		sections.push({ label: "Dynamic Context", source: "providers", content, tokens: estimateTokens(content) });
 	}
 
 	return sections;

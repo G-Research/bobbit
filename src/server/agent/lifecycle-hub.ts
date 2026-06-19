@@ -88,8 +88,9 @@ export class LifecycleHub {
 					epoch: 0,
 					exportKind: "providers",
 					member: hook,
-					ctx: hookCtx as unknown as InvokeRequest["ctx"],
+					ctx: { ...hookCtx, workingDir: base.cwd } as unknown as InvokeRequest["ctx"],
 					arg: undefined,
+					workingDir: base.cwd,
 				}, provider.budget.timeoutMs);
 				ms = Math.round(performance.now() - t0);
 

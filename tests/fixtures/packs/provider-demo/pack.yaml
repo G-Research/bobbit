@@ -1,0 +1,15 @@
+name: provider-demo
+description: G1.3 deterministic provider fixture.
+version: 1.0.0
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: [demo, boom]
+  hooks: []
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []
