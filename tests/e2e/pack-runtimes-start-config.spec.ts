@@ -235,4 +235,36 @@ describe("pack-runtimes start/restart derives + remaps the saved deployment conf
 		// The deployment config remap is still applied regardless of the explicit mode.
 		expect(startCall!.opts?.config?.HINDSIGHT_API_LLM_API_KEY).toBe("sk-override");
 	});
+
+	test("saved EXTERNAL mode + no explicit body mode → 409, never starts Docker", async () => {
+		await seedAndRefresh(bobbitDir, { mode: "external", externalUrl: "http://localhost:9177", bank: "hermes" });
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/start`, { method: "POST" });
+		const body = await res.json().catch(() => ({}));
+		expect(res.status, JSON.stringify(body)).toBe(409);
+		expect(body.mode).toBe("external");
+		expect(body.started).toBe(false);
+		// The supervisor must NOT have been asked to start anything.
+		expect(calls.find((c) => c.op === "start"), "external mode must not start Docker").toBeFalsy();
+	});
+
+	test("saved EXTERNAL mode + restart with no explicit body mode → 409, never restarts Docker", async () => {
+		await seedAndRefresh(bobbitDir, { mode: "external", externalUrl: "http://localhost:9177", bank: "hermes" });
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/restart`, { method: "POST" });
+		const body = await res.json().catch(() => ({}));
+		expect(res.status, JSON.stringify(body)).toBe(409);
+		expect(calls.find((c) => c.op === "restart"), "external mode must not restart Docker").toBeFalsy();
+	});
+
+	test("saved EXTERNAL mode + explicit managed body mode → starts the requested managed stack", async () => {
+		await seedAndRefresh(bobbitDir, { mode: "external", externalUrl: "http://localhost:9177", llmApiKey: "sk-explicit", bank: "bobbit" });
+		const res = await apiFetch(`/api/pack-runtimes/${RUNTIME_API_ID}/start`, {
+			method: "POST",
+			body: JSON.stringify({ mode: "managed-postgres" }),
+		});
+		expect(res.status, await res.text().catch(() => "")).toBe(200);
+		const startCall = calls.find((c) => c.op === "start");
+		expect(startCall, "an explicit managed body mode overrides the external saved plan").toBeTruthy();
+		expect(startCall!.opts?.mode).toBe("managed-postgres");
+		expect(startCall!.opts?.config?.HINDSIGHT_API_LLM_API_KEY).toBe("sk-explicit");
+	});
 });

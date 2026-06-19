@@ -27,6 +27,7 @@ import {
 	revalidateHostPort,
 	isPortAvailable,
 	substitutePlaceholders,
+	expandTilde,
 	buildPlaceholderVars,
 	resolveRuntimeEnv,
 	buildRuntimeInvocation,
@@ -171,6 +172,21 @@ describe("substitutePlaceholders", () => {
 	});
 });
 
+describe("expandTilde", () => {
+	it("expands a bare ~ and a leading ~/ to the home directory", () => {
+		assert.equal(expandTilde("~", "/home/u"), "/home/u");
+		assert.equal(expandTilde("~/.hindsight", "/home/u"), path.join("/home/u", ".hindsight"));
+	});
+	it("leaves absolute paths, db urls, and ~-containing-but-not-leading values unchanged", () => {
+		assert.equal(expandTilde("/srv/hindsight", "/home/u"), "/srv/hindsight");
+		assert.equal(expandTilde("postgres://u:p@db:5432/x", "/home/u"), "postgres://u:p@db:5432/x");
+		assert.equal(expandTilde("/a/~b", "/home/u"), "/a/~b");
+	});
+	it("defaults to the real home dir", () => {
+		assert.equal(expandTilde("~/.hindsight"), path.join(os.homedir(), ".hindsight"));
+	});
+});
+
 // ── Mode-specific invocation ──────────────────────────────────────────────────
 
 const PACK_ROOT = path.resolve("/packs/hindsight");
@@ -309,6 +325,31 @@ describe("buildRuntimeInvocation", () => {
 		assert.throws(
 			() => buildRuntimeInvocation(MANIFEST, "nope", { sourceFile: SRC, packRoot: PACK_ROOT, envFile }),
 			/no mode 'nope'/,
+		);
+	});
+
+	it("expands the DEFAULT managed data dir (~/.hindsight) to an absolute home path — never a literal ~ under pack root", () => {
+		// No `dataDir` configured → the ${dataDir:-~/.hindsight} default applies. The
+		// rendered env MUST be the absolute home path so Docker Compose never sees a
+		// literal `~/.hindsight` (which it would mount relative to the compose project
+		// dir, i.e. UNDER the pack root).
+		const inv = buildRuntimeInvocation(MANIFEST, "managed-postgres", {
+			sourceFile: SRC,
+			packRoot: PACK_ROOT,
+			envFile,
+			ctx: {
+				secrets: { "hindsight.llm.apiKey": "sk" },
+				generated: { "hindsight.db.password": "pw" },
+				// vars intentionally omit dataDir so the default branch is taken.
+			},
+		});
+		const expected = path.join(os.homedir(), ".hindsight");
+		assert.equal(inv.env.HINDSIGHT_DATA_DIR, expected);
+		assert.ok(path.isAbsolute(inv.env.HINDSIGHT_DATA_DIR), "default data dir resolves to an absolute path");
+		assert.ok(!inv.env.HINDSIGHT_DATA_DIR.includes("~"), "no literal tilde survives into the env");
+		assert.ok(
+			!inv.env.HINDSIGHT_DATA_DIR.startsWith(PACK_ROOT),
+			"default managed data must NOT land under the pack root",
 		);
 	});
 });

@@ -23,6 +23,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -85,8 +86,10 @@ describe("Hindsight runtime manifest — mode → services mapping", () => {
 		// Managed DB url is assembled in-compose from the GENERATED password — not
 		// from any user-supplied connection string.
 		assert.equal(inv.env.HINDSIGHT_API_DATABASE_URL, "postgresql://hindsight:db-pass@db:5432/hindsight");
-		// Default managed data dir when no dataDir var is supplied.
-		assert.equal(inv.env.HINDSIGHT_DATA_DIR, "~/.hindsight");
+		// Default managed data dir when no dataDir var is supplied: the ~/.hindsight
+		// default is EXPANDED to an absolute home path (Docker Compose never sees a
+		// literal `~`, which it would mount relative to the compose project dir).
+		assert.equal(inv.env.HINDSIGHT_DATA_DIR, path.join(os.homedir(), ".hindsight"));
 		// Port + user LLM key are resolved into the env (managed start needs them).
 		assert.equal(inv.env.HINDSIGHT_API_PORT, "38080");
 		assert.equal(inv.env.HINDSIGHT_API_LLM_API_KEY, "llm-key");

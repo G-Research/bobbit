@@ -697,10 +697,14 @@ export class PackRuntimeSupervisor {
 		// Validate the runtime exists (404 mapping) before touching Docker.
 		const { contribution } = this._lookup(packId, runtimeId, opts.projectId);
 		const tail = clampTail(opts.tail);
-		// Derive the compose target + this runtime's owned services from the
-		// validated invocation. Invalid manifests propagate rather than degrading to
-		// an unscoped whole-pack `logs`.
-		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
+		// READ-ONLY: `logs` neither consumes nor needs the resolved start env, so it
+		// uses the minimal read-only compose target (like `status`) rather than
+		// rebuilding a full start invocation. This keeps logs viewable for a managed
+		// runtime whose start-only secret (HINDSIGHT_API_LLM_API_KEY) lives only in
+		// deployment config, or one that was never started (no env file / sidecar),
+		// instead of failing the panel's logs affordance with a 400. Invalid manifests
+		// still propagate rather than degrading to an unscoped whole-pack `logs`.
+		const { target, services } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		try {
 			const { stdout } = await this._exec(
 				this._composeArgs(target, "logs", "--tail", String(tail), ...services),
@@ -733,6 +737,14 @@ export class PackRuntimeSupervisor {
 	 * A missing Docker install surfaces as a `docker-unavailable` status (never a
 	 * throw) so an uninstall on a Docker-less host still proceeds; local state
 	 * removal still runs when requested.
+	 *
+	 * TEARDOWN MUST NOT REQUIRE START-ONLY INPUTS. `down` addresses the compose
+	 * project with the READ-ONLY minimal target ({@link _readonlyComposeContext}) —
+	 * the collision-guarded project name + the contained compose file, reusing an
+	 * already-rendered `.env` ONLY when a prior start left one. It deliberately does
+	 * NOT rebuild a full start invocation (which resolves deployment secrets /
+	 * `requireEnv`), so a managed runtime whose config lacks `llmApiKey`, or one that
+	 * was never started (no env file / config sidecar), can still be torn down.
 	 */
 	async down(
 		packId: string,
@@ -742,7 +754,7 @@ export class PackRuntimeSupervisor {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
-		const { target } = await this._composeContext(packId, runtimeId, contribution);
+		const { target } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		const downArgs = this._composeArgs(target, "down", ...(opts.volumes ? ["-v"] : []));
 		try {
 			await this._exec(downArgs);

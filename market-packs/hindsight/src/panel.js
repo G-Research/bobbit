@@ -31,6 +31,34 @@ const asText = (v, d = "") => (v == null ? d : String(v));
 const SECRET_FIELDS = ["apiKey", "externalDatabaseUrl", "llmApiKey"];
 const POLL_INTERVAL_MS = 1500;
 const POLL_MAX_TICKS = 20; // bounded ~30s health poll for managed modes coming up.
+const LOGS_TAIL = 200;
+
+// The managed runtime's URL-safe API id (mirrors the server's
+// encodePackRuntimeId(packId, runtimeId)). For this first-party pack the
+// structural packId and the runtime id are both `hindsight`.
+const RUNTIME_API_ID = `${encodeURIComponent("hindsight")}:${encodeURIComponent("hindsight")}`;
+
+// Resolve the authed gateway base + bearer for the managed-runtime LOGS surface.
+// `/api/pack-runtimes/:id/logs` is a SERVER admin route (NOT a pack route), so it
+// is reached the same way the built-in BgProcessPill reaches its own logs route:
+// the panel module runs in the app realm and reads the gateway url/token the shell
+// persisted. This is the ONLY raw gateway fetch in the panel and is confined to
+// the read-only logs affordance — all CONFIG/STATUS/RECALL data still flows through
+// the versioned Host API (`host.callRoute`).
+function gatewayBase() {
+	try {
+		return (globalThis.localStorage && localStorage.getItem("gateway.url")) || globalThis.location?.origin || "";
+	} catch {
+		return globalThis.location?.origin || "";
+	}
+}
+function gatewayToken() {
+	try {
+		return (globalThis.localStorage && localStorage.getItem("gateway.token")) || "";
+	} catch {
+		return "";
+	}
+}
 
 // Per-session panel state survives repaints + panel-instance re-creation within a
 // page session (module-closure cache keyed by the bound `__sessionId`).
@@ -59,6 +87,10 @@ function freshEntry() {
 		searchScope: "", // "" → use configured recallScope
 		pollTimer: null,
 		pollTicks: 0,
+		logsOpen: false,
+		logsState: "idle", // idle | loading | loaded | error
+		logs: "",
+		logsError: null,
 	};
 }
 
@@ -220,6 +252,50 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		}
 	}
 
+	// ── Managed-runtime logs: a REAL affordance (not static text). Toggles an
+	//    inline view that fetches GET /api/pack-runtimes/:id/logs?tail= from the
+	//    server runtime-logs surface. Read-only; only ever a GET. ──
+	async function loadLogs(host, key) {
+		const entry = get(key);
+		if (!entry) return;
+		entry.logsState = "loading";
+		entry.logsError = null;
+		repaint(host);
+		try {
+			const base = gatewayBase();
+			const res = await fetch(`${base}/api/pack-runtimes/${RUNTIME_API_ID}/logs?tail=${LOGS_TAIL}`, {
+				headers: { Authorization: `Bearer ${gatewayToken()}` },
+			});
+			const e2 = get(key);
+			if (!e2) return;
+			if (!res.ok) {
+				e2.logsState = "error";
+				e2.logsError = `HTTP ${res.status}`;
+				repaint(host);
+				return;
+			}
+			const data = await res.json().catch(() => ({}));
+			e2.logs = asText(data && data.logs, "");
+			e2.logsState = "loaded";
+			e2.logsError = data && data.status === "docker-unavailable" ? "Docker is not available" : null;
+			repaint(host);
+		} catch (err) {
+			const e2 = get(key);
+			if (!e2) return;
+			e2.logsState = "error";
+			e2.logsError = msgOf(err);
+			repaint(host);
+		}
+	}
+
+	const toggleLogs = (host, key) => {
+		const entry = get(key);
+		if (!entry) return;
+		entry.logsOpen = !entry.logsOpen;
+		repaint(host);
+		if (entry.logsOpen) loadLogs(host, key);
+	};
+
 	async function runSearch(host, key) {
 		const entry = get(key);
 		if (!entry) return;
@@ -360,12 +436,30 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						</dl>
 						<div class="hs-chips">
 							<span class="hs-chip" data-testid="hindsight-queue-depth" data-queue-depth=${String(queueDepth)}>${queueDepth} queued ${queueDepth === 1 ? "retain" : "retains"}</span>
-							${isManaged(mode) ? html`<span class="hs-chip hs-chip-muted" data-testid="hindsight-logs-link" title="View runtime logs in the Marketplace runtime view">Logs: Marketplace runtime view</span>` : nothing}
+							${isManaged(mode)
+								? html`<button class="hs-chip hs-chip-muted hs-chip-btn" data-testid="hindsight-logs-button" type="button" aria-expanded=${entry.logsOpen ? "true" : "false"} @click=${() => toggleLogs(host, key)}>${entry.logsOpen ? "Hide logs" : "View runtime logs"}</button>`
+								: nothing}
 						</div>
+						${isManaged(mode) && entry.logsOpen ? renderLogsView(entry, host, key) : nothing}
 						${lastErrMsg ? html`<p class="hs-last-error" data-testid="hindsight-last-error">Last error: ${lastErrMsg}</p>` : nothing}
 					`}
 			</section>`;
 	};
+
+	const renderLogsView = (entry, host, key) => html`
+		<div class="hs-logs" data-testid="hindsight-logs-view" data-logs-state=${entry.logsState}>
+			<div class="hs-logs-head">
+				<span class="hs-label">Runtime logs (tail ${LOGS_TAIL})</span>
+				<button class="hs-btn" data-testid="hindsight-logs-refresh" type="button" ?disabled=${entry.logsState === "loading"} @click=${() => loadLogs(host, key)}>${entry.logsState === "loading" ? "Loading…" : "Refresh"}</button>
+			</div>
+			${entry.logsState === "error"
+				? html`<p class="hs-error" data-testid="hindsight-logs-error">${asText(entry.logsError, "Logs unavailable")}</p>`
+				: entry.logsState === "loading" && !entry.logs
+					? html`<p class="hs-muted">Loading logs…</p>`
+					: html`
+						${entry.logsError ? html`<p class="hs-muted" data-testid="hindsight-logs-note">${asText(entry.logsError)}</p>` : nothing}
+						<pre class="hs-logs-pre" data-testid="hindsight-logs-pre">${entry.logs && entry.logs.length ? entry.logs : "No logs yet."}</pre>`}
+		</div>`;
 
 	const renderConfigCard = (entry, host, key) => {
 		const d = entry.draft || draftFromConfig(null);
@@ -519,6 +613,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		.hs-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 		.hs-chip { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); background: color-mix(in oklch, var(--chart-1) 10%, transparent); color: var(--foreground); }
 		.hs-chip-muted { background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); color: var(--muted-foreground); }
+		.hs-chip-btn { cursor: pointer; font: inherit; }
+		.hs-chip-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--foreground); }
+		.hs-logs { border: 1px solid var(--border); border-radius: 8px; background: var(--background); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+		.hs-logs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+		.hs-logs-pre { margin: 0; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--foreground); }
 		.hs-muted { color: var(--muted-foreground); margin: 0; }
 		.hs-error { color: var(--negative); margin: 0; }
 		.hs-last-error { color: var(--muted-foreground); font-size: 12px; margin: 0; }

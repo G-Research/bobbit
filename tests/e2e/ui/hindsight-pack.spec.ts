@@ -269,4 +269,52 @@ describe("Hindsight pack — native config/status panel (built-in band)", () => 
 			{ timeout: 20_000 },
 		);
 	});
+
+	test("managed mode exposes a REAL runtime-logs affordance that fetches the logs endpoint", async ({ page }) => {
+		const contribution = await resolveHindsightContribution();
+		test.skip(
+			!contribution,
+			"Hindsight pack panel contribution is not served in this environment (panel/entrypoints/routes not built or not merged)",
+		);
+		const { paletteEntrypointId } = contribution!;
+
+		await openApp(page);
+		const sid = await createSessionViaUI(page);
+		expect(sid, "a session must be selected").toBeTruthy();
+		await waitForSessionStatus(sid, "idle").catch(() => { /* best-effort */ });
+		await reconcile(page);
+
+		await expect.poll(async () => {
+			await reconcile(page);
+			await page.evaluate((key) => (window as any).__bobbitRunPackLauncher?.(key), launcherKey(paletteEntrypointId)).catch(() => { /* race */ });
+			return panel(page).count();
+		}, { timeout: 20_000 }).toBeGreaterThan(0);
+		await expect(panel(page)).toBeVisible({ timeout: 15_000 });
+
+		// Switch to a MANAGED deployment mode + supply the LLM key so the runtime is
+		// `configured`, then Save. The logs affordance is managed-only.
+		await page.locator('[data-testid="hindsight-mode"]').selectOption("managed");
+		await page.locator('[data-testid="hindsight-llm-api-key"]').fill("sk-test-managed");
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// The logs affordance is a REAL button (not static text), shown for managed modes.
+		const logsBtn = page.locator('[data-testid="hindsight-logs-button"]');
+		await expect(logsBtn, "managed mode shows a real View-logs button").toBeVisible({ timeout: 20_000 });
+
+		// Clicking it must FETCH the server runtime-logs endpoint (proving it is not
+		// dead text) and reveal the inline logs view.
+		const [logsReq] = await Promise.all([
+			page.waitForRequest(/\/api\/pack-runtimes\/[^/]+\/logs(\?|$)/, { timeout: 20_000 }),
+			logsBtn.click(),
+		]);
+		expect(logsReq.url(), "the logs button hits GET /api/pack-runtimes/:id/logs?tail=").toMatch(/tail=\d+/);
+		await expect(
+			page.locator('[data-testid="hindsight-logs-view"]'),
+			"the inline runtime-logs view opens",
+		).toBeVisible({ timeout: 15_000 });
+		// Either real log content or a graceful error/note renders — never static text.
+		await expect(
+			page.locator('[data-testid="hindsight-logs-pre"], [data-testid="hindsight-logs-error"]').first(),
+		).toBeVisible({ timeout: 15_000 });
+	});
 });

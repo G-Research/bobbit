@@ -6275,12 +6275,14 @@ async function handleApiRoute(
 			body = parsed as Record<string, unknown>;
 		}
 		let mode: string | undefined;
+		let explicitMode = false;
 		let startConfig: Record<string, unknown> | undefined;
 		if (action !== "stop") {
 			const rawMode = (body as { mode?: unknown }).mode;
 			if (rawMode !== undefined && rawMode !== null) {
 				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
 				mode = rawMode;
+				explicitMode = true;
 			}
 			// Derive the saved provider deployment config and remap it onto the
 			// runtime's env keys EXACTLY like marketplace activation start does
@@ -6288,9 +6290,11 @@ async function handleApiRoute(
 			// route would forward only {projectId, mode} and a managed start would fail
 			// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
 			const deploymentConfig: Record<string, unknown> = {};
+			let hasDeploymentSurface = false;
 			{
 				const pack = packContributionRegistry.getPack(projectId, packId);
 				for (const p of pack?.providers ?? []) {
+					hasDeploymentSurface = true;
 					Object.assign(deploymentConfig, p.config ?? {});
 					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
 					if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
@@ -6298,6 +6302,32 @@ async function handleApiRoute(
 			}
 			const plan = resolveRuntimeStartPlan(deploymentConfig);
 			startConfig = plan.config;
+			// Respect a saved EXTERNAL (or default/unset) deployment mode: that is the
+			// non-Docker setup path (plan.start === false), so there is NO managed
+			// runtime to bring up. Without an explicit body mode the route must NOT
+			// silently fall through to the runtime's first manifest mode (managed) and
+			// start Docker — activation already gates on plan.start, and the REST surface
+			// must agree. Answer 409 with a clear external/no-runtime shape; a caller that
+			// genuinely wants to start a managed stack must pass an explicit `mode`.
+			//
+			// The guard applies ONLY when the pack actually exposes a deployment-config
+			// surface (a provider whose config carries the mode). A runtime with no such
+			// surface has no external/managed concept to honor, so it keeps the legacy
+			// supervisor-default-mode behaviour and an unknown pack still reaches the
+			// supervisor (→ 404) rather than being masked by this 409.
+			if (hasDeploymentSurface && !plan.start && !explicitMode) {
+				const deploymentMode = typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
+					? deploymentConfig.mode
+					: "external";
+				json({
+					error: "runtime is configured for external (non-managed) mode; no Docker runtime to start",
+					mode: deploymentMode,
+					status: "stopped",
+					started: false,
+					id: encodePackRuntimeId(packId, runtimeId),
+				}, 409);
+				return;
+			}
 			// An explicit body mode (a runtime manifest mode) overrides the
 			// deployment-derived plan mode; otherwise use the plan's mapped mode.
 			if (mode === undefined) mode = plan.mode;

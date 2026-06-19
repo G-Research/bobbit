@@ -631,17 +631,63 @@ describe("PackRuntimeSupervisor.stop / restart", () => {
 // ── Logs ─────────────────────────────────────────────────────────────────────
 
 describe("PackRuntimeSupervisor.logs", () => {
-	it("runs `compose logs --tail N` and returns stdout", async () => {
-		const docker = makeDocker({ logs: () => ok("hello logs") });
+	it("runs `compose logs --tail N` scoped to the runtime's services, reusing the rendered env", async () => {
+		const docker = makeDocker({ up: () => ok(), ps: () => ok(""), logs: () => ok("hello logs") });
 		const sup = makeSupervisor(docker.executor);
+		// Start once so the read-only logs target reuses the rendered env file.
+		await sup.start(PACK_ID, RUNTIME_ID);
 		const out = await sup.logs(PACK_ID, RUNTIME_ID, { tail: 42 });
 		assert.equal(out, "hello logs");
 		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
 		const composeAbs = path.join(tmp, "packs", PACK_ID, "runtimes", "compose.yaml");
 		const envFile = path.join(tmp, "data", project, `${RUNTIME_ID}.env`);
-		// Carries the compose file/env file AND is scoped to this runtime's service (`db`).
+		// Carries the compose file/env file (reused) AND is scoped to this runtime's service (`db`).
 		assert.deepEqual(logCall.args, [...composeBase(project, composeAbs, envFile), "logs", "--tail", "42", "db"]);
+	});
+
+	it("reuses an env file rendered by a prior start, and never resolves start-only secrets", async () => {
+		// A runtime whose base env REQUIRES a user-configured secret — logs must NOT
+		// rebuild the full start invocation (which would throw on the missing secret).
+		const packRoot = path.join(tmp, "packs", "logsecret");
+		const contribution = {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				env: { LLM_KEY: { secret: "LLM_KEY" } },
+				modes: { "managed-postgres": { services: ["api"] } },
+			},
+		} as RuntimeContribution;
+		const pack = {
+			packId: "logsecret", packName: "Log Secret", packRoot,
+			panels: [], entrypoints: [], providers: [], runtimes: [contribution],
+		};
+		const registry = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, id: string) => (id === "logsecret" ? pack : undefined),
+			getRuntime: (_p: string | undefined, id: string, rt: string) =>
+				id === "logsecret" && rt === "svc" ? contribution : undefined,
+			getPanel: () => undefined, getEntrypoint: () => undefined,
+			listProviders: () => [], hasRoute: () => false,
+		} as unknown as PackContributionResolver;
+		const docker = makeDocker({ logs: () => ok("managed logs") });
+		const sup = new PackRuntimeSupervisor({
+			registry,
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "logsecret-data"),
+			// No secretsStore seeded with LLM_KEY — a full start invocation would throw.
+		});
+		const out = await sup.logs("logsecret", "svc", { tail: 10 });
+		assert.equal(out, "managed logs");
+		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
+		assert.ok(logCall.args.includes("api"), "scoped to the runtime's service");
 	});
 });
 
@@ -1676,6 +1722,99 @@ describe("PackRuntimeSupervisor.down (uninstall vs purge)", () => {
 		const sup = makeDownSupervisor(docker.executor, inMemorySecrets(), new FilePortStore(path.join(tmp, "down-nf-ports.json")));
 		await assert.rejects(() => sup.down("downpack", "nope"), PackRuntimeNotFoundError);
 		assert.equal(docker.countSub("down"), 0);
+	});
+});
+
+// ── down without start-only secrets / sidecar (managed teardown) ─────────────
+//
+// Teardown must NEVER rebuild a full start invocation. A managed runtime whose
+// config supplies the LLM key only as a START-time `secret:` env ref (NOT in the
+// global secret store), or one that was never started (no rendered env file / no
+// persisted config sidecar), must still tear down: `down` addresses the compose
+// project read-only and runs `compose down`/`down -v` regardless.
+
+describe("PackRuntimeSupervisor.down without start-only secrets/sidecar", () => {
+	// A managed-only runtime whose base env REQUIRES a user-configured secret
+	// (HINDSIGHT_API_LLM_API_KEY) — exactly the shape that makes a full start
+	// invocation throw when the secret is absent.
+	function makeSecretRequiringContribution(): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", "secretpack");
+		return {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				env: { LLM_KEY: { secret: "LLM_KEY" } },
+				modes: { "managed-postgres": { services: ["api", "db"] } },
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeSecretRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: "secretpack",
+			packName: "Secret Pack",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === "secretpack" ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === "secretpack" && runtimeId === "svc" ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeSecretSupervisor(executor: DockerExecutor) {
+		return new PackRuntimeSupervisor({
+			registry: makeSecretRegistry(makeSecretRequiringContribution()),
+			executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "secret-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			// NO secretsStore seeded with LLM_KEY — a full start invocation would throw.
+			portStore: new FilePortStore(path.join(tmp, "secret-ports.json")),
+		});
+	}
+
+	const PROJECT = "bobbit-pack-secretpack-testsuffix";
+	// composeFile is resolved relative to the sourceFile's dir (runtimes/).
+	const COMPOSE_ABS = path.join(tmp, "packs", "secretpack", "runtimes", "compose.yaml");
+
+	it("tears down a never-started managed runtime WITHOUT resolving the missing secret or a sidecar", async () => {
+		const docker = makeDocker({ down: () => ok() });
+		const sup = makeSecretSupervisor(docker.executor);
+		// Never started: no env file, no config sidecar, no LLM_KEY in any store.
+		const st = await sup.down("secretpack", "svc");
+		assert.equal(st.status, "stopped");
+		assert.equal(st.composeProject, PROJECT);
+		const downCall = docker.calls.find((c) => c.args.includes("down"))!;
+		// Minimal read-only target: project + compose file, NO --env-file (none rendered).
+		assert.deepEqual(downCall.args, ["compose", "-p", PROJECT, "-f", COMPOSE_ABS, "down"]);
+		assert.ok(!downCall.args.includes("--env-file"), "never-started down carries no env file");
+	});
+
+	it("purges (down -v + removeState) a never-started managed runtime without secrets", async () => {
+		const docker = makeDocker({ down: () => ok() });
+		const sup = makeSecretSupervisor(docker.executor);
+		const st = await sup.down("secretpack", "svc", { volumes: true, removeState: true });
+		assert.equal(st.status, "stopped");
+		const downCall = docker.calls.find((c) => c.args.includes("down"))!;
+		assert.deepEqual(downCall.args, ["compose", "-p", PROJECT, "-f", COMPOSE_ABS, "down", "-v"]);
 	});
 });
 
