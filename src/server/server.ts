@@ -7428,6 +7428,11 @@ async function handleApiRoute(
 				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
 					scope: "server" as InstallScope,
 					packName: e.manifest!.name,
+					// Structural id (the shipped `market-packs/<dir>` segment) the
+					// runtime/panel APIs key by — can DIVERGE from the manifest name for a
+					// built-in whose directory differs. The UI addresses runtime REST with
+					// this, not `packName`.
+					packId: packIdFromRoot(e.path),
 					manifest: e.manifest!,
 					meta: e.meta,
 					status: "ok" as const,

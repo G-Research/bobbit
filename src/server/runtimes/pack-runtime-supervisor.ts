@@ -593,25 +593,32 @@ export class PackRuntimeSupervisor {
 
 	/**
 	 * Dedupes concurrent `ensureRuntime`/`start` for one runtime IDENTITY (pack +
-	 * runtime + project, mode-AGNOSTIC): while a start is in flight, later callers
-	 * for the SAME mode await the same Promise (one `compose up`). On settle, the
-	 * entry is cleared so a later call can retry. Mirrors `sandbox-manager.ts`'s
+	 * runtime, mode-AGNOSTIC): while a start is in flight, later callers for the
+	 * SAME mode await the same Promise (one `compose up`). On settle, the entry is
+	 * cleared so a later call can retry. Mirrors `sandbox-manager.ts`'s
 	 * `_ensureInFlight` discipline.
 	 *
+	 * The key deliberately OMITS projectId: the rendered `.env` file and compose
+	 * project ({@link _envFilePath}/{@link composeProjectFor}) are keyed by pack +
+	 * runtime + server suffix ONLY — they are NOT project-scoped. So two starts for
+	 * the SAME pack/runtime from DIFFERENT project scopes target the SAME env file
+	 * and SAME compose project; keying the in-flight slot by projectId would let
+	 * them bypass this guard and race (two `compose up`s clobbering one env file).
+	 * The key must therefore match the actual shared runtime identity.
+	 *
 	 * The key is mode-agnostic ON PURPOSE: a runtime identity owns ONE rendered
-	 * `.env` file + ONE compose project ({@link _envFilePath}/{@link composeProjectFor}
-	 * are mode-independent), so two concurrent starts requesting DIFFERENT modes
-	 * would race — both `renderRuntimeEnvFile` to the same path and `compose up`
-	 * against the same project, the second clobbering the first's env. We record
-	 * the in-flight mode alongside the promise and REJECT a concurrent start that
-	 * requests a conflicting mode (rather than silently collapsing it onto the
-	 * first mode's promise) so the race is impossible and the caller learns its
-	 * mode was not honoured.
+	 * `.env` file + ONE compose project, so two concurrent starts requesting
+	 * DIFFERENT modes would race — both `renderRuntimeEnvFile` to the same path and
+	 * `compose up` against the same project, the second clobbering the first's env.
+	 * We record the in-flight mode alongside the promise and REJECT a concurrent
+	 * start that requests a conflicting mode (rather than silently collapsing it
+	 * onto the first mode's promise) so the race is impossible and the caller learns
+	 * its mode was not honoured.
 	 */
 	private readonly _startInFlight = new Map<string, { promise: Promise<PackRuntimeStatus>; mode?: string }>();
 
 	/**
-	 * Runtime keys (pack+runtime+project, mode-agnostic) this supervisor instance
+	 * Runtime keys (pack+runtime, mode-agnostic) this supervisor instance
 	 * has successfully brought up to `running`. Drives the idempotent {@link start}
 	 * fast-path: a repeat `start` of a still-running runtime must not re-render the
 	 * invocation, `compose up` again, or rotate its host port. Cleared on
@@ -719,16 +726,22 @@ export class PackRuntimeSupervisor {
 		// any persisted host port verbatim (see `_doStart`'s `reusePersisted`), so a
 		// post-restart start of an already-running runtime never rotates the port even
 		// before this in-memory flag is repopulated.
-		if (this._started.has(this._startedKey(packId, runtimeId, opts.projectId))) {
+		if (this._started.has(this._startedKey(packId, runtimeId))) {
 			const current = await this.status(packId, runtimeId, opts.projectId);
 			if (current.status === "running") return current;
 		}
 		return this._startDeduped(packId, runtimeId, opts);
 	}
 
-	/** Mode-agnostic key for the {@link _started} idempotence set. */
-	private _startedKey(packId: string, runtimeId: string, projectId?: string): string {
-		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}`;
+	/**
+	 * Mode-agnostic key for the {@link _started} idempotence set. Keyed by
+	 * pack+runtime ONLY (NOT projectId): the runtime's compose project + env file
+	 * are not project-scoped, so the idempotence flag must track that same shared
+	 * identity — else a start from project A wouldn't see a start from project B as
+	 * already-running and would re-`compose up` the same project.
+	 */
+	private _startedKey(packId: string, runtimeId: string): string {
+		return `${packId}\u0000${runtimeId}`;
 	}
 
 	/** Stop a runtime (`compose stop`) and report the resulting status. */
@@ -752,7 +765,7 @@ export class PackRuntimeSupervisor {
 		const { target, services } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		// The runtime is being brought down — drop the idempotent-start flag so a
 		// later `start` (incl. the `restart` stop→start) actually (re)starts it.
-		this._started.delete(this._startedKey(packId, runtimeId, opts.projectId));
+		this._started.delete(this._startedKey(packId, runtimeId));
 		try {
 			await this._exec(this._composeArgs(target, "stop", ...services));
 		} catch (err) {
@@ -841,7 +854,7 @@ export class PackRuntimeSupervisor {
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
 		// Tearing the project down — the runtime is no longer up; drop the flag.
-		this._started.delete(this._startedKey(packId, runtimeId, opts.projectId));
+		this._started.delete(this._startedKey(packId, runtimeId));
 		const { target } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		const downArgs = this._composeArgs(target, "down", ...(opts.volumes ? ["-v"] : []));
 		try {
@@ -1029,14 +1042,16 @@ export class PackRuntimeSupervisor {
 	}
 
 	/**
-	 * Dedupe key for an in-flight start — the runtime IDENTITY only (pack + runtime
-	 * + project), mode-AGNOSTIC. A runtime identity owns ONE rendered env file + ONE
-	 * compose project, so all starts for it serialize through one in-flight slot
-	 * regardless of mode (see {@link _startInFlight}). The requested mode is tracked
-	 * separately and a conflicting concurrent mode is rejected, not keyed apart.
+	 * Dedupe key for an in-flight start — the runtime IDENTITY only (pack +
+	 * runtime), mode-AGNOSTIC and project-AGNOSTIC. A runtime identity owns ONE
+	 * rendered env file + ONE compose project (NEITHER is project-scoped), so all
+	 * starts for it — from ANY project scope — must serialize through one in-flight
+	 * slot regardless of mode (see {@link _startInFlight}). The requested mode is
+	 * tracked separately and a conflicting concurrent mode is rejected, not keyed
+	 * apart. Including projectId here would reopen the cross-project start race.
 	 */
-	private _runtimeKey(packId: string, runtimeId: string, projectId?: string): string {
-		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}`;
+	private _runtimeKey(packId: string, runtimeId: string): string {
+		return `${packId}\u0000${runtimeId}`;
 	}
 
 	private _startDeduped(
@@ -1044,7 +1059,7 @@ export class PackRuntimeSupervisor {
 		runtimeId: string,
 		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> },
 	): Promise<PackRuntimeStatus> {
-		const key = this._runtimeKey(packId, runtimeId, opts.projectId);
+		const key = this._runtimeKey(packId, runtimeId);
 		const inFlight = this._startInFlight.get(key);
 		if (inFlight) {
 			// A start for this runtime identity is already in flight. Same mode ⇒ share
@@ -1136,7 +1151,7 @@ export class PackRuntimeSupervisor {
 		// of re-rendering / `compose up` / rotating the port. Only `running` qualifies —
 		// an `unhealthy`/timeout start stays restartable.
 		if (result.status === "running") {
-			this._started.add(this._startedKey(packId, runtimeId, opts.projectId));
+			this._started.add(this._startedKey(packId, runtimeId));
 		}
 		return result;
 	}

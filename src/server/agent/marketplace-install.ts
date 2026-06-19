@@ -65,6 +65,13 @@ export interface BrowsePack extends PackManifest {
 export interface InstalledPackWire {
 	scope: InstallScope;
 	packName: string;
+	/** Structural pack id — the on-disk directory name, i.e. the
+	 *  `market-packs/<dir>` segment the extension-host APIs (panels, runtimes)
+	 *  key packs by via `packIdFromRoot`. Equals `packName` for installed packs
+	 *  (which install into `market-packs/<manifest.name>/`), but can DIVERGE for
+	 *  built-in packs whose shipped directory differs from their manifest name.
+	 *  The UI uses this (not `packName`) to address `/api/pack-runtimes/:id/*`. */
+	packId?: string;
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
@@ -644,13 +651,16 @@ export class MarketplaceInstaller {
 				const manifest = readManifest(dir);
 				const meta = readMeta(dir);
 				if (manifest && meta) {
-					rows.set(d.name, { scope: c.scope, packName: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta) });
+					// `packId` (structural) === the on-disk dir name (`d.name`), which is
+					// what `packIdFromRoot` derives for an installed pack at this scope.
+					rows.set(d.name, { scope: c.scope, packName: d.name, packId: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta) });
 				} else if (manifest || meta) {
 					// Partial / corrupt install — surface so the UI can offer cleanup.
 					// Corrupt rows never offer an update and report an unknown source.
 					rows.set(d.name, {
 						scope: c.scope,
 						packName: d.name,
+						packId: d.name,
 						manifest: manifest ?? synthManifest(d.name, meta),
 						meta: meta ?? synthMeta(d.name, c.scope, manifest),
 						status: "corrupt",

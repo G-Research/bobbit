@@ -2906,6 +2906,14 @@ export interface BrowsePackWire extends PackManifest {
 export interface InstalledPackWire {
 	scope: MarketScope;
 	packName: string;
+	/** Structural pack id (the `market-packs/<dir>` segment) the extension-host
+	 *  APIs key packs/runtimes by — NOT the manifest `name`. Equals `packName` for
+	 *  installed packs (installed into `market-packs/<name>/`) but can DIVERGE for
+	 *  built-in packs whose shipped directory differs from their manifest name. Use
+	 *  this (not `packName`) when addressing `/api/pack-runtimes/:id/*`. Optional so
+	 *  the client still works against an older server that omits it (falls back to
+	 *  `packName`). MUST stay in sync with the server `InstalledPackWire`. */
+	packId?: string;
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";

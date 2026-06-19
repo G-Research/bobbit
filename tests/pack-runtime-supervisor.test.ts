@@ -1468,6 +1468,53 @@ describe("PackRuntimeSupervisor start mode dedupe", () => {
 		assert.equal(docker.countSub("up"), 1);
 	});
 
+	it("concurrent starts from DIFFERENT projectIds with conflicting modes still serialize (shared runtime identity)", async () => {
+		// REGRESSION (identity mismatch): the compose project + rendered .env file are
+		// keyed by pack/runtime/server-suffix ONLY — NOT projectId. So two starts for the
+		// SAME pack/runtime from DIFFERENT project scopes target the SAME env file + SAME
+		// compose project. If the in-flight/idempotence key included projectId they'd
+		// bypass the conflicting-mode guard and race two `compose up`s on one env file.
+		// The key must match the shared runtime identity, so the second (conflicting) mode
+		// is rejected and only ONE `compose up` runs even across project scopes.
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}'),
+		});
+		const sup = makeMmSupervisor(docker.executor);
+		const [a, b] = await Promise.allSettled([
+			sup.start(MM_PACK, "svc", { mode: "default", projectId: "projA" }),
+			sup.start(MM_PACK, "svc", { mode: "alt", projectId: "projB" }),
+		]);
+		const fulfilled = [a, b].filter((r) => r.status === "fulfilled");
+		const rejected = [a, b].filter((r) => r.status === "rejected");
+		assert.equal(fulfilled.length, 1, "exactly one cross-project start succeeds");
+		assert.equal(rejected.length, 1, "the conflicting-mode cross-project start is rejected");
+		assert.ok(
+			(rejected[0] as PromiseRejectedResult).reason instanceof PackRuntimeBadRequestError,
+			"conflicting concurrent mode from another project rejects with PackRuntimeBadRequestError",
+		);
+		// Only ONE `compose up` — the projectId difference did NOT split the in-flight slot.
+		assert.equal(docker.countSub("up"), 1);
+	});
+
+	it("concurrent SAME-mode starts from DIFFERENT projectIds dedupe to one up", async () => {
+		// The shared runtime identity also dedupes same-mode concurrent starts across
+		// project scopes onto one in-flight promise — one `compose up`, no env-file race.
+		let started = false;
+		const docker = makeDocker({
+			up: () => { started = true; return ok(); },
+			ps: () => ok(started ? '{"Service":"db","State":"running","Health":"healthy"}' : ""),
+		});
+		const sup = makeMmSupervisor(docker.executor);
+		const [a, b] = await Promise.all([
+			sup.start(MM_PACK, "svc", { mode: "alt", projectId: "projA" }),
+			sup.start(MM_PACK, "svc", { mode: "alt", projectId: "projB" }),
+		]);
+		assert.equal(a.status, "running");
+		assert.equal(b.status, "running");
+		assert.equal(docker.countSub("up"), 1);
+	});
+
 	it("sequential starts in different modes each run (no false in-flight conflict)", async () => {
 		const docker = makeDocker({
 			up: () => ok(),

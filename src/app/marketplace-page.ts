@@ -83,7 +83,10 @@ let conflicts: ConflictWire[] = [];
 const activationByPack = new Map<string, PackActivationResponse>();
 
 /** Per-runtime capability disclosure for the consent enable-card (P3 design §8),
- *  keyed by `${scope}:${packName}:${runtimeId}`. Derived from the validated
+ *  keyed by {@link runtimeCapabilityCacheKey} (`${scope}:${structuralPackId}:${runtimeId}:${projectId}`).
+ *  The key carries the projectId so switching project focus refetches rather than
+ *  reusing a stale summary, and the STRUCTURAL pack id so it matches what the
+ *  fetch addressed. Derived from the validated
  *  manifest + selected mode (no Docker needed), fetched lazily + best-effort so
  *  the disclosure paints even when Docker is unavailable / the runtime stopped.
  *  `null` = fetch attempted but unavailable (route not present / errored) →
@@ -306,16 +309,43 @@ const RUNTIME_MEMORY_DISCLOSURE =
 const RUNTIME_EXTERNAL_GUIDANCE =
 	"External mode does not run Docker. Point Bobbit at an existing Hindsight deployment by configuring its URL, optional API key, namespace and memory bank in the provider settings.";
 
+/** Structural pack id used to address the runtime REST routes
+ *  (`/api/pack-runtimes/:id/*`). The extension-host keys packs/runtimes by the
+ *  `market-packs/<dir>` STRUCTURAL id, which can diverge from the manifest
+ *  `name` for a built-in pack — so passing `packName` would 404 the capability
+ *  lookup. Prefer the wire's `packId`; fall back to `packName` only for an older
+ *  server that omits it (where the two coincide for installed packs). */
+export function runtimeRestPackId(pack: { packId?: string; packName: string }): string {
+	return pack.packId ?? pack.packName;
+}
+
+/** Cache / in-flight key for a runtime capability fetch. MUST include the
+ *  projectId the fetch is scoped to: project-scope packs fetch with
+ *  {@link currentProjectId}, so omitting it would reuse one project's disclosure
+ *  after the user switches project focus (stale capability summary). Server-scope
+ *  packs always fetch with no projectId, so their key carries an empty segment. */
+export function runtimeCapabilityCacheKey(
+	scope: MarketScope,
+	packId: string,
+	runtimeId: string,
+	projectId: string | undefined,
+): string {
+	return `${scope}:${packId}:${runtimeId}:${projectId ?? ""}`;
+}
+
 /** Lazily fetch + cache the capability disclosure for a managed runtime so the
  *  consent enable-card can render images/services, ports, volume path and trust
  *  copy. Best-effort: a missing route / error caches `null` and the card falls
  *  back to static copy. Repaints once resolved. */
 function ensureRuntimeCapabilities(pack: InstalledPackWire, runtimeId: string): void {
-	const key = `${pack.scope}:${pack.packName}:${runtimeId}`;
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	const restPackId = runtimeRestPackId(pack);
+	// Cache key tracks the STRUCTURAL pack id + the projectId the fetch is scoped
+	// to, so a project-focus switch refetches rather than reusing a stale summary.
+	const key = runtimeCapabilityCacheKey(pack.scope, restPackId, runtimeId, projectId);
 	if (runtimeCapabilities.has(key) || runtimeCapabilitiesInFlight.has(key)) return;
 	runtimeCapabilitiesInFlight.add(key);
-	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
-	void getPackRuntimeCapabilities({ packId: pack.packName, runtimeId, projectId }).then((res) => {
+	void getPackRuntimeCapabilities({ packId: restPackId, runtimeId, projectId }).then((res) => {
 		runtimeCapabilitiesInFlight.delete(key);
 		runtimeCapabilities.set(key, res.ok ? res.data : null);
 		renderApp();
@@ -1334,7 +1364,9 @@ function renderRuntimeRow(pack: InstalledPackWire, runtimeId: string, checked: b
 /** The consent enable-card for a managed runtime (looks up the cached capability
  *  summary, then defers to the pure {@link renderRuntimeConsentCardView}). */
 function renderRuntimeConsentCard(pack: InstalledPackWire, runtimeId: string): TemplateResult {
-	return renderRuntimeConsentCardView(runtimeId, runtimeCapabilities.get(`${pack.scope}:${pack.packName}:${runtimeId}`));
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	const key = runtimeCapabilityCacheKey(pack.scope, runtimeRestPackId(pack), runtimeId, projectId);
+	return renderRuntimeConsentCardView(runtimeId, runtimeCapabilities.get(key));
 }
 
 /** Pure view for the managed-runtime consent enable-card. Discloses images/

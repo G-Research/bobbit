@@ -177,6 +177,40 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		expect(trust.toLowerCase()).toContain("memory");
 	});
 
+	test("capability fetch addresses the STRUCTURAL pack id, not the manifest name (finding #3)", async ({ page }) => {
+		await gotoAndWait(page);
+		const ids = await page.evaluate(() => ({
+			// A built-in pack whose shipped directory (structural id) differs from its
+			// manifest name: the runtime REST routes key by the structural id, so the UI
+			// must send `packId`, not `packName`.
+			divergent: (window as any).__restPackId({ packId: "hindsight-memory", packName: "Hindsight Memory" }),
+			// Older server omits `packId` → fall back to `packName` (they coincide for
+			// installed packs).
+			fallback: (window as any).__restPackId({ packName: "hindsight" }),
+		}));
+		expect(ids.divergent).toBe("hindsight-memory");
+		expect(ids.fallback).toBe("hindsight");
+	});
+
+	test("capability cache key includes the scoped projectId so a project-focus switch refetches (finding #2)", async ({ page }) => {
+		await gotoAndWait(page);
+		const keys = await page.evaluate(() => ({
+			projA: (window as any).__capKey("project", "hindsight", "hindsight", "projA"),
+			projB: (window as any).__capKey("project", "hindsight", "hindsight", "projB"),
+			server: (window as any).__capKey("server", "hindsight", "hindsight", undefined),
+			// The key tracks the STRUCTURAL pack id, matching what the fetch addressed.
+			structural: (window as any).__capKey("server", "hindsight-memory", "hindsight", undefined),
+		}));
+		// Two project scopes ⇒ DISTINCT keys (no stale disclosure reuse across focus).
+		expect(keys.projA).not.toBe(keys.projB);
+		expect(keys.projA).toContain("projA");
+		expect(keys.projB).toContain("projB");
+		// Server scope carries an empty projectId segment.
+		expect(keys.server.endsWith(":")).toBe(true);
+		// Structural pack id participates in the key.
+		expect(keys.structural).toContain("hindsight-memory");
+	});
+
 	test("master-toggle counts include the schema-v2 arrays (runtimes)", async ({ page }) => {
 		await gotoAndWait(page);
 		const counts = await page.evaluate(() => {
