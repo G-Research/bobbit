@@ -29,10 +29,14 @@ const CANONICAL_SESSION_ACTION_IDS = [
 const HEADER_ACTION_SELECTOR = `[data-session-action-surface="header"][data-session-action-id]`;
 const POPOVER_ACTION_SELECTOR = `sidebar-actions-popover [role="menuitem"][data-session-action-id]`;
 
-type StaffRecord = { id: string; currentSessionId?: string; name: string; projectId?: string };
+type StaffRecord = { id: string; currentSessionId?: string; name: string };
 
 function sessionRow(page: Page, sessionId: string): Locator {
 	return page.locator(`[data-session-id="${sessionId}"]`).first();
+}
+
+function staffSessionRow(page: Page, sessionId: string): Locator {
+	return page.locator(`[data-nav-id="session:${sessionId}"]`).first();
 }
 
 function sidebarTrigger(row: Locator, sessionId: string): Locator {
@@ -51,86 +55,17 @@ function headerDirectAction(page: Page, actionId: string): Locator {
 	return page.locator(`[data-session-action-surface="header"][data-session-action-id="${actionId}"]`).first();
 }
 
-async function openSession(page: Page, sessionId: string, options: { staff?: StaffRecord } = {}): Promise<Locator> {
+async function openSessionView(page: Page, sessionId: string): Promise<void> {
 	await openApp(page);
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+}
+
+async function openSession(page: Page, sessionId: string): Promise<Locator> {
+	await openSessionView(page, sessionId);
 	const row = sessionRow(page, sessionId);
-	if (options.staff && !(await row.isVisible().catch(() => false))) {
-		await revealStaffSessionRow(page, sessionId, options.staff);
-	}
 	await expect(row).toBeVisible({ timeout: 10_000 });
 	return row;
-}
-
-async function revealStaffSessionRow(page: Page, sessionId: string, staff: StaffRecord): Promise<Locator> {
-	const row = sessionRow(page, sessionId);
-	const resolved = await waitForStaffSidebarRecord(staff);
-	const deadline = Date.now() + 20_000;
-	let expandedStaffSection = false;
-
-	while (Date.now() < deadline) {
-		if (await row.isVisible().catch(() => false)) return row;
-
-		if (resolved.projectId) {
-			await ensureProjectSectionExpanded(page, resolved.projectId);
-			expandedStaffSection = await ensureStaffSectionExpanded(page, resolved.projectId);
-		} else {
-			expandedStaffSection = await expandAnyStaffSection(page) || expandedStaffSection;
-		}
-
-		if (expandedStaffSection) {
-			await expect(page.getByText(resolved.name, { exact: false }).first()).toBeVisible({ timeout: 5_000 }).catch(() => {});
-		}
-		await page.waitForTimeout(250);
-	}
-
-	await expect(row, `staff session row ${sessionId} for ${resolved.name} should be visible in the Staff sidebar section`).toBeVisible({ timeout: 1_000 });
-	return row;
-}
-
-async function waitForStaffSidebarRecord(staff: StaffRecord): Promise<StaffRecord> {
-	let resolved = staff;
-	await expect.poll(async () => {
-		const resp = await apiFetch(`/api/staff/${staff.id}`);
-		if (!resp.ok) return "";
-		resolved = await resp.json() as StaffRecord;
-		return resolved.currentSessionId && resolved.name ? resolved.currentSessionId : "";
-	}, { timeout: 30_000 }).not.toBe("");
-	return resolved;
-}
-
-async function ensureProjectSectionExpanded(page: Page, projectId: string): Promise<void> {
-	const staffHeader = page.locator(`[data-nav-id="staff-header:${projectId}"]`).first();
-	if (await staffHeader.isVisible().catch(() => false)) return;
-
-	const projectHeader = page.locator(`[data-testid="project-header"][data-project-id="${projectId}"]`).first();
-	await expect(projectHeader, `project ${projectId} should be present before revealing its Staff section`).toBeVisible({ timeout: 10_000 });
-	await projectHeader.click();
-	await expect(staffHeader, `Staff section for project ${projectId} should render after expanding the project`).toBeVisible({ timeout: 5_000 });
-}
-
-async function ensureStaffSectionExpanded(page: Page, projectId: string): Promise<boolean> {
-	const staffHeader = page.locator(`[data-nav-id="staff-header:${projectId}"]`).first();
-	await expect(staffHeader).toBeVisible({ timeout: 5_000 });
-	const chevron = ((await staffHeader.locator("span").first().textContent().catch(() => "")) || "").trim();
-	if (chevron.includes("▸")) {
-		await staffHeader.click();
-	}
-	return true;
-}
-
-async function expandAnyStaffSection(page: Page): Promise<boolean> {
-	const headers = page.locator(`[data-nav-id^="staff-header:"]`);
-	const count = await headers.count();
-	for (let i = 0; i < count; i++) {
-		const header = headers.nth(i);
-		if (!(await header.isVisible().catch(() => false))) continue;
-		const chevron = ((await header.locator("span").first().textContent().catch(() => "")) || "").trim();
-		if (chevron.includes("▸")) await header.click();
-		return true;
-	}
-	return false;
 }
 
 async function openSidebarActions(page: Page, sessionId: string): Promise<void> {
@@ -274,13 +209,19 @@ test.describe("unified session actions", () => {
 		const staffSessionId = await waitForStaffSession(staff.id);
 		sessionsToDelete.add(staffSessionId);
 		await waitForSessionStatus(staffSessionId, "idle", 30_000);
-		await openSession(page, staffSessionId, { staff });
+		await openSessionView(page, staffSessionId);
 
 		expect(await actionLabel(page, "modify")).toContain("Edit staff");
-		await openSidebarActions(page, staffSessionId);
-		await expect(popoverAction(page, "modify")).toContainText("Edit staff");
-		await closePopover(page);
 		await clickHeaderAction(page, "modify");
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/staff/${staff.id}`);
+
+		await openSessionView(page, staffSessionId);
+		const staffRow = staffSessionRow(page, staffSessionId);
+		await expect(staffRow, "staff sidebar rows use nav ids and expose an existing Edit button").toBeVisible({ timeout: 10_000 });
+		await staffRow.hover();
+		const staffSidebarEdit = staffRow.locator(`button[title="Edit"]`).first();
+		await expect(staffSidebarEdit).toBeVisible({ timeout: 5_000 });
+		await staffSidebarEdit.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/staff/${staff.id}`);
 
 		const goal = await createGoal({ title: `Session actions team ${Date.now()}`, team: false, worktree: false });
