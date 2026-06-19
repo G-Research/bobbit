@@ -1,0 +1,55 @@
+name: hindsight_recall
+description: "Recall relevant memories from the Hindsight bank for a query."
+summary: "Recall long-term memories for a query"
+params: [query, scope?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Hindsight
+docs: |-
+  Required: `query`. Optional: `scope` (`project` | `all`).
+
+  Fetches durable memories from the shared Hindsight bank. `scope: project`
+  restricts to this project (route adds a `project:<id>` tag when a real project
+  id is present); `scope: all` searches the whole bank. When `scope` is omitted
+  the pack's configured `recallScope` applies. Returns a concise list plus the
+  structured route result under `details`. Dormant (unconfigured) Hindsight
+  returns an empty result, not an error.
+detail_docs: >-
+  ## Purpose
+
+
+  `hindsight_recall` retrieves durable, long-term memories (past decisions,
+  preferences, project facts) from the single shared Hindsight bank so the agent
+  can ground its work in accumulated context.
+
+
+  The tool NEVER talks to Hindsight directly. It mints a tool-bound surface
+  token and dispatches the pack's `recall` route, which owns bank resolution
+  (default `bobbit`), external/managed-mode handling, dormancy, and the
+  scope→tag mapping.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `query` | string | **Yes** | What to recall. |
+
+  | `scope` | `project` \| `all` | No | `project` scopes to this project via a
+  project tag; `all` searches the shared bank. Defaults to the pack's configured
+  `recallScope`. |
+
+
+  ## Notes
+
+
+  - Scope maps to tag filters on the SAME shared bank — never a different bank.
+
+  - A `project` recall only adds a `project:<id>` filter when the session has a
+  real project id; otherwise no project tag is fabricated.
+
+  - Unconfigured Hindsight returns an empty list (dormant), not an error.
