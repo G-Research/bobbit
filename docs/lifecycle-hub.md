@@ -11,7 +11,6 @@
 > built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
 > install still produces no Dynamic Context section. This page documents the Hub core and its
 > session wiring.
-
 ## What it is, and why
 
 The Lifecycle Hub is the server-side seam that lets **pack-contributed providers** inject
@@ -548,8 +547,7 @@ ambient context a session received and why blocks were dropped.
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
   It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
   with no active provider, no Dynamic Context section is added and the per-turn bridge is never
-  spawned.
-- Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
+  spawned.- Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also
 

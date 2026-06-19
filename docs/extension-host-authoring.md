@@ -43,7 +43,6 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
 that hold a `host`.
@@ -91,7 +90,6 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-
   lib/                            # shared implementation modules, NOT entities
     SharedRenderer.js
     ArtifactViewerPanel.js
@@ -807,8 +805,7 @@ the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforeP
 production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the built-in
 band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box install
 still produces no Dynamic Context section. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
-and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
+[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
