@@ -329,6 +329,10 @@ export interface SessionInfo {
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
 	setupComplete?: boolean;
+	/** User text echoed during the current/just-finished turn; passed to afterTurn providers. */
+	latestTurnUserText?: string;
+	/** Assistant final text from the current/just-finished turn; passed to afterTurn providers. */
+	latestTurnAssistantText?: string;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
 	/**
@@ -2669,7 +2673,12 @@ export class SessionManager {
 			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 		}
 
+		if (event.type === "message_end" && (event.message?.role === "user" || event.message?.role === "user-with-attachments")) {
+			session.latestTurnUserText = extractUserMessageText(event.message);
+		}
+
 		if (event.type === "message_end" && event.message?.role === "assistant") {
+			session.latestTurnAssistantText = extractUserMessageText(event.message);
 			const errored = event.message.stopReason === "error";
 			session.lastTurnErrored = errored;
 			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
@@ -2687,6 +2696,8 @@ export class SessionManager {
 			// the set doesn't leak across the process lifetime (restoreSession is
 			// also re-invoked on in-place respawn).
 			this._bootRepromptedSessions.delete(session.id);
+			session.latestTurnUserText = undefined;
+			session.latestTurnAssistantText = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
@@ -2761,6 +2772,9 @@ export class SessionManager {
 					cwd: session.cwd,
 					goalId: session.goalId,
 					roleName: session.role,
+					prompt: session.latestTurnUserText,
+					userText: session.latestTurnUserText,
+					assistantText: session.latestTurnAssistantText,
 					turn: { index: turnIndex },
 				}).catch((err) => {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);

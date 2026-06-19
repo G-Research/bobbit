@@ -42,10 +42,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
-
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-
-
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
 that hold a `host`.
@@ -92,10 +89,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
 
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
-
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-
-
   lib/                            # shared implementation modules, NOT entities
     SharedRenderer.js
     ArtifactViewerPanel.js
@@ -805,18 +799,17 @@ created, the Hub dispatches `sessionSetup` and the returned blocks render as a f
 **Dynamic Context** prompt section (visible in the prompt-sections inspector with
 `source: "providers"` provenance) — so a provider that declares `sessionSetup` and is installed +
 active + enabled for the session's scope contributes context today. A provider fault never blocks
-
 the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforePrompt` /
 `beforeCompact` fire via a generated provider-bridge pi extension, and `afterTurn` /
-`sessionShutdown` fire server-side from the gateway's agent-event stream. **No built-in
-production provider ships yet** (G1.6), so an out-of-the-box install produces no Dynamic Context
-section. See [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
-and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
+`sessionShutdown` fire server-side from the gateway's agent-event stream. The first built-in
+production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the built-in
+band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box install
+still produces no Dynamic Context section. See
+[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
 dispatches it, the provider runs as a module on the worker tier and returns context
-
 blocks (see the [provider module contract](#provider-module-contract) below).
 
 Key author-facing rules (full reference, field table, defaults, and clamps live in

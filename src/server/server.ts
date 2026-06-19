@@ -52,12 +52,10 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions } from "./agent/pack-contributions.js";
-
+import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
-
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -1239,11 +1237,32 @@ export function createGateway(config: GatewayConfig) {
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
+		// Config-gated provider activation + effective-config overlay: read the
+		// provider's PERSISTED flat config (written by the pack's `config` route to
+		// the pack-scoped store under providerConfigStoreKey) synchronously, so a
+		// provider declaring `activation.requiresConfig` stays dormant until it is
+		// configured. packId scopes the store; scope/project are accepted for parity
+		// with the activation lookups (provider config is pack-global in external mode).
+		(_scope, _projectId, packId, providerId) => {
+			if (!packId) return undefined;
+			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
+			return persisted && typeof persisted === "object" ? persisted : undefined;
+		},
 	);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
 		trace: new ContextTraceStore(bobbitStateDir()),
+		// Least-privilege, store-only host for provider hooks (capabilities.store ===
+		// true; session/agents denied) — gives a provider its own pack-scoped durable
+		// store via the same parent-authorized path routes use.
+		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+			sessionId,
+			packId,
+			contributionId: "",
+			packStore: getPackStore(),
+			capabilityMask: { store: true, session: false, agents: false },
+		}),
 		gatewayInfo: () => {
 			try {
 				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -2585,6 +2604,14 @@ async function handleApiRoute(
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
 	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
+	// Host-owned activation-cache invalidation: a pack persisting provider config
+	// (key `provider-config:*`) must drop the activation-filtered provider index so
+	// a dormant provider (e.g. Hindsight gaining an externalUrl) activates WITHOUT a
+	// gateway restart. Wired into every pack store-write path (route `host.store`
+	// puts + the `/api/ext/store/:op` endpoint). Non-config keys are ignored.
+	const notePackStoreWrite = (key: unknown): void => {
+		if (typeof key === "string" && key.startsWith(PROVIDER_CONFIG_KEY_PREFIX)) invalidateResolverCaches();
+	};
 	// pack-schema-v1 §6.6: scoped-endpoint authorization for a PACK-BOUND surface
 	// token (no carrier tool). The token validation already proved installed +
 	// active + own-session via the pack-contribution registry, so allowedTools is
@@ -4367,6 +4394,18 @@ async function handleApiRoute(
 	const beforeCompactMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-compact$/);
 	if (beforeCompactMatch && req.method === "POST") {
 		const sessionId = beforeCompactMatch[1];
+		// The bridge forwards the about-to-be-lost span (and optionally a precomputed
+		// summary) from the pi session_before_compact payload. Validate both as strings
+		// so a malformed body is rejected rather than silently dispatched empty.
+		const body = await readBody(req).catch(() => ({} as any));
+		if (body && body.span !== undefined && typeof body.span !== "string") {
+			json({ error: "span must be a string" }, 400);
+			return;
+		}
+		if (body && body.summary !== undefined && typeof body.summary !== "string") {
+			json({ error: "summary must be a string" }, 400);
+			return;
+		}
 		const base = resolveHookCtx(sessionId);
 		if (!base) {
 			json({ error: "Session not found" }, 404);
@@ -4378,7 +4417,11 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			await hub.dispatch("beforeCompact", base);
+			await hub.dispatch("beforeCompact", {
+				...base,
+				span: typeof body?.span === "string" ? body.span : undefined,
+				summary: typeof body?.summary === "string" ? body.summary : undefined,
+			});
 			json({});
 		} catch (err: any) {
 			jsonError(500, err);
@@ -5961,6 +6004,8 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// Drop activation caches when an action persists provider config (host-owned).
+			onStoreWrite: notePackStoreWrite,
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -6147,6 +6192,8 @@ async function handleApiRoute(
 				result = await withStoreTimeout(packStore.get(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "put") {
 				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value), undefined, `store ${op}`);
+				// Host-owned: a direct provider-config write must drop activation caches too.
+				notePackStoreWrite(key);
 				result = { ok: true };
 			} else {
 				result = await withStoreTimeout(packStore.list(ident.packId, typeof prefix === "string" ? prefix : undefined), undefined, `store ${op}`);
@@ -6334,6 +6381,8 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// Drop activation caches when a route persists provider config (host-owned).
+			onStoreWrite: notePackStoreWrite,
 		});
 		const start = Date.now();
 		try {
@@ -6345,7 +6394,7 @@ async function handleApiRoute(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, workingDir: routeWorkingDir },
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir },
 				{ method, query, body: init.body },
 			);
 			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);

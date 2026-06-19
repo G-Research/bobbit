@@ -69,6 +69,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 			get: async (packId: string, key: string) => { calls.push({ op: "get", packId, key }); return null; },
 			put: async (packId: string, key: string, value: unknown) => { calls.push({ op: "put", packId, key, value }); },
 			list: async (packId: string, prefix?: string) => { calls.push({ op: "list", packId, prefix }); return ["a"]; },
+			getSync: () => null,
 		};
 		const host = createServerHostApi({ sessionId: "s", packId: "my-pack", contributionId: "g/t", packStore: fakeStore });
 		assert.equal(host.capabilities.store, true);
@@ -85,6 +86,92 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 	it("throws a clear error when no store backend is injected", () => {
 		const host = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
 		assert.throws(() => host.store.get("k"), /backend unavailable/);
+	});
+});
+
+describe("createServerHostApi — onStoreWrite (host-owned activation-cache invalidation)", () => {
+	// Regression: a pack persisting provider config (e.g. Hindsight gaining an
+	// externalUrl) must let the host drop its activation-filtered provider cache so
+	// a dormant provider activates without a gateway restart. The host fires
+	// onStoreWrite AFTER a successful put, with the written key.
+	const noopStore = { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null };
+
+	it("fires onStoreWrite with the written key AFTER the put resolves", async () => {
+		const order: string[] = [];
+		const written: string[] = [];
+		const host = createServerHostApi({
+			sessionId: "s", packId: "hindsight", contributionId: "g/t",
+			packStore: { ...noopStore, put: async () => { order.push("put"); } },
+			onStoreWrite: (key) => { order.push("notify"); written.push(key); },
+		});
+		await host.store.put("provider-config:memory", { externalUrl: "http://x" });
+		assert.deepEqual(order, ["put", "notify"], "notify must run after the put resolves");
+		assert.deepEqual(written, ["provider-config:memory"]);
+	});
+
+	it("does not fire onStoreWrite for get/list", async () => {
+		let fired = 0;
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t",
+			packStore: noopStore,
+			onStoreWrite: () => { fired++; },
+		});
+		await host.store.get("k");
+		await host.store.list();
+		assert.equal(fired, 0);
+	});
+
+	it("a throwing onStoreWrite is swallowed (never breaks the put)", async () => {
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t",
+			packStore: noopStore,
+			onStoreWrite: () => { throw new Error("boom"); },
+		});
+		await host.store.put("provider-config:memory", { a: 1 }); // must not throw
+	});
+});
+
+describe("createServerHostApi — capabilityMask (least-privilege provider hosts)", () => {
+	it("a store-only provider host reports store true, session/agents false", () => {
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "",
+			packStore: { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null },
+			capabilityMask: { store: true, session: false, agents: false },
+		});
+		assert.equal(host.capabilities.store, true);
+		assert.equal(host.capabilities.session, false);
+		assert.equal(host.capabilities.agents, false);
+		assert.equal(host.capabilities.has("store"), true);
+		assert.equal(host.capabilities.has("session"), false);
+		assert.equal(host.capabilities.has("agents"), false);
+	});
+
+	it("the store namespace still works on a store-only host", async () => {
+		const calls: string[] = [];
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "",
+			packStore: { get: async (_p, k) => { calls.push(`get:${k}`); return null; }, put: async () => {}, list: async () => [], getSync: () => null },
+			capabilityMask: { store: true, session: false, agents: false },
+		});
+		await host.store.get("retain-queue");
+		assert.deepEqual(calls, ["get:retain-queue"]);
+	});
+
+	it("masked-off namespaces throw 'not available' on every method (defence-in-depth)", () => {
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "",
+			packStore: { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null },
+			capabilityMask: { store: true, session: false, agents: false },
+		});
+		assert.throws(() => host.session.readTranscript(), /host\.session capability is not available/);
+		assert.throws(() => host.agents.list(), /host\.agents capability is not available/);
+	});
+
+	it("omitting the mask preserves the full implemented capability set", () => {
+		const host = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
+		assert.equal(host.capabilities.store, true);
+		assert.equal(host.capabilities.session, true);
+		assert.equal(host.capabilities.agents, true);
 	});
 });
 

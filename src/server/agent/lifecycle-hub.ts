@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import { ActionError } from "../extension-host/action-dispatcher.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
+import { packIdFromRoot } from "./pack-contributions.js";
+import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
 
@@ -17,6 +19,15 @@ export interface HookCtx {
 	goalId?: string;
 	roleName?: string;
 	prompt?: string;
+	userText?: string;
+	assistantText?: string;
+	/** The about-to-be-lost conversation span (beforeCompact): the concatenated
+	 *  text of the messages compaction is about to summarize away. Providers retain
+	 *  it before the context is dropped. */
+	span?: string;
+	/** A pre-computed summary of the compacted span, when the runtime supplies one
+	 *  (beforeCompact). Providers prefer it over `span` when present. */
+	summary?: string;
 	turn?: { index: number };
 	budget: { maxTokens: number };
 	config: Record<string, unknown>;
@@ -47,6 +58,7 @@ export class LifecycleHub {
 	private readonly trace: ContextTraceStore;
 	private readonly gatewayInfo: () => { baseUrl: string; token: string };
 	private readonly globalMaxTokens: number;
+	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -54,12 +66,19 @@ export class LifecycleHub {
 		trace: ContextTraceStore;
 		gatewayInfo: () => { baseUrl: string; token: string };
 		globalMaxTokens?: number;
+		/** Factory for a LEAST-PRIVILEGE, provider-scoped server Host API (store-only:
+		 *  `capabilities.store === true`, `session`/`agents` false/unavailable). Built
+		 *  per provider invocation so a hook reaches its own pack's durable store
+		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
+		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
+		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
 		this.trace = deps.trace;
 		this.gatewayInfo = deps.gatewayInfo;
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
+		this.providerHostApi = deps.providerHostApi;
 	}
 
 	/**
@@ -89,6 +108,11 @@ export class LifecycleHub {
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
 			};
+			// Provider-scoped, store-only host (least privilege). The LIVE object stays
+			// in the parent (module-host-worker strips it before serialization) and
+			// services the worker's proxied store calls — the durable retain queue /
+			// diagnostics path. packId is derived from the contribution's pack root.
+			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot) });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;
@@ -99,7 +123,7 @@ export class LifecycleHub {
 					epoch: 0,
 					exportKind: "providers",
 					member: hook,
-					ctx: { ...hookCtx, workingDir: base.cwd } as unknown as InvokeRequest["ctx"],
+					ctx: { ...hookCtx, workingDir: base.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
 					arg: undefined,
 					workingDir: base.cwd,
 				}, provider.budget.timeoutMs);

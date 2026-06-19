@@ -187,16 +187,33 @@ export class ModuleHost {
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
 		const providerCtx = req.ctx as unknown as Record<string, unknown>;
+		// The LIVE host stays in the PARENT (it services proxied store calls); it is a
+		// function-bearing object that cannot cross the MessagePort, so strip it from
+		// the serialized provider ctx. Provider capabilities are derived from the
+		// provider-scoped host: `store` reflects the (least-privilege) host so the
+		// worker tier gets `capabilities.store === true`; `callRoute` is always false
+		// (a server module reaches its own routes directly).
+		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
 		const serCtx = req.exportKind === "providers"
 			? {
-				...providerCtx,
+				...providerCtxNoHost,
 				workingDir: providerCtx.workingDir ?? req.workingDir,
-				capabilities: { callRoute: false, session: false, store: false, agents: false },
+				hostVersion: (host as { version?: number } | undefined)?.version,
+				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+				capabilities: {
+					callRoute: false,
+					session: capSrc?.session === true,
+					store: capSrc?.store === true,
+					agents: capSrc?.agents === true,
+				},
 			}
 			: {
 				sessionId: req.ctx?.sessionId,
 				toolUseId: req.ctx?.toolUseId,
 				tool: req.ctx?.tool,
+				// The calling session's project id (when resolvable) so a route handler
+				// can scope to the real project instead of fabricating one.
+				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
