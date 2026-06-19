@@ -119,11 +119,14 @@ const PACKS = [
 			// routes), each authored in TS and bundled to lib/*.mjs with the REST client
 			// inlined (provider.ts / routes.ts dynamic-import ./hindsight-client.js, which
 			// esbuild inlines into each single self-contained file). platform:"node" so
-			// Buffer + node:* stay node globals/builtins. No CLIENT contributions yet
-			// (panel + tools land in G2.3).
+			// Buffer + node:* stay node globals/builtins.
 			{ in: "hindsight-client.ts", out: "lib/hindsight-client.mjs", platform: "node" },
 			{ in: "provider.ts", out: "lib/provider.mjs", platform: "node" },
 			{ in: "routes.ts", out: "lib/routes.mjs", platform: "node" },
+			// CLIENT panel (browser): the native config/status surface (P4). `lit` stays
+			// external (host-injected); the bundle is a single self-contained ESM emitted
+			// to the shared lib/ dir, auto-discovered via panels/hindsight-memory.yaml.
+			{ in: "panel.js", out: "lib/HindsightPanel.js" },
 		],
 	},
 ];
