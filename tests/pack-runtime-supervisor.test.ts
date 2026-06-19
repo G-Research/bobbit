@@ -16,6 +16,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -728,6 +729,70 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		assert.match(body, new RegExp(`WEB_PORT="${portStore.get("WEB_PORT")}"`));
 	});
 
+	it("status/logs/stop after start reuse the persisted port (no churn while bound)", async () => {
+		// A counting PortStore: proves read/control paths never re-allocate (call
+		// `set`) once a port is persisted, even while the live port is un-bindable.
+		class CountingPortStore {
+			data: Record<string, number> = {};
+			sets = 0;
+			get(k: string) { return this.data[k]; }
+			set(k: string, v: number) { this.data[k] = v; this.sets++; }
+		}
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+			stop: () => ok(),
+			logs: () => ok("out"),
+		});
+		const contribution = makeEnvContribution();
+		const secrets = inMemorySecrets({ USER_KEY: "configured-llm-key" });
+		const portStore = new CountingPortStore();
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "churn-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore,
+		});
+
+		const st = await sup.start("envpack", "svc");
+		assert.equal(st.status, "running");
+		const allocatedPort = portStore.get("WEB_PORT");
+		assert.equal(typeof allocatedPort, "number");
+		const setsAfterStart = portStore.sets;
+		assert.equal(setsAfterStart, 1);
+
+		// Occupy the allocated port so it is NOT currently bindable, exactly as a
+		// running container would. The buggy revalidating allocation would now rotate
+		// the persisted port on every status/logs/stop call.
+		const blocker = net.createServer();
+		await new Promise<void>((res, rej) => {
+			blocker.once("error", rej);
+			blocker.listen(allocatedPort, "127.0.0.1", res);
+		});
+		try {
+			await sup.status("envpack", "svc");
+			await sup.logs("envpack", "svc", { tail: 5 });
+			await sup.stop("envpack", "svc");
+		} finally {
+			await new Promise<void>((res) => blocker.close(() => res()));
+		}
+
+		// Persisted port never rotated and no replacement allocation happened.
+		assert.equal(portStore.get("WEB_PORT"), allocatedPort);
+		assert.equal(portStore.sets, setsAfterStart);
+
+		// The re-rendered env file still carries the SAME resolved port/secret values.
+		const project = "bobbit-pack-envpack-testsuffix";
+		const envFile = path.join(tmp, "churn-data", project, "svc.env");
+		const body = fs.readFileSync(envFile, "utf-8");
+		assert.match(body, new RegExp(`WEB_PORT="${allocatedPort}"`));
+		assert.match(body, /USER_KEY="configured-llm-key"/);
+	});
+
 	it("a missing required user secret rejects with a clear error (not silent)", async () => {
 		const docker = makeDocker({ up: () => ok(), ps: () => ok("") });
 		const contribution = makeEnvContribution();
@@ -741,5 +806,108 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		});
 		await assert.rejects(() => sup.start("envpack", "svc"), /USER_KEY/);
 		assert.equal(docker.countSub("up"), 0);
+	});
+});
+
+// ── Start in-flight dedupe keyed by mode ─────────────────────────────────────
+
+describe("PackRuntimeSupervisor start mode dedupe", () => {
+	const MM_PACK = "mm";
+
+	/** A runtime with two modes that issue DISTINCT compose profiles. */
+	function makeMmContribution(): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", MM_PACK);
+		return {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				modes: {
+					default: { services: ["db"], profiles: ["managed"] },
+					alt: { services: ["db"], profiles: ["external"] },
+				},
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeMmRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: MM_PACK,
+			packName: "Multi Mode",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === MM_PACK ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === MM_PACK && runtimeId === contribution.id ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeMmSupervisor(executor: DockerExecutor): PackRuntimeSupervisor {
+		return new PackRuntimeSupervisor({
+			registry: makeMmRegistry(makeMmContribution()),
+			executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "mm-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+		});
+	}
+
+	it("concurrent explicit starts with DIFFERENT modes each issue their own up", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}'),
+		});
+		const sup = makeMmSupervisor(docker.executor);
+		const [a, b] = await Promise.all([
+			sup.start(MM_PACK, "svc", { mode: "default" }),
+			sup.start(MM_PACK, "svc", { mode: "alt" }),
+		]);
+		assert.equal(a.status, "running");
+		assert.equal(b.status, "running");
+		assert.equal(a.mode, "default");
+		assert.equal(b.mode, "alt");
+		// Each mode must actually run — neither collapses onto the other's promise.
+		assert.equal(docker.countSub("up"), 2);
+		const profiles = docker.calls
+			.filter((c) => c.args.includes("up"))
+			.flatMap((c) => {
+				const i = c.args.indexOf("--profile");
+				return i >= 0 ? [c.args[i + 1]] : [];
+			});
+		assert.ok(profiles.includes("managed"));
+		assert.ok(profiles.includes("external"));
+	});
+
+	it("concurrent explicit starts with the SAME mode still dedupe to one up", async () => {
+		let started = false;
+		const docker = makeDocker({
+			up: () => { started = true; return ok(); },
+			ps: () => ok(started ? '{"Service":"db","State":"running","Health":"healthy"}' : ""),
+		});
+		const sup = makeMmSupervisor(docker.executor);
+		const [a, b] = await Promise.all([
+			sup.start(MM_PACK, "svc", { mode: "alt" }),
+			sup.start(MM_PACK, "svc", { mode: "alt" }),
+		]);
+		assert.equal(a.status, "running");
+		assert.equal(b.status, "running");
+		assert.equal(docker.countSub("up"), 1);
 	});
 });

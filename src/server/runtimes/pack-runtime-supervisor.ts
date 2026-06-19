@@ -523,8 +523,15 @@ export class PackRuntimeSupervisor {
 
 	// ── internals ────────────────────────────────────────────────────────────
 
-	private _runtimeKey(packId: string, runtimeId: string, projectId?: string): string {
-		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}`;
+	/**
+	 * Dedupe key for an in-flight start. The selected `mode` is part of the key so
+	 * two concurrent EXPLICIT `start` calls requesting DIFFERENT modes never
+	 * collapse onto the first request's promise (which would silently ignore the
+	 * second mode). Mode-agnostic `ensureRuntime` callers pass the same (usually
+	 * `undefined`) mode, so they still share one key → one `compose up`.
+	 */
+	private _runtimeKey(packId: string, runtimeId: string, projectId?: string, mode?: string): string {
+		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}\u0000${mode ?? ""}`;
 	}
 
 	private _startDeduped(
@@ -532,7 +539,7 @@ export class PackRuntimeSupervisor {
 		runtimeId: string,
 		opts: { projectId?: string; mode?: string },
 	): Promise<PackRuntimeStatus> {
-		const key = this._runtimeKey(packId, runtimeId, opts.projectId);
+		const key = this._runtimeKey(packId, runtimeId, opts.projectId, opts.mode);
 		const inFlight = this._startInFlight.get(key);
 		if (inFlight) return inFlight;
 		const p = this._doStart(packId, runtimeId, opts);
@@ -764,7 +771,15 @@ export class PackRuntimeSupervisor {
 	): Promise<{ target: ComposeTarget; services: string[] }> {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
-		const { manifest, invocation } = await this._buildInvocation(contribution, envFile);
+		// Read/control paths MUST reuse persisted port allocations as-is. While the
+		// runtime is running its host ports are bound, so a revalidating allocation
+		// (`allocateHostPort`) would find them un-bindable, rotate to fresh ports, and
+		// rewrite ports.json + the env file — desyncing the persisted port from the
+		// live container and breaking the NEXT restart. `reusePersisted: true` keeps
+		// the stored port without a bindability probe.
+		const { manifest, invocation } = await this._buildInvocation(contribution, envFile, undefined, {
+			reusePersisted: true,
+		});
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 		return {
 			target: {
@@ -787,6 +802,7 @@ export class PackRuntimeSupervisor {
 	private async _resolveContext(
 		manifest: RuntimeManifest,
 		contribution: RuntimeContribution,
+		opts: { reusePersisted?: boolean } = {},
 	): Promise<RuntimeResolveContext> {
 		if (this.buildContext) return this.buildContext(manifest, contribution);
 
@@ -825,9 +841,21 @@ export class PackRuntimeSupervisor {
 			if (typeof v === "string" && v.length > 0) secrets[key] = v;
 		}
 		for (const key of portKeys) {
-			ports[key] = this.portStore
-				? await allocateHostPort(this.portStore, key)
-				: await probeFreePort();
+			if (!this.portStore) {
+				ports[key] = await probeFreePort();
+				continue;
+			}
+			if (opts.reusePersisted) {
+				// Reuse the persisted assignment verbatim (no bindability probe) so a
+				// running runtime's bound port is never rotated by a read/control call.
+				// Only when nothing valid is persisted do we allocate one.
+				const existing = this.portStore.get(key);
+				if (typeof existing === "number" && Number.isInteger(existing) && existing >= 1 && existing <= 65535) {
+					ports[key] = existing;
+					continue;
+				}
+			}
+			ports[key] = await allocateHostPort(this.portStore, key);
 		}
 		return { secrets, generated, ports };
 	}
@@ -836,6 +864,7 @@ export class PackRuntimeSupervisor {
 		contribution: RuntimeContribution,
 		envFile: string,
 		mode?: string,
+		opts: { reusePersisted?: boolean } = {},
 	): Promise<{ manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation }> {
 		const manifest = this._resolveManifest(contribution);
 		const modeKeys = Object.keys(manifest.modes ?? {});
@@ -846,7 +875,7 @@ export class PackRuntimeSupervisor {
 		if (!modeKey) {
 			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} declares no modes`);
 		}
-		const ctx = await this._resolveContext(manifest, contribution);
+		const ctx = await this._resolveContext(manifest, contribution, opts);
 		const invocation = buildRuntimeInvocation(manifest, modeKey, {
 			sourceFile: contribution.sourceFile,
 			packRoot: contribution.packRoot,
