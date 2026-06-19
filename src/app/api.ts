@@ -2940,14 +2940,18 @@ export function setPackActivation(opts: { scope: MarketScope; projectId?: string
 // non-Docker setup path and reports `dockerRequired: false`.
 // ============================================================================
 
-/** One exposed host port for the enable-card disclosure. */
+/** One exposed host port for the enable-card disclosure. Mirrors the server's
+ *  `PackRuntimeCapabilityPort` shape (pack-runtime-supervisor.ts) — there is no
+ *  human `label`; the env var name / manifest key serve as the label. */
 export interface PackRuntimePortInfo {
-	/** Human label, e.g. "API" / "Web". */
-	label: string;
-	/** Allocated/stable host port when known (loopback-bound). */
-	host?: number | null;
-	/** Container port the service listens on. */
-	container?: number | null;
+	/** Manifest persistence/env key (e.g. `HINDSIGHT_API_PORT`). */
+	key: string;
+	/** Env var name the chosen host port is exposed under, when declared. */
+	env?: string;
+	/** Informational container-side port the service listens on. */
+	container?: number;
+	/** Allocated/persisted host port when one is already known (loopback-bound). */
+	host?: number;
 }
 
 /** Capability disclosure for a managed runtime, derived from the manifest +
