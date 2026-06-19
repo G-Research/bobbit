@@ -1839,6 +1839,21 @@ export class SessionManager {
 		return names.length > 0 ? new Set(names) : undefined;
 	}
 
+	/**
+	 * Prompt section order from the `bobbit.promptSectionOrder` metadata
+	 * convention for a session's effective goal; undefined when none. Mirrors
+	 * session-setup.ts::promptSectionOrderFromMetadata so the restore / respawn
+	 * paths reorder prompt sections the same way initial setup does — without
+	 * this a restored session under a goal with a custom order silently reverts
+	 * to the default prompt order after a gateway restart.
+	 */
+	private promptSectionOrderForGoal(goalId: string | undefined, projectId?: string): string[] | undefined {
+		const raw = this.resolveEffectiveGoalMetadataForSession(goalId, projectId)["bobbit.promptSectionOrder"];
+		if (!Array.isArray(raw)) return undefined;
+		const order = raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+		return order.length > 0 ? order : undefined;
+	}
+
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: EffectiveTool[] | undefined,
@@ -4052,7 +4067,13 @@ export class SessionManager {
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
 		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
 		// consistent with what buildToolActivationArgs actually activates.
-		const restoreDisabled = this.disabledToolsForGoal(ps.goalId ?? ps.teamGoalId, ps.projectId);
+		const restoreEffectiveGoalId = ps.goalId ?? ps.teamGoalId;
+		const restoreDisabled = this.disabledToolsForGoal(restoreEffectiveGoalId, ps.projectId);
+		// Per-goal prompt section ordering (bobbit.promptSectionOrder) for the
+		// session's EFFECTIVE goal — mirrors session-setup's initial-setup path so
+		// a restored session keeps its goal's custom order instead of reverting to
+		// the default after a gateway restart. Undefined ⇒ byte-identical default.
+		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
 		const restoredFiltered = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
@@ -4095,6 +4116,7 @@ export class SessionManager {
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else if (ps.delegateOf && !ps.goalId) {
@@ -4121,6 +4143,7 @@ export class SessionManager {
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -4149,6 +4172,7 @@ export class SessionManager {
 				roleName,
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
