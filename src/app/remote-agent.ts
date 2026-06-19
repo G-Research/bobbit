@@ -2254,23 +2254,43 @@ export class RemoteAgent {
 	private _checkReviewToolResult(msg: any, isLive = false): void {
 		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
 
-		// Extract text content from the message
-		const texts: string[] = [];
-		if (typeof msg.content === "string") texts.push(msg.content);
-		else if (Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (typeof block === "string") texts.push(block);
-				else if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
-				else if (typeof block.content === "string") texts.push(block.content);
+		// Extract review tool-result payloads. Production providers are not fully
+		// consistent here: the review extension usually returns a JSON text block,
+		// but direct/tool-protocol paths can carry the same envelope as a structured
+		// object or nested under a tool_result block. Only inspect result-like
+		// content/output fields; do not treat tool-call input as an opened review.
+		const payloads: any[] = [];
+		const collectReviewPayloads = (value: unknown): void => {
+			if (typeof value === "string") {
+				const trimmed = value.trim();
+				if (!trimmed.startsWith('{"action":"review_')) return;
+				try { payloads.push(JSON.parse(trimmed)); } catch { /* ignore non-JSON text */ }
+				return;
 			}
-		}
+			if (Array.isArray(value)) {
+				for (const item of value) collectReviewPayloads(item);
+				return;
+			}
+			if (!value || typeof value !== "object") return;
+			const block = value as Record<string, unknown>;
+			if (typeof block.action === "string" && block.action.startsWith("review_")) {
+				payloads.push(block);
+				return;
+			}
+			if (block.type === "text") collectReviewPayloads(block.text);
+			else if (block.type === "tool_result" || block.type === "toolResult" || block.role === "toolResult") {
+				collectReviewPayloads(block.content);
+				collectReviewPayloads(block.output);
+				collectReviewPayloads(block.result);
+			} else if (typeof block.content === "string") {
+				collectReviewPayloads(block.content);
+			}
+		};
+		collectReviewPayloads(msg.content);
+		collectReviewPayloads((msg as any).output);
+		collectReviewPayloads((msg as any).result);
 
-		for (const text of texts) {
-			const trimmed = text.trim();
-			if (!trimmed.startsWith('{"action":"review_')) continue;
-			let data: any;
-			try { data = JSON.parse(trimmed); } catch { continue; }
-
+		for (const data of payloads) {
 			if (data.action === "review_open" && data.title && data.markdown) {
 				if (this._sessionId) {
 					const title = String(data.title);
@@ -2280,7 +2300,7 @@ export class RemoteAgent {
 						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
 						return tabTitle === title;
 					});
-					if (!hasOpenWorkspaceTab && (!isLive || isReviewSubmitted(this._sessionId))) return;
+					if (!hasOpenWorkspaceTab && !isLive) return;
 				}
 				// If the user already submitted this review, suppress reopening it on
 				// REPLAY paths (snapshot loop / non-live message_end). The submitted

@@ -2356,7 +2356,7 @@ export function doRenderApp(): void {
 	`;
 
 	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
-		${tab.kind === "preview" && state.previewPanelEntry ? previewControlButtons(tab) : ""}
+		${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? previewControlButtons(tab) : ""}
 	`;
 
 	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
@@ -2374,7 +2374,7 @@ export function doRenderApp(): void {
 				${icon(PanelRightOpen, "sm")}
 			</button>
 		`}
-		<a
+		${tab.kind !== "preview" ? html`<a
 			href=${sidePanelPopoutUrl(tab)}
 			target="_blank"
 			rel="noopener noreferrer"
@@ -2382,7 +2382,7 @@ export function doRenderApp(): void {
 			style=${sidePanelChromeButtonStyle}
 			title="Open side panel in new tab"
 			data-testid="side-panel-popout"
-		>${icon(ExternalLink, "sm")}</a>
+		>${icon(ExternalLink, "sm")}</a>` : ""}
 		<button @click=${() => setSidePanelModeAndRender("collapsed")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Collapse side panel${shortcutHint("toggle-preview")}`} data-testid="side-panel-collapse">
 			${icon(PanelRightClose, "sm")}
 		</button>

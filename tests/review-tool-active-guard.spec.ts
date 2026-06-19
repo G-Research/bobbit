@@ -101,6 +101,28 @@ test.describe("review tool active-session guard", () => {
 		expect(result.docTitles).toEqual(["PR-from-active"]);
 	});
 
+	test("active session's inline review_open also handles structured tool-result payloads", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => {
+			const w = window as any;
+			const active = w.__makeAgent("active-session");
+			w.__setActive(active);
+			w.__clearReviewState();
+
+			w.__deliverReviewToolResult(active, "review_open", {
+				title: "Structured inline markdown",
+				markdown: "# Inline\n\nOpened from a structured result object.",
+			}, true, "nested-tool-result");
+
+			return w.__getReviewState();
+		});
+
+		expect(result.open).toBe(true);
+		expect(result.activeTab).toBe("Structured inline markdown");
+		expect(result.docCount).toBe(1);
+		expect(result.docTitles).toEqual(["Structured inline markdown"]);
+	});
+
 	test("background session's review_close does NOT clear active session's documents", async ({ page }) => {
 		await gotoAndWait(page);
 		const result = await page.evaluate(() => {

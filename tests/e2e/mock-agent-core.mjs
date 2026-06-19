@@ -477,6 +477,14 @@ export class MockAgentCore {
 				})),
 			};
 		}
+		if (lower.includes("review_open_revised")) {
+			const md = "# Test Document\n\nRevised review document after rejection.\n\n## Revised Section\n\nRevised markdown after rejected feedback should reopen the review pane.";
+			return {
+				tool: "review_open",
+				input: { title: "Test Document", markdown: md },
+				output: JSON.stringify({ action: "review_open", title: "Test Document", markdown: md, replace: true }),
+			};
+		}
 		if (lower.includes("review_open")) {
 			const md = "# Test Document\n\nThis is a test document for review.\n\n## Section One\n\nSome important text that could be commented on.\n\n## Section Two\n\nMore content here with `code examples` and details.";
 			return {
