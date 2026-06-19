@@ -103,6 +103,28 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 				openMarked,
 				`eligible parent option must NOT be marked; got disabled=${open.disabled} text=${JSON.stringify(open.text)}`,
 			).toBe(false);
+
+			// The tab must visibly separate the two concepts so the picker reads as
+			// "where this new goal is attached", distinct from "may the new goal
+			// host its own children". The parent picker lives in the attach section;
+			// the allow-sub-goals toggle lives in the host section.
+			const attachSection = page.locator("[data-testid='goal-form-attach-section']");
+			const hostSection = page.locator("[data-testid='goal-form-host-section']");
+			await expect(attachSection).toBeVisible();
+			await expect(hostSection).toBeVisible();
+			await expect(attachSection.locator("[data-testid='goal-form-parent-picker']")).toHaveCount(1);
+			await expect(hostSection.locator("[data-testid='goal-form-subgoals-toggle']")).toHaveCount(1);
+			// The attach heading must NOT contain the host toggle, and vice-versa.
+			await expect(attachSection.locator("[data-testid='goal-form-subgoals-toggle']")).toHaveCount(0);
+			await expect(hostSection.locator("[data-testid='goal-form-parent-picker']")).toHaveCount(0);
+
+			// Selecting the ineligible parent surfaces an attachment-focused warning
+			// that points at the parent's dashboard → Children tab.
+			await picker.selectOption(blockedId);
+			const warning = page.locator("[data-testid='goal-form-parent-ineligible-warning']");
+			await expect(warning).toBeVisible({ timeout: 10_000 });
+			await expect(warning).toContainText(/Children tab/i);
+			await expect(warning).toContainText(/attached|host this goal/i);
 		} finally {
 			await deleteGoal(blockedId).catch(() => {});
 			await deleteGoal(openId).catch(() => {});
