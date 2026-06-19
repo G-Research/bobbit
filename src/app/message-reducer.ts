@@ -146,6 +146,25 @@ function isCompactionToolResult(m: any): boolean {
 	return m?.role === "toolResult" && (m as any).toolName === COMPACTION_TOOL_NAME;
 }
 
+/** Stable id of the live in-progress / just-completed compaction synthetic. */
+const COMPACTION_ACTIVE_ID = "compact_active";
+
+/** Pull the sidecar `compactionId` off a rich `__compaction_summary` row.
+ *  Persisted (reload-spliced) rows and the post-fix live `compact_active`
+ *  card both carry it in `arguments.compactionId`; returns null otherwise. */
+function compactionSummaryId(m: any): string | null {
+	if (!m || m.role !== "assistant") return null;
+	const cs = m.content;
+	if (!Array.isArray(cs)) return null;
+	for (const c of cs) {
+		if (c?.type === "toolCall" && c?.name === COMPACTION_TOOL_NAME) {
+			const cid = c?.arguments?.compactionId;
+			return typeof cid === "string" && cid.length > 0 ? cid : null;
+		}
+	}
+	return null;
+}
+
 function isLegacyTextCompaction(m: any): boolean {
 	if (!m || m.role !== "assistant") return false;
 	const t = extractText(m);
@@ -344,6 +363,37 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			let effectiveRows = enriched;
 			if (hasRichSyntheticCompaction) {
 				effectiveRows = enriched.filter((m: any) => !isLegacyTextCompaction(m));
+			}
+			// Live-session compaction dedup: when state holds the live
+			// `compact_active` synthetic carrying a `compactionId`, the server's
+			// post-compaction snapshot ALSO splices the persisted sidecar synthetic
+			// for the same compaction (under a different id = the compactionId).
+			// Drop the snapshot's persisted assistant card AND its paired
+			// toolResult so a single live card survives — the live card already
+			// hosts the affordance via its compactionId, and reusing one DOM node
+			// avoids a flicker/duplicate. On reload there is NO live `compact_active`
+			// in state, so this set is empty and the persisted synthetic survives
+			// untouched (reload persistence preserved).
+			const liveCompactionIds = new Set<string>();
+			for (const m of state.messages) {
+				if (m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID) {
+					const cid = compactionSummaryId(m);
+					if (cid) liveCompactionIds.add(cid);
+				}
+			}
+			if (liveCompactionIds.size > 0) {
+				const pairedToolCallIds = new Set<string>();
+				for (const id of liveCompactionIds) pairedToolCallIds.add(`compaction-summary:${id}`);
+				effectiveRows = effectiveRows.filter((m: any) => {
+					const cid = compactionSummaryId(m);
+					if (cid && liveCompactionIds.has(cid)) return false;
+					if (
+						m?.role === "toolResult"
+						&& typeof (m as any).toolCallId === "string"
+						&& pairedToolCallIds.has((m as any).toolCallId)
+					) return false;
+					return true;
+				});
 			}
 			const snapshotRows: OrderedMessage[] = effectiveRows.map((m, i) => {
 				const explicit = (m as any)._order;
@@ -629,11 +679,33 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// invariant pinned by message-reducer.test.ts case 12d.
 			const tick = state.nextTick;
 			const order = state.highestSeq + 0.5;
+			// When the terminal live card carries a `compactionId`, also drop any
+			// persisted (reload/refresh-spliced) sidecar synthetic + paired
+			// toolResult for the SAME compaction. The server splices that card
+			// into the post-compaction snapshot, which typically lands BEFORE this
+			// in-place transition (the card has a min-visible-duration delay), so
+			// the snapshot-case dedup can't yet see a compactionId on the live
+			// in-progress placeholder. Reconciling here guarantees a single card.
+			const resultCompactionId = compactionSummaryId(action.message);
+			const dupToolCallId = resultCompactionId
+				? `compaction-summary:${resultCompactionId}`
+				: null;
 			const messages = state.messages.filter(
-				(m) =>
-					m.id !== "compacting_placeholder"
-					&& m.id !== "compact_active"
-					&& (m as any).toolCallId !== "compaction-summary:compact_active",
+				(m) => {
+					if (
+						m.id === "compacting_placeholder"
+						|| m.id === "compact_active"
+						|| (m as any).toolCallId === "compaction-summary:compact_active"
+					) return false;
+					if (resultCompactionId) {
+						if (compactionSummaryId(m) === resultCompactionId) return false;
+						if (
+							m.role === "toolResult"
+							&& (m as any).toolCallId === dupToolCallId
+						) return false;
+					}
+					return true;
+				},
 			);
 			messages.push(stamp(action.message, "synthetic", order, tick));
 			if (action.toolResult) {
