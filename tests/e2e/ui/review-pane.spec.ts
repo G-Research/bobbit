@@ -53,4 +53,40 @@ test.describe("Review Pane", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("reopens review pane when active agent sends revised live review_open after rejection", async ({ page }) => {
+		const sessionId = await createSession();
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			await openApp(page);
+			await goToSession(page, sessionId);
+			const pane = await openReviewDocument(page);
+
+			await pane.getByRole("textbox", { name: /final comment/i }).fill("Needs revised markdown before merge.");
+			await pane.getByRole("button", { name: "Reject" }).click();
+			await expect(
+				page.locator("user-message").filter({ hasText: /Review Rejected|Needs revised markdown before merge/i }).last(),
+				"Reject should send review feedback through the existing agent chat flow",
+			).toBeVisible({ timeout: 10_000 });
+			await waitForAgentResponse(page, { text: "OK", timeout: 15_000 });
+			await expect(reviewTab(page), "rejected review_open document should close its review tab").toHaveCount(0, { timeout: 5_000 });
+
+			await sendMessage(page, "REVIEW_OPEN_REVISED");
+			await expect(page.getByText("Done. Used review_open tool.", { exact: true })).toHaveCount(2, { timeout: 15_000 });
+
+			const reopenedTab = reviewTab(page);
+			await expect(
+				reopenedTab,
+				"fresh live review_open after rejected submission should reopen Review: Test Document tab",
+			).toHaveCount(1, { timeout: 10_000 });
+			await reopenedTab.click();
+			await expect(page.locator("review-pane"), "reopened review pane should be visible").toBeVisible({ timeout: 5_000 });
+			await expect(
+				page.locator("review-document").getByText("Revised markdown after rejected feedback should reopen the review pane.").first(),
+				"reopened review pane should display revised markdown",
+			).toBeVisible({ timeout: 5_000 });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });
