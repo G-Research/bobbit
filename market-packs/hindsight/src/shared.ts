@@ -43,6 +43,38 @@ export interface ClientConfig {
 	timeoutMs?: number;
 }
 
+// ── Managed-runtime context (P3) ───────────────────────────────────────────────
+// Injected by the host (lifecycle hub) for ACTIVE managed Hindsight provider
+// invocations only. `baseUrl` points at the locally-running managed Hindsight API
+// (`http://127.0.0.1:<api-port>`); `headers` mirrors the apiKey-derived auth the
+// client also builds; `status` is the supervisor's runtime state. Absent in
+// external mode and whenever the managed runtime is not running — the provider
+// stays dormant in that case (it NEVER starts Docker itself).
+export interface RuntimeContext {
+	baseUrl: string;
+	headers?: Record<string, string>;
+	status?: string;
+}
+
+/** The deployment modes that are backed by a Bobbit-managed Docker runtime
+ *  (Hindsight API/web, with managed or external Postgres). External mode keeps
+ *  the unchanged operator-supplied data-plane URL path. */
+export function isManagedMode(mode: string): boolean {
+	return mode === "managed" || mode === "managed-external-postgres";
+}
+
+/** Map a deployment `mode` onto the runtime descriptor's launch mode key
+ *  (market-packs/hindsight/runtimes/hindsight.yaml::modes). `managed` brings up a
+ *  managed Postgres (`managed-postgres`); `managed-external-postgres` omits the
+ *  `db` service and injects HINDSIGHT_API_DATABASE_URL (`external-postgres`).
+ *  External mode launches no runtime ⇒ undefined. This is the single source of
+ *  truth for the config-mode → runtime-mode mapping the host's enable action uses. */
+export function runtimeModeFor(mode: string): "managed-postgres" | "external-postgres" | undefined {
+	if (mode === "managed") return "managed-postgres";
+	if (mode === "managed-external-postgres") return "external-postgres";
+	return undefined;
+}
+
 export type ClientFactory = (cfg: ClientConfig) => HindsightClientLike | Promise<HindsightClientLike>;
 
 let clientFactoryOverride: ClientFactory | null = null;
@@ -65,6 +97,11 @@ export interface EffectiveConfig {
 	mode: string;
 	externalUrl?: string;
 	apiKey?: string;
+	/** External Postgres connection URL for `managed-external-postgres` mode. Maps
+	 *  onto the runtime env HINDSIGHT_API_DATABASE_URL; never used in external mode. */
+	externalDatabaseUrl?: string;
+	/** Host bind-mount path for fully managed Postgres data (`managed` mode). */
+	dataDir: string;
 	bank: string;
 	namespace: string;
 	recallScope: "project" | "all";
@@ -77,6 +114,7 @@ export interface EffectiveConfig {
 /** Flat defaults — the single source of truth mirrored by providers/memory.yaml. */
 export const CONFIG_DEFAULTS: EffectiveConfig = {
 	mode: "external",
+	dataDir: "~/.hindsight",
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all",
@@ -114,11 +152,14 @@ function asNum(v: unknown, d: number): number {
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
 	const apiKey = asString(flat(raw, "apiKey"));
+	const externalDatabaseUrl = asString(flat(raw, "externalDatabaseUrl"));
 	const recallScope = flat(raw, "recallScope") === "project" ? "project" : "all";
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
 		...(apiKey ? { apiKey } : {}),
+		...(externalDatabaseUrl ? { externalDatabaseUrl } : {}),
+		dataDir: asString(flat(raw, "dataDir")) ?? CONFIG_DEFAULTS.dataDir,
 		bank: asString(flat(raw, "bank")) ?? CONFIG_DEFAULTS.bank,
 		namespace: asString(flat(raw, "namespace")) ?? CONFIG_DEFAULTS.namespace,
 		recallScope,
@@ -129,20 +170,46 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	};
 }
 
-/** The dormancy gate (the central invariant): active ONLY in external mode with a
- *  non-empty URL. Inactive ⇒ every hook is a no-op and no client is constructed. */
-export function isActive(cfg: EffectiveConfig): boolean {
-	return cfg.mode === "external" && typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0;
+/** The dormancy gate (the central invariant): the provider runs a hook's work
+ *  ONLY when active; inactive ⇒ every hook is a no-op and no client is constructed.
+ *
+ *  - External mode: active ONLY with a non-empty `externalUrl` (unchanged).
+ *  - Managed modes: active ONLY when the host injected a running managed runtime
+ *    (`runtime.baseUrl` present and `status` not stopped/unhealthy/starting). The
+ *    provider NEVER starts Docker — an absent/stopped/unhealthy runtime simply
+ *    keeps it dormant, so recall yields no blocks and retains queue. */
+export function isActive(cfg: EffectiveConfig, runtime?: RuntimeContext): boolean {
+	if (cfg.mode === "external") {
+		return typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0;
+	}
+	if (isManagedMode(cfg.mode)) {
+		if (!runtime || typeof runtime.baseUrl !== "string" || runtime.baseUrl.trim().length === 0) return false;
+		// Defensive: only a running runtime serves recall/retain. A known
+		// stopped/unhealthy/starting/docker-unavailable status keeps us dormant; an
+		// unspecified status is tolerated (treated as reachable).
+		return runtime.status === undefined || runtime.status === "running";
+	}
+	return false;
 }
 
-/** Same gate phrased for the routes' "configured" surface. */
+/** The routes' "configured" surface (no runtime context available). External mode
+ *  needs a URL; a managed mode is "configured" once the user selects it — runtime
+ *  health is a separate, runtime-context-gated concern surfaced via `isActive`. */
 export function isConfigured(cfg: EffectiveConfig): boolean {
-	return isActive(cfg);
+	if (cfg.mode === "external") {
+		return typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0;
+	}
+	return isManagedMode(cfg.mode);
 }
 
-export function clientConfig(cfg: EffectiveConfig): ClientConfig {
+/** Build the REST client config for the effective deployment mode. Managed modes
+ *  ignore `externalUrl` and dial the host-injected managed runtime base URL;
+ *  external mode keeps the operator-supplied URL. The apiKey (when set) drives the
+ *  client's own `Authorization` header, mirroring `runtime.headers`. */
+export function clientConfig(cfg: EffectiveConfig, runtime?: RuntimeContext): ClientConfig {
+	const base = isManagedMode(cfg.mode) ? (runtime?.baseUrl ?? "") : (cfg.externalUrl ?? "");
 	return {
-		baseUrl: (cfg.externalUrl ?? "").replace(/\/+$/, ""),
+		baseUrl: base.replace(/\/+$/, ""),
 		...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
 		namespace: cfg.namespace,
 		timeoutMs: cfg.timeoutMs,
@@ -228,10 +295,11 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 	const value: Record<string, unknown> = {};
 
 	if ("mode" in body) {
-		if (body.mode === "external" || body.mode === "managed") value.mode = body.mode;
-		else errors.push("mode must be 'external' or 'managed'");
+		if (body.mode === "external" || body.mode === "managed" || body.mode === "managed-external-postgres") value.mode = body.mode;
+		else errors.push("mode must be 'external', 'managed', or 'managed-external-postgres'");
 	}
-	for (const key of ["externalUrl", "apiKey"] as const) {
+	// Optional secret/string fields; "" (or null) clears.
+	for (const key of ["externalUrl", "apiKey", "externalDatabaseUrl"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string") value[key] = v; // "" clears
@@ -239,7 +307,7 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 			else errors.push(`${key} must be a string`);
 		}
 	}
-	for (const key of ["bank", "namespace"] as const) {
+	for (const key of ["bank", "namespace", "dataDir"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string" && v.trim().length > 0) value[key] = v.trim();
