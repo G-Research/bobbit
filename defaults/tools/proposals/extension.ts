@@ -142,8 +142,8 @@ export default function (pi: ExtensionAPI) {
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
 			}, { description: "Inline workflow snapshot frozen on the goal; may reference inlineRoles." })),
-			worktreeSetupCommand: Type.Optional(Type.String({ description: "Host command run once during this goal's worktree provisioning, after component setup. Runs on the host (same trust model as project worktree_setup_command); cwd is the goal worktree, env includes SOURCE_REPO + BOBBIT_GOAL_ID/BRANCH/WORKTREE_PATH." })),
-			worktreeSetupTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Per-goal worktree-setup timeout override in ms (>0). Omit for the project default, else 120000." })),
+			worktreeSetupCommand: Type.Optional(Type.String({ description: "Host setup command run once after component setup." })),
+			worktreeSetupTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Per-goal setup timeout override in ms." })),
 		}),
 		async execute(_id, args) {
 			// `workflow` (string id) and `inlineWorkflow` (full Workflow object)
