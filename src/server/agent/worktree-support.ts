@@ -48,6 +48,13 @@ export interface WorktreeSupportDeps {
 	hasResolvedHead?: (repoPath: string) => Promise<boolean>;
 }
 
+export interface WorktreeSupportOptions {
+	/** Explicit start point that will be passed to createWorktree/createWorktreeSet. */
+	startPoint?: string;
+	/** Project-level base_ref that will be passed to createWorktree/createWorktreeSet. */
+	configuredBaseRef?: string;
+}
+
 /**
  * Resolve worktree capability from `(components, projectRoot, cwd)`.
  *
@@ -55,6 +62,8 @@ export interface WorktreeSupportDeps {
  * @param projectRoot The project's root directory (poly-repo container).
  * @param cwd         The launch cwd (used for the single-repo `isGitRepo` probe).
  * @param deps        Injectable git probes (defaults to the real git helpers).
+ * @param opts        Worktree start-point context. A resolved local HEAD is
+ *                    required only when creation will fall back implicitly to HEAD.
  */
 export async function resolveWorktreeSupport(
 	components: Component[],
@@ -66,9 +75,11 @@ export async function resolveWorktreeSupport(
 		isGitRepoRoot: defaultIsGitRepoRoot,
 		hasResolvedHead: defaultHasResolvedHead,
 	},
+	opts: WorktreeSupportOptions = {},
 ): Promise<WorktreeSupport> {
 	const multiRepo = components.some(c => c.repo !== ".");
 	const hasResolvedHead = deps.hasResolvedHead ?? (async () => true);
+	const requiresResolvedHead = !(opts.startPoint ?? "").trim() && !(opts.configuredBaseRef ?? "").trim();
 
 	if (multiRepo) {
 		// Multi-repo worktrees anchor at `projectRoot` ONLY. Supported iff at
@@ -85,7 +96,7 @@ export async function resolveWorktreeSupport(
 					if (distinct.has(c.repo)) continue;
 					distinct.add(c.repo);
 					const repoSrc = path.join(projectRoot, c.repo === "." ? "" : c.repo);
-					if (await deps.isGitRepoRoot(repoSrc) && await hasResolvedHead(repoSrc)) {
+					if (await deps.isGitRepoRoot(repoSrc) && (!requiresResolvedHead || await hasResolvedHead(repoSrc))) {
 						return { supported: true, repoPath: projectRoot, multiRepo: true };
 					}
 				}
@@ -100,7 +111,7 @@ export async function resolveWorktreeSupport(
 	try {
 		if (!(await deps.isGitRepo(cwd))) return { supported: false, multiRepo };
 		const repoPath = await deps.getRepoRoot(cwd);
-		if (!(await hasResolvedHead(repoPath))) return { supported: false, multiRepo };
+		if (requiresResolvedHead && !(await hasResolvedHead(repoPath))) return { supported: false, multiRepo };
 		return { supported: true, repoPath, multiRepo };
 	} catch {
 		return { supported: false, multiRepo };

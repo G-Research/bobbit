@@ -4625,7 +4625,8 @@ async function handleApiRoute(
 				// Single source of truth shared with the staff path
 				// (staff-manager.ts) and goal path (goal-manager.ts).
 				const components = projCtx?.projectConfigStore.getComponents() ?? [];
-				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef });
 				if (support.supported && support.repoPath) {
 					worktreeOpts = { repoPath: support.repoPath };
 				}
@@ -9951,7 +9952,8 @@ async function handleApiRoute(
 		if (wantWorktree) {
 			const projCtx = projectContextManager.getOrCreate(ps.projectId);
 			const components = projCtx?.projectConfigStore.getComponents() ?? [];
-			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd);
+			const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef });
 			if (!support.supported || !support.repoPath) {
 				json({
 					error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
