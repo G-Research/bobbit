@@ -1627,6 +1627,36 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 	}
 }
 
+/**
+ * Update an existing goal's per-goal sub-goal policy via
+ * `PATCH /api/goals/:id/policy`. Used by the existing-goal Sub-goals settings
+ * control on the goal dashboard so a user can turn on sub-goals for a parent
+ * that was created with the toggle off. Backend authz (team-lead-only on the
+ * /policy route) is preserved server-side; this just forwards the request with
+ * the session credentials. Returns true on success.
+ */
+export async function patchGoalSubgoalPolicy(
+	id: string,
+	updates: { subgoalsAllowed?: boolean; maxNestingDepth?: number },
+): Promise<boolean> {
+	try {
+		const body: Record<string, unknown> = {};
+		if (updates.subgoalsAllowed !== undefined) body.subgoalsAllowed = updates.subgoalsAllowed;
+		if (updates.maxNestingDepth !== undefined) body.maxNestingDepth = updates.maxNestingDepth;
+		const res = await gatewayFetch(`/api/goals/${id}/policy`, {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to update sub-goal settings: ${res.status}`);
+		await refreshSessions();
+		return true;
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update sub-goal settings", message, { code, stack });
+		return false;
+	}
+}
+
 export async function deleteGoal(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;

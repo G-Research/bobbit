@@ -113,6 +113,13 @@ export interface Goal {
 	mergeTarget?: "master" | "parent";
 	divergencePolicy?: "strict" | "balanced" | "autonomous";
 	maxConcurrentChildren?: number;
+	/** Per-goal subgoals-allowed override. `false` disables even when the
+	 *  system flag is ON. Surfaced by the parent picker (host eligibility) and
+	 *  the existing-goal Sub-goals settings control. See subgoal-eligibility.ts. */
+	subgoalsAllowed?: boolean;
+	/** Per-goal max nesting depth override (root=1, +1 per hop). Cannot exceed
+	 *  the system pref ceiling. */
+	maxNestingDepth?: number;
 	acceptanceCriteria?: string[];
 	spawnedFromPlanId?: string;
 	/** Sibling planIds this child depends on (Phase 5 — explicit DAG). */
