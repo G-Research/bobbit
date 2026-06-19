@@ -9,7 +9,7 @@ contents:
   roles: []
   tools: [] # explicit hindsight_* tools land in G2.3
   skills: []
-  entrypoints: [] # panel + deep link land in G2.3
+  entrypoints: [hindsight-palette, hindsight-route] # native config/status panel + deep link (P4)
   providers: [memory] # → providers/memory.yaml
   hooks: []
   mcp: []

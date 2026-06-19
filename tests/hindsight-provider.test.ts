@@ -530,3 +530,88 @@ test("routes config GET redacts externalDatabaseUrl to a boolean like apiKey", a
 		__setClientFactory(null);
 	}
 });
+
+// ── Managed-mode ROUTES: runtime context gating (implementation finding) ───────
+//
+// The routes used to build `clientConfig(cfg)` with NO runtime context, so a
+// managed mode (which dials a host-injected runtime base URL, never `externalUrl`)
+// produced an EMPTY base URL and could never reach a running managed runtime.
+// The routes now gate every client call on `isActive(cfg, ctx.runtime)`: they use
+// the host-injected `ctx.runtime` when one is present, and otherwise report a
+// deterministic configured-but-not-healthy / dormant state WITHOUT dialing an
+// empty base URL. External mode is unchanged (a URL is its own reachability gate).
+
+test("routes status: managed mode WITHOUT a runtime ⇒ configured:true, healthy:false, no client constructed", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => { factoryCalls++; return makeClient().client; });
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { mode: "managed" });
+		// No ctx.runtime ⇒ no reachable managed runtime from the route context.
+		const st = (await routes.status({ host: { store } } as never)) as {
+			configured: boolean; healthy: boolean; mode: string; queueDepth: number;
+		};
+		assert.equal(st.configured, true, "a selected managed mode is configured");
+		assert.equal(st.healthy, false, "no running runtime ⇒ not healthy (panel renders 'Starting')");
+		assert.equal(st.mode, "managed");
+		assert.equal(st.queueDepth, 0);
+		assert.equal(factoryCalls, 0, "no empty-base client call is made");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes status: managed mode WITH a running runtime probes the injected runtime base URL", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.healthy = true;
+		const store = makeStore();
+		// externalUrl is set but MUST be ignored in a managed mode.
+		await store.put(CONFIG_KEY, { mode: "managed", externalUrl: "http://should-not-be-used:9999" });
+		const st = (await routes.status({
+			host: { store },
+			runtime: { baseUrl: "http://127.0.0.1:48080", headers: { Authorization: "Bearer tok" }, status: "running" },
+		} as never)) as { configured: boolean; healthy: boolean };
+		assert.equal(st.configured, true);
+		assert.equal(st.healthy, true, "a running managed runtime reports healthy");
+		assert.equal(cap.baseUrl(), "http://127.0.0.1:48080", "health probe dials the managed runtime base URL, not externalUrl");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall: managed mode WITHOUT a runtime ⇒ configured:true, empty, no empty-base client call", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => { factoryCalls++; return makeClient().client; });
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { mode: "managed" });
+		const res = (await routes.recall({ host: { store } } as never, { body: { query: "x" } } as never)) as {
+			configured: boolean; memories: unknown[];
+		};
+		assert.deepEqual(res, { configured: true, memories: [] }, "configured-but-dormant managed recall is empty");
+		assert.equal(factoryCalls, 0, "no client is constructed without a running managed runtime");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall: managed mode WITH a running runtime dials the injected runtime base URL", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.memories = [{ text: "managed-route-mem", id: "m1" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { mode: "managed", externalUrl: "http://should-not-be-used:9999", bank: "bobbit" });
+		const res = (await routes.recall(
+			{ host: { store }, runtime: { baseUrl: "http://127.0.0.1:38080", status: "running" } } as never,
+			{ body: { query: "q" } } as never,
+		)) as { configured: boolean; memories: { text: string }[] };
+		assert.equal(res.configured, true);
+		assert.equal(res.memories.length, 1);
+		assert.equal(res.memories[0].text, "managed-route-mem");
+		assert.equal(cap.baseUrl(), "http://127.0.0.1:38080", "recall dials the managed runtime base URL");
+		assert.equal(cap.calls.recall[0].bank, "bobbit");
+	} finally {
+		__setClientFactory(null);
+	}
+});

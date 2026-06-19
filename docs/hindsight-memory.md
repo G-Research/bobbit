@@ -18,8 +18,10 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > `managed` and `managed-external-postgres`, explicit-consent start, disable/uninstall/purge, and
 > `ctx.runtime` injection) now ships as **P3** and is documented in
 > [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
-> explicit `hindsight_recall/retain/reflect` agent tools, the native memory panel, the reflect UI,
-> and cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
+> **native config/status panel** and its launch entrypoints now ship as **P4** — see
+> [Native config & status panel](#native-config--status-panel). The explicit
+> `hindsight_recall/retain/reflect` agent tools, the reflect UI, and cross-engine dedupe remain
+> **out of scope** — see [Non-goals](#non-goals).
 
 ## Installed but dormant by default
 
@@ -50,10 +52,17 @@ only opt-out (there is no uninstall for built-in packs). See
 
 ## Turning it on
 
-Set the provider config (via the `config` pack route — see [Pack routes](#pack-routes)) with at
-least `externalUrl` pointing at your Hindsight base URL (default Hindsight port is `8888`). Once
-the effective config has a non-empty URL, the provider activates on the next session spawn and
-starts recalling and retaining.
+The user-facing way to configure the pack is the **native panel** — open **Hindsight Memory**
+from the command palette or visit the deep link `#/ext/hindsight`, set at least `externalUrl`
+(external mode), and Save. See [Native config & status panel](#native-config--status-panel).
+Under the hood the panel writes through the `config` pack route (see [Pack routes](#pack-routes)),
+so you can also drive it programmatically: set at least `externalUrl` pointing at your Hindsight
+base URL (default Hindsight port is `8888`). Once the effective config has a non-empty URL, the
+provider activates on the next session spawn and starts recalling and retaining.
+
+> Earlier the only non-test way to configure the pack was seeding the pack store directly. With P4
+> the panel + `config` route are the user-facing path; **store-seeding is now a test-only seam**
+> (used by the E2E `seedConfig` helper), not a documented configuration mechanism.
 
 ### Configuration keys
 
@@ -170,6 +179,72 @@ list) rather than erroring.
 | `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
+## Native config & status panel
+
+The pack ships a **native, theme-compatible panel** (Extension Platform **P4**) that is the
+user-facing configuration surface and a live status/search view. It is a pure client of the
+existing P2 [pack routes](#pack-routes) through the versioned Host API — it adds **no new server
+routes**, never makes a raw `fetch`, and never writes pack-store config keys directly (so the
+`config` route's validation + secret redaction always apply). Source is
+`market-packs/hindsight/src/panel.js`, built to `lib/HindsightPanel.js`; the panel descriptor is
+`panels/hindsight-memory.yaml` (`id: hindsight.panel`). Full implementation contract:
+[docs/design/hindsight-panel-p4-implementation.md](design/hindsight-panel-p4-implementation.md).
+
+**Why a native panel?** Before P4 the only non-test way to configure the pack was seeding the
+pack store directly. The panel makes configuration a one-screen task, surfaces runtime health
+and the retry-queue depth where the operator can act on them, and keeps secrets write-only — the
+store-seeding path is now a test-only seam.
+
+### Entrypoints
+
+Two entrypoints open the same **singleton** panel (one per session view), declared under
+`market-packs/hindsight/entrypoints/` and listed in `pack.yaml` `contents.entrypoints`:
+
+| Entrypoint | Kind | How to reach it |
+|---|---|---|
+| `hindsight-palette` | `command-palette` | A launcher labelled **Hindsight Memory**. Its target is a bare `PanelTarget` (no `action: spawn`), so it opens the panel in the **active/owner session** — there is no sub-agent, unlike the pr-walkthrough spawn launchers. |
+| `hindsight-route` | `route` (`routeId: hindsight`) | Deep link **`#/ext/hindsight`**. Carries no params (`paramKeys: []`); the panel rehydrates entirely from the `config`/`status` routes on mount, so a reload or shared link restores the same view. |
+
+### What the panel does
+
+The panel reads and writes only through `host.callRoute` and feature-detects
+`host.capabilities.callRoute` (degrading to an "unavailable on this host" message on a host that
+predates the capability). Its state is cached per `params.__sessionId` so reopening or reloading
+rehydrates cleanly. It never mutates config on mount — mount kicks read-only `config` GET +
+`status` GET; only **Save** and **Search** write.
+
+- **Configuration card.** Picks the deployment `mode` (`external` / `managed` /
+  `managed-external-postgres`) and progressively discloses the fields relevant to that mode:
+  `externalUrl` (external), `dataDir` (managed), `externalDatabaseUrl` (managed-external-postgres),
+  `llmApiKey` (managed modes), plus `apiKey`, `bank`, `namespace`, `recallScope`, the
+  `autoRecall`/`autoRetain` toggles, and `recallBudget`/`timeoutMs`. Save POSTs **only changed**
+  keys to the `config` route; an empty optional string clears that value. Validation is the route's
+  job — `{ ok: false, errors }` renders inline next to Save without mutating the panel snapshot.
+- **Secrets are write-only.** The `config` GET surface returns only `*Set` booleans
+  (`apiKeySet`/`externalDatabaseUrlSet`/`llmApiKeySet`), so the panel shows a "set" placeholder and
+  never echoes a stored secret. An untouched secret field is omitted from the Save body (preserving
+  it); an explicit clear sends `""`.
+- **Runtime status card.** Driven by the `status` route. A state badge derives from
+  `{ configured, healthy, mode }` — **Dormant** (not configured), **Connected** (`--positive`),
+  **Unreachable** (external + unhealthy, `--negative`), or **Starting** (managed + not-yet-healthy,
+  `--warning`). It shows mode/bank/namespace/recallScope/auto-toggles, the **retry-queue counter**
+  (`queueDepth`), `lastError` as a muted diagnostic when present, and a **logs link** affordance
+  (managed modes only — points at the marketplace runtime view; the panel never starts/stops
+  Docker). A **Refresh** button re-polls `status`; while a managed mode is configured-but-not-yet
+  healthy the panel runs a bounded health poll so the badge flips to Connected when the runtime
+  comes up. Recent-retains data is **not** invented — P2 `status` exposes only `queueDepth` +
+  `lastError`, so that is what the card shows.
+- **Memory search.** A query input + scope (`all`/`project`) toggle POSTs to the `recall` route
+  and renders the returned memory cards (text plus optional `score`/`id`), with loading / empty /
+  dormant / error states. It never calls `retain` or `reflect`.
+
+The panel uses only Bobbit theme tokens (`--background`, `--foreground`, `--card`, `--border`,
+`--primary`, `--muted-foreground`, the `--chart-*` palette, and the `--positive`/`--negative`/
+`--warning` semantic slots via `color-mix`) — no hardcoded palette. Browser coverage lives in
+`tests/e2e/ui/hindsight-pack.spec.ts` (reusing the shared `tests/e2e/hindsight-stub.mjs`): open
+from the palette, Save external URL + bank, stub status flips to connected, search renders seeded
+memories, and persistence across reload via the `#/ext/hindsight` deep link.
+
 ## REST client
 
 `market-packs/hindsight/src/hindsight-client.ts` is a thin, faithful mapping over the Hindsight
@@ -234,13 +309,17 @@ both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
 
 Tracked in later Extension Platform goals, **not** in this release:
 
-- Explicit agent tools `hindsight_recall/retain/reflect`, the native memory panel, and entry
-  points — **G2.3**.
+- Explicit agent tools `hindsight_recall/retain/reflect` — **G2.3** (the tools; the panel + entry
+  points half of G2.3 shipped in P4).
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
 
-> **Now shipped (was a non-goal):** the managed Docker runtime + Postgres + `~/.hindsight`
-> bind-mount + deployment-mode selection (`mode: managed` / `managed-external-postgres`) landed in
-> **P3** — see [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle).
+> **Now shipped (were non-goals):**
+> - The **native config/status panel** + command-palette and `#/ext/hindsight` deep-link
+>   entrypoints landed in **P4** — see [Native config & status panel](#native-config--status-panel).
+>   Store-seeding is no longer the user-facing configuration path (test-only now).
+> - The managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
+>   (`mode: managed` / `managed-external-postgres`) landed in **P3** — see
+>   [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle).
 
 ## See also
 

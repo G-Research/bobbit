@@ -214,6 +214,11 @@ export class ModuleHost {
 				// The calling session's project id (when resolvable) so a route handler
 				// can scope to the real project instead of fabricating one.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+				// P3/P4 — the managed-runtime linkage the route endpoint resolved for a
+				// managed-mode pack (`{ baseUrl, headers, status }`). A plain serializable
+				// object, so it crosses the MessagePort intact; absent in external mode and
+				// whenever no managed runtime is running, so the route stays dormant.
+				runtime: (req.ctx as { runtime?: unknown } | undefined)?.runtime,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,

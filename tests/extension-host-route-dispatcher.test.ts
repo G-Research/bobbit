@@ -63,6 +63,27 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { via: "default" });
 	});
+
+	// P3/P4 — the managed-runtime linkage the route endpoint resolves
+	// (`{ baseUrl, headers, status }`) must survive the worker serialization
+	// boundary (module-host-worker route ctx → bootstrap reconstruction) and reach
+	// the handler as `ctx.runtime`. Without the forwarding it arrives undefined and a
+	// managed-mode pack (e.g. Hindsight) can never reach its running runtime.
+	it("forwards ctx.runtime to the route handler across the worker boundary", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "runtime"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ runtime: ctx.runtime ?? null }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		const runtime = { baseUrl: "http://127.0.0.1:54321", headers: { Authorization: "Bearer tok" }, status: "running" };
+		const result = await d.dispatch(modulePath, packRoot, "bundle", { ...ctx(), runtime }, { method: "GET" });
+		assert.deepEqual(result, { runtime });
+	});
+
+	it("omits ctx.runtime when none is resolved (external mode / no runtime)", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "no-runtime"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ hasRuntime: ctx.runtime !== undefined }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { hasRuntime: false });
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {
