@@ -31,6 +31,7 @@ import {
 	existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, normalize, resolve, sep } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 import { fileURLToPath } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.js";
 
@@ -215,7 +216,7 @@ test.describe("Poly Repo — integration", () => {
 		ti.setTimeout(180_000);
 		port = await freePort();
 
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		fixtureRoot = join(tmp, `bobbit-poly-${port}`);
 		rmSync(fixtureRoot, { recursive: true, force: true });
 		mkdirSync(fixtureRoot, { recursive: true });
