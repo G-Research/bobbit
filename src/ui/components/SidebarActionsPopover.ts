@@ -667,6 +667,7 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-actions-row
 				data-sidebar-actions-index=${index}
 				data-sidebar-action-id=${item.id}
+				data-session-action-id=${item.id}
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
 				tabindex=${rowActive ? "0" : "-1"}
 				title=${item.title || item.label}
@@ -699,6 +700,7 @@ export class SidebarActionsPopover extends LitElement {
 					role="menuitemcheckbox"
 					data-sidebar-actions-toggle
 					data-sidebar-action-id=${item.id}
+					data-session-action-id=${item.id}
 					aria-checked=${toggle.checked ? "true" : "false"}
 					aria-label=${toggle.ariaLabel}
 					title=${toggle.ariaLabel}
