@@ -247,6 +247,41 @@ describe("PackRuntimeSupervisor.status", () => {
 	});
 });
 
+// ── No auto-start (P3 invariant) ─────────────────────────────────────────────
+//
+// P3 hard invariant: Docker `compose up` happens ONLY from an explicit user
+// enable/start action. The READ paths (boot listing / status polling) must never
+// implicitly bring a runtime up. This pins that contract at the supervisor seam:
+// neither `list()` nor `status()` may ever issue an `up` subcommand, regardless
+// of the runtime's current state (stopped, healthy, or unhealthy).
+
+describe("PackRuntimeSupervisor no-auto-start (P3)", () => {
+	for (const [label, psOut] of [
+		["stopped", ""],
+		["running", '{"Service":"db","State":"running","Health":"healthy"}'],
+		["unhealthy", '{"Service":"db","State":"running","Health":"unhealthy"}'],
+	] as const) {
+		it(`status() never issues compose up (${label})`, async () => {
+			// `up` is intentionally UNHANDLED: if status ever called it the spy would
+			// still record the call, so the zero-count assertion is meaningful.
+			const docker = makeDocker({ ps: () => ok(psOut) });
+			const sup = makeSupervisor(docker.executor);
+			await sup.status(PACK_ID, RUNTIME_ID);
+			assert.equal(docker.countSub("up"), 0, "status must not auto-start the runtime");
+			// The only Docker subcommand a read path may issue is `ps`.
+			assert.ok(docker.calls.every((c) => c.args.includes("ps")));
+		});
+	}
+
+	it("list() never issues compose up across every active runtime", async () => {
+		const docker = makeDocker({ ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}') });
+		const sup = makeSupervisor(docker.executor);
+		await sup.list();
+		assert.equal(docker.countSub("up"), 0, "boot listing must not auto-start any runtime");
+		assert.ok(docker.calls.every((c) => c.args.includes("ps")));
+	});
+});
+
 // ── Start / ensure / poll ────────────────────────────────────────────────────
 
 describe("PackRuntimeSupervisor.start / ensureRuntime", () => {
