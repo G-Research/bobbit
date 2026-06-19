@@ -482,3 +482,26 @@ test("routes config SET validates, persists, and redacts the secret", async () =
 		__setClientFactory(null);
 	}
 });
+
+test("routes config GET redacts externalDatabaseUrl to a boolean like apiKey", async () => {
+	__setClientFactory(() => makeClient().client);
+	try {
+		const store = makeStore();
+		// managed-external-postgres with a configured external DB connection URL (a secret).
+		await store.put(CONFIG_KEY, { mode: "managed-external-postgres", externalDatabaseUrl: "postgres://u:p@host:5432/db", apiKey: "k" });
+		const cfg = (await routes.config({ host: { store } } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal("externalDatabaseUrl" in cfg.config, false, "raw external DB URL secret is never echoed");
+		assert.equal(cfg.config.externalDatabaseUrlSet, true, "externalDatabaseUrl collapses to a boolean");
+		assert.equal("apiKey" in cfg.config, false);
+		assert.equal(cfg.config.apiKeySet, true);
+
+		// Absent secret → the *Set boolean is false (and still no raw value).
+		const empty = makeStore();
+		await empty.put(CONFIG_KEY, { mode: "managed" });
+		const cfg2 = (await routes.config({ host: { store: empty } } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal(cfg2.config.externalDatabaseUrlSet, false);
+		assert.equal("externalDatabaseUrl" in cfg2.config, false);
+	} finally {
+		__setClientFactory(null);
+	}
+});

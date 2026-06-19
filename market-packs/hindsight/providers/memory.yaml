@@ -3,6 +3,11 @@ kind: memory
 # Lifecycle provider module (bundled, REST client inlined) — resolves to
 # market-packs/hindsight/lib/provider.mjs, contained in the pack root.
 module: ../lib/provider.mjs
+# Managed-runtime linkage (P3): names the runtime descriptor (runtimes/hindsight.yaml)
+# the host consults to inject `ctx.runtime` for managed deployment modes. The host
+# resolves the runtime's status + API host port WITHOUT starting Docker; external
+# mode ignores this entirely.
+runtime: hindsight
 hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
 # Activation is additionally gated on `externalUrl` (see `activation` below); the
@@ -35,10 +40,14 @@ activation:
   # externalUrl.
   #
   # MANAGED modes (managed / managed-external-postgres) do NOT use externalUrl. The
-  # host activates the memory provider for these via the runtime-enable path: when
+  # host activates the memory provider for these via `activeWhenConfig` below: when
   # the effective config selects a managed mode, the provider is bridged so it can
   # consume the injected ctx.runtime. The provider's own isActive(cfg, ctx.runtime)
   # gate then keeps every hook dormant (no client, no network) until the managed
   # runtime is actually running — it NEVER starts Docker itself. See
   # docs/design (P3 modes/consent) §8.
   requiresConfig: [externalUrl]
+  # OR escape hatch (deployment-mode linkage): a managed mode activates the provider
+  # regardless of externalUrl. External mode falls through to requiresConfig above.
+  activeWhenConfig:
+    mode: [managed, managed-external-postgres]

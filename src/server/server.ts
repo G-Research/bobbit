@@ -1286,6 +1286,19 @@ export function createGateway(config: GatewayConfig) {
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
 	);
+	// P2 pack managed-runtime supervisor handle (Docker-backed). Declared HERE — before
+	// the LifecycleHub — so the hub's runtime-context resolver can consult it lazily at
+	// dispatch time. The production instance is built lazily in start(); a registered
+	// test factory is consulted FRESH per call so registerPackRuntimeSupervisorFactory(null)
+	// reverts cleanly with no stale mock cached. Boot/install/update/list/status never
+	// start Docker (see the design invariants); the runtime resolver only READS status
+	// + the already-persisted API host port to inject ctx.runtime for managed providers.
+	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+	const getActivePackRuntimeSupervisor = (): PackRuntimeSupervisorLike | undefined =>
+		_packRuntimeSupervisorFactory
+			? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
+			: realPackRuntimeSupervisor;
+
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -1309,6 +1322,37 @@ export function createGateway(config: GatewayConfig) {
 				return { baseUrl: "", token: "" };
 			}
 		},
+		// P3 — managed-runtime context injection. For a provider declaring a `runtime`
+		// linkage in a MANAGED deployment mode, resolve ctx.runtime from the supervisor
+		// WITHOUT starting Docker: read the runtime status + the already-persisted API
+		// host port (from the pure capability summary). External mode / a stopped runtime
+		// / an unknown port ⇒ undefined, and the provider stays dormant via its own gate.
+		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) => {
+			const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
+			if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
+			const sup = getActivePackRuntimeSupervisor();
+			if (!sup) return undefined;
+			let status: PackRuntimeStatus;
+			try {
+				status = await sup.status(packId, runtimeId, projectId);
+			} catch {
+				return undefined;
+			}
+			let apiPort: number | undefined;
+			try {
+				const cap = await sup.capabilitySummary(packId, runtimeId, { projectId });
+				const apiSpec =
+					cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
+					cap.ports[0];
+				if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
+			} catch {
+				return undefined;
+			}
+			if (apiPort === undefined) return undefined;
+			const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
+			const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+			return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
+		},
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
@@ -1319,8 +1363,9 @@ export function createGateway(config: GatewayConfig) {
 	// immediately reverts to the production instance (or 503) with no stale mock
 	// left in the closure across in-process E2E tests. The real supervisor is
 	// loaded lazily in start() (dynamic import keeps this wiring compilable even
-	// before the supervisor module is merged — routes then return 503).
-	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+	// before the supervisor module is merged — routes then return 503). The handle
+	// itself + the getActivePackRuntimeSupervisor() resolver are declared above (before
+	// the LifecycleHub, which consults the resolver for ctx.runtime injection).
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -1599,10 +1644,9 @@ export function createGateway(config: GatewayConfig) {
 			// process test harnesses register a (mocked) one AFTER gateway start, so it
 			// must override the real supervisor built in start(). Derived FRESH each
 			// request (never cached), so clearing the factory reverts to the production
-			// instance with no stale mock. No-op in production (factory stays null).
-			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
-				? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
-				: realPackRuntimeSupervisor;
+			// instance with no stale mock. No-op in production (factory stays null). Shares
+			// the same resolver the LifecycleHub uses so the route + ctx.runtime paths agree.
+			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = getActivePackRuntimeSupervisor();
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
@@ -5973,10 +6017,36 @@ async function handleApiRoute(
 		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const rawMode = url.searchParams.get("mode");
-		const mode = rawMode !== null && rawMode.trim().length > 0 ? rawMode : undefined;
+		const requestedMode = rawMode !== null && rawMode.trim().length > 0 ? rawMode.trim() : undefined;
+		// The disclosure is DEPLOYMENT-mode aware (external / managed / managed-external-
+		// postgres). The caller may pass an explicit mode; absent that, resolve the
+		// EFFECTIVE deployment mode from the pack's provider config so the external
+		// (no-Docker) setup path is reachable even when the UI does not know the mode.
+		const deploymentMode = requestedMode ?? ((): string => {
+			const pack = packContributionRegistry.getPack(projectId, packId);
+			for (const p of pack?.providers ?? []) {
+				const m = p.config?.mode;
+				if (typeof m === "string" && m.length > 0) return m;
+			}
+			return "external";
+		})();
+		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
+		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
+			managed: "managed-postgres",
+			"managed-external-postgres": "external-postgres",
+		};
 		try {
-			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode });
-			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId) });
+			if (deploymentMode === "external") {
+				// External: derive descriptor/trust from the default manifest mode but disclose
+				// NO services/ports and flag dockerRequired:false, so the UI shows setup
+				// guidance instead of a Docker start disclosure. Works without Docker.
+				const base = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId });
+				json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
+				return;
+			}
+			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
+			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode });
+			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
 		} catch (err) {
 			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
 			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
@@ -7120,10 +7190,13 @@ async function handleApiRoute(
 			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			// P3 — best-effort: tear down this pack's managed runtimes BEFORE removing
-			// it, preserving bind-mounted data (no `-v`, no state removal). A missing
-			// Docker install is tolerated (down returns docker-unavailable, never throws).
+			// P3 — tear down this pack's managed runtimes BEFORE removing it, preserving
+			// bind-mounted data (no `-v`, no state removal). A missing Docker install is
+			// tolerated (down returns a docker-unavailable STATUS, never throws), so an
+			// uninstall on a Docker-less host still proceeds. A REAL teardown failure (down
+			// throws) is reported and the uninstall is ABORTED — never silently swallowed.
 			if (packRuntimeSupervisor) {
+				const teardownFailures: string[] = [];
 				try {
 					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
 					if (rtCtx && rtCtx.runtimes.length > 0) {
@@ -7132,12 +7205,18 @@ async function handleApiRoute(
 							try {
 								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
 							} catch (err) {
-								console.warn(`[pack-runtimes] uninstall down failed for ${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? err}`);
+								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
 							}
 						}
 					}
 				} catch (err) {
+					// Resolving the pack's runtime context failed (e.g. the pack is no longer
+					// resolvable on disk) — there is nothing to tear down; proceed.
 					console.warn(`[pack-runtimes] uninstall runtime teardown skipped: ${(err as Error)?.message ?? err}`);
+				}
+				if (teardownFailures.length > 0) {
+					json({ error: "runtime teardown failed; pack not uninstalled", details: teardownFailures }, 502);
+					return;
 				}
 			}
 			try {

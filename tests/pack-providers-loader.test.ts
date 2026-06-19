@@ -116,6 +116,47 @@ describe("loadProviders (schema v2)", () => {
 		assert.deepEqual(p.activation, { requiresConfig: ["externalUrl"] });
 	});
 
+	it("parses activeWhenConfig (deployment-mode linkage) alongside requiresConfig", () => {
+		const root = packRoot("activation-mode");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [p] = loadProviders(root, manifest(["memory"]));
+		assert.deepEqual(p.activation, {
+			requiresConfig: ["externalUrl"],
+			activeWhenConfig: { mode: ["managed", "managed-external-postgres"] },
+		});
+	});
+
+	it("accepts a scalar activeWhenConfig value and normalises it to a one-element list", () => {
+		const root = packRoot("activation-scalar");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"activation:",
+			"  activeWhenConfig:",
+			"    mode: managed",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [p] = loadProviders(root, manifest(["memory"]));
+		assert.deepEqual(p.activation, { activeWhenConfig: { mode: ["managed"] } });
+	});
+
 	it("omits config/configSchema/activation when the provider declares none", () => {
 		const root = packRoot("no-config");
 		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory"));

@@ -454,6 +454,59 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
 	});
 
+	it("activeWhenConfig: a managed deployment mode activates the provider without requiresConfig (external still needs it)", () => {
+		const root = packRoot("act-mode", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// Default (external mode, no externalUrl) → dormant: activeWhenConfig unmatched,
+		// requiresConfig unsatisfied.
+		const dormant = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(dormant.listProviders(undefined).map((p) => p.id), []);
+
+		// managed mode override → active WITHOUT an externalUrl (deployment-mode linkage).
+		const managed = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "managed" }),
+		);
+		assert.deepEqual(managed.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// managed-external-postgres likewise activates without externalUrl.
+		const managedExt = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "managed-external-postgres" }),
+		);
+		assert.deepEqual(managedExt.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// external mode WITH an externalUrl → active via requiresConfig (unchanged path).
+		const external = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "external", externalUrl: "http://localhost:8888" }),
+		);
+		assert.deepEqual(external.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// external mode WITHOUT an externalUrl → still dormant.
+		const externalUnset = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "external" }),
+		);
+		assert.deepEqual(externalUnset.listProviders(undefined).map((p) => p.id), []);
+	});
+
 	it("config overlay: store override wins over the schema default for an unconditional provider", () => {
 		const root = packRoot("cfg-overlay", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
