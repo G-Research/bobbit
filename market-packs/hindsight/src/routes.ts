@@ -12,9 +12,24 @@
 // DORMANCY: when not configured (no external URL) every route returns a clean,
 // structured signal (`configured:false` / empty list) rather than erroring, so the
 // panel and tests get a deterministic dormant response with no network touched.
+//
+// REACHABILITY vs CONFIGURED (managed modes): `isConfigured` is the user-facing
+// "a valid deployment is selected" gate (external needs a URL; a managed mode is
+// configured the moment it is picked). It is NOT a license to dial a client.
+// `clientConfig` only yields a usable base URL when there is a REACHABLE data
+// plane — an external URL, or a host-injected running managed runtime
+// (`ctx.runtime.baseUrl`). The route ctx carries `runtime` ONLY when the host
+// injected one for this call; in a managed mode with no running runtime it is
+// absent and `clientConfig(cfg)` would otherwise produce an EMPTY base URL. So
+// every client-touching route gates on `isActive(cfg, ctx.runtime)` (the same
+// reachability gate the provider uses) and reports a deterministic
+// configured-but-not-healthy / dormant state instead of issuing an empty-base
+// client call. External-mode behavior is unchanged (`isActive` == `isConfigured`
+// there). See docs/design/hindsight-pack-external.md §6/§8 + the P3 runtime modes.
 
 import {
 	clientConfig,
+	isActive,
 	isConfigured,
 	loadEffectiveConfig,
 	loadQueue,
@@ -24,6 +39,7 @@ import {
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	type EffectiveConfig,
+	type RuntimeContext,
 	type StoreLike,
 	type Tags,
 } from "./shared.js";
@@ -37,6 +53,13 @@ interface RouteCtx {
 	/** The calling session's project id, supplied by the host route ctx. Used to
 	 *  scope a `project` recall to the REAL project; absent ⇒ no project filter. */
 	projectId?: string;
+	/** Managed-runtime context injected by the host for a route call against an
+	 *  ACTIVE managed Hindsight runtime (mirrors the provider's `ctx.runtime`).
+	 *  Carries the locally-running managed API base URL. Absent in external mode and
+	 *  whenever the managed runtime is not running — the route then reports a
+	 *  deterministic dormant/not-healthy state and NEVER dials an empty base URL
+	 *  (it never starts Docker). */
+	runtime?: RuntimeContext;
 }
 interface RouteReq {
 	method?: string;
@@ -100,8 +123,9 @@ export const routes = {
 		return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg) };
 	},
 
-	// Health + queue + effective-config snapshot. `healthy` is a fresh probe when
-	// configured (short client timeout), else false.
+	// Health + queue + effective-config snapshot. `healthy` is a fresh probe when the
+	// data plane is reachable (external URL, or a host-injected running managed
+	// runtime via ctx.runtime; short client timeout), else false.
 	status: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
@@ -118,10 +142,14 @@ export const routes = {
 			queueDepth: depth,
 			...(err ? { lastError: err } : {}),
 		};
-		if (!isConfigured(cfg)) return { ...base, healthy: false };
+		// Probe health ONLY when there is a reachable data plane (an external URL, or a
+		// host-injected running managed runtime). A managed mode that is configured but
+		// has no running runtime reports `healthy:false` deterministically — the panel
+		// renders that as "Starting" — without ever dialing an empty base URL.
+		if (!isActive(cfg, ctx.runtime)) return { ...base, healthy: false };
 		let healthy = false;
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			healthy = (await client.health()).ok === true;
 		} catch {
 			healthy = false;
@@ -133,7 +161,10 @@ export const routes = {
 	recall: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
-		if (!isConfigured(cfg)) return { configured: false, memories: [] };
+		// Recall needs a reachable data plane. Not active (unconfigured, or a managed
+		// mode with no running runtime) ⇒ a deterministic empty result that still
+		// reports whether a deployment is configured, with NO empty-base client call.
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), memories: [] };
 		const body = isObj(req?.body) ? req!.body : {};
 		const query = strOf(body.query) ?? strOf(req?.query?.query);
 		if (!query) return { configured: true, memories: [] };
@@ -144,7 +175,7 @@ export const routes = {
 		const projectId = strOf(ctx.projectId);
 		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.recall(cfg.bank, query, {
 				maxTokens: cfg.recallBudget,
 				...(tags ? { tags, tagsMatch: "any" as const } : {}),
@@ -159,14 +190,16 @@ export const routes = {
 	retain: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
-		if (!isConfigured(cfg)) return { ok: false, configured: false };
+		// A manual retain needs a reachable data plane; not active ⇒ report the
+		// configured surface without dialing an empty base URL.
+		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
 		const body = isObj(req?.body) ? req!.body : {};
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
 		const tags = manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined);
 		const sync = body.sync === true;
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			await client.ensureBank(cfg.bank);
 			await client.retain(cfg.bank, content, { tags, sync });
 			return { ok: true, configured: true };
@@ -179,12 +212,12 @@ export const routes = {
 	reflect: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
-		if (!isConfigured(cfg)) return { configured: false, text: "" };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), text: "" };
 		const body = isObj(req?.body) ? req!.body : {};
 		const prompt = strOf(body.prompt);
 		if (!prompt) return { configured: true, text: "" };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.reflect(cfg.bank, prompt);
 			return { configured: true, text: res?.text ?? "" };
 		} catch (e) {
@@ -196,9 +229,9 @@ export const routes = {
 	banks: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
 		const cfg: EffectiveConfig = await loadEffectiveConfig(store);
-		if (!isConfigured(cfg)) return { configured: false, banks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), banks: [] };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.listBanks();
 			return { configured: true, banks: res?.banks ?? [] };
 		} catch (e) {
