@@ -745,6 +745,13 @@ export function handleWebSocketConnection(
 					const startedAtMs = Date.now();
 					const compactionId = makeCompactionId(startedAtMs);
 					session.isCompacting = true;
+					// Stash the shared compactionId on the session BEFORE awaiting the
+					// RPC so session-manager's manual `compaction_end` branch can stamp
+					// the broadcast event with it. That lets the client's live
+					// `compact_active` card mount the pre-compaction affordance in the
+					// same session (it polls the sidecar, written below once the RPC
+					// resolves).
+					(session as any)._manualCompactionId = compactionId;
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
