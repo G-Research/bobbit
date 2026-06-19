@@ -659,6 +659,7 @@ interface OpenHeaderSessionActionsPopover {
 	element: SidebarActionsPopover;
 	actions: SessionActionDescriptor[];
 	refresh: () => SessionActionDescriptor[];
+	cleanup?: () => void;
 }
 
 let _openHeaderSessionActionsPopover: OpenHeaderSessionActionsPopover | null = null;
@@ -694,6 +695,7 @@ function closeHeaderSessionActionsPopover(renderAfterClose = true): void {
 	const current = _openHeaderSessionActionsPopover;
 	if (!current) return;
 	_openHeaderSessionActionsPopover = null;
+	current.cleanup?.();
 	current.element.open = false;
 	try { current.element.remove(); } catch { /* ignore */ }
 	if (renderAfterClose) renderApp();
@@ -704,6 +706,7 @@ function refreshOpenHeaderSessionActionsPopover(): void {
 	if (current) {
 		current.actions = current.refresh();
 		current.element.items = toHeaderPopoverItems(current.actions);
+		return;
 	}
 	renderApp();
 }
@@ -727,6 +730,22 @@ async function openHeaderSessionActionsPopover(input: {
 	element.items = toHeaderPopoverItems(input.actions);
 	element.sourceRects = [];
 	element.open = true;
+	const handleTrailingToggleKeydown = (event: KeyboardEvent) => {
+		if (event.key !== " " && event.key !== "Space" && event.key !== "Spacebar" && event.key !== "Enter") return;
+		const target = event.target;
+		const toggle = target instanceof HTMLElement
+			? target.closest<HTMLElement>("[data-sidebar-actions-toggle][data-session-action-id]")
+			: null;
+		if (!toggle || !element.contains(toggle)) return;
+		const actionId = toggle.dataset.sessionActionId || toggle.dataset.sidebarActionId || "";
+		const action = _openHeaderSessionActionsPopover?.actions.find((item) => String(item.id) === actionId);
+		if (!action?.trailingToggle) return;
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		action.trailingToggle.onToggle();
+	};
+	window.addEventListener("keydown", handleTrailingToggleKeydown, true);
+	const cleanup = () => window.removeEventListener("keydown", handleTrailingToggleKeydown, true);
 	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
 		event.stopPropagation();
 		const current = _openHeaderSessionActionsPopover;
@@ -734,7 +753,12 @@ async function openHeaderSessionActionsPopover(input: {
 		void action?.run(event);
 	}) as EventListener);
 	element.addEventListener("close", () => {
-		if (_openHeaderSessionActionsPopover?.element === element) _openHeaderSessionActionsPopover = null;
+		if (_openHeaderSessionActionsPopover?.element === element) {
+			_openHeaderSessionActionsPopover.cleanup?.();
+			_openHeaderSessionActionsPopover = null;
+		} else {
+			cleanup();
+		}
 		try { element.remove(); } catch { /* ignore */ }
 		renderApp();
 	});
@@ -744,6 +768,7 @@ async function openHeaderSessionActionsPopover(input: {
 		element,
 		actions: input.actions,
 		refresh: input.refresh,
+		cleanup,
 	};
 	renderApp();
 }
