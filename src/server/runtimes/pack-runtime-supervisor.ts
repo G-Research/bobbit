@@ -149,6 +149,8 @@ export interface PackRuntimeSupervisorOptions {
 	dockerBin?: string;
 	/** Docker invocation seam; defaults to promisified `execFile`. */
 	executor?: DockerExecutor;
+	/** HTTP readiness probe seam; defaults to a `fetch`-based GET probe. */
+	httpProbe?: HttpHealthProbe;
 	/** Per-server suffix on compose project names (collision guard, §15.5). */
 	serverIdentitySuffix?: string;
 	/** Max time to wait for a runtime to become healthy after `up -d`. */
@@ -286,6 +288,78 @@ export class FilePortStore implements PortStore {
 export function readRuntimeStartPolicy(manifest: Record<string, unknown> | undefined): PackRuntimeStartPolicy {
 	return manifest?.startPolicy === "on-enable" ? "on-enable" : "manual";
 }
+
+/**
+ * A runtime's declared HTTP startup-readiness probe. Read from the RAW manifest
+ * object (the validated {@link RuntimeManifest} intentionally ignores this
+ * supervisor-only field, exactly like `startPolicy`). After `compose up -d`, the
+ * supervisor polls `http://127.0.0.1:<resolved host port for `port`><path>` and
+ * only completes `start`/`ensureRuntime` as `running` once it returns HTTP 200
+ * (or `unhealthy` on timeout) — a compose-ps "running" alone is NOT sufficient.
+ */
+export interface RuntimeHealthcheck {
+	/** Informational compose service the probe targets (disclosure only). */
+	service?: string;
+	/** Declared port KEY (matches a `ports[].key`) whose resolved host port is probed. */
+	port: string;
+	/** HTTP path probed on `127.0.0.1:<host port>` (e.g. `/health`). */
+	path: string;
+	/** Re-poll interval while waiting; falls back to the supervisor default. */
+	intervalMs?: number;
+	/** Max time to wait for HTTP 200; falls back to the supervisor default. */
+	startupTimeoutMs?: number;
+}
+
+/**
+ * Read a runtime's declared {@link RuntimeHealthcheck} from its RAW manifest. A
+ * missing/malformed block (or one without both a non-empty `path` and `port`)
+ * resolves to `null`, so a runtime with no HTTP probe keeps the compose-ps-only
+ * readiness behaviour.
+ */
+export function readRuntimeHealthcheck(manifest: Record<string, unknown> | undefined): RuntimeHealthcheck | null {
+	const hc = manifest?.healthcheck;
+	if (!hc || typeof hc !== "object" || Array.isArray(hc)) return null;
+	const o = hc as Record<string, unknown>;
+	const probePath = typeof o.path === "string" && o.path.length > 0 ? o.path : undefined;
+	const port = typeof o.port === "string" && o.port.length > 0 ? o.port : undefined;
+	if (!probePath || !port) return null;
+	const out: RuntimeHealthcheck = { port, path: probePath };
+	if (typeof o.service === "string" && o.service.length > 0) out.service = o.service;
+	if (typeof o.intervalMs === "number" && Number.isFinite(o.intervalMs) && o.intervalMs > 0) {
+		out.intervalMs = o.intervalMs;
+	}
+	if (typeof o.startupTimeoutMs === "number" && Number.isFinite(o.startupTimeoutMs) && o.startupTimeoutMs > 0) {
+		out.startupTimeoutMs = o.startupTimeoutMs;
+	}
+	return out;
+}
+
+/**
+ * Injectable HTTP readiness probe seam. Returns the HTTP status code for a GET
+ * of `url` (resolving the connection within `timeoutMs`), or `0` when the
+ * endpoint cannot be reached (connection refused / abort / network error). Fully
+ * mocked in unit tests so no real socket is opened.
+ */
+export type HttpHealthProbe = (url: string, timeoutMs: number) => Promise<number>;
+
+const defaultHttpProbe: HttpHealthProbe = async (url, timeoutMs) => {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+	try {
+		const res = await fetch(url, { method: "GET", signal: controller.signal });
+		// Drain the body so the connection can be released/closed promptly.
+		try {
+			await res.arrayBuffer();
+		} catch {
+			/* ignore body errors — only the status matters */
+		}
+		return res.status;
+	} catch {
+		return 0;
+	} finally {
+		clearTimeout(timer);
+	}
+};
 
 // ── Id encoding (URL-safe, reversible) ───────────────────────────────────────
 
@@ -459,6 +533,7 @@ export class PackRuntimeSupervisor {
 	private readonly registry: PackContributionResolver;
 	private readonly dockerBin: string;
 	private readonly executor: DockerExecutor;
+	private readonly httpProbe: HttpHealthProbe;
 	private readonly suffix: string;
 	private readonly startupTimeoutMs: number;
 	private readonly pollIntervalMs: number;
@@ -485,6 +560,7 @@ export class PackRuntimeSupervisor {
 		this.registry = opts.registry;
 		this.dockerBin = opts.dockerBin ?? process.env.DOCKER_BIN ?? "docker";
 		this.executor = opts.executor ?? (execFileAsync as unknown as DockerExecutor);
+		this.httpProbe = opts.httpProbe ?? defaultHttpProbe;
 		this.suffix = sanitizeComposeToken(opts.serverIdentitySuffix ?? crypto.randomBytes(4).toString("hex"));
 		this.startupTimeoutMs = opts.startupTimeoutMs ?? 60_000;
 		this.pollIntervalMs = opts.pollIntervalMs ?? 1_000;
@@ -860,9 +936,15 @@ export class PackRuntimeSupervisor {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
 
-		const { invocation, modeKey } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode, {
+		const { invocation, modeKey, ctx } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode, {
 			configOverlay: opts.config,
 		});
+
+		// Resolve the declared HTTP readiness probe (if any) + the resolved host
+		// port it targets, so `_pollUntilHealthy` can gate `running` on HTTP 200
+		// rather than trusting a compose-ps "running".
+		const healthcheck = readRuntimeHealthcheck(contribution.manifest);
+		const healthPort = healthcheck ? ctx.ports?.[healthcheck.port] : undefined;
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 		// Persist the effective mode + config overlay used for THIS start so later
@@ -900,23 +982,67 @@ export class PackRuntimeSupervisor {
 			throw err;
 		}
 
-		return this._pollUntilHealthy(descriptor, target, modeKey, invocation.services);
+		return this._pollUntilHealthy(descriptor, target, modeKey, invocation.services, healthcheck, healthPort);
 	}
 
+	/**
+	 * Poll until the runtime is ready (returns `running`) or the startup deadline
+	 * elapses (returns `unhealthy`). Two readiness regimes:
+	 *
+	 *  - HTTP-gated (a {@link RuntimeHealthcheck} is declared AND its host port
+	 *    resolved): `running` is reported ONLY once an HTTP GET of the declared
+	 *    health path at `http://127.0.0.1:<host port><path>` returns 200. A
+	 *    compose-ps "running" alone is deliberately NOT sufficient — the container
+	 *    can be up well before its HTTP server accepts requests.
+	 *  - compose-ps-only (no usable healthcheck): legacy behaviour — `running`
+	 *    once compose ps reports all services running/healthy.
+	 *
+	 * In both regimes a compose-ps `docker-unavailable` short-circuits, and a
+	 * container reported `unhealthy` by Docker short-circuits to `unhealthy`.
+	 */
 	private async _pollUntilHealthy(
 		descriptor: PackRuntimeDescriptor,
 		target: ComposeTarget,
 		mode: string,
 		services: string[],
+		healthcheck?: RuntimeHealthcheck | null,
+		healthPort?: number,
 	): Promise<PackRuntimeStatus> {
-		const deadline = this.now() + this.startupTimeoutMs;
+		const httpGated = !!(
+			healthcheck &&
+			typeof healthPort === "number" &&
+			Number.isInteger(healthPort) &&
+			healthPort >= 1 &&
+			healthPort <= 65535
+		);
+		// The supervisor's configured startup budget + poll interval govern the loop
+		// (both are injectable — the managed-runtime caller sizes them for image pull
+		// + DB init, and tests drive them deterministically). The manifest healthcheck
+		// supplies WHAT to poll (path + port), not the loop timing.
+		const timeoutMs = this.startupTimeoutMs;
+		const intervalMs = this.pollIntervalMs;
+		const healthUrl = httpGated ? `http://127.0.0.1:${healthPort}${healthcheck!.path}` : "";
+		const deadline = this.now() + timeoutMs;
 		for (;;) {
 			const status = await this._statusFromPs(descriptor, target, services, mode);
-			if (
-				status.status === "running" ||
-				status.status === "unhealthy" ||
-				status.status === "docker-unavailable"
-			) {
+			// A missing Docker install or a Docker-reported unhealthy container is
+			// terminal in both readiness regimes.
+			if (status.status === "docker-unavailable" || status.status === "unhealthy") {
+				return status;
+			}
+			if (httpGated) {
+				let code = 0;
+				try {
+					code = await this.httpProbe(healthUrl, intervalMs);
+				} catch {
+					code = 0;
+				}
+				if (code === 200) {
+					// HTTP health passed — NOW the runtime is genuinely ready.
+					return { ...status, status: "running", message: undefined };
+				}
+				// else: ignore any compose-ps "running" and keep polling the HTTP path.
+			} else if (status.status === "running") {
 				return status;
 			}
 			if (this.now() >= deadline) {
@@ -926,10 +1052,10 @@ export class PackRuntimeSupervisor {
 					mode,
 					composeProject: target.composeProject,
 					services: status.services,
-					message: `runtime did not become healthy within ${this.startupTimeoutMs}ms`,
+					message: `runtime did not become healthy within ${timeoutMs}ms`,
 				};
 			}
-			await this.sleep(this.pollIntervalMs);
+			await this.sleep(intervalMs);
 		}
 	}
 
@@ -1275,7 +1401,7 @@ export class PackRuntimeSupervisor {
 		envFile: string,
 		mode?: string,
 		opts: { reusePersisted?: boolean; configOverlay?: Record<string, unknown> } = {},
-	): Promise<{ manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation }> {
+	): Promise<{ manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation; ctx: RuntimeResolveContext }> {
 		const manifest = this._resolveManifest(contribution);
 		const modeKeys = Object.keys(manifest.modes ?? {});
 		if (mode !== undefined && !manifest.modes?.[mode]) {
@@ -1311,7 +1437,7 @@ export class PackRuntimeSupervisor {
 				`runtime ${contribution.id} invocation failed: ${(err as Error)?.message ?? String(err)}`,
 			);
 		}
-		return { manifest, modeKey, invocation };
+		return { manifest, modeKey, invocation, ctx };
 	}
 
 	private _exec(args: readonly string[]): Promise<DockerExecResult> {

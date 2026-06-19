@@ -340,13 +340,16 @@ describe("real market-packs/hindsight runtime manifest", () => {
 		assert.ok(m.modes?.["managed-postgres"]);
 		assert.ok(m.modes?.["external-postgres"]);
 		// Generated secrets are declared with `generate: true`, not env `secret:` refs.
+		// Only the managed Postgres password is generated; the API needs no separate
+		// session secret (it is not part of the verified data-plane deployment).
 		const keys = (m.secrets ?? []).map((s) => s.key).sort();
-		assert.deepEqual(keys, ["HINDSIGHT_API_SECRET", "HINDSIGHT_DB_PASSWORD"]);
+		assert.deepEqual(keys, ["HINDSIGHT_DB_PASSWORD"]);
 		assert.ok((m.secrets ?? []).every((s) => s.generate === true));
-		// Port specs use `container`, not `target`.
+		// Single host port: the data-plane API on container port 8888 (no web split).
 		const ports = (m.ports ?? []).map((p) => p.key).sort();
-		assert.deepEqual(ports, ["HINDSIGHT_API_PORT", "HINDSIGHT_WEB_PORT"]);
+		assert.deepEqual(ports, ["HINDSIGHT_API_PORT"]);
 		assert.ok((m.ports ?? []).every((p) => typeof p.container === "number"));
+		assert.equal((m.ports ?? []).find((p) => p.key === "HINDSIGHT_API_PORT")?.container, 8888);
 	});
 
 	it("builds managed-postgres: includes db, LLM key from configured secret, DB URL has generated password", () => {
@@ -357,20 +360,19 @@ describe("real market-packs/hindsight runtime manifest", () => {
 			envFile,
 			ctx: {
 				secrets: { HINDSIGHT_API_LLM_API_KEY: "sk-configured" },
-				generated: { HINDSIGHT_API_SECRET: "api-secret", HINDSIGHT_DB_PASSWORD: "gen-db-pw" },
-				ports: { HINDSIGHT_WEB_PORT: 31000, HINDSIGHT_API_PORT: 31001 },
+				generated: { HINDSIGHT_DB_PASSWORD: "gen-db-pw" },
+				ports: { HINDSIGHT_API_PORT: 31001 },
 				vars: { dataDir: "/var/lib/hindsight" },
 			},
 		});
-		assert.deepEqual(inv.services, ["api", "web", "db"], "managed services include db");
+		assert.deepEqual(inv.services, ["api", "db"], "managed services are the data-plane API + Postgres");
 		assert.equal(inv.composeFile, path.join(packRoot, "runtime", "compose.yaml"));
 		assert.equal(inv.env.HINDSIGHT_API_LLM_API_KEY, "sk-configured", "LLM key from configured secret");
-		assert.equal(inv.env.HINDSIGHT_API_SECRET, "api-secret");
 		assert.equal(inv.env.HINDSIGHT_DATA_DIR, "/var/lib/hindsight");
 		// Managed DB URL is assembled from the GENERATED password.
 		assert.equal(
 			inv.env.HINDSIGHT_API_DATABASE_URL,
-			"postgres://hindsight:gen-db-pw@db:5432/hindsight",
+			"postgresql://hindsight:gen-db-pw@db:5432/hindsight",
 			"managed DB URL contains the generated password",
 		);
 		assert.ok(inv.env.HINDSIGHT_API_DATABASE_URL.includes("gen-db-pw"));
@@ -387,11 +389,10 @@ describe("real market-packs/hindsight runtime manifest", () => {
 					HINDSIGHT_API_LLM_API_KEY: "sk-configured",
 					HINDSIGHT_API_DATABASE_URL: "postgres://operator@ext-host:5432/hindsight",
 				},
-				generated: { HINDSIGHT_API_SECRET: "api-secret" },
-				ports: { HINDSIGHT_WEB_PORT: 31000, HINDSIGHT_API_PORT: 31001 },
+				ports: { HINDSIGHT_API_PORT: 31001 },
 			},
 		});
-		assert.deepEqual(inv.services, ["api", "web"], "external omits db");
+		assert.deepEqual(inv.services, ["api"], "external omits db (data-plane API only)");
 		assert.ok(!inv.services.includes("db"));
 		assert.equal(inv.env.HINDSIGHT_API_LLM_API_KEY, "sk-configured", "LLM key from configured secret");
 		assert.equal(
@@ -411,8 +412,7 @@ describe("real market-packs/hindsight runtime manifest", () => {
 					envFile,
 					ctx: {
 						secrets: { HINDSIGHT_API_LLM_API_KEY: "sk", HINDSIGHT_API_DATABASE_URL: "" },
-						generated: { HINDSIGHT_API_SECRET: "x" },
-						ports: { HINDSIGHT_WEB_PORT: 1, HINDSIGHT_API_PORT: 2 },
+						ports: { HINDSIGHT_API_PORT: 2 },
 					},
 				}),
 			/requires env 'HINDSIGHT_API_DATABASE_URL'/,

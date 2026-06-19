@@ -9,8 +9,8 @@
 id: hindsight
 title: Hindsight
 description: >-
-  Managed Hindsight stack — API + web UI backed by Postgres. Supports a fully
-  managed Postgres (bind-mounted data dir) or an external/operator-supplied
+  Managed Hindsight stack — the data-plane API backed by Postgres. Supports a
+  fully managed Postgres (bind-mounted data dir) or an external/operator-supplied
   Postgres via a connection URL.
 
 # P3 — Activation policy. `on-enable` means Docker is started ONLY from an explicit
@@ -18,6 +18,19 @@ description: >-
 # discovery, install, update, and provider/session setup must NEVER `compose up`
 # implicitly. (Default for descriptors that omit this is manual / no auto-start.)
 startPolicy: on-enable
+
+# Startup readiness probe (consumed by PackRuntimeSupervisor — NOT the pure P1
+# parser, which ignores unknown top-level keys). After `compose up -d`, the
+# supervisor polls http://127.0.0.1:<resolved host port for `port`><path> and only
+# reports the runtime `running` once it returns HTTP 200 (or `unhealthy` on
+# timeout). `port` references a declared ports[].key; `path` is the data-plane
+# /health endpoint on the Hindsight API (port 8888).
+healthcheck:
+  service: api
+  port: HINDSIGHT_API_PORT
+  path: /health
+  intervalMs: 2000
+  startupTimeoutMs: 120000
 
 # P3 — Capability disclosure shown on the enable-card before the runtime starts.
 # Images/services, exposed host ports, and the volume path are derived by the
@@ -47,17 +60,13 @@ secrets:
   # Managed Postgres password — generated once and persisted via SecretsStore.
   - key: HINDSIGHT_DB_PASSWORD
     generate: true
-  # Hindsight API session/encryption secret — generated once and persisted.
-  - key: HINDSIGHT_API_SECRET
-    generate: true
 
 # Host ports allocated via bind :0, persisted, and re-validated on boot by the
-# runtime helpers. `container` is the informational container-side port.
+# runtime helpers. `container` is the informational container-side port — the
+# Hindsight data-plane API listens on 8888.
 ports:
-  - key: HINDSIGHT_WEB_PORT
-    container: 3000
   - key: HINDSIGHT_API_PORT
-    container: 8080
+    container: 8888
 
 # Base environment shared by all modes. Each value is exactly one ref kind:
 #   secret:   resolve from a USER-CONFIGURED secret (never generated)
@@ -68,11 +77,6 @@ env:
   # LLM API key MUST come from a configured user secret — not generated.
   HINDSIGHT_API_LLM_API_KEY:
     secret: HINDSIGHT_API_LLM_API_KEY
-  # API session/encryption secret — generated + persisted.
-  HINDSIGHT_API_SECRET:
-    generate: HINDSIGHT_API_SECRET
-  HINDSIGHT_WEB_PORT:
-    port: HINDSIGHT_WEB_PORT
   HINDSIGHT_API_PORT:
     port: HINDSIGHT_API_PORT
 
@@ -85,7 +89,6 @@ modes:
     # directory; the API connects to it over the compose network.
     services:
       - api
-      - web
       - db
     env:
       # Generated + persisted managed Postgres password.
@@ -99,7 +102,7 @@ modes:
       # the in-compose `db` service hostname. The ${HINDSIGHT_DB_PASSWORD}
       # placeholder is resolved from the generated secret of the same key.
       HINDSIGHT_API_DATABASE_URL:
-        value: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
+        value: postgresql://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
 
   external-postgres:
     title: External Postgres
@@ -107,7 +110,6 @@ modes:
     # the externally provided HINDSIGHT_API_DATABASE_URL.
     services:
       - api
-      - web
       - db
     omitServices:
       - db

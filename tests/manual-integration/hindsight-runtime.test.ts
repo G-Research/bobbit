@@ -21,7 +21,8 @@
  *   - Docker is unavailable (no daemon / not installed), or
  *   - HINDSIGHT_API_LLM_API_KEY is unset (the managed API needs an LLM key), or
  *   - the managed stack cannot become healthy within the deadline (e.g. the
- *     digest-pinned ghcr.io/hindsight images are not pullable on this host).
+ *     digest-pinned ghcr.io/vectorize-io/hindsight + pgvector/pgvector images are
+ *     not pullable on this host).
  * So the manual suite stays green everywhere; the test does real work only where a
  * usable managed Hindsight can actually start.
  *
@@ -195,7 +196,7 @@ describe("hindsight managed runtime (real Docker)", () => {
 			const up = await supervisor.start(PACK_ID, RUNTIME_ID, { mode: "managed-postgres", config: startConfig });
 			started = true;
 			if (up.status !== "running") {
-				// The digest-pinned ghcr.io/hindsight images may not be pullable on this
+				// The digest-pinned ghcr.io/vectorize-io/hindsight images may not be pullable on this
 				// host — that is an environment limitation, not a product regression.
 				t.skip(`managed Hindsight did not become healthy (status=${up.status}; ${up.message ?? "images may be unpullable"})`);
 				return;

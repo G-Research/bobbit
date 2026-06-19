@@ -14,7 +14,7 @@
 Bobbit packs can ship **managed runtimes**: a declarative description of a
 containerised service stack (images, env, secrets, ports, launch modes) that
 Bobbit prepares and — in a later phase — runs via Docker Compose on the user's
-behalf. The motivating example is the **Hindsight** stack (API + web UI +
+behalf. The motivating example is the **Hindsight** stack (data-plane API +
 Postgres): a user installs the pack, supplies an LLM API key, and Bobbit brings
 up the whole thing with generated credentials and free host ports, no manual
 `docker compose` wrangling.
@@ -137,11 +137,16 @@ Validation is **tolerant in the same spirit as the loaders**: problems are
 pushed onto an optional `problems[]` string sink and the parse returns `null`
 for an unusable manifest rather than throwing.
 
+> The YAML below is an **illustrative** schema walkthrough that exercises every
+> field kind (multiple ports, a second generated secret, a `value` ref,
+> `omitServices`). The **actual shipped** `market-packs/hindsight` descriptor is
+> trimmer — see [The Hindsight reference pack](#the-hindsight-reference-pack).
+
 ```yaml
 id: hindsight                       # REQUIRED. /^[a-z0-9][a-z0-9_.-]*$/i
 title: Hindsight                    # OPTIONAL.
 description: >-                     # OPTIONAL.
-  Managed Hindsight stack — API + web UI backed by Postgres.
+  Managed Hindsight stack — data-plane API backed by Postgres.
 
 composeFile: ../runtime/compose.yaml   # REQUIRED. Pack-relative; see containment below.
 
@@ -344,17 +349,22 @@ The result carries `runtimeId`, `mode`, the resolved absolute `composeFile`, the
 
 ## The Hindsight reference pack
 
-`market-packs/hindsight/` is the first managed-runtime pack and exercises every
-schema feature. Its compose template (`runtime/compose.yaml`) is **static and
-digest-pinned** (`image@sha256:<64 hex>` for `api`, `web`, and `db`) for
-reproducibility, and is **never executed in P1** — it is only ever selected from
-and resolved as a path.
+`market-packs/hindsight/` is the first managed-runtime pack. Its compose template
+(`runtime/compose.yaml`) is **static and digest-pinned**
+(`name:tag@sha256:<64 hex>`) for reproducibility, and is **never executed in P1**
+— it is only ever selected from and resolved as a path. The images are the
+**verified upstream coordinates**: the data-plane API
+`ghcr.io/vectorize-io/hindsight` and the pgvector-enabled Postgres
+`pgvector/pgvector:pg18`. Managed Bobbit integration only needs the data-plane
+API (container port **8888**) plus Postgres — there is **no** separate
+web/control-plane container.
 
-The descriptor declares two **generated** secrets (`HINDSIGHT_DB_PASSWORD`,
-`HINDSIGHT_API_SECRET`), two **ports** (`HINDSIGHT_WEB_PORT` → container 3000,
-`HINDSIGHT_API_PORT` → container 8080), and wires the LLM API key from a
+The descriptor declares one **generated** secret (`HINDSIGHT_DB_PASSWORD`), one
+**port** (`HINDSIGHT_API_PORT` → container 8888), and wires the LLM API key from a
 **user-configured** secret via `HINDSIGHT_API_LLM_API_KEY: { secret: ... }` —
-the only user-supplied secret; everything else is generated.
+the only user-supplied secret; the DB password is generated. It also declares a
+`healthcheck` (`path: /health`, `port: HINDSIGHT_API_PORT`) that the supervisor
+polls over HTTP before reporting the runtime `running`.
 
 ### Managed vs external Postgres
 
@@ -440,9 +450,9 @@ the first request's promise (which would silently ignore the second mode), while
 mode-agnostic `ensureRuntime` callers pass the same (usually `undefined`) mode
 and still share one key.
 
-**Startup health polling.** After `up -d`, `start` polls `compose ps` every
-`pollIntervalMs` (default 1 s) until services report ready or `startupTimeoutMs`
-(default 60 s) elapses. Service rows are mapped to a single state by
+**Startup health polling.** After `up -d`, `start` polls every `pollIntervalMs`
+(default 1 s) until the runtime is ready or `startupTimeoutMs` (default 60 s)
+elapses. Each poll first reads `compose ps`, mapped to a single state by
 `mapServicesToState`:
 
 - any service `unhealthy` → `unhealthy`
@@ -450,9 +460,23 @@ and still share one key.
 - any service `running`/`created`/`restarting`/`starting` → `starting`
 - otherwise → `stopped`
 
-If the timeout is hit while still `starting`, the result is `unhealthy` with a
-`"runtime did not become healthy within <N>ms"` message — startup never blocks
-forever.
+A `docker-unavailable` (ENOENT) or a Docker-reported `unhealthy` short-circuits
+the loop immediately.
+
+**HTTP readiness gate.** When the manifest declares a `healthcheck`
+(`{ service?, port, path }`, where `port` names a declared `ports[].key`),
+`start`/`ensureRuntime` do **not** report `running` off a `compose ps` "running"
+alone — a container is often up well before its HTTP server accepts requests. The
+supervisor additionally polls
+`http://127.0.0.1:<resolved host port for `port`><path>` (via an injectable
+`httpProbe` seam, defaulting to a `fetch` GET) and only completes as `running`
+once it returns **HTTP 200**. Runtimes with no declared `healthcheck` keep the
+`compose ps`-only readiness behaviour. `status()` always reflects the
+`compose ps` mapping regardless.
+
+If the timeout is hit while still `starting` (or HTTP health never returns 200),
+the result is `unhealthy` with a `"runtime did not become healthy within <N>ms"`
+message — startup never blocks forever.
 
 ### Status states
 
@@ -779,9 +803,8 @@ runtime's env (`resolveRuntimeStartPlan`):
 Both, plus `apiKey`, are **secrets** and are redacted on the `config` GET surface
 (`redactConfig` in `market-packs/hindsight/src/shared.ts`): the raw value is never
 echoed and collapses to a boolean — `apiKeySet`, `externalDatabaseUrlSet`,
-`llmApiKeySet`. The managed Postgres password (`HINDSIGHT_DB_PASSWORD`) and the
-API session secret (`HINDSIGHT_API_SECRET`) are **generated and persisted** by
-the supervisor, never user-supplied.
+`llmApiKeySet`. The managed Postgres password (`HINDSIGHT_DB_PASSWORD`) is
+**generated and persisted** by the supervisor, never user-supplied.
 
 The **data directory** (`dataDir`, default `~/.hindsight`) and the **allocated
 host ports** are *disclosed*, not secret — they are surfaced on the consent card

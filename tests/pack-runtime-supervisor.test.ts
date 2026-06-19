@@ -27,6 +27,7 @@ import {
 	PackRuntimeDockerUnavailableError,
 	FilePortStore,
 	readRuntimeStartPolicy,
+	readRuntimeHealthcheck,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
 	packRuntimePersistKey,
@@ -351,6 +352,119 @@ describe("PackRuntimeSupervisor.start / ensureRuntime", () => {
 		assert.equal(a.status, "running");
 		assert.equal(b.status, "running");
 		assert.equal(docker.countSub("up"), 1);
+	});
+});
+
+// ── HTTP startup readiness gate (declared healthcheck) ───────────────────────
+//
+// When a runtime declares an HTTP `healthcheck`, startup readiness MUST poll the
+// declared path at http://127.0.0.1:<resolved host port><path> until HTTP 200.
+// A compose-ps "running" alone must NOT complete start as `running` — the gap
+// these pin is exactly the supervisor declaring `running` off `compose ps` before
+// the data-plane API actually accepts requests.
+
+/** A runtime declaring an HTTP `/health` readiness probe on an allocated port. */
+function makeHealthContribution(hc: Record<string, unknown> = {}): RuntimeContribution {
+	const packRoot = path.join(tmp, "packs", PACK_ID);
+	const sourceFile = path.join(packRoot, "runtimes", `${RUNTIME_ID}.yaml`);
+	return {
+		id: RUNTIME_ID,
+		title: "Hindsight API",
+		listName: RUNTIME_ID,
+		sourceFile,
+		packRoot,
+		manifest: {
+			id: RUNTIME_ID,
+			composeFile: "compose.yaml",
+			healthcheck: { service: "api", port: "API_PORT", path: "/health", intervalMs: 5, startupTimeoutMs: 60, ...hc },
+			ports: [{ key: "API_PORT", container: 8888 }],
+			env: { API_PORT: { port: "API_PORT" } },
+			modes: { default: { services: ["api"] } },
+		},
+	};
+}
+
+describe("PackRuntimeSupervisor HTTP startup readiness", () => {
+	it("polls the declared HTTP health path and reports running only on 200", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		let probes = 0;
+		const urls: string[] = [];
+		const httpProbe = async (url: string) => {
+			urls.push(url);
+			probes++;
+			return probes >= 2 ? 200 : 0; // not ready first poll, ready second
+		};
+		let t = 0;
+		const sup = makeSupervisor(docker.executor, {
+			contribution: makeHealthContribution(),
+			httpProbe,
+			now: () => t,
+			sleep: async (ms: number) => { t += ms; },
+			startupTimeoutMs: 1000,
+			pollIntervalMs: 5,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "running");
+		assert.ok(probes >= 2, "must keep polling until the HTTP health path returns 200");
+		// The probe URL targets 127.0.0.1 on the RESOLVED host port + declared path.
+		assert.match(urls[0], /^http:\/\/127\.0\.0\.1:\d+\/health$/);
+	});
+
+	it("does NOT report running off compose ps alone — never-200 health times out to unhealthy", async () => {
+		// compose ps reports a healthy/running container the WHOLE time, but the HTTP
+		// health path never returns 200. The previous ps-only gap would have reported
+		// `running`; the fix must hold at `starting` and time out to `unhealthy`.
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		let probes = 0;
+		const httpProbe = async () => { probes++; return 503; };
+		let t = 0;
+		const sup = makeSupervisor(docker.executor, {
+			contribution: makeHealthContribution(),
+			httpProbe,
+			now: () => t,
+			sleep: async (ms: number) => { t += ms; },
+			startupTimeoutMs: 30,
+			pollIntervalMs: 5,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "unhealthy");
+		assert.match(st.message ?? "", /did not become healthy/);
+		assert.ok(probes >= 1, "the HTTP health path must actually be probed");
+	});
+
+	it("a Docker-reported unhealthy container short-circuits before the HTTP probe", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"unhealthy"}'),
+		});
+		let probes = 0;
+		const httpProbe = async () => { probes++; return 200; };
+		const sup = makeSupervisor(docker.executor, {
+			contribution: makeHealthContribution(),
+			httpProbe,
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "unhealthy");
+		assert.equal(probes, 0, "a Docker-unhealthy container must short-circuit before any HTTP probe");
+	});
+
+	it("readRuntimeHealthcheck parses a valid block and rejects malformed ones", () => {
+		assert.deepEqual(
+			readRuntimeHealthcheck({ healthcheck: { service: "api", port: "API_PORT", path: "/health", intervalMs: 2000, startupTimeoutMs: 120000 } }),
+			{ service: "api", port: "API_PORT", path: "/health", intervalMs: 2000, startupTimeoutMs: 120000 },
+		);
+		assert.equal(readRuntimeHealthcheck(undefined), null);
+		assert.equal(readRuntimeHealthcheck({}), null);
+		assert.equal(readRuntimeHealthcheck({ healthcheck: { path: "/health" } }), null, "missing port → null");
+		assert.equal(readRuntimeHealthcheck({ healthcheck: { port: "API_PORT" } }), null, "missing path → null");
 	});
 });
 

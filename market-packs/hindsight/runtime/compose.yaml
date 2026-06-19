@@ -1,47 +1,51 @@
 # Hindsight runtime compose template (P1 — static, digest-pinned).
 #
 # This is a STATIC template consumed by the runtime manifest layer. It is NEVER
-# executed at this phase. All images are digest-pinned (image@sha256:<64 hex>)
-# for reproducibility. The `db` service is defined here so helpers can SELECT
-# services per mode: `managed-postgres` includes `db`; `external-postgres` omits
-# it and supplies HINDSIGHT_API_DATABASE_URL instead.
+# executed at this phase. The images are the VERIFIED upstream Hindsight
+# data-plane coordinates (see /Users/aj/Documents/dev/hindsight
+# docker/docker-compose/external-pg/docker-compose.yaml): the first-party API
+# image `ghcr.io/vectorize-io/hindsight` and the pgvector-enabled Postgres image
+# `pgvector/pgvector:pg18`. Both carry a `name:tag@sha256:<digest>` pin so the
+# tag stays human-readable while the digest makes the pull reproducible.
+#
+# Managed Bobbit integration only needs the data-plane API (port 8888) plus
+# Postgres — there is NO separate web/control-plane container. The `db` service
+# is defined here so helpers can SELECT services per mode: `managed-postgres`
+# includes `db`; `external-postgres` omits it and supplies
+# HINDSIGHT_API_DATABASE_URL instead.
 name: hindsight
 
 services:
+  # Hindsight data-plane API. Exposes the /v1/{ns}/banks/{bank}/… contract the
+  # client/tools talk to, plus the /health readiness probe the supervisor polls.
   api:
-    image: ghcr.io/hindsight/api@sha256:fc49bf69e5364d0a527afd38b2a7a94bb8a4f7f138855182a876791b523fb011
+    image: ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
     restart: unless-stopped
     environment:
       HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY}
-      HINDSIGHT_API_SECRET: ${HINDSIGHT_API_SECRET}
       HINDSIGHT_API_DATABASE_URL: ${HINDSIGHT_API_DATABASE_URL}
-      HINDSIGHT_API_PORT: ${HINDSIGHT_API_PORT:-8080}
     ports:
-      - "127.0.0.1:${HINDSIGHT_API_PORT:-8080}:8080"
+      # Data-plane API port is 8888 (verified upstream). Host port is allocated
+      # by the runtime helpers and rendered as HINDSIGHT_API_PORT.
+      - "127.0.0.1:${HINDSIGHT_API_PORT:-8888}:8888"
 
-  web:
-    image: ghcr.io/hindsight/web@sha256:25584622a6b41957a4903748f4fcf6743a6b2d424c8629f96639d48d8c715a77
-    restart: unless-stopped
-    depends_on:
-      - api
-    environment:
-      HINDSIGHT_WEB_PORT: ${HINDSIGHT_WEB_PORT:-3000}
-      HINDSIGHT_API_PORT: ${HINDSIGHT_API_PORT:-8080}
-    ports:
-      - "127.0.0.1:${HINDSIGHT_WEB_PORT:-3000}:3000"
-
-  # Managed Postgres. Selected only in `managed-postgres` mode. The data
-  # directory is bind-mounted from the host. The path comes from the rendered
-  # env var HINDSIGHT_DATA_DIR (the manifest resolves it from the provider
-  # `dataDir` config, defaulting to ~/.hindsight); compose interpolates THAT
-  # rendered key — NOT the raw `dataDir` config field, which is never written to
-  # the env file — so a configured custom data dir is actually honoured here.
+  # Managed Postgres. Selected only in `managed-postgres` mode. The image is the
+  # pgvector-enabled Postgres 18 build Hindsight requires (the vector extension
+  # is pre-installed) — NOT plain postgres. PGDATA is pinned to the bind-mount
+  # path so the data lands on the visible host directory regardless of the
+  # image's default data layout. The data directory is bind-mounted from the
+  # host; the path comes from the rendered env var HINDSIGHT_DATA_DIR (the
+  # manifest resolves it from the provider `dataDir` config, defaulting to
+  # ~/.hindsight); compose interpolates THAT rendered key — NOT the raw `dataDir`
+  # config field, which is never written to the env file — so a configured custom
+  # data dir is actually honoured here.
   db:
-    image: docker.io/library/postgres@sha256:3b2c8f6c262a2aa333b3b750e5a821aeb6b1a14dd57189b9f172d903ecdaec27
+    image: pgvector/pgvector:pg18@sha256:c8a919765f2ef63681329fa21021b830cd4d79d1165bdca730dd016014e4da84
     restart: unless-stopped
     environment:
       POSTGRES_USER: hindsight
       POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD}
       POSTGRES_DB: hindsight
+      PGDATA: /var/lib/postgresql/data
     volumes:
       - "${HINDSIGHT_DATA_DIR:-~/.hindsight}/postgres:/var/lib/postgresql/data"
