@@ -1,15 +1,17 @@
-# Token & Cost Efficiency — audit, findings, and remediation plan
+# Time & Token-Cost Efficiency — audit, findings, and remediation plan
 
 Status: **investigation complete, remediation not started** · Audited: 2026-06-10 against
-master @ `4e7fce1f` and live state on the primary dev machine. Workstream **CE** in
+master @ `4e7fce1f`; **latency axis + architecture root-cause added 2026-06-19** (§9, from a
+second 326-session snapshot — shapes corroborate §1). Workstream **CE** in
 [fable-program-execution-plan.md](fable-program-execution-plan.md) (program sequencing +
 master checklist).
 Companion docs: [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md)
 (several goals here ride its pack surfaces), [comms-stack/04-current-state-and-backlog.md](comms-stack/04-current-state-and-backlog.md)
 (overlapping retry findings).
 
-**The question this answers:** Bobbit *feels* more expensive per unit of work than Claude Code
-or hermes-agent. Is it, why, and what do we change?
+**The question this answers:** Bobbit *feels* more expensive **and slower** per unit of work
+than Claude Code or hermes-agent. Is it, why, and what do we change? (Cost: §1–§7. Wall-clock
+latency and the inherent architectural root cause: **§9**.)
 
 **The one-paragraph answer:** Prompt caching is working (only 0.008% of input tokens were
 uncached across 246 sessions), so the spend is not a caching bug. The spend is
@@ -218,6 +220,23 @@ bounded retry attempts (`verification-harness.ts:~2550`). Each reviewer re-inges
 resident stack even when the reviewed artifact is a small diff. No diff-scoped context, no
 cheap-model default, no cap on tool-call rounds.
 
+**Refinement (2026-06-19): verifier cache economics are *inverted* — write-bound, not
+read-bound.** §1.1's headline ("the bill is cache reads") is a global average that does **not**
+hold for the `llm-review` class. Measured on the 2026-06-19 snapshot (189 verifier sessions),
+cache *writes* are 40–48% of each verifier's (write+read) tokens, vs a 3% global write/read
+ratio. Converting to base-input-equivalent units (write ×1.25, read ×0.1, fresh ×1.0):
+
+| Class | write share | read share | fresh share |
+|---|---|---|---|
+| Verifiers (`llm-review`, n=189) | **34%** | 51% | 15% |
+| Work sessions (n=144) | 23% | 68% | 9% |
+
+The cause is structural (see §9): each verifier is a **separate, short-lived OS process** that
+writes the full resident stack *cold* and dies before the cache write amortises — it can never
+inherit the lead's warm cache. **Remediation implication:** for verifiers the dominant lever is
+cold-**write** bytes (shrink the resident context per spawn — CE-G8.2) and/or warm-cache reuse
+(CE-G8.4), **not** request-count reduction as CE-G3.3 frames it. Re-scope CE-G3.3 accordingly.
+
 ### F6 — Images as base64 in context (MED overall, EXTREME per-incident, difficulty S)
 One `generate_image` result = 2.4–2.7MB of base64 in the transcript and in context; 73% of a
 $10.75 session was image bytes. Results should be written to disk and returned by reference
@@ -321,6 +340,10 @@ Hand-off format matches `extension-platform-implementation-plan.md`: each sub-go
 independently mergeable, master-green, with tests and acceptance criteria. Lanes: G0 and G1 are
 parallel day-one lanes; G2/G3 depend on G1.0's re-verification; G4/G5 are BENCH-GATED on G0.3.
 
+**Latency workstream (CE-G8)** lives in §9.5 — it targets *wall-clock*, not just dollars
+(risk-proportional gates, slim sub-agent context, warm-cache reuse, latency instrumentation,
+"solo fast" mode). CE-G8.1/G8.3 are the quick wins and can start day-one alongside G0/G1.
+
 **Conflict hotspots:** `session-manager.ts` and `session-setup.ts` are also touched by the
 comms-stack backlog (CS-R*) — coordinate merge order; `verification-harness.ts` is touched by
 CE-G3.3 and CE-G5.2 (sequence them).
@@ -418,6 +441,14 @@ Adopt Hermes' model, scoped to whatever 0.79.x doesn't already do:
 - Implementation seam: prefer the SDK layer (fork patch — it owns tool execution) with a
   Bobbit-side fallback in the tool wrappers; decide per CE-G1.0's report. Spill files are
   session-scoped and cleaned with session deletion.
+- **Hermes' exact constants** (source: `hermes-agent/tools/budget_config.py`, verified
+  2026-06-19) — adopt as starting defaults: `DEFAULT_RESULT_SIZE_CHARS = 100_000` (per-result),
+  `DEFAULT_TURN_BUDGET_CHARS = 200_000` (per-turn aggregate), `DEFAULT_PREVIEW_SIZE_CHARS = 1_500`
+  (inline snippet after spill). Resolution order: `pinned > tool_overrides > registry per-tool >
+  default`. **Non-obvious gotcha to copy:** Hermes *pins* `read_file = inf` in `PINNED_THRESHOLDS`
+  — a read tool that itself spills creates an infinite persist→read→persist loop, so the read path
+  must be exempt from the budget (caps belong on `read` via offset/limit guidance — CE-G7.1 — not
+  via spill).
 - **Tests (write RED first):** unit — cap/preview/spill matrix per layer, path cleanup; E2E —
   oversized fixture command produces preview + readable spill file; pin that previews always
   carry the path (no silent truncation).
@@ -615,3 +646,200 @@ jq -s '[.[] | select(.type=="message" and .message.role=="toolResult") |
 6. **Data drift** — every number in §1 is a 2026-06-10 snapshot of one machine spanning
    multiple projects and weeks of model-price changes; CE-G0 exists so this document never
    needs to be hand-reproduced again.
+
+---
+
+## §9 Latency axis & the process-per-agent root cause *(added 2026-06-19)*
+
+§1–§8 optimise **dollars**. The owner's lived complaint is also **wall-clock**: "goals take a
+*really* long time; Claude Code felt a lot faster." Cost and time are correlated but not the
+same — a $1 verifier still makes you wait three minutes — so latency needs its own axis, and the
+investigation surfaced an **inherent architectural root cause** that several §3 symptoms
+(F2 resident floor, F5 verifier economics) trace back to. All numbers here are a 2026-06-19
+snapshot of `.bobbit/state` (326 sessions, $1,069, 1.16B cache-read) on the primary dev machine;
+the *shapes* corroborate §1's 2026-06-10 snapshot. Repro recipes in §9.6.
+
+### 9.1 The surprise: per-request latency is *not* where Bobbit loses
+
+| Metric | Bobbit | Claude Code | Source |
+|---|---|---|---|
+| Context tokens per API request (median) | ~18k–55k resident + history | **377,590** | CC is *larger* and still fast |
+| Per-API-round latency (median / mean / p90) | comparable per round | **4.4s / 15.1s / 26.5s** | CC `~/.claude/projects/*.jsonl` timestamps |
+
+Claude Code runs **bigger** contexts per request and still turns each round in ~4.4s median. So
+Bobbit is **not** slow because individual requests are heavy. The wall-clock goes somewhere
+structural — the orchestration model inserts machine work *between you and "done"* that, in
+Claude Code, either doesn't happen or is you doing it instantly in real time.
+
+### 9.2 Where the wall-clock actually goes (measured)
+
+| Signal | Value | Why it's wall-clock you wait through |
+|---|---|---|
+| Verifier (`llm-review`) sessions vs work sessions | **189 vs 141 — 1.34 per unit of work** | Each gated step spawns a verifier that runs *after* the work, on the critical path |
+| Verifier session duration | median **2.8 min**, max **9.9 min** (10h total, 175 traced) | `review-findings` blocks `team_complete`; serialized, not overlapped with work |
+| Work session duration | median **20.5 min** | multi-turn, multi-tool |
+| Per-spawn startup floor | process boot + N MCP stdio spawns + optional `docker exec` + role/AGENTS/tool-doc load | paid *before the first token*, every spawn |
+| Nudge/backoff dead time | 5s worker-idle debounce, 5-min stuck-quiet, 30-min long-streaming suppression, exp backoff (cap 12h) | literal inserted sleeps in the coordination loop (`team-manager.ts`) |
+
+Claude Code has none of these: you are the orchestrator and reviewer, in real time, so there is
+zero machine wall-clock between turns. **The slowness is the price of unattended autonomy +
+automated quality gates** — the fix is making them *proportional to risk*, not removing them.
+
+### 9.3 Root cause: process-per-agent (inherent to the gateway architecture)
+
+Bobbit's deepest inherent tax is that **every agent — lead, worker, and each of the 189
+verifiers — is a separate OS process.** `rpc-bridge.ts` does
+`spawn(process.execPath, [pi-cli, ...])` per session; each session connects its own **MCP stdio
+child processes** (`mcp-client.ts::_connectStdio`); sandboxed goals add a `docker exec` into a
+pool container on top (`rpc-bridge.ts:~658`).
+
+Claude Code does the opposite — sub-agents are **in-process forks** (`tools/AgentTool/runAgent.ts`
+is an async generator; `utils/swarm/spawnInProcess.js`) that **inherit the parent's already-warm
+context** via `forkContextMessages`, and it *deliberately* trims per-spawn context: the
+read-only Explore/Plan agents drop CLAUDE.md — source comment: *"Dropping claudeMd here saves
+~5–15 Gtok/week across 34M+ Explore spawns"* (`runAgent.ts:~387`). Hermes likewise runs tools
+in-process against one resident context.
+
+This single choice explains the symptoms:
+- **Verifier write-thrash (F5 refinement).** A separate process has its own prompt-cache
+  lifecycle, so it *cannot* inherit the lead's warm cache — it writes the full resident stack
+  **cold** and dies before the write amortises. Hence 34% of verifier cost is cache *writes*
+  (vs 3% global).
+- **The per-agent latency floor (9.2).** Process boot + MCP stdio handshakes + optional
+  container exec + role/AGENTS/tool-doc load happen before the model emits a token, paid 189×
+  for verifiers alone.
+- **Why the resident-prompt floor (F2) is so expensive.** It isn't just resident once — it's
+  re-written cold on every short-lived spawn.
+
+This is not a quick fix (it fights the gateway/session model), but naming it reframes the
+priority order: **shrink what each cold spawn must write, and reuse warm cache where possible**,
+before chasing request-count.
+
+### 9.4 New findings (continuing the §3 F-numbering)
+
+#### F13 — Verification on the critical path with no risk-proportionality (HIGH for latency, difficulty M)
+`review-findings` is server-enforced before `team_complete`; a 2-line tooltip tweak triggers the
+same full-context ~3-min verifier as a 500-line refactor. No diff-size threshold, no "skip gate
+under N lines", no fast-path. This is the single biggest *wall-clock* tax. (Cost cousin: F5.)
+
+#### F14 — Cold-spawn write tax from process-per-agent (HIGH for cost+latency, difficulty L, **inherent**)
+§9.3. Short-lived spawns (verifiers, small worker tasks) never amortise their cold cache write
+and pay a process+MCP+container startup floor. Inherent to the architecture; mitigable by
+context-diet (F15) now and warm-cache reuse (CE-G8.4) later.
+
+#### F15 — No slim sub-agent context profile (MED-HIGH, difficulty S–M)
+Every spawned agent inherits the full AGENTS.md cascade + full role, including read-only
+verifiers that never commit, lint, or open PRs and so cannot act on most of it. Claude Code's
+`omitClaudeMd` for read-only sub-agents is the proven pattern. **This is the highest-leverage,
+lowest-risk quick win** — attacks F5's 34% write share with zero behaviour risk.
+
+#### F16 — Coordination dead-time is invisible (MED for latency, difficulty S–M)
+Nudge debounce/backoff and the per-spawn startup floor are pure wall-clock that **no token or
+cost metric captures**, so CE-G0's ledger (dollars/tokens) would still not surface them. Latency
+needs its own instrumentation dimension (wall-clock per turn, queue/startup/verify waits).
+
+#### F17 — No "solo fast" execution mode (MED, difficulty S)
+Every goal pays the full team+gate orchestration even when the user would have just used a
+single interactive agent. There is no lightweight single-agent, no-gate path for low-risk work —
+so the cases most comparable to Claude Code pay the most overhead relative to their value.
+
+### 9.5 Remediation — latency workstream (CE-G8)
+
+Hand-off format matches §6. Lane independent of G0–G7 except where noted. **CE-G8.1 and CE-G8.3
+are the quick wins; do them first.** Behaviour-affecting items are BENCH-GATED on CE-G0.3 plus a
+**wall-clock** comparison (extend the bench report with `wallClock`, `startupMs`, `verifyMs`).
+
+#### CE-G8.1 Risk-proportional verification gates (M) **[BENCH-GATED]** — *biggest latency win*
+- Add a per-gate **fast-path**: skip or downgrade `review-findings` when the change under review
+  is below a configurable threshold (default ~30 changed lines, no non-doc/test files,
+  green `npm run check`) — config-overridable per project/workflow; never silently skip a gate a
+  workflow marks `required: strict`.
+- Where not skipped, run a **lighter review** (cheap model + diff-scoped context, ties to
+  CE-G3.3/CE-G5.2) instead of the full verifier.
+- **Tests:** unit — threshold/skip decision table (lines, file classes, strictness); E2E — a
+  sub-threshold gated step completes without spawning a full verifier; BENCH — review task
+  quality holds on the suite while median goal wall-clock drops.
+
+#### CE-G8.2 Verifier cold-write reduction (S–M) — *attacks F5's 34% write share*
+- Pair with CE-G3.3/F15: verifiers spawn with a **diff-scoped, slim** context (artifact +
+  acceptance criteria + slim reviewer role), measured by cache-**write** tokens per verifier,
+  not just rounds. Target: halve verifier write share.
+- **Tests:** unit — verifier context assembly excludes the AGENTS.md cascade by default; E2E —
+  spawned verifier's resident snapshot under a byte budget; **measure cacheWrite/verifier** in
+  the CE-G0.1 ledger before/after.
+
+#### CE-G8.3 Slim sub-agent / read-only context profile (S–M) — *quick win, zero behaviour risk*
+- Adopt Claude Code's `omitClaudeMd` pattern: read-only roles (verifiers, explorers, reviewers)
+  get a context profile that **drops the project AGENTS.md cascade and commit/PR/lint rules**
+  they cannot act on. Resolution lives where role context is assembled (`session-setup.ts`).
+- **Tests:** unit — profile resolution per role (read-only ⇒ no cascade); E2E — a read-only
+  spawn's prompt sections omit AGENTS.md; pin a per-profile resident-size budget (like the
+  tool-description budget) so it can't silently regrow.
+
+#### CE-G8.4 Warm-cache reuse for short-lived spawns (L, **inherent-architecture**, research-first)
+- Investigate letting a verifier/sub-agent **reuse the parent's warm cache** instead of
+  cold-spawning a fresh process: options are (a) an in-process review path for non-sandboxed
+  goals, (b) a pooled warm agent process keyed by resident-prefix hash, (c) SDK/fork support for
+  prefix sharing across processes. Decide feasibility against the gateway model in a spike;
+  this is the real ceiling on F14 but must not regress sandbox isolation.
+- **Tests:** spike + design note appended here before any code; if adopted, E2E that a reused
+  spawn records ~0 cold cache-write for the shared prefix.
+
+#### CE-G8.5 Latency instrumentation (S–M) — *extends CE-G0.1, closes F16*
+- Add wall-clock dimensions to the CE-G0.1 ledger: per-turn `wallClockMs`, and per-spawn
+  `startupMs` (spawn→first-token), `queueMs` (enqueue→start), `verifyMs` (gate signal→verdict).
+  Surface a "time breakdown" alongside the cost lens (CE-G0.2): work vs coordination vs
+  verification vs startup.
+- Extend the bench report (CE-G0.3) with `wallClock`, `startupMs`, `verifyMs` so CE-G8.1’s
+  BENCH gate can assert *time* not just dollars.
+- **Tests:** unit — timing capture + attribution; API E2E — rollup math over a fixture ledger.
+
+#### CE-G8.6 "Solo fast" goal mode (S) — *closes F17*
+- A goal option that runs a **single agent, no team, no gates** (or design-doc only) for
+  low-risk work — the Claude-Code-equivalent path — selectable at goal creation, with the
+  trade-off (no automated verification) made explicit in the UI.
+- **Tests:** unit — mode disables team/gate machinery; E2E — a solo-fast goal completes without
+  spawning verifiers; browser E2E for the creation toggle + persisted choice.
+
+### Expected impact (latency — estimates; the bench harness replaces these)
+
+| Goal | Axis | Est. effect |
+|---|---|---|
+| CE-G8.1 | wall-clock | removes ~1.34× × ~3 min serialized verify from small goals — the dominant tax |
+| CE-G8.2/G8.3 | cost+wall-clock | halves verifier cache-**write** share + cuts per-spawn load; zero behaviour risk (G8.3) |
+| CE-G8.4 | cost+wall-clock | eliminates cold-write for reused prefixes (ceiling fix; highest risk) |
+| CE-G8.5 | visibility | makes coordination/startup dead-time a dashboard number (blocker for tuning) |
+| CE-G8.6 | wall-clock | low-risk goals skip orchestration entirely |
+
+### 9.6 Reproduction recipes (latency)
+
+```bash
+# Verifier vs work session counts + cache-write share (the inverted economics)
+python3 - <<'PY'
+import json,statistics
+d=json.load(open(".bobbit/state/session-costs.json"))
+for lbl,pred in [("VERIFIER",lambda k:k.startswith("llm-review")),("WORK",lambda k:not k.startswith("llm-review"))]:
+    rows=[v for k,v in d.items() if pred(k)]
+    cw=sum(v.get("cacheWriteTokens",0) for v in rows); cr=sum(v.get("cacheReadTokens",0) for v in rows)
+    print(f"{lbl}: n={len(rows)} write/read={cw/max(1,cr):.3f}")
+PY
+
+# Bobbit verifier wall-clock (sessionSetup→Shutdown) from context traces
+for f in .bobbit/state/session-context-trace/llm-review-*.jsonl; do
+  python3 -c 'import json,sys; t=[json.loads(l)["ts"] for l in open(sys.argv[1])]; print((max(t)-min(t))/1000)' "$f"
+done | sort -n | awk '{a[NR]=$1} END{print "median(s)=" a[int(NR/2)], "max(s)=" a[NR]}'
+
+# Claude Code per-API-round latency baseline
+python3 - <<'PY'
+import json,glob,datetime,statistics
+def ms(t):
+    try: return datetime.datetime.fromisoformat(t.replace("Z","+00:00")).timestamp()*1000
+    except: return None
+gaps=[]
+for f in glob.glob("~/.claude/projects/*/*.jsonl".replace("~",__import__("os").path.expanduser("~"))):
+    a=[ms(json.loads(l).get("timestamp")) for l in open(f) if '"assistant"' in l]
+    a=[x for x in a if x]
+    gaps+=[ (y-x)/1000 for x,y in zip(a,a[1:]) if 0<(y-x)/1000<600 ]
+if gaps: print(f"CC per-round gap: median {statistics.median(gaps):.1f}s p90 {sorted(gaps)[int(len(gaps)*0.9)]:.1f}s")
+PY
+```

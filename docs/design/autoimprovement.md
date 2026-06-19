@@ -309,7 +309,7 @@ recorded; regression triggers demotion + revert proposal. Acceptance: planted re
 
 Cross-references: [mission-control.md](mission-control.md) (Improver/Archivist staff, flight
 recorder, inbox digests) · [harness-gap-analysis.md](harness-gap-analysis.md) G1/G2/G11 ·
-[token-cost-efficiency.md](token-cost-efficiency.md) (cost ledger CE-G0.1, aux summarizer) ·
+[time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) (cost ledger CE-G0.1, aux summarizer) ·
 [skill-ux-and-autonomous-activation.md](skill-ux-and-autonomous-activation.md) ·
 [editable-proposals.md](editable-proposals.md) · [human-signoff-gates.md](human-signoff-gates.md).
 Execution tracking: [fable-program-execution-plan.md](fable-program-execution-plan.md).

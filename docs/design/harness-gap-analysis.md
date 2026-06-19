@@ -2,7 +2,7 @@
 
 Status: research complete; roadmap not started. Feature/UX gaps only — **cost/token
 efficiency is explicitly out of scope** here because
-[token-cost-efficiency.md](token-cost-efficiency.md) §4 already covers the Claude Code /
+[time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) §4 already covers the Claude Code /
 Hermes comparison on that axis.
 
 > **Execution authority** for the §5 quick wins (R2–R6, R9):
@@ -106,7 +106,7 @@ Disposition: the *retrieval* half is the extension platform's `session-memory` r
 profile**: a global `USER.md`-equivalent (server-scoped, ~500 tokens, agent-managed via a
 small tool, injected as a stable prompt section through the existing `PromptParts` assembly
 in `src/server/agent/system-prompt.ts`). Frozen-snapshot semantics preserve the cache prefix
-(matches Bobbit's existing cache discipline per token-cost-efficiency §1). The *writing* half
+(matches Bobbit's existing cache discipline per time-and-token-cost-efficiency §1). The *writing* half
 (when to save) belongs to the autoimprovement loop (→ autoimprovement.md §loop, "observe").
 
 ### G2 — Self-improving skills (HIGH value; the subject of its own doc)

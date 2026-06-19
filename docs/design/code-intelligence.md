@@ -11,7 +11,7 @@ Status: design accepted, not started. Workstream **CI** in
 > swapping any component.
 
 **The problem:** Bobbit agents are "an LLM with grep". 56% of tool calls are bash
-(token-cost-efficiency.md §3), discovery is multi-round grep cascades, edits are text
+(time-and-token-cost-efficiency.md §3), discovery is multi-round grep cascades, edits are text
 patches whose correctness is only discovered at gate time, and nothing understands symbols,
 types, or structure. Peers are converging on the same answer (Serena, Octocode, Aider's
 repo-map, graphify): pair fast lexical search with **structural (AST), semantic (LSP),
@@ -180,7 +180,7 @@ artifacts for absolute paths — the graphify lesson, enforced.
 
 Cross-references: [code-intelligence-alternatives.md](code-intelligence-alternatives.md)
 (alternatives, citations, research record),
-[token-cost-efficiency.md](token-cost-efficiency.md) (CE-G2/G7),
+[time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) (CE-G2/G7),
 [extension-platform.md](extension-platform.md) (capabilities §3.1, providers, runtimes),
 [harness-gap-analysis.md](harness-gap-analysis.md) (peer evidence),
 [mission-control.md](mission-control.md) (Caretaker sweep, flight recorder for service

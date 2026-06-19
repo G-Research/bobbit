@@ -322,7 +322,7 @@ Cross-references: [autoimprovement.md](autoimprovement.md) ·
 [harness-gap-analysis.md](harness-gap-analysis.md) (G3/G4/G5/G6/G10) ·
 [client-performance-battery.md](client-performance-battery.md) (Observer watches the perf
 baseline once the harness exists) · [extension-platform.md](extension-platform.md) ·
-[token-cost-efficiency.md](token-cost-efficiency.md) (budgets, aux models) ·
+[time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) (budgets, aux models) ·
 `docs/staff-agents.md` · `docs/staff-triggers.md` · `docs/staff-inbox.md` ·
 `docs/mcp-meta-tools.md` · `docs/rest-api.md`.
 Execution tracking: [fable-program-execution-plan.md](fable-program-execution-plan.md).

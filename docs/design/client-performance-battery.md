@@ -24,7 +24,7 @@ streaming delta schedules a full root re-render (rAF-coalesced, so up to ~60 ful
 tree evaluations per second during streaming). None of these is individually fatal; together
 they mean the browser never reaches its power-saving render-idle state. The plan below is
 **instrumentation-first** (same discipline as
-[token-cost-efficiency.md](token-cost-efficiency.md)): we build a small repeatable measurement
+[time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md)): we build a small repeatable measurement
 harness, capture a baseline, then land tiered fixes — each behind a
 [`perf-flags.ts`](../../src/app/perf-flags.ts)-style kill switch and re-measured against the
 baseline.
@@ -316,7 +316,7 @@ cadence ~10 Hz; all existing unit + e2e phases green.
 - **A WebGL/canvas renderer rewrite** — not justified by any current evidence; revisit only
   if P3.2 data demands it.
 
-Cross-references: [token-cost-efficiency.md](token-cost-efficiency.md) (the sibling
+Cross-references: [time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) (the sibling
 "instrumentation-first" effort, server/cost side), [mission-control.md](mission-control.md)
 (the Observer staff can watch for perf regressions once the harness exists),
 [harness-gap-analysis.md](harness-gap-analysis.md) §battery for how peer harnesses avoid this

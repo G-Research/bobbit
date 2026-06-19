@@ -10,7 +10,7 @@ The workstreams (each doc owns its *content* — tasks, contracts, acceptance; t
 | Workstream | Design (WHAT/WHY) | Execution authority (HOW) |
 |---|---|---|
 | **EP** extension platform | [extension-platform.md](extension-platform.md) | [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md) (G1.1–G9) |
-| **CE** token/cost efficiency | [token-cost-efficiency.md](token-cost-efficiency.md) §1–§5 | same doc, §6 (CE-G0.1–G7.2, BENCH gates) |
+| **CE** time & token-cost efficiency | [time-and-token-cost-efficiency.md](time-and-token-cost-efficiency.md) §1–§5, **§9** (latency + arch root cause) | same doc, §6 (CE-G0.1–G7.2) + **§9.5 (CE-G8 latency)**, BENCH gates |
 | **CS** comms-stack reliability | [comms-stack/01–03](comms-stack/01-understanding.md) | [comms-stack/04-current-state-and-backlog.md](comms-stack/04-current-state-and-backlog.md) §6–§7 (waves + merge map) |
 | **SN** sidebar & goal-nesting | [sidebar-goal-nesting-audit.md](sidebar-goal-nesting-audit.md) §1–§3 | same doc, §4 (T1–T9) |
 | **PB** client perf/battery | [client-performance-battery.md](client-performance-battery.md) | [client-performance-battery-implementation-plan.md](client-performance-battery-implementation-plan.md) |
