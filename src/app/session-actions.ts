@@ -2,8 +2,10 @@ import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, refreshAgentSession, type SidebarCopyLinkTitle } from "./api.js";
+import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
+import { forkSession, terminateSession } from "./session-manager.js";
 import type { GatewaySession } from "./state.js";
 
 export type SessionActionId =
@@ -114,7 +116,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 				}
 				: (event: Event) => {
 					event.stopPropagation();
-					void import("./dialogs-lazy.js").then(({ showRenameDialog }) => showRenameDialog(session.id, displayTitle));
+					showRenameDialog(session.id, displayTitle);
 				},
 		},
 		{
@@ -127,10 +129,9 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			quick: true,
 			run: (event: Event) => {
 				event.stopPropagation();
-				void import("./session-manager.js").then(({ terminateSession }) => {
-					if (isTeamLead) return terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true });
-					return terminateSession(session.id);
-				});
+				void (isTeamLead
+					? terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true })
+					: terminateSession(session.id));
 			},
 		},
 		{
@@ -156,7 +157,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			visible: canForkSession(session),
 			run: (event: Event) => {
 				event.stopPropagation();
-				void import("./session-manager.js").then(({ forkSession }) => forkSession(session, { newWorktree: _forkNewWorktree }));
+				void forkSession(session, { newWorktree: _forkNewWorktree });
 			},
 			trailingToggle: {
 				id: "fork-new-worktree",
@@ -223,7 +224,6 @@ async function runRefreshAgentSession(session: GatewaySession, onRefreshStateCha
 	if (_refreshingAgentSessionIds.has(session.id)) return;
 	const force = refreshAgentNeedsConfirmation(session);
 	if (force) {
-		const { confirmAction } = await import("./dialogs-lazy.js");
 		const confirmed = await confirmAction(
 			"Refresh agent",
 			"This will interrupt the current agent process and restart it with the latest prompt, tools, MCP configuration, and auth state. Transcript and history remain intact.",

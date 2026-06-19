@@ -442,8 +442,15 @@ function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: st
 		&& _openSidebarActionsPopover.element.open;
 }
 
-function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
-	return actions.map(({ id, label, title, icon, tone, quick, trailingToggle }) => ({ id, label, title, icon, tone, quick, trailingToggle }));
+function toSidebarActionsPopoverItem({ id, label, title, icon, tone, quick, trailingToggle }: SidebarActionItem): SidebarActionsPopoverItem {
+	return { id, label, title, icon, tone, quick, trailingToggle };
+}
+
+function sidebarActionPopoverItems(kind: SidebarActionEntityKind, actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
+	if (kind === "session") return actions.map(toSidebarActionsPopoverItem);
+	const quickActions = actions.filter((action) => action.quick).reverse();
+	const menuOnlyActions = actions.filter((action) => !action.quick);
+	return [...quickActions, ...menuOnlyActions].map(toSidebarActionsPopoverItem);
 }
 
 function closeSidebarActionsPopover(render = true): void {
@@ -465,7 +472,7 @@ function refreshOpenSidebarActionsPopover(): void {
 	const current = _openSidebarActionsPopover;
 	if (!current) return;
 	current.actions = current.refresh();
-	current.element.items = sidebarActionPopoverItems(current.actions);
+	current.element.items = sidebarActionPopoverItems(current.kind, current.actions);
 }
 
 async function openSidebarActionsPopover(input: {
@@ -486,7 +493,7 @@ async function openSidebarActionsPopover(input: {
 	if (requestId !== _sidebarActionsPopoverRequestId || !input.trigger.isConnected) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
-	element.items = sidebarActionPopoverItems(input.actions);
+	element.items = sidebarActionPopoverItems(input.kind, input.actions);
 	element.sourceRects = input.sourceRects;
 	element.open = true;
 	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
