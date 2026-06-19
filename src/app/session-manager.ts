@@ -415,6 +415,8 @@ const goalDraft = createDraftManager({
 		previewCwdEdited: state.previewCwdEdited,
 		hasReceivedProposal: state.assistantHasProposal,
 		goalAssistantTab: state.assistantTab,
+		previewWorktreeSetupCommand: state.previewWorktreeSetupCommand,
+		previewWorktreeSetupTimeoutMs: state.previewWorktreeSetupTimeoutMs,
 	}),
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
@@ -469,6 +471,8 @@ const goalDraft = createDraftManager({
 			state.previewSpecEdited = false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
 			state.assistantHasProposal = false;
+			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
+			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
 		} else {
 			state.previewTitle = draft.previewTitle ?? "";
 			state.previewSpec = draft.previewSpec ?? "";
@@ -478,6 +482,8 @@ const goalDraft = createDraftManager({
 			state.previewSpecEdited = draft.previewSpecEdited ?? false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
 			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
+			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
 		}
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
 	},
@@ -1109,6 +1115,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
+		state.previewWorktreeSetupCommand = "";
+		state.previewWorktreeSetupTimeoutMs = "";
 		// Restore previewProjectId from the session record on fast-path switch-back.
 		// The draft-restore on the slow path has a matching fallback at ~line 1488;
 		// without this, clicking "Create Goal" in the proposal form after switching
@@ -2188,6 +2196,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewTitle = "";
 					state.previewCwd = "";
 					state.previewSpec = "";
+					state.previewWorktreeSetupCommand = "";
+					state.previewWorktreeSetupTimeoutMs = "";
 					state.previewTitleEdited = false;
 					state.previewCwdEdited = false;
 					state.previewSpecEdited = false;
