@@ -20,7 +20,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -10586,6 +10586,20 @@ async function handleApiRoute(
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/oauth/logout — clear/revoke a single provider's OAuth credential.
+	// Provider-partitioned: never touches other providers or API-key entries,
+	// and never echoes token material back to the client.
+	if (url.pathname === "/api/oauth/logout" && req.method === "POST") {
+		try {
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthLogout(body?.provider);
+			json(result);
+		} catch (err) {
+			jsonError(400, err);
 		}
 		return;
 	}
