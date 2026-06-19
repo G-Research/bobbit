@@ -44,6 +44,10 @@ exact targets for the follow-up implementation task.
 - `GET  /api/oauth/flow-status?flowId=&provider=` → `oauthFlowStatus`
 - `POST /api/oauth/start` `{ provider }` → `oauthStart`
 - `POST /api/oauth/complete` `{ flowId, code }` → `oauthComplete`
+- **New:** `POST /api/oauth/logout` `{ provider }` → normalize provider, revoke/clear that
+  provider's `auth.json` entry, call `clearOAuthCache()`, return `{ success: true }`, and never echo
+  token material. It must be provider-partitioned: logging out `google-gemini-cli` cannot delete
+  `anthropic`, `openai-codex`, or API-key-only `google` credentials.
 - Provider **API keys** (separate from OAuth): `GET /api/provider-keys`, `POST/DELETE
   /api/provider-keys/:provider`. **These write `preferencesStore` under `providerKey.<provider>`,
   NOT `auth.json`.** `POST /api/pi-ai/provider-key-test` → `testProviderApiKey`.
@@ -218,7 +222,7 @@ Code Assist runtime, while Bobbit's gateway already owns the Account-tab loopbac
 provider-partitioned status endpoints. The implementation should still reuse the existing
 `pendingFlows` map, TTL cleanup, provider mismatch checks, and redaction helpers; it should add a
 Google flow record shape, not a parallel untracked lifecycle. pi-ai's `registerOAuthProvider` remains
-available only for later agent-session parity (§4.3), after Bobbit has a working Code Assist
+available only for later agent-session parity (§4.4), after Bobbit has a working Code Assist
 runtime.
 
 ---
@@ -275,7 +279,22 @@ runtime.
    keep it (mirror Anthropic's policy). Persist new `{access, refresh: new ?? old, expires}` and
    `clearOAuthCache()`.
 
-### 4.2 Settings Account row — `src/app/settings-page.ts`
+### 4.2 REST route changes — `src/server/server.ts`
+
+1. Existing `/api/oauth/status`, `/api/oauth/flow-status`, `/api/oauth/start`, and
+   `/api/oauth/complete` remain provider-partitioned and ride the `normalizeProvider()` changes.
+2. Add `POST /api/oauth/logout` with body `{ provider }`:
+   - normalize the provider using the same canonical mapping as start/status/complete;
+   - optionally revoke the upstream token for providers with revoke endpoints (Google: POST token to
+     `GOOGLE_REVOKE_URL` when an access or refresh token is available; do not fail logout if revoke
+     is transiently unavailable);
+   - delete only `auth.json[canonicalProvider]`;
+   - call `clearOAuthCache()`;
+   - return `{ success: true, provider: canonicalProvider }` with no token fields.
+3. Add API E2E coverage that logging out `google-gemini-cli` leaves `anthropic`, `openai-codex`, and
+   API-key-only `providerKey.google` untouched.
+
+### 4.3 Settings Account row — `src/app/settings-page.ts`
 
 1. `type AccountProviderId = "anthropic" | "openai-codex" | "google-gemini-cli"`.
 2. Append to `ACCOUNT_PROVIDERS`:
@@ -292,7 +311,7 @@ runtime.
    `google-gemini-cli|google|gemini → "Google"`. The rest of the dialog (start/poll/paste) is
    provider-agnostic.
 
-### 4.3 Runtime: making Gemini usable from the OAuth credential
+### 4.4 Runtime: making Gemini usable from the OAuth credential
 
 Two consumers exist; both need the Code Assist path because pi-ai's `google` provider is API-key only.
 
@@ -324,14 +343,14 @@ as the upstream-parity alternative:
      long-term; out of this goal's control. Until then, ship (i) or scope agent-session Gemini to
      API-key `google`.
 
-The follow-up implementation task should treat §4.1/§4.2/§4.5 (auth, UI, fallback) as **must-ship**,
-and §4.3 runtime as the substantive engineering item, implemented as (a) for gateway helpers first,
-then (b)(i) for agent sessions. If (b)(i) proves too large for one iteration, the UI copy from §4.2
-already tells the user the credential targets the Code Assist API, and API-key `google` remains the
-working inference path — acceptance criterion "API-key Google auth remains possible and discoverable"
-is still met.
+The follow-up implementation task should treat §4.1/§4.2/§4.3/§4.6 (auth, REST, UI, fallback) as
+**must-ship**, and §4.4 runtime as the substantive engineering item, implemented as (a) for gateway
+helpers first, then (b)(i) for agent sessions. If (b)(i) proves too large for one iteration, the UI
+copy from §4.3 already tells the user the credential targets the Code Assist API, and API-key
+`google` remains the working inference path — acceptance criterion "API-key Google auth remains
+possible and discoverable" is still met.
 
-### 4.4 Model registry / auth detection — `src/server/agent/model-registry.ts`
+### 4.5 Model registry / auth detection — `src/server/agent/model-registry.ts`
 
 - Add an explicit OAuth-capability guard so generic OAuth credentials cannot over-authenticate API-
   key-only providers. Concrete mechanism: introduce `const OAUTH_AUTHENTICATED_PROVIDERS = new Set([
@@ -350,7 +369,7 @@ is still met.
   `google` provider models API-key-only. Gemini ranking in the priority function already covers the
   ids.
 
-### 4.5 API-key fallback discoverability (Settings drift fix) — `src/app/settings-page.ts`
+### 4.6 API-key fallback discoverability (Settings drift fix) — `src/app/settings-page.ts`
 
 - Add a **"Model provider API keys"** section to `renderModelsTab()` (the live Models tab), reusing
   the legacy component `src/ui/components/ProviderKeyInput.ts` and the existing `/api/provider-keys`
@@ -363,7 +382,7 @@ is still met.
 - Either delete `src/ui/dialogs/ProvidersModelsTab.ts` (dead) or repoint it; do not leave two
   competing UIs. Update any docs/onboarding copy that references a "Providers & Models" screen.
 
-### 4.6 Sandbox credential propagation — `src/server/agent/host-tokens.ts` (+ `docker-args.ts`)
+### 4.7 Sandbox credential propagation — `src/server/agent/host-tokens.ts` (+ `docker-args.ts`)
 
 - Add a `PROVIDER_TOKENS` entry for the OAuth provider so detection/resolution see it:
   `{ envVar: "GOOGLE_CLOUD_ACCESS_TOKEN", label: "Google (Gemini Code Assist OAuth)", provider:
@@ -381,7 +400,7 @@ is still met.
 - `docker-args.ts` needs no structural change: it already mounts the scoped `auth.json` and injects
   allowed sandbox tokens as env vars; the new entry rides those existing paths.
 
-### 4.7 Logging / safety invariants (must hold)
+### 4.8 Logging / safety invariants (must hold)
 
 - Reuse `redactSensitive` for every Google log line and error body; truncate provider error bodies
   (256-char cap already in `oauthComplete`).
@@ -421,7 +440,7 @@ Browser E2E (`tests/e2e/ui/settings.spec.ts` pattern):
   API-key entry point is present in the current Settings (guards the drift from re-appearing).
 
 Manual integration (`tests/manual-integration/`, gate-exempt): real Google account → Account login →
-reload persists → a Gemini model is selectable and (when §4.3 runtime lands) returns a completion
+reload persists → a Gemini model is selectable and (when §4.4 runtime lands) returns a completion
 via Code Assist without an API key; document the exact steps + the project/onboarding behavior.
 
 ---
@@ -430,10 +449,10 @@ via Code Assist without an API key; document the exact steps + the project/onboa
 
 | Goal AC | Covered by |
 |---|---|
-| Login Google, reload, still authenticated | §4.1 storage + §4.2 row + browser E2E persistence |
-| Gemini usable without API key (where supported) | §4.3 Code Assist runtime; §2.4 honest constraint surfaced in §4.2 copy |
+| Login Google, reload, still authenticated | §4.1 storage + §4.3 row + browser E2E persistence |
+| Gemini usable without API key (where supported) | §4.4 Code Assist runtime; §2.4 honest constraint surfaced in §4.3 copy |
 | Anthropic/OpenAI OAuth unchanged | §4.1 additive `normalizeProvider`/union; no edits to their branches |
-| API-key Google remains possible + discoverable | §4.5 Models-tab key field + §2.1 fallback |
+| API-key Google remains possible + discoverable | §4.6 Models-tab key field + §2.1 fallback |
 | Regression test for missing settings path | §5 browser E2E asserting the API-key entry exists |
 
 ## 7. Out of scope / explicitly avoided
@@ -442,4 +461,4 @@ via Code Assist without an API key; document the exact steps + the project/onboa
   endpoints (goal constraint). Only the official installed-app OAuth client + Code Assist /
   Developer APIs are used.
 - Vertex AI (`google-vertex`) integration beyond not colliding with it.
-- Shipping the pi-ai upstream Code Assist provider (§4.3 b-ii) — tracked as a follow-up.
+- Shipping the pi-ai upstream Code Assist provider (§4.4 b-ii) — tracked as a follow-up.

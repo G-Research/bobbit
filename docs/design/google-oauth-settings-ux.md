@@ -74,19 +74,21 @@ The app has **two** settings surfaces. Only one is wired into the live UI.
 ### 1.3 Server OAuth pipeline
 
 - Routes in `src/server/server.ts`: `GET /api/oauth/status`, `GET
-  /api/oauth/flow-status`, `POST /api/oauth/start`, `POST /api/oauth/complete`
-  (~L10538–10590).
+  /api/oauth/flow-status`, `POST /api/oauth/start`, `POST /api/oauth/complete`,
+  and new `POST /api/oauth/logout` (~L10538–10590 plus the new route).
 - `src/server/auth/oauth.ts`:
   - `OAuthProviderId = "anthropic" | "openai-codex"` (~L21) and
-    `OAUTH_PROVIDER_LABELS` (~L23) — **add `google` here**.
+    `OAUTH_PROVIDER_LABELS` (~L23) — **add canonical `google-gemini-cli` here**.
   - `normalizeProvider()` (~L102) throws on unknown providers — **must accept
-    `google` / `google-gemini`** for provider isolation.
+    `google-gemini-cli`, plus inbound aliases `google` / `gemini`, and collapse
+    them to canonical `google-gemini-cli`** for provider isolation.
   - Anthropic uses a built-in PKCE flow; non-anthropic providers delegate to
-    `oauthStartExternal()` → pi-ai `getOAuthProvider(provider)`. Google would
-    follow the external path **iff** pi-ai exposes a Google OAuth provider;
-    otherwise a Google PKCE flow is added alongside.
-  - Credentials are written to `auth.json` keyed by provider
-    (`storeOAuthCredentials`, ~L147), and `oauthStatus()` (~L402) returns only
+    `oauthStartExternal()` → pi-ai `getOAuthProvider(provider)`. Google account
+    auth uses Bobbit's native Google PKCE flow because installed pi-ai has no
+    Gemini Code Assist OAuth provider.
+  - Credentials are written to `auth.json` keyed by canonical provider
+    (`storeOAuthCredentials`, ~L147), so Google account OAuth is stored only at
+    `auth.json["google-gemini-cli"]`; `oauthStatus()` (~L402) returns only
     `{ authenticated, expires }` — **never the token** (strict-OAuth contract).
 - Model auth detection: `src/server/agent/model-registry.ts` —
   `PROVIDER_ENV` already maps `google`, `google-gemini-cli`, `google-vertex`
@@ -116,7 +118,7 @@ spacing token, and affordance.
 ### 2.1 Provider entry (content)
 
 ```
-id:                 "google"              // new AccountProviderId member
+id:                 "google-gemini-cli"   // canonical OAuth AccountProviderId member
 title:              "Google OAuth"
 description:        "OAuth credentials used by agent sessions to access Gemini
                      models through your Google account. Re-authenticate to
@@ -124,7 +126,9 @@ description:        "OAuth credentials used by agent sessions to access Gemini
 authenticatedLabel: "Authenticated"
 ```
 
-`AccountProviderId` becomes `"anthropic" | "openai-codex" | "google"`.
+`AccountProviderId` becomes `"anthropic" | "openai-codex" | "google-gemini-cli"`.
+The plain `google` id remains reserved for the Google AI Studio / Gemini Developer
+API-key provider in Models → Provider API Keys.
 
 ### 2.2 Visual layout (ASCII reference — matches existing rows exactly)
 
@@ -184,11 +188,12 @@ pointer, §5 limitations note), and both reuse existing muted-text styling.
 
 ## 3. OAuth dialog — Google branch
 
-`openOAuthDialog("google")` reuses the entire existing flow. Required changes:
+`openOAuthDialog("google-gemini-cli")` reuses the entire existing flow. Required changes:
 
 - **Display name:** replace the ternary in `src/app/dialogs.ts` (~L484) with a
-  lookup that maps `"google"` → `"Google"`. Header becomes "Google Login";
-  body copy "A browser tab has been opened for Google authentication."
+  lookup that maps `"google-gemini-cli"` (and inbound aliases `"google"` /
+  `"gemini"`) → `"Google"`. Header becomes "Google Login"; body copy "A
+  browser tab has been opened for Google authentication."
 - **Flow shape:** Google's official flow is a redirect/consent → callback or
   paste-code exchange. The existing dialog already supports both the
   `callbackServer` polling path and the manual paste path, so **no new dialog
@@ -319,10 +324,11 @@ Re-authenticate:
 There is no clear endpoint today (only Anthropic self-clears on revoked token in
 `oauth.ts` ~L498). Add:
 
-- `POST /api/oauth/logout` `{ provider }` → deletes the provider key from
-  `auth.json`, calls `clearOAuthCache()`, returns `{ success: true }`.
-- Must respect provider isolation: deleting `google` must not touch `anthropic`
-  / `openai-codex` entries.
+- `POST /api/oauth/logout` `{ provider }` → normalizes the provider, deletes that
+  canonical provider key from `auth.json`, calls `clearOAuthCache()`, returns
+  `{ success: true }`, and never echoes token material.
+- Must respect provider isolation: deleting `google-gemini-cli` must not touch
+  `anthropic`, `openai-codex`, or API-key-only `google` entries.
 
 ### 6.3 Empty state after logout
 
@@ -336,12 +342,12 @@ provider — no special empty state needed.
 
 - Credentials live server-side in `auth.json`; the client holds **no** token.
 - On Settings open / tab mount, `loadAccountStatus()` re-fetches
-  `GET /api/oauth/status?provider=google`, so an authenticated Google account
-  shows **Authenticated** after a full page reload with no extra work.
+  `GET /api/oauth/status?provider=google-gemini-cli`, so an authenticated Google
+  account shows **Authenticated** after a full page reload with no extra work.
 - **Acceptance:** *open Settings → Account, authenticate Google, reload Bobbit,
   still see Google authenticated.* This is satisfied by the existing status-fetch
-  path the moment `google` is added to `ACCOUNT_PROVIDERS` and accepted by
-  `normalizeProvider()`.
+  path the moment `google-gemini-cli` is added to `ACCOUNT_PROVIDERS` and
+  accepted by `normalizeProvider()`.
 - The `Expires` line renders from `status.expires`; an expired token shows
   **Expired** (destructive) and the button reads **Re-authenticate** — identical
   to the other providers.
@@ -355,7 +361,7 @@ Reuse the existing dialog/state machinery; no new error UI invented.
 | State | Where | Treatment |
 |---|---|---|
 | Status fetch fails | `loadAccountStatus()` catch | Row shows **Not authenticated** (fail-safe), no crash. |
-| `normalizeProvider` rejects `google` (pre-fix) | server | Surfaced as dialog `error` step. **Must not throw** post-implementation. |
+| `normalizeProvider` rejects `google-gemini-cli` or inbound alias `google` (pre-fix) | server | Surfaced as dialog `error` step. **Must not throw** post-implementation. |
 | OAuth start fails (`POST /api/oauth/start`) | dialog `error` step | `<error-details>` + **Try again** button (existing). |
 | Code exchange fails (`POST /api/oauth/complete`) | dialog `error` step | Server `error` string shown via `<error-details>`; truncated server-side. |
 | Flow timeout (5 min) | dialog poll | "OAuth flow timed out after 5 minutes" + Try again. |
@@ -394,15 +400,15 @@ Recommended naming (kebab, provider-scoped):
 | Element | `data-testid` |
 |---|---|
 | Account tab container | `account-tab` |
-| Per-provider row | `account-row-google` (and `-anthropic`, `-openai-codex`) |
-| Status text | `account-status-google` |
-| Expires text | `account-expires-google` |
-| Primary auth button | `account-auth-btn-google` |
-| Logout button | `account-logout-btn-google` |
-| API-key cross-link | `account-apikey-link-google` |
-| Limitations note | `account-google-limit-note` |
+| Per-provider row | `account-row-google-gemini-cli` (and `-anthropic`, `-openai-codex`) |
+| Status text | `account-status-google-gemini-cli` |
+| Expires text | `account-expires-google-gemini-cli` |
+| Primary auth button | `account-auth-btn-google-gemini-cli` |
+| Logout button | `account-logout-btn-google-gemini-cli` |
+| API-key cross-link | `account-apikey-link-google-gemini-cli` |
+| Limitations note | `account-google-gemini-cli-limit-note` |
 | Models-tab API-key section | `provider-keys-section` |
-| Google key input wrapper | `provider-key-input-google` |
+| Google AI Studio key input wrapper | `provider-key-input-google` |
 
 The model-selector item already exposes `data-model-item` / `data-model-id`
 (`ModelSelector.ts` ~L356); the authenticated/locked state is observable via the
@@ -411,7 +417,7 @@ The model-selector item already exposes `data-model-item` / `data-model-id`
 ### 9.3 Required tests (per AGENTS.md "every user-facing feature MUST have a browser E2E")
 
 1. **Browser E2E** (`tests/e2e/ui/`): open Settings → Account, assert the Google
-   row renders with `Log in`; mock `GET /api/oauth/status?provider=google` →
+   row renders with `Log in`; mock `GET /api/oauth/status?provider=google-gemini-cli` →
    `{ authenticated: true, expires }`, reload, assert **Authenticated** persists;
    assert Re-authenticate + Log out appear; assert logout returns to `Log in`.
 2. **Regression test for the drift:** assert the model-selector unauthenticated
@@ -419,16 +425,19 @@ The model-selector item already exposes `data-model-item` / `data-model-id`
    Models tab renders the `provider-keys-section`. This pins the acceptance
    criterion *"tests cover the regression where a user is told to use a settings
    path that is not present in the current app."*
-3. **Unit/API E2E:** `normalizeProvider("google")` resolves (no throw);
-   `oauthStatus("google")` never returns the token; provider isolation —
-   logging out `google` leaves `anthropic`/`openai-codex` entries intact.
+3. **Unit/API E2E:** `normalizeProvider("google-gemini-cli")` resolves, inbound
+   alias `normalizeProvider("google")` canonicalizes to `google-gemini-cli`,
+   `oauthStatus("google-gemini-cli")` never returns the token, and provider
+   isolation holds — logging out `google-gemini-cli` leaves `anthropic`,
+   `openai-codex`, and API-key-only `google` entries intact.
 
 ---
 
 ## 10. Implementation handoff checklist (UI/UX surface only)
 
-- [ ] Add `"google"` to `AccountProviderId` + a `Google OAuth` entry in
-      `ACCOUNT_PROVIDERS` (`settings-page.ts`).
+- [ ] Add `"google-gemini-cli"` to `AccountProviderId` + a `Google OAuth` entry
+      in `ACCOUNT_PROVIDERS` (`settings-page.ts`); keep plain `google` reserved
+      for the Models-tab Google AI Studio API-key provider.
 - [ ] Add Google branch to `providerName` in `openOAuthDialog` (`dialogs.ts`).
 - [ ] Add Logout button + confirm + `POST /api/oauth/logout` (server) for all
       three providers.
