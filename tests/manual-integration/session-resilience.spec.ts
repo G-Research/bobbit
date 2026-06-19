@@ -381,11 +381,12 @@ async function createGoalViaBrowser(
 	const assistantSessionId = sessionMatch[1];
 	await pollIdle(gw, assistantSessionId, 120_000);
 
+	const workflowId = opts?.workflowId ?? "feature";
 	const proposalPrompt = [
 		"Create a goal proposal now. Do not ask follow-up questions.",
 		`Use exactly this title: ${title}`,
 		`Use exactly this specification: ${spec}`,
-		opts?.workflowId ? `Use workflow id: ${opts.workflowId}` : "Use the default workflow.",
+		`Use workflow id: ${workflowId}`,
 		"Call the propose_goal tool with those values.",
 	].join("\n");
 	await page.fill("textarea", proposalPrompt);
@@ -420,12 +421,10 @@ async function createGoalViaBrowser(
 		}
 	}
 
-	// Select workflow from dropdown
-	if (opts?.workflowId) {
-		const workflowSelect = page.locator(".goal-preview-panel select").first();
-		if (await workflowSelect.isVisible({ timeout: 3_000 }).catch(() => false)) {
-			await workflowSelect.selectOption(opts.workflowId);
-		}
+	// Select the explicit workflow from the dropdown if the model omitted or altered it.
+	const workflowSelect = page.locator(".goal-preview-panel select").first();
+	if (await workflowSelect.isVisible({ timeout: 3_000 }).catch(() => false)) {
+		await workflowSelect.selectOption(workflowId);
 	}
 
 	await takeScreenshot(page, "goal-creation-form.png");

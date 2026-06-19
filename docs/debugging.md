@@ -617,12 +617,12 @@ A flush is racing removal of the project's `.bobbit/state/search.flex/` dir. The
 - FlexSearch builds posting lists at upsert time; there is no separate "build ANN index" phase.
 - Slow search? Check `GET /api/search/stats` for row counts per source and `datasetBytes`. Expected p95 < 100ms for typical Bobbit corpora (< 100K rows). If the in-memory index has grown very large, trigger a rebuild — orphaned rows accumulated from deletes can inflate posting lists.
 - Staff not appearing in search? Staff are indexed via a dedicated hook — `StaffManager` calls `searchIndex.indexStaff(staff)` (on `SearchService`) whenever a staff record is created or updated. `SearchService.indexStaff` builds an `Indexable` via `StaffIndexSource.toIndexable` and hands it to `Indexer.upsertEntries`. Staff are **not** walked by `rebuildFromStores` under normal operation (only on a full rebuild). If a staff entry is missing, check in order: (1) the project's `SearchService.getState()` is `"ready"` (not `"disabled"` / `"rebuilding"`); (2) `indexStaff` was called with the correct staff object (add a log in `StaffManager` or watch `[search]` log lines); (3) the `Indexer` progress emission shows the row was upserted (`index:progress` with a non-zero `completed` for the `incremental` phase).
-- Sidebar filter not working? The sidebar uses client-side filtering only (no API calls). It matches goal titles, session titles, session agent roles, and staff names. Check `_applySearchFilter()` in `Sidebar.ts`
+- Sidebar filter not working? Live sessions/goals/staff and already-loaded archived rows are filtered client-side by case-insensitive substring matching on goal titles, session titles/roles, and staff names. Archived full-corpus lookup is debounced and uses `GET /api/sessions?include=archived&q=<query>` plus `GET /api/goals?archived=true&q=<query>` when archived is visible or auto-opened. Check `handleSidebarSearchInput()` / `renderArchivedSearchControls()` in `src/app/sidebar.ts`, archived search fetches in `src/app/api.ts`, and [docs/sidebar-archived-search.md](sidebar-archived-search.md).
 - Show Busy / Show Read filters not applying to a session? Filtering is centralised in `passesSidebarFilters` (`src/app/render-helpers.ts`) and applied at four sites: ungrouped sessions (desktop `sidebar.ts`, mobile `render.ts`), delegate children (`renderSessionRow`, `renderArchivedDelegates` — both in `render-helpers.ts`), and goal-grouped sessions (`renderGoalGroup` in `render-helpers.ts`). All four use `bypassFilters = !!state.searchQuery.trim()`. Active session is always exempt. Goal headers always render. Team-lead is sticky — if it would be filtered out but a child passes, it is re-inserted at its natural position to host the child. If a new sidebar render site is added it must also call `passesSidebarFilters`, or the bug returns; the pinning tests live in `tests/sidebar-goal-group-filters.spec.ts` and `tests/e2e/ui/sidebar-goal-group-filters.spec.ts`.
 - Mobile sidebar showing every archived goal when a query is typed? `renderMobileLanding` in `src/app/render.ts` must route archived goals through `filterArchivedGoalsByQuery` and standalone archived sessions through `filterArchivedSessionsByQuery` (both in `src/app/render-helpers.ts`) — the same helpers desktop's `renderSidebar` uses. If mobile skips the filter, every archived goal leaks through regardless of the query.
 - Matched substring not bolded in the sidebar? Goal titles, session titles/roles, and staff names render through `renderHighlightedText(text, state.searchQuery)` in `render-helpers.ts`. Empty/null query → plain text; non-empty query wraps every case-insensitive occurrence in `<strong class="font-semibold">`. Regex special chars in the query are escaped. If highlighting breaks layout, check that the wrapper stays inline and that the span does not introduce whitespace.
-- Full search page (`#/search`) is the sole consumer of the FTS API — it manages its own state, independent from sidebar filtering
-- Archived section not auto-opening on search match? Check `_archivedBySearch` flag — it distinguishes search-triggered expansion from manual clicks
+- Full search page (`#/search`) is the sole consumer of the FTS API (`GET /api/search`) — sidebar archived lookup uses the archived list endpoints with `q`, not the FTS index.
+- Archived section not auto-opening on search? Check `_archivedBySearch` / `_ensureArchivedForSearch` in `src/app/sidebar.ts` — they distinguish search-triggered expansion from manual clicks and schedule the debounced archived `q` lookup.
 
 ## Sidebar child loading
 
@@ -646,8 +646,8 @@ Debugging checklist:
 - Count mismatch? Verify total from paginated response metadata
 - Archived delegates disappearing on "Show Archived" toggle? The `?include=archived` path returns `archivedDelegates` via BFS enrichment — if they're missing, check that the server is running the child BFS on the archived response and the client is merging them into `state.archivedSessions`
 - Per-project Archived subsections not persisting their collapsed state? Each project's Archived subsection defaults to expanded; collapsed project IDs are persisted in `localStorage["bobbit-archived-collapsed-projects"]` (mirrors `bobbit-collapsed-ungrouped` / `bobbit-collapsed-staff`). The global `bobbit-show-archived` toggle controls all per-project subsections at once
-- Per-project Archived subsection empty for a project you expected to have items? Check in order: (1) `state.showArchived` is true (global toggle on) — if false, **every** project's subsection is suppressed; (2) `state.archivedSessions` / `state.archivedGoals` actually contain the items (paginated "Load more" may still be needed); (3) each item's `projectId` resolves to a registered project — items missing `projectId` or pointing at an unregistered project fall back to the **default** project's bucket with a `console.warn("[sidebar] archived goal/session missing projectId, using default", id)`. If a user reports "my archived items moved to the wrong project", that console warning is the signal.
-- "Load more archived" button missing or in the wrong place? The pagination buttons are rendered **once** below the project list, not per project. They only appear when `state.showArchived` is on, there is no active search query, and `state.archivedGoalsHasMore` / `state.archivedSessionsHasMore` is true. See `src/app/sidebar.ts` around the `renderProjectArchivedSection` call site.
+- Per-project Archived subsection empty for a project you expected to have items? Check in order: (1) `state.showArchived` is true (global toggle on) — if false, **every** project's subsection is suppressed; (2) the relevant normal archive page or active `q` search page has populated `state.archivedSessions` / `state.goals` with the archived items; (3) each item's `projectId` resolves to a registered project — items missing `projectId` or pointing at an unregistered project fall back to the first project's archived bucket with a `console.warn("[sidebar] archived goal/session missing projectId, using default", id)`. If a user reports "my archived items moved to the wrong project", that console warning is the signal.
+- "Load more archived" button missing or in the wrong place? With no active search query, normal archive pagination buttons are rendered **once** below the project list, not per project, when `state.showArchived` is on and `state.archivedGoalsHasMore` / `state.archivedSessionsHasMore` is true. With an active query, those unfiltered buttons are replaced by query-aware controls from `renderArchivedSearchControls()` — "Load more matching archived goals..." / "Load more matching archived sessions..." — driven by `state.archivedSearch*HasMore` and the archived `q` endpoints.
 
 ## Slash skill expansion
 
@@ -813,8 +813,9 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 
 ## Phased verification
 
-- Steps are grouped by `phase` (integer, default 0) and phases execute sequentially
-- Within each phase, command steps serialize; non-command steps still run in parallel
+- Steps are grouped by `phase` (integer, default 0) and phases execute sequentially in ascending order
+- Within each phase, steps run concurrently by default, including command steps
+- Use different `phase` values when command checks require explicit ordering
 - Component-linked `command: unit` steps default to a 1200s timeout when `timeout` is omitted; other command steps default to 300s
 - If any step in a phase fails, remaining phases are skipped (status: `"skipped"`)
 - Skipped steps carry `skipped: true` on `GateSignalStep`, persisted in `gates.json` — this lets the UI show the correct dash icon after reload (without it, skipped steps would appear as passed or failed based on the `passed` field alone)
@@ -1034,6 +1035,12 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 ## Tools page "MCP" section missing or empty
 
 `GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
+
+## MCP group changed from `never`, but refreshed agent still cannot use it
+
+`Refresh agent` should recompute normal role-derived allowed tools from the current role/group/MCP policy cascade. If the `mcp_<server>` meta-tool is still absent after changing `mcp__<server>` from `never` to `ask` or `allow`, check `SessionManager.recomputeAllowedToolsForRestart()` and `restoreSession()` in `src/server/agent/session-manager.ts`: normal sessions must not carry the stale live `session.allowedTools` cache as `_overrideAllowedTools`. Persisted session allow-lists, `session-only` grants, and unconsumed `one-time` grants are the exceptions. Regression coverage: `tests/e2e/mcp-tool-permission.spec.ts`.
+
+If the meta-tool remains blocked only for one role, inspect that role's `toolPolicies`. Role-level `mcp__<server>: never` intentionally wins over group defaults.
 
 ## Auto-nudge flooding
 

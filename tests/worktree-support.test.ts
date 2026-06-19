@@ -26,13 +26,16 @@ function makeDeps(opts: {
 	gitRoots?: string[];
 	gitRepos?: string[];
 	repoRoot?: string;
+	resolvedHeads?: string[];
 }): WorktreeSupportDeps {
 	const roots = new Set((opts.gitRoots ?? []).map(p => path.resolve(p)));
 	const repos = new Set((opts.gitRepos ?? []).map(p => path.resolve(p)));
+	const resolvedHeads = new Set((opts.resolvedHeads ?? [...roots, ...repos]).map(p => path.resolve(p)));
 	return {
 		isGitRepoRoot: async (dir: string) => roots.has(path.resolve(dir)),
 		isGitRepo: async (dir: string) => repos.has(path.resolve(dir)),
 		getRepoRoot: async (_dir: string) => opts.repoRoot ?? _dir,
+		hasResolvedHead: async (repoPath: string) => resolvedHeads.has(path.resolve(repoPath)),
 	};
 }
 
@@ -113,9 +116,31 @@ describe("resolveWorktreeSupport", () => {
 
 	it("single-repo git cwd ⇒ supported, repoPath = getRepoRoot(cwd)", async () => {
 		const components = [comp(".")];
-		const deps = makeDeps({ gitRepos: [cwd], repoRoot: "/git/toplevel" });
+		const deps = makeDeps({ gitRepos: [cwd], repoRoot: "/git/toplevel", resolvedHeads: ["/git/toplevel"] });
 		const support = await resolveWorktreeSupport(components, projectRoot, cwd, deps);
 		assert.deepStrictEqual(support, { supported: true, repoPath: "/git/toplevel", multiRepo: false });
+	});
+
+	it("single-repo unresolved HEAD is unsupported only for implicit HEAD fallback", async () => {
+		const components = [comp(".")];
+		const deps = makeDeps({ gitRepos: [cwd], repoRoot: "/git/toplevel", resolvedHeads: [] });
+
+		const implicit = await resolveWorktreeSupport(components, projectRoot, cwd, deps);
+		assert.deepStrictEqual(implicit, { supported: false, multiRepo: false });
+
+		const configured = await resolveWorktreeSupport(components, projectRoot, cwd, deps, { configuredBaseRef: "origin/main" });
+		assert.deepStrictEqual(configured, { supported: true, repoPath: "/git/toplevel", multiRepo: false });
+	});
+
+	it("multi-repo unresolved component HEAD is supported when a configured base_ref will be used", async () => {
+		const components = [comp("."), comp("repo-a")];
+		const deps = makeDeps({ gitRoots: [path.join(projectRoot, "repo-a")], resolvedHeads: [] });
+
+		const implicit = await resolveWorktreeSupport(components, projectRoot, cwd, deps);
+		assert.deepStrictEqual(implicit, { supported: false, multiRepo: true });
+
+		const configured = await resolveWorktreeSupport(components, projectRoot, cwd, deps, { configuredBaseRef: "origin/main" });
+		assert.deepStrictEqual(configured, { supported: true, repoPath: projectRoot, multiRepo: true });
 	});
 
 	it("non-git single-repo ⇒ unsupported (graceful no-worktree)", async () => {

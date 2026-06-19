@@ -19,7 +19,8 @@
  *   - seed { workflow: "feature", options: "bad" }   → 400 UNKNOWN_OPTIONAL_STEP (+ validOptionalSteps)
  *   - seed { workflow: "feature", options: "QA testing" } → 200 { ok: true } (canonical name)
  *   - seed { workflow: "feature", options: "Enable QA Testing" } → 400 (label NOT a valid key)
- *   - seed { workflow: "feature" } / omitted workflow → 200 (no false rejection)
+ *   - seed { workflow: "feature" }                  → 200 (no false rejection)
+ *   - seed with omitted/empty workflow                → 400 MISSING_WORKFLOW (+ availableWorkflows)
  *   - project-less session (no workflows resolvable)  → 200 (validation skipped)
  */
 import fs from "node:fs";
@@ -50,6 +51,24 @@ async function persistedGoalProposalFields(sid: string): Promise<Record<string, 
 	const proposal = body.proposals?.find(p => p.proposalType === "goal");
 	expect(proposal?.fields).toBeTruthy();
 	return proposal!.fields!;
+}
+
+async function expectMissingWorkflow(r: Response): Promise<void> {
+	expect(r.status).toBe(400);
+	const b = await r.json();
+	expect(b.ok).toBe(false);
+	expect(b.code).toBe("MISSING_WORKFLOW");
+	expect(Array.isArray(b.availableWorkflows)).toBe(true);
+	expect(b.availableWorkflows).toEqual(expect.arrayContaining([
+		expect.objectContaining({ id: "feature" }),
+		expect.objectContaining({ id: "general" }),
+	]));
+	const ids = b.availableWorkflows.map((w: any) => w.id);
+	expect(ids).toContain("feature");
+	expect(ids).toContain("general");
+	expect(String(b.message)).toMatch(/workflow/i);
+	expect(String(b.message)).toMatch(/feature/);
+	expect(String(b.message)).toMatch(/general/);
 }
 
 test.describe("goal proposal — workflow validation @smoke", () => {
@@ -195,9 +214,19 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 		expect((await r.json()).ok).toBe(true);
 	});
 
-	test("omitted workflow is NOT an error (UI supplies the default) → 200", async () => {
+	test("omitted workflow → 400 MISSING_WORKFLOW listing available ids", async () => {
 		const r = await seedGoal(sid, { title: "G", spec: "body\n" });
-		expect(r.status).toBe(200);
+		await expectMissingWorkflow(r);
+	});
+
+	test("empty string workflow → 400 MISSING_WORKFLOW listing available ids", async () => {
+		const r = await seedGoal(sid, { title: "G", spec: "body\n", workflow: "" });
+		await expectMissingWorkflow(r);
+	});
+
+	test("whitespace-only workflow → 400 MISSING_WORKFLOW listing available ids", async () => {
+		const r = await seedGoal(sid, { title: "G", spec: "body\n", workflow: "   " });
+		await expectMissingWorkflow(r);
 	});
 
 	test("project-less session (no resolvable workflows) skips validation → 200", async () => {

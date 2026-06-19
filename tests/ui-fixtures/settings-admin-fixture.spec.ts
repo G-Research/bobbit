@@ -93,9 +93,11 @@ test.describe("Settings/admin UI fixture", () => {
 		await renderSettings(page, "#/settings/system/account");
 		await expect(page.getByText("Anthropic OAuth")).toBeVisible();
 		await expect(page.getByText("OpenAI OAuth")).toBeVisible();
+		await expect(page.getByText("Google OAuth")).toBeVisible();
 		await expect(page.getByText("ChatGPT subscription GPT models")).toBeVisible();
-		await expect(page.getByText("Authenticated", { exact: true })).toBeVisible();
-		await expect(page.getByText("Not authenticated", { exact: true })).toBeVisible();
+		await expect(page.getByTestId("account-status-anthropic")).toHaveText("Authenticated");
+		await expect(page.getByTestId("account-status-openai-codex")).toHaveText("Not authenticated");
+		await expect(page.getByTestId("account-status-google-gemini-cli")).toHaveText("Not authenticated");
 
 		await renderSettings(page, "#/settings/proj-1/appearance");
 		await expect(page.locator("button").filter({ hasText: "Scope UI Project" })).toBeVisible();
@@ -151,14 +153,14 @@ test.describe("Settings/admin UI fixture", () => {
 		await renderSettings(page, "#/settings/system/account");
 		const loginButtons = page.locator("button").filter({ hasText: /Log in|Re-authenticate|Authenticating/ });
 		await expect(loginButtons.first()).toBeVisible();
-		await expect(loginButtons).toHaveCount(2);
+		await expect(loginButtons).toHaveCount(3);
 		for (let i = 0; i < await loginButtons.count(); i++) {
 			await expect(loginButtons.nth(i)).toBeEnabled();
 		}
 
 		await loginButtons.first().click();
 		const disabledButtons = page.locator("button").filter({ hasText: /Log in|Re-authenticate|Authenticating/ });
-		await expect(disabledButtons).toHaveCount(2);
+		await expect(disabledButtons).toHaveCount(3);
 		for (let i = 0; i < await disabledButtons.count(); i++) {
 			await expect(disabledButtons.nth(i)).toBeDisabled();
 		}
