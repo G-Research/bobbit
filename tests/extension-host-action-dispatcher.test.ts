@@ -178,7 +178,16 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 	it("handler exceeding the per-call timeout → 504, slot released", async () => {
 		const base = path.join(tmp, "case-timeout");
 		writeTool(base, "demo", { actionsJs: `export const actions = { retry: () => new Promise(() => {}) };` });
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 40 });
+		// Timeout GENEROUSLY larger than worker spawn+load (same convention as the
+		// hung-eval test below) so the terminate bounds the HUNG HANDLER, not spawn/parse
+		// latency. A short cap (≈40ms < the ~70-110ms worker load) fires `worker.terminate()`
+		// while the worker is still SYNCHRONOUSLY inside the native CJS lexer
+		// (`node::cjs_lexer::Parse` during ESM `syncLink`), which on Node 26 crashes the
+		// whole process with `v8::ToLocalChecked Empty MaybeLocal` — and never even reaches
+		// the handler, so it wasn't proving the intended 504-on-hung-handler semantic. With
+		// the larger cap the worker loads, invokes the (never-resolving) handler, and the
+		// terminate lands on an idle event-loop-parked worker (the safe termination path).
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 800 });
 		await assert.rejects(() => d.dispatch("sample_action", "retry", ctx(), {}), (e) => e instanceof ActionError && e.status === 504);
 		// Slot released: another (fast) handler from an independent fixture runs.
 		const ok = path.join(tmp, "case-timeout-ok");
@@ -212,7 +221,16 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 			actionsJs: `export const actions = { retry: () => new Promise(() => {}) };`,
 		});
 		const maxConcurrent = 3;
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 60, maxConcurrent });
+		// Timeout GENEROUSLY larger than worker spawn+load (same convention as the
+		// hung-eval test below) so the terminate bounds the HUNG HANDLER, not spawn/parse
+		// latency. A short cap (≈60ms < the ~70-110ms worker load) fires `worker.terminate()`
+		// while the worker is still SYNCHRONOUSLY inside the native CJS lexer
+		// (`node::cjs_lexer::Parse` during ESM `syncLink`), which on Node 26 crashes the
+		// whole process with `v8::ToLocalChecked Empty MaybeLocal` (× the concurrent workers
+		// here). With the larger cap each worker loads, invokes the (never-resolving)
+		// handler, and the terminate lands on an idle event-loop-parked worker (the safe
+		// termination path).
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 800, maxConcurrent });
 
 		// Fire `maxConcurrent` dispatches; each hangs in its worker and times out 504.
 		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
