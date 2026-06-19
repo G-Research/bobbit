@@ -54,10 +54,12 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surfa
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import {
 	PackRuntimeSupervisor,
+	FilePortStore,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
 	PackRuntimeNotFoundError,
 	PackRuntimeBadRequestError,
+	PackRuntimeDockerUnavailableError,
 	type PackRuntimeStatus,
 } from "./runtimes/index.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
@@ -2024,9 +2026,17 @@ export function createGateway(config: GatewayConfig) {
 			// supervisor; rendered env files live under the server state dir.
 			if (!packRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
 				try {
+					const { SecretsStore } = await import("./agent/secrets-store.js");
+					const runtimeDataDir = path.join(stateDir, "pack-runtimes");
+					// Production-safe resolver context: declared generated secrets are
+					// created+persisted via SecretsStore and declared host ports via a
+					// file-backed FilePortStore, so real pack runtimes (e.g. Hindsight)
+					// resolve their env refs instead of throwing before Docker starts.
 					packRuntimeSupervisor = new PackRuntimeSupervisor({
 						registry: packContributionRegistry,
-						runtimeDataDir: path.join(stateDir, "pack-runtimes"),
+						runtimeDataDir,
+						secretsStore: new SecretsStore(stateDir),
+						portStore: new FilePortStore(path.join(runtimeDataDir, "ports.json")),
 					});
 				} catch (err) {
 					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
@@ -5979,7 +5989,16 @@ async function handleApiRoute(
 			try {
 				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
 				json({ logs });
-			} catch (err) { handleErr(err); }
+			} catch (err) {
+				// Surface a missing-Docker install as a consistent docker-unavailable
+				// shape (200 with empty logs + status) rather than hiding it behind an
+				// empty body or a generic 500.
+				if (err instanceof PackRuntimeDockerUnavailableError) {
+					json({ logs: "", status: "docker-unavailable", message: err.message });
+					return;
+				}
+				handleErr(err);
+			}
 			return;
 		}
 

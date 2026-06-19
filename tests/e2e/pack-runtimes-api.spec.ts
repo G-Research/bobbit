@@ -21,6 +21,7 @@ import {
 	clampTail,
 	encodePackRuntimeId,
 	PackRuntimeNotFoundError,
+	PackRuntimeDockerUnavailableError,
 } from "../../dist/server/runtimes/index.js";
 
 // ---------------------------------------------------------------------------
@@ -211,5 +212,26 @@ test.describe("Pack runtimes REST API", () => {
 		expect(res.status).toBe(200);
 		const data = await res.json();
 		expect(data.logs).toContain("tail=1"); // clampTail(-5) → 1
+	});
+
+	test("logs docker-unavailable → 200 with docker-unavailable status (not hidden)", async () => {
+		const mod = await import("../../dist/server/server.js");
+		// Swap in a supervisor whose logs() reports Docker missing for this case.
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async logs() {
+				throw new PackRuntimeDockerUnavailableError("docker is not available");
+			},
+		}));
+		try {
+			const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+			const res = await apiFetch(`/api/pack-runtimes/${id}/logs?tail=50`);
+			expect(res.status).toBe(200);
+			const data = await res.json();
+			expect(data.status).toBe("docker-unavailable");
+			expect(data.logs).toBe("");
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+		}
 	});
 });

@@ -11,6 +11,7 @@
 // Design: docs/design — "P2 PackRuntimeSupervisor + REST design".
 
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
@@ -25,8 +26,14 @@ import {
 import {
 	buildRuntimeInvocation,
 	renderRuntimeEnvFile,
+	getOrCreateRuntimeSecret,
+	generateSecretValue,
+	allocateHostPort,
+	probeFreePort,
 	type RuntimeInvocation,
 	type RuntimeResolveContext,
+	type SecretLike,
+	type PortStore,
 } from "../runtime/helpers.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -103,8 +110,32 @@ export interface PackRuntimeSupervisorOptions {
 	now?: () => number;
 	/** Sleep seam (deterministic timeout tests). Defaults to real timers. */
 	sleep?: (ms: number) => Promise<void>;
-	/** Resolver context builder for env refs/placeholders. Default: empty. */
-	buildContext?: (manifest: RuntimeManifest, contribution: RuntimeContribution) => RuntimeResolveContext;
+	/**
+	 * Persisted user-configured + generated secret store (satisfied by the
+	 * production `SecretsStore`). When supplied, the default resolver context
+	 * idempotently generates+persists `generate: true` secrets and reads
+	 * user-configured `secret:` values from it. When absent, generated secrets
+	 * fall back to ephemeral values and user-configured secrets are unresolved
+	 * (a runtime that actually references one then fails with a clear error).
+	 */
+	secretsStore?: SecretLike;
+	/**
+	 * Persisted host-port store (satisfied by {@link FilePortStore}). When
+	 * supplied, the default resolver context allocates+persists a stable host
+	 * port per declared `port` key; otherwise an ephemeral free port is probed.
+	 */
+	portStore?: PortStore;
+	/**
+	 * Resolver context builder for env refs/placeholders. When omitted, a
+	 * production-safe default resolves declared generated secrets + ports (and
+	 * user-configured secrets from {@link secretsStore}) so real pack runtimes
+	 * no longer throw in `buildRuntimeInvocation` before Docker starts. May be
+	 * async (port allocation is async).
+	 */
+	buildContext?: (
+		manifest: RuntimeManifest,
+		contribution: RuntimeContribution,
+	) => RuntimeResolveContext | Promise<RuntimeResolveContext>;
 }
 
 // ── Errors (mappable to HTTP codes by the REST layer) ────────────────────────
@@ -122,6 +153,63 @@ export class PackRuntimeBadRequestError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "PackRuntimeBadRequestError";
+	}
+}
+
+/**
+ * Docker executable not found (`ENOENT`). Operations that return a
+ * {@link PackRuntimeStatus} surface this as a `docker-unavailable` state; the
+ * string-returning {@link PackRuntimeSupervisor.logs} throws this instead so the
+ * REST layer can answer a consistent `docker-unavailable` shape rather than
+ * hiding a Docker-installation failure behind empty output.
+ */
+export class PackRuntimeDockerUnavailableError extends Error {
+	constructor(message = "docker is not available") {
+		super(message);
+		this.name = "PackRuntimeDockerUnavailableError";
+	}
+}
+
+// ── File-backed host-port store (production default) ─────────────────────────
+
+/**
+ * Minimal JSON-file-backed {@link PortStore} for persisted host-port
+ * assignments, mirroring `SecretsStore`'s on-disk discipline. Read/write errors
+ * are swallowed (best-effort persistence) so a corrupt file degrades to fresh
+ * allocation rather than crashing the supervisor.
+ */
+export class FilePortStore implements PortStore {
+	private data: Record<string, number> = {};
+	private readonly filePath: string;
+
+	constructor(filePath: string) {
+		this.filePath = filePath;
+		try {
+			if (fs.existsSync(filePath)) {
+				const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+					for (const [k, v] of Object.entries(raw)) {
+						if (typeof v === "number" && Number.isInteger(v)) this.data[k] = v;
+					}
+				}
+			}
+		} catch {
+			/* best effort — start fresh on unreadable/corrupt state */
+		}
+	}
+
+	get(key: string): number | undefined {
+		return this.data[key];
+	}
+
+	set(key: string, value: number): void {
+		this.data[key] = value;
+		try {
+			fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+			fs.writeFileSync(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf-8");
+		} catch {
+			/* best effort */
+		}
 	}
 }
 
@@ -277,10 +365,12 @@ export class PackRuntimeSupervisor {
 	private readonly runtimeDataDir: string;
 	private readonly now: () => number;
 	private readonly sleep: (ms: number) => Promise<void>;
-	private readonly buildContext: (
+	private readonly secretsStore?: SecretLike;
+	private readonly portStore?: PortStore;
+	private readonly buildContext?: (
 		manifest: RuntimeManifest,
 		contribution: RuntimeContribution,
-	) => RuntimeResolveContext;
+	) => RuntimeResolveContext | Promise<RuntimeResolveContext>;
 
 	/**
 	 * Dedupes concurrent `ensureRuntime`/`start` for one runtime key: while a
@@ -301,7 +391,9 @@ export class PackRuntimeSupervisor {
 		this.runtimeDataDir = opts.runtimeDataDir ?? path.join(os.tmpdir(), "bobbit-pack-runtimes");
 		this.now = opts.now ?? Date.now;
 		this.sleep = opts.sleep ?? defaultSleep;
-		this.buildContext = opts.buildContext ?? (() => ({}));
+		this.secretsStore = opts.secretsStore;
+		this.portStore = opts.portStore;
+		this.buildContext = opts.buildContext;
 	}
 
 	/** Compose project name for a pack (collision-guarded by server suffix). */
@@ -324,7 +416,8 @@ export class PackRuntimeSupervisor {
 	async status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
-		return this._statusFromPs(descriptor, this.composeProjectFor(packId));
+		const services = this._runtimeServices(contribution);
+		return this._statusFromPs(descriptor, this.composeProjectFor(packId), services);
 	}
 
 	/** Idempotent start. Fast-paths when already running; dedupes concurrent starts. */
@@ -335,6 +428,9 @@ export class PackRuntimeSupervisor {
 	): Promise<PackRuntimeStatus> {
 		const current = await this.status(packId, runtimeId, opts.projectId);
 		if (current.status === "running") return current;
+		// Preserve a clear docker-unavailable state — do not fall through to start
+		// (which would re-run Docker / render env and surface a noisier error).
+		if (current.status === "docker-unavailable") return current;
 		return this._startDeduped(packId, runtimeId, opts);
 	}
 
@@ -356,15 +452,18 @@ export class PackRuntimeSupervisor {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
+		// Scope the stop to THIS runtime's services so one runtime cannot stop every
+		// service in a multi-runtime pack project (§ collision guard).
+		const services = this._runtimeServices(contribution);
 		try {
-			await this._exec(["compose", "-p", composeProject, "stop"]);
+			await this._exec(["compose", "-p", composeProject, "stop", ...services]);
 		} catch (err) {
 			if (isEnoent(err)) {
 				return { ...descriptor, status: "docker-unavailable", composeProject, message: "docker is not available" };
 			}
 			throw err;
 		}
-		return this._statusFromPs(descriptor, composeProject);
+		return this._statusFromPs(descriptor, composeProject, services);
 	}
 
 	/** Stop then start a runtime. */
@@ -384,14 +483,22 @@ export class PackRuntimeSupervisor {
 		opts: { projectId?: string; tail?: number } = {},
 	): Promise<string> {
 		// Validate the runtime exists (404 mapping) before touching Docker.
-		this._lookup(packId, runtimeId, opts.projectId);
+		const { contribution } = this._lookup(packId, runtimeId, opts.projectId);
 		const composeProject = this.composeProjectFor(packId);
 		const tail = clampTail(opts.tail);
+		// Scope logs to THIS runtime's services so one runtime cannot read every
+		// service's logs in a multi-runtime pack project.
+		const services = this._runtimeServices(contribution);
 		try {
-			const { stdout } = await this._exec(["compose", "-p", composeProject, "logs", "--tail", String(tail)]);
+			const { stdout } = await this._exec([
+				"compose", "-p", composeProject, "logs", "--tail", String(tail), ...services,
+			]);
 			return stdout;
 		} catch (err) {
-			if (isEnoent(err)) return "";
+			// Surface a consistent docker-unavailable failure instead of hiding a
+			// missing-Docker install behind empty output (REST maps this to a
+			// docker-unavailable shaped response).
+			if (isEnoent(err)) throw new PackRuntimeDockerUnavailableError();
 			throw err;
 		}
 	}
@@ -429,7 +536,7 @@ export class PackRuntimeSupervisor {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.env`);
 
-		const { invocation, modeKey } = this._buildInvocation(contribution, envFile, opts.mode);
+		const { invocation, modeKey } = await this._buildInvocation(contribution, envFile, opts.mode);
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 
@@ -462,17 +569,18 @@ export class PackRuntimeSupervisor {
 			throw err;
 		}
 
-		return this._pollUntilHealthy(descriptor, composeProject, modeKey);
+		return this._pollUntilHealthy(descriptor, composeProject, modeKey, invocation.services);
 	}
 
 	private async _pollUntilHealthy(
 		descriptor: PackRuntimeDescriptor,
 		composeProject: string,
 		mode: string,
+		services: string[],
 	): Promise<PackRuntimeStatus> {
 		const deadline = this.now() + this.startupTimeoutMs;
 		for (;;) {
-			const status = await this._statusFromPs(descriptor, composeProject, mode);
+			const status = await this._statusFromPs(descriptor, composeProject, services, mode);
 			if (
 				status.status === "running" ||
 				status.status === "unhealthy" ||
@@ -497,10 +605,15 @@ export class PackRuntimeSupervisor {
 	private async _statusFromPs(
 		descriptor: PackRuntimeDescriptor,
 		composeProject: string,
+		scopeServices: string[],
 		mode?: string,
 	): Promise<PackRuntimeStatus> {
 		try {
-			const { stdout } = await this._exec(["compose", "-p", composeProject, "ps", "--format", "json"]);
+			// Scope `ps` to this runtime's services so status never reflects (or maps
+			// the health of) sibling runtimes sharing the pack compose project.
+			const { stdout } = await this._exec([
+				"compose", "-p", composeProject, "ps", "--format", "json", ...scopeServices,
+			]);
 			const services = parseComposePs(stdout);
 			return {
 				...descriptor,
@@ -553,11 +666,11 @@ export class PackRuntimeSupervisor {
 		return d;
 	}
 
-	private _buildInvocation(
-		contribution: RuntimeContribution,
-		envFile: string,
-		mode?: string,
-	): { manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation } {
+	/**
+	 * Validate the carried manifest (deep, P1 semantics). Throws
+	 * {@link PackRuntimeBadRequestError} for an unusable manifest.
+	 */
+	private _resolveManifest(contribution: RuntimeContribution): RuntimeManifest {
 		const problems: string[] = [];
 		const manifest = validateRuntimeManifest(
 			contribution.manifest,
@@ -570,6 +683,93 @@ export class PackRuntimeSupervisor {
 				`invalid runtime manifest for ${contribution.id}: ${problems.join("; ") || "unknown error"}`,
 			);
 		}
+		return manifest;
+	}
+
+	/**
+	 * The set of compose services this runtime owns — the union of every mode's
+	 * declared `services` (a mode's `omitServices` only changes what `up` starts,
+	 * not what the runtime manages). Used to scope `ps`/`stop`/`logs` so one
+	 * runtime cannot read or stop a sibling runtime's services in a shared
+	 * pack-scoped compose project. Empty (project-wide) only when no manifest
+	 * mode declares services.
+	 */
+	private _runtimeServices(contribution: RuntimeContribution): string[] {
+		let manifest: RuntimeManifest;
+		try {
+			manifest = this._resolveManifest(contribution);
+		} catch {
+			return [];
+		}
+		const set = new Set<string>();
+		for (const mode of Object.values(manifest.modes ?? {})) {
+			for (const svc of mode.services ?? []) set.add(svc);
+		}
+		return [...set];
+	}
+
+	/**
+	 * Build a production-safe resolver context for a manifest's env refs. The
+	 * injected {@link PackRuntimeSupervisorOptions.buildContext} wins when set;
+	 * otherwise generated secrets are idempotently created+persisted, declared
+	 * ports are allocated+persisted, and user-configured secrets are read from
+	 * the secret store. This prevents real runtimes (e.g. Hindsight) from
+	 * throwing in `buildRuntimeInvocation` before Docker is ever invoked.
+	 */
+	private async _resolveContext(
+		manifest: RuntimeManifest,
+		contribution: RuntimeContribution,
+	): Promise<RuntimeResolveContext> {
+		if (this.buildContext) return this.buildContext(manifest, contribution);
+
+		// Collect every key the manifest references, from BOTH the explicit
+		// secrets[]/ports[] declarations AND any env `secret|generate|port` refs
+		// (the LLM-key style user secret is declared only as an env `secret:` ref,
+		// not in secrets[]). Generated secrets win over user-configured for a key.
+		const generatedKeys = new Set<string>();
+		const userSecretKeys = new Set<string>();
+		const portKeys = new Set<string>();
+		for (const spec of manifest.secrets ?? []) {
+			(spec.generate ? generatedKeys : userSecretKeys).add(spec.key);
+		}
+		for (const spec of manifest.ports ?? []) portKeys.add(spec.key);
+		const envMaps = [manifest.env, ...Object.values(manifest.modes ?? {}).map((m) => m.env)];
+		for (const env of envMaps) {
+			for (const value of Object.values(env ?? {})) {
+				if (!value || typeof value !== "object") continue;
+				if (typeof value.generate === "string") generatedKeys.add(value.generate);
+				if (typeof value.secret === "string") userSecretKeys.add(value.secret);
+				if (typeof value.port === "string") portKeys.add(value.port);
+			}
+		}
+
+		const secrets: Record<string, string> = {};
+		const generated: Record<string, string> = {};
+		const ports: Record<string, number> = {};
+		for (const key of generatedKeys) {
+			generated[key] = this.secretsStore
+				? getOrCreateRuntimeSecret(this.secretsStore, key)
+				: generateSecretValue();
+		}
+		for (const key of userSecretKeys) {
+			if (generatedKeys.has(key)) continue;
+			const v = this.secretsStore?.get(key);
+			if (typeof v === "string" && v.length > 0) secrets[key] = v;
+		}
+		for (const key of portKeys) {
+			ports[key] = this.portStore
+				? await allocateHostPort(this.portStore, key)
+				: await probeFreePort();
+		}
+		return { secrets, generated, ports };
+	}
+
+	private async _buildInvocation(
+		contribution: RuntimeContribution,
+		envFile: string,
+		mode?: string,
+	): Promise<{ manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation }> {
+		const manifest = this._resolveManifest(contribution);
 		const modeKeys = Object.keys(manifest.modes ?? {});
 		if (mode !== undefined && !manifest.modes?.[mode]) {
 			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} has no mode ${JSON.stringify(mode)}`);
@@ -578,11 +778,12 @@ export class PackRuntimeSupervisor {
 		if (!modeKey) {
 			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} declares no modes`);
 		}
+		const ctx = await this._resolveContext(manifest, contribution);
 		const invocation = buildRuntimeInvocation(manifest, modeKey, {
 			sourceFile: contribution.sourceFile,
 			packRoot: contribution.packRoot,
 			envFile,
-			ctx: this.buildContext(manifest, contribution),
+			ctx,
 		});
 		return { manifest, modeKey, invocation };
 	}

@@ -23,6 +23,8 @@ import {
 	PackRuntimeSupervisor,
 	PackRuntimeNotFoundError,
 	PackRuntimeBadRequestError,
+	PackRuntimeDockerUnavailableError,
+	FilePortStore,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
 	clampTail,
@@ -323,10 +325,19 @@ describe("PackRuntimeSupervisor docker-unavailable", () => {
 		assert.equal(st.status, "docker-unavailable");
 	});
 
-	it("logs return empty string on ENOENT", async () => {
+	it("logs throw PackRuntimeDockerUnavailableError on ENOENT (no silent empty)", async () => {
 		const docker = makeDocker({ logs: enoent });
 		const sup = makeSupervisor(docker.executor);
-		assert.equal(await sup.logs(PACK_ID, RUNTIME_ID), "");
+		await assert.rejects(() => sup.logs(PACK_ID, RUNTIME_ID), PackRuntimeDockerUnavailableError);
+	});
+
+	it("ensureRuntime short-circuits on docker-unavailable (no compose up)", async () => {
+		const docker = makeDocker({ ps: enoent, up: () => ok() });
+		const sup = makeSupervisor(docker.executor);
+		const st = await sup.ensureRuntime(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "docker-unavailable");
+		// status() saw ENOENT → ensureRuntime must NOT fall through into start.
+		assert.equal(docker.countSub("up"), 0);
 	});
 });
 
@@ -340,7 +351,8 @@ describe("PackRuntimeSupervisor.stop / restart", () => {
 		assert.equal(st.status, "stopped");
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
-		assert.deepEqual(stopCall.args, ["compose", "-p", project, "stop"]);
+		// Scoped to this runtime's service (`db`) — not the whole pack project.
+		assert.deepEqual(stopCall.args, ["compose", "-p", project, "stop", "db"]);
 	});
 
 	it("restart stops then starts", async () => {
@@ -368,7 +380,8 @@ describe("PackRuntimeSupervisor.logs", () => {
 		assert.equal(out, "hello logs");
 		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
-		assert.deepEqual(logCall.args, ["compose", "-p", project, "logs", "--tail", "42"]);
+		// Scoped to this runtime's service (`db`).
+		assert.deepEqual(logCall.args, ["compose", "-p", project, "logs", "--tail", "42", "db"]);
 	});
 });
 
@@ -404,5 +417,210 @@ describe("compose project name + docker env discipline", () => {
 		const sup = makeSupervisor(docker.executor, { dockerBin: "podman" });
 		await sup.status(PACK_ID, RUNTIME_ID);
 		assert.equal(docker.calls[0]!.file, "podman");
+	});
+});
+
+// ── Service-scoped commands across a multi-runtime pack ─────────────────────
+
+describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
+	const MULTI_PACK = "multi";
+
+	function makeMultiContribution(id: string, services: string[]): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", MULTI_PACK);
+		return {
+			id,
+			title: id,
+			description: id,
+			listName: id,
+			sourceFile: path.join(packRoot, "runtimes", `${id}.yaml`),
+			packRoot,
+			manifest: {
+				id,
+				composeFile: "compose.yaml",
+				modes: { default: { services } },
+			},
+		} as RuntimeContribution;
+	}
+
+	/** Registry with two runtimes (a/b) under ONE shared pack compose project. */
+	function makeMultiRegistry(contribs: RuntimeContribution[]): PackContributionResolver {
+		const pack = {
+			packId: MULTI_PACK,
+			packName: "Multi",
+			packRoot: contribs[0]!.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: contribs,
+		};
+		const byId = new Map(contribs.map((c) => [c.id, c]));
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === MULTI_PACK ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === MULTI_PACK ? byId.get(runtimeId) : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeMultiSupervisor(executor: DockerExecutor): PackRuntimeSupervisor {
+		const contribs = [
+			makeMultiContribution("alpha", ["a1", "a2"]),
+			makeMultiContribution("beta", ["b1", "b2"]),
+		];
+		return new PackRuntimeSupervisor({
+			registry: makeMultiRegistry(contribs),
+			executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "multi-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+		});
+	}
+
+	const PROJECT = `bobbit-pack-${MULTI_PACK}-testsuffix`;
+
+	it("stop scopes to the runtime's own services only", async () => {
+		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
+		const sup = makeMultiSupervisor(docker.executor);
+		await sup.stop(MULTI_PACK, "alpha");
+		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
+		assert.deepEqual(stopCall.args, ["compose", "-p", PROJECT, "stop", "a1", "a2"]);
+		// Sibling runtime's services are never passed.
+		assert.ok(!stopCall.args.includes("b1"));
+		assert.ok(!stopCall.args.includes("b2"));
+	});
+
+	it("status scopes `ps` to the runtime's own services only", async () => {
+		const docker = makeDocker({ ps: () => ok("") });
+		const sup = makeMultiSupervisor(docker.executor);
+		await sup.status(MULTI_PACK, "beta");
+		const psCall = docker.calls.find((c) => c.args.includes("ps"))!;
+		assert.deepEqual(psCall.args, ["compose", "-p", PROJECT, "ps", "--format", "json", "b1", "b2"]);
+		assert.ok(!psCall.args.includes("a1"));
+	});
+
+	it("logs scope to the runtime's own services only", async () => {
+		const docker = makeDocker({ logs: () => ok("out") });
+		const sup = makeMultiSupervisor(docker.executor);
+		await sup.logs(MULTI_PACK, "alpha", { tail: 10 });
+		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
+		assert.deepEqual(logCall.args, ["compose", "-p", PROJECT, "logs", "--tail", "10", "a1", "a2"]);
+		assert.ok(!logCall.args.includes("b1"));
+	});
+});
+
+// ── Production-safe resolver context (env refs resolve before Docker) ───────
+
+describe("PackRuntimeSupervisor production resolver context", () => {
+	function makeEnvContribution(): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", "envpack");
+		return {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				secrets: [{ key: "GEN_SECRET", generate: true }],
+				ports: [{ key: "WEB_PORT", container: 8080 }],
+				env: {
+					GEN_SECRET: { generate: "GEN_SECRET" },
+					WEB_PORT: { port: "WEB_PORT" },
+					USER_KEY: { secret: "USER_KEY" },
+				},
+				modes: { default: { services: ["api"], requireEnv: ["USER_KEY"] } },
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeEnvRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: "envpack",
+			packName: "Env Pack",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === "envpack" ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === "envpack" && runtimeId === "svc" ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function inMemorySecrets(seed: Record<string, string> = {}) {
+		const data: Record<string, string> = { ...seed };
+		return {
+			get: (k: string) => data[k],
+			set: (k: string, v: string) => { data[k] = v; },
+			data,
+		};
+	}
+
+	it("resolves generated + port + configured-secret env refs without throwing", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		const contribution = makeEnvContribution();
+		const secrets = inMemorySecrets({ USER_KEY: "configured-llm-key" });
+		const portStore = new FilePortStore(path.join(tmp, "envpack-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "envpack-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore,
+		});
+
+		const st = await sup.start("envpack", "svc");
+		assert.equal(st.status, "running");
+
+		// Generated secret was created+persisted.
+		assert.ok((secrets.data.GEN_SECRET ?? "").length > 0);
+		// Port was allocated+persisted.
+		assert.ok(typeof portStore.get("WEB_PORT") === "number");
+
+		// Rendered env file carries the resolved values (no unresolved refs).
+		const project = "bobbit-pack-envpack-testsuffix";
+		const envFile = path.join(tmp, "envpack-data", project, "svc.env");
+		const body = fs.readFileSync(envFile, "utf-8");
+		assert.match(body, /USER_KEY="configured-llm-key"/);
+		assert.match(body, /GEN_SECRET="/);
+		assert.match(body, new RegExp(`WEB_PORT="${portStore.get("WEB_PORT")}"`));
+	});
+
+	it("a missing required user secret rejects with a clear error (not silent)", async () => {
+		const docker = makeDocker({ up: () => ok(), ps: () => ok("") });
+		const contribution = makeEnvContribution();
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "envpack-data2"),
+			secretsStore: inMemorySecrets(), // USER_KEY absent
+			portStore: new FilePortStore(path.join(tmp, "envpack-ports2.json")),
+		});
+		await assert.rejects(() => sup.start("envpack", "svc"), /USER_KEY/);
+		assert.equal(docker.countSub("up"), 0);
 	});
 });
