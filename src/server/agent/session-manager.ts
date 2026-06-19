@@ -1322,6 +1322,11 @@ export class SessionManager {
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
 			prStatusStore: this.prStatusStore!,
+			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
+			// The pipeline (tool activation, prompt order, bridge-install) resolves the
+			// effective (inherited) metadata for a session's goal through this single
+			// closure — no other site walks the goal ancestry. Absent metadata ⇒ {}.
+			resolveGoalMetadata: (goalId: string | undefined) => resolvedGoalManager.getEffectiveGoalMetadata(goalId),
 		};
 	}
 
@@ -4571,6 +4576,19 @@ export class SessionManager {
 		// Inherit tool access from parent session, unless the caller passes an
 		// explicit allowedTools override (OrchestrationCore strips spawn verbs).
 		const parentSession = this.sessions.get(parentSessionId);
+
+		// ── Goal-metadata inheritance (anti-asymmetry invariant) ──
+		// A `team_delegate` sub-agent natively carries only `delegateOf`; it has no
+		// `goalId`/`teamGoalId`, so every per-session goal-metadata edge (disabled
+		// tools, disabled providers, prompt order) would resolve to {} and the child
+		// could re-acquire a tool/provider the goal disabled — a treatment leak.
+		// Stamp the PARENT's effective goal as the delegate's `teamGoalId` (NOT
+		// `goalId`, so it is treated as a member, not a lead) so the resolver walks
+		// the same ancestry and the delegate inherits the same metadata. Prefer the
+		// live parent session, then its persisted record (restart/respawn).
+		const parentEffectiveGoalId =
+			parentSession?.goalId ?? parentSession?.teamGoalId
+			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
 			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4592,6 +4610,10 @@ export class SessionManager {
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
+			// Effective-goal stamp (see above): makes the inherited goal metadata
+			// available DURING the delegate's own setup pipeline (tool activation /
+			// bridge-install / prompt order), not just after the fact.
+			teamGoalId: parentEffectiveGoalId,
 			// Persist the source discriminator + read-only marker (orchestration-core
 			// §3/§2.2) so a delegate-style child (e.g. host-agents) is rebuilt with
 			// the correct kind on restart and is enumerable by source-filtered verbs.
@@ -4618,6 +4640,14 @@ export class SessionManager {
 
 		const session = await executePlan(plan, ctx);
 		if (parentProjectId) session.projectId = parentProjectId;
+		// Persist the effective-goal stamp on BOTH the live session and the store
+		// record so it survives restart/respawn (the initial structural put happens
+		// inside executePlan; this guarantees the field regardless of plan
+		// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
+		if (parentEffectiveGoalId) {
+			session.teamGoalId = parentEffectiveGoalId;
+			this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
+		}
 
 		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
