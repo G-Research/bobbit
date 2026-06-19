@@ -26,6 +26,7 @@ import {
 	PackRuntimeBadRequestError,
 	PackRuntimeDockerUnavailableError,
 	FilePortStore,
+	readRuntimeStartPolicy,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
 	packRuntimePersistKey,
@@ -100,7 +101,7 @@ interface DockerCall {
 type SubHandler = (ctx: { calls: DockerCall[] }) => DockerExecResult | Promise<DockerExecResult>;
 
 function subcommandOf(args: string[]): string {
-	for (const sub of ["up", "stop", "logs", "ps"]) {
+	for (const sub of ["up", "stop", "logs", "ps", "down"]) {
 		if (args.includes(sub)) return sub;
 	}
 	return "other";
@@ -244,6 +245,41 @@ describe("PackRuntimeSupervisor.status", () => {
 		assert.equal(all.length, 1);
 		assert.equal(all[0]!.runtimeId, RUNTIME_ID);
 		assert.equal(all[0]!.status, "stopped");
+	});
+});
+
+// ── No auto-start (P3 invariant) ─────────────────────────────────────────────
+//
+// P3 hard invariant: Docker `compose up` happens ONLY from an explicit user
+// enable/start action. The READ paths (boot listing / status polling) must never
+// implicitly bring a runtime up. This pins that contract at the supervisor seam:
+// neither `list()` nor `status()` may ever issue an `up` subcommand, regardless
+// of the runtime's current state (stopped, healthy, or unhealthy).
+
+describe("PackRuntimeSupervisor no-auto-start (P3)", () => {
+	for (const [label, psOut] of [
+		["stopped", ""],
+		["running", '{"Service":"db","State":"running","Health":"healthy"}'],
+		["unhealthy", '{"Service":"db","State":"running","Health":"unhealthy"}'],
+	] as const) {
+		it(`status() never issues compose up (${label})`, async () => {
+			// `up` is intentionally UNHANDLED: if status ever called it the spy would
+			// still record the call, so the zero-count assertion is meaningful.
+			const docker = makeDocker({ ps: () => ok(psOut) });
+			const sup = makeSupervisor(docker.executor);
+			await sup.status(PACK_ID, RUNTIME_ID);
+			assert.equal(docker.countSub("up"), 0, "status must not auto-start the runtime");
+			// The only Docker subcommand a read path may issue is `ps`.
+			assert.ok(docker.calls.every((c) => c.args.includes("ps")));
+		});
+	}
+
+	it("list() never issues compose up across every active runtime", async () => {
+		const docker = makeDocker({ ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}') });
+		const sup = makeSupervisor(docker.executor);
+		await sup.list();
+		assert.equal(docker.countSub("up"), 0, "boot listing must not auto-start any runtime");
+		assert.ok(docker.calls.every((c) => c.args.includes("ps")));
 	});
 });
 
@@ -1080,5 +1116,329 @@ describe("PackRuntimeSupervisor cross-runtime persistence isolation", () => {
 		// Resolved from the RAW key (no namespaced lookup for user secrets).
 		const envFile = path.join(tmp, "isouser-data", "bobbit-pack-isouser-testsuffix", "svc.env");
 		assert.match(fs.readFileSync(envFile, "utf-8"), /SHARED_KEY="global-value"/);
+	});
+});
+
+// ── readRuntimeStartPolicy (pure) ────────────────────────────────────────────
+
+describe("readRuntimeStartPolicy", () => {
+	it("only the literal 'on-enable' opts a runtime into auto-start; everything else is manual", () => {
+		assert.equal(readRuntimeStartPolicy({ startPolicy: "on-enable" }), "on-enable");
+		assert.equal(readRuntimeStartPolicy({ startPolicy: "manual" }), "manual");
+		assert.equal(readRuntimeStartPolicy({}), "manual", "absent policy defaults to manual");
+		assert.equal(readRuntimeStartPolicy(undefined), "manual");
+		// Defensive: a non-literal/garbage value never silently enables auto-start.
+		assert.equal(readRuntimeStartPolicy({ startPolicy: "On-Enable" }), "manual");
+		assert.equal(readRuntimeStartPolicy({ startPolicy: true as unknown as string }), "manual");
+	});
+});
+
+// ── down() — uninstall vs explicit purge (P3) ────────────────────────────────
+//
+// `down` is the uninstall/purge primitive. Pins the design invariants:
+//   - uninstall  → `docker compose down` (NO `-v`): containers/networks removed,
+//     bind-mounted data SURVIVES, supervisor-owned local state is preserved.
+//   - purge      → `docker compose down -v` + removeState: Docker volumes AND the
+//     rendered env / persisted generated-secret / allocated-port bookkeeping go.
+//   - ENOENT     → docker-unavailable (never throws), and the requested local
+//     state removal still runs (host-FS bookkeeping is meaningful Docker-less).
+
+describe("PackRuntimeSupervisor.down (uninstall vs purge)", () => {
+	function inMemorySecrets(seed: Record<string, string> = {}) {
+		const data: Record<string, string> = { ...seed };
+		const removed: string[] = [];
+		return {
+			get: (k: string) => data[k],
+			set: (k: string, v: string) => { data[k] = v; },
+			remove: (k: string) => { delete data[k]; removed.push(k); },
+			data,
+			removed,
+		};
+	}
+
+	/** A runtime that declares a generated secret + a port so state-removal has
+	 *  something namespaced to delete. */
+	function makeStateContribution(): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", "downpack");
+		return {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				secrets: [{ key: "GEN_SECRET", generate: true }],
+				ports: [{ key: "WEB_PORT", container: 8080 }],
+				env: { GEN_SECRET: { generate: "GEN_SECRET" }, WEB_PORT: { port: "WEB_PORT" } },
+				modes: { default: { services: ["api"] } },
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeDownRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: "downpack",
+			packName: "Down Pack",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === "downpack" ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === "downpack" && runtimeId === "svc" ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeDownSupervisor(executor: DockerExecutor, secrets: ReturnType<typeof inMemorySecrets>, portStore: FilePortStore) {
+		return new PackRuntimeSupervisor({
+			registry: makeDownRegistry(makeStateContribution()),
+			executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "down-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore,
+		});
+	}
+
+	const PROJECT = "bobbit-pack-downpack-testsuffix";
+	const COMPOSE_ABS = path.join(tmp, "packs", "downpack", "runtimes", "compose.yaml");
+	const ENV_FILE = path.join(tmp, "down-data", PROJECT, "svc.env");
+
+	it("uninstall: `compose down` WITHOUT -v, reports stopped, preserves local state", async () => {
+		const docker = makeDocker({ up: () => ok(), ps: () => ok(""), down: () => ok() });
+		const secrets = inMemorySecrets();
+		const portStore = new FilePortStore(path.join(tmp, "down-ports.json"));
+		const sup = makeDownSupervisor(docker.executor, secrets, portStore);
+
+		// Start once so the env file + namespaced secret/port are persisted.
+		await sup.start("downpack", "svc");
+		const genKey = packRuntimePersistKey("downpack", "svc", "GEN_SECRET");
+		const portKey = packRuntimePersistKey("downpack", "svc", "WEB_PORT");
+		assert.ok(fs.existsSync(ENV_FILE));
+		assert.ok((secrets.data[genKey] ?? "").length > 0);
+		assert.equal(typeof portStore.get(portKey), "number");
+
+		const st = await sup.down("downpack", "svc");
+		assert.equal(st.status, "stopped");
+		assert.equal(st.composeProject, PROJECT);
+
+		const downCall = docker.calls.find((c) => c.args.includes("down"))!;
+		// Carries the compose file/env file; NO `-v` (bind data must survive).
+		assert.deepEqual(downCall.args, [...composeBase(PROJECT, COMPOSE_ABS, ENV_FILE), "down"]);
+		assert.ok(!downCall.args.includes("-v"), "uninstall down must never pass -v");
+
+		// Local supervisor-owned state preserved on a non-purge down.
+		assert.ok(fs.existsSync(ENV_FILE), "rendered env file preserved on uninstall");
+		assert.ok((secrets.data[genKey] ?? "").length > 0, "generated secret preserved on uninstall");
+		assert.equal(typeof portStore.get(portKey), "number", "allocated port preserved on uninstall");
+		assert.deepEqual(secrets.removed, [], "no secret removal on uninstall");
+	});
+
+	it("purge: `compose down -v` AND removes the rendered env + persisted secret/port", async () => {
+		const docker = makeDocker({ up: () => ok(), ps: () => ok(""), down: () => ok() });
+		const secrets = inMemorySecrets();
+		const portStore = new FilePortStore(path.join(tmp, "purge-ports.json"));
+		const sup = makeDownSupervisor(docker.executor, secrets, portStore);
+
+		await sup.start("downpack", "svc");
+		const genKey = packRuntimePersistKey("downpack", "svc", "GEN_SECRET");
+		const portKey = packRuntimePersistKey("downpack", "svc", "WEB_PORT");
+		assert.ok(fs.existsSync(ENV_FILE));
+		assert.ok((secrets.data[genKey] ?? "").length > 0);
+		assert.equal(typeof portStore.get(portKey), "number");
+
+		const st = await sup.down("downpack", "svc", { volumes: true, removeState: true });
+		assert.equal(st.status, "stopped");
+
+		const downCall = docker.calls.find((c) => c.args.includes("down"))!;
+		// `down -v` for the explicit purge.
+		assert.deepEqual(downCall.args, [...composeBase(PROJECT, COMPOSE_ABS, ENV_FILE), "down", "-v"]);
+
+		// Supervisor-owned local state removed: env file gone, namespaced secret + port dropped.
+		assert.ok(!fs.existsSync(ENV_FILE), "rendered env file removed on purge");
+		assert.equal(secrets.data[genKey], undefined, "generated secret removed on purge");
+		assert.ok(secrets.removed.includes(genKey), "secret store remove() called for the namespaced key");
+		assert.equal(portStore.get(portKey), undefined, "allocated port removed on purge");
+	});
+
+	it("down ENOENT → docker-unavailable (no throw); removeState still runs", async () => {
+		const enoent = () => { const e = new Error("spawn docker ENOENT") as Error & { code: string }; e.code = "ENOENT"; throw e; };
+		// up/ps succeed so a prior start persists state; only `down` hits ENOENT.
+		const docker = makeDocker({ up: () => ok(), ps: () => ok(""), down: enoent });
+		const secrets = inMemorySecrets();
+		const portStore = new FilePortStore(path.join(tmp, "down-enoent-ports.json"));
+		const sup = makeDownSupervisor(docker.executor, secrets, portStore);
+
+		await sup.start("downpack", "svc");
+		const genKey = packRuntimePersistKey("downpack", "svc", "GEN_SECRET");
+		assert.ok((secrets.data[genKey] ?? "").length > 0);
+
+		const st = await sup.down("downpack", "svc", { volumes: true, removeState: true });
+		assert.equal(st.status, "docker-unavailable");
+		assert.equal(st.composeProject, PROJECT);
+		// Even with Docker missing, the host-FS state removal proceeds.
+		assert.ok(!fs.existsSync(ENV_FILE), "env file removed despite docker-unavailable");
+		assert.equal(secrets.data[genKey], undefined, "namespaced secret removed despite docker-unavailable");
+	});
+
+	it("unknown runtime → PackRuntimeNotFoundError", async () => {
+		const docker = makeDocker({ down: () => ok() });
+		const sup = makeDownSupervisor(docker.executor, inMemorySecrets(), new FilePortStore(path.join(tmp, "down-nf-ports.json")));
+		await assert.rejects(() => sup.down("downpack", "nope"), PackRuntimeNotFoundError);
+		assert.equal(docker.countSub("down"), 0);
+	});
+});
+
+// ── capabilitySummary — pre-start consent disclosure (P3 §8) ─────────────────
+//
+// Pure w.r.t. Docker: derived only from the validated manifest + selected mode +
+// already-persisted ports (NEVER allocates, NEVER runs a compose command). Pins
+// the enable-card disclosure surface: images/services after omitServices, declared
+// ports + persisted host assignment, the managed volume/data path, the start
+// policy, and the memory/trust copy.
+
+describe("PackRuntimeSupervisor.capabilitySummary", () => {
+	/** A multi-mode runtime mirroring Hindsight's shape: a managed mode with `db`
+	 *  and an external-postgres mode that omits `db`, plus ports + a DATA_DIR env. */
+	function makeCapContribution(): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", "cappack");
+		return {
+			id: "hindsight",
+			title: "Hindsight",
+			description: "Managed memory",
+			listName: "hindsight",
+			sourceFile: path.join(packRoot, "runtimes", "hindsight.yaml"),
+			packRoot,
+			manifest: {
+				id: "hindsight",
+				startPolicy: "on-enable",
+				composeFile: "compose.yaml",
+				ports: [
+					{ key: "WEB_PORT", env: "HINDSIGHT_WEB_PORT", container: 3000 },
+					{ key: "API_PORT", env: "HINDSIGHT_API_PORT", container: 8080 },
+				],
+				env: {
+					HINDSIGHT_DATA_DIR: { value: "${dataDir:-~/.hindsight}" },
+				},
+				modes: {
+					"managed-postgres": { services: ["api", "web", "db"] },
+					"external-postgres": { services: ["api", "web", "db"], omitServices: ["db"] },
+				},
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeCapRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: "cappack",
+			packName: "Cap Pack",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === "cappack" ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === "cappack" && runtimeId === "hindsight" ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeCapSupervisor(portStore?: FilePortStore): PackRuntimeSupervisor {
+		const docker = makeDocker({});
+		return new PackRuntimeSupervisor({
+			registry: makeCapRegistry(makeCapContribution()),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "cap-data"),
+			...(portStore ? { portStore } : {}),
+		});
+	}
+
+	it("managed mode discloses api+web+db, ports, default volume path, on-enable policy, trust copy", async () => {
+		const sup = makeCapSupervisor();
+		const cap = await sup.capabilitySummary("cappack", "hindsight", { mode: "managed-postgres" });
+		assert.equal(cap.mode, "managed-postgres");
+		assert.equal(cap.startPolicy, "on-enable");
+		assert.deepEqual(cap.services, ["api", "web", "db"]);
+		assert.deepEqual(cap.images, ["api", "web", "db"]);
+		assert.equal(cap.composeProject, "bobbit-pack-cappack-testsuffix");
+		// Declared ports surfaced with their env name + container port; no host yet.
+		const web = cap.ports.find((p) => p.key === "WEB_PORT")!;
+		assert.equal(web.env, "HINDSIGHT_WEB_PORT");
+		assert.equal(web.container, 3000);
+		assert.equal(web.host, undefined, "no host port allocated by a pure capability read");
+		// Default managed data path resolved from the ${dataDir:-~/.hindsight} value ref.
+		assert.equal(cap.volumePath, "~/.hindsight");
+		assert.match(cap.trust, /store and recall agent memory/);
+		assert.match(cap.trust, /purge removes Docker/i);
+	});
+
+	it("external-postgres mode subtracts db from the disclosed services", async () => {
+		const sup = makeCapSupervisor();
+		const cap = await sup.capabilitySummary("cappack", "hindsight", { mode: "external-postgres" });
+		assert.deepEqual(cap.services, ["api", "web"]);
+		assert.ok(!cap.services.includes("db"), "external-postgres discloses no managed db service");
+	});
+
+	it("discloses an ALREADY-persisted host port without allocating a new one", async () => {
+		const portStore = new FilePortStore(path.join(tmp, "cap-ports.json"));
+		portStore.set(packRuntimePersistKey("cappack", "hindsight", "WEB_PORT"), 54321);
+		const sup = makeCapSupervisor(portStore);
+		const cap = await sup.capabilitySummary("cappack", "hindsight", { mode: "managed-postgres" });
+		const web = cap.ports.find((p) => p.key === "WEB_PORT")!;
+		assert.equal(web.host, 54321, "persisted host port disclosed verbatim");
+		// The API port was never persisted → no host assignment fabricated.
+		const api = cap.ports.find((p) => p.key === "API_PORT")!;
+		assert.equal(api.host, undefined);
+	});
+
+	it("a configured dataDir overrides the default disclosed volume path", async () => {
+		const sup = makeCapSupervisor();
+		const cap = await sup.capabilitySummary("cappack", "hindsight", {
+			mode: "managed-postgres",
+			config: { dataDir: "/srv/hindsight" },
+		});
+		assert.equal(cap.volumePath, "/srv/hindsight");
+	});
+
+	it("defaults to the first declared mode when none is requested", async () => {
+		const sup = makeCapSupervisor();
+		const cap = await sup.capabilitySummary("cappack", "hindsight");
+		assert.equal(cap.mode, "managed-postgres");
+	});
+
+	it("rejects an unknown mode with PackRuntimeBadRequestError", async () => {
+		const sup = makeCapSupervisor();
+		await assert.rejects(
+			() => sup.capabilitySummary("cappack", "hindsight", { mode: "nope" }),
+			PackRuntimeBadRequestError,
+		);
+	});
+
+	it("startPolicyFor reports the runtime's declared on-enable policy (no Docker)", () => {
+		const sup = makeCapSupervisor();
+		assert.equal(sup.startPolicyFor("cappack", "hindsight"), "on-enable");
 	});
 });

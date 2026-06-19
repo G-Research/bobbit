@@ -41,6 +41,7 @@ import {
 	updateInstalledPack,
 	fetchContributions,
 	fetchTools,
+	getPackRuntimeCapabilities,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
@@ -49,6 +50,7 @@ import {
 	type MarketScope,
 	type PackActivationResponse,
 	type PackEntityDescriptions,
+	type PackRuntimeCapabilitySummary,
 } from "./api.js";
 
 // ============================================================================
@@ -79,6 +81,16 @@ let conflicts: ConflictWire[] = [];
  *  filtered /api/tools or /api/ext/contributions — so a DISABLED entity stays
  *  visible + re-enableable. */
 const activationByPack = new Map<string, PackActivationResponse>();
+
+/** Per-runtime capability disclosure for the consent enable-card (P3 design §8),
+ *  keyed by `${scope}:${packName}:${runtimeId}`. Derived from the validated
+ *  manifest + selected mode (no Docker needed), fetched lazily + best-effort so
+ *  the disclosure paints even when Docker is unavailable / the runtime stopped.
+ *  `null` = fetch attempted but unavailable (route not present / errored) →
+ *  the card falls back to static disclosure copy. */
+const runtimeCapabilities = new Map<string, PackRuntimeCapabilitySummary | null>();
+/** Guard so we issue at most one in-flight capability fetch per runtime key. */
+const runtimeCapabilitiesInFlight = new Set<string>();
 
 let newSourceUrl = "";
 let newSourceRef = "";
@@ -264,13 +276,51 @@ async function loadActivationForInstalled(): Promise<void> {
 	if (changed) renderApp();
 }
 
+/** Toggleable entity kinds (singular testid form). The schema-v2 kinds
+ *  (`provider`/`hook`/`mcp`/`pi-extension`/`runtime`/`workflow`) appear only for
+ *  schema≥2 packs; `runtime` is the consent-gated managed Docker runtime. */
+type ActivationKind = "role" | "tool" | "skill" | "entrypoint" | "provider" | "hook" | "mcp" | "pi-extension" | "runtime" | "workflow";
+
 /** Maps the singular testid kind → the `DisabledRefs` array key. */
-const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint", keyof DisabledRefs> = {
+const ACTIVATION_KIND_KEY: Record<ActivationKind, keyof DisabledRefs> = {
 	role: "roles",
 	tool: "tools",
 	skill: "skills",
 	entrypoint: "entrypoints",
+	provider: "providers",
+	hook: "hooks",
+	mcp: "mcp",
+	"pi-extension": "piExtensions",
+	runtime: "runtimes",
+	workflow: "workflows",
 };
+
+/** Memory/trust disclosure shown on the managed-runtime consent enable-card
+ *  (design §8). Enabling starts Docker containers that store + recall agent
+ *  memory; disabling stops them but keeps data; purge removes the volumes. */
+const RUNTIME_MEMORY_DISCLOSURE =
+	"Enabling this managed runtime starts local Docker containers that store and recall agent memory — conversation summaries plus project/goal/session tags — in the configured memory bank. Disabling stops the containers but keeps your data on disk; purging removes the Docker volumes and runtime state.";
+
+/** External-mode setup guidance (no Docker). Shown when the runtime is configured
+ *  to talk to an already-running Hindsight instead of a Bobbit-managed one. */
+const RUNTIME_EXTERNAL_GUIDANCE =
+	"External mode does not run Docker. Point Bobbit at an existing Hindsight deployment by configuring its URL, optional API key, namespace and memory bank in the provider settings.";
+
+/** Lazily fetch + cache the capability disclosure for a managed runtime so the
+ *  consent enable-card can render images/services, ports, volume path and trust
+ *  copy. Best-effort: a missing route / error caches `null` and the card falls
+ *  back to static copy. Repaints once resolved. */
+function ensureRuntimeCapabilities(pack: InstalledPackWire, runtimeId: string): void {
+	const key = `${pack.scope}:${pack.packName}:${runtimeId}`;
+	if (runtimeCapabilities.has(key) || runtimeCapabilitiesInFlight.has(key)) return;
+	runtimeCapabilitiesInFlight.add(key);
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	void getPackRuntimeCapabilities({ packId: pack.packName, runtimeId, projectId }).then((res) => {
+		runtimeCapabilitiesInFlight.delete(key);
+		runtimeCapabilities.set(key, res.ok ? res.data : null);
+		renderApp();
+	});
+}
 
 /** Toggle a user-facing pack entity's activation. Computes the new `disabled`
  *  set, PUTs it (the response carries the refreshed catalogue + normalized
@@ -279,7 +329,7 @@ const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint", keyo
  *  (pack schema V1 §9). Entrypoints are keyed by `listName`. */
 async function handleToggleActivation(
 	pack: InstalledPackWire,
-	kind: "role" | "tool" | "skill" | "entrypoint",
+	kind: ActivationKind,
 	name: string,
 	enable: boolean,
 ): Promise<void> {
@@ -297,13 +347,23 @@ async function handleToggleAllActivation(pack: InstalledPackWire, enable: boolea
 	const current = activationByPack.get(cacheKey);
 	if (!current) return;
 	const cat = current.catalogue;
+	// Disabling-all MUST cover the schema-v2 arrays too (providers/hooks/mcp/
+	// piExtensions/runtimes/workflows) — otherwise the master OFF toggle would
+	// leave a managed runtime enabled (and Docker running). Enabling-all clears
+	// every kind back to the default-enabled state.
 	const disabled: DisabledRefs = enable
-		? { roles: [], tools: [], skills: [], entrypoints: [] }
+		? { roles: [], tools: [], skills: [], entrypoints: [], providers: [], hooks: [], mcp: [], piExtensions: [], runtimes: [], workflows: [] }
 		: {
 			roles: [...cat.roles],
 			tools: [...cat.tools],
 			skills: [...cat.skills],
 			entrypoints: cat.entrypoints.map((e) => e.listName),
+			providers: [...(cat.providers ?? [])],
+			hooks: [...(cat.hooks ?? [])],
+			mcp: [...(cat.mcp ?? [])],
+			piExtensions: [...(cat.piExtensions ?? [])],
+			runtimes: [...(cat.runtimes ?? [])],
+			workflows: [...(cat.workflows ?? [])],
 		};
 	await savePackActivation(pack, disabled, `activation:${cacheKey}:all`);
 }
@@ -1115,18 +1175,30 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 	`;
 }
 
-function activationEntityTotal(activation: PackActivationResponse): number {
-	const cat = activation.catalogue;
-	return cat.roles.length + cat.tools.length + cat.skills.length + cat.entrypoints.length;
+/** Every keyof DisabledRefs that the catalogue counts as a toggleable entity.
+ *  Keeps the master-toggle total/enabled count in sync with the schema-v2
+ *  arrays (so a managed runtime is part of "Enabled"/"Disabled"). */
+const ACTIVATION_COUNT_KINDS: Array<keyof DisabledRefs> = [
+	"roles", "tools", "skills", "entrypoints",
+	"providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows",
+];
+
+export function activationEntityTotal(activation: PackActivationResponse): number {
+	const cat = activation.catalogue as Record<keyof DisabledRefs, unknown>;
+	let total = 0;
+	for (const kind of ACTIVATION_COUNT_KINDS) {
+		const arr = cat[kind];
+		if (Array.isArray(arr)) total += arr.length;
+	}
+	return total;
 }
 
-function activationEntityEnabledCount(activation: PackActivationResponse): number {
+export function activationEntityEnabledCount(activation: PackActivationResponse): number {
 	const disabled = activation.disabled || {};
-	const disabledCount =
-		(disabled.roles ?? []).length +
-		(disabled.tools ?? []).length +
-		(disabled.skills ?? []).length +
-		(disabled.entrypoints ?? []).length;
+	let disabledCount = 0;
+	for (const kind of ACTIVATION_COUNT_KINDS) {
+		disabledCount += (disabled[kind] ?? []).length;
+	}
 	return Math.max(0, activationEntityTotal(activation) - disabledCount);
 }
 
@@ -1165,7 +1237,7 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	const isEnabled = (kindKey: keyof DisabledRefs, name: string) => !(disabled[kindKey] ?? []).includes(name);
 
 	const toggle = (
-		kind: "role" | "tool" | "skill" | "entrypoint",
+		kind: ActivationKind,
 		name: string,
 		label: string,
 		kindLabel?: string,
@@ -1205,11 +1277,104 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	if (cat.entrypoints.length) {
 		groups.push(group("Entry points", cat.entrypoints.map((e) => toggle("entrypoint", e.listName, entrypointDisplayLabel(e), entrypointKindLabel(e.kind)))));
 	}
+	// Schema-v2 toggleable arrays (present only for schema≥2 packs).
+	if (cat.providers?.length) groups.push(group("Providers", cat.providers.map((n) => toggle("provider", n, n))));
+	if (cat.hooks?.length) groups.push(group("Hooks", cat.hooks.map((n) => toggle("hook", n, n))));
+	if (cat.mcp?.length) groups.push(group("MCP servers", cat.mcp.map((n) => toggle("mcp", n, n))));
+	if (cat.piExtensions?.length) groups.push(group("Extensions", cat.piExtensions.map((n) => toggle("pi-extension", n, n))));
+	if (cat.workflows?.length) groups.push(group("Workflows", cat.workflows.map((n) => toggle("workflow", n, n))));
+	// Managed runtimes get an explicit consent enable-card per runtime (design §8):
+	// the toggle is the explicit on-enable start action, so the disclosure (images/
+	// services, ports, volume path, memory/trust copy) renders inline with it.
+	if (cat.runtimes?.length) {
+		groups.push(html`
+			<div class="market-activation-group">
+				<div class="market-activation-group-title">Runtimes</div>
+				<div class="market-runtime-rows">
+					${cat.runtimes.map((runtimeId) => renderRuntimeRow(pack, runtimeId, isEnabled("runtimes", runtimeId)))}
+				</div>
+			</div>
+		`);
+	}
 	if (groups.length === 0) return html``;
 
 	return html`
 		<div class="market-activation" data-testid="market-activation-${pack.packName}">
 			${groups}
+		</div>
+	`;
+}
+
+/** A managed-runtime activation row: the explicit on-enable toggle plus the
+ *  consent enable-card disclosing what starting it does (design §8). */
+function renderRuntimeRow(pack: InstalledPackWire, runtimeId: string, checked: boolean): TemplateResult {
+	ensureRuntimeCapabilities(pack, runtimeId);
+	const busyKey = `activation:${pack.scope}:${pack.packName}:runtime:${runtimeId}`;
+	return html`
+		<div class="market-runtime-row" data-testid="market-runtime-${runtimeId}">
+			<label class="market-activation-toggle ${checked ? "" : "market-activation-toggle--off"}" title=${`runtime: ${runtimeId}`}>
+				<span class="market-toggle-switch">
+					<input
+						type="checkbox"
+						data-testid="market-toggle-runtime-${runtimeId}"
+						.checked=${checked}
+						?disabled=${busy.has(busyKey)}
+						@change=${(e: Event) => handleToggleActivation(pack, "runtime", runtimeId, (e.target as HTMLInputElement).checked)}
+					/>
+					<span class="market-toggle-slider"></span>
+				</span>
+				<span class="market-entrypoint-kind">Runtime</span>
+				<span class="market-activation-label">${runtimeId}</span>
+			</label>
+			${renderRuntimeConsentCard(pack, runtimeId)}
+		</div>
+	`;
+}
+
+/** The consent enable-card for a managed runtime (looks up the cached capability
+ *  summary, then defers to the pure {@link renderRuntimeConsentCardView}). */
+function renderRuntimeConsentCard(pack: InstalledPackWire, runtimeId: string): TemplateResult {
+	return renderRuntimeConsentCardView(runtimeId, runtimeCapabilities.get(`${pack.scope}:${pack.packName}:${runtimeId}`));
+}
+
+/** Pure view for the managed-runtime consent enable-card. Discloses images/
+ *  services, host ports, the data/volume path and the memory/trust copy BEFORE
+ *  enabling (design §8). External (no-Docker) mode shows setup guidance instead.
+ *  Renders from the capability summary when available, else static fallback copy.
+ *  Exported for focused render tests (no module state / fetch). */
+export function renderRuntimeConsentCardView(runtimeId: string, cap: PackRuntimeCapabilitySummary | null | undefined): TemplateResult {
+	const external = cap?.dockerRequired === false;
+	const services = cap?.services ?? [];
+	const ports = cap?.ports ?? [];
+	const volumePath = cap?.volumePath;
+	const trust = cap?.trust || RUNTIME_MEMORY_DISCLOSURE;
+
+	if (external) {
+		return html`
+			<div class="market-runtime-card market-runtime-card--external" data-testid="market-runtime-card-${runtimeId}">
+				<div class="market-runtime-card-title">${icon(Database, "xs")} External mode — no Docker</div>
+				<p class="market-runtime-card-text" data-testid="market-runtime-external-guidance">${RUNTIME_EXTERNAL_GUIDANCE}</p>
+			</div>
+		`;
+	}
+
+	const portText = ports.length
+		? ports.map((p) => `127.0.0.1:${p.host ?? p.container ?? "?"}${p.label ? ` (${p.label})` : ""}`).join(", ")
+		: "loopback ports allocated on enable";
+	const serviceText = services.length ? services.join(", ") : "api, web, db";
+
+	return html`
+		<div class="market-runtime-card" data-testid="market-runtime-card-${runtimeId}">
+			<div class="market-runtime-card-title">${icon(Database, "xs")} Enabling starts a local Docker runtime</div>
+			<dl class="market-runtime-card-grid">
+				<dt>Services</dt>
+				<dd data-testid="market-runtime-services">${serviceText}</dd>
+				<dt>Ports</dt>
+				<dd data-testid="market-runtime-ports">${portText}</dd>
+				<dt>Data</dt>
+				<dd data-testid="market-runtime-volume">${volumePath || "~/.hindsight"}</dd>
+			</dl>
+			<p class="market-runtime-card-text" data-testid="market-runtime-trust">${trust}</p>
 		</div>
 	`;
 }

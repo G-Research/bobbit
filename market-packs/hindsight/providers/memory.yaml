@@ -9,9 +9,19 @@ budget: { maxTokens: 1200, timeoutMs: 1500 }
 # provider also enforces the same dormancy gate defensively at runtime.
 defaultEnabled: true
 config:
-  mode: { type: enum, values: [external, managed], default: external } # managed reserved for G3
+  # Deployment mode (P3):
+  #   external                  → operator-supplied data-plane URL (externalUrl). No Docker.
+  #   managed                   → Bobbit runs Hindsight API/web + Postgres (runtime mode managed-postgres).
+  #   managed-external-postgres → Bobbit runs Hindsight API/web only; HINDSIGHT_API_DATABASE_URL
+  #                                from externalDatabaseUrl (runtime mode external-postgres).
+  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }
   externalUrl: { type: string, optional: true }
   apiKey: { type: secret, optional: true }
+  # External Postgres connection URL for managed-external-postgres mode. Maps onto
+  # the runtime env HINDSIGHT_API_DATABASE_URL; unused in external/managed modes.
+  externalDatabaseUrl: { type: secret, optional: true }
+  # Host bind-mount path for the fully managed Postgres data (managed mode).
+  dataDir: { type: string, default: ~/.hindsight }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }
   recallScope: { type: enum, values: [project, all], default: all }
@@ -20,6 +30,15 @@ config:
   recallBudget: { type: number, default: 1200 }
   timeoutMs: { type: number, default: 1500 }
 activation:
-  # Host omits the provider entirely (no bridge injection, no per-turn hook calls)
-  # until the effective config has a non-empty externalUrl.
+  # EXTERNAL-mode dormancy gate: the host omits the provider entirely (no bridge
+  # injection, no per-turn hook calls) until the effective config has a non-empty
+  # externalUrl.
+  #
+  # MANAGED modes (managed / managed-external-postgres) do NOT use externalUrl. The
+  # host activates the memory provider for these via the runtime-enable path: when
+  # the effective config selects a managed mode, the provider is bridged so it can
+  # consume the injected ctx.runtime. The provider's own isActive(cfg, ctx.runtime)
+  # gate then keeps every hook dormant (no client, no network) until the managed
+  # runtime is actually running — it NEVER starts Docker itself. See
+  # docs/design (P3 modes/consent) §8.
   requiresConfig: [externalUrl]
