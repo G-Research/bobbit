@@ -8,7 +8,7 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch, base, createSession, nonGitCwd, readE2ETokenAsync } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const ENTRY = "durable-preview.html";
@@ -30,6 +30,17 @@ async function navigateToSession(page: Page, sessionId: string): Promise<void> {
 	await expect.poll(
 		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
 		{ timeout: 10_000, message: "session route should be active" },
+	).toBe(sessionId);
+}
+
+async function openSessionDirectly(page: Page, sessionId: string): Promise<void> {
+	const token = await readE2ETokenAsync();
+	await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sessionId}`, { waitUntil: "domcontentloaded" });
+	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
+		{ timeout: 10_000, message: "direct session route should be active" },
 	).toBe(sessionId);
 }
 
@@ -202,6 +213,47 @@ async function expectPreviewTabStaysClosed(page: Page): Promise<void> {
 test.describe.configure({ mode: "serial" });
 
 test.describe("Durable HTML preview restart restore", () => {
+	test("shows preview refresh immediately when a persisted preview tab restores before the preview mirror", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		const sessionId = await createSession({ cwd: nonGitCwd() });
+		await enablePreviewSession(sessionId);
+		const mount = await mountPreview(sessionId);
+		await waitForWorkspacePreviewTab(sessionId);
+
+		await openSessionDirectly(page, sessionId);
+		await expectPreviewTabActive(page, "direct navigation restore");
+		await expectPreviewIframeContains(page, "direct navigation restore");
+
+		// Recreate the restore race: the active server-persisted preview tab has
+		// the entry in its source/state, while the transient previewPanelEntry
+		// mirror is still empty. The iframe can render from the tab entry; the
+		// header controls must use the same source instead of hiding.
+		await page.evaluate(() => {
+			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
+			s.previewPanelEntry = "";
+			s.previewPanelMtime = 0;
+			(window as any).__bobbitRenderApp?.();
+		});
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.previewPanelEntry ?? ""),
+			{ timeout: 2_000, message: "test setup should leave the previewPanelEntry mirror empty" },
+		).toBe("");
+		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror");
+
+		await expect(
+			page.locator('button[title="Refresh preview"]').first(),
+			"Refresh preview should be visible immediately from the restored preview tab entry, before collapse/expand",
+		).toBeVisible({ timeout: 5_000 });
+
+		const encodedSessionId = encodeURIComponent(sessionId);
+		const encodedEntry = encodeURIComponent(mount.entry);
+		const openPreview = page.locator('a[title="Open preview in new tab"]').first();
+		await expect(openPreview, "open-preview action should use the restored preview tab entry").toBeVisible({ timeout: 5_000 });
+		await expect(openPreview).toHaveAttribute("href", `/preview/${encodedSessionId}/${encodedEntry}`);
+	});
+
 	test("restores the mounted preview tab and iframe after restart, but keeps a user-closed tab closed", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1280, height: 800 });
