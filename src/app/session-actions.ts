@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
-import { copySidebarLink, refreshAgentSession, type SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, refreshAgentSession, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -179,7 +179,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			quick: false,
 			run: (event: Event) => {
 				event.stopPropagation();
-				void copyLink(sessionDeepLink(session.id), "Copy session link");
+				void copyLink(sessionPathDeepLink(session.id), "Copy session link");
 			},
 		},
 		{
@@ -246,25 +246,11 @@ async function defaultCopySidebarLink(url: string, title: SidebarCopyLinkTitle):
 	await copySidebarLink(url, title);
 }
 
-function sessionDeepLink(sessionId: string): string {
-	return absoluteHashUrl(`/session/${encodeURIComponent(sessionId)}`);
-}
-
-function absoluteHashUrl(hash: string): string {
-	const route = hash.startsWith("#")
-		? hash
-		: hash.startsWith("/")
-			? `#${hash}`
-			: `#/${hash}`;
-	if (typeof location === "undefined") return route;
-	return `${location.origin}${location.pathname}${location.search}${route}`;
-}
-
 function openExternalUrl(url: string): void {
 	const opened = window.open(url, "_blank", "noopener");
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
 }
 
 function openSessionInNewWindow(sessionId: string): void {
-	openExternalUrl(sessionDeepLink(sessionId));
+	openExternalUrl(sessionPathDeepLink(sessionId));
 }
