@@ -391,10 +391,12 @@ test.describe("search orphan filter & weak-match drop", () => {
 		const goal = await goalResp.json();
 
 		const weakToken = uniqueToken("zzweakgoal");
-		// Index a goal doc where the token sits past the 300-char snippet
-		// window — title tokenizer still matches it via identifier_text, but
-		// highlight() centres on the first match in `text` and finds none,
-		// returning a head-of-text preview with no <b>.
+		// Index a goal doc where the token is searchable from metadata only.
+		// Keep it out of `text` so highlight() finds no visible body match and
+		// returns a head-of-text preview with no <b>. Including the exact token
+		// in both title and identifier_text avoids full-suite FlexSearch suggest
+		// noise where a long strict identifier-only token can lose to unrelated
+		// fuzzy goal hits even though the synthetic row remains in the store.
 		const filler = "lorem ipsum dolor sit amet ".repeat(40); // ~1080 chars
 		const syntheticDocId = `goal:${goal.id}:weak-${weakToken}`;
 		const syntheticResultId = `${goal.id}:weak-${weakToken}`;
@@ -405,11 +407,11 @@ test.describe("search orphan filter & weak-match drop", () => {
 			// overwrite this weak metadata-only fixture under full-suite load.
 			id: syntheticDocId,
 			source_id: "goals",
-			title: "Weak Match Goal",
+			title: `Weak Match Goal ${weakToken}`,
 			// Body text does NOT contain the token — the index hit comes
-			// from identifier_text only, and highlight() can't find the
-			// token in `text` so it falls back to a head-of-text preview
-			// with no <b>. That's the weak-match contract we're testing.
+			// from metadata (title/identifier_text), and highlight() can't
+			// find the token in `text` so it falls back to a head-of-text
+			// preview with no <b>. That's the weak-match contract we're testing.
 			text: filler,
 			identifier_text: weakToken,
 			project_id: projectId,
