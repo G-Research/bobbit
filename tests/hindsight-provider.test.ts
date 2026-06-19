@@ -309,6 +309,154 @@ test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no pr
 	}
 });
 
+// ── Managed deployment modes (P3 — ctx.runtime injection) ──────────────────
+//
+// In a managed mode the provider NEVER dials `externalUrl`; it uses the host-
+// injected `ctx.runtime = { baseUrl, headers, status }` pointing at the locally
+// running managed Hindsight API. The provider never starts Docker — an absent or
+// non-running runtime simply keeps it dormant (recall → no blocks, retain → queued).
+
+const MANAGED = {
+	mode: "managed",
+	bank: "bobbit",
+	namespace: "default",
+	recallScope: "all" as const,
+	autoRecall: true,
+	autoRetain: true,
+	recallBudget: 1200,
+	timeoutMs: 1500,
+};
+
+function captureClientBaseUrl() {
+	const { client, calls, state } = makeClient();
+	let seenBaseUrl: string | undefined;
+	let seenCfg: { baseUrl: string; apiKey?: string } | undefined;
+	__setClientFactory((cfg: { baseUrl: string; apiKey?: string }) => {
+		seenBaseUrl = cfg.baseUrl;
+		seenCfg = cfg;
+		return client;
+	});
+	return { client, calls, state, baseUrl: () => seenBaseUrl, cfg: () => seenCfg };
+}
+
+test("managed mode: a RUNNING runtime makes the provider dial ctx.runtime.baseUrl (not externalUrl)", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.memories = [{ text: "managed-mem" }];
+		const store = makeStore();
+		const c = {
+			// externalUrl is set but MUST be ignored in a managed mode.
+			config: { ...MANAGED, externalUrl: "http://should-not-be-used:9999" },
+			host: { store },
+			runtime: { baseUrl: "http://127.0.0.1:48080", headers: { Authorization: "Bearer tok" }, status: "running" },
+			projectId: "proj-1",
+			prompt: "recall please",
+		};
+		const out = await provider.beforePrompt(c);
+		assert.equal(out.blocks.length, 1, "a running managed runtime serves recall blocks");
+		assert.equal(cap.baseUrl(), "http://127.0.0.1:48080", "client dials the managed runtime base URL");
+		assert.equal(cap.calls.recall.length, 1);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("managed mode: managed-external-postgres also activates via ctx.runtime.baseUrl", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.memories = [{ text: "x" }];
+		const store = makeStore();
+		const c = {
+			config: { ...MANAGED, mode: "managed-external-postgres" },
+			host: { store },
+			runtime: { baseUrl: "http://127.0.0.1:38080", status: "running" },
+			prompt: "q",
+		};
+		const out = await provider.beforePrompt(c);
+		assert.equal(out.blocks.length, 1);
+		assert.equal(cap.baseUrl(), "http://127.0.0.1:38080");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("managed mode is dormant + non-fatal when the runtime is ABSENT (no ctx.runtime)", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => { factoryCalls++; return makeClient().client; });
+	try {
+		const store = makeStore();
+		const base = { config: { ...MANAGED }, host: { store }, sessionId: "s", prompt: "hello", response: "hi" };
+		// recall hooks → no blocks; retain hooks → no throw; no client constructed.
+		assert.deepEqual(await provider.beforePrompt(base), { blocks: [] });
+		assert.deepEqual(await provider.afterTurn(base), { blocks: [] });
+		assert.deepEqual(await provider.sessionSetup(base), { blocks: [] });
+		assert.equal(factoryCalls, 0, "no client constructed without a running managed runtime");
+		assert.equal(store.map.size, 0, "no store writes — nothing even queued while dormant");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("managed mode is dormant when the runtime is STOPPED/unhealthy (status gate)", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => { factoryCalls++; return makeClient().client; });
+	try {
+		for (const status of ["stopped", "unhealthy", "starting", "docker-unavailable"]) {
+			const store = makeStore();
+			const c = {
+				config: { ...MANAGED },
+				host: { store },
+				runtime: { baseUrl: "http://127.0.0.1:48080", status },
+				prompt: "q",
+			};
+			assert.deepEqual(await provider.beforePrompt(c), { blocks: [] }, `status=${status} must stay dormant`);
+		}
+		assert.equal(factoryCalls, 0, "a non-running managed runtime never constructs a client");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("managed mode: afterTurn QUEUES the retain when the running runtime's retain fails (non-fatal)", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.failRetain = true;
+		const store = makeStore();
+		const c = {
+			config: { ...MANAGED },
+			host: { store },
+			runtime: { baseUrl: "http://127.0.0.1:48080", status: "running" },
+			sessionId: "s",
+			prompt: "turn-x",
+		};
+		const out = await provider.afterTurn(c);
+		assert.deepEqual(out.blocks, [], "afterTurn never throws on a managed retain failure");
+		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		assert.equal(q.length, 1, "failed managed retain is durably queued");
+		assert.equal(q[0].content, "User: turn-x");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("managed mode: a RUNNING runtime with an empty status (unspecified) is tolerated as reachable", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.memories = [{ text: "m" }];
+		const c = {
+			config: { ...MANAGED },
+			host: { store: makeStore() },
+			runtime: { baseUrl: "http://127.0.0.1:48080" }, // status omitted
+			prompt: "q",
+		};
+		const out = await provider.beforePrompt(c);
+		assert.equal(out.blocks.length, 1, "an unspecified status is treated as reachable");
+		assert.equal(cap.baseUrl(), "http://127.0.0.1:48080");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("routes config SET validates, persists, and redacts the secret", async () => {
 	__setClientFactory(() => makeClient().client);
 	try {
