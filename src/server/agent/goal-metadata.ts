@@ -34,6 +34,23 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * Deep-clone a value that is about to be assigned wholesale into a merge
+ * result, so the resolved metadata never shares mutable references (arrays or
+ * nested objects inside arrays) with the persisted source. Scalars are returned
+ * as-is. Without this, a consumer mutating a resolved array (e.g. sorting or
+ * pushing onto `bobbit.disabledTools`) would corrupt the persisted goal record.
+ */
+function cloneValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(cloneValue);
+	if (isPlainObject(value)) {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) out[k] = cloneValue(v);
+		return out;
+	}
+	return value;
+}
+
+/**
  * Deep-merge `override` onto `base`, returning a fresh object. Inputs are
  * never mutated.
  *
@@ -44,16 +61,25 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  - scalar/object mismatches are replaced by the descendant (override) value.
  */
 export function deepMergeMetadata(base: GoalMetadata, override: GoalMetadata): GoalMetadata {
-	const out: GoalMetadata = { ...base };
+	// Deep-clone every base entry first so base-only keys (arrays / nested
+	// objects the override never touches) do not leak a reference into the
+	// result — otherwise a consumer mutating the resolved metadata could corrupt
+	// the persisted goal's arrays.
+	const out: GoalMetadata = {};
+	for (const [key, value] of Object.entries(base)) {
+		out[key] = cloneValue(value);
+	}
 	for (const [key, value] of Object.entries(override)) {
 		const existing = out[key];
 		if (isPlainObject(value)) {
 			// Recurse into a fresh object so the result never shares references
-			// with either input (recursion clones nested plain-object subtrees).
+			// with either input (existing is already a clone of the base subtree).
 			out[key] = deepMergeMetadata(isPlainObject(existing) ? existing : {}, value);
 		} else {
-			// Arrays + scalars replace wholesale.
-			out[key] = value;
+			// Arrays + scalars replace wholesale. Arrays (and any nested objects
+			// they contain) are deep-cloned so the resolved metadata can never
+			// mutate the persisted goal's arrays. Scalars are returned as-is.
+			out[key] = cloneValue(value);
 		}
 	}
 	return out;

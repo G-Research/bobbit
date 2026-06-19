@@ -65,6 +65,30 @@ describe("deepMergeMetadata", () => {
 		out.a.x = 99;
 		assert.equal((override.a as { x: number }).x, 1);
 	});
+
+	it("clones arrays so the result cannot mutate the override's array", () => {
+		const override = { "bobbit.disabledTools": ["a", "b"] };
+		const out = deepMergeMetadata({}, override) as { "bobbit.disabledTools": string[] };
+		// Mutating the resolved array (sort/push/splice by a consumer) must NOT
+		// reach back into the persisted source array.
+		out["bobbit.disabledTools"].push("c");
+		out["bobbit.disabledTools"][0] = "zzz";
+		assert.deepEqual(override["bobbit.disabledTools"], ["a", "b"]);
+	});
+
+	it("clones arrays so the result cannot mutate the base's array", () => {
+		const base = { tools: ["a", "b"] };
+		const out = deepMergeMetadata(base, {}) as { tools: string[] };
+		out.tools.push("c");
+		assert.deepEqual(base.tools, ["a", "b"]);
+	});
+
+	it("deep-clones objects nested inside replaced arrays", () => {
+		const override = { rules: [{ name: "x", on: true }] };
+		const out = deepMergeMetadata({}, override) as { rules: Array<{ name: string; on: boolean }> };
+		out.rules[0].on = false;
+		assert.equal((override.rules[0] as { on: boolean }).on, true);
+	});
 });
 
 describe("resolveGoalMetadata", () => {
@@ -145,5 +169,14 @@ describe("resolveGoalMetadata", () => {
 		const out = resolveGoalMetadata(lookupOf(nodes), "g") as { a: { x: number } };
 		out.a.x = 42;
 		assert.equal((stored.a as { x: number }).x, 1);
+	});
+
+	it("resolved arrays are decoupled from the persisted node's array", () => {
+		const stored: GoalMetadata = { "bobbit.disabledTools": ["browser_navigate"] };
+		const nodes = { g: { metadata: stored } };
+		const out = resolveGoalMetadata(lookupOf(nodes), "g") as { "bobbit.disabledTools": string[] };
+		// A consumer mutating the resolved array must not corrupt the persisted goal.
+		out["bobbit.disabledTools"].push("bash");
+		assert.deepEqual(stored["bobbit.disabledTools"], ["browser_navigate"]);
 	});
 });

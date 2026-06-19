@@ -25,6 +25,7 @@ import {
 } from "../src/server/agent/tool-activation.ts";
 import type { ToolProvider } from "../src/server/agent/tool-manager.ts";
 import { reorderLabeledSections, assembleSystemPrompt, getPromptSections, initPromptDirs } from "../src/server/agent/system-prompt.ts";
+import { offsetWorktreeCwd } from "../src/server/agent/session-setup.ts";
 import { LifecycleHub, type HookCtx } from "../src/server/agent/lifecycle-hub.ts";
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.ts";
@@ -289,5 +290,25 @@ describe("LifecycleHub — bobbit.disabledProviders", () => {
 			moduleHost.dispose();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
+	});
+});
+
+// The goalProvisioned hook must receive the agent's ACTUAL working directory
+// (the project-subdirectory offset applied), not the branch-container root, so
+// filesystem treatments land where the agent runs (e.g. a monorepo package).
+describe("offsetWorktreeCwd — session goalProvisioned cwd", () => {
+	it("returns the worktree root when the project root IS the repo root", () => {
+		const plan = { repoPath: "/repo", cwd: "/repo" };
+		assert.equal(offsetWorktreeCwd(plan, "/wt/branch"), "/wt/branch");
+	});
+
+	it("applies the subdirectory offset when the project root is nested in the repo", () => {
+		const plan = { repoPath: "/repo", cwd: "/repo/packages/web" };
+		assert.equal(offsetWorktreeCwd(plan, "/wt/branch"), path.join("/wt/branch", "packages/web"));
+	});
+
+	it("returns the worktree root when no repoPath is known", () => {
+		const plan = { repoPath: undefined, cwd: "/anywhere" };
+		assert.equal(offsetWorktreeCwd(plan, "/wt/branch"), "/wt/branch");
 	});
 });

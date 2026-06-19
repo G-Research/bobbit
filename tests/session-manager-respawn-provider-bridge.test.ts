@@ -97,4 +97,56 @@ describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore
 			`expected NO provider-bridge --extension without a hub, got: ${JSON.stringify(exts)}`,
 		);
 	});
+
+	it("forwards the session's effective goal id to the hub so disabled providers filter after respawn", () => {
+		const manager = makeManager();
+		const seen: Array<{ projectId?: string; goalId?: string }> = [];
+		manager.lifecycleHub = {
+			hasProvidersForHooks(projectId: string | undefined, _hooks: readonly string[], goalId?: string) {
+				seen.push({ projectId, goalId });
+				return false;
+			},
+		};
+
+		manager.buildToolActivationArgs("sess-goal", undefined, undefined, tmpRoot, "proj-4", "goal-xyz");
+
+		assert.ok(
+			seen.some((s) => s.projectId === "proj-4" && s.goalId === "goal-xyz"),
+			`expected hub queried with (projectId, goalId); got ${JSON.stringify(seen)}`,
+		);
+	});
+});
+
+describe("disabledToolsForGoal — effective-goal metadata resolution (respawn/restore)", () => {
+	function seedGoal(manager: any, goal: Record<string, unknown>) {
+		const store = manager._testGoalManager.getGoalStore();
+		store.put({
+			cwd: tmpRoot, state: "in-progress", spec: "", title: "g",
+			createdAt: Date.now(), updatedAt: Date.now(), ...goal,
+		});
+	}
+
+	it("returns the lower-cased disabled-tool set from bobbit.disabledTools", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-disabled", metadata: { "bobbit.disabledTools": ["Browser_Navigate", "bash"] } });
+		const set = manager.disabledToolsForGoal("g-disabled");
+		assert.ok(set instanceof Set);
+		assert.ok(set.has("browser_navigate"));
+		assert.ok(set.has("bash"));
+	});
+
+	it("inherits a parent's disabled tools through the ancestry walk", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-parent", metadata: { "bobbit.disabledTools": ["browser_navigate"] } });
+		seedGoal(manager, { id: "g-child", parentGoalId: "g-parent", metadata: { other: 1 } });
+		const set = manager.disabledToolsForGoal("g-child");
+		assert.ok(set?.has("browser_navigate"), "child must inherit parent's disabled tool");
+	});
+
+	it("returns undefined when the goal has no disabled tools (byte-identical default)", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-none", metadata: { other: 1 } });
+		assert.equal(manager.disabledToolsForGoal("g-none"), undefined);
+		assert.equal(manager.disabledToolsForGoal(undefined), undefined);
+	});
 });

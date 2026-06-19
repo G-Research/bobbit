@@ -1768,22 +1768,67 @@ export class SessionManager {
 		return merged.length > 0 ? merged : undefined;
 	}
 
+	/**
+	 * Resolve a session's effective (ancestry-merged) goal metadata for the
+	 * restore / respawn / force-abort tool-activation paths. Routes by goal id
+	 * (mirrors the lifecycle-hub's getContextForGoal routing), falling back to
+	 * the project's GoalManager, then the in-process test GoalManager. Returns
+	 * `{}` (a guarded no-op) when there is no goal or no manager. Never throws —
+	 * metadata is best-effort and must not break a respawn.
+	 */
+	private resolveEffectiveGoalMetadataForSession(goalId: string | undefined, projectId?: string): Record<string, unknown> {
+		if (!goalId) return {};
+		try {
+			if (this.projectContextManager) {
+				const ctx = this.projectContextManager.getContextForGoal(goalId)
+					?? (projectId ? this.projectContextManager.getOrCreate(projectId) : undefined);
+				if (ctx) return ctx.goalManager.getEffectiveGoalMetadata(goalId) ?? {};
+			}
+			if (this._testGoalManager) return this._testGoalManager.getEffectiveGoalMetadata(goalId) ?? {};
+		} catch (err) {
+			console.warn(`[session-manager] resolveEffectiveGoalMetadata failed for goal ${goalId} (non-fatal):`, err);
+		}
+		return {};
+	}
+
+	/**
+	 * Lower-cased set of tool names disabled via the `bobbit.disabledTools`
+	 * metadata convention for a session's effective goal; undefined when none.
+	 * Mirrors session-setup.ts::disabledToolsFromMetadata so the restore /
+	 * respawn / force-abort paths apply the same disablement as initial setup.
+	 */
+	private disabledToolsForGoal(goalId: string | undefined, projectId?: string): ReadonlySet<string> | undefined {
+		const raw = this.resolveEffectiveGoalMetadataForSession(goalId, projectId)["bobbit.disabledTools"];
+		if (!Array.isArray(raw)) return undefined;
+		const names = raw.filter((v): v is string => typeof v === "string" && v.length > 0).map(s => s.toLowerCase());
+		return names.length > 0 ? new Set(names) : undefined;
+	}
+
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 		projectId?: string,
+		effectiveGoalId?: string,
 	): { args: string[]; env: Record<string, string> } {
-		const flatNames = allowedTools?.map(e => e.name);
+		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
+		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
+		// so restart/respawn/force-abort keep the same disablement initial setup
+		// applied — without this a restored session re-acquires disabled tools.
+		const disabledTools = this.disabledToolsForGoal(effectiveGoalId, projectId);
+		const filteredAllowed = disabledTools && allowedTools
+			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
+			: allowedTools;
+		const flatNames = filteredAllowed?.map(e => e.name);
 
 		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore)
+			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
 
 		const args = [...activation.args];
 
@@ -1796,7 +1841,7 @@ export class SessionManager {
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants)
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -1807,9 +1852,11 @@ export class SessionManager {
 		// (restore, role reassignment, force-abort respawn) keep the bridge that
 		// initial setup added. Without this, provider-enabled sessions lose the
 		// bridge after a gateway restart/respawn and per-turn hooks stop firing.
+		// The effective goal id filters disabled providers (bobbit.disabledProviders)
+		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId)) {
+		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
 			const bridgePath = writeProviderBridgeExtension(sessionId);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
@@ -2777,7 +2824,9 @@ export class SessionManager {
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
 					cwd: session.cwd,
-					goalId: session.goalId,
+					// Effective goal: members/delegates/reviewers carry teamGoalId, not
+					// goalId — resolve both so disabled-provider filtering applies.
+					goalId: session.goalId ?? session.teamGoalId,
 					roleName: session.role,
 					prompt: session.latestTurnUserText,
 					userText: session.latestTurnUserText,
@@ -3965,9 +4014,16 @@ export class SessionManager {
 			: persistedAllowedTools
 				? persistedAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
 				: this.resolveEffectiveAllowedTools(restoredRole);
-		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
+		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
+		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
+		// consistent with what buildToolActivationArgs actually activates.
+		const restoreDisabled = this.disabledToolsForGoal(ps.goalId ?? ps.teamGoalId, ps.projectId);
+		const restoredFiltered = restoreDisabled
+			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
+			: effectiveAllowed;
+		const restoredAllowedTools = restoredFiltered.length > 0 ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
@@ -5663,7 +5719,15 @@ export class SessionManager {
 		const goalSpec = goal?.spec;
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
+		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
+		// session's effective goal so the reassembled prompt, the activation args,
+		// and the persisted allowedTools all agree after a role reassignment.
+		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
+		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
+		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
+		const effectiveAllowed = respawnDisabled
+			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
+			: effectiveAllowedRaw;
 		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
 		// Resolve the role prompt through the shared helper so placeholder
@@ -5717,7 +5781,7 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd, session.projectId);
+		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
@@ -6056,7 +6120,9 @@ export class SessionManager {
 						projectId: src.projectId,
 						scope: src.projectId ? "project" : "global",
 						cwd: src.cwd,
-						goalId: src.goalId,
+						// Effective goal (goalId ?? teamGoalId) so disabled-provider
+						// filtering applies to members/delegates/reviewers too.
+						goalId: src.goalId ?? src.teamGoalId,
 						roleName: src.role,
 					});
 				} catch (err) {
@@ -6185,7 +6251,9 @@ export class SessionManager {
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
 					cwd: session.cwd,
-					goalId: session.goalId,
+					// Effective goal (goalId ?? teamGoalId) so disabled-provider
+					// filtering applies to members/delegates/reviewers too.
+					goalId: session.goalId ?? session.teamGoalId,
 					roleName: session.role,
 				});
 			} catch (err) {
@@ -7005,7 +7073,7 @@ export class SessionManager {
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
 			const effective = this.resolveEffectiveAllowedTools(role);
-			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd, session.projectId);
+			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 

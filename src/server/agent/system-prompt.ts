@@ -506,20 +506,21 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		if (skillsSection) sections.push({ label: "Available Skills", content: skillsSection });
 	}
 
-	// 5. Goal spec (merge rolePrompt into goalSpec section for backward compat).
-	// Volatile sections (goal/task/workflow context) follow the stable prefix above
-	// so provider prompt caches reuse the tool docs + skills catalog between turns.
-	{
-		let effectiveGoalSpec = parts.goalSpec || "";
-		if (parts.rolePrompt?.trim()) {
-			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + parts.rolePrompt.trim();
-		}
-		if (effectiveGoalSpec.trim()) {
-			const header = parts.goalTitle
-				? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-				: "# Goal";
-			sections.push({ label: "Goal", content: header + "\n\n" + effectiveGoalSpec.trim() });
-		}
+	// 5. Goal spec + role as SEPARATE labeled sections so each can be reordered
+	// independently via `bobbit.promptSectionOrder` and the assembled prompt
+	// mirrors the inspector (getPromptSections) which already exposes Goal and
+	// Role distinctly. Joined by the section separator below, the default order
+	// (Goal then Role) is byte-identical to the previous merged `Goal` section.
+	// Volatile sections (goal/role/task/workflow context) follow the stable prefix
+	// above so provider prompt caches reuse the tool docs + skills catalog.
+	if (parts.goalSpec?.trim()) {
+		const header = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		sections.push({ label: "Goal", content: header + "\n\n" + parts.goalSpec.trim() });
+	}
+	if (parts.rolePrompt?.trim()) {
+		sections.push({ label: "Role", content: parts.rolePrompt.trim() });
 	}
 
 	// 5.5. Goal nesting context — three stanzas for team-lead sessions

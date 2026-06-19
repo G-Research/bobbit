@@ -360,6 +360,19 @@ function effectiveGoalId(plan: SessionSetupPlan): string | undefined {
 }
 
 /**
+ * Apply the project-subdirectory offset to a freshly provisioned branch
+ * container, yielding the agent's ACTUAL working directory. When the project
+ * root is a subdirectory of the repo, the agent runs in `<worktree>/<offset>`,
+ * not at the container root. Mirrors the offset computation in
+ * `executeWorktreeAsync` so callers (e.g. the goalProvisioned hook) see the
+ * same cwd the session will boot with.
+ */
+export function offsetWorktreeCwd(plan: Pick<SessionSetupPlan, "repoPath" | "cwd">, worktreeCwd: string): string {
+	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, plan.cwd) : "";
+	return relativeOffset && relativeOffset !== "." ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
+}
+
+/**
  * Resolve the effective (ancestry-merged) per-goal metadata for this session.
  * Returns `{}` when no resolver is wired or no goal — so all downstream edges
  * are guarded no-ops and behaviour is byte-identical to today.
@@ -401,12 +414,17 @@ async function dispatchGoalProvisionedHook(plan: SessionSetupPlan, ctx: Pipeline
 	const goalId = effectiveGoalId(plan);
 	if (!goalId) return;
 	const metadata = resolveEffectiveGoalMetadata(plan, ctx);
+	// `worktreePath` is the branch-container root; `cwd` is the agent's actual
+	// working directory after the project-subdirectory offset. Passing the
+	// offset cwd keeps filesystem treatments symmetric with where the agent
+	// runs (e.g. a monorepo package subdir), rather than the container root.
+	const cwd = offsetWorktreeCwd(plan, worktreePath);
 	try {
 		await ctx.lifecycleHub.dispatchGoalProvisioned({
 			goalId,
 			projectId: plan.projectId,
 			worktreePath,
-			cwd: worktreePath,
+			cwd,
 			branch: plan.branch,
 			metadata,
 		});
@@ -1055,9 +1073,8 @@ export async function executeWorktreeAsync(
 		const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
 		const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
 		if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
-		const offsetCwd = relativeOffset && relativeOffset !== "."
-			? path.join(worktreeCwd, relativeOffset)
-			: worktreeCwd;
+		// Same offset the goalProvisioned hook was dispatched with above.
+		const offsetCwd = offsetWorktreeCwd(plan, worktreeCwd);
 
 		// Update session and plan with worktree CWD (offset applied)
 		session.cwd = offsetCwd;
