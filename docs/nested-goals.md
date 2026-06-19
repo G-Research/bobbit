@@ -139,7 +139,17 @@ at-cap notice (`data-testid="goal-subgoal-settings-at-cap"`) instead — there i
 no room below it for children regardless of the toggle.
 
 These persist via `PATCH /api/goals/:id/policy` (the goal feed echoes the new
-values so they survive a reload). The two sub-goal fields
+values so they survive a reload).
+
+**Enabling sub-goals co-persists a valid depth.** Turning the toggle ON does
+not always PATCH `{ subgoalsAllowed: true }` alone: if the goal's stored
+`maxNestingDepth` is missing, stale, or outside the currently valid
+`[minDepth, maxDepth]` band, the toggle also sends the clamped `depthValue`
+(`{ subgoalsAllowed: true, maxNestingDepth: depthValue }`). Without this the
+goal could be flagged sub-goals-allowed while keeping a too-low cap that still
+refuses children — the toggle would appear to work but the dead-end would
+persist, and the UI's clamped display would silently disagree with the stored
+value. When the stored depth is already valid the toggle leaves it untouched. The two sub-goal fields
 (`subgoalsAllowed` / `maxNestingDepth`) are **operator-class** authz — a
 verified human cookie is accepted — so the human-driven UI can flip them, while
 the orchestration fields on the same endpoint stay team-lead-only (see
@@ -222,6 +232,15 @@ levels of sub-goals allowed below this goal = maxNestingDepth − (this goal's d
 - When only one value fits (`thisDepth + 1 == inheritedCap`), the stepper is
   **locked** and the help text explains why ("only one value fits, so it's
   fixed"). Whenever a valid range exists, the `-`/`+` buttons step through it.
+- **The displayed value is the value submitted.** Both controls derive their
+  number from `resolveDepthControl` (`src/app/subgoal-eligibility.ts`), whose
+  `depthValue` is the configured override **clamped into `[minDepth, maxDepth]`**
+  (or the full cap when untouched). The stepper renders this same `depthValue`
+  and every change PATCHes it, so what the user sees can never diverge from what
+  is persisted — even when the stored override is stale or out of range, the
+  control shows the clamped value and submits *that*. The server re-clamps on
+  write regardless (see below), so the UI is a faithful mirror, never the
+  authority.
 
 Because the effective cap is recomputed dynamically against the live ancestor
 chain, **tightening an ancestor's cap retroactively bites already-created
