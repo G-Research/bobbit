@@ -3,8 +3,10 @@
 Status: design / implementation blueprint. Scope is the **external-URL** Hindsight memory pack:
 a REST client, an in-process stub harness, the lifecycle provider, pack routes + config surface,
 bank/tag derivation, dormancy, and built-in-band registration (dormant). Managed Docker runtime,
-Postgres, volumes, deployment-mode selection, the explicit agent tools, and the native panel are
-**out of scope** (G2.3 / G3 / G4).
+Postgres, volumes, deployment-mode selection, the explicit agent tools, and the native panel were
+**out of scope** of this blueprint (G2.3 / G3 / G4) and shipped later: the managed runtime in P3,
+the native panel in P4, and the agent tools `hindsight_recall/retain/reflect` in **P5** (see
+[hindsight-memory.md → Agent tools](../hindsight-memory.md#agent-tools)).
 
 > Authority notes. This folds the impl-plan's **G2.1 + G2.2** ([extension-platform-implementation-plan.md
 > §G2](extension-platform-implementation-plan.md)) and applies two owner overrides recorded for
@@ -495,10 +497,11 @@ A separate defensive unit test calls the provider hooks directly with no `extern
 
 ## 11. Non-goals (tracked elsewhere)
 
-- Explicit agent tools `hindsight_recall/retain/reflect` — **G2.3**. (The **native panel +
+- Explicit agent tools `hindsight_recall/retain/reflect` — **G2.3** (shipped in **P5**; see
+  [hindsight-memory.md → Agent tools](../hindsight-memory.md#agent-tools)). The **native panel +
   entrypoints** half of G2.3 shipped in **P4** — see
   [hindsight-memory.md → Native config & status panel](../hindsight-memory.md#native-config--status-panel)
-  and [hindsight-panel-p4-implementation.md](hindsight-panel-p4-implementation.md).)
+  and [hindsight-panel-p4-implementation.md](hindsight-panel-p4-implementation.md).
 - Managed Docker runtime + Postgres + `~/.hindsight` + deployment-mode selection — **G3** (shipped
   in **P3**; see [managed-runtimes.md](../managed-runtimes.md#p3--deployment-modes-consent--lifecycle)).
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.

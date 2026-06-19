@@ -20,8 +20,9 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
 > **native config/status panel** and its launch entrypoints now ship as **P4** — see
 > [Native config & status panel](#native-config--status-panel). The explicit
-> `hindsight_recall/retain/reflect` agent tools, the reflect UI, and cross-engine dedupe remain
-> **out of scope** — see [Non-goals](#non-goals).
+> `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
+> [Agent tools](#agent-tools). The reflect UI and cross-engine dedupe remain **out of scope** —
+> see [Non-goals](#non-goals).
 
 ## Installed but dormant by default
 
@@ -179,6 +180,75 @@ list) rather than erroring.
 | `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
+## Agent tools
+
+The pack ships three **agent tools** (Extension Platform **P5**) that give an agent explicit,
+on-demand access to memory — complementing the automatic recall/retain the [provider](#provider-lifecycle-behaviour)
+does every turn. Where the provider is implicit ("inject relevant memory into the prompt"), these
+tools are deliberate: the agent decides *when* to look something up, write something down, or ask
+for a synthesized answer.
+
+| Tool | Purpose | Parameters | Output |
+|---|---|---|---|
+| `hindsight_recall` | Fetch durable memories matching a query before acting. | `query` (required), `scope?` (`project`\|`all`) | A numbered list of memory texts, plus the structured route result (`memories`, `count`, `configured`) under `details`. Empty recall ⇒ "No relevant memories found." |
+| `hindsight_retain` | Durably record a decision, preference, or fact. | `content` (required), `scope?`, `tags?` (extra key/value, additive), `sync?` (wait for durability; default `false`) | "Memory retained." on success; an error result otherwise. The route auto-applies a `kind:manual` tag. |
+| `hindsight_reflect` | Get a synthesized answer drawing on accumulated memory, not a raw list. | `prompt` (required), `scope?` | The synthesized text. Empty reflection ⇒ "(no reflection produced)". |
+
+These tools live in `market-packs/hindsight/tools/hindsight/` (`extension.ts` plus one descriptor
+YAML per tool); each descriptor declares `provider: { type: bobbit-extension, extension: extension.ts }`.
+
+**Pack-owned — disabling the pack removes them.** The tools are contributed by the pack
+(`pack.yaml` `contents.tools: [hindsight]`), so they appear in a session's tool list only while the
+pack is enabled. Disabling the pack (or just its tools) at any scope removes them from tool
+resolution for sessions created afterward, and the activation gate is closed end-to-end: a disabled
+tool no longer resolves as a market-pack tool, so it cannot even mint a surface token. This is the
+same disable mechanism as any [first-party pack](marketplace.md#built-in-first-party-packs).
+
+**They never call Hindsight directly — they go through the pack routes.** The agent surface is
+deliberately thin. Each tool invocation does exactly two authenticated gateway calls:
+
+1. `POST /api/ext/surface-token` `{ sessionId, tool }` — mint a **tool-bound** surface token
+   (the [tool-guard](#pack-routes) checks the tool is in `allowedTools`, belongs to the calling
+   session, and resolves to a market pack). The server derives `{ packId, tool }` from the minted
+   token, so the route body never carries a pack id.
+2. `POST /api/ext/route/<recall|retain|reflect>` with the minted `surfaceToken` — dispatch the
+   pack's own [route](#pack-routes) in the confined worker.
+
+The route — not the tool — owns config merge, bank resolution (the single shared bank, default
+`bobbit`), external/managed-mode handling, dormancy, and the scope→tag mapping. **Why route the
+tools through the pack routes instead of letting them talk to Hindsight?** It keeps a single
+authorization path (surface-token + tool-guard) and a single source of truth for bank/scope/config
+behaviour, so the agent tools, the panel's manual search, and the provider all resolve memory the
+same way. A dormant (unconfigured) Hindsight yields a clean signal — recall/reflect return empty,
+retain returns a not-configured error — never a crash.
+
+### `scope` → tags on the shared bank
+
+All three tools accept `scope: project | all`. **Scope is a tag filter on the single shared bank
+(`config.bank`, default `bobbit`) — never a different bank.** When `scope` is omitted, the pack's
+configured [`recallScope`](#configuration-keys) applies.
+
+- `recall` — `project` adds a `project:<id>` tag filter with `tags_match: "any"` (so untagged
+  org-wide memories still surface); `all` adds no project filter. The project tag is only added when
+  the session has a **real project id** — a global/server-scope session fabricates no placeholder
+  tag.
+- `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the
+  auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags`
+  are additive and never change the bank.
+- `reflect` — `scope` is accepted for API symmetry; reflection runs over the resolved shared bank
+  and creates no extra banks.
+
+A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the
+scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's
+[bank & tag taxonomy](#bank--tag-taxonomy): scope is *always* expressed as tags on one bank, never
+as bank fan-out.
+
+API E2E coverage lives in `tests/e2e/hindsight-agent-tools.spec.ts` (reusing the shared
+`tests/e2e/hindsight-stub.mjs`): it drives the real surface-token + route round-trip for each tool,
+asserts the scope→tag mapping and default/custom bank routing on the stub, confirms the three tools
+resolve for a project session, and that disabling the pack tools removes them from a newly-created
+session's tool list (and closes the surface-token mint with a 403).
+
 ## Native config & status panel
 
 The pack ships a **native, theme-compatible panel** (Extension Platform **P4**) that is the
@@ -268,6 +338,7 @@ and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
 | `tests/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building (vs the in-process stub). |
 | `tests/hindsight-provider.test.ts` | unit | Dormancy (no URL ⇒ no client constructed), auto-tag taxonomy, `recallScope` filter, retry-queue retry + cap, block shape. |
 | `tests/e2e/hindsight-external.spec.ts` | E2E | sessionSetup + beforePrompt blocks appear; a turn retains on the stub with bank `bobbit` + correct tags; unhealthy ⇒ session unaffected + diagnostic + `status` unhealthy; recovery flushes the queue; per-project disable ⇒ no injection; persists across reload. |
+| `tests/e2e/hindsight-agent-tools.spec.ts` | E2E | The three P5 agent tools round-trip through the real surface-token + route path to the stub; `scope`→tag mapping on the default/custom bank; tools resolve for a project session; per-project pack disable removes them (and 403s the surface-token mint). |
 | `tests/manual-integration/hindsight-external.test.ts` | manual | Real local Hindsight round-trip. |
 
 The shared in-process stub `tests/e2e/hindsight-stub.mjs` (`startHindsightStub`) backs the
@@ -309,11 +380,11 @@ both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
 
 Tracked in later Extension Platform goals, **not** in this release:
 
-- Explicit agent tools `hindsight_recall/retain/reflect` — **G2.3** (the tools; the panel + entry
-  points half of G2.3 shipped in P4).
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
 
 > **Now shipped (were non-goals):**
+> - The explicit **agent tools** `hindsight_recall/retain/reflect` landed in **P5** — see
+>   [Agent tools](#agent-tools).
 > - The **native config/status panel** + command-palette and `#/ext/hindsight` deep-link
 >   entrypoints landed in **P4** — see [Native config & status panel](#native-config--status-panel).
 >   Store-seeding is no longer the user-facing configuration path (test-only now).
