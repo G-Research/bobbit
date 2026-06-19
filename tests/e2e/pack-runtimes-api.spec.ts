@@ -39,6 +39,20 @@ interface RuntimeStatus {
 	message?: string;
 }
 
+interface CapabilitySummary {
+	id: string;
+	packId: string;
+	runtimeId: string;
+	mode: string;
+	startPolicy: string;
+	composeProject: string;
+	services: string[];
+	images: string[];
+	ports: Array<{ key: string; env?: string; container?: number; host?: number }>;
+	volumePath?: string;
+	trust: string;
+}
+
 const KNOWN = { packId: "demo-pack", runtimeId: "web", packName: "Demo Pack" };
 const KNOWN_PROJECT = "bobbit-pack-demo-pack-testsuffix";
 
@@ -96,6 +110,30 @@ const fakeSupervisor = {
 		calls.push({ op: "logs", packId, runtimeId, opts });
 		if (!isKnown(packId, runtimeId)) throw notFound();
 		return `web | started\nweb | tail=${tail}`;
+	},
+	async down(packId: string, runtimeId: string, opts?: { volumes?: boolean; removeState?: boolean }) {
+		calls.push({ op: "down", packId, runtimeId, opts });
+		if (!isKnown(packId, runtimeId)) throw notFound();
+		return baseStatus("stopped");
+	},
+	async capabilitySummary(packId: string, runtimeId: string, opts?: { mode?: string }): Promise<CapabilitySummary> {
+		calls.push({ op: "capabilities", packId, runtimeId, opts });
+		if (!isKnown(packId, runtimeId)) throw notFound();
+		const mode = opts?.mode ?? "managed-postgres";
+		const services = mode === "external-postgres" ? ["api", "web"] : ["api", "web", "db"];
+		return {
+			id: `${KNOWN.packId}:${KNOWN.runtimeId}`,
+			packId: KNOWN.packId,
+			runtimeId: KNOWN.runtimeId,
+			mode,
+			startPolicy: "on-enable",
+			composeProject: KNOWN_PROJECT,
+			services,
+			images: [...services],
+			ports: [{ key: "HINDSIGHT_API_PORT", env: "HINDSIGHT_API_PORT", container: 8080, host: 48080 }],
+			volumePath: "~/.hindsight",
+			trust: "store and recall agent memory",
+		};
 	},
 };
 
@@ -279,6 +317,73 @@ test.describe("Pack runtimes REST API", () => {
 		expect(res.status).toBe(200);
 		const data = await res.json();
 		expect(data.logs).toContain("tail=1"); // clampTail(-5) → 1
+	});
+
+	test("GET capabilities returns the consent disclosure (services/ports/volume/policy/trust)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities?mode=managed-postgres`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.id).toBe(id);
+		expect(data.mode).toBe("managed-postgres");
+		expect(data.startPolicy).toBe("on-enable");
+		expect(data.services).toEqual(["api", "web", "db"]);
+		expect(data.ports[0].env).toBe("HINDSIGHT_API_PORT");
+		expect(data.volumePath).toBe("~/.hindsight");
+		expect(typeof data.trust).toBe("string");
+		const capCall = calls.find((c) => c.op === "capabilities");
+		expect((capCall?.opts as { mode?: string })?.mode).toBe("managed-postgres");
+	});
+
+	test("GET capabilities forwards the mode query (external-postgres omits db)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities?mode=external-postgres`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.services).toEqual(["api", "web"]);
+	});
+
+	test("GET capabilities for an unknown runtime → 404", async () => {
+		const id = encodeId("ghost-pack", "nope");
+		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
+		expect(res.status).toBe(404);
+	});
+
+	test("POST down (default) forwards volumes:false/removeState:false — the uninstall primitive", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/down`, { method: "POST" });
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.status).toBe("stopped");
+		expect(data.id).toBe(id);
+		const downCall = calls.find((c) => c.op === "down");
+		expect((downCall?.opts as { volumes?: boolean })?.volumes).toBe(false);
+		expect((downCall?.opts as { removeState?: boolean })?.removeState).toBe(false);
+	});
+
+	test("POST down { volumes:true, removeState:true } forwards the explicit purge flags", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/down`, {
+			method: "POST",
+			body: JSON.stringify({ volumes: true, removeState: true }),
+		});
+		expect(res.status).toBe(200);
+		const downCall = calls.find((c) => c.op === "down");
+		expect((downCall?.opts as { volumes?: boolean })?.volumes).toBe(true);
+		expect((downCall?.opts as { removeState?: boolean })?.removeState).toBe(true);
+	});
+
+	test("POST down with a malformed JSON body → 400 (no down)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/down`, { method: "POST", body: "{not json" });
+		expect(res.status).toBe(400);
+		expect(calls.some((c) => c.op === "down")).toBe(false);
+	});
+
+	test("POST down for an unknown runtime → 404", async () => {
+		const id = encodeId("ghost-pack", "nope");
+		const res = await apiFetch(`/api/pack-runtimes/${id}/down`, { method: "POST" });
+		expect(res.status).toBe(404);
 	});
 
 	test("logs docker-unavailable → 200 with docker-unavailable status (not hidden)", async () => {
