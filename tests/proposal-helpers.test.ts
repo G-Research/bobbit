@@ -76,9 +76,68 @@ const {
 	loadProposalDraft,
 	deleteProposalDraft,
 	_cancelAllPendingProposalDraftSaves,
+	metadataObjectToRows,
+	metadataRowsToObject,
 } = helpers;
 
 const TYPES = ["goal", "project", "workflow", "role", "tool", "staff"] as const;
+
+describe("proposal-helpers — goal metadata editor", () => {
+	it("metadataRowsToObject drops blank keys and trims keys", () => {
+		const out = metadataRowsToObject([["  ", "x"], ["", "y"], [" a ", "1"]]);
+		assert.deepEqual(out, { a: 1 });
+	});
+
+	it("metadataRowsToObject returns undefined when no usable rows", () => {
+		assert.equal(metadataRowsToObject([]), undefined);
+		assert.equal(metadataRowsToObject([["", "v"], ["   ", "w"]]), undefined);
+	});
+
+	it("metadataRowsToObject JSON-parses values when possible, else keeps strings", () => {
+		const out = metadataRowsToObject([
+			["num", "42"],
+			["bool", "true"],
+			["arr", '["browser_navigate"]'],
+			["obj", '{"x":1}'],
+			["str", "hello world"],
+			["empty", ""],
+		]);
+		assert.deepEqual(out, {
+			num: 42,
+			bool: true,
+			arr: ["browser_navigate"],
+			obj: { x: 1 },
+			str: "hello world",
+			empty: "",
+		});
+	});
+
+	it("metadataObjectToRows shows strings verbatim and JSON-stringifies the rest", () => {
+		const rows = metadataObjectToRows({
+			"hindsight.memory.enabled": false,
+			"bobbit.disabledTools": ["browser_navigate"],
+			name: "alice",
+		});
+		assert.deepEqual(rows, [
+			["hindsight.memory.enabled", "false"],
+			["bobbit.disabledTools", '["browser_navigate"]'],
+			["name", "alice"],
+		]);
+	});
+
+	it("metadataObjectToRows yields no rows for non-object input", () => {
+		assert.deepEqual(metadataObjectToRows(undefined), []);
+		assert.deepEqual(metadataObjectToRows(null), []);
+		assert.deepEqual(metadataObjectToRows([1, 2]), []);
+		assert.deepEqual(metadataObjectToRows("x"), []);
+	});
+
+	it("round-trips object -> rows -> object", () => {
+		const meta = { "bobbit.disabledTools": ["browser_navigate"], "graphify.enabled": true, label: "exp-1" };
+		const rt = metadataRowsToObject(metadataObjectToRows(meta));
+		assert.deepEqual(rt, meta);
+	});
+});
 
 describe("proposal-helpers — dismissal fingerprint", () => {
 	beforeEach(() => {
