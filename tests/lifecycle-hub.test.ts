@@ -9,6 +9,8 @@ import { LifecycleHub, type HookCtx } from "../src/server/agent/lifecycle-hub.ts
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.ts";
 import { ModuleHost } from "../src/server/extension-host/module-host-worker.ts";
+import { createServerHostApi } from "../src/server/extension-host/server-host-api.ts";
+import { createPackStore } from "../src/server/extension-host/pack-store.ts";
 
 function tmpDir(): string {
 	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "lifecycle-hub-")));
@@ -124,6 +126,58 @@ describe("LifecycleHub", () => {
 			assert.equal(result.diagnostics.length, 1);
 			assert.equal(result.diagnostics[0].providerId, "mixed");
 			assert.equal(result.diagnostics[0].error, "malformed block(s) dropped");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("provider hooks receive a store-only host: capabilities.store true, store round-trips, session/agents denied", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const packStore = createPackStore({ rootDir: path.join(tmp, "state") });
+		try {
+			// The provider reads its capability flags, round-trips a value through
+			// ctx.host.store, and confirms the masked-off session namespace is denied.
+			const provider = fixtureProvider(tmp, "storeprov", `export default { async sessionSetup(ctx) {
+				const caps = ctx.host.capabilities;
+				const okStore = caps.store === true;
+				const sessionFlag = caps.session === true;
+				const agentsFlag = caps.agents === true;
+				await ctx.host.store.put("marker", { v: ctx.sessionId });
+				const got = await ctx.host.store.get("marker");
+				let sessionDenied = false;
+				try { await ctx.host.session.readTranscript(); } catch { sessionDenied = true; }
+				return { blocks: [{ id: "store", title: "store", authority: "memory", priority: 1, reason: "r", content: JSON.stringify({ okStore, sessionFlag, agentsFlag, got, sessionDenied }) }] };
+			} };`);
+
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+					sessionId,
+					packId,
+					contributionId: "",
+					packStore,
+					capabilityMask: { store: true, session: false, agents: false },
+				}),
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "store-sess"));
+			assert.deepEqual(result.diagnostics, []);
+			assert.equal(result.blocks.length, 1);
+			const payload = JSON.parse(result.blocks[0].content);
+			assert.equal(payload.okStore, true, "capabilities.store === true for provider hooks");
+			assert.equal(payload.sessionFlag, false, "session capability is false for provider hooks");
+			assert.equal(payload.agentsFlag, false, "agents capability is false for provider hooks");
+			assert.deepEqual(payload.got, { v: "store-sess" }, "store round-trips through the parent host");
+			assert.equal(payload.sessionDenied, true, "masked-off session namespace is unavailable");
+
+			// The value really landed in the pack-scoped store under the derived packId.
+			const packId = path.basename(tmp);
+			assert.deepEqual(await packStore.get(packId, "marker"), { v: "store-sess" });
 		} finally {
 			moduleHost.dispose();
 			fs.rmSync(tmp, { recursive: true, force: true });

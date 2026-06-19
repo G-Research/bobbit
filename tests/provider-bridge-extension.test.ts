@@ -79,6 +79,15 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(source.includes("/provider-hooks/before-compact"), "expected before-compact route");
 	});
 
+	it("forwards the compacted span to before-compact (not an empty body)", () => {
+		// Regression: the bridge used to post `{}` so provider.beforeCompact was a
+		// no-op. It must extract the about-to-be-lost span from the event.
+		assert.ok(source.includes("extractCompactSpan"), "expected a span extractor");
+		assert.ok(source.includes("messagesToSummarize"), "expected to read messagesToSummarize from the event");
+		assert.ok(/span \? \{ span \}/.test(source), "expected the before-compact body to carry { span }");
+		assert.ok(!/before-compact\",\s*\{\}/.test(source), "must NOT post an empty {} before-compact body");
+	});
+
 	it("mutates only systemPrompt and forwards prompt read-only", () => {
 		// The non-negotiable invariant: the user's message text is never rewritten.
 		assert.ok(source.includes("systemPrompt:"), "expected to return a systemPrompt field");

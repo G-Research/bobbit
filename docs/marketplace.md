@@ -315,28 +315,25 @@ Validation rules: `name`, `description`, `version` must be non-empty; `name` mus
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
-
 Schema 2 is the **Extension Platform** workstream's manifest tier. It began as a deliberately
 **additive** change — schema 2 widens what a `pack.yaml` may declare and adds a loader for one
 new contribution type (**providers**) — and remains **fully back-compatible**: existing
 schema-1 (v1) packs see zero behaviour change. A pack opts in with a top-level `schema:` field;
 absent (or `1`) keeps the exact v1 semantics.
-
 **Providers now dispatch through the Lifecycle Hub.** What began as a manifest-only step is
 live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforePrompt` /
 `beforeCompact` (via a generated provider-bridge pi extension) plus the server-side `afterTurn`
 / `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
-contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). No
-built-in production provider ships yet (G1.6), so an out-of-the-box install contributes nothing
-until you add a provider pack.
-
+contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). The
+first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
+ships in the built-in band but stays **dormant until a Hindsight URL is configured**, so an
+out-of-the-box install still contributes nothing until you opt in or add another provider pack.
 Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
 independently-mergeable PRs. Defining the manifest surface and the per-entity activation
 plumbing first meant later PRs (the lifecycle hub that actually *runs* providers, plus loaders
 for the other reserved contribution types) only added dispatch — they never had to re-open the
 manifest format or the activation REST. Authors could start shipping provider files before the
 dispatch PRs landed and have them load, validate, and toggle in the meantime.
-
 
 #### The `schema` field and back-compat
 
@@ -445,17 +442,15 @@ Field rules and defaults:
   may run.
 - **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
-
 **All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
 indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
 `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
 is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
 section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
-extension and `afterTurn` / `sessionShutdown` fire server-side. **No built-in production provider
-ships yet** (G1.6) — so an out-of-the-box install contributes nothing until you add a provider
-pack.
-
-
+extension and `afterTurn` / `sessionShutdown` fire server-side. The first built-in
+production provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped in the
+built-in band but **dormant until a Hindsight URL is configured**, so a fresh install still
+contributes nothing until you opt in.
 #### Why providers are pack-scoped, *not* name-merged
 
 Provider contributions are keyed `(packId, contributionId)` and loaded through the pack-contribution path —

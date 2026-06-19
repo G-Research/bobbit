@@ -111,6 +111,45 @@ function stripDelimitedTail(systemPrompt) {
   return before + systemPrompt.slice(endStart + DYNAMIC_CONTEXT_END.length);
 }
 
+// Cap (chars) for the compacted-span text forwarded to beforeCompact providers.
+// Bounds the hook payload; the memory provider trims further before retaining.
+const COMPACT_SPAN_CAP = 8000;
+
+// Extract the about-to-be-lost conversation span from the pi
+// session_before_compact event so beforeCompact providers retain real content
+// instead of an empty body. Reads event.preparation.messagesToSummarize (the
+// messages compaction will discard), concatenating their text; falls back to a
+// prior summary. All failures degrade to "" so a turn never breaks.
+function extractCompactSpan(event) {
+  try {
+    const prep = event && event.preparation;
+    const msgs = prep && Array.isArray(prep.messagesToSummarize) ? prep.messagesToSummarize : [];
+    const parts = [];
+    for (const m of msgs) {
+      if (!m || typeof m !== "object") continue;
+      const role = typeof m.role === "string" ? m.role : "";
+      const c = m.content;
+      let text = "";
+      if (typeof c === "string") {
+        text = c;
+      } else if (Array.isArray(c)) {
+        text = c
+          .filter((p) => p && p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text)
+          .join(" ");
+      }
+      text = text.trim();
+      if (!text) continue;
+      parts.push(role ? role + ": " + text : text);
+    }
+    let span = parts.join("\\n\\n").trim();
+    if (!span && prep && typeof prep.previousSummary === "string") span = prep.previousSummary.trim();
+    return span.length > COMPACT_SPAN_CAP ? span.slice(0, COMPACT_SPAN_CAP) : span;
+  } catch {
+    return "";
+  }
+}
+
 export default function(pi) {
   const sessionId = ${JSON.stringify(sessionId)};
 
@@ -171,9 +210,11 @@ export default function(pi) {
     return { systemPrompt: stripped + tail };
   });
 
-  // beforeCompact: notify providers; we do not amend compaction output here.
-  pi.on("session_before_compact", async () => {
-    await postHook("/provider-hooks/before-compact", {}, ${BEFORE_COMPACT_TIMEOUT_MS});
+  // beforeCompact: forward the about-to-be-lost span so providers can retain it
+  // before context is dropped. We do NOT amend compaction output here.
+  pi.on("session_before_compact", async (event) => {
+    const span = extractCompactSpan(event);
+    await postHook("/provider-hooks/before-compact", span ? { span } : {}, ${BEFORE_COMPACT_TIMEOUT_MS});
     return undefined;
   });
 }

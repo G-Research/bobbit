@@ -49,6 +49,21 @@ export type DisabledEntrypointsLookup = (
 	packName: string,
 ) => Iterable<string>;
 
+/** Synchronous lookup of a provider's PERSISTED flat config overrides (store
+ *  config) for an install scope + project + pack + provider. `packId` is the
+ *  SERVER-DERIVED pack identity (the pack store is keyed by it, NOT by packName).
+ *  Overlaid ON TOP of the provider's schema-default flat config to form the
+ *  effective config the Hub hands to the provider AND the config-gated activation
+ *  filter evaluates. Absent / returns undefined ⇒ no overrides (schema defaults
+ *  only). Must be synchronous: `listProviders` feeds the sync session-setup
+ *  bridge-injection decision. */
+export type ProviderConfigOverrideLookup = (
+	scope: PackScope,
+	projectId: string | undefined,
+	packId: string,
+	providerId: string,
+) => Record<string, unknown> | undefined;
+
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
@@ -69,6 +84,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly enumerate: (projectId: string | undefined) => PackEntry[],
 		private readonly disabledEntrypoints?: DisabledEntrypointsLookup,
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
+		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -143,11 +159,28 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (disabled && disabled.size > 0) {
 				contrib = { ...contrib, entrypoints: contrib.entrypoints.filter((ep) => !disabled.has(ep.listName)) };
 			}
+			// Providers: (1) drop entries disabled via pack_activation (DisabledRefs
+			// wins), (2) overlay persisted store config on the schema-default flat
+			// config to form the effective config, (3) apply config-gated activation
+			// (`activation.requiresConfig`) against that effective config. Steps (2)+(3)
+			// run for EVERY provider — a provider with no overrides + no requiresConfig
+			// is unchanged.
 			const disabledProviders = this.disabledProviders
 				? new Set(this.disabledProviders(e.scope, projectId, contrib.packName))
 				: undefined;
-			if (disabledProviders && disabledProviders.size > 0) {
-				contrib = { ...contrib, providers: contrib.providers.filter((p) => !disabledProviders.has(p.listName)) };
+			const resolvedProviders: ProviderContribution[] = [];
+			for (const p of contrib.providers) {
+				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
+				const defaults = p.config ?? {};
+				const overrides = this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
+				const hasOverrides = !!overrides && Object.keys(overrides).length > 0;
+				const effective = hasOverrides ? { ...defaults, ...overrides } : defaults;
+				const provider = hasOverrides ? { ...p, config: effective } : p;
+				if (!providerActivationSatisfied(provider)) continue; // dormant until configured
+				resolvedProviders.push(provider);
+			}
+			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
+				contrib = { ...contrib, providers: resolvedProviders };
 			}
 			loaded.push(contrib);
 		}
@@ -185,4 +218,19 @@ export class PackContributionRegistry implements PackContributionResolver {
 		for (const pack of filtered) byId.set(pack.packId, pack);
 		return { list: filtered, byId };
 	}
+}
+
+/** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
+ *  flat config — every required key present and, for a string, non-empty after
+ *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
+function providerActivationSatisfied(provider: ProviderContribution): boolean {
+	const required = provider.activation?.requiresConfig;
+	if (!required || required.length === 0) return true;
+	const config = provider.config ?? {};
+	return required.every((key) => {
+		const value = config[key];
+		if (value === undefined || value === null) return false;
+		if (typeof value === "string") return value.trim().length > 0;
+		return true;
+	});
 }
