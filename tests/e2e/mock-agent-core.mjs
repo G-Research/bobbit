@@ -441,6 +441,25 @@ export class MockAgentCore {
 			};
 		}
 
+		// Goal proposal carrying the per-goal worktree-setup fields — used by
+		// goal-worktree-setup-command.spec.ts to assert a propose_goal-seeded
+		// proposal mirrors worktreeSetupCommand / worktreeSetupTimeoutMs into the
+		// goal form and preserves them through acceptance. Must precede the generic
+		// goal_proposal matcher (it contains the "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_WORKTREE_SETUP")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "E2E Test Goal",
+					workflow: "general",
+					spec: "A goal whose worktree-setup fields are seeded by the agent.",
+					worktreeSetupCommand: "./scripts/agent-seed.sh",
+					worktreeSetupTimeoutMs: 45000,
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 			return {
 				tool: "propose_goal",
