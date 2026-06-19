@@ -33,6 +33,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -176,7 +177,7 @@ test.describe.configure({ mode: "serial" });
 test("compaction — real LLM @real", async ({ page }) => {
 	test.setTimeout(480_000);
 
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	const tmp = manualTmpRoot();
 	const port = await freePort();
 	const dir = join(tmp, `.bobbit-compact-manual-${port}`);
 	const agentDir = join(tmp, `.bobbit-compact-manual-${port}-agent`);

@@ -42,6 +42,7 @@ import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync
 import { join, resolve } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -442,7 +443,7 @@ test.describe.serial("Agent tool use", () => {
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(180_000);
 		port = await freePort();
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		dir = join(tmp, `.bobbit-manual-${port}`);
 		rmSync(dir, { recursive: true, force: true });
 		initRepo(dir);
