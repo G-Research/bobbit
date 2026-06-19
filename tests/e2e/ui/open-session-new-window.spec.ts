@@ -61,7 +61,11 @@ async function stubWindowOpen(page: Page): Promise<void> {
 	});
 }
 
-function expectedDeepLink(page: Page, sessionId: string): Promise<string> {
+function expectedPathDeepLink(page: Page, sessionId: string): Promise<string> {
+	return page.evaluate((id) => `${location.origin}/session/${id}`, sessionId);
+}
+
+function expectedHashDeepLink(page: Page, sessionId: string): Promise<string> {
 	return page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, sessionId);
 }
 
@@ -82,7 +86,7 @@ test.describe("Open session in new window (UI)", () => {
 		await waitForSessionStatus(sessionId, "idle");
 
 		const row = await openSession(page, sessionId);
-		const deepLink = await expectedDeepLink(page, sessionId);
+		const deepLink = await expectedPathDeepLink(page, sessionId);
 		await stubWindowOpen(page);
 
 		await openMenu(row, sessionId);
@@ -110,7 +114,7 @@ test.describe("Open session in new window (UI)", () => {
 		await openSession(page, activeId);
 		const otherRow = sessionRow(page, otherId);
 		await expect(otherRow).toBeVisible({ timeout: 10_000 });
-		const otherDeepLink = await expectedDeepLink(page, otherId);
+		const otherDeepLink = await expectedHashDeepLink(page, otherId);
 		await stubWindowOpen(page);
 
 		// Root cause of the flake: Playwright's real middle-click
