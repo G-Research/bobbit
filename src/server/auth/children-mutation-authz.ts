@@ -15,7 +15,8 @@
  *
  * To shrink the blast radius we split the mutations into two classes:
  *
- *   ORCHESTRATION — `spawn-child`, plan `PATCH`, `integrate-child`, `policy`.
+ *   ORCHESTRATION — `spawn-child`, plan `PATCH`, `integrate-child`, and
+ *     `policy` carrying `divergencePolicy` / `maxConcurrentChildren`.
  *     These are the autonomous team-lead orchestration verbs: they spawn child
  *     teams, rewrite the execution plan, merge child branches, and resize the
  *     concurrency policy. They are NEVER issued by the human/UI gateway path
@@ -28,8 +29,12 @@
  *     Orchestration is refused on a missing/unknown secret, a teamless goal, or
  *     a non-team-lead caller.
  *
- *   OPERATOR — `pause`, `resume`, mutation `decision`, `archive-child`.
- *     These are the human-in-the-loop verbs the web UI actually drives. A
+ *   OPERATOR — `pause`, `resume`, mutation `decision`, `archive-child`, and
+ *     `policy` carrying EXCLUSIVELY the per-goal sub-goal opt-in fields
+ *     (`subgoalsAllowed` / `maxNestingDepth` — the goal-dashboard Sub-goal
+ *     settings control). A body that mixes in ANY orchestration field is
+ *     classified as orchestration (the stricter class wins). These are the
+ *     human-in-the-loop verbs the web UI actually drives. A
  *     verified `bobbit_session` cookie is accepted (human/UI gateway call);
  *     otherwise we fall back to the same AUTHENTIC team-lead match the
  *     orchestration class uses (so a team-lead agent can also
