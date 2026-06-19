@@ -7164,8 +7164,27 @@ export class SessionManager {
 
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
-			const effective = this.resolveEffectiveAllowedTools(role);
-			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
+			// Derive the effective allowlist from the session/persisted allowlist when
+			// present — NOT from the role alone. A restricted child/delegate (or any
+			// session whose allowlist was narrowed/removed by bobbit.disabledTools)
+			// persists a constrained allowedTools; recomputing from
+			// `resolveEffectiveAllowedTools(role)` would widen it back to the role
+			// default (minus disabled names) on force-abort respawn. Mirrors the
+			// restore path's persisted-allowlist handling.
+			const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
+			const forceAbortAllowedNames = forceAbortPersisted?.allowedTools ?? session.allowedTools;
+			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
+				? forceAbortAllowedNames.map(n => tagAllowedTool(n, this.toolManager))
+				: this.resolveEffectiveAllowedTools(role);
+			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
+			// collapse it to `undefined`, which would re-grant every tool. Only a
+			// genuinely unrestricted resolution (role-less ⇒ resolves to `[]`)
+			// collapses to `undefined` (all tools), preserving today's behaviour.
+			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
+				? effective
+				: (effective.length > 0 ? effective : undefined);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 

@@ -1045,8 +1045,15 @@ export function writeMcpProxyExtensions(
 	// failed before listing tools), so always land at `<server>.ts`.
 	for (const status of statuses) {
 		if (status.status !== "error") continue;
+		const metaLower = makeMetaToolName(status.name).toLowerCase();
 		// Respect goal-metadata disable for the flat meta-tool of an error server.
-		if (hasDisabled && disabledTools!.has(makeMetaToolName(status.name).toLowerCase())) continue;
+		if (hasDisabled && disabledTools!.has(metaLower)) continue;
+		// Honour the allowlist for error stubs too: when an allowlist is in effect
+		// (including an empty `[]` that permits nothing), only emit a stub for an
+		// error-state server whose meta-tool name is allowed. Without this, a
+		// locked-down session would still see `mcp_<server>` for every failed
+		// server even though no MCP tool is permitted.
+		if (allowedSet && !allowedSet.has(metaLower)) continue;
 		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state");
 		writeFile(status.name, undefined, code);
 		handled.add(`${status.name}\u0000`);

@@ -308,4 +308,35 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		assert.match(code, /name:\s*"mcp_broken"/);
 		assert.match(code, /unavailable/);
 	});
+
+	it("error-state stub honours the allowlist: [] emits no stub", (t) => {
+		setIsolatedBobbit(t);
+
+		const mgr = {
+			getToolInfos: () => [],
+			getServerStatuses: () => [
+				{ name: "broken", status: "error", toolCount: 0, error: "timeout" },
+			],
+		} as any;
+
+		// Explicit empty allowlist ⇒ a locked-down session that permits nothing.
+		// The error-state stub must NOT be emitted just because the server failed —
+		// otherwise the model still sees `mcp_broken` despite having no MCP access.
+		const none = writeMcpProxyExtensions(mgr, []);
+		assert.equal(none.length, 0, "[] allowlist must suppress error-state stubs");
+
+		// An allowlist that does not include the error server's meta-tool also
+		// suppresses its stub.
+		const otherOnly = writeMcpProxyExtensions(mgr, ["mcp_other"]);
+		assert.equal(otherOnly.length, 0, "non-matching allowlist suppresses the stub");
+
+		// An allowlist that DOES include the error server's meta-tool still emits it.
+		const allowed = writeMcpProxyExtensions(mgr, ["mcp_broken"]);
+		assert.equal(allowed.length, 1, "allowlisted error server still emits its stub");
+		assert.equal(path.basename(allowed[0]), "broken.ts");
+
+		// Unrestricted (undefined) still emits the stub — byte-identical to today.
+		const unrestricted = writeMcpProxyExtensions(mgr);
+		assert.equal(unrestricted.length, 1, "undefined allowlist still emits the stub");
+	});
 });
