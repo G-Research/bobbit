@@ -171,6 +171,39 @@ function isLegacyTextCompaction(m: any): boolean {
 	return typeof t === "string" && t.startsWith("Context compacted");
 }
 
+/**
+ * Shared ordering invariant (docs/design/fix-compaction-ordering.md §2, §4):
+ * a live `compact_active` card retained in place of the persisted/snapshot
+ * sidecar card for the SAME `compactionId` must inherit that persisted row's
+ * canonical `_order` (and its paired toolResult's `_order`) — otherwise the
+ * live card keeps a stale positive `highestSeq + 0.5` order and sorts AFTER
+ * the negative-ordered preserved tail, diverging from reload ordering.
+ *
+ * Returns the persisted card / paired-toolResult `_order`s for `compactionId`,
+ * EXCLUDING the live `compact_active` surface itself (id !== compact_active).
+ * `null` when no persisted row is present. Pinned by message-reducer.test.ts
+ * cases (12f)/(12g)/(12h)/(12i).
+ */
+function persistedCompactionAnchor(
+	messages: OrderedMessage[],
+	compactionId: string,
+): { cardOrder: number | null; toolResultOrder: number | null } {
+	let cardOrder: number | null = null;
+	let toolResultOrder: number | null = null;
+	const pairedToolCallId = `compaction-summary:${compactionId}`;
+	for (const m of messages) {
+		if (m.id !== COMPACTION_ACTIVE_ID && compactionSummaryId(m) === compactionId) {
+			cardOrder = m._order;
+		} else if (
+			m.role === "toolResult"
+			&& (m as any).toolCallId === pairedToolCallId
+		) {
+			toolResultOrder = m._order;
+		}
+	}
+	return { cardOrder, toolResultOrder };
+}
+
 // `parseTokensBeforeFromServerMarker` and `upgradeServerCompactionMarker`
 // removed. With the compaction sidecar (docs/design/persist-compaction-
 // history.md §A), the server splices the rich synthetic into snapshots
@@ -375,16 +408,50 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// in state, so this set is empty and the persisted synthetic survives
 			// untouched (reload persistence preserved).
 			const liveCompactionIds = new Set<string>();
+			// Interim duplicate-card window (docs/design/fix-compaction-ordering.md
+			// §4.1, HIGH finding): when a post-compaction snapshot arrives while the
+			// live `compact_active` card is still in-progress and carries NO
+			// `compactionId`, the cid-keyed dedup below can't see it, so BOTH the
+			// persisted sidecar card and the live card would survive until the
+			// deferred `compaction-result` fires. Track the in-progress live card so
+			// we can anchor it to the persisted sidecar card's position instead.
+			let hasInProgressLiveCard = false;
 			for (const m of state.messages) {
 				if (m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID) {
 					const cid = compactionSummaryId(m);
 					if (cid) liveCompactionIds.add(cid);
+					else hasInProgressLiveCard = true;
 				}
 			}
+			// Stamp the FULL row set FIRST so canonical snapshot `_order`s
+			// (SNAPSHOT_ORDER_FLOOR + index) are computed over the unfiltered,
+			// server-spliced ordering — the persisted compaction card keeps the
+			// most-negative (prepended) position the server gave it. We then
+			// partition out the persisted compaction rows that a live
+			// `compact_active` card already represents, RECORDING their canonical
+			// orders, instead of dropping them before stamping. The surviving
+			// live card inherits those orders below so live ordering matches
+			// reload (docs/design/fix-compaction-ordering.md §4.1).
+			const stampedAll: OrderedMessage[] = effectiveRows.map((m, i) => {
+				const explicit = (m as any)._order;
+				const order = typeof explicit === "number" ? explicit : SNAPSHOT_ORDER_FLOOR + i;
+				return stamp(m, "server", order, tick);
+			});
+			const compactionAnchors = new Map<
+				string,
+				{ cardOrder: number | null; toolResultOrder: number | null }
+			>();
+			// Anchor transferred to an IN-PROGRESS live `compact_active` card (no
+			// compactionId yet) from the persisted sidecar card it duplicates.
+			let inProgressAnchor: { cardOrder: number; toolResultOrder: number | null } | null = null;
+			let snapshotRows: OrderedMessage[] = stampedAll;
 			if (liveCompactionIds.size > 0) {
+				for (const cid of liveCompactionIds) {
+					compactionAnchors.set(cid, persistedCompactionAnchor(stampedAll, cid));
+				}
 				const pairedToolCallIds = new Set<string>();
 				for (const id of liveCompactionIds) pairedToolCallIds.add(`compaction-summary:${id}`);
-				effectiveRows = effectiveRows.filter((m: any) => {
+				snapshotRows = stampedAll.filter((m: any) => {
 					const cid = compactionSummaryId(m);
 					if (cid && liveCompactionIds.has(cid)) return false;
 					if (
@@ -394,12 +461,38 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					) return false;
 					return true;
 				});
+			} else if (hasInProgressLiveCard) {
+				// Interim case: the live card has no compactionId, so we can't match
+				// by cid. Treat the MOST RECENT persisted sidecar compaction card in
+				// the snapshot (greatest `_order` among sidecar cards — the latest row
+				// prepended by mergeCompactionSidecarIntoMessages) as the pending live
+				// compaction anchor. Drop that card + its paired toolResult and stash
+				// their canonical orders so the surviving in-progress live card sorts
+				// before the preserved tail — exactly one card during the window.
+				let bestCard: OrderedMessage | null = null;
+				for (const m of stampedAll) {
+					if (m.id !== COMPACTION_ACTIVE_ID && compactionSummaryId(m) !== null) {
+						if (bestCard === null || m._order > bestCard._order) bestCard = m;
+					}
+				}
+				if (bestCard) {
+					const bestCid = compactionSummaryId(bestCard) as string;
+					const pairedToolCallId = `compaction-summary:${bestCid}`;
+					let trOrder: number | null = null;
+					for (const m of stampedAll) {
+						if (m.role === "toolResult" && (m as any).toolCallId === pairedToolCallId) {
+							trOrder = m._order;
+						}
+					}
+					inProgressAnchor = { cardOrder: bestCard._order, toolResultOrder: trOrder };
+					const dropCard = bestCard;
+					snapshotRows = stampedAll.filter((m: any) => {
+						if (m === dropCard) return false;
+						if (m.role === "toolResult" && (m as any).toolCallId === pairedToolCallId) return false;
+						return true;
+					});
+				}
 			}
-			const snapshotRows: OrderedMessage[] = effectiveRows.map((m, i) => {
-				const explicit = (m as any)._order;
-				const order = typeof explicit === "number" ? explicit : SNAPSHOT_ORDER_FLOOR + i;
-				return stamp(m, "server", order, tick);
-			});
 
 			const serverIds = new Set<string>();
 			// Equivalence sets keyed on toolCallId — the snapshot is authoritative
@@ -577,7 +670,57 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				survivors.push(m);
 			}
 
-			const merged = [...snapshotRows, ...survivors];
+			let merged = [...snapshotRows, ...survivors];
+			// Transfer the displaced persisted card's canonical `_order` to the
+			// surviving live `compact_active` card + its paired toolResult, so the
+			// card+affordance sort BEFORE the negative-ordered preserved tail —
+			// identical to reload (docs/design/fix-compaction-ordering.md §4.1;
+			// pinned by (12f)/(12h)). Pure: replace via spread, never mutate the
+			// prior-state survivor objects in place.
+			if (compactionAnchors.size > 0) {
+				const liveCard = merged.find(
+					(m) => m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID,
+				);
+				const liveCid = liveCard ? compactionSummaryId(liveCard) : null;
+				const anchor = liveCid ? compactionAnchors.get(liveCid) : undefined;
+				if (anchor && anchor.cardOrder !== null) {
+					const cardOrder = anchor.cardOrder;
+					const trOrder = anchor.toolResultOrder ?? cardOrder + 0.001;
+					merged = merged.map((m) => {
+						if (m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID) {
+							return { ...m, _order: cardOrder };
+						}
+						if (
+							m.role === "toolResult"
+							&& (m as any).toolCallId === `compaction-summary:${COMPACTION_ACTIVE_ID}`
+						) {
+							return { ...m, _order: trOrder };
+						}
+						return m;
+					});
+				}
+			} else if (inProgressAnchor) {
+				// Transfer the displaced persisted card's canonical (negative) order to
+				// the surviving IN-PROGRESS live `compact_active` card. Its paired
+				// toolResult usually doesn't exist yet (the in-progress placeholder is
+				// a bare toolCall), so the toolResult branch is a no-op until the
+				// terminal transition. This makes the interim window show exactly one
+				// card, positioned before the preserved tail.
+				const cardOrder = inProgressAnchor.cardOrder;
+				const trOrder = inProgressAnchor.toolResultOrder ?? cardOrder + 0.001;
+				merged = merged.map((m) => {
+					if (m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID) {
+						return { ...m, _order: cardOrder };
+					}
+					if (
+						m.role === "toolResult"
+						&& (m as any).toolCallId === `compaction-summary:${COMPACTION_ACTIVE_ID}`
+					) {
+						return { ...m, _order: trOrder };
+					}
+					return m;
+				});
+			}
 			// highestSeq tracks live seqs only — snapshots are negative; keep prior.
 			const positiveMax = merged.reduce(
 				(acc, m) => (m._order > 0 && m._order > acc ? m._order : acc),
@@ -660,8 +803,17 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// `docs/design/compaction-e2e-rich-summary.md` §7.4.
 			const tick = state.nextTick;
 			const order = state.highestSeq + 0.5;
+			// Also drop the prior `compact_active` card's PAIRED synthetic
+			// toolResult (`toolCallId === "compaction-summary:compact_active"`).
+			// Filtering only the assistant card by id leaves a stale orphaned
+			// toolResult behind when a subsequent compaction starts, which then
+			// renders/anchors incorrectly. The `compaction-result` filter already
+			// removes this toolResult; keep the two filters symmetric.
 			const messages = state.messages.filter(
-				(m) => m.id !== "compacting_placeholder" && m.id !== "compact_active",
+				(m) =>
+					m.id !== "compacting_placeholder"
+					&& m.id !== "compact_active"
+					&& (m as any).toolCallId !== "compaction-summary:compact_active",
 			);
 			messages.push(stamp(action.message, "synthetic", order, tick));
 			return {
@@ -678,7 +830,6 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// rich row(s) under the same stable id. Single-DOM-identity
 			// invariant pinned by message-reducer.test.ts case 12d.
 			const tick = state.nextTick;
-			const order = state.highestSeq + 0.5;
 			// When the terminal live card carries a `compactionId`, also drop any
 			// persisted (reload/refresh-spliced) sidecar synthetic + paired
 			// toolResult for the SAME compaction. The server splices that card
@@ -690,6 +841,39 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const dupToolCallId = resultCompactionId
 				? `compaction-summary:${resultCompactionId}`
 				: null;
+			// Sub-case 2 (docs/design/fix-compaction-ordering.md §2.1, §4.2):
+			// when the post-compaction snapshot landed BEFORE this deferred
+			// terminal transition, a persisted sidecar card for `compactionId`
+			// already sits in state at its canonical (negative, prepended)
+			// snapshot order. The new `compact_active` card REPLACES it, so it
+			// must inherit that anchor order — NOT `highestSeq + 0.5` (positive),
+			// which would re-sink the card below the preserved tail. Falls back
+			// to the tail anchor only when no persisted card is being displaced
+			// (the genuinely-live case; corrected later when its snapshot lands).
+			// Pinned by (12g)/(12h).
+			const anchor = resultCompactionId
+				? persistedCompactionAnchor(state.messages, resultCompactionId)
+				: { cardOrder: null, toolResultOrder: null };
+			// Fallback chain (docs/design/fix-compaction-ordering.md §4.2): when no
+			// persisted sidecar card is being displaced — because the interim
+			// snapshot already dropped it in favour of the in-progress live card and
+			// transferred its negative order onto `compact_active` — inherit that
+			// existing live card's `_order` so the deferred transition preserves the
+			// negative anchor. Only the genuinely-live case (no snapshot yet) falls
+			// back to the positive `highestSeq + 0.5` tail anchor, corrected later
+			// when its snapshot lands.
+			const existingActiveCard = state.messages.find(
+				(m) => m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID,
+			);
+			const existingActiveToolResult = state.messages.find(
+				(m) =>
+					m.role === "toolResult"
+					&& (m as any).toolCallId === `compaction-summary:${COMPACTION_ACTIVE_ID}`,
+			);
+			const order =
+				anchor.cardOrder ?? existingActiveCard?._order ?? state.highestSeq + 0.5;
+			const toolResultOrder =
+				anchor.toolResultOrder ?? existingActiveToolResult?._order ?? order + 0.001;
 			const messages = state.messages.filter(
 				(m) => {
 					if (
@@ -710,7 +894,7 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			messages.push(stamp(action.message, "synthetic", order, tick));
 			if (action.toolResult) {
 				messages.push(
-					stamp(action.toolResult, "synthetic", order + 0.001, tick + 1),
+					stamp(action.toolResult, "synthetic", toolResultOrder, tick + 1),
 				);
 			}
 			return {
