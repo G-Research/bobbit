@@ -103,20 +103,36 @@ export function effectiveMaxNestingDepth(
 export type NestingCheckResult =
 	| { ok: true; childDepth: number; maxDepth: number }
 	| { ok: false; code: "SUBGOALS_DISABLED" }
+	| { ok: false; code: "PARENT_SUBGOALS_DISABLED" }
 	| { ok: false; code: "NESTING_DEPTH_EXCEEDED"; currentDepth: number; maxDepth: number };
 
 /**
  * Run the full pre-spawn gate. Returns a structured outcome instead of
  * throwing or writing a response so both the REST handler and the
  * verification harness can consume it.
+ *
+ * Two distinct block reasons:
+ *   - `SUBGOALS_DISABLED`         — the SYSTEM pref is OFF (master gate). This
+ *                                   is the authoritative block and wins even
+ *                                   when the parent also disallows sub-goals.
+ *   - `PARENT_SUBGOALS_DISABLED`  — the system pref is ON but this specific
+ *                                   parent goal carries `subgoalsAllowed:
+ *                                   false`. Distinct so the UI can name the
+ *                                   parent and offer to flip its policy.
  */
 export function checkCanSpawnChild(
 	parent: PersistedGoal,
 	prefs: SubgoalNestingPrefs,
 	lookup: (id: string) => PersistedGoal | undefined,
 ): NestingCheckResult {
-	if (!effectiveSubgoalsAllowed(parent, prefs)) {
+	// System pref is the master gate — when OFF it always wins, regardless of
+	// any per-goal flag, and keeps the original SUBGOALS_DISABLED code.
+	if (!prefs.subgoalsEnabled) {
 		return { ok: false, code: "SUBGOALS_DISABLED" };
+	}
+	// System ON but THIS parent opted out — distinct, parent-scoped block.
+	if (parent.subgoalsAllowed === false) {
+		return { ok: false, code: "PARENT_SUBGOALS_DISABLED" };
 	}
 	const maxDepth = effectiveMaxNestingDepth(parent, prefs);
 	const currentDepth = nestingDepth(parent, lookup);
