@@ -227,14 +227,34 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 }
 
-/** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
- *  flat config — every required key present and, for a string, non-empty after
- *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
+/** True when a provider's `activation` gate is satisfied by its EFFECTIVE flat
+ *  config. No `activation` ⇒ unconditionally active. Otherwise, in priority order:
+ *
+ *    1. `activeWhenConfig` (OR escape hatch / deployment-mode linkage): if ANY
+ *       listed key's effective value is in its allowed-value list, the provider is
+ *       active — this is what lets a managed deployment mode activate without an
+ *       external URL.
+ *    2. `requiresConfig` (AND gate): every listed key present and, for a string,
+ *       non-empty after trimming.
+ *
+ *  When `activeWhenConfig` is declared but unmatched AND there is no `requiresConfig`
+ *  to fall back on, the provider stays dormant (the gate was declared for a reason). */
 function providerActivationSatisfied(provider: ProviderContribution): boolean {
-	const required = provider.activation?.requiresConfig;
-	if (!required || required.length === 0) return true;
+	const activation = provider.activation;
+	if (!activation) return true;
 	const config = provider.config ?? {};
-	return required.every((key) => {
+	const { activeWhenConfig, requiresConfig } = activation;
+	if (activeWhenConfig) {
+		for (const [key, allowed] of Object.entries(activeWhenConfig)) {
+			const value = config[key];
+			if (typeof value === "string" && allowed.includes(value)) return true;
+		}
+	}
+	if (!requiresConfig || requiresConfig.length === 0) {
+		// No AND gate: an unmatched `activeWhenConfig` means dormant; otherwise active.
+		return !activeWhenConfig;
+	}
+	return requiresConfig.every((key) => {
 		const value = config[key];
 		if (value === undefined || value === null) return false;
 		if (typeof value === "string") return value.trim().length > 0;

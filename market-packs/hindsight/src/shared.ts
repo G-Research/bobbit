@@ -335,10 +335,15 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 	return errors.length > 0 ? { ok: false, errors } : { ok: true, value };
 }
 
-/** Redact secrets for the `config` GET surface — apiKey collapses to a boolean. */
+/** Redact secrets for the `config` GET surface — every secret field collapses to a
+ *  `<field>Set` boolean and the raw value is never echoed. */
 export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
-	const { apiKey, ...rest } = cfg;
-	return { ...rest, apiKeySet: typeof apiKey === "string" && apiKey.length > 0 };
+	const { apiKey, externalDatabaseUrl, ...rest } = cfg;
+	return {
+		...rest,
+		apiKeySet: typeof apiKey === "string" && apiKey.length > 0,
+		externalDatabaseUrlSet: typeof externalDatabaseUrl === "string" && externalDatabaseUrl.length > 0,
+	};
 }
 
 /** Effective config for the routes (store overrides over flat defaults). */

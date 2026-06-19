@@ -220,6 +220,63 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 		}
 	});
 
+	test("uninstall reports a REAL teardown failure (down throws) and does NOT uninstall", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-uninstall-fail-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async down(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+				calls.push({ op: "down", packId, runtimeId, opts });
+				throw new Error("compose down exploded");
+			},
+		}));
+		try {
+			const res = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "server", packName }),
+			});
+			// A real Docker teardown failure is reported — never silently swallowed.
+			expect(res.status).toBe(502);
+			const body = await res.json();
+			expect(String(body.error)).toContain("teardown failed");
+			expect(Array.isArray(body.details)).toBe(true);
+			expect(body.details.join(" ")).toContain("compose down exploded");
+			// The pack is STILL installed (the uninstall was aborted, not silently completed).
+			const listed = await apiFetch("/api/marketplace/installed");
+			const installed = (await listed.json()).installed as Array<{ packName: string; scope: string }>;
+			expect(installed.some((p) => p.packName === packName && p.scope === "server")).toBe(true);
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("uninstall TOLERATES a docker-unavailable runtime (down returns status, no throw) and still uninstalls", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-uninstall-nodocker-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async down(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+				calls.push({ op: "down", packId, runtimeId, opts });
+				return statusFor(packId, runtimeId, "docker-unavailable");
+			},
+		}));
+		try {
+			const res = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "server", packName }),
+			});
+			// A docker-unavailable STATUS (graceful, no throw) must not block uninstall.
+			expect(res.status).toBe(204);
+			expect(calls.filter((c) => c.op === "down").length).toBe(1);
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
 	test("explicit purge runs down WITH volumes + state removal", async ({ gateway }) => {
 		const packName = `rt-purge-${Date.now()}`;
 		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");

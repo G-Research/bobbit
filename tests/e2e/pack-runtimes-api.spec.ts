@@ -343,6 +343,33 @@ test.describe("Pack runtimes REST API", () => {
 		expect(data.services).toEqual(["api", "web"]);
 	});
 
+	test("GET capabilities ?mode=external reflects the no-Docker setup (dockerRequired:false, no services/ports)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities?mode=external`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.mode).toBe("external");
+		expect(data.dockerRequired).toBe(false);
+		expect(data.services).toEqual([]);
+		expect(data.ports).toEqual([]);
+		// The supervisor is consulted WITHOUT a runtime mode (descriptor/trust only) —
+		// external mode never maps onto a managed runtime mode.
+		const capCall = calls.find((c) => c.op === "capabilities");
+		expect((capCall?.opts as { mode?: string })?.mode).toBeUndefined();
+	});
+
+	test("GET capabilities ?mode=managed maps the deployment mode to the managed-postgres runtime mode", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities?mode=managed`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.dockerRequired).toBe(true);
+		expect(data.mode).toBe("managed-postgres");
+		expect(data.services).toEqual(["api", "web", "db"]);
+		const capCall = calls.find((c) => c.op === "capabilities");
+		expect((capCall?.opts as { mode?: string })?.mode).toBe("managed-postgres");
+	});
+
 	test("GET capabilities for an unknown runtime → 404", async () => {
 		const id = encodeId("ghost-pack", "nope");
 		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
