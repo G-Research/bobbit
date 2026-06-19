@@ -27,6 +27,38 @@ export const GOOGLE_GEMINI_CLI_PROVIDER = "google-gemini-cli";
 /** pi-ai-style `api` discriminator marking a Code Assist (Bearer) model. */
 export const GOOGLE_CODE_ASSIST_API = "google-code-assist";
 
+/**
+ * Providers whose models are emitted with `sessionSelectable: false` and so MUST
+ * NOT be bound to an agent session by ANY path (browser picker, role override,
+ * `default.sessionModel` preference, API write, or a restored/persisted config).
+ * The pi-coding-agent runtime has no provider/api capable of running them, so a
+ * `setModel(provider, …)` either silently falls back or hard-fails the session.
+ *
+ * This mirrors the per-model `sessionSelectable: false` contract emitted in
+ * `google-code-assist-models.ts`; `getGoogleCodeAssistModels()` only ever emits
+ * `google-gemini-cli` models, so a provider-level guard is sufficient and avoids
+ * an async model-registry lookup on the synchronous spawn/bind path. The pinning
+ * test in `google-code-assist.test.ts` cross-checks the two so they can't drift.
+ */
+const NON_SESSION_SELECTABLE_PROVIDERS = new Set<string>([GOOGLE_GEMINI_CLI_PROVIDER]);
+
+/** True when models from `provider` may be bound to an agent session. */
+export function isSessionSelectableProvider(provider: string): boolean {
+	return !NON_SESSION_SELECTABLE_PROVIDERS.has(provider);
+}
+
+/**
+ * True when a `"<provider>/<modelId>"` string may be bound to an agent session.
+ * Malformed strings return `true` so existing malformed-pref handling (which
+ * logs/ignores) is unchanged; this guard only screens out the known
+ * not-session-runnable providers.
+ */
+export function isSessionSelectableModelString(modelString: string): boolean {
+	const slash = modelString.indexOf("/");
+	const provider = slash > 0 ? modelString.slice(0, slash) : modelString;
+	return isSessionSelectableProvider(provider);
+}
+
 const CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION = "v1internal";
 const CLIENT_METADATA = { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } as const;
@@ -41,7 +73,7 @@ interface StoredGoogleCredential {
 	email?: string;
 }
 
-export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<{
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{
 	ok: boolean;
 	status: number;
 	text: () => Promise<string>;
@@ -54,6 +86,12 @@ export interface CodeAssistGenerateArgs {
 	maxTokens?: number;
 	/** pi-ai thinking level mapped to a Gemini thinkingConfig hint. */
 	thinkingLevel?: string;
+	/**
+	 * Abort the underlying Code Assist fetch(es) after this many ms. Threaded from
+	 * `completeModelText({ timeoutMs })` so a stalled `generateContent` / onboarding
+	 * request can't hang past the caller's deadline. `undefined`/`<=0` disables it.
+	 */
+	timeoutMs?: number;
 }
 
 export interface CodeAssistDeps {
@@ -165,12 +203,35 @@ function codeAssistUrl(method: string): string {
 	return `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:${method}`;
 }
 
-async function codeAssistPost(method: string, token: string, body: unknown, fetchFn: FetchLike): Promise<any> {
-	const res = await fetchFn(codeAssistUrl(method), {
+async function codeAssistPost(method: string, token: string, body: unknown, fetchFn: FetchLike, timeoutMs?: number): Promise<any> {
+	const init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal } = {
 		method: "POST",
 		headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 		body: JSON.stringify(body),
-	});
+	};
+
+	let res: { ok: boolean; status: number; text: () => Promise<string> };
+	if (typeof timeoutMs === "number" && timeoutMs > 0) {
+		// Race the fetch against a timeout that also aborts the request. Racing (not
+		// just relying on the AbortSignal) guarantees a deterministic timeout even
+		// when the provided fetch implementation ignores `signal` (e.g. a test stub).
+		const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
+		if (controller) init.signal = controller.signal;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => {
+				controller?.abort();
+				reject(new Error(`Code Assist ${method} timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
+		});
+		try {
+			res = await Promise.race([fetchFn(codeAssistUrl(method), init), timeout]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	} else {
+		res = await fetchFn(codeAssistUrl(method), init);
+	}
 	const text = await res.text();
 	if (!res.ok) {
 		throw new Error(`Code Assist ${method} failed: HTTP ${res.status} ${text.slice(0, 256)}`);
@@ -189,7 +250,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * `loadCodeAssist` (returns the project when already onboarded) and finally
  * `onboardUser` (a long-running operation) for the free tier.
  */
-export async function ensureCodeAssistProject(token: string, fetchFn: FetchLike = defaultFetch()): Promise<string | undefined> {
+export async function ensureCodeAssistProject(token: string, fetchFn: FetchLike = defaultFetch(), timeoutMs?: number): Promise<string | undefined> {
 	if (cachedProjectId) return cachedProjectId;
 	const persisted = readPersistedProject();
 	if (persisted) {
@@ -197,7 +258,7 @@ export async function ensureCodeAssistProject(token: string, fetchFn: FetchLike 
 		return persisted;
 	}
 
-	const load = await codeAssistPost("loadCodeAssist", token, { metadata: CLIENT_METADATA }, fetchFn);
+	const load = await codeAssistPost("loadCodeAssist", token, { metadata: CLIENT_METADATA }, fetchFn, timeoutMs);
 	let project: string | undefined = load?.cloudaicompanionProject;
 	if (!project) {
 		const tierId: string =
@@ -207,6 +268,7 @@ export async function ensureCodeAssistProject(token: string, fetchFn: FetchLike 
 			token,
 			{ tierId, cloudaicompanionProject: project, metadata: CLIENT_METADATA },
 			fetchFn,
+			timeoutMs,
 		);
 		for (let i = 0; i < 8 && op && op.done !== true; i++) {
 			await sleep(1500);
@@ -215,6 +277,7 @@ export async function ensureCodeAssistProject(token: string, fetchFn: FetchLike 
 				token,
 				{ tierId, cloudaicompanionProject: project, metadata: CLIENT_METADATA },
 				fetchFn,
+				timeoutMs,
 			);
 		}
 		const resolved = op?.response?.cloudaicompanionProject;
@@ -288,10 +351,10 @@ export async function codeAssistComplete(args: CodeAssistGenerateArgs, deps: Cod
 		);
 	}
 
-	const getProject = deps.getProject ?? ((t: string) => ensureCodeAssistProject(t, fetchFn));
+	const getProject = deps.getProject ?? ((t: string) => ensureCodeAssistProject(t, fetchFn, args.timeoutMs));
 	const project = await getProject(token);
 
 	const body = buildGenerateContentBody(args, project);
-	const payload = await codeAssistPost("generateContent", token, body, fetchFn);
+	const payload = await codeAssistPost("generateContent", token, body, fetchFn, args.timeoutMs);
 	return extractCodeAssistText(payload);
 }

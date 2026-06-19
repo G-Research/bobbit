@@ -61,6 +61,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
+import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -4851,12 +4852,14 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				// Skip models that can't run in an agent session (e.g. google-gemini-cli
+				// Code Assist) so a role override doesn't pin an unrunnable provider.
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4906,11 +4909,11 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4924,7 +4927,12 @@ export class SessionManager {
 		// matching the contract used for review/QA sessions: if a user explicitly
 		// pinned a model on a role and it cannot be bound, surface the failure.
 		const roleModel = this.resolveRoleModel(session);
-		if (roleModel) {
+		if (roleModel && !isSessionSelectableModelString(roleModel)) {
+			// A role pinned a model that can't run in an agent session (e.g.
+			// google-gemini-cli Code Assist). Binding it would hard-fail the session,
+			// so skip it and fall through to the default/aigw selection instead.
+			console.warn(`[session-manager] Role model "${roleModel}" is not session-selectable for ${session.id} (role=${session.role}); skipping role override.`);
+		} else if (roleModel) {
 			try {
 				await applyModelString(session.rpcClient, roleModel, {
 					sessionManager: this,
@@ -4953,7 +4961,12 @@ export class SessionManager {
 
 		// Check explicit preference first (works for both aigw and public providers)
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref) {
+		if (sessionModelPref && !isSessionSelectableModelString(sessionModelPref)) {
+			// A stale/restored preference points at a not-session-runnable model
+			// (e.g. google-gemini-cli Code Assist). Skip it and fall through to aigw
+			// auto-selection rather than attempting an unrunnable bind.
+			console.warn(`[session-manager] default.sessionModel "${sessionModelPref}" is not session-selectable for ${session.id}; falling back.`);
+		} else if (sessionModelPref) {
 			const slash = sessionModelPref.indexOf("/");
 			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);

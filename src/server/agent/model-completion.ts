@@ -162,6 +162,9 @@ export async function completeModelText(
 			userPrompt: args.userPrompt,
 			maxTokens: args.maxTokens ?? 500,
 			...(args.thinkingLevel ? { thinkingLevel: args.thinkingLevel } : {}),
+			// Honor the caller's deadline so Code Assist completions can't hang past
+			// it; mirrors the timeoutMs handed to pi-ai for normal providers below.
+			timeoutMs: args.timeoutMs ?? 30_000,
 		});
 	}
 
