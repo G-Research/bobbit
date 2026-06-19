@@ -2294,7 +2294,7 @@ function renderTabBar(): TemplateResult {
 		// host them (so the existing-goal Sub-goals settings control is always
 		// reachable for a goal that was created with sub-goals off — the dead-end
 		// fix). `canHostChildren` = there's nesting headroom below this goal.
-		const canHostChildren = nestingDepthOf(currentGoal.id, state.goals) < effectiveMaxNestingDepthOf(currentGoal as any);
+		const canHostChildren = nestingDepthOf(currentGoal.id, state.goals) < effectiveMaxNestingDepthOf(currentGoal as any, state.goals as any);
 		if (shouldShowChildrenTab(currentGoal as any, liveChildCount > 0 || archivedChildCount > 0 || canHostChildren)) {
 			tabs.push({
 				id: "children",

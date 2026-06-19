@@ -403,3 +403,64 @@ test.describe("PATCH /policy — child maxNestingDepth cannot widen past inherit
 		}
 	});
 });
+
+/**
+ * REGRESSION (#2) — retroactively tightening an ANCESTOR must constrain an
+ * already-created descendant. Root + child are first created under the wide
+ * system cap (3); the child is stamped own=3. The root is THEN tightened to 2
+ * via /policy. A grandchild under the existing child (depth 3) must now be
+ * refused, even though the child's stored `maxNestingDepth` is the stale 3 —
+ * the spawn gate recomputes the effective cap against the ancestor chain.
+ */
+test.describe("PATCH /policy — lowering an ancestor cap blocks an already-created descendant", () => {
+	test.afterEach(async () => {
+		await setSubgoalsEnabled(true);
+	});
+
+	test("root + child at cap 3; lower root to 2 → grandchild under existing child is blocked", async () => {
+		await setSubgoalsEnabled(true);
+		const rootTitle = `retro-root ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const rootId = await createParent(rootTitle, true);
+		let childId: string | undefined;
+		try {
+			// Child created while the tree cap is still the wide system default (3);
+			// it inherits + stores own=3.
+			const childResp = await apiFetch("/api/goals", {
+				method: "POST",
+				body: await childBody(rootId),
+			});
+			expect(childResp.status).toBe(201);
+			const childCreated = await childResp.json();
+			childId = childCreated.id as string;
+			const child = await (await apiFetch(`/api/goals/${childId}`)).json();
+			expect(child.maxNestingDepth).toBe(3);
+
+			// Retroactively tighten the ROOT to a 2-level tree.
+			const rootHeaders = seedTeamLeadHeader(gw, rootId);
+			const rootPatch = await rawApiFetch(`/api/goals/${rootId}/policy`, {
+				method: "PATCH",
+				headers: { "X-Bobbit-Session-Secret": rootHeaders["X-Bobbit-Session-Secret"] },
+				body: JSON.stringify({ maxNestingDepth: 2 }),
+			});
+			expect(rootPatch.status).toBe(200);
+
+			// The child's stored own is still the stale 3 …
+			const childStale = await (await apiFetch(`/api/goals/${childId}`)).json();
+			expect(childStale.maxNestingDepth).toBe(3);
+
+			// … but a grandchild (depth 3) under the existing child is now refused,
+			// because the spawn gate recomputes the effective cap against the
+			// now-lowered ancestor.
+			const grandResp = await apiFetch("/api/goals", {
+				method: "POST",
+				body: await childBody(childId),
+			});
+			expect(grandResp.status).not.toBe(201);
+			const grandBody = await grandResp.json().catch(() => ({} as any));
+			expect(grandBody.code).toBe("NESTING_DEPTH_EXCEEDED");
+		} finally {
+			if (childId) await deleteGoal(childId);
+			await deleteGoal(rootId);
+		}
+	});
+});

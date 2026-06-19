@@ -31,7 +31,15 @@ async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	expect(resp.status).toBe(200);
 }
 
-async function createParent(title: string, subgoalsAllowed: boolean): Promise<string> {
+async function setMaxNestingDepth(value: number | null): Promise<void> {
+	const resp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ maxNestingDepth: value }),
+	});
+	expect(resp.status).toBe(200);
+}
+
+async function createParent(title: string, subgoalsAllowed: boolean, maxNestingDepth?: number): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
@@ -43,6 +51,7 @@ async function createParent(title: string, subgoalsAllowed: boolean): Promise<st
 			spec: PARENT_SPEC,
 			projectId: await defaultProjectId(),
 			subgoalsAllowed,
+			...(maxNestingDepth !== undefined ? { maxNestingDepth } : {}),
 		}),
 	});
 	expect(resp.status).toBe(201);
@@ -128,6 +137,57 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 		} finally {
 			await deleteGoal(blockedId).catch(() => {});
 			await deleteGoal(openId).catch(() => {});
+			await setSubgoalsEnabled(true);
+		}
+	});
+
+	// FIX #1 — the new goal's Max-nesting-depth control must derive its range
+	// from the SELECTED PARENT's effective/inherited cap, not the bare system
+	// cap. With system cap 4 but a parent capped at 3, selecting that parent
+	// must constrain the control to 3 (the value the server would clamp to),
+	// never offer 4. RED on the previous tree (maxDepth = systemCap ignored the
+	// parent's cap, letting the child be configured at 4).
+	test("the new goal's max-depth control is bounded by the selected parent's effective cap", async ({ page }) => {
+		await setSubgoalsEnabled(true);
+		// System ceiling 4, but the parent is tightened to a 3-level tree.
+		await setMaxNestingDepth(4);
+		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const cappedTitle = `picker-capped ${stamp}`;
+		const cappedId = await createParent(cappedTitle, true, 3);
+		try {
+			await openApp(page);
+			await createSessionViaUI(page);
+			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await expect(titleInput).toBeVisible({ timeout: 20_000 });
+			await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+			const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']");
+			await expect(subgoalsTab).toBeVisible({ timeout: 10_000 });
+			await subgoalsTab.click();
+
+			// Attach the new goal under the capped parent.
+			const picker = page.locator("[data-testid='goal-form-parent-picker']");
+			await expect(picker).toBeVisible({ timeout: 10_000 });
+			await picker.selectOption(cappedId);
+
+			// Turn on “Allow sub-goals on this goal” so the max-depth control renders.
+			const toggle = page.locator("[data-testid='goal-form-subgoals-toggle']");
+			await expect(toggle).toBeVisible({ timeout: 10_000 });
+			await expect(toggle).toBeEnabled();
+			await toggle.check();
+
+			// The control must be bounded by the parent's effective cap (3), NOT the
+			// system cap (4). The new goal sits at depth 2 under a depth-1 parent, so
+			// with cap 3 only one level fits below → the value is fixed at 3.
+			const maxDepth = page.locator("[data-testid='goal-form-max-depth']");
+			await expect(maxDepth).toBeVisible({ timeout: 10_000 });
+			await expect(maxDepth).toHaveAttribute("max", "3");
+			await expect(maxDepth).toHaveValue("3");
+		} finally {
+			await deleteGoal(cappedId).catch(() => {});
+			await setMaxNestingDepth(null);
 			await setSubgoalsEnabled(true);
 		}
 	});

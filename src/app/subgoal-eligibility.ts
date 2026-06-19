@@ -44,17 +44,38 @@ export function nestingDepthOf(
 	return depth;
 }
 
+/** Clamp a candidate override into the [1, 10] band (mirrors server clampMaxDepth). */
+function clampOwn(n: number): number {
+	return Math.min(10, Math.max(1, Math.floor(n)));
+}
+
 /**
- * Effective absolute max nesting depth for a goal: the system ceiling, tightened
- * by the goal's own override when present. Mirrors `effectiveMaxNestingDepth`.
+ * Effective absolute max nesting depth for a goal: the system ceiling AND every
+ * ancestor's own override are ceilings (descendants can only tighten). Mirrors
+ * the server's `effectiveMaxNestingDepth`.
+ *
+ * When `goals` is supplied we walk the full `parentGoalId` chain and take the
+ * MIN of the system cap and every override along the way — so a retroactively
+ * tightened ancestor is reflected in the UI exactly as the server enforces it.
+ * Without `goals` (back-compat) only the goal's own override is considered.
  */
-export function effectiveMaxNestingDepthOf(goal: EligibilityGoal | undefined): number {
-	const sys = getSystemMaxNestingDepth();
-	const own = goal?.maxNestingDepth;
-	if (typeof own === "number" && Number.isFinite(own)) {
-		return Math.min(sys, Math.max(1, Math.floor(own)));
+export function effectiveMaxNestingDepthOf(
+	goal: EligibilityGoal | undefined,
+	goals?: ReadonlyArray<EligibilityGoal>,
+): number {
+	let cap = getSystemMaxNestingDepth();
+	let cur: EligibilityGoal | undefined = goal;
+	const seen = new Set<string>();
+	while (cur && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		const own = cur.maxNestingDepth;
+		if (typeof own === "number" && Number.isFinite(own)) {
+			cap = Math.min(cap, clampOwn(own));
+		}
+		if (!goals || !cur.parentGoalId || seen.size >= 64) break;
+		cur = goals.find(g => g.id === cur!.parentGoalId);
 	}
-	return sys;
+	return cap;
 }
 
 export type ParentEligibility =
@@ -82,7 +103,7 @@ export function parentHostEligibility(
 		};
 	}
 	const depth = nestingDepthOf(goal.id, goals);
-	const maxDepth = effectiveMaxNestingDepthOf(goal);
+	const maxDepth = effectiveMaxNestingDepthOf(goal, goals);
 	if (depth + 1 > maxDepth) {
 		return {
 			eligible: false,
