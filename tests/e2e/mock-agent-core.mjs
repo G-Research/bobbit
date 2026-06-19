@@ -441,20 +441,23 @@ export class MockAgentCore {
 			};
 		}
 
-		// Goal proposal carrying the per-goal worktree-setup fields — used by
-		// goal-worktree-setup-command.spec.ts to assert a propose_goal-seeded
-		// proposal mirrors worktreeSetupCommand / worktreeSetupTimeoutMs into the
-		// goal form and preserves them through acceptance. Must precede the generic
-		// goal_proposal matcher (it contains the "GOAL_PROPOSAL" substring).
-		if (text.includes("GOAL_PROPOSAL_WORKTREE_SETUP")) {
+		// Goal proposal carrying arbitrary per-goal metadata — used to assert a
+		// propose_goal-seeded proposal mirrors `metadata` into the goal form and
+		// preserves it through acceptance. Supersedes the removed per-goal
+		// worktreeSetupCommand / worktreeSetupTimeoutMs surface (PR #816). Must
+		// precede the generic goal_proposal matcher (it contains the
+		// "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_METADATA")) {
 			return {
 				tool: "propose_goal",
 				input: {
 					title: "E2E Test Goal",
 					workflow: "general",
-					spec: "A goal whose worktree-setup fields are seeded by the agent.",
-					worktreeSetupCommand: "./scripts/agent-seed.sh",
-					worktreeSetupTimeoutMs: 45000,
+					spec: "A goal whose metadata is seeded by the agent.",
+					metadata: {
+						"hindsight.memory.enabled": false,
+						"bobbit.disabledTools": ["browser_navigate"],
+					},
 				},
 				output: "Proposal submitted. Waiting for user response.",
 			};

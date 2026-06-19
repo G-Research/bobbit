@@ -151,6 +151,15 @@ export interface SessionSetupPlan {
 	title: string;
 	cwd: string;
 	goalId?: string;
+	/**
+	 * The team/goal this session belongs to as a NON-lead member (team_spawn
+	 * member, llm-review reviewer, team_delegate sub-agent). The effective goal
+	 * for per-goal metadata resolution is `goalId ?? teamGoalId`, so every
+	 * session in a goal's tree resolves the SAME inherited metadata. Stamped by
+	 * SessionManager (incl. the delegate-stamping fix); absent for leads (which
+	 * carry `goalId`) and for goal-less sessions.
+	 */
+	teamGoalId?: string;
 	assistantType?: string;
 	delegateOf?: string;
 	parentSessionId?: string;
@@ -237,6 +246,14 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+	/**
+	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
+	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
+	 * so tests can construct a context without it; absent ⇒ `{}` (no overrides),
+	 * keeping every edge byte-identical to today. The single source of truth for
+	 * goal metadata at every session edge — no per-site ancestry walks.
+	 */
+	resolveGoalMetadata?: (goalId: string | undefined) => Record<string, unknown>;
 	costTracker: CostTracker;
 	store: SessionStore;
 	searchIndex: SearchService;
@@ -333,6 +350,69 @@ export async function withRetry<T>(
 		}
 	}
 	throw lastError!;
+}
+
+// ── Goal-metadata helpers ───────────────────────────────────────────────────
+
+/** Effective goal id for a session: own goal (lead) else team/parent goal (member). */
+function effectiveGoalId(plan: SessionSetupPlan): string | undefined {
+	return plan.goalId ?? plan.teamGoalId;
+}
+
+/**
+ * Resolve the effective (ancestry-merged) per-goal metadata for this session.
+ * Returns `{}` when no resolver is wired or no goal — so all downstream edges
+ * are guarded no-ops and behaviour is byte-identical to today.
+ */
+function resolveEffectiveGoalMetadata(plan: SessionSetupPlan, ctx: PipelineContext): Record<string, unknown> {
+	if (!ctx.resolveGoalMetadata) return {};
+	try {
+		return ctx.resolveGoalMetadata(effectiveGoalId(plan)) ?? {};
+	} catch (err) {
+		console.warn(`[session-setup] resolveGoalMetadata failed for ${plan.id} (non-fatal):`, err);
+		return {};
+	}
+}
+
+/** Lower-cased set of tool names disabled by `bobbit.disabledTools`; undefined when none. */
+function disabledToolsFromMetadata(meta: Record<string, unknown>): ReadonlySet<string> | undefined {
+	const raw = meta["bobbit.disabledTools"];
+	if (!Array.isArray(raw)) return undefined;
+	const names = raw.filter((v): v is string => typeof v === "string" && v.length > 0).map(s => s.toLowerCase());
+	return names.length > 0 ? new Set(names) : undefined;
+}
+
+/** Prompt section order from `bobbit.promptSectionOrder`; undefined when none. */
+function promptSectionOrderFromMetadata(meta: Record<string, unknown>): string[] | undefined {
+	const raw = meta["bobbit.promptSectionOrder"];
+	if (!Array.isArray(raw)) return undefined;
+	const order = raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+	return order.length > 0 ? order : undefined;
+}
+
+/**
+ * Fire the `goalProvisioned` lifecycle hook for a freshly provisioned worktree
+ * in this goal's subtree. Dispatched at EVERY provisioning path (cold create,
+ * pool claim) so metadata-driven filesystem treatments land on every agent /
+ * sub-agent / sub-goal worktree, not just the goal worktree. Non-fatal.
+ */
+async function dispatchGoalProvisionedHook(plan: SessionSetupPlan, ctx: PipelineContext, worktreePath: string): Promise<void> {
+	if (!ctx.lifecycleHub) return;
+	const goalId = effectiveGoalId(plan);
+	if (!goalId) return;
+	const metadata = resolveEffectiveGoalMetadata(plan, ctx);
+	try {
+		await ctx.lifecycleHub.dispatchGoalProvisioned({
+			goalId,
+			projectId: plan.projectId,
+			worktreePath,
+			cwd: worktreePath,
+			branch: plan.branch,
+			metadata,
+		});
+	} catch (err) {
+		console.warn(`[session-setup] goalProvisioned dispatch failed for ${plan.id} (non-fatal):`, err);
+	}
 }
 
 // ── Pipeline steps ─────────────────────────────────────────────────────────
@@ -488,7 +568,9 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			projectId: plan.projectId,
 			scope: plan.projectId ? "project" : "global",
 			cwd: plan.cwd,
-			goalId: plan.goalId,
+			// Effective goal so metadata-disabled providers are filtered for the
+			// whole subtree (members/sub-agents resolve the inherited metadata).
+			goalId: effectiveGoalId(plan),
 			roleName: plan.roleName,
 			prompt: plan.instructions,
 		});
@@ -505,6 +587,10 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 
 function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
+
+	// Per-goal prompt section ordering (bobbit.promptSectionOrder). Undefined ⇒
+	// today's fixed order, byte-identical. Applies to every prompt variant.
+	const sectionOrder = promptSectionOrderFromMetadata(resolveEffectiveGoalMetadata(plan, ctx));
 
 	if (assistantDef) {
 		// Assistant sessions (goal/role/tool assistants)
@@ -552,6 +638,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			goalState: "active",
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	} else if (plan.mode === "delegate") {
@@ -575,6 +662,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			goalTitle: "Delegate Task",
 			goalState: "active",
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	} else {
@@ -631,6 +719,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			nestingContext,
+			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
@@ -667,12 +756,22 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// to group defaults (e.g. `PR Walkthrough: never`) and reject every reviewer
 	// tool call. `lookupRole` mirrors the cascade-first pattern used elsewhere.
 	const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
+
+	// Goal-metadata disabled tools (bobbit.disabledTools). Filter the resolved
+	// allowlist HERE — after assistant/delegate branches may have recomputed it
+	// in resolvePrompt — so the persisted/inspector `effectiveAllowedTools` and
+	// the generated activation/proxy/guard all agree. Undefined ⇒ no-op.
+	const disabledTools = disabledToolsFromMetadata(resolveEffectiveGoalMetadata(plan, ctx));
+	if (disabledTools && plan.effectiveAllowedTools) {
+		plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(t => !disabledTools.has(t.name.toLowerCase()));
+	}
+
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
+	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools);
 
 	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
@@ -685,6 +784,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		effectiveRole ?? undefined,
 		ctx.groupPolicyStore ?? undefined,
 		[],
+		disabledTools,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
@@ -695,7 +795,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// session's project declares those hooks. When no provider is interested the
 	// bridge is never written or passed to pi — preserving zero overhead and
 	// keeping spawn args byte-identical to the no-provider baseline.
-	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId)) {
+	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) {
 		const bridgePath = writeProviderBridgeExtension(plan.id);
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
@@ -855,6 +955,10 @@ export async function executeWorktreeAsync(
 	if (preBuiltWorktreePath) {
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
+		// Pool/prebuilt worktrees skip component setup, so dispatch the
+		// goalProvisioned hook HERE too — a metadata-driven filesystem treatment
+		// must land on pooled worktrees, not only cold-created ones.
+		await dispatchGoalProvisionedHook(plan, ctx, worktreeCwd);
 	} else {
 		// Cold-path worktree creation. Multi-repo (poly-repo) projects need
 		// `createWorktreeSet` so each component repo gets its own sibling
@@ -920,6 +1024,13 @@ export async function executeWorktreeAsync(
 			} catch (err) {
 				console.warn(`[session-setup] runComponentSetups failed for session ${session.id} (non-fatal):`, err);
 			}
+		}
+
+		// Cold-path worktree provisioned — dispatch the goalProvisioned hook so
+		// metadata-driven filesystem treatments land on this worktree (matches the
+		// pool/prebuilt path above). Skipped when no worktree was created.
+		if (!noWorktreeFallback) {
+			await dispatchGoalProvisionedHook(plan, ctx, worktreeCwd);
 		}
 	}
 

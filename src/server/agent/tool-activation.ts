@@ -831,8 +831,22 @@ export function writeToolGuardExtension(
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	grantedTools?: string[],
+	disabledTools?: ReadonlySet<string>,
 ): string | undefined {
-	const policies = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore);
+	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore);
+	const hasDisabled = !!disabledTools && disabledTools.size > 0;
+
+	// Defense in depth: treat any goal-metadata disabled tool as effective
+	// `never` in the guard so it is hard-blocked even if it somehow gets
+	// registered. Clone before mutating so the cached policy map isn't poisoned.
+	const policies: Record<string, ToolPolicyEntry> = hasDisabled ? { ...computed } : computed;
+	if (hasDisabled) {
+		for (const name of Object.keys(policies)) {
+			if (disabledTools!.has(name.toLowerCase())) {
+				policies[name] = { ...policies[name], policy: 'never' };
+			}
+		}
+	}
 
 	// Generate the guard if any tool needs interception — 'ask' (long-poll for
 	// user grant) or 'never' (hard-block). 'allow' tools don't need the guard.
@@ -841,12 +855,14 @@ export function writeToolGuardExtension(
 
 	// Fingerprint of all inputs that affect the generated code. Used to cache
 	// both the generated source (skip template gen) and the written file path
-	// (skip fs read-compare-write).
+	// (skip fs read-compare-write). The disabled-tools set is folded in only
+	// when non-empty so the empty case keeps today's key.
 	const genKey = hashKey({
 		kind: 'guardCode',
 		sessionId,
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
+		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 
 	// Fast path: same code was already written to disk — reuse path if it still exists.
@@ -895,12 +911,16 @@ export function writeMcpProxyExtensions(
 	role?: { toolPolicies?: Record<string, GrantPolicy> },
 	toolManager?: ToolManager,
 	groupPolicyStore?: GroupPolicyProvider,
+	disabledTools?: ReadonlySet<string>,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
+	const hasDisabled = !!disabledTools && disabledTools.size > 0;
 
 	// Content-based cache key: MCP tool schemas + filter + role/group policy.
 	// On cache hit, every file path is validated before returning; if any was
-	// deleted externally we fall through and regenerate.
+	// deleted externally we fall through and regenerate. The disabled-tools set
+	// is included ONLY when non-empty so the empty case keeps today's key (and
+	// thus byte-identical reuse).
 	const cacheKey = hashKey({
 		kind: 'mcpProxy_v2',
 		infos: infos.map(i => ({
@@ -914,6 +934,7 @@ export function writeMcpProxyExtensions(
 		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
+		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 	const cachedPaths = mcpProxyCache.get(cacheKey);
 	if (cachedPaths && cachedPaths.every(p => fs.existsSync(p))) {
@@ -960,6 +981,15 @@ export function writeMcpProxyExtensions(
 	for (const info of infos) {
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
+		// Goal-metadata disabled tool: drop the meta-tool (and its per-op surface)
+		// in BOTH the filtered and unrestricted branches — a disabled MCP meta-tool
+		// is never emitted even when no allowlist is in effect.
+		if (hasDisabled) {
+			const metaLower = makeMetaToolName(parsed.server, parsed.sub).toLowerCase();
+			if (disabledTools!.has(metaLower) || disabledTools!.has(info.name.toLowerCase())) {
+				continue;
+			}
+		}
 		// If filtering, check if the bobbit name is in the allowed set OR if
 		// the meta-tool for this (server, sub) is. The model-facing surface
 		// only includes `mcp_<server>__<sub>` — per-op names are hidden.
@@ -1010,6 +1040,8 @@ export function writeMcpProxyExtensions(
 	// failed before listing tools), so always land at `<server>.ts`.
 	for (const status of statuses) {
 		if (status.status !== "error") continue;
+		// Respect goal-metadata disable for the flat meta-tool of an error server.
+		if (hasDisabled && disabledTools!.has(makeMetaToolName(status.name).toLowerCase())) continue;
 		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state");
 		writeFile(status.name, undefined, code);
 		handled.add(`${status.name}\u0000`);
@@ -1048,7 +1080,7 @@ export function writeMcpProxyExtensions(
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
-export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[]): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>): ToolActivationResult {
 	// pi 0.70+ unified `--tools <list>` into an allowlist over BOTH builtins and
 	// extension-registered tools, which broke our old "--tools <only-builtins>
 	// + --extension shell" pattern (every extension tool got stripped). We now
@@ -1088,6 +1120,10 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp"; name: string }>) => {
 		for (const entry of entries) {
 			if (entry.kind === "mcp") continue;
+			// Goal-metadata disabled tool: drop in BOTH the allowlist branch and the
+			// unrestricted/all-tools branch (both flow through here), so a disabled
+			// tool is never registered even for a role-less / all-tools session.
+			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
 			const provider = providers.get(entry.name);
 			if (!provider) {
 				console.warn(`[tool-activation] Tool "${entry.name}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
