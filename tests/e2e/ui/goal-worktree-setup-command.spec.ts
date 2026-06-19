@@ -40,6 +40,32 @@ async function openGoalAssistantProposal(page: import("@playwright/test").Page) 
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 }
 
+/**
+ * Open the goal assistant and drive a propose_goal that ALREADY carries the
+ * per-goal worktree-setup fields (mock trigger GOAL_PROPOSAL_WORKTREE_SETUP),
+ * so we can assert they are mirrored into the goal form and survive acceptance.
+ */
+async function openGoalAssistantSetupSeededProposal(page: import("@playwright/test").Page) {
+	test.setTimeout(90_000);
+	await openApp(page);
+	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
+	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
+	const sessionCreated = page.waitForResponse(
+		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
+		{ timeout: 60_000 },
+	);
+	await newGoalBtn.click();
+	await sessionCreated;
+	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	const textarea = page.locator("textarea").first();
+	await expect(textarea).toBeVisible({ timeout: 10_000 });
+	await sendMessage(page, "Please GOAL_PROPOSAL_WORKTREE_SETUP now");
+	const titleInput = page.locator("input[placeholder='Goal title']").first();
+	await expect(titleInput).toBeVisible({ timeout: 10_000 });
+	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+}
+
 async function findGoalByTitle(title: string): Promise<any | undefined> {
 	const resp = await apiFetch("/api/goals");
 	const data = await resp.json();
@@ -81,6 +107,35 @@ test.describe("Goal creation dialog — per-goal worktree setup controls", () =>
 		try {
 			expect(created.worktreeSetupCommand).toBeUndefined();
 			expect(created.worktreeSetupTimeoutMs).toBeUndefined();
+		} finally {
+			if (created) await deleteGoal(created.id);
+		}
+	});
+
+	test("a propose_goal-seeded proposal mirrors setup fields into the form and preserves them through acceptance", async ({ page }) => {
+		await openGoalAssistantSetupSeededProposal(page);
+
+		// Finding 1: the agent-seeded worktreeSetupCommand / worktreeSetupTimeoutMs
+		// must be mirrored into the goal form (not just title/spec/cwd/workflow).
+		const cmd = page.locator(CMD_TESTID).first();
+		const timeout = page.locator(TIMEOUT_TESTID).first();
+		await expect(cmd).toHaveValue("./scripts/agent-seed.sh", { timeout: 10_000 });
+		await expect(timeout).toHaveValue("45000", { timeout: 10_000 });
+
+		// Accept the proposal as-is — the seeded fields must reach goal creation.
+		await clickCreate(page);
+
+		const created = await findGoalByTitle("E2E Test Goal");
+		expect(created).toBeTruthy();
+		try {
+			expect(created.worktreeSetupCommand).toBe("./scripts/agent-seed.sh");
+			expect(created.worktreeSetupTimeoutMs).toBe(45000);
+
+			await page.reload();
+			const reloaded = await findGoalByTitle("E2E Test Goal");
+			expect(reloaded).toBeTruthy();
+			expect(reloaded.worktreeSetupCommand).toBe("./scripts/agent-seed.sh");
+			expect(reloaded.worktreeSetupTimeoutMs).toBe(45000);
 		} finally {
 			if (created) await deleteGoal(created.id);
 		}

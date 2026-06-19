@@ -46,12 +46,18 @@ describe("resolveSetupTimeoutMs", () => {
 		assert.equal(resolveSetupTimeoutMs({ projectTimeoutMs: "30000" }), 30_000);
 	});
 
-	it("floors fractional values", () => {
-		assert.equal(resolveSetupTimeoutMs({ goalTimeoutMs: 1500.9 }), 1500);
+	it("rejects fractional values rather than flooring them", () => {
+		// Design requires finite positive INTEGERS. A fractional goal override
+		// must fall through to the next tier, not be truncated.
+		assert.equal(resolveSetupTimeoutMs({ goalTimeoutMs: 1500.9 }), DEFAULT_WORKTREE_SETUP_TIMEOUT_MS);
+		assert.equal(resolveSetupTimeoutMs({ goalTimeoutMs: 1500.9, projectTimeoutMs: 7000 }), 7000);
+		// "0.5" must fall back, not resolve to 0.
+		assert.equal(resolveSetupTimeoutMs({ goalTimeoutMs: "0.5", projectTimeoutMs: 7000 }), 7000);
+		assert.equal(resolveSetupTimeoutMs({ projectTimeoutMs: "2.5" }), DEFAULT_WORKTREE_SETUP_TIMEOUT_MS);
 	});
 
-	it("falls through invalid / zero / negative / non-finite goal values to the project default", () => {
-		for (const bad of [0, -1, -1000, Number.NaN, Number.POSITIVE_INFINITY, "nope", "", "  ", null, undefined, {}, []]) {
+	it("falls through invalid / zero / negative / fractional / non-finite goal values to the project default", () => {
+		for (const bad of [0, -1, -1000, 0.5, 1.9, "0.5", "1.5", Number.NaN, Number.POSITIVE_INFINITY, "nope", "", "  ", null, undefined, {}, []]) {
 			assert.equal(
 				resolveSetupTimeoutMs({ goalTimeoutMs: bad as unknown, projectTimeoutMs: 7000 }),
 				7000,
@@ -61,7 +67,7 @@ describe("resolveSetupTimeoutMs", () => {
 	});
 
 	it("falls through invalid project values to the 120s default", () => {
-		for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, "abc", "", null, undefined]) {
+		for (const bad of [0, -5, 0.5, 2.5, "0.5", "2.5", Number.NaN, Number.POSITIVE_INFINITY, "abc", "", null, undefined]) {
 			assert.equal(
 				resolveSetupTimeoutMs({ projectTimeoutMs: bad as unknown }),
 				DEFAULT_WORKTREE_SETUP_TIMEOUT_MS,

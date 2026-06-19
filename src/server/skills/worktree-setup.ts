@@ -49,8 +49,11 @@ function coercePositiveIntMs(v: unknown): number | undefined {
 	if (typeof v === "number") n = v;
 	else if (typeof v === "string" && v.trim() !== "") n = Number(v);
 	else return undefined;
-	if (!Number.isFinite(n) || n <= 0) return undefined;
-	return Math.floor(n);
+	// Design says finite positive INTEGERS. Reject fractional values rather than
+	// flooring them — "0.5" must fall through to the next tier, not resolve to 0
+	// (and "1.5" must not be silently truncated to 1).
+	if (!Number.isInteger(n) || n <= 0) return undefined;
+	return n;
 }
 
 export interface RunComponentSetupsOpts {

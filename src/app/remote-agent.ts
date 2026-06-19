@@ -485,7 +485,7 @@ export class RemoteAgent {
 	 *  `streaming === true` means input is still arriving; consumers must keep
 	 *  their `*Edited` gating intact and must not commit destructive actions on
 	 *  streaming-mode fires. */
-	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string }, streaming: boolean) => void;
+	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }, streaming: boolean) => void;
 	/** Callback fired when a role proposal is detected in an assistant message. */
 	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }, streaming: boolean) => void;
 	/** Callback fired when a tool proposal is detected in an assistant message. */
