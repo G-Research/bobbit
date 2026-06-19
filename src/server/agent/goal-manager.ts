@@ -14,8 +14,16 @@ import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
+import { runGoalSetup, resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 
 const pExecFile = promisify(execFileCb);
+
+/** Final worktree paths produced by provisioning, before the per-goal hook + ready flip. */
+type ProvisionedWorktree = {
+	worktreePath: string;
+	cwd: string;
+	repoWorktrees?: Record<string, string>;
+};
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -208,6 +216,17 @@ export class GoalManager {
 	}
 
 	/**
+	 * Wire a project-level default worktree-setup timeout resolver. Returns the
+	 * project's `worktree_setup_timeout_ms` (number or numeric string, or
+	 * undefined). Used as the middle tier in `resolveSetupTimeoutMs` between a
+	 * per-goal override and the 120s default.
+	 */
+	private worktreeSetupTimeoutResolver?: (projectId: string) => number | string | undefined;
+	setWorktreeSetupTimeoutResolver(resolver: (projectId: string) => number | string | undefined): void {
+		this.worktreeSetupTimeoutResolver = resolver;
+	}
+
+	/**
 	 * On startup, scan for goals stuck in setupStatus === "preparing"
 	 * and mark them as "error" (setup was interrupted by server restart).
 	 */
@@ -231,8 +250,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, worktreeSetupCommand, worktreeSetupTimeoutMs } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -309,6 +328,17 @@ export class GoalManager {
 		if (subgoalsAllowed !== undefined) goal.subgoalsAllowed = subgoalsAllowed;
 		if (maxNestingDepth !== undefined && Number.isFinite(maxNestingDepth)) {
 			goal.maxNestingDepth = maxNestingDepth;
+		}
+
+		// Per-goal worktree setup hook. Only persist a trimmed non-empty command
+		// and a finite positive integer timeout override; absent fields preserve
+		// today's behaviour (no hook, default timeout resolution).
+		if (typeof worktreeSetupCommand === "string") {
+			const trimmed = worktreeSetupCommand.trim();
+			if (trimmed) goal.worktreeSetupCommand = trimmed;
+		}
+		if (worktreeSetupTimeoutMs !== undefined && Number.isFinite(worktreeSetupTimeoutMs) && worktreeSetupTimeoutMs > 0) {
+			goal.worktreeSetupTimeoutMs = Math.floor(worktreeSetupTimeoutMs);
 		}
 
 		// Root-only orchestration policy. divergencePolicy and
@@ -434,6 +464,86 @@ export class GoalManager {
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 
+		// Provision the worktree (pool claim, or create + per-component setup).
+		// _provisionGoalWorktree owns the retry loop; the per-goal hook runs ONCE
+		// afterward, outside that loop, so a hook failure never re-creates the
+		// worktree or re-runs the command.
+		const provisioned = await this._provisionGoalWorktree(goal, preliminaryOffset);
+		if (provisioned === "no-worktree") return;
+
+		// Per-goal setup runs once, after the final worktreePath/cwd are known.
+		// Fatal: on failure it sets setupStatus:"error" and rethrows so the goal
+		// never auto-starts mis-configured.
+		await this.runPerGoalSetupOrFail(goal, provisioned.worktreePath, provisioned.cwd);
+
+		this.store.update(goal.id, {
+			worktreePath: provisioned.worktreePath,
+			cwd: provisioned.cwd,
+			repoWorktrees: provisioned.repoWorktrees,
+			setupStatus: "ready",
+			setupError: undefined,
+		});
+		console.log(`[goal-manager] Worktree ready for goal "${goal.title}": ${provisioned.worktreePath} (branch: ${goal.branch})`);
+	}
+
+	/**
+	 * Resolve the worktree-setup timeout: per-goal override → project
+	 * `worktree_setup_timeout_ms` → the 120s default. Single source of truth
+	 * for both per-component and per-goal setup timeouts.
+	 */
+	private resolveGoalSetupTimeout(goal: PersistedGoal): number {
+		const projectTimeoutMs = goal.projectId && this.worktreeSetupTimeoutResolver
+			? this.worktreeSetupTimeoutResolver(goal.projectId)
+			: undefined;
+		return resolveSetupTimeoutMs({ goalTimeoutMs: goal.worktreeSetupTimeoutMs, projectTimeoutMs });
+	}
+
+	/**
+	 * Run the optional per-goal worktree setup command exactly once. A failure
+	 * is fatal: record setupStatus:"error" with a descriptive setupError and
+	 * rethrow (blocking auto-start). Runs OUTSIDE the provisioning retry loop so
+	 * the command is never re-invoked.
+	 */
+	private async runPerGoalSetupOrFail(goal: PersistedGoal, worktreePath: string, cwd: string): Promise<void> {
+		try {
+			const timeoutMs = this.resolveGoalSetupTimeout(goal);
+			const { execShellCommand } = await import("./shell-util.js");
+			await runGoalSetup({
+				goalId: goal.id,
+				branch: goal.branch!,
+				worktreePath,
+				cwd,
+				primaryWorktreeRoot: goal.repoPath!,
+				command: goal.worktreeSetupCommand,
+				timeoutMs,
+				// Same resolved timeout under the inner shell timeout — a longer
+				// override must NOT be killed early by a hardcoded inner limit.
+				exec: async (cmd, execCwd, env) => {
+					await execShellCommand(cmd, { cwd: execCwd, env, timeout: timeoutMs });
+				},
+			});
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.store.update(goal.id, {
+				setupStatus: "error",
+				setupError: `Per-goal worktree setup failed: ${msg}`,
+			});
+			throw err;
+		}
+	}
+
+	/**
+	 * Provision the goal's worktree: claim from the pool, or create it (single-
+	 * or multi-repo) running per-component setup, retrying only worktree
+	 * creation. Returns the final paths WITHOUT flipping setupStatus to "ready"
+	 * (the caller does that after the per-goal hook). Returns "no-worktree" when
+	 * no worktree-able repo remained (already restored to the no-worktree
+	 * state). Throws after recording setupStatus:"error" when all attempts fail.
+	 */
+	private async _provisionGoalWorktree(goal: PersistedGoal, preliminaryOffset: string): Promise<ProvisionedWorktree | "no-worktree"> {
+		// Resolved timeout shared by per-component setup here and the per-goal hook.
+		const setupTimeoutMs = this.resolveGoalSetupTimeout(goal);
+
 		// Child goals branch off the parent's HEAD so siblings see prior
 		// siblings' commits. The pool pre-builds off master, so we skip the
 		// pool for children (a pool claim would lack the parent's commits).
@@ -448,20 +558,13 @@ export class GoalManager {
 					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 						? path.join(claim.worktreePath, preliminaryOffset)
 						: claim.worktreePath;
-					const updates: Parameters<typeof this.store.update>[1] = {
-						worktreePath: claim.worktreePath,
-						cwd: offsetCwd,
-						setupStatus: "ready",
-						setupError: undefined,
-					};
-					if (claim.worktrees && claim.worktrees.length > 0) {
-						updates.repoWorktrees = Object.fromEntries(
-							claim.worktrees.map(w => [w.repo, w.worktreePath]),
-						);
-					}
-					this.store.update(goal.id, updates);
+					const repoWorktrees = claim.worktrees && claim.worktrees.length > 0
+						? Object.fromEntries(claim.worktrees.map(w => [w.repo, w.worktreePath]))
+						: undefined;
 					console.log(`[goal-manager] Worktree claimed from pool for goal "${goal.title}": ${claim.worktreePath} (branch: ${goal.branch}${claim.degraded ? ", degraded" : ""})`);
-					return;
+					// Pool fill already ran per-component setup; the per-goal hook is
+					// goal-specific and still runs (caller) before setupStatus flips.
+					return { worktreePath: claim.worktreePath, cwd: offsetCwd, repoWorktrees };
 				}
 			} catch (err) {
 				console.warn(`[goal-manager] Pool claim failed for goal "${goal.title}" — falling back to createWorktree:`, err);
@@ -496,7 +599,7 @@ export class GoalManager {
 					if (set.worktrees.length === 0) {
 						this._restoreNoWorktree(goal, preliminaryOffset);
 						console.warn(`[goal-manager] No worktree-able repo for goal "${goal.title}" — proceeding without a worktree`);
-						return;
+						return "no-worktree";
 					}
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
@@ -507,8 +610,9 @@ export class GoalManager {
 							components,
 							branchContainer: set.container,
 							primaryWorktreeRoot: goal.repoPath!,
+							timeoutMs: setupTimeoutMs,
 							exec: async (cmd, cwd, env) => {
-								await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
+								await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
 							},
 						});
 					} catch (err) {
@@ -520,15 +624,8 @@ export class GoalManager {
 					const repoWorktrees = Object.fromEntries(
 						set.worktrees.map(w => [w.repo, w.worktreePath]),
 					);
-					this.store.update(goal.id, {
-						worktreePath: set.container,
-						cwd: offsetCwd,
-						repoWorktrees,
-						setupStatus: "ready",
-						setupError: undefined,
-					});
-					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
-					return;
+					console.log(`[goal-manager] Multi-repo worktree set provisioned for goal "${goal.title}" at ${set.container}`);
+					return { worktreePath: set.container, cwd: offsetCwd, repoWorktrees };
 				}
 				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch, configuredBaseRef });
 				// Per-component setup — non-fatal on failure. Mirrors the multi-repo
@@ -541,8 +638,9 @@ export class GoalManager {
 							components,
 							branchContainer: result.worktreePath,
 							primaryWorktreeRoot: goal.repoPath!,
+							timeoutMs: setupTimeoutMs,
 							exec: async (cmd, cwd, env) => {
-								await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
+								await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
 							},
 						});
 					} catch (err) {
@@ -553,15 +651,8 @@ export class GoalManager {
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 					? path.join(result.worktreePath, preliminaryOffset)
 					: result.worktreePath;
-				// Update goal with actual worktree path and mark as ready
-				this.store.update(goal.id, {
-					worktreePath: result.worktreePath,
-					cwd: offsetCwd,
-					setupStatus: "ready",
-					setupError: undefined,
-				});
-				console.log(`[goal-manager] Worktree ready for goal "${goal.title}": ${result.worktreePath} (branch: ${goal.branch})`);
-				return;
+				console.log(`[goal-manager] Worktree provisioned for goal "${goal.title}": ${result.worktreePath} (branch: ${goal.branch})`);
+				return { worktreePath: result.worktreePath, cwd: offsetCwd };
 			} catch (err) {
 				lastError = err;
 				console.error(`[goal-manager] Worktree setup attempt ${attempt + 1} failed for goal "${goal.title}":`, err);
