@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, waitForSessionStatus, readE2EToken } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -230,5 +230,57 @@ test.describe("Pre-compaction history affordance", () => {
 		await expect(
 			page.locator("[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)"),
 		).toHaveCount(3, { timeout: 15_000 });
+	});
+
+	// Live-session repro (no reload): drives a real mock-agent auto compaction
+	// via the AUTO_COMPACT trigger and asserts the pre-compaction affordance is
+	// present — with exactly ONE compaction summary card — in the same session,
+	// before any reload. Pre-fix this fails: the in-flight `compact_active` card
+	// carries no compactionId (so it never mounts the affordance), and the
+	// server splices a SECOND persisted sidecar card into the post-compaction
+	// snapshot — leaving two stacked cards (issue-analysis findings #1, #3).
+	test("@live-compaction-affordance live compaction surfaces the affordance with exactly one card (no reload)", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		// Drive a live auto/threshold compaction with 3 pre-compaction messages.
+		await sendMessage(page, "AUTO_COMPACT:3");
+
+		// The compaction card lifecycle begins; wait for at least one card.
+		const cards = page.locator("[data-testid='compaction-summary-card']");
+		await expect(cards.first()).toBeVisible({ timeout: 20_000 });
+
+		// The affordance must surface in the live session. Proactively kick the
+		// count fetch (headless IntersectionObserver can be flaky) and wait for
+		// the resolved collapsed state with the correct count. Reaching this
+		// state proves the post-compaction snapshot + sidecar have landed.
+		const widget = page.locator("[data-testid='pre-compaction-history']");
+		await expect(widget).toHaveCount(1, { timeout: 20_000 });
+		await page.evaluate(() => {
+			const el = document.querySelector("bobbit-pre-compaction-history") as any;
+			el?.refreshCount?.();
+		});
+		await expect(widget).toHaveAttribute("data-state", "collapsed", { timeout: 20_000 });
+		await expect(page.locator("[data-testid='pre-compaction-toggle']"))
+			.toContainText(/Show 3 messages before compaction/, { timeout: 15_000 });
+
+		// Single-card invariant: exactly one compaction summary card. Pre-fix
+		// there are two (live `compact_active` + spliced sidecar card). This
+		// assertion is the primary repro signal.
+		await expect(cards).toHaveCount(1, { timeout: 8_000 });
+
+		// Expanding reveals the 3 orphaned pre-compaction rows.
+		await page.locator("[data-testid='pre-compaction-toggle']").click();
+		await expect(widget).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
+		const rows = page.locator(
+			"[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)",
+		);
+		await expect(rows).toHaveCount(3, { timeout: 15_000 });
+		await expect(rows.first()).toContainText("pre-msg-0");
+		await expect(rows.last()).toContainText("pre-msg-2");
 	});
 });
