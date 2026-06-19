@@ -251,6 +251,17 @@ export function sandboxTokenPolicyAllowsGoogleAuth(entries: Array<{ key?: string
 	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
 }
 
+export function resolveSandboxAgentAuthPolicy(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): { includeCodexAuth: boolean; includeGoogleAuth: boolean } {
+	const list = entries || [];
+	return {
+		// Preserve legacy Codex behavior: projects without an explicit sandbox_tokens
+		// policy still receive the host Codex auth file when available.
+		includeCodexAuth: list.length === 0 || sandboxTokenPolicyAllowsCodexAuth(list),
+		// Google OAuth carries a Google refresh token; require explicit opt-in.
+		includeGoogleAuth: sandboxTokenPolicyAllowsGoogleAuth(list),
+	};
+}
+
 export function ensureSandboxAgentAuthFile(options?: PreferencesStore | SandboxAgentAuthOptions | null): string {
 	const normalized = normalizeSandboxAgentAuthOptions(options);
 	const authPath = sandboxAgentAuthPath(normalized.scope);

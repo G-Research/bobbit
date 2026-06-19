@@ -159,6 +159,21 @@ describe("codeAssistComplete", () => {
 		);
 	});
 
+	it("redacts sensitive provider error bodies before surfacing them", async () => {
+		const secret = "ya29." + "a".repeat(40) + "." + "b".repeat(40);
+		const fetchFn: FetchLike = async () => ({ ok: false, status: 403, text: async () => `denied token=${secret}` });
+		await assert.rejects(
+			() => codeAssistComplete({ model: "gemini-2.5-pro", userPrompt: "hi" }, { getToken: async () => "tok", getProject: async () => "p", fetchFn }),
+			(err: unknown) => {
+				const message = err instanceof Error ? err.message : String(err);
+				assert.match(message, /HTTP 403/);
+				assert.match(message, /<redacted-jwt>|<redacted-token>/);
+				assert.equal(message.includes(secret), false);
+				return true;
+			},
+		);
+	});
+
 	it("aborts and rejects when a generateContent fetch never resolves and timeoutMs elapses", async () => {
 		let sawSignal = false;
 		// Never-resolving fetch: only the timeout race can settle this promise.
