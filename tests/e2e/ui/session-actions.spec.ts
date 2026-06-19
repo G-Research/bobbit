@@ -79,10 +79,13 @@ async function openSidebarActions(page: Page, sessionId: string): Promise<void> 
 }
 
 async function openHeaderActions(page: Page): Promise<void> {
+	const menu = page.locator("sidebar-actions-popover [role='menu']").first();
+	if (await menu.isVisible().catch(() => false)) return;
+
 	const trigger = headerTrigger(page);
 	await expect(trigger).toBeVisible({ timeout: 5_000 });
 	await trigger.click();
-	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+	await expect(menu).toBeVisible({ timeout: 5_000 });
 }
 
 async function closePopover(page: Page): Promise<void> {
