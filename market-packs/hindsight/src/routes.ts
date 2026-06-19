@@ -186,7 +186,11 @@ export const routes = {
 		}
 	},
 
-	// { content, tags?, sync? } → ensureBank + retain with merged auto-tags.
+	// { content, tags?, sync?, scope? } → ensureBank + retain with merged auto-tags.
+	// `scope` maps to a PROJECT TAG on the single shared bank (NOT a different bank):
+	//   - scope "project" + a REAL project id in the route ctx ⇒ add `project:<id>`.
+	//   - scope "all" (or no project id) ⇒ no project tag fabricated from scope.
+	// User-supplied `tags` stay additive and never change the bank (cfg.bank).
 	retain: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
@@ -196,7 +200,11 @@ export const routes = {
 		const body = isObj(req?.body) ? req!.body : {};
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
-		const tags = manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined);
+		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
+		const projectId = strOf(ctx.projectId);
+		const projectTag: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
+		const userTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
+		const tags = manualTags({ ...(userTags ?? {}), ...(projectTag ?? {}) });
 		const sync = body.sync === true;
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));

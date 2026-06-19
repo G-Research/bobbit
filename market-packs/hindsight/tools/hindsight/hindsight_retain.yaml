@@ -1,0 +1,58 @@
+name: hindsight_retain
+description: "Persist a memory to the Hindsight bank for future recall."
+summary: "Save a durable memory for future recall"
+params: [content, scope?, tags?, sync?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Hindsight
+docs: |-
+  Required: `content`. Optional: `scope` (`project` | `all`), `tags`
+  (key/value, additive), `sync` (wait for durability).
+
+  Stores a durable memory on the shared Hindsight bank with an auto
+  `kind:manual` tag. `scope: project` adds a `project:<id>` tag when a real
+  project id is present; `scope: all` adds no project tag. User `tags` are
+  additive and never change the bank. Returns success/error from the route.
+detail_docs: >-
+  ## Purpose
+
+
+  `hindsight_retain` durably records a memory (a decision, preference, or fact
+  worth remembering) on the single shared Hindsight bank for later recall.
+
+
+  The tool NEVER talks to Hindsight directly. It mints a tool-bound surface
+  token and dispatches the pack's `retain` route, which owns bank resolution
+  (default `bobbit`), auto-tagging (`kind:manual`), and the scope→tag mapping.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `content` | string | **Yes** | The memory text to store. |
+
+  | `scope` | `project` \| `all` | No | `project` tags the memory to this
+  project; `all` leaves it unscoped on the shared bank. Defaults to the pack's
+  configured `recallScope`. |
+
+  | `tags` | object | No | Extra key/value tags, merged additively. |
+
+  | `sync` | boolean | No | Wait for the write to be durable. Default `false`. |
+
+
+  ## Notes
+
+
+  - Scope maps to a project TAG on the SAME shared bank — never a different
+  bank.
+
+  - The project tag is only added when the session has a real project id.
+
+  - User `tags` are additive and must not change the bank.
+
+  - Unconfigured Hindsight returns a not-configured error (dormant).

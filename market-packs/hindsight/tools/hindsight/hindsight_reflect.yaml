@@ -1,0 +1,50 @@
+name: hindsight_reflect
+description: "Reflect over the Hindsight bank to synthesize an answer to a prompt."
+summary: "Synthesize an answer from long-term memory"
+params: [prompt, scope?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Hindsight
+docs: |-
+  Required: `prompt`. Optional: `scope` (`project` | `all`).
+
+  Asks Hindsight to synthesize an answer over the shared bank rather than
+  returning a raw recall list. `scope` is accepted for API symmetry but
+  reflection runs over the resolved shared bank and never creates extra banks.
+  Returns the synthesized text. Dormant (unconfigured) Hindsight returns empty
+  text, not an error.
+detail_docs: >-
+  ## Purpose
+
+
+  `hindsight_reflect` produces a synthesized answer drawing on accumulated
+  long-term memory, as opposed to `hindsight_recall` which returns matching
+  memory records.
+
+
+  The tool NEVER talks to Hindsight directly. It mints a tool-bound surface
+  token and dispatches the pack's `reflect` route, which runs over the resolved
+  shared bank (default `bobbit`).
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `prompt` | string | **Yes** | The question to reflect on. |
+
+  | `scope` | `project` \| `all` | No | Accepted for symmetry with recall/retain.
+  Reflection runs over the shared bank; scope creates no extra banks. |
+
+
+  ## Notes
+
+
+  - Reflection stays in the single resolved bank — no extra banks, no direct
+  Hindsight calls.
+
+  - Unconfigured Hindsight returns empty text (dormant), not an error.

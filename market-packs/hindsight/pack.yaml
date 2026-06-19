@@ -7,7 +7,7 @@ description: >-
 version: 1.0.0
 contents:
   roles: []
-  tools: [] # explicit hindsight_* tools land in G2.3
+  tools: [hindsight] # explicit hindsight_recall/retain/reflect agent tools (P5)
   skills: []
   entrypoints: [hindsight-palette, hindsight-route] # native config/status panel + deep link (P4)
   providers: [memory] # → providers/memory.yaml
