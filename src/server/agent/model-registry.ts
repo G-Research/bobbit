@@ -36,6 +36,18 @@ export interface ApiModel {
 	headers?: Record<string, string>;
 	compat?: unknown;
 	authenticated: boolean;
+	/**
+	 * When `false`, the model is authenticated but MUST NOT be bound to an agent
+	 * session: the pi-coding-agent runtime has no provider/api capable of running
+	 * it (e.g. `google-gemini-cli` Code Assist models, whose Code Assist adapter is
+	 * only wired into server-side completion, not the session runtime). The
+	 * ModelSelector renders these visibly unavailable-for-sessions and refuses to
+	 * select them. Undefined/true means selectable. Single source of truth for
+	 * session-selectability lives where each model is emitted.
+	 */
+	sessionSelectable?: boolean;
+	/** Human-readable reason shown in the selector when `sessionSelectable === false`. */
+	sessionUnavailableReason?: string;
 }
 
 export interface CustomProviderConfig {

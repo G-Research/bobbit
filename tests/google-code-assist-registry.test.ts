@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../src/server/agent/model-registry.js";
+import { GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON } from "../src/server/agent/google-code-assist-models.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;
@@ -71,6 +72,37 @@ describe("Google account model emission + auth isolation", () => {
 			assert.equal(m.api, "google-code-assist");
 			assert.equal(m.authenticated, true);
 			assert.match(m.id, /^gemini-/);
+		}
+	});
+
+	it("marks google-gemini-cli account models as not selectable for sessions, with a reason", async () => {
+		// Gap mitigation: the Code Assist adapter is server-side only; pi-coding-agent
+		// has no google-gemini-cli provider, so these must NOT be bindable to a session.
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		const models = await getAvailableModels(prefs);
+		const account = models.filter((m) => m.provider === "google-gemini-cli");
+		assert.ok(account.length > 0, "expected at least one google-gemini-cli model");
+		for (const m of account) {
+			assert.equal(m.sessionSelectable, false, `${m.id} must be gated from sessions`);
+			assert.equal(m.sessionUnavailableReason, GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON);
+		}
+	});
+
+	it("keeps API-key google (Gemini Developer API) models selectable for sessions", async () => {
+		// The always-working API-key fallback must never be gated. Authenticate it via env.
+		process.env.GOOGLE_API_KEY = "test-key";
+		try {
+			invalidateModelCache();
+			const models = await getAvailableModels(prefs);
+			const googleModels = models.filter((m) => m.provider === "google");
+			assert.ok(googleModels.length > 0, "expected built-in google models");
+			for (const m of googleModels) {
+				assert.equal(m.authenticated, true, `${m.id} should be authenticated by GOOGLE_API_KEY`);
+				assert.notEqual(m.sessionSelectable, false, `${m.id} must stay selectable for sessions`);
+			}
+		} finally {
+			delete process.env.GOOGLE_API_KEY;
+			invalidateModelCache();
 		}
 	});
 

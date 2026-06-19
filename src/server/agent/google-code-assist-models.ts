@@ -9,6 +9,15 @@
  * `hasGoogleCodeAssistCredential`), so the selector is not cluttered with
  * non-functional account models for users who never log in with Google.
  *
+ * IMPORTANT: these models are NOT yet runnable inside an agent/session. The Code
+ * Assist adapter is only wired into server-side `completeModelText` — the
+ * pi-coding-agent runtime has no `google-gemini-cli` provider / `google-code-assist`
+ * api, so `setModel("google-gemini-cli", …)` fails and a session silently falls
+ * back to a different model. Until agent-side Code Assist exists we emit them with
+ * `sessionSelectable: false` so the ModelSelector shows them as authenticated but
+ * visibly unavailable-for-sessions and refuses to bind them. The API-key `google`
+ * (Gemini Developer API) provider is unaffected and stays fully selectable.
+ *
  * Design: docs/design/google-oauth-model-auth.md §4.5.
  */
 
@@ -30,6 +39,15 @@ function isCodeAssistEligible(id: string): boolean {
 	const s = id.toLowerCase();
 	return s.startsWith("gemini-") && !s.includes("customtools");
 }
+
+/**
+ * Why a logged-in Google account model can't be picked for a session yet. Shown
+ * as the ModelSelector tooltip/copy. Exported so tests can pin it in lockstep.
+ */
+export const GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON =
+	"Signed in, but Google account (Code Assist) models can't run in agent sessions yet — " +
+	"the agent runtime has no Code Assist provider. For Gemini in sessions, add a Google AI " +
+	"Studio API key (provider \u201Cgoogle\u201D) under Settings \u2192 Models.";
 
 export function getGoogleCodeAssistModels(): ApiModel[] {
 	if (!hasGoogleCodeAssistCredential()) return [];
@@ -58,6 +76,10 @@ export function getGoogleCodeAssistModels(): ApiModel[] {
 			cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			// `authenticated` is set by the registry via detectProviderAuth.
 			authenticated: false,
+			// Account-backed Code Assist models are authenticated but not yet runnable
+			// in an agent session (no agent-side Code Assist provider). Gate selection.
+			sessionSelectable: false,
+			sessionUnavailableReason: GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON,
 		});
 	}
 	return models;
