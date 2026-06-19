@@ -592,12 +592,23 @@ export class PackRuntimeSupervisor {
 	) => RuntimeResolveContext | Promise<RuntimeResolveContext>;
 
 	/**
-	 * Dedupes concurrent `ensureRuntime`/`start` for one runtime key: while a
-	 * start is in flight, later callers await the same Promise (one `compose up`).
-	 * On settle, the entry is cleared so a later call can retry. Mirrors
-	 * `sandbox-manager.ts`'s `_ensureInFlight` discipline.
+	 * Dedupes concurrent `ensureRuntime`/`start` for one runtime IDENTITY (pack +
+	 * runtime + project, mode-AGNOSTIC): while a start is in flight, later callers
+	 * for the SAME mode await the same Promise (one `compose up`). On settle, the
+	 * entry is cleared so a later call can retry. Mirrors `sandbox-manager.ts`'s
+	 * `_ensureInFlight` discipline.
+	 *
+	 * The key is mode-agnostic ON PURPOSE: a runtime identity owns ONE rendered
+	 * `.env` file + ONE compose project ({@link _envFilePath}/{@link composeProjectFor}
+	 * are mode-independent), so two concurrent starts requesting DIFFERENT modes
+	 * would race — both `renderRuntimeEnvFile` to the same path and `compose up`
+	 * against the same project, the second clobbering the first's env. We record
+	 * the in-flight mode alongside the promise and REJECT a concurrent start that
+	 * requests a conflicting mode (rather than silently collapsing it onto the
+	 * first mode's promise) so the race is impossible and the caller learns its
+	 * mode was not honoured.
 	 */
-	private readonly _startInFlight = new Map<string, Promise<PackRuntimeStatus>>();
+	private readonly _startInFlight = new Map<string, { promise: Promise<PackRuntimeStatus>; mode?: string }>();
 
 	/**
 	 * Runtime keys (pack+runtime+project, mode-agnostic) this supervisor instance
@@ -1018,14 +1029,14 @@ export class PackRuntimeSupervisor {
 	}
 
 	/**
-	 * Dedupe key for an in-flight start. The selected `mode` is part of the key so
-	 * two concurrent EXPLICIT `start` calls requesting DIFFERENT modes never
-	 * collapse onto the first request's promise (which would silently ignore the
-	 * second mode). Mode-agnostic `ensureRuntime` callers pass the same (usually
-	 * `undefined`) mode, so they still share one key → one `compose up`.
+	 * Dedupe key for an in-flight start — the runtime IDENTITY only (pack + runtime
+	 * + project), mode-AGNOSTIC. A runtime identity owns ONE rendered env file + ONE
+	 * compose project, so all starts for it serialize through one in-flight slot
+	 * regardless of mode (see {@link _startInFlight}). The requested mode is tracked
+	 * separately and a conflicting concurrent mode is rejected, not keyed apart.
 	 */
-	private _runtimeKey(packId: string, runtimeId: string, projectId?: string, mode?: string): string {
-		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}\u0000${mode ?? ""}`;
+	private _runtimeKey(packId: string, runtimeId: string, projectId?: string): string {
+		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}`;
 	}
 
 	private _startDeduped(
@@ -1033,13 +1044,25 @@ export class PackRuntimeSupervisor {
 		runtimeId: string,
 		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> },
 	): Promise<PackRuntimeStatus> {
-		const key = this._runtimeKey(packId, runtimeId, opts.projectId, opts.mode);
+		const key = this._runtimeKey(packId, runtimeId, opts.projectId);
 		const inFlight = this._startInFlight.get(key);
-		if (inFlight) return inFlight;
+		if (inFlight) {
+			// A start for this runtime identity is already in flight. Same mode ⇒ share
+			// its promise (one `compose up`). DIFFERENT mode ⇒ reject: honouring it would
+			// race the first start on the SAME env file + compose project. The caller
+			// should retry after the in-flight start settles.
+			if ((inFlight.mode ?? "") === (opts.mode ?? "")) return inFlight.promise;
+			return Promise.reject(
+				new PackRuntimeBadRequestError(
+					`runtime ${packId}:${runtimeId} already starting in mode ${JSON.stringify(inFlight.mode ?? "")}; ` +
+						`cannot concurrently start it in mode ${JSON.stringify(opts.mode ?? "")}`,
+				),
+			);
+		}
 		const p = this._doStart(packId, runtimeId, opts);
-		this._startInFlight.set(key, p);
+		this._startInFlight.set(key, { promise: p, mode: opts.mode });
 		const cleanup = () => {
-			if (this._startInFlight.get(key) === p) this._startInFlight.delete(key);
+			if (this._startInFlight.get(key)?.promise === p) this._startInFlight.delete(key);
 		};
 		p.then(cleanup, cleanup);
 		return p;

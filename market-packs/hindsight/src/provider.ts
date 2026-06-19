@@ -17,6 +17,7 @@ import {
 	isActive,
 	loadQueue,
 	makeClient,
+	recallTagFilter,
 	recordError,
 	resolveConfig,
 	saveQueue,
@@ -104,13 +105,15 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	const q = (query ?? "").trim();
 	if (!q) return [];
 
-	const tags: Tags | undefined = cfg.recallScope === "project" && ctx.projectId ? { project: String(ctx.projectId) } : undefined;
+	// Project scope maps to a project-tagged + untagged/global filter on the shared
+	// bank (recallTagFilter / PROJECT_RECALL_TAGS_MATCH); `all` scope sends no filter.
+	const filter = recallTagFilter(cfg.recallScope, ctx.projectId !== undefined ? String(ctx.projectId) : undefined);
 	const store = getStore(ctx);
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		const res = await client.recall(cfg.bank, q, {
 			maxTokens: cfg.recallBudget,
-			...(tags ? { tags, tagsMatch: "any" as const } : {}),
+			...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 		});
 		const memories = res?.memories ?? [];
 		if (memories.length === 0) return [];

@@ -7384,20 +7384,20 @@ async function handleApiRoute(
 					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
 					if (rtCtx && rtCtx.runtimes.length > 0) {
 						const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
-						// Only managed deployment modes have a Docker stack to tear down. The
-						// external (non-Docker) mode (plan.start === false) never created one and
-						// has no managed compose env — calling down would force the supervisor to
-						// resolve a managed invocation (requiring HINDSIGHT_API_LLM_API_KEY) that an
-						// external setup never configured, failing the uninstall before Docker is
-						// even consulted. Skip it so external no-Docker uninstall always proceeds.
-						const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
-						if (plan.start) {
-							for (const rc of rtCtx.runtimes) {
-								try {
-									await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
-								} catch (err) {
-									teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
-								}
+						// Tear down EVERY runtime contribution unconditionally — do NOT gate on the
+						// CURRENT saved deployment mode (resolveRuntimeStartPlan). A pack started in a
+						// managed mode and later reconfigured to `external` would otherwise skip
+						// teardown and leak its still-running containers. `down` is read-only/minimal
+						// and idempotent (it never resolves start-only inputs like
+						// HINDSIGHT_API_LLM_API_KEY, reuses an already-rendered .env only when one
+						// exists, and maps a missing Docker install to a docker-unavailable STATUS
+						// rather than throwing), so calling it for an external-only never-started
+						// runtime is a harmless no-op (`compose down` on an absent project exits 0).
+						for (const rc of rtCtx.runtimes) {
+							try {
+								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
+							} catch (err) {
+								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
 							}
 						}
 					}
@@ -7635,17 +7635,18 @@ async function handleApiRoute(
 									}
 								}
 							} else if (!wasDisabled && nowDisabled) {
-								// enabled → disabled: stop the managed container (idempotent — no-op
-								// if not running). The external (non-Docker) deployment mode
-								// (plan.start === false) never started a container and has no managed
-								// compose env, so skip the side effect entirely: calling stop would
-								// force the supervisor to resolve a managed invocation (requiring
-								// HINDSIGHT_API_LLM_API_KEY) that an external setup never configured,
-								// which would 502 and block persisting the disable.
-								if (plan.start) {
-									const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
-									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-								}
+								// enabled → disabled: stop the managed container UNCONDITIONALLY — do NOT
+								// gate on the CURRENT saved deployment mode (plan.start). A runtime started
+								// in a managed mode and later reconfigured to `external` would otherwise
+								// skip the stop and leak its still-running container. `stop` is
+								// read-only/minimal and idempotent: it never resolves start-only inputs
+								// (e.g. HINDSIGHT_API_LLM_API_KEY), reuses an already-rendered .env only
+								// when one exists, and maps a missing Docker install to a
+								// docker-unavailable STATUS rather than throwing — so calling it for an
+								// external-only never-started runtime is a harmless no-op (`compose stop`
+								// on an absent project exits 0) and never 502s the disable.
+								const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
+								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
 							}
 						} catch (err) {
 							// A thrown start/stop (e.g. compose up/stop exploded) is a hard

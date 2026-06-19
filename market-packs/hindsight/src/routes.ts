@@ -34,6 +34,7 @@ import {
 	loadEffectiveConfig,
 	loadQueue,
 	makeClient,
+	recallTagFilter,
 	redactConfig,
 	validateConfigOverrides,
 	CONFIG_KEY,
@@ -172,16 +173,17 @@ export const routes = {
 		const query = strOf(body.query) ?? strOf(req?.query?.query);
 		if (!query) return { configured: true, memories: [] };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		// Scope a `project` recall to the REAL project id from the host route ctx. When
-		// the ctx carries no project (global/server-scope session), apply NO project
-		// filter rather than a fabricated placeholder tag.
-		const projectId = strOf(ctx.projectId);
-		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
+		// Scope a `project` recall to the REAL project id from the host route ctx via
+		// the shared recallTagFilter: project-tagged PLUS untagged/global memories on
+		// the shared bank (PROJECT_RECALL_TAGS_MATCH). When the ctx carries no project
+		// (global/server-scope session) or scope is `all`, NO tag filter is applied
+		// (recall the whole bank) rather than a fabricated placeholder tag.
+		const filter = recallTagFilter(scope, ctx.projectId);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.recall(cfg.bank, query, {
 				maxTokens: cfg.recallBudget,
-				...(tags ? { tags, tagsMatch: "any" as const } : {}),
+				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 			});
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
@@ -232,11 +234,12 @@ export const routes = {
 		const prompt = strOf(body.prompt);
 		if (!prompt) return { configured: true, text: "" };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectId = strOf(ctx.projectId);
-		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
+		// Same shared tag-scoped filter as recall: project scope ⇒ project-tagged plus
+		// untagged/global; `all`/no-project ⇒ reflect over the whole bank.
+		const filter = recallTagFilter(scope, ctx.projectId);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.reflect(cfg.bank, prompt, tags ? { tags, tagsMatch: "any" as const } : undefined);
+			const res = await client.reflect(cfg.bank, prompt, filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : undefined);
 			return { configured: true, text: res?.text ?? "" };
 		} catch (e) {
 			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };

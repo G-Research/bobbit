@@ -168,6 +168,43 @@ describe("hindsight-client — round-trips against the stub", () => {
 			["a"],
 		);
 	});
+
+	it("project recall (tags_match=any) returns project-tagged PLUS untagged/global, excluding other projects", async () => {
+		// The shared tag-scoped bank: a project recall must surface this project's
+		// memories AND untagged/global ones, while never leaking another project's.
+		const client = createClient({ baseUrl: stub.url });
+		stub.seedMemories("shared", [
+			{ text: "mine", id: "p1", tags: ["project:proj-1"] },
+			{ text: "global", id: "g" }, // untagged / global
+			{ text: "theirs", id: "p2", tags: ["project:proj-2"] },
+		]);
+		const out = await client.recall("shared", "q", {
+			tags: { project: "proj-1" },
+			tagsMatch: "any",
+		});
+		assert.deepEqual(
+			out.memories.map((m) => m.id).sort(),
+			["g", "p1"],
+			"project-tagged + untagged returned; other-project excluded",
+		);
+	});
+
+	it("tags_match=any_strict excludes untagged/global (the variant we deliberately avoid)", async () => {
+		const client = createClient({ baseUrl: stub.url });
+		stub.seedMemories("strict", [
+			{ text: "mine", id: "p1", tags: ["project:proj-1"] },
+			{ text: "global", id: "g" },
+		]);
+		const out = await client.recall("strict", "q", {
+			tags: { project: "proj-1" },
+			tagsMatch: "any_strict",
+		});
+		assert.deepEqual(
+			out.memories.map((m) => m.id),
+			["p1"],
+			"any_strict drops untagged/global — why the pack uses plain 'any'",
+		);
+	});
 });
 
 describe("hindsight-client — auth header", () => {

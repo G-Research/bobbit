@@ -222,64 +222,56 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 		}
 	});
 
-	test("external mode: DISABLING never calls stop and persists the disable without a managed runtime (review finding #1)", async ({ gateway }) => {
-		const mod = await import("../../dist/server/server.js");
+	test("disable stops the runtime even when the CURRENT mode is external (managed-start leak guard, review finding)", async ({ gateway }) => {
+		// Scenario: the runtime was previously started in a MANAGED mode, then the saved
+		// deployment config was changed to `external`. Teardown must NOT be gated on the
+		// CURRENT saved mode — gating skips the stop and leaks the still-running container.
+		// stop() is now read-only/minimal/idempotent (it never resolves start-only inputs
+		// like HINDSIGHT_API_LLM_API_KEY, reuses an already-rendered .env only when one
+		// exists, and maps a missing Docker install to a docker-unavailable STATUS rather
+		// than throwing), so calling it for an external/never-started runtime is harmless.
 		const packName = `rt-external-disable-${Date.now()}`;
 		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "external");
-		// A supervisor whose stop() THROWS stands in for the real one: external mode has
-		// no managed runtime and no persisted start config, so stop() would have to build
-		// a default managed invocation (requiring HINDSIGHT_API_LLM_API_KEY) and blow up.
-		// The activation hook must SKIP the side effect entirely for external mode.
-		mod.registerPackRuntimeSupervisorFactory(() => ({
-			...fakeSupervisor,
-			async stop(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
-				calls.push({ op: "stop", packId, runtimeId, opts });
-				throw new Error("managed env resolution required HINDSIGHT_API_LLM_API_KEY");
-			},
-		}));
 		try {
-			// Runtime starts enabled (empty disabled set).
 			expect(await getDisabledRuntimes(packName)).not.toContain("hindsight");
 			const disable = await setDisabledRuntimes(packName, ["hindsight"]);
-			// External disable must NOT touch Docker — no stop call, no 502.
 			expect(disable.status).toBe(200);
-			expect(calls.some((c) => c.op === "stop")).toBe(false);
-			// The disable persisted despite the absence of any managed runtime/secret.
+			// stop IS called now (unconditional teardown) and harmlessly returns stopped.
+			const stopCalls = calls.filter((c) => c.op === "stop");
+			expect(stopCalls.length).toBe(1);
+			expect(stopCalls[0].runtimeId).toBe("hindsight");
+			// The disable still persists.
 			expect(await getDisabledRuntimes(packName)).toContain("hindsight");
 		} finally {
-			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}
 	});
 
-	test("external mode: UNINSTALL never calls down and does not require a managed runtime (review finding #2)", async ({ gateway }) => {
-		const mod = await import("../../dist/server/server.js");
+	test("uninstall tears the runtime down (without -v) even when the CURRENT mode is external (managed-start leak guard, review finding)", async ({ gateway }) => {
+		// Mirror of the disable guard for uninstall: a runtime started managed and later
+		// reconfigured to external must still be `compose down`-ed on uninstall, or the
+		// container leaks. down() is read-only/minimal/idempotent (never resolves managed
+		// start-only inputs, maps no-Docker to a status), so it is harmless for an
+		// external/never-started runtime. Default uninstall preserves data (no `-v`).
 		const packName = `rt-external-uninstall-${Date.now()}`;
 		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "external");
-		// A down() that THROWS simulates the real supervisor failing to resolve a managed
-		// compose env for an external install. Uninstall must SKIP down for external mode,
-		// so a Docker-less external install always uninstalls cleanly.
-		mod.registerPackRuntimeSupervisorFactory(() => ({
-			...fakeSupervisor,
-			async down(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
-				calls.push({ op: "down", packId, runtimeId, opts });
-				throw new Error("managed env resolution required HINDSIGHT_API_LLM_API_KEY");
-			},
-		}));
 		try {
 			const res = await apiFetch("/api/marketplace/installed", {
 				method: "DELETE",
 				body: JSON.stringify({ scope: "server", packName }),
 			});
-			// External uninstall proceeds without ever calling down.
 			expect(res.status).toBe(204);
-			expect(calls.some((c) => c.op === "down")).toBe(false);
+			// down IS called now (unconditional teardown) WITHOUT volumes (bind data survives).
+			const downCalls = calls.filter((c) => c.op === "down");
+			expect(downCalls.length).toBe(1);
+			expect(downCalls[0].runtimeId).toBe("hindsight");
+			expect(downCalls[0].opts?.volumes).toBe(false);
+			expect(downCalls[0].opts?.removeState).toBe(false);
 			// The pack is gone from the install ledger.
 			const listed = await apiFetch("/api/marketplace/installed");
 			const installed = (await listed.json()).installed as Array<{ packName: string; scope: string }>;
 			expect(installed.some((p) => p.packName === packName && p.scope === "server")).toBe(false);
 		} finally {
-			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}
 	});

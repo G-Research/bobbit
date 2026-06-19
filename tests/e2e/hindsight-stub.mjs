@@ -53,11 +53,16 @@ function send(res, status, body) {
 	res.end(payload);
 }
 
-/** Does a seeded memory's tags satisfy the request's tags + tags_match? */
+/** Does a seeded memory's tags satisfy the request's tags + tags_match?
+ *  Mirrors the real Hindsight recall semantics (openapi.json): `any`/`all` are the
+ *  NON-strict variants that INCLUDE untagged/global memories; `any_strict`/
+ *  `all_strict` EXCLUDE them. Within tagged memories, `all`/`all_strict` require
+ *  every requested tag; `any`/`any_strict` require at least one. */
 function tagsMatch(memTags, reqTags, mode) {
 	if (!reqTags || reqTags.length === 0) return true;
 	const have = new Set(memTags ?? []);
-	// "all"/"all_strict" ⇒ every requested tag present; otherwise (any/any_strict) ⇒ at least one.
+	// Untagged/global memory: included by the non-strict modes, excluded by `_strict`.
+	if (have.size === 0) return mode !== "any_strict" && mode !== "all_strict";
 	if (mode === "all" || mode === "all_strict") {
 		return reqTags.every((t) => have.has(t));
 	}

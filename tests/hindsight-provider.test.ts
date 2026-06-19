@@ -12,7 +12,35 @@ import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../market-packs/hindsight/src/provider.ts";
 import { routes } from "../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, QUEUE_KEY } from "../market-packs/hindsight/src/shared.ts";
+import {
+	CONFIG_KEY,
+	PROJECT_RECALL_TAGS_MATCH,
+	QUEUE_KEY,
+	recallTagFilter,
+} from "../market-packs/hindsight/src/shared.ts";
+
+// ── recallTagFilter — the shared project/all tag-scope source of truth ─────────
+test("recallTagFilter: project scope + real id ⇒ project tag with the include-untagged match", () => {
+	// PROJECT_RECALL_TAGS_MATCH is "any" = "OR, includes untagged": project-tagged +
+	// untagged/global, excluding other projects (verified end-to-end in the client test).
+	assert.equal(PROJECT_RECALL_TAGS_MATCH, "any");
+	assert.deepEqual(recallTagFilter("project", "proj-7"), {
+		tags: { project: "proj-7" },
+		tagsMatch: "any",
+	});
+	// Whitespace-padded ids are trimmed; blank/whitespace ids ⇒ no filter.
+	assert.deepEqual(recallTagFilter("project", "  proj-7  "), {
+		tags: { project: "proj-7" },
+		tagsMatch: "any",
+	});
+});
+
+test("recallTagFilter: 'all' scope, or project scope with no id ⇒ no tag filter", () => {
+	assert.equal(recallTagFilter("all", "proj-7"), undefined);
+	assert.equal(recallTagFilter("project", undefined), undefined);
+	assert.equal(recallTagFilter("project", ""), undefined);
+	assert.equal(recallTagFilter("project", "   "), undefined);
+});
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {

@@ -1439,30 +1439,50 @@ describe("PackRuntimeSupervisor start mode dedupe", () => {
 		});
 	}
 
-	it("concurrent explicit starts with DIFFERENT modes each issue their own up", async () => {
+	it("concurrent explicit starts with CONFLICTING modes reject the second (one up, no env-file race)", async () => {
+		// A runtime identity owns ONE rendered env file + ONE compose project, so two
+		// concurrent starts in DIFFERENT modes would race — both render the same env
+		// file and `compose up` the same project. The supervisor serializes at runtime
+		// identity: the first mode wins, the conflicting concurrent mode is rejected.
 		const docker = makeDocker({
 			up: () => ok(),
 			ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}'),
 		});
 		const sup = makeMmSupervisor(docker.executor);
-		const [a, b] = await Promise.all([
+		const [a, b] = await Promise.allSettled([
 			sup.start(MM_PACK, "svc", { mode: "default" }),
 			sup.start(MM_PACK, "svc", { mode: "alt" }),
 		]);
-		assert.equal(a.status, "running");
-		assert.equal(b.status, "running");
-		assert.equal(a.mode, "default");
-		assert.equal(b.mode, "alt");
-		// Each mode must actually run — neither collapses onto the other's promise.
+		// Exactly one start succeeds (the first to claim the in-flight slot); the other
+		// is rejected with a deterministic bad-request rather than racing the env file.
+		const fulfilled = [a, b].filter((r) => r.status === "fulfilled");
+		const rejected = [a, b].filter((r) => r.status === "rejected");
+		assert.equal(fulfilled.length, 1);
+		assert.equal(rejected.length, 1);
+		assert.equal((fulfilled[0] as PromiseFulfilledResult<{ status: string }>).value.status, "running");
+		assert.ok(
+			(rejected[0] as PromiseRejectedResult).reason instanceof PackRuntimeBadRequestError,
+			"conflicting concurrent mode rejects with PackRuntimeBadRequestError",
+		);
+		// Only ONE `compose up` runs — the rejected start never reached `_doStart`.
+		assert.equal(docker.countSub("up"), 1);
+	});
+
+	it("sequential starts in different modes each run (no false in-flight conflict)", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"db","State":"running","Health":"healthy"}'),
+		});
+		const sup = makeMmSupervisor(docker.executor);
+		// Await each — the in-flight slot clears on settle, so a later different-mode
+		// start is NOT a conflict. (A repeat-same-mode start of an already-running
+		// runtime fast-paths, so we use distinct modes to force a second `up`.)
+		const first = await sup.start(MM_PACK, "svc", { mode: "default" });
+		await sup.stop(MM_PACK, "svc");
+		const second = await sup.start(MM_PACK, "svc", { mode: "alt" });
+		assert.equal(first.mode, "default");
+		assert.equal(second.mode, "alt");
 		assert.equal(docker.countSub("up"), 2);
-		const profiles = docker.calls
-			.filter((c) => c.args.includes("up"))
-			.flatMap((c) => {
-				const i = c.args.indexOf("--profile");
-				return i >= 0 ? [c.args[i + 1]] : [];
-			});
-		assert.ok(profiles.includes("managed"));
-		assert.ok(profiles.includes("external"));
 	});
 
 	it("concurrent explicit starts with the SAME mode still dedupe to one up", async () => {

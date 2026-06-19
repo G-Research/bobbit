@@ -17,6 +17,31 @@
 export type Tags = Record<string, string>;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
 
+/** Tag-match mode for a PROJECT-scoped recall/reflect on the single shared bank.
+ *  Per the Hindsight recall API, `"any"` means "OR, INCLUDES untagged": it returns
+ *  memories tagged with this project AND untagged/global memories, while STILL
+ *  excluding other projects' tagged memories. That is exactly the shared
+ *  tag-scoped bank design — project scope = this project + global, never another
+ *  project. (`"any_strict"` is "OR, EXCLUDES untagged"; we deliberately do NOT use
+ *  it, which would drop global memories from a project recall.) */
+export const PROJECT_RECALL_TAGS_MATCH: TagsMatch = "any";
+
+/** Resolve the recall/reflect tag filter for a deployment scope on the single
+ *  shared bank (the single source of truth shared by the provider auto-recall and
+ *  the `recall`/`reflect` routes):
+ *   - `project` scope WITH a real project id ⇒ `{ project:<id> }` matched with
+ *     {@link PROJECT_RECALL_TAGS_MATCH} (project-tagged PLUS untagged/global).
+ *   - any other case (scope `all`, or no project id in ctx) ⇒ NO tag filter, so
+ *     recall/reflect runs over the whole bank rather than a fabricated tag. */
+export function recallTagFilter(
+	scope: "project" | "all",
+	projectId: string | undefined,
+): { tags: Tags; tagsMatch: TagsMatch } | undefined {
+	const pid = typeof projectId === "string" && projectId.trim().length > 0 ? projectId.trim() : undefined;
+	if (scope === "project" && pid) return { tags: { project: pid }, tagsMatch: PROJECT_RECALL_TAGS_MATCH };
+	return undefined;
+}
+
 export interface RecallMemory {
 	text: string;
 	score?: number;
