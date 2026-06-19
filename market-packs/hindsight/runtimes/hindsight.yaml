@@ -13,6 +13,28 @@ description: >-
   managed Postgres (bind-mounted data dir) or an external/operator-supplied
   Postgres via a connection URL.
 
+# P3 — Activation policy. `on-enable` means Docker is started ONLY from an explicit
+# user enable/start action in the marketplace/runtime UI or API. Boot, built-in pack
+# discovery, install, update, and provider/session setup must NEVER `compose up`
+# implicitly. (Default for descriptors that omit this is manual / no auto-start.)
+startPolicy: on-enable
+
+# P3 — Capability disclosure shown on the enable-card before the runtime starts.
+# Images/services, exposed host ports, and the volume path are derived by the
+# supervisor from this manifest + the selected mode; the fields below carry the
+# human-facing data path default and the memory/trust disclosure copy.
+capabilities:
+  # Effective managed-Postgres bind-mount data path (mode `managed-postgres`).
+  # Mirrors the provider `dataDir` config default; "~/.hindsight" when unset.
+  volumePath: ${dataDir:-~/.hindsight}
+  # First-party Hindsight memory disclosure (design §8).
+  memoryDisclosure: >-
+    Enabling managed Hindsight lets Bobbit store and recall agent conversation
+    summaries and project/goal/session tags in the configured bank. Disabling
+    stops the containers but keeps your data; purge removes the Docker volumes
+    and runtime state.
+  trust: first-party
+
 # Compose template lives one directory up, inside the same pack root. The parser
 # resolves this relative to THIS manifest file and rejects any path that escapes
 # the pack root.

@@ -505,6 +505,76 @@
 	max-width: 14rem;
 }
 
+/* ── Managed-runtime consent enable-card (P3 design §8) ──────────────────────
+ * Each managed runtime gets an explicit on-enable toggle plus a disclosure card
+ * stating what starting it does: images/services, loopback ports, the data
+ * volume path and the memory/trust copy. External (no-Docker) mode swaps the
+ * disclosure for setup guidance. Theme tokens only. */
+.market-runtime-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.market-runtime-row {
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+}
+
+.market-runtime-card {
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--info) 7%, var(--card));
+	padding: 0.5rem 0.625rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+}
+
+.market-runtime-card--external {
+	background: var(--muted);
+}
+
+.market-runtime-card-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3125rem;
+	font-size: 0.6875rem;
+	font-weight: 650;
+	color: var(--foreground);
+}
+
+.market-runtime-card-text {
+	margin: 0;
+	font-size: 0.6875rem;
+	line-height: 1.4;
+	color: var(--muted-foreground);
+}
+
+.market-runtime-card-grid {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 0.1875rem 0.625rem;
+	margin: 0;
+	font-size: 0.6875rem;
+}
+
+.market-runtime-card-grid dt {
+	font-weight: 600;
+	color: var(--muted-foreground);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-size: 0.5625rem;
+	align-self: center;
+}
+
+.market-runtime-card-grid dd {
+	margin: 0;
+	color: var(--foreground);
+	word-break: break-word;
+}
+
 /* ── Status lozenges (theme tokens only) ─────────────────────────────────────
  * Non-button status indicators: "Source not found" (R2) and the Browse
  * "Installed" marker (R4). A muted base + a warning variant. */
