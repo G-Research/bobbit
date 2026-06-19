@@ -7044,6 +7044,14 @@ async function handleApiRoute(
 			if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0) {
 				config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
 			}
+			// The managed Hindsight runtime declares its LLM API key as a USER-configured
+			// secret env ref (HINDSIGHT_API_LLM_API_KEY). Remap the provider's `llmApiKey`
+			// deployment-config field onto that env key so the supervisor's config overlay
+			// satisfies it without requiring the operator to also seed the global secret
+			// store. (A value set directly under HINDSIGHT_API_LLM_API_KEY still wins.)
+			if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0) {
+				config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
+			}
 			switch (mode) {
 				case "managed": return { start: true, mode: "managed-postgres", config };
 				case "managed-external-postgres": return { start: true, mode: "external-postgres", config };

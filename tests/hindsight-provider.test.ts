@@ -283,6 +283,31 @@ test("routes: dormant store ⇒ clean configured:false signals, no client constr
 	}
 });
 
+test("routes config: llmApiKey is a persisted, redacted secret field (finding #1)", async () => {
+	// The managed Hindsight runtime requires HINDSIGHT_API_LLM_API_KEY. The provider
+	// exposes it as the `llmApiKey` config secret so the host can forward it onto the
+	// runtime env. It must round-trip through the config route: PUT persists it, GET
+	// redacts it to an `llmApiKeySet` boolean (never echoing the raw value).
+	const store = makeStore();
+	const put = (await routes.config(
+		{ host: { store } } as never,
+		{ method: "PUT", body: { mode: "managed", llmApiKey: "sk-secret-123" } } as never,
+	)) as { ok: boolean; config: Record<string, unknown> };
+	assert.equal(put.ok, true);
+	// The raw value is NEVER echoed back; only the presence boolean.
+	assert.equal(put.config.llmApiKeySet, true);
+	assert.equal(put.config.llmApiKey, undefined);
+
+	// Persisted under the provider-config store key so the host's managed-enable path
+	// (deploymentConfig overlay) can read + forward it.
+	const persisted = (await store.get(CONFIG_KEY)) as Record<string, unknown>;
+	assert.equal(persisted.llmApiKey, "sk-secret-123");
+
+	const get = (await routes.config({ host: { store } } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+	assert.equal(get.config.llmApiKeySet, true);
+	assert.equal(get.config.llmApiKey, undefined);
+});
+
 test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no project filter", async () => {
 	// Regression: the recall route used to send a fabricated { project: "current" }
 	// tag. It must use the actual project id from the route ctx, and apply NO

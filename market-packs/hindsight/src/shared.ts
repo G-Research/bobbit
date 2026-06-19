@@ -100,6 +100,10 @@ export interface EffectiveConfig {
 	/** External Postgres connection URL for `managed-external-postgres` mode. Maps
 	 *  onto the runtime env HINDSIGHT_API_DATABASE_URL; never used in external mode. */
 	externalDatabaseUrl?: string;
+	/** LLM API key the MANAGED Hindsight API uses. Maps onto the runtime env
+	 *  HINDSIGHT_API_LLM_API_KEY (the runtime's only user-configured secret); never
+	 *  used by the provider client itself, only forwarded to the managed runtime. */
+	llmApiKey?: string;
 	/** Host bind-mount path for fully managed Postgres data (`managed` mode). */
 	dataDir: string;
 	bank: string;
@@ -153,12 +157,14 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
 	const apiKey = asString(flat(raw, "apiKey"));
 	const externalDatabaseUrl = asString(flat(raw, "externalDatabaseUrl"));
+	const llmApiKey = asString(flat(raw, "llmApiKey"));
 	const recallScope = flat(raw, "recallScope") === "project" ? "project" : "all";
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
 		...(apiKey ? { apiKey } : {}),
 		...(externalDatabaseUrl ? { externalDatabaseUrl } : {}),
+		...(llmApiKey ? { llmApiKey } : {}),
 		dataDir: asString(flat(raw, "dataDir")) ?? CONFIG_DEFAULTS.dataDir,
 		bank: asString(flat(raw, "bank")) ?? CONFIG_DEFAULTS.bank,
 		namespace: asString(flat(raw, "namespace")) ?? CONFIG_DEFAULTS.namespace,
@@ -299,7 +305,7 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		else errors.push("mode must be 'external', 'managed', or 'managed-external-postgres'");
 	}
 	// Optional secret/string fields; "" (or null) clears.
-	for (const key of ["externalUrl", "apiKey", "externalDatabaseUrl"] as const) {
+	for (const key of ["externalUrl", "apiKey", "externalDatabaseUrl", "llmApiKey"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string") value[key] = v; // "" clears
@@ -338,11 +344,12 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 /** Redact secrets for the `config` GET surface — every secret field collapses to a
  *  `<field>Set` boolean and the raw value is never echoed. */
 export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
-	const { apiKey, externalDatabaseUrl, ...rest } = cfg;
+	const { apiKey, externalDatabaseUrl, llmApiKey, ...rest } = cfg;
 	return {
 		...rest,
 		apiKeySet: typeof apiKey === "string" && apiKey.length > 0,
 		externalDatabaseUrlSet: typeof externalDatabaseUrl === "string" && externalDatabaseUrl.length > 0,
+		llmApiKeySet: typeof llmApiKey === "string" && llmApiKey.length > 0,
 	};
 }
 

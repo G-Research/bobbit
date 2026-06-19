@@ -400,6 +400,20 @@ test.describe("Pack runtimes REST API", () => {
 		expect((downCall?.opts as { removeState?: boolean })?.removeState).toBe(true);
 	});
 
+	test("POST down reads projectId from the QUERY string (client/server consistency, finding #3)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		// The client sends projectId on the query string; the server must read it there
+		// (not the JSON body). A body-only projectId would be silently dropped.
+		const res = await apiFetch(`/api/pack-runtimes/${id}/down?projectId=proj-xyz`, {
+			method: "POST",
+			body: JSON.stringify({ volumes: true, removeState: true }),
+		});
+		expect(res.status).toBe(200);
+		const downCall = calls.find((c) => c.op === "down");
+		expect((downCall?.opts as { projectId?: string })?.projectId).toBe("proj-xyz");
+		expect((downCall?.opts as { volumes?: boolean })?.volumes).toBe(true);
+	});
+
 	test("POST down with a malformed JSON body → 400 (no down)", async () => {
 		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
 		const res = await apiFetch(`/api/pack-runtimes/${id}/down`, { method: "POST", body: "{not json" });

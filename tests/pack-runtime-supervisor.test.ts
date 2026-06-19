@@ -857,6 +857,84 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		);
 		assert.equal(docker.countSub("up"), 0);
 	});
+
+	it("control paths reuse the start config overlay so config-only secrets re-resolve (finding #2)", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+			stop: () => ok(),
+			logs: () => ok("out"),
+			down: () => ok(),
+		});
+		const contribution = makeEnvContribution();
+		// USER_KEY is NOT in the global secret store — it is supplied ONLY via the
+		// start config overlay (mirrors the marketplace managed-enable path forwarding
+		// a config-only secret). `requireEnv` makes it mandatory, so WITHOUT a persisted
+		// overlay every later control/teardown command would re-throw
+		// PackRuntimeBadRequestError when it rebuilds the compose env.
+		const secrets = inMemorySecrets();
+		const portStore = new FilePortStore(path.join(tmp, "overlay-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "overlay-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore,
+		});
+
+		const started = await sup.start("envpack", "svc", { config: { USER_KEY: "from-config" } });
+		assert.equal(started.status, "running");
+
+		// The effective mode + config overlay are persisted beside the rendered env.
+		const project = "bobbit-pack-envpack-testsuffix";
+		const cfgFile = path.join(tmp, "overlay-data", project, "svc.config.json");
+		assert.ok(fs.existsSync(cfgFile));
+		assert.deepEqual(JSON.parse(fs.readFileSync(cfgFile, "utf-8")), {
+			mode: "default",
+			config: { USER_KEY: "from-config" },
+		});
+
+		// Control + teardown must NOT throw: the persisted overlay re-resolves the
+		// config-only USER_KEY secret on every rebuild.
+		await sup.status("envpack", "svc");
+		await sup.logs("envpack", "svc", { tail: 5 });
+		await sup.stop("envpack", "svc");
+		const downStatus = await sup.down("envpack", "svc");
+		assert.equal(downStatus.status, "stopped");
+
+		// The re-rendered env file still carries the config-supplied secret.
+		const envFile = path.join(tmp, "overlay-data", project, "svc.env");
+		assert.match(fs.readFileSync(envFile, "utf-8"), /USER_KEY="from-config"/);
+	});
+
+	it("purge (down -v + removeState) deletes the persisted config sidecar (finding #2)", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+			down: () => ok(),
+		});
+		const contribution = makeEnvContribution();
+		const portStore = new FilePortStore(path.join(tmp, "purge-cfg-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "purge-cfg-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: inMemorySecrets(),
+			portStore,
+		});
+		await sup.start("envpack", "svc", { config: { USER_KEY: "from-config" } });
+		const project = "bobbit-pack-envpack-testsuffix";
+		const cfgFile = path.join(tmp, "purge-cfg-data", project, "svc.config.json");
+		assert.ok(fs.existsSync(cfgFile));
+		await sup.down("envpack", "svc", { volumes: true, removeState: true });
+		assert.equal(fs.existsSync(cfgFile), false);
+	});
 });
 
 // ── Start in-flight dedupe keyed by mode ─────────────────────────────────────
