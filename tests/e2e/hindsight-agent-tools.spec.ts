@@ -342,6 +342,31 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		expect(item.tags.some((t) => t.startsWith("project:"))).toBe(false);
 	});
 
+	test("retain enforces kind:manual — user-supplied tags cannot override it", async () => {
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+
+		const before = stub.retained("bobbit").length;
+		// A user tries to spoof the provenance marker via `tags: { kind: "spoofed" }`.
+		const res = await invokeTool(id, RETAIN, "retain", {
+			content: "Manual provenance is enforced.",
+			tags: { kind: "spoofed", topic: "billing" },
+			scope: "all",
+			sync: true,
+		});
+		expect(res.status).toBe(200);
+		expect(res.body.ok).toBe(true);
+
+		const retained = stub.retained("bobbit");
+		expect(retained.length).toBe(before + 1);
+		const item = retained[retained.length - 1];
+		// kind stays "manual"; the spoofed value is never persisted.
+		expect(item.tags).toContain("kind:manual");
+		expect(item.tags).not.toContain("kind:spoofed");
+		// Other user tags stay additive.
+		expect(item.tags).toContain("topic:billing");
+	});
+
 	test("reflect runs over the resolved shared bank and returns synthesized text", async () => {
 		seedConfig(bobbitDir, externalConfig(stub.url)); // bank: bobbit
 		const id = await newSession();
@@ -356,6 +381,33 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		const calls = reflectCalls(stub, mark);
 		expect(calls.length).toBe(1);
 		expect(calls[0].bank).toBe("bobbit");
+	});
+
+	test("reflect maps scope to tag filters on the shared bank (project filters; all does not)", async () => {
+		// P5 contract: reflect's `scope` maps to a TAG FILTER on the shared bank, just
+		// like recall — a project-scoped reflect must NOT reflect over the whole bank.
+		seedConfig(bobbitDir, externalConfig(stub.url)); // bank: bobbit
+		const id = await newSession();
+
+		// scope:project → project:<id> tag + tags_match:any on bank `bobbit`.
+		let mark = stub.calls.length;
+		const proj = await invokeTool(id, REFLECT, "reflect", { prompt: "how do we ship safely?", scope: "project" });
+		expect(proj.status).toBe(200);
+		const projCalls = reflectCalls(stub, mark);
+		expect(projCalls.length).toBe(1);
+		expect(projCalls[0].bank).toBe("bobbit");
+		expect(projCalls[0].body?.tags).toEqual([`project:${projectId}`]);
+		expect(projCalls[0].body?.tags_match).toBe("any");
+
+		// scope:all → NO project tag filter (reflect over the whole bank).
+		mark = stub.calls.length;
+		const all = await invokeTool(id, REFLECT, "reflect", { prompt: "how do we ship safely?", scope: "all" });
+		expect(all.status).toBe(200);
+		const allCalls = reflectCalls(stub, mark);
+		expect(allCalls.length).toBe(1);
+		expect(allCalls[0].bank).toBe("bobbit");
+		expect(allCalls[0].body?.tags).toBeUndefined();
+		expect(allCalls[0].body?.tags_match).toBeUndefined();
 	});
 
 	test("a configured custom bank flows through every route to the stub", async () => {

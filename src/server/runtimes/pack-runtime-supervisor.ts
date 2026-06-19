@@ -281,6 +281,41 @@ export class FilePortStore implements PortStore {
 }
 
 /**
+ * Get or create a STABLE per-server identity suffix for compose project names,
+ * persisted under the gateway state dir (`<stateDir>/pack-runtimes/server-identity`).
+ *
+ * Compose project names are `bobbit-pack-<pack>-<suffix>` ({@link PackRuntimeSupervisor.composeProjectFor}).
+ * The suffix guards against collisions between concurrent Bobbit servers sharing a
+ * host, but it MUST stay stable across gateway process restarts — otherwise a
+ * restart would compute a different project name and orphan the still-running
+ * containers (they'd no longer be addressable via `compose -p <project>`).
+ *
+ * Production wiring passes this value as `serverIdentitySuffix`, so the supervisor
+ * never falls back to the per-process random suffix in `opts.serverIdentitySuffix ??
+ * crypto.randomBytes(...)`. Read errors / a blank file degrade to (re)creating the
+ * identity; a write error degrades to the in-memory value for this process only.
+ */
+export function getOrCreatePackRuntimeServerIdentity(stateDir: string): string {
+	const file = path.join(stateDir, "pack-runtimes", "server-identity");
+	try {
+		if (fs.existsSync(file)) {
+			const existing = fs.readFileSync(file, "utf-8").trim();
+			if (existing) return existing;
+		}
+	} catch {
+		/* unreadable — fall through to (re)create */
+	}
+	const identity = crypto.randomBytes(4).toString("hex");
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${identity}\n`, "utf-8");
+	} catch {
+		/* best effort — use the in-memory value for this process */
+	}
+	return identity;
+}
+
+/**
  * Read a runtime's declared {@link PackRuntimeStartPolicy} from its RAW manifest
  * object (the un-validated `RuntimeContribution.manifest`). Anything other than
  * the literal `"on-enable"` — including an absent field — resolves to `manual`,
@@ -564,6 +599,16 @@ export class PackRuntimeSupervisor {
 	 */
 	private readonly _startInFlight = new Map<string, Promise<PackRuntimeStatus>>();
 
+	/**
+	 * Runtime keys (pack+runtime+project, mode-agnostic) this supervisor instance
+	 * has successfully brought up to `running`. Drives the idempotent {@link start}
+	 * fast-path: a repeat `start` of a still-running runtime must not re-render the
+	 * invocation, `compose up` again, or rotate its host port. Cleared on
+	 * {@link stop}/{@link down} (the runtime is no longer up). Per-instance (not
+	 * disk-backed) so it never leaks across the unit fixtures' shared data dir.
+	 */
+	private readonly _started = new Set<string>();
+
 	constructor(opts: PackRuntimeSupervisorOptions) {
 		this.registry = opts.registry;
 		this.dockerBin = opts.dockerBin ?? process.env.DOCKER_BIN ?? "docker";
@@ -651,7 +696,28 @@ export class PackRuntimeSupervisor {
 		runtimeId: string,
 		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> } = {},
 	): Promise<PackRuntimeStatus> {
+		// Idempotent fast-path: a runtime THIS supervisor already brought up stays up.
+		// Re-running `start` must NOT re-render the invocation, rotate the (now
+		// container-bound) persisted host port — `allocateHostPort` would treat the
+		// bound port as unavailable, probe+persist a NEW one, and the next `compose up`
+		// would orphan the live port mapping — or `compose up` again. We short-circuit
+		// ONLY when THIS instance previously started the runtime to `running` AND it
+		// still reports `running`, so a fresh first start always proceeds to `compose
+		// up` and a stopped runtime (e.g. mid-`restart`, which clears the flag) is
+		// (re)started normally. As a second line of defence the start path also reuses
+		// any persisted host port verbatim (see `_doStart`'s `reusePersisted`), so a
+		// post-restart start of an already-running runtime never rotates the port even
+		// before this in-memory flag is repopulated.
+		if (this._started.has(this._startedKey(packId, runtimeId, opts.projectId))) {
+			const current = await this.status(packId, runtimeId, opts.projectId);
+			if (current.status === "running") return current;
+		}
 		return this._startDeduped(packId, runtimeId, opts);
+	}
+
+	/** Mode-agnostic key for the {@link _started} idempotence set. */
+	private _startedKey(packId: string, runtimeId: string, projectId?: string): string {
+		return `${projectId ?? ""}\u0000${packId}\u0000${runtimeId}`;
 	}
 
 	/** Stop a runtime (`compose stop`) and report the resulting status. */
@@ -673,6 +739,9 @@ export class PackRuntimeSupervisor {
 		// never degrades to an unscoped whole-pack `stop`); the service list is empty
 		// ONLY for a valid manifest that truly declares no services.
 		const { target, services } = this._readonlyComposeContext(packId, runtimeId, contribution);
+		// The runtime is being brought down — drop the idempotent-start flag so a
+		// later `start` (incl. the `restart` stop→start) actually (re)starts it.
+		this._started.delete(this._startedKey(packId, runtimeId, opts.projectId));
 		try {
 			await this._exec(this._composeArgs(target, "stop", ...services));
 		} catch (err) {
@@ -760,6 +829,8 @@ export class PackRuntimeSupervisor {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
+		// Tearing the project down — the runtime is no longer up; drop the flag.
+		this._started.delete(this._startedKey(packId, runtimeId, opts.projectId));
 		const { target } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		const downArgs = this._composeArgs(target, "down", ...(opts.volumes ? ["-v"] : []));
 		try {
@@ -984,8 +1055,14 @@ export class PackRuntimeSupervisor {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
 
+		// `reusePersisted: true` — a valid persisted host port is reused VERBATIM
+		// (no bindability re-probe), so a start of an already-running runtime (whose
+		// port is currently container-bound) never rotates it. Fresh runtimes with no
+		// persisted port still allocate one. This backstops the in-memory idempotent
+		// fast-path for the post-restart case (flag not yet repopulated).
 		const { invocation, modeKey, ctx } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode, {
 			configOverlay: opts.config,
+			reusePersisted: true,
 		});
 
 		// Resolve the declared HTTP readiness probe (if any) + the resolved host
@@ -1031,7 +1108,14 @@ export class PackRuntimeSupervisor {
 			throw err;
 		}
 
-		return this._pollUntilHealthy(descriptor, target, modeKey, invocation.services, healthcheck, healthPort);
+		const result = await this._pollUntilHealthy(descriptor, target, modeKey, invocation.services, healthcheck, healthPort);
+		// Record a confirmed-running start so a later repeat `start` fast-paths instead
+		// of re-rendering / `compose up` / rotating the port. Only `running` qualifies —
+		// an `unhealthy`/timeout start stays restartable.
+		if (result.status === "running") {
+			this._started.add(this._startedKey(packId, runtimeId, opts.projectId));
+		}
+		return result;
 	}
 
 	/**

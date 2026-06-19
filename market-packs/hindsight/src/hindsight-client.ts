@@ -62,6 +62,12 @@ export interface RetainOptions {
 	sync?: boolean;
 }
 
+export interface ReflectOptions {
+	/** Tag filter applied during reflection (maps to scope on the shared bank). */
+	tags?: Record<string, string>;
+	tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+}
+
 export interface HindsightClient {
 	health(): Promise<{ ok: boolean }>;
 	/** Idempotent create-or-update — call before the first retain. PUT …/banks/{bank}. */
@@ -69,7 +75,7 @@ export interface HindsightClient {
 	recall(bank: string, query: string, opts?: RecallOptions): Promise<RecallResult>;
 	/** POST …/memories. Resolves on a 2xx (extraction is async upstream). */
 	retain(bank: string, content: string, opts?: RetainOptions): Promise<void>;
-	reflect(bank: string, prompt: string): Promise<{ text: string }>;
+	reflect(bank: string, prompt: string, opts?: ReflectOptions): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
 }
 
@@ -204,10 +210,14 @@ export function createClient(cfg: HindsightClientConfig): HindsightClient {
 			});
 		},
 
-		async reflect(bank: string, prompt: string): Promise<{ text: string }> {
-			const data = await requestJson<{ text: string }>("POST", `${bankBase(bank)}/reflect`, {
-				query: prompt,
-			});
+		async reflect(bank: string, prompt: string, opts?: ReflectOptions): Promise<{ text: string }> {
+			const tags = flattenTags(opts?.tags);
+			const body: Record<string, unknown> = { query: prompt };
+			if (tags.length > 0) {
+				body.tags = tags;
+				body.tags_match = opts?.tagsMatch ?? "any";
+			}
+			const data = await requestJson<{ text: string }>("POST", `${bankBase(bank)}/reflect`, body);
 			return { text: data.text };
 		},
 

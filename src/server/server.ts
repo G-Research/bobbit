@@ -55,6 +55,7 @@ import { PackContributionRegistry } from "./extension-host/pack-contribution-reg
 import {
 	PackRuntimeSupervisor,
 	FilePortStore,
+	getOrCreatePackRuntimeServerIdentity,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
 	PackRuntimeNotFoundError,
@@ -2159,6 +2160,10 @@ export function createGateway(config: GatewayConfig) {
 					realPackRuntimeSupervisor = new PackRuntimeSupervisor({
 						registry: packContributionRegistry,
 						runtimeDataDir,
+						// STABLE across gateway restarts (persisted under the state dir): a
+						// random per-process suffix would change the compose project name on
+						// every restart and orphan the still-running containers.
+						serverIdentitySuffix: getOrCreatePackRuntimeServerIdentity(stateDir),
 						secretsStore: new SecretsStore(stateDir),
 						portStore: new FilePortStore(path.join(runtimeDataDir, "ports.json")),
 					});

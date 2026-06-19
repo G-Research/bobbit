@@ -10,10 +10,12 @@ docs: |-
   Required: `prompt`. Optional: `scope` (`project` | `all`).
 
   Asks Hindsight to synthesize an answer over the shared bank rather than
-  returning a raw recall list. `scope` is accepted for API symmetry but
-  reflection runs over the resolved shared bank and never creates extra banks.
-  Returns the synthesized text. Dormant (unconfigured) Hindsight returns empty
-  text, not an error.
+  returning a raw recall list. `scope: project` restricts reflection to this
+  project's memories (the route adds a `project:<id>` tag filter when a real
+  project id is present); `scope: all` reflects over the whole bank. When `scope`
+  is omitted the pack's configured `recallScope` applies. Scope maps to a tag
+  filter on the SAME shared bank — never a different bank. Returns the synthesized
+  text. Dormant (unconfigured) Hindsight returns empty text, not an error.
 detail_docs: >-
   ## Purpose
 
@@ -37,14 +39,19 @@ detail_docs: >-
 
   | `prompt` | string | **Yes** | The question to reflect on. |
 
-  | `scope` | `project` \| `all` | No | Accepted for symmetry with recall/retain.
-  Reflection runs over the shared bank; scope creates no extra banks. |
+  | `scope` | `project` \| `all` | No | `project` filters reflection to this
+  project's memories via a `project:<id>` tag; `all` reflects over the whole
+  bank. Defaults to the pack's configured `recallScope`. Maps to a tag filter on
+  the SAME shared bank — never a different bank. |
 
 
   ## Notes
 
 
-  - Reflection stays in the single resolved bank — no extra banks, no direct
-  Hindsight calls.
+  - Scope maps to a tag filter on the single resolved bank — no extra banks, no
+  direct Hindsight calls.
+
+  - A `project` reflect only adds a `project:<id>` filter when the session has a
+  real project id; otherwise no project tag is fabricated.
 
   - Unconfigured Hindsight returns empty text (dormant), not an error.

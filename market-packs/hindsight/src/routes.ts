@@ -87,9 +87,12 @@ async function lastError(store: StoreLike): Promise<unknown> {
 	}
 }
 
-/** Auto-tags applied to a manual `retain` route call (mirrors the provider). */
+/** Auto-tags applied to a manual `retain` route call (mirrors the provider).
+ *  `kind: "manual"` is spread LAST so user-supplied/scope tags stay additive but can
+ *  NEVER override the manual-retain provenance marker (a user `tags: { kind: "x" }`
+ *  is ignored for `kind`). */
 function manualTags(extra: Tags | undefined): Tags {
-	return { kind: "manual", ...(extra ?? {}) };
+	return { ...(extra ?? {}), kind: "manual" };
 }
 
 export const routes = {
@@ -216,7 +219,11 @@ export const routes = {
 		}
 	},
 
-	// { prompt } → reflect. Dormant ⇒ empty text.
+	// { prompt, scope? } → reflect, with scope mapped to a tag filter on the single
+	// shared bank (NOT a different bank), mirroring `recall`:
+	//   - scope "project" + a REAL project id in the route ctx ⇒ filter on `project:<id>`.
+	//   - scope "all" (or no project id) ⇒ no project filter (reflect over the bank).
+	// Dormant ⇒ empty text.
 	reflect: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const cfg = await loadEffectiveConfig(store);
@@ -224,9 +231,12 @@ export const routes = {
 		const body = isObj(req?.body) ? req!.body : {};
 		const prompt = strOf(body.prompt);
 		if (!prompt) return { configured: true, text: "" };
+		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
+		const projectId = strOf(ctx.projectId);
+		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.reflect(cfg.bank, prompt);
+			const res = await client.reflect(cfg.bank, prompt, tags ? { tags, tagsMatch: "any" as const } : undefined);
 			return { configured: true, text: res?.text ?? "" };
 		} catch (e) {
 			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };

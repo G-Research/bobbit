@@ -304,7 +304,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "hindsight_reflect: Synthesize an answer from long-term memory.",
 		promptGuidelines: [
 			"Use hindsight_reflect for a synthesized answer drawing on accumulated memory, not a raw recall list.",
-			"scope is accepted for symmetry; reflection runs over the shared bank.",
+			"scope 'project' filters reflection to this project's memories; 'all' reflects over the shared bank.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String({ description: "The question to reflect on." }),

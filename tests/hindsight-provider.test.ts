@@ -41,7 +41,7 @@ function makeClient() {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
 		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
 		ensureBank: [] as string[],
-		reflect: [] as { bank: string; prompt: string }[],
+		reflect: [] as { bank: string; prompt: string; opts?: { tags?: Record<string, string>; tagsMatch?: string } }[],
 		health: 0,
 		listBanks: 0,
 	};
@@ -63,8 +63,8 @@ function makeClient() {
 			calls.retain.push({ bank, content, opts });
 			if (state.failRetain) throw new Error("retain failed");
 		},
-		reflect: async (bank: string, prompt: string) => {
-			calls.reflect.push({ bank, prompt });
+		reflect: async (bank: string, prompt: string, opts?: { tags?: Record<string, string>; tagsMatch?: string }) => {
+			calls.reflect.push({ bank, prompt, opts });
 			return { text: "reflection" };
 		},
 		listBanks: async () => {
@@ -329,6 +329,66 @@ test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no pr
 		await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
 		const o2 = calls.recall[1].opts as { tags?: unknown };
 		assert.equal(o2.tags, undefined);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes reflect: project scope sends a project tag filter; all scope sends none", async () => {
+	// P5 contract: hindsight_reflect's `scope` must map to a TAG FILTER on the shared
+	// bank (NOT reflect over the whole bank for a project-scoped call).
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+
+		// scope:project + a real project id ⇒ filter on { project: <id> }.
+		await routes.reflect(
+			{ host: { store }, projectId: "proj-9" } as never,
+			{ body: { prompt: "what did we decide", scope: "project" } } as never,
+		);
+		assert.deepEqual(calls.reflect[0].opts?.tags, { project: "proj-9" });
+		assert.equal(calls.reflect[0].opts?.tagsMatch, "any");
+
+		// scope:all ⇒ no project filter (reflect over the bank).
+		await routes.reflect(
+			{ host: { store }, projectId: "proj-9" } as never,
+			{ body: { prompt: "anything", scope: "all" } } as never,
+		);
+		assert.equal(calls.reflect[1].opts, undefined);
+
+		// scope:project but NO project id in ctx ⇒ no fabricated placeholder tag.
+		await routes.reflect(
+			{ host: { store } } as never,
+			{ body: { prompt: "global", scope: "project" } } as never,
+		);
+		assert.equal(calls.reflect[2].opts, undefined);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes retain: kind:manual is enforced — user-supplied tags cannot override it", async () => {
+	// A manual retain must always carry kind:"manual" provenance. User `tags` stay
+	// additive, but a malicious/accidental `tags: { kind: ... }` must NOT win.
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallScope: "project" });
+
+		const res = (await routes.retain(
+			{ host: { store }, projectId: "proj-3" } as never,
+			{ body: { content: "remember this", tags: { kind: "spoofed", topic: "auth" }, scope: "project" } } as never,
+		)) as { ok: boolean };
+		assert.equal(res.ok, true);
+		const tags = calls.retain[0].opts.tags as Record<string, string>;
+		// kind is forced to "manual" regardless of the user-supplied kind.
+		assert.equal(tags.kind, "manual");
+		// User + scope tags stay additive.
+		assert.equal(tags.topic, "auth");
+		assert.equal(tags.project, "proj-3");
 	} finally {
 		__setClientFactory(null);
 	}

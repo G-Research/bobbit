@@ -127,6 +127,18 @@ describe("hindsight-client — round-trips against the stub", () => {
 		assert.equal(call.method, "POST");
 		assert.equal(call.path, "/v1/default/banks/bobbit/reflect");
 		assert.equal(call.body.query, "summarise the project");
+		// No tags ⇒ no tag filter sent (reflect over the whole bank).
+		assert.equal(call.body.tags, undefined);
+		assert.equal(call.body.tags_match, undefined);
+	});
+
+	it("reflect() forwards a scoped tag filter when provided", async () => {
+		const client = createClient({ baseUrl: stub.url });
+		await client.reflect("bobbit", "what did we decide", { tags: { project: "p1" } });
+		const call = stub.calls.at(-1)!;
+		assert.equal(call.path, "/v1/default/banks/bobbit/reflect");
+		assert.deepEqual(call.body.tags, ["project:p1"]);
+		assert.equal(call.body.tags_match, "any");
 	});
 
 	it("listBanks() maps bank items → bank ids", async () => {

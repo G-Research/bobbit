@@ -32,7 +32,7 @@ export interface HindsightClientLike {
 		opts?: { maxTokens?: number; tags?: Tags; tagsMatch?: TagsMatch },
 	): Promise<{ memories: RecallMemory[] }>;
 	retain(bank: string, content: string, opts?: { tags?: Tags; sync?: boolean }): Promise<void>;
-	reflect(bank: string, prompt: string): Promise<{ text: string }>;
+	reflect(bank: string, prompt: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
 }
 

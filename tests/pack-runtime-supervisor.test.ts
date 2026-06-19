@@ -26,6 +26,7 @@ import {
 	PackRuntimeBadRequestError,
 	PackRuntimeDockerUnavailableError,
 	FilePortStore,
+	getOrCreatePackRuntimeServerIdentity,
 	readRuntimeStartPolicy,
 	readRuntimeHealthcheck,
 	encodePackRuntimeId,
@@ -728,6 +729,35 @@ describe("compose project name + docker env discipline", () => {
 		await sup.status(PACK_ID, RUNTIME_ID);
 		assert.equal(docker.calls[0]!.file, "podman");
 	});
+
+	it("server identity is STABLE across restarts → stable compose project name (finding)", () => {
+		// Production wiring derives the compose-project suffix from a STATE-persisted
+		// server identity (not a per-process random), so a gateway restart computes the
+		// SAME project name and never orphans the still-running containers.
+		const stateDir = fs.mkdtempSync(path.join(tmp, "ident-state-"));
+		const idA = getOrCreatePackRuntimeServerIdentity(stateDir);
+		assert.ok(idA.length > 0);
+		// A second read of the same state dir returns the SAME identity (persisted,
+		// never re-randomized) — this is what a process restart does.
+		const idB = getOrCreatePackRuntimeServerIdentity(stateDir);
+		assert.equal(idB, idA, "identity is persisted, not re-randomized across reads/restarts");
+
+		// Two supervisors built from that identity (as production does) produce the
+		// SAME compose project name.
+		const mk = (suffix: string) =>
+			makeSupervisor(makeDocker({ ps: () => ok("") }).executor, { serverIdentitySuffix: suffix });
+		assert.equal(
+			mk(idA).composeProjectFor(PACK_ID),
+			mk(idB).composeProjectFor(PACK_ID),
+			"same persisted identity ⇒ identical compose project name",
+		);
+
+		// A DIFFERENT state dir (a co-resident second server) gets its own identity, so
+		// the collision guard still holds across concurrent servers.
+		const otherStateDir = fs.mkdtempSync(path.join(tmp, "ident-state2-"));
+		const idOther = getOrCreatePackRuntimeServerIdentity(otherStateDir);
+		assert.notEqual(idOther, idA, "a distinct server state dir gets a distinct identity");
+	});
 });
 
 // ── Service-scoped commands across a multi-runtime pack ─────────────────────
@@ -1120,6 +1150,62 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		const body = fs.readFileSync(envFile, "utf-8");
 		assert.match(body, new RegExp(`WEB_PORT="${allocatedPort}"`));
 		assert.match(body, /USER_KEY="configured-llm-key"/);
+	});
+
+	it("repeated start of an already-running runtime is idempotent — no second `up`, no port re-allocation", async () => {
+		// Finding: a repeat REST `/start` while the runtime is RUNNING must NOT rebuild
+		// the invocation, `compose up` again, or rotate the (now container-bound) host
+		// port. `allocateHostPort` would see the bound port as unavailable and probe a
+		// NEW one, orphaning the live mapping — so the second start must fast-path.
+		class CountingPortStore {
+			data: Record<string, number> = {};
+			sets = 0;
+			get(k: string) { return this.data[k]; }
+			set(k: string, v: number) { this.data[k] = v; this.sets++; }
+		}
+		let started = false;
+		const docker = makeDocker({
+			up: () => { started = true; return ok(); },
+			ps: () => ok(started ? '{"Service":"api","State":"running","Health":"healthy"}' : ""),
+		});
+		const contribution = makeEnvContribution();
+		const portStore = new CountingPortStore();
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "idempotent-start-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: inMemorySecrets({ USER_KEY: "configured-llm-key" }),
+			portStore,
+		});
+
+		const first = await sup.start("envpack", "svc");
+		assert.equal(first.status, "running");
+		assert.equal(docker.countSub("up"), 1, "first start issues exactly one compose up");
+		assert.equal(portStore.sets, 1, "first start allocates the host port once");
+		const portKey = packRuntimePersistKey("envpack", "svc", "WEB_PORT");
+		const allocatedPort = portStore.get(portKey)!;
+
+		// Bind the allocated port so it is NOT currently bindable — exactly as a live
+		// container holds it. A non-idempotent start would now rotate the port.
+		const blocker = net.createServer();
+		await new Promise<void>((res, rej) => {
+			blocker.once("error", rej);
+			blocker.listen(allocatedPort, "127.0.0.1", res);
+		});
+		try {
+			const second = await sup.start("envpack", "svc");
+			assert.equal(second.status, "running");
+		} finally {
+			await new Promise<void>((res) => blocker.close(() => res()));
+		}
+
+		// Idempotent: no second `up`, and the persisted port was neither rotated nor re-set.
+		assert.equal(docker.countSub("up"), 1, "repeat start must not compose up again");
+		assert.equal(portStore.sets, 1, "repeat start must not re-allocate the host port");
+		assert.equal(portStore.get(portKey), allocatedPort, "persisted port unchanged");
 	});
 
 	it("a missing required user secret rejects as PackRuntimeBadRequestError (→ 400, not 500)", async () => {
