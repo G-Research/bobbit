@@ -135,15 +135,26 @@ async function actionLabel(page: Page, actionId: string): Promise<string> {
 }
 
 async function clickHeaderAction(page: Page, actionId: string): Promise<void> {
+	await closePopover(page);
 	const direct = headerDirectAction(page, actionId);
 	if (await direct.isVisible().catch(() => false)) {
 		await direct.click();
 		return;
 	}
+
 	await openHeaderActions(page);
-	const item = popoverAction(page, actionId);
-	await expect(item).toBeVisible({ timeout: 5_000 });
-	await item.click();
+	await expect(popoverAction(page, actionId)).toBeVisible({ timeout: 5_000 });
+	await page.evaluate((id) => {
+		const selector = `sidebar-actions-popover [role="menuitem"][data-session-action-id="${CSS.escape(id)}"]`;
+		const items = Array.from(document.querySelectorAll<HTMLElement>(selector));
+		const item = items.find((el) => {
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+		});
+		if (!item) throw new Error(`Visible header action not found: ${id}`);
+		item.click();
+	}, actionId);
 }
 
 async function createStaffAgent(name: string): Promise<StaffRecord> {
