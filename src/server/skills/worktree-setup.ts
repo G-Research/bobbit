@@ -18,7 +18,43 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnosti
 import { componentRoot } from "./worktree-paths.js";
 import type { Component } from "../agent/project-config-store.js";
 
-const TIMEOUT_MS = 120_000;
+/**
+ * Single source of truth for the worktree-setup timeout fallback.
+ * Per-goal override → project `worktree_setup_timeout_ms` → this default.
+ */
+export const DEFAULT_WORKTREE_SETUP_TIMEOUT_MS = 120_000;
+
+/**
+ * Resolve the worktree-setup timeout (ms) from a goal override, then a
+ * project default, then {@link DEFAULT_WORKTREE_SETUP_TIMEOUT_MS}.
+ *
+ * Only finite, strictly-positive integers are accepted at each level.
+ * The project value may be a number or a numeric string (project config
+ * stores everything as strings). Invalid / zero / negative / non-finite
+ * values fall through to the next level.
+ */
+export function resolveSetupTimeoutMs(input?: {
+	goalTimeoutMs?: unknown;
+	projectTimeoutMs?: unknown;
+}): number {
+	const goal = coercePositiveIntMs(input?.goalTimeoutMs);
+	if (goal !== undefined) return goal;
+	const project = coercePositiveIntMs(input?.projectTimeoutMs);
+	if (project !== undefined) return project;
+	return DEFAULT_WORKTREE_SETUP_TIMEOUT_MS;
+}
+
+function coercePositiveIntMs(v: unknown): number | undefined {
+	let n: number;
+	if (typeof v === "number") n = v;
+	else if (typeof v === "string" && v.trim() !== "") n = Number(v);
+	else return undefined;
+	// Design says finite positive INTEGERS. Reject fractional values rather than
+	// flooring them — "0.5" must fall through to the next tier, not resolve to 0
+	// (and "1.5" must not be silently truncated to 1).
+	if (!Number.isInteger(n) || n <= 0) return undefined;
+	return n;
+}
 
 export interface RunComponentSetupsOpts {
 	components: Component[];
@@ -26,6 +62,25 @@ export interface RunComponentSetupsOpts {
 	branchContainer: string;
 	/** The project's primary checkout root — used to compute `SOURCE_REPO`. */
 	primaryWorktreeRoot: string;
+	/** Resolved per-command timeout (ms). Defaults to {@link DEFAULT_WORKTREE_SETUP_TIMEOUT_MS}. */
+	timeoutMs?: number;
+	/** Caller-supplied exec — host or in-container. */
+	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
+}
+
+export interface RunGoalSetupOpts {
+	goalId: string;
+	branch: string;
+	/** The goal's worktree root (branch container). */
+	worktreePath: string;
+	/** The resolved goal cwd (worktree root + project subdirectory offset). */
+	cwd: string;
+	/** The project's primary checkout root — used to compute `SOURCE_REPO`. */
+	primaryWorktreeRoot: string;
+	/** The per-goal setup command. Blank/absent → no-op. */
+	command?: string;
+	/** Resolved timeout (ms). Defaults to {@link DEFAULT_WORKTREE_SETUP_TIMEOUT_MS}. */
+	timeoutMs?: number;
 	/** Caller-supplied exec — host or in-container. */
 	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
 }
@@ -41,6 +96,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<void> {
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKTREE_SETUP_TIMEOUT_MS;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	const counters = diagEnabled ? { components: opts.components.length, skippedByEnv: 0, commands: 0, successes: 0, failures: 0 } : undefined;
@@ -75,7 +131,7 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 
 			const componentStart = diagEnabled ? performance.now() : 0;
 			try {
-				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), TIMEOUT_MS, `[worktree-setup] ${c.name}`);
+				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), timeoutMs, `[worktree-setup] ${c.name}`);
 				if (counters) counters.successes++;
 				console.log(`[worktree-setup] ${c.name}: ok`);
 				if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:component", performance.now() - componentStart, { commands: 1, successes: 1, failures: 0 });
@@ -88,4 +144,41 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 	} finally {
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:run", performance.now() - diagStart, counters);
 	}
+}
+
+/**
+ * Run the optional per-goal worktree setup command exactly once, after any
+ * per-component setup hooks. Unlike per-component setup (best-effort,
+ * non-fatal), failures here PROPAGATE — the caller marks the goal
+ * `setupStatus: "error"` so it never auto-starts mis-configured.
+ *
+ * Blank/absent command returns without invoking `exec`. The command runs
+ * in the goal's resolved `cwd` (offset-applied), with the inherited process
+ * env plus `SOURCE_REPO` and the `BOBBIT_*` goal-context vars.
+ */
+export async function runGoalSetup(opts: RunGoalSetupOpts): Promise<void> {
+	const command = opts.command?.trim();
+	if (!command) return; // no per-goal hook
+
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKTREE_SETUP_TIMEOUT_MS;
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		SOURCE_REPO: opts.primaryWorktreeRoot,
+		BOBBIT_GOAL_ID: opts.goalId,
+		BOBBIT_GOAL_BRANCH: opts.branch,
+		BOBBIT_WORKTREE_PATH: opts.worktreePath,
+	};
+
+	// Test hook: mirror runComponentSetups' BOBBIT_TEST_RECORD_SETUP audit,
+	// with a distinguishable per-goal line prefix.
+	const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
+	if (recordPath) {
+		try {
+			fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+			fs.appendFileSync(recordPath, `goal\t${opts.goalId}\t${opts.cwd}\t${opts.primaryWorktreeRoot}\t${command}\n`);
+		} catch { /* test-only — don't fail the worktree on audit IO errors */ }
+	}
+
+	await withTimeout(opts.exec(command, opts.cwd, env), timeoutMs, `[worktree-setup] goal ${opts.goalId}`);
+	console.log(`[worktree-setup] goal ${opts.goalId}: ok`);
 }

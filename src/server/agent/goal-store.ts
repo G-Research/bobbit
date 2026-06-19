@@ -35,6 +35,10 @@ export interface PersistedGoal {
 	setupStatus?: "ready" | "preparing" | "error";
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
+	/** Optional host command run once after component setup during this goal's worktree provisioning. */
+	worktreeSetupCommand?: string;
+	/** Optional per-goal setup timeout override in milliseconds. */
+	worktreeSetupTimeoutMs?: number;
 	/** If this goal is a re-attempt of another goal, the original goal's ID */
 	reattemptOf?: string;
 	/** Whether this goal has been archived (soft-deleted) */
@@ -179,6 +183,13 @@ export class GoalStore {
 							// Default setupStatus for existing goals
 							if (!g.setupStatus) {
 								g.setupStatus = "ready";
+							}
+							// Defensively drop an invalid persisted per-goal setup
+							// timeout (absent ⇒ default resolution; a finite positive
+							// integer is the only valid override).
+							if (g.worktreeSetupTimeoutMs !== undefined
+								&& !(Number.isFinite(g.worktreeSetupTimeoutMs) && g.worktreeSetupTimeoutMs > 0)) {
+								delete g.worktreeSetupTimeoutMs;
 							}
 							// Lazy-migrate workflow snapshots that were written
 							// in YAML shape (snake_case `depends_on`,

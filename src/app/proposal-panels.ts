@@ -469,6 +469,15 @@ interface GoalFormConfig {
 	autoStartTeam: boolean;
 	onAutoStartTeamChange: (e: Event) => void;
 
+	// ---- Per-goal worktree setup hook ----
+	/** Current value of the optional per-goal worktree setup command. */
+	worktreeSetupCommand: string;
+	/** Current value of the optional per-goal setup timeout (ms), as a raw
+	 *  string for input round-tripping. Empty = use the default. */
+	worktreeSetupTimeoutMs: string;
+	onWorktreeSetupCommandChange: (e: Event) => void;
+	onWorktreeSetupTimeoutChange: (e: Event) => void;
+
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
 	cwdHighlightIndex: number;
@@ -561,6 +570,19 @@ interface GoalFormConfig {
 	roleListLoading?: boolean;
 	availableTools?: ToolInfo[];
 	groupPolicies?: Record<string, string>;
+}
+
+/**
+ * Parse the per-goal worktree-setup timeout input (a raw string) into a number
+ * suitable for createGoal. Returns undefined for blank/invalid values so the
+ * goal falls back to the project default / 120s. Only finite positive integers
+ * are forwarded.
+ */
+function parseSetupTimeoutMs(raw: string): number | undefined {
+	const t = raw.trim();
+	if (t === "") return undefined;
+	const n = Number(t);
+	return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
 /** Compute a goal's depth (1-based) by walking parentGoalId links. */
@@ -983,6 +1005,31 @@ function renderGoalForm(config: GoalFormConfig) {
 				`;})}
 				${!tabbed ? renderSubgoalsToggle(config) : ""}
 			</div>
+			<div class="flex flex-col gap-1.5" data-testid="goal-form-worktree-setup">
+				<div class="flex items-center gap-1.5">
+					<label class="text-xs text-muted-foreground font-medium">Setup command</label>
+					<span title="Runs once on the HOST during worktree provisioning, after component setup — same trust model as the project worktree setup command. cwd is the goal worktree; env includes SOURCE_REPO, BOBBIT_GOAL_ID, BOBBIT_GOAL_BRANCH, BOBBIT_WORKTREE_PATH. Optional."
+						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+				</div>
+				<textarea
+					data-testid="goal-form-worktree-setup-command"
+					class="min-h-[44px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+					placeholder="Optional host command, e.g. ./scripts/seed.sh"
+					.value=${config.worktreeSetupCommand}
+					@input=${config.onWorktreeSetupCommandChange}
+				></textarea>
+				<p class="text-[10px] text-muted-foreground opacity-70">Runs on the host during provisioning — trusted, same as project worktree setup.</p>
+				<div class="flex items-center gap-2">
+					<label class="text-xs text-muted-foreground font-medium">Timeout (ms)</label>
+					<input type="number" min="1" step="1"
+						data-testid="goal-form-worktree-setup-timeout-ms"
+						class="w-28 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+						placeholder="default"
+						.value=${config.worktreeSetupTimeoutMs}
+						@input=${config.onWorktreeSetupTimeoutChange}
+					/>
+				</div>
+			</div>
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<div class="flex items-center gap-1">
@@ -1402,6 +1449,8 @@ function goalPreviewPanel() {
 				projectId,
 				enabledOptionalSteps,
 				autoStartTeam,
+				worktreeSetupCommand: state.previewWorktreeSetupCommand.trim() || undefined,
+				worktreeSetupTimeoutMs: parseSetupTimeoutMs(state.previewWorktreeSetupTimeoutMs),
 			});
 		} catch (err) {
 			const { message, code, stack } = errorDetails(err);
@@ -1432,6 +1481,8 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
+		state.previewWorktreeSetupCommand = "";
+		state.previewWorktreeSetupTimeoutMs = "";
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1527,6 +1578,18 @@ function goalPreviewPanel() {
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
 				autoStartTeam: _goalAutoStartTeam,
 				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
+				worktreeSetupCommand: state.previewWorktreeSetupCommand,
+				worktreeSetupTimeoutMs: state.previewWorktreeSetupTimeoutMs,
+				onWorktreeSetupCommandChange: (e: Event) => {
+					state.previewWorktreeSetupCommand = (e.target as HTMLTextAreaElement).value;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+				},
+				onWorktreeSetupTimeoutChange: (e: Event) => {
+					state.previewWorktreeSetupTimeoutMs = (e.target as HTMLInputElement).value;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+				},
 				cwdDropdownOpen: state.cwdDropdownOpen,
 				cwdHighlightIndex: state.cwdHighlightIndex,
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
@@ -2608,6 +2671,10 @@ let _proposalSaving = false;
 let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
+// Per-goal worktree setup hook. Initialized from proposal frontmatter in
+// syncProposalFormState; stored as raw strings for input round-tripping.
+let _proposalWorktreeSetupCommand = "";
+let _proposalWorktreeSetupTimeoutMs = "";
 let _proposalInitializedFrom: string | null = null;
 // Per-goal subgoal controls. null means "inherit system preference" — only
 // forwarded to createGoal when the user actually touched the control.
@@ -2798,6 +2865,7 @@ function syncProposalFormState(): void {
 		parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
 		subgoalsAllowed?: boolean; maxNestingDepth?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
+		worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number;
 	};
 	if (!proposal) return;
 
@@ -2828,7 +2896,7 @@ function syncProposalFormState(): void {
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}`;
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.worktreeSetupCommand ?? ""}|${proposal.worktreeSetupTimeoutMs ?? ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2859,6 +2927,10 @@ function syncProposalFormState(): void {
 		? proposal.divergencePolicy
 		: null;
 	_proposalMaxConcurrentChildren = typeof proposal.maxConcurrentChildren === "number" ? proposal.maxConcurrentChildren : null;
+	// Per-goal worktree setup hook: seed the dialog controls from frontmatter so
+	// a propose_goal-seeded proposal pre-fills the inputs. Absent => empty.
+	_proposalWorktreeSetupCommand = typeof proposal.worktreeSetupCommand === "string" ? proposal.worktreeSetupCommand : "";
+	_proposalWorktreeSetupTimeoutMs = typeof proposal.worktreeSetupTimeoutMs === "number" ? String(proposal.worktreeSetupTimeoutMs) : "";
 }
 
 function goalProposalPanel() {
@@ -2974,6 +3046,8 @@ function goalProposalPanel() {
 					maxNestingDepth: maxNestingDepthField,
 					divergencePolicy: divergencePolicyField,
 					maxConcurrentChildren: maxConcurrentChildrenField,
+					worktreeSetupCommand: _proposalWorktreeSetupCommand.trim() || undefined,
+					worktreeSetupTimeoutMs: parseSetupTimeoutMs(_proposalWorktreeSetupTimeoutMs),
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -2998,6 +3072,8 @@ function goalProposalPanel() {
 			_proposalMaxNestingDepth = null;
 			_proposalDivergencePolicy = null;
 			_proposalMaxConcurrentChildren = null;
+			_proposalWorktreeSetupCommand = "";
+			_proposalWorktreeSetupTimeoutMs = "";
 			resetProposalTabsState();
 			await closeCurrentProposalPanel("goal", proposalSessionId);
 			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "goal");
@@ -3035,6 +3111,8 @@ function goalProposalPanel() {
 		_proposalMaxNestingDepth = null;
 		_proposalDivergencePolicy = null;
 		_proposalMaxConcurrentChildren = null;
+		_proposalWorktreeSetupCommand = "";
+		_proposalWorktreeSetupTimeoutMs = "";
 		resetProposalTabsState();
 		// Persist dismiss so it survives reconnect
 		const sid = proposalSessionId;
@@ -3085,6 +3163,10 @@ function goalProposalPanel() {
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
 		autoStartTeam: _proposalAutoStartTeam,
 		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
+		worktreeSetupCommand: _proposalWorktreeSetupCommand,
+		worktreeSetupTimeoutMs: _proposalWorktreeSetupTimeoutMs,
+		onWorktreeSetupCommandChange: (e: Event) => { _proposalWorktreeSetupCommand = (e.target as HTMLTextAreaElement).value; },
+		onWorktreeSetupTimeoutChange: (e: Event) => { _proposalWorktreeSetupTimeoutMs = (e.target as HTMLInputElement).value; },
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },

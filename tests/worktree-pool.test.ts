@@ -251,6 +251,39 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 		}
 	});
 
+	it("threads the project worktree_setup_timeout_ms into pool component setup", async () => {
+		const repo = await makeRepo();
+		try {
+			const components: Component[] = [
+				{ name: "app", repo: ".", worktreeSetupCommand: "sleep 5; touch SETUP_RAN" },
+			];
+			const pool = new WorktreePool({
+				repoPath: repo,
+				targetSize: 1,
+				componentsResolver: () => components,
+				// Tiny project default — the setup command sleeps far longer, so the
+				// resolved timeout must kill it before it can create the marker. Without
+				// threading (hardcoded 120000) the sleep would finish and the marker
+				// would appear. Mirrors the per-goal timeout-resolution path.
+				setupTimeoutResolver: () => 50,
+			});
+			pool.startFilling();
+			for (let i = 0; i < 100 && pool.size === 0; i++) {
+				await new Promise(r => setTimeout(r, 100));
+			}
+			assert.equal(pool.size, 1, "pool should still publish the entry (setup failure is non-fatal)");
+			const u = await pool.claim("session/abcd1234");
+			assert.ok(u);
+			assert.equal(
+				fs.existsSync(path.join(u!.worktreePath, "SETUP_RAN")),
+				false,
+				"component setup must be killed by the resolved project timeout before touching the marker",
+			);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
 	it("single-repo pool fill is a no-op when no component declares worktreeSetupCommand", async () => {
 		const repo = await makeRepo();
 		try {

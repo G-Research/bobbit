@@ -1626,14 +1626,16 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined): void {
 		if (this.worktreePools.has(projectId)) return;
 		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
 		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
 		// current configured integration target without a server restart. When
 		// callers don't supply one, the pool falls back to today's
 		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver });
+		// `setupTimeoutResolver` reads `worktree_setup_timeout_ms` so the project
+		// default applies to per-component setup during pool prebuild.
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't

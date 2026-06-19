@@ -167,6 +167,10 @@ function wireGoalManagerResolvers(
 		const c = deps.projectContextManager.getOrCreate(pid);
 		return c?.projectConfigStore.get("base_ref") || undefined;
 	});
+	ctx.goalManager.setWorktreeSetupTimeoutResolver((pid: string) => {
+		const c = deps.projectContextManager.getOrCreate(pid);
+		return c?.projectConfigStore.get("worktree_setup_timeout_ms") || undefined;
+	});
 	ctx.goalManager.setLiveSessionResolver(() => collectVisibleSessionWorktreeReferences(deps.projectContextManager));
 }
 
@@ -2286,7 +2290,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"));
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined);
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -3470,7 +3474,7 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -5091,6 +5095,20 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
+			// Per-goal worktree setup hook (optional). Accept camelCase or snake_case.
+			// Command: trimmed, passed only when non-empty. Timeout: number or numeric
+			// string, passed only when a finite positive integer.
+			let worktreeSetupCommand: string | undefined;
+			{
+				const raw = body.worktreeSetupCommand ?? body.worktree_setup_command;
+				if (typeof raw === "string" && raw.trim()) worktreeSetupCommand = raw.trim();
+			}
+			let worktreeSetupTimeoutMs: number | undefined;
+			{
+				const raw = body.worktreeSetupTimeoutMs ?? body.worktree_setup_timeout_ms;
+				const n = typeof raw === "number" ? raw : (typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN);
+				if (Number.isFinite(n) && n > 0) worktreeSetupTimeoutMs = Math.floor(n);
+			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
@@ -5321,6 +5339,8 @@ async function handleApiRoute(
 				maxNestingDepth: effMaxNestingDepth,
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
+				worktreeSetupCommand,
+				worktreeSetupTimeoutMs,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
