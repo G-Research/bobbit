@@ -1500,6 +1500,21 @@ export class SessionManager {
 					opts.sandboxBaseBranch,
 				);
 				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+				// Fire the `goalProvisioned` lifecycle hook for the sandbox worktree
+				// just created inside the container. team-manager skips its own
+				// dispatch for sandboxed members (no host worktreeResult), and the
+				// session-setup provisioning dispatch never runs for these container
+				// worktrees — so without this, metadata-driven filesystem treatments
+				// would be missing on every sandboxed team lead / member worktree.
+				// Resolves effective (inherited) metadata via the single resolver, and
+				// uses the actual container worktree path + offset-applied cwd + branch.
+				await this.dispatchGoalProvisionedForWorktree({
+					goalId: opts.goalId,
+					projectId,
+					worktreePath,
+					cwd: bridgeOptions.cwd,
+					branch: opts.sandboxBranch,
+				});
 			} catch (err) {
 				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
 				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);

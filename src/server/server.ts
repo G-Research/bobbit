@@ -4376,7 +4376,11 @@ async function handleApiRoute(
 			projectId,
 			scope: projectId ? "project" : "global",
 			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
-			goalId: live?.goalId ?? persisted?.goalId,
+			// Effective goal: team members, delegates, and reviewers carry the goal
+			// only in teamGoalId, so fall back to it before persisted state. Without
+			// this, disabled-provider filtering would not apply at the provider hook
+			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
+			goalId: live?.goalId ?? live?.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId,
 			roleName: live?.role ?? persisted?.role,
 		};
 	};

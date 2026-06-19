@@ -1745,8 +1745,9 @@ export class TeamManager {
 		// metadata-driven filesystem treatments would be missing on normal member
 		// worktrees. Resolves the member's effective (inherited) goal metadata via
 		// the single SessionManager resolver — no ad-hoc ancestry walk. Skipped for
-		// sandboxed members (worktree lives inside the container, provisioned by
-		// applySandboxWiring). Non-fatal.
+		// sandboxed members here because their worktree lives inside the container
+		// and is created later by applySandboxWiring, which fires the hook itself
+		// (with the actual container worktree path). Non-fatal.
 		if (worktreeResult) {
 			await this.sessionManager.dispatchGoalProvisionedForWorktree({
 				goalId,
