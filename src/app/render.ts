@@ -810,8 +810,6 @@ function renderHeaderSessionActions(input: {
 					type="button"
 					class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
 					data-testid="session-actions-trigger"
-					data-session-action-surface="header"
-					data-session-action-id="overflow"
 					aria-label="Session actions"
 					aria-haspopup="menu"
 					aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}
