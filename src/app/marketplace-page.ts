@@ -1358,8 +1358,19 @@ export function renderRuntimeConsentCardView(runtimeId: string, cap: PackRuntime
 		`;
 	}
 
+	// The server only fills `host` once a stable loopback port is persisted; `container`
+	// is informational. Render a `127.0.0.1:<port>` loopback URL ONLY for an allocated
+	// host port — otherwise disclose the host port is allocated on enable (showing the
+	// container port separately when known) so we never imply a loopback bind that does
+	// not exist yet.
 	const portText = ports.length
-		? ports.map((p) => `127.0.0.1:${p.host ?? p.container ?? "?"}${p.label ? ` (${p.label})` : ""}`).join(", ")
+		? ports.map((p) => {
+			const label = p.env || p.key;
+			const prefix = label ? `${label}: ` : "";
+			if (typeof p.host === "number") return `${prefix}127.0.0.1:${p.host}`;
+			if (typeof p.container === "number") return `${prefix}container :${p.container}, host port allocated on enable`;
+			return `${prefix}allocated on enable`;
+		}).join(", ")
 		: "loopback ports allocated on enable";
 	const serviceText = services.length ? services.join(", ") : "api, web, db";
 

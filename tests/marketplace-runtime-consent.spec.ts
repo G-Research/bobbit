@@ -106,7 +106,7 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 				runtimeId: "hindsight",
 				mode: "managed-postgres",
 				services: ["api", "web", "db"],
-				ports: [{ label: "API", host: 41827, container: 8000 }, { label: "Web", host: 41828, container: 3000 }],
+				ports: [{ key: "HINDSIGHT_API_PORT", env: "HINDSIGHT_API_PORT", host: 41827, container: 8000 }, { key: "HINDSIGHT_WEB_PORT", env: "HINDSIGHT_WEB_PORT", host: 41828, container: 3000 }],
 				volumePath: "/home/dev/.hindsight",
 				dockerRequired: true,
 			}) as string,
@@ -114,6 +114,7 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		// Discloses what enabling does, BEFORE the runtime starts.
 		expect(html).toContain("market-runtime-services");
 		expect(html).toContain("api, web, db");
+		// An allocated host port renders as a loopback URL.
 		expect(html).toContain("127.0.0.1:41827");
 		expect(html).toContain("/home/dev/.hindsight");
 		// Memory/trust copy (no server-provided trust → static disclosure).
@@ -121,6 +122,30 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		expect(trust.toLowerCase()).toContain("memory");
 		// It must NOT be the external (no-Docker) card.
 		await expect(page.locator('[data-testid="market-runtime-external-guidance"]')).toHaveCount(0);
+	});
+
+	test("unallocated host port shows 'allocated on enable', never a loopback URL on the container port", async ({ page }) => {
+		// REGRESSION: the card previously fell back to `127.0.0.1:<container>` when no
+		// host port was persisted, implying a loopback bind that does not exist yet. The
+		// server only fills `host` once a stable port is allocated; `container` is
+		// informational. With host absent, the card must disclose the host port is
+		// allocated on enable — and must NOT render a loopback URL on the container port.
+		await gotoAndWait(page);
+		const ports = await page.evaluate(() => {
+			(window as any).__renderCard("hindsight", {
+				packId: "hindsight",
+				runtimeId: "hindsight",
+				mode: "managed-postgres",
+				services: ["api", "web", "db"],
+				ports: [{ key: "HINDSIGHT_API_PORT", env: "HINDSIGHT_API_PORT", container: 8000 }],
+				dockerRequired: true,
+			});
+			return document.querySelector('[data-testid="market-runtime-ports"]')?.textContent ?? "";
+		});
+		expect(ports.toLowerCase()).toContain("allocated on enable");
+		// The container port may be shown for context, but never as a loopback URL.
+		expect(ports).not.toContain("127.0.0.1:8000");
+		expect(ports).not.toContain("127.0.0.1:?");
 	});
 
 	test("external mode shows no-Docker setup guidance, not a Docker disclosure", async ({ page }) => {
