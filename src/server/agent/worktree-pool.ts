@@ -31,7 +31,7 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { createWorktree, cleanupWorktree, shouldSkipRemotePush, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult } from "../skills/git.js";
-import { runComponentSetups } from "../skills/worktree-setup.js";
+import { runComponentSetups, resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
@@ -273,6 +273,15 @@ export class WorktreePool {
 	 */
 	private baseRefResolver?: () => string | undefined;
 
+	/**
+	 * Live resolver for the project's `worktree_setup_timeout_ms` setting — called
+	 * fresh on every `_fill()` so the project default applies to per-component
+	 * setup during pool prebuild too (matching the per-goal setup path). Returns
+	 * a number, numeric string, or undefined; `resolveSetupTimeoutMs` validates
+	 * and falls back to the 120s default when unset/invalid.
+	 */
+	private setupTimeoutResolver?: () => number | string | undefined;
+
 	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
 	private worktreeRoot?: string;
 
@@ -286,11 +295,12 @@ export class WorktreePool {
 	 * construction, `this.repoPath` is always the git root (or, when the
 	 * supplied path isn't a git working tree at all, the original input).
 	 */
-	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; worktreeRoot?: string }) {
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string }) {
 		this.repoPath = resolveRepoToplevel(opts.repoPath);
 		this.targetSize = opts.targetSize ?? 2;
 		this.componentsResolver = opts.componentsResolver;
 		this.baseRefResolver = opts.baseRefResolver;
+		this.setupTimeoutResolver = opts.setupTimeoutResolver;
 		this.worktreeRoot = opts.worktreeRoot;
 	}
 
@@ -776,14 +786,21 @@ export class WorktreePool {
 					const setupNames = components.filter(c => c.worktreeSetupCommand).map(c => c.name);
 					if (counters) counters.setupComponents += setupNames.length;
 					if (setupNames.length > 0) {
+						// Resolve the project default timeout fresh on every fill so a
+						// `worktree_setup_timeout_ms` config edit applies to component setup
+						// during pool prebuild too. No per-goal override exists at fill time
+						// (the pool entry isn't yet claimed by a goal), so only the project
+						// tier feeds the resolver here.
+						const setupTimeoutMs = resolveSetupTimeoutMs({ projectTimeoutMs: this.setupTimeoutResolver?.() });
 						console.log(`[worktree-pool] running setup for components: ${setupNames.join(", ")}`);
 						try {
 							await runComponentSetups({
 								components,
 								branchContainer: container,
 								primaryWorktreeRoot: this.repoPath,
+								timeoutMs: setupTimeoutMs,
 								exec: async (cmd, cwd, env) => {
-									await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
+									await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
 								},
 							});
 						} catch (err) {

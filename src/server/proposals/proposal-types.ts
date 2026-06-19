@@ -58,6 +58,8 @@ const GOAL_FRONTMATTER_KEYS = [
 	"maxNestingDepth",   // number — per-goal sub-goal nesting cap (clamped to the global ceiling)
 	"divergencePolicy",  // "strict"|"balanced"|"autonomous" — root-only plan-change autonomy
 	"maxConcurrentChildren", // number [1,8] — root-only concurrent child-team cap
+	"worktreeSetupCommand",  // string — host command run once during this goal's worktree provisioning
+	"worktreeSetupTimeoutMs", // number > 0 — per-goal worktree-setup timeout override (ms)
 ] as const;
 
 /**
@@ -138,6 +140,15 @@ function validateGoalInlineFields(fields: Record<string, unknown>): ParseError |
 	const mcc = fields.maxConcurrentChildren;
 	if (mcc !== undefined && mcc !== null && (typeof mcc !== "number" || !Number.isInteger(mcc) || mcc < 1 || mcc > 8)) {
 		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "maxConcurrentChildren must be an integer in [1, 8]" };
+	}
+	// Per-goal worktree setup hook. Both optional; validated only when present.
+	const wsc = fields.worktreeSetupCommand;
+	if (wsc !== undefined && wsc !== null && typeof wsc !== "string") {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "worktreeSetupCommand must be a string" };
+	}
+	const wst = fields.worktreeSetupTimeoutMs;
+	if (wst !== undefined && wst !== null && (typeof wst !== "number" || !Number.isInteger(wst) || wst <= 0)) {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "worktreeSetupTimeoutMs must be an integer > 0" };
 	}
 	return null;
 }

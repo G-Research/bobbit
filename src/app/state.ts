@@ -101,6 +101,11 @@ export interface Goal {
 	workflowId?: string;
 	setupStatus?: "ready" | "preparing" | "error";
 	setupError?: string;
+	/** Optional host command run once after component setup during this goal's
+	 *  worktree provisioning. */
+	worktreeSetupCommand?: string;
+	/** Optional per-goal worktree-setup timeout override in milliseconds. */
+	worktreeSetupTimeoutMs?: number;
 	archived?: boolean;
 	archivedAt?: number;
 	/** If this goal is a re-attempt of another goal, the original goal's ID */
@@ -402,6 +407,10 @@ export const state = {
 	previewSpecEdited: false,
 	hasReceivedProposal: false,
 	previewProjectId: "" as string,
+	// Per-goal worktree setup hook (assistant goal-draft flow). Stored as strings
+	// for direct <input>/<textarea> round-tripping; parsed/validated at submit.
+	previewWorktreeSetupCommand: "",
+	previewWorktreeSetupTimeoutMs: "",
 	previewSpecEditMode: false,
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,
