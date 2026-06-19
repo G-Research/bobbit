@@ -239,7 +239,7 @@ test.describe("Pre-compaction history affordance", () => {
 	// carries no compactionId (so it never mounts the affordance), and the
 	// server splices a SECOND persisted sidecar card into the post-compaction
 	// snapshot — leaving two stacked cards (issue-analysis findings #1, #3).
-	test("live compaction surfaces the affordance with exactly one card (no reload)", async ({ page, gateway }) => {
+	test("@live-compaction-affordance live compaction surfaces the affordance with exactly one card (no reload)", async ({ page, gateway }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
