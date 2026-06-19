@@ -13,10 +13,13 @@ in [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md), 
 covers the topology rationale (one shared bank, tag-scoped) summarised under
 [Bank & tag taxonomy](#bank--tag-taxonomy) below.
 
-> **Scope of this release (Extension Platform G2.1 + G2.2).** Only **external mode** ships — you
-> point the pack at a Hindsight URL you already run. The managed Docker/Postgres runtime, the
+> **Scope.** This page documents the **external mode** data plane — you point the pack at a
+> Hindsight URL you already run. The **managed Docker/Postgres runtime** (deployment modes
+> `managed` and `managed-external-postgres`, explicit-consent start, disable/uninstall/purge, and
+> `ctx.runtime` injection) now ships as **P3** and is documented in
+> [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
 > explicit `hindsight_recall/retain/reflect` agent tools, the native memory panel, the reflect UI,
-> and cross-engine dedupe are **out of scope** here — see [Non-goals](#non-goals).
+> and cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
 
 ## Installed but dormant by default
 
@@ -61,9 +64,10 @@ provider reads.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `mode` | enum `external` \| `managed` | `external` | Deployment mode. **`managed` is reserved for G3** and does nothing here; only `external` activates the provider. |
-| `externalUrl` | string (optional) | — | Base URL of your running Hindsight. **Empty ⇒ dormant.** This is the single field that switches the pack on. |
-| `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). |
+| `mode` | enum `external` \| `managed` \| `managed-external-postgres` | `external` | Deployment mode. `external` is documented here; the two managed modes start a Docker runtime — see [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). Only `external` activates via `externalUrl`; managed modes activate via `activeWhenConfig`. |
+| `externalUrl` | string (optional) | — | Base URL of your running Hindsight (external mode). **Empty ⇒ dormant** in external mode. This is the single field that switches the external pack on. |
+| `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). Also forms `ctx.runtime.headers` for the managed API. |
+| `llmApiKey` / `externalDatabaseUrl` / `dataDir` | secret / secret / string | — / — / `~/.hindsight` | **Managed-mode only.** `llmApiKey` → `HINDSIGHT_API_LLM_API_KEY`, `externalDatabaseUrl` → `HINDSIGHT_API_DATABASE_URL` (redacted to `*Set` booleans on the GET surface), `dataDir` is the managed-Postgres bind path. See [managed-runtimes.md — P3](managed-runtimes.md#secrets--config-mapping). |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
 | `namespace` | string | `default` | Hindsight namespace path segment. |
 | `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank (cross-project); `project` adds a `project:<id>` tag filter. |
@@ -232,9 +236,11 @@ Tracked in later Extension Platform goals, **not** in this release:
 
 - Explicit agent tools `hindsight_recall/retain/reflect`, the native memory panel, and entry
   points — **G2.3**.
-- Managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
-  (`mode: managed`) — **G3**.
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
+
+> **Now shipped (was a non-goal):** the managed Docker runtime + Postgres + `~/.hindsight`
+> bind-mount + deployment-mode selection (`mode: managed` / `managed-external-postgres`) landed in
+> **P3** — see [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle).
 
 ## See also
 
