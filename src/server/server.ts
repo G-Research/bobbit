@@ -994,6 +994,42 @@ export interface PackRuntimeSupervisorDeps {
 }
 
 /**
+ * Map an effective Hindsight-style deployment config onto a runtime START plan —
+ * the SINGLE source of truth shared by the marketplace pack-activation enable
+ * path AND the `/api/pack-runtimes/:id/{start,restart}` REST routes, so the two
+ * can never diverge on how a deployment config becomes supervisor start args.
+ *
+ * - `mode` (deployment) maps to a runtime manifest mode: `managed` ⇒
+ *   `managed-postgres`, `managed-external-postgres` ⇒ `external-postgres`. The
+ *   external (and absent/default) deployment mode is a NON-Docker setup path, so
+ *   `start: false` and no container is brought up.
+ * - The provider's `externalDatabaseUrl` is remapped onto the manifest's
+ *   `HINDSIGHT_API_DATABASE_URL` env key, and `llmApiKey` onto
+ *   `HINDSIGHT_API_LLM_API_KEY`, so the supervisor's config overlay satisfies
+ *   those user-configured `secret:` env refs without seeding the global secret
+ *   store. A value already set directly under the env key wins.
+ */
+export function resolveRuntimeStartPlan(
+	deploymentConfig: Record<string, unknown>,
+): { start: boolean; mode?: string; config: Record<string, unknown> } {
+	const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
+	const config: Record<string, unknown> = { ...deploymentConfig };
+	if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0
+		&& !(typeof config.HINDSIGHT_API_DATABASE_URL === "string" && (config.HINDSIGHT_API_DATABASE_URL as string).length > 0)) {
+		config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
+	}
+	if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0
+		&& !(typeof config.HINDSIGHT_API_LLM_API_KEY === "string" && (config.HINDSIGHT_API_LLM_API_KEY as string).length > 0)) {
+		config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
+	}
+	switch (mode) {
+		case "managed": return { start: true, mode: "managed-postgres", config };
+		case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
+		default: return { start: false, config };
+	}
+}
+
+/**
  * P3 managed-runtime context resolution — the SINGLE source of truth shared by
  * BOTH the LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE
  * dispatch path (`/api/ext/route/:name`), so a managed provider and its sibling
@@ -6239,19 +6275,39 @@ async function handleApiRoute(
 			body = parsed as Record<string, unknown>;
 		}
 		let mode: string | undefined;
+		let startConfig: Record<string, unknown> | undefined;
 		if (action !== "stop") {
 			const rawMode = (body as { mode?: unknown }).mode;
 			if (rawMode !== undefined && rawMode !== null) {
 				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
 				mode = rawMode;
 			}
+			// Derive the saved provider deployment config and remap it onto the
+			// runtime's env keys EXACTLY like marketplace activation start does
+			// (resolveRuntimeStartPlan — the shared source of truth). Without this the
+			// route would forward only {projectId, mode} and a managed start would fail
+			// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
+			const deploymentConfig: Record<string, unknown> = {};
+			{
+				const pack = packContributionRegistry.getPack(projectId, packId);
+				for (const p of pack?.providers ?? []) {
+					Object.assign(deploymentConfig, p.config ?? {});
+					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+					if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+				}
+			}
+			const plan = resolveRuntimeStartPlan(deploymentConfig);
+			startConfig = plan.config;
+			// An explicit body mode (a runtime manifest mode) overrides the
+			// deployment-derived plan mode; otherwise use the plan's mapped mode.
+			if (mode === undefined) mode = plan.mode;
 		}
 		try {
 			const status = action === "stop"
 				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
 				: action === "start"
-					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode })
-					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode });
+					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode, config: startConfig })
+					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode, config: startConfig });
 			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
 		} catch (err) { handleErr(err); }
 		return;
@@ -7139,34 +7195,9 @@ async function handleApiRoute(
 			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig };
 		};
 
-		// Map a deployment `mode` to a runtime start plan. `external` (and the
-		// absent/default) is a NON-Docker setup path — the provider talks to an
-		// operator-supplied URL, so NO container starts. `managed` runs the fully
-		// managed stack (managed-postgres); `managed-external-postgres` runs the API/web
-		// only against an operator Postgres (external-postgres), remapping the provider's
-		// `externalDatabaseUrl` onto the manifest's HINDSIGHT_API_DATABASE_URL secret.
-		const resolveRuntimeStartPlan = (
-			deploymentConfig: Record<string, unknown>,
-		): { start: boolean; mode?: string; config: Record<string, unknown> } => {
-			const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
-			const config: Record<string, unknown> = { ...deploymentConfig };
-			if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0) {
-				config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
-			}
-			// The managed Hindsight runtime declares its LLM API key as a USER-configured
-			// secret env ref (HINDSIGHT_API_LLM_API_KEY). Remap the provider's `llmApiKey`
-			// deployment-config field onto that env key so the supervisor's config overlay
-			// satisfies it without requiring the operator to also seed the global secret
-			// store. (A value set directly under HINDSIGHT_API_LLM_API_KEY still wins.)
-			if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0) {
-				config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
-			}
-			switch (mode) {
-				case "managed": return { start: true, mode: "managed-postgres", config };
-				case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
-				default: return { start: false, config };
-			}
-		};
+		// Deployment-mode → runtime start plan mapping is the module-level
+		// resolveRuntimeStartPlan() (the SINGLE source of truth shared with the
+		// /api/pack-runtimes/:id/{start,restart} REST routes — see finding #2).
 
 		// ── Sources ───────────────────────────────────────────────
 		// GET /api/marketplace/sources

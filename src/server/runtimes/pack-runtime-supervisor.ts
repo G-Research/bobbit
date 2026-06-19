@@ -21,6 +21,7 @@ import type { PackContributionResolver } from "../extension-host/pack-contributi
 import type { RuntimeContribution } from "../agent/pack-contributions.js";
 import {
 	validateRuntimeManifest,
+	resolveContainedComposePath,
 	type RuntimeManifest,
 } from "../runtime/manifest.js";
 import {
@@ -524,7 +525,14 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 interface ComposeTarget {
 	composeProject: string;
 	composeFile: string;
-	envFile: string;
+	/**
+	 * Rendered `.env` file to hand compose via `--env-file`. OPTIONAL: the
+	 * read-only status/list path omits it when no env file has been rendered yet
+	 * (a never-started runtime), so a fresh runtime can be inspected without first
+	 * rendering an env file / resolving deployment secrets. Control paths
+	 * (start/stop/logs/down) always carry a rendered env file.
+	 */
+	envFile?: string;
 }
 
 // ── Supervisor ───────────────────────────────────────────────────────────────
@@ -583,21 +591,43 @@ export class PackRuntimeSupervisor {
 		const out: PackRuntimeStatus[] = [];
 		for (const pack of this.registry.list(projectId)) {
 			for (const runtime of pack.runtimes) {
-				out.push(await this.status(pack.packId, runtime.id, projectId));
+				try {
+					out.push(await this.status(pack.packId, runtime.id, projectId));
+				} catch (err) {
+					// Isolate a single unusable runtime (e.g. an invalid manifest) so it
+					// can't blank the entire boot listing. Surface it as a structured
+					// `stopped` row carrying the reason rather than throwing the whole
+					// list. This is a READ path — it never starts Docker or mutates state.
+					const descriptor = this._descriptor(runtime, pack.packId, runtime.id, pack.packName);
+					out.push({
+						...descriptor,
+						status: "stopped",
+						composeProject: this.composeProjectFor(pack.packId),
+						message: (err as Error)?.message ?? String(err),
+					});
+				}
 			}
 		}
 		return out;
 	}
 
-	/** Current status for a single runtime (Docker queried via `compose ps`). */
+	/**
+	 * Current status for a single runtime (Docker queried via `compose ps`).
+	 *
+	 * READ-ONLY: this path NEVER renders an env file, allocates/persists a host
+	 * port, or resolves deployment secrets (e.g. HINDSIGHT_API_LLM_API_KEY). It
+	 * derives a minimal, non-mutating compose target — the collision-guarded
+	 * project name plus the contained compose file and this runtime's services —
+	 * and reuses an already-rendered `.env` file ONLY when one exists from a prior
+	 * start. So a fresh/default unstarted runtime reports `stopped` (or
+	 * `docker-unavailable`) without requiring any deployment config, and polling
+	 * status can never silently mutate runtime state. An invalid manifest still
+	 * propagates (→ PackRuntimeBadRequestError → 400) before any Docker command.
+	 */
 	async status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
-		// Derive the compose target (project + `-f composeFile` + `--env-file`) from
-		// the validated runtime invocation so status inspects the SAME compose
-		// context start uses, regardless of the gateway's cwd. Manifest/invocation
-		// errors propagate (→ PackRuntimeBadRequestError → 400).
-		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
+		const { target, services } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		return this._statusFromPs(descriptor, target, services);
 	}
 
@@ -1015,12 +1045,15 @@ export class PackRuntimeSupervisor {
 			healthPort >= 1 &&
 			healthPort <= 65535
 		);
-		// The supervisor's configured startup budget + poll interval govern the loop
-		// (both are injectable — the managed-runtime caller sizes them for image pull
-		// + DB init, and tests drive them deterministically). The manifest healthcheck
-		// supplies WHAT to poll (path + port), not the loop timing.
-		const timeoutMs = this.startupTimeoutMs;
-		const intervalMs = this.pollIntervalMs;
+		// The manifest healthcheck owns the loop timing when it declares it: a runtime
+		// that knows its own startup budget (e.g. Hindsight sizes
+		// `startupTimeoutMs: 120000` for image pull + DB init) and re-poll cadence
+		// (`intervalMs`) is honored as parsed by readRuntimeHealthcheck() (which only
+		// surfaces positive, finite values). The supervisor's injectable defaults are
+		// the fallback when the manifest omits/has an invalid value — and remain the
+		// sole governor for the compose-ps-only regime (no declared healthcheck).
+		const timeoutMs = healthcheck?.startupTimeoutMs ?? this.startupTimeoutMs;
+		const intervalMs = healthcheck?.intervalMs ?? this.pollIntervalMs;
 		const healthUrl = httpGated ? `http://127.0.0.1:${healthPort}${healthcheck!.path}` : "";
 		const deadline = this.now() + timeoutMs;
 		for (;;) {
@@ -1224,18 +1257,50 @@ export class PackRuntimeSupervisor {
 		}
 	}
 
-	/** Base `docker compose` args carrying the project + `-f`/`--env-file`. */
+	/**
+	 * Base `docker compose` args carrying the project + `-f composeFile`, plus
+	 * `--env-file` ONLY when the target has a rendered env file. The read-only
+	 * status/list path omits it for a never-started runtime so compose is never
+	 * handed a non-existent `--env-file` (which real Docker rejects) and so status
+	 * never forces an env render just to inspect a dormant runtime. Control paths
+	 * always pass a rendered env file.
+	 */
 	private _composeArgs(target: ComposeTarget, ...rest: string[]): string[] {
-		return [
-			"compose",
-			"-p",
-			target.composeProject,
-			"-f",
-			target.composeFile,
-			"--env-file",
-			target.envFile,
-			...rest,
-		];
+		const base = ["compose", "-p", target.composeProject, "-f", target.composeFile];
+		if (target.envFile) base.push("--env-file", target.envFile);
+		return [...base, ...rest];
+	}
+
+	/**
+	 * Build a READ-ONLY compose target for {@link status}/{@link list}. Resolves
+	 * ONLY the validated manifest (so an invalid/uncontained manifest still
+	 * propagates → 400) and the contained compose path + this runtime's owned
+	 * services. It NEVER renders an env file, allocates/persists a port, or
+	 * resolves deployment secrets. A `.env` file rendered by a prior start is
+	 * reused (accurate interpolation); otherwise `--env-file` is omitted entirely.
+	 */
+	private _readonlyComposeContext(
+		packId: string,
+		runtimeId: string,
+		contribution: RuntimeContribution,
+	): { target: ComposeTarget; services: string[] } {
+		const manifest = this._resolveManifest(contribution);
+		const composeFile = resolveContainedComposePath(
+			manifest.composeFile,
+			contribution.sourceFile,
+			contribution.packRoot,
+		);
+		if (composeFile === null) {
+			// Defensive: _resolveManifest already rejects an escaping composeFile.
+			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} composeFile escapes the pack root`);
+		}
+		const composeProject = this.composeProjectFor(packId);
+		const envFile = this._envFilePath(composeProject, runtimeId);
+		const persistedEnv = fs.existsSync(envFile) ? envFile : undefined;
+		return {
+			target: { composeProject, composeFile, ...(persistedEnv ? { envFile: persistedEnv } : {}) },
+			services: this._servicesForManifest(manifest),
+		};
 	}
 
 	/**

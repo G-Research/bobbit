@@ -219,10 +219,18 @@ const extension: ExtensionFactory = (pi) => {
 			}
 			const text = memories
 				.map((m, i) => {
-					const content = typeof (m as { content?: unknown })?.content === "string"
-						? (m as { content: string }).content
-						: JSON.stringify(m);
-					return `${i + 1}. ${content}`;
+					// Recall results follow the route/client shape `{ id, text, score, ... }`
+					// (hindsight-client.ts RecallMemory). Prefer the human-readable `text`;
+					// fall back to a legacy `content` field, then to JSON only as a last
+					// resort so a successful recall shows memory prose, not a JSON blob.
+					const mm = m as { text?: unknown; content?: unknown };
+					const body =
+						typeof mm?.text === "string" && mm.text.length > 0
+							? mm.text
+							: typeof mm?.content === "string" && mm.content.length > 0
+								? mm.content
+								: JSON.stringify(m);
+					return `${i + 1}. ${body}`;
 				})
 				.join("\n");
 			return {

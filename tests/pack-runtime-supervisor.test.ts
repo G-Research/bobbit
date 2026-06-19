@@ -465,6 +465,99 @@ describe("PackRuntimeSupervisor HTTP startup readiness", () => {
 		assert.equal(readRuntimeHealthcheck({}), null);
 		assert.equal(readRuntimeHealthcheck({ healthcheck: { path: "/health" } }), null, "missing port → null");
 		assert.equal(readRuntimeHealthcheck({ healthcheck: { port: "API_PORT" } }), null, "missing path → null");
+		// Invalid (non-positive / non-finite) timing fields are dropped, NOT carried —
+		// so the supervisor falls back to its own defaults for those (finding #3).
+		assert.deepEqual(
+			readRuntimeHealthcheck({ healthcheck: { port: "API_PORT", path: "/health", intervalMs: 0, startupTimeoutMs: -1 } }),
+			{ port: "API_PORT", path: "/health" },
+		);
+	});
+});
+
+// ── Healthcheck loop timing honours the manifest (finding #3) ─────────────────
+//
+// The HTTP readiness loop must use the manifest healthcheck's `startupTimeoutMs`
+// and `intervalMs` when declared (as parsed by readRuntimeHealthcheck — positive,
+// finite values only), falling back to the supervisor defaults only when absent
+// or invalid. A runtime that knows its own startup budget (e.g. Hindsight's
+// 120s) must not be cut short by a smaller supervisor default, and vice-versa.
+
+describe("PackRuntimeSupervisor healthcheck loop timing (finding #3)", () => {
+	it("honours the manifest startupTimeoutMs over a (much larger) supervisor default", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		let probes = 0;
+		const httpProbe = async () => { probes++; return 0; }; // never ready
+		let t = 0;
+		const sup = makeSupervisor(docker.executor, {
+			// Manifest says: give up after 30ms, re-poll every 5ms.
+			contribution: makeHealthContribution({ intervalMs: 5, startupTimeoutMs: 30 }),
+			httpProbe,
+			now: () => t,
+			sleep: async (ms: number) => { t += ms; },
+			// Supervisor default is enormous — if it (wrongly) governed the loop the
+			// runtime would poll ~200k times before giving up.
+			startupTimeoutMs: 1_000_000,
+			pollIntervalMs: 5,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "unhealthy");
+		// 30ms budget / 5ms interval ⇒ a small, bounded number of probes (proves the
+		// manifest's 30ms — not the 1_000_000ms default — bounded the loop).
+		assert.ok(probes > 0 && probes <= 12, `expected a manifest-bounded probe count, got ${probes}`);
+	});
+
+	it("honours the manifest intervalMs for both the re-poll sleep and the probe timeout", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		const probeTimeouts: number[] = [];
+		const httpProbe = async (_url: string, timeoutMs: number) => { probeTimeouts.push(timeoutMs); return 0; };
+		const sleeps: number[] = [];
+		let t = 0;
+		const sup = makeSupervisor(docker.executor, {
+			contribution: makeHealthContribution({ intervalMs: 5, startupTimeoutMs: 20 }),
+			httpProbe,
+			now: () => t,
+			sleep: async (ms: number) => { sleeps.push(ms); t += ms; },
+			// Supervisor defaults differ from the manifest so a regression to them is visible.
+			startupTimeoutMs: 9999,
+			pollIntervalMs: 999,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "unhealthy");
+		// Re-poll sleeps use the MANIFEST interval (5), never the supervisor 999.
+		assert.ok(sleeps.length > 0);
+		assert.ok(sleeps.every((s) => s === 5), `expected all sleeps to be the manifest interval 5, got ${sleeps}`);
+		// The HTTP probe timeout is the manifest interval too.
+		assert.ok(probeTimeouts.every((s) => s === 5), `expected probe timeouts of 5, got ${probeTimeouts}`);
+	});
+
+	it("falls back to supervisor defaults when the manifest omits/invalidates the timing", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		const httpProbe = async () => 0; // never ready
+		const sleeps: number[] = [];
+		let t = 0;
+		const sup = makeSupervisor(docker.executor, {
+			// Invalid timing values ⇒ readRuntimeHealthcheck drops them ⇒ fallback.
+			contribution: makeHealthContribution({ intervalMs: 0, startupTimeoutMs: 0 }),
+			httpProbe,
+			now: () => t,
+			sleep: async (ms: number) => { sleeps.push(ms); t += ms; },
+			startupTimeoutMs: 25,
+			pollIntervalMs: 7,
+		});
+		const st = await sup.start(PACK_ID, RUNTIME_ID);
+		assert.equal(st.status, "unhealthy");
+		// Loop used the SUPERVISOR interval (7) since the manifest had no valid one.
+		assert.ok(sleeps.length > 0);
+		assert.ok(sleeps.every((s) => s === 7), `expected supervisor-default sleeps of 7, got ${sleeps}`);
 	});
 });
 
@@ -671,10 +764,16 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.status(MULTI_PACK, "beta");
 		const psCall = docker.calls.find((c) => c.args.includes("ps"))!;
+		// READ-ONLY status on a never-started runtime carries the project + compose
+		// file but NO `--env-file` (none rendered yet) — it never renders an env file
+		// just to inspect a dormant runtime. Still scoped to beta's own services.
 		assert.deepEqual(psCall.args, [
-			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("beta")), "ps", "--format", "json", "b1", "b2",
+			"compose", "-p", PROJECT, "-f", COMPOSE_ABS, "ps", "--format", "json", "b1", "b2",
 		]);
+		assert.ok(!psCall.args.includes("--env-file"));
 		assert.ok(!psCall.args.includes("a1"));
+		// Read-only status never wrote a rendered env file for beta.
+		assert.equal(fs.existsSync(envFileFor("beta")), false);
 	});
 
 	it("logs scope to the runtime's own services only", async () => {
@@ -750,6 +849,20 @@ describe("PackRuntimeSupervisor invalid-manifest handling", () => {
 		const sup = makeBadSupervisor(docker.executor, ESCAPING);
 		await assert.rejects(() => sup.status(BAD_PACK, "bad"), PackRuntimeBadRequestError);
 		assert.equal(docker.calls.length, 0);
+	});
+
+	it("list() isolates an invalid-manifest runtime as a structured stopped row (no throw)", async () => {
+		// A single unusable runtime must not blank the whole boot listing: list()
+		// catches the per-runtime failure and surfaces a `stopped` row carrying the
+		// reason instead of throwing (finding #1).
+		const docker = makeDocker({ ps: () => ok("") });
+		const sup = makeBadSupervisor(docker.executor, ESCAPING);
+		const all = await sup.list();
+		assert.equal(all.length, 1);
+		assert.equal(all[0]!.status, "stopped");
+		assert.match(all[0]!.message ?? "", /escapes the pack root|invalid runtime manifest/);
+		// The bad runtime never reached a Docker command.
+		assert.equal(docker.countSub("ps"), 0);
 	});
 
 	it("stop rejects an invalid manifest and never runs an unscoped whole-project stop", async () => {
@@ -970,6 +1083,77 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 			(err: unknown) => err instanceof PackRuntimeBadRequestError && /USER_KEY/.test((err as Error).message),
 		);
 		assert.equal(docker.countSub("up"), 0);
+	});
+
+	it("status() for an unstarted runtime needs NO deployment secrets and never mutates state (finding #1)", async () => {
+		// `ps` returns empty (nothing running). The runtime's manifest declares a
+		// REQUIRED user secret (USER_KEY) + a generated secret + an allocated port —
+		// none of which are configured. A read-only status must NOT try to resolve
+		// them (which would 400), render an env file, or allocate/persist a port.
+		const docker = makeDocker({ ps: () => ok("") });
+		const contribution = makeEnvContribution();
+		const secrets = inMemorySecrets(); // USER_KEY absent ⇒ a start would 400
+		const portStore = new FilePortStore(path.join(tmp, "ro-status-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "ro-status-data"),
+			secretsStore: secrets,
+			portStore,
+		});
+
+		const st = await sup.status("envpack", "svc");
+		assert.equal(st.status, "stopped"); // structured status, no throw
+
+		// No mutation: no rendered env file, no allocated/persisted port, no generated secret.
+		const project = "bobbit-pack-envpack-testsuffix";
+		const envFile = path.join(tmp, "ro-status-data", project, "svc.env");
+		assert.equal(fs.existsSync(envFile), false, "status must not render an env file");
+		assert.equal(portStore.get(packRuntimePersistKey("envpack", "svc", "WEB_PORT")), undefined, "status must not allocate a port");
+		assert.equal(secrets.data[packRuntimePersistKey("envpack", "svc", "GEN_SECRET")], undefined, "status must not generate a secret");
+
+		// `ps` carried the project + compose file but NO --env-file (none rendered).
+		const psCall = docker.calls.find((c) => c.args.includes("ps"))!;
+		assert.ok(!psCall.args.includes("--env-file"));
+
+		// list() over the same registry is equally read-only and secret-free.
+		const all = await sup.list();
+		assert.equal(all.length, 1);
+		assert.equal(all[0]!.status, "stopped");
+		assert.equal(fs.existsSync(envFile), false);
+	});
+
+	it("status() reuses a rendered env file once a start has produced one (finding #1)", async () => {
+		// After a real start renders the env file, read-only status PREFERS it so
+		// compose interpolation is accurate — it still never re-renders or rotates ports.
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"api","State":"running","Health":"healthy"}'),
+		});
+		const contribution = makeEnvContribution();
+		const portStore = new FilePortStore(path.join(tmp, "ro-reuse-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeEnvRegistry(contribution),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "ro-reuse-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: inMemorySecrets({ USER_KEY: "k" }),
+			portStore,
+		});
+		await sup.start("envpack", "svc");
+		const project = "bobbit-pack-envpack-testsuffix";
+		const envFile = path.join(tmp, "ro-reuse-data", project, "svc.env");
+		assert.ok(fs.existsSync(envFile));
+
+		docker.calls.length = 0;
+		await sup.status("envpack", "svc");
+		const psCall = docker.calls.find((c) => c.args.includes("ps"))!;
+		// Now that an env file exists, status reuses it via --env-file.
+		assert.ok(psCall.args.includes("--env-file"));
+		assert.ok(psCall.args.includes(envFile));
 	});
 
 	it("control paths reuse the start config overlay so config-only secrets re-resolve (finding #2)", async () => {
