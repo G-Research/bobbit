@@ -72,6 +72,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	// intentionally NOT listed here — secrets must never be archived.
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
 	"state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
+	"state/pack-runtimes/",       // server.ts (PackRuntimeSupervisor rendered env files + ports.json for live Docker runtimes)
 ];
 
 export interface ArchiveResult {
