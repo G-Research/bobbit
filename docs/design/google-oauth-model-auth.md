@@ -141,14 +141,24 @@ This is the surface the official **Gemini CLI** uses for "Login with Google" (pe
 free Code Assist tier). Verified from `google-gemini/gemini-cli`
 (`packages/core/src/code_assist/oauth2.ts` and `server.ts`):
 
-- **OAuth client (installed app, public — secret is intentionally non-secret per Google's installed-
-  app guidance):**
+- **OAuth client decision (installed app, public — secret is intentionally non-secret per Google's
+  installed-app guidance): reuse the official Gemini CLI OAuth client, not a Bobbit-owned GCP OAuth
+  client.**
   - client_id: `681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com`
   - client_secret: a public `GOCSPX-…` installed-app secret published in the Gemini CLI source
     (`packages/core/src/code_assist/oauth2.ts`, `OAUTH_CLIENT_SECRET`). Per Google's installed-app
     guidance it is not treated as secret; the implementation should read the literal value from that
     upstream source. (Not pasted here so GitHub push-protection / secret-scanning does not flag the
     design doc.)
+  - **ToS / feasibility rationale:** this feature intentionally follows the same Google-supported
+    installed-app flow and Code Assist API surface that Gemini CLI ships for user-initiated login.
+    Bobbit must identify this as a Gemini CLI / Code Assist compatible account path in UI/docs and
+    must not imply it unlocks the Gemini web app, web-app subscription entitlements, or the
+    `generativelanguage.googleapis.com` API-key provider. A Bobbit-owned OAuth client is deferred
+    because third-party access to Code Assist scopes/brand approval is not guaranteed; if Google
+    later rejects or revokes use of the Gemini CLI public client by non-CLI apps, the implementation
+    must disable the Google account row with a clear limitation message while keeping API-key
+    Gemini auth available.
 - **Scopes:**
   - `https://www.googleapis.com/auth/cloud-platform`
   - `https://www.googleapis.com/auth/userinfo.email`
@@ -201,11 +211,15 @@ Gemini subscription cannot be used via an official model API, surface that clear
 - The runtime is implemented **natively in Bobbit** (option B below), not via pi-ai, because pi-ai
   ships no Code Assist provider and we should not block on an upstream change.
 
-Provider-id decision (recorded so it is not re-litigated): native Bobbit flow in `oauth.ts` rather
-than a pi-ai `registerOAuthProvider` custom provider — the Anthropic path is already native, the
-loopback+manual-paste UX is gateway-specific, and it avoids coupling login to an upstream provider
-registry. pi-ai's `registerOAuthProvider` remains available if we later want agent-session parity
-through pi-ai (§4.3).
+Provider-id / flow decision (recorded so it is not re-litigated): native Bobbit flow in `oauth.ts`
+rather than the existing pi-ai external-provider path. Reason: the installed pi-ai OAuth registry has
+no Google / Gemini Code Assist provider (`getOAuthProvider("google")` returns `undefined`) and no
+Code Assist runtime, while Bobbit's gateway already owns the Account-tab loopback/manual-paste UX and
+provider-partitioned status endpoints. The implementation should still reuse the existing
+`pendingFlows` map, TTL cleanup, provider mismatch checks, and redaction helpers; it should add a
+Google flow record shape, not a parallel untracked lifecycle. pi-ai's `registerOAuthProvider` remains
+available only for later agent-session parity (§4.3), after Bobbit has a working Code Assist
+runtime.
 
 ---
 
@@ -249,11 +263,17 @@ through pi-ai (§4.3).
    id; returns `{ authenticated, expires, provider }` only. Add `email` to the returned shape **only
    if** we decide to show the signed-in account; it is non-secret. Tokens stay omitted.
 8. `oauthFlowStatus`: generic; the provider cross-check already guards isolation.
-9. **Generalize refresh**: rename/extend `refreshOAuthToken()` to take a provider, or add
-   `refreshGoogleToken()`. For `google-gemini-cli`: skip if `Date.now() < expires`; else POST
-   `grant_type=refresh_token, refresh_token, client_id, client_secret` to `GOOGLE_TOKEN_URL`; on
-   400/401/403 delete the stored entry; on 5xx/429/network keep it (mirror Anthropic's policy).
-   Persist new `{access, refresh: new ?? old, expires}` and `clearOAuthCache()`.
+9. **Refresh implementation: keep the existing no-arg Anthropic API stable and add a new Google-
+   specific helper.** Do **not** change the public signature of `refreshOAuthToken()` in this
+   iteration; current callers are `src/server/agent/model-completion.ts`,
+   `src/server/agent/name-generator.ts`, and `src/server/agent/title-generator.ts`, all of which are
+   Anthropic-oriented today and must keep working unchanged. Add `refreshOAuthTokenForProvider(provider)`
+   or `refreshGoogleOAuthToken()` as an internal provider-aware helper, then optionally make the
+   existing no-arg function delegate to it with `provider="anthropic"`. For `google-gemini-cli`: skip
+   if `Date.now() < expires`; else POST `grant_type=refresh_token, refresh_token, client_id,
+   client_secret` to `GOOGLE_TOKEN_URL`; on 400/401/403 delete the stored entry; on 5xx/429/network
+   keep it (mirror Anthropic's policy). Persist new `{access, refresh: new ?? old, expires}` and
+   `clearOAuthCache()`.
 
 ### 4.2 Settings Account row — `src/app/settings-page.ts`
 
@@ -313,15 +333,22 @@ is still met.
 
 ### 4.4 Model registry / auth detection — `src/server/agent/model-registry.ts`
 
-- `ENV_MAP` already has `google-gemini-cli`. `detectProviderAuth("google-gemini-cli", prefs)` will
-  return true once `auth.json["google-gemini-cli"]` exists (via `hasOAuthCredentials`). Confirm
-  `hasOAuthCredentials` treats a `{type:"oauth"}` entry whose `access` may be expired correctly —
-  for the **selector** we want "authenticated = credential present" (expired is still "logged in,
-  needs refresh"), matching how Anthropic behaves. No change needed beyond emitting the models.
-- Emit `google-gemini-cli` Gemini models: either map the same Gemini ids as the `google` provider
-  under provider `google-gemini-cli` with `api:"google-code-assist"` (for path (b)(i)), or, in the
-  fallback-only iteration, surface them through provider `google` (API key) unchanged. Gemini
-  ranking in the priority function already covers the ids.
+- Add an explicit OAuth-capability guard so generic OAuth credentials cannot over-authenticate API-
+  key-only providers. Concrete mechanism: introduce `const OAUTH_AUTHENTICATED_PROVIDERS = new Set([
+  "anthropic", "openai-codex", "google-gemini-cli" ])` (or equivalent metadata on each provider) and
+  have `detectProviderAuth` call `hasOAuthCredentials(provider)` only when the provider is in that
+  allow-list. This preserves existing Anthropic/OpenAI behavior, allows Code Assist models to show as
+  authenticated, and prevents `auth.json["google-gemini-cli"]` from making API-key-only `google`
+  Developer API models look usable.
+- `ENV_MAP` already has `google-gemini-cli`. `detectProviderAuth("google-gemini-cli", prefs)` should
+  return true once `auth.json["google-gemini-cli"]` exists (via the allow-listed OAuth credential
+  path). Confirm the selector treats a `{type:"oauth"}` entry whose `access` may be expired as
+  "authenticated = credential present" (expired is still "logged in, needs refresh"), matching how
+  Anthropic behaves.
+- Emit `google-gemini-cli` Gemini models by mapping the Code Assist-supported Gemini ids under
+  provider `google-gemini-cli` with `api:"google-code-assist"` (for path (b)(i)). Keep the existing
+  `google` provider models API-key-only. Gemini ranking in the priority function already covers the
+  ids.
 
 ### 4.5 API-key fallback discoverability (Settings drift fix) — `src/app/settings-page.ts`
 
