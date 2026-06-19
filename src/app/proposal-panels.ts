@@ -1390,22 +1390,45 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 // ============================================================================
 function renderProposalSubgoalsTab(config: GoalFormConfig): TemplateResult {
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
+	const sectionHeading = (title: string, desc: string, testid: string) => html`
+		<div class="flex flex-col gap-0.5" data-testid=${testid}>
+			<h3 class="text-xs font-semibold text-foreground">${title}</h3>
+			<p class="text-[11px] text-muted-foreground leading-snug">${desc}</p>
+		</div>
+	`;
+	const hostControls = config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange;
 	return html`
-		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-4"
+		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-5"
 			role="tabpanel"
 			id="goal-proposal-panel-subgoals"
 			aria-labelledby="goal-proposal-tab-subgoals"
 			data-testid="goal-proposal-panel-subgoals">
-			<div class="flex flex-col gap-2.5">
+
+			<!-- Section 1: where this NEW goal lives — attach it under an existing goal. -->
+			<section class="flex flex-col gap-2.5" data-testid="goal-form-attach-section">
+				${sectionHeading(
+					"Attach to an existing goal",
+					"Choose where this new goal lives. Pick an existing goal to nest this one beneath it, or leave None to create it at the top level.",
+					"goal-form-attach-heading",
+				)}
 				${renderParentPickerRow(config, lblCls)}
 				${renderSubgoalBreadcrumb(config)}
-				${config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange ? html`
+			</section>
+
+			<!-- Section 2: whether the NEW goal may host its OWN future children. -->
+			${hostControls ? html`
+				<section class="flex flex-col gap-2.5 border-t border-border/60 pt-4" data-testid="goal-form-host-section">
+					${sectionHeading(
+						"Allow this new goal to host sub-goals",
+						"Whether the goal you're creating may spawn its own child sub-goals later. This is about the new goal — it does not change the parent selected above.",
+						"goal-form-host-heading",
+					)}
 					<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-0.5">
 						${renderSubgoalsToggle(config)}
 					</div>
-				` : ""}
-				${renderSubgoalOrchestration(config)}
-			</div>
+					${renderSubgoalOrchestration(config)}
+				</section>
+			` : ""}
 		</div>
 	`;
 }

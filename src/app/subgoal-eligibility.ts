@@ -78,7 +78,7 @@ export function parentHostEligibility(
 			eligible: false,
 			reason: "subgoals-off",
 			suffix: "(sub-goals off)",
-			hint: "This goal doesn't allow sub-goals. Open its dashboard → Children tab and turn on \u201CAllow sub-goals\u201D, then it can host children.",
+			hint: "This parent doesn't allow sub-goals yet, so this new goal can't be attached under it. Open the parent's dashboard → Children tab and turn on \u201CAllow sub-goals\u201D, then it can host this goal.",
 		};
 	}
 	const depth = nestingDepthOf(goal.id, goals);
@@ -88,7 +88,7 @@ export function parentHostEligibility(
 			eligible: false,
 			reason: "at-cap",
 			suffix: "(at nesting cap)",
-			hint: `This goal is at depth ${depth}; the nesting cap (${maxDepth}) leaves no room for sub-goals below it. Pick a shallower parent.`,
+			hint: `This parent is at depth ${depth}; the nesting cap (${maxDepth}) leaves no room to attach this goal below it. Pick a shallower parent.`,
 		};
 	}
 	return { eligible: true };
