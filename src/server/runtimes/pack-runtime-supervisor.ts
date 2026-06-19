@@ -352,6 +352,19 @@ export function mapServicesToState(services: PackRuntimeServiceStatus[]): PackRu
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The compose addressing context shared by every Docker command for a runtime:
+ * the collision-guarded project name plus the validated invocation's resolved
+ * `composeFile` and rendered `envFile`. Carrying `-f`/`--env-file` on EVERY
+ * call (not just `up`) means status/stop/logs inspect/control the correct
+ * compose context regardless of the gateway's cwd.
+ */
+interface ComposeTarget {
+	composeProject: string;
+	composeFile: string;
+	envFile: string;
+}
+
 // ── Supervisor ───────────────────────────────────────────────────────────────
 
 export class PackRuntimeSupervisor {
@@ -416,8 +429,12 @@ export class PackRuntimeSupervisor {
 	async status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
-		const services = this._runtimeServices(contribution);
-		return this._statusFromPs(descriptor, this.composeProjectFor(packId), services);
+		// Derive the compose target (project + `-f composeFile` + `--env-file`) from
+		// the validated runtime invocation so status inspects the SAME compose
+		// context start uses, regardless of the gateway's cwd. Manifest/invocation
+		// errors propagate (→ PackRuntimeBadRequestError → 400).
+		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
+		return this._statusFromPs(descriptor, target, services);
 	}
 
 	/** Idempotent start. Fast-paths when already running; dedupes concurrent starts. */
@@ -451,19 +468,20 @@ export class PackRuntimeSupervisor {
 	): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
-		const composeProject = this.composeProjectFor(packId);
-		// Scope the stop to THIS runtime's services so one runtime cannot stop every
-		// service in a multi-runtime pack project (§ collision guard).
-		const services = this._runtimeServices(contribution);
+		// Derive the compose target + this runtime's owned services from the
+		// validated invocation. A manifest validation/invocation failure propagates
+		// (it never degrades to an unscoped whole-pack `stop`); the service list is
+		// empty ONLY for a valid manifest that truly declares no services.
+		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
 		try {
-			await this._exec(["compose", "-p", composeProject, "stop", ...services]);
+			await this._exec(this._composeArgs(target, "stop", ...services));
 		} catch (err) {
 			if (isEnoent(err)) {
-				return { ...descriptor, status: "docker-unavailable", composeProject, message: "docker is not available" };
+				return { ...descriptor, status: "docker-unavailable", composeProject: target.composeProject, message: "docker is not available" };
 			}
 			throw err;
 		}
-		return this._statusFromPs(descriptor, composeProject, services);
+		return this._statusFromPs(descriptor, target, services);
 	}
 
 	/** Stop then start a runtime. */
@@ -484,15 +502,15 @@ export class PackRuntimeSupervisor {
 	): Promise<string> {
 		// Validate the runtime exists (404 mapping) before touching Docker.
 		const { contribution } = this._lookup(packId, runtimeId, opts.projectId);
-		const composeProject = this.composeProjectFor(packId);
 		const tail = clampTail(opts.tail);
-		// Scope logs to THIS runtime's services so one runtime cannot read every
-		// service's logs in a multi-runtime pack project.
-		const services = this._runtimeServices(contribution);
+		// Derive the compose target + this runtime's owned services from the
+		// validated invocation. Invalid manifests propagate rather than degrading to
+		// an unscoped whole-pack `logs`.
+		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
 		try {
-			const { stdout } = await this._exec([
-				"compose", "-p", composeProject, "logs", "--tail", String(tail), ...services,
-			]);
+			const { stdout } = await this._exec(
+				this._composeArgs(target, "logs", "--tail", String(tail), ...services),
+			);
 			return stdout;
 		} catch (err) {
 			// Surface a consistent docker-unavailable failure instead of hiding a
@@ -534,25 +552,24 @@ export class PackRuntimeSupervisor {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
-		const envFile = path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.env`);
+		const envFile = this._envFilePath(composeProject, runtimeId);
 
 		const { invocation, modeKey } = await this._buildInvocation(contribution, envFile, opts.mode);
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 
-		const upArgs = [
-			"compose",
-			"-p",
+		const target: ComposeTarget = {
 			composeProject,
-			"-f",
-			invocation.composeFile,
-			"--env-file",
-			invocation.envFile,
+			composeFile: invocation.composeFile,
+			envFile: invocation.envFile,
+		};
+		const upArgs = this._composeArgs(
+			target,
 			...invocation.profiles.flatMap((p) => ["--profile", p]),
 			"up",
 			"-d",
 			...invocation.services,
-		];
+		);
 
 		try {
 			await this._exec(upArgs);
@@ -569,18 +586,18 @@ export class PackRuntimeSupervisor {
 			throw err;
 		}
 
-		return this._pollUntilHealthy(descriptor, composeProject, modeKey, invocation.services);
+		return this._pollUntilHealthy(descriptor, target, modeKey, invocation.services);
 	}
 
 	private async _pollUntilHealthy(
 		descriptor: PackRuntimeDescriptor,
-		composeProject: string,
+		target: ComposeTarget,
 		mode: string,
 		services: string[],
 	): Promise<PackRuntimeStatus> {
 		const deadline = this.now() + this.startupTimeoutMs;
 		for (;;) {
-			const status = await this._statusFromPs(descriptor, composeProject, services, mode);
+			const status = await this._statusFromPs(descriptor, target, services, mode);
 			if (
 				status.status === "running" ||
 				status.status === "unhealthy" ||
@@ -593,7 +610,7 @@ export class PackRuntimeSupervisor {
 					...descriptor,
 					status: "unhealthy",
 					mode,
-					composeProject,
+					composeProject: target.composeProject,
 					services: status.services,
 					message: `runtime did not become healthy within ${this.startupTimeoutMs}ms`,
 				};
@@ -604,22 +621,24 @@ export class PackRuntimeSupervisor {
 
 	private async _statusFromPs(
 		descriptor: PackRuntimeDescriptor,
-		composeProject: string,
+		target: ComposeTarget,
 		scopeServices: string[],
 		mode?: string,
 	): Promise<PackRuntimeStatus> {
 		try {
 			// Scope `ps` to this runtime's services so status never reflects (or maps
-			// the health of) sibling runtimes sharing the pack compose project.
-			const { stdout } = await this._exec([
-				"compose", "-p", composeProject, "ps", "--format", "json", ...scopeServices,
-			]);
+			// the health of) sibling runtimes sharing the pack compose project. The
+			// `-f composeFile`/`--env-file` come from the validated invocation so the
+			// inspected compose context is correct regardless of the gateway cwd.
+			const { stdout } = await this._exec(
+				this._composeArgs(target, "ps", "--format", "json", ...scopeServices),
+			);
 			const services = parseComposePs(stdout);
 			return {
 				...descriptor,
 				status: mapServicesToState(services),
 				mode,
-				composeProject,
+				composeProject: target.composeProject,
 				services,
 			};
 		} catch (err) {
@@ -628,7 +647,7 @@ export class PackRuntimeSupervisor {
 					...descriptor,
 					status: "docker-unavailable",
 					mode,
-					composeProject,
+					composeProject: target.composeProject,
 					message: "docker is not available",
 				};
 			}
@@ -691,21 +710,70 @@ export class PackRuntimeSupervisor {
 	 * declared `services` (a mode's `omitServices` only changes what `up` starts,
 	 * not what the runtime manages). Used to scope `ps`/`stop`/`logs` so one
 	 * runtime cannot read or stop a sibling runtime's services in a shared
-	 * pack-scoped compose project. Empty (project-wide) only when no manifest
-	 * mode declares services.
+	 * pack-scoped compose project.
+	 *
+	 * The empty (project-wide) list is reserved EXCLUSIVELY for a successfully
+	 * validated manifest that genuinely declares no services. Manifest validation
+	 * failures must NEVER reach here as `[]` — they propagate from
+	 * {@link _resolveManifest}/{@link _buildInvocation} (callers go through
+	 * {@link _composeContext}), so an invalid/uncontained manifest can never
+	 * silently broaden a `stop`/`logs` to the whole pack project.
 	 */
-	private _runtimeServices(contribution: RuntimeContribution): string[] {
-		let manifest: RuntimeManifest;
-		try {
-			manifest = this._resolveManifest(contribution);
-		} catch {
-			return [];
-		}
+	private _servicesForManifest(manifest: RuntimeManifest): string[] {
 		const set = new Set<string>();
 		for (const mode of Object.values(manifest.modes ?? {})) {
 			for (const svc of mode.services ?? []) set.add(svc);
 		}
 		return [...set];
+	}
+
+	/** Rendered `.env` file path for a runtime (one dir per compose project). */
+	private _envFilePath(composeProject: string, runtimeId: string): string {
+		return path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.env`);
+	}
+
+	/** Base `docker compose` args carrying the project + `-f`/`--env-file`. */
+	private _composeArgs(target: ComposeTarget, ...rest: string[]): string[] {
+		return [
+			"compose",
+			"-p",
+			target.composeProject,
+			"-f",
+			target.composeFile,
+			"--env-file",
+			target.envFile,
+			...rest,
+		];
+	}
+
+	/**
+	 * Build the compose target (project + resolved `composeFile` + rendered
+	 * `envFile`) and the runtime's owned service list for read/control commands
+	 * (`status`/`stop`/`logs`). Derives everything from the VALIDATED runtime
+	 * invocation so these commands address the same compose context `start` uses
+	 * regardless of the gateway cwd, and so a manifest validation/invocation
+	 * failure propagates (→ 400/500) instead of silently falling back to an
+	 * unscoped whole-pack command. The default mode supplies the env file (the
+	 * compose file is mode-independent; the owned-service list is the union of all
+	 * modes).
+	 */
+	private async _composeContext(
+		packId: string,
+		runtimeId: string,
+		contribution: RuntimeContribution,
+	): Promise<{ target: ComposeTarget; services: string[] }> {
+		const composeProject = this.composeProjectFor(packId);
+		const envFile = this._envFilePath(composeProject, runtimeId);
+		const { manifest, invocation } = await this._buildInvocation(contribution, envFile);
+		renderRuntimeEnvFile(invocation.envFile, invocation.env);
+		return {
+			target: {
+				composeProject,
+				composeFile: invocation.composeFile,
+				envFile: invocation.envFile,
+			},
+			services: this._servicesForManifest(manifest),
+		};
 	}
 
 	/**

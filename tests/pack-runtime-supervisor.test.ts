@@ -121,6 +121,16 @@ function makeDocker(handlers: Partial<Record<string, SubHandler>>) {
 
 const ok = (stdout = ""): DockerExecResult => ({ stdout, stderr: "" });
 
+/**
+ * Expected base of EVERY `docker compose` invocation: the project plus the
+ * `-f composeFile`/`--env-file` derived from the validated runtime invocation.
+ * status/stop/logs must all carry these (not just `up`) so they address the
+ * correct compose context regardless of the gateway cwd.
+ */
+function composeBase(project: string, composeAbs: string, envFile: string): string[] {
+	return ["compose", "-p", project, "-f", composeAbs, "--env-file", envFile];
+}
+
 function makeSupervisor(
 	executor: DockerExecutor,
 	opts: Partial<ConstructorParameters<typeof PackRuntimeSupervisor>[0]> = {},
@@ -351,8 +361,11 @@ describe("PackRuntimeSupervisor.stop / restart", () => {
 		assert.equal(st.status, "stopped");
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
-		// Scoped to this runtime's service (`db`) — not the whole pack project.
-		assert.deepEqual(stopCall.args, ["compose", "-p", project, "stop", "db"]);
+		const composeAbs = path.join(tmp, "packs", PACK_ID, "runtimes", "compose.yaml");
+		const envFile = path.join(tmp, "data", project, `${RUNTIME_ID}.env`);
+		// Carries the compose file/env file AND is scoped to this runtime's service
+		// (`db`) — not the whole pack project.
+		assert.deepEqual(stopCall.args, [...composeBase(project, composeAbs, envFile), "stop", "db"]);
 	});
 
 	it("restart stops then starts", async () => {
@@ -380,8 +393,10 @@ describe("PackRuntimeSupervisor.logs", () => {
 		assert.equal(out, "hello logs");
 		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
-		// Scoped to this runtime's service (`db`).
-		assert.deepEqual(logCall.args, ["compose", "-p", project, "logs", "--tail", "42", "db"]);
+		const composeAbs = path.join(tmp, "packs", PACK_ID, "runtimes", "compose.yaml");
+		const envFile = path.join(tmp, "data", project, `${RUNTIME_ID}.env`);
+		// Carries the compose file/env file AND is scoped to this runtime's service (`db`).
+		assert.deepEqual(logCall.args, [...composeBase(project, composeAbs, envFile), "logs", "--tail", "42", "db"]);
 	});
 });
 
@@ -483,13 +498,17 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 	}
 
 	const PROJECT = `bobbit-pack-${MULTI_PACK}-testsuffix`;
+	const COMPOSE_ABS = path.join(tmp, "packs", MULTI_PACK, "runtimes", "compose.yaml");
+	const envFileFor = (runtimeId: string) => path.join(tmp, "multi-data", PROJECT, `${runtimeId}.env`);
 
 	it("stop scopes to the runtime's own services only", async () => {
 		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.stop(MULTI_PACK, "alpha");
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
-		assert.deepEqual(stopCall.args, ["compose", "-p", PROJECT, "stop", "a1", "a2"]);
+		assert.deepEqual(stopCall.args, [
+			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("alpha")), "stop", "a1", "a2",
+		]);
 		// Sibling runtime's services are never passed.
 		assert.ok(!stopCall.args.includes("b1"));
 		assert.ok(!stopCall.args.includes("b2"));
@@ -500,7 +519,9 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.status(MULTI_PACK, "beta");
 		const psCall = docker.calls.find((c) => c.args.includes("ps"))!;
-		assert.deepEqual(psCall.args, ["compose", "-p", PROJECT, "ps", "--format", "json", "b1", "b2"]);
+		assert.deepEqual(psCall.args, [
+			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("beta")), "ps", "--format", "json", "b1", "b2",
+		]);
 		assert.ok(!psCall.args.includes("a1"));
 	});
 
@@ -509,8 +530,106 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.logs(MULTI_PACK, "alpha", { tail: 10 });
 		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
-		assert.deepEqual(logCall.args, ["compose", "-p", PROJECT, "logs", "--tail", "10", "a1", "a2"]);
+		assert.deepEqual(logCall.args, [
+			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("alpha")), "logs", "--tail", "10", "a1", "a2",
+		]);
 		assert.ok(!logCall.args.includes("b1"));
+	});
+});
+
+// ── Invalid-manifest propagation (no whole-project fallback) ────────────────
+
+describe("PackRuntimeSupervisor invalid-manifest handling", () => {
+	const BAD_PACK = "badpack";
+
+	/** A contribution whose carried manifest fails deep P1 validation. */
+	function makeBadContribution(manifest: Record<string, unknown>): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", BAD_PACK);
+		return {
+			id: "bad",
+			title: "bad",
+			description: "bad",
+			listName: "bad",
+			sourceFile: path.join(packRoot, "runtimes", "bad.yaml"),
+			packRoot,
+			manifest,
+		} as RuntimeContribution;
+	}
+
+	function makeBadRegistry(contribution: RuntimeContribution): PackContributionResolver {
+		const pack = {
+			packId: BAD_PACK,
+			packName: "Bad",
+			packRoot: contribution.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === BAD_PACK ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === BAD_PACK && runtimeId === contribution.id ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function makeBadSupervisor(executor: DockerExecutor, manifest: Record<string, unknown>): PackRuntimeSupervisor {
+		return new PackRuntimeSupervisor({
+			registry: makeBadRegistry(makeBadContribution(manifest)),
+			executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "bad-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+		});
+	}
+
+	// composeFile escapes the pack root → deep validation rejects the manifest.
+	const ESCAPING = { id: "bad", composeFile: "../../escape.yaml", modes: { default: { services: ["svc"] } } };
+
+	it("status rejects an invalid manifest and never runs a compose command", async () => {
+		const docker = makeDocker({ ps: () => ok("") });
+		const sup = makeBadSupervisor(docker.executor, ESCAPING);
+		await assert.rejects(() => sup.status(BAD_PACK, "bad"), PackRuntimeBadRequestError);
+		assert.equal(docker.calls.length, 0);
+	});
+
+	it("stop rejects an invalid manifest and never runs an unscoped whole-project stop", async () => {
+		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
+		const sup = makeBadSupervisor(docker.executor, ESCAPING);
+		await assert.rejects(() => sup.stop(BAD_PACK, "bad"), PackRuntimeBadRequestError);
+		assert.equal(docker.countSub("stop"), 0);
+	});
+
+	it("logs reject an invalid manifest and never run an unscoped whole-project logs", async () => {
+		const docker = makeDocker({ logs: () => ok("") });
+		const sup = makeBadSupervisor(docker.executor, ESCAPING);
+		await assert.rejects(() => sup.logs(BAD_PACK, "bad"), PackRuntimeBadRequestError);
+		assert.equal(docker.countSub("logs"), 0);
+	});
+
+	it("a VALID manifest with no declared services scopes stop to the whole project", async () => {
+		// The empty-service (whole-project) form is reserved for a successfully
+		// validated manifest that genuinely declares no services.
+		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
+		const sup = makeBadSupervisor(docker.executor, {
+			id: "bad",
+			composeFile: "compose.yaml",
+			modes: { default: {} },
+		});
+		await sup.stop(BAD_PACK, "bad");
+		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
+		const project = `bobbit-pack-${BAD_PACK}-testsuffix`;
+		const composeAbs = path.join(tmp, "packs", BAD_PACK, "runtimes", "compose.yaml");
+		const envFile = path.join(tmp, "bad-data", project, "bad.env");
+		// Compose file/env file still present; no trailing service args.
+		assert.deepEqual(stopCall.args, [...composeBase(project, composeAbs, envFile), "stop"]);
 	});
 });
 
