@@ -1,4 +1,10 @@
-# Managed runtimes (P1 — pure manifest + helper layer)
+# Managed runtimes
+
+> This page covers two layers: **P1**, the pure manifest + helper layer
+> (no Docker), and **P2**, the Docker-backed supervisor + REST surface that runs
+> the prepared inputs. P1 is documented first; jump to
+> [P2 — the Docker-backed supervisor + REST](#p2--the-docker-backed-supervisor--rest)
+> for lifecycle, routes, and command discipline.
 
 Bobbit packs can ship **managed runtimes**: a declarative description of a
 containerised service stack (images, env, secrets, ports, launch modes) that
@@ -382,6 +388,224 @@ The boundary exists so the trust-critical logic (pack-authored YAML parsing,
 path containment, secret handling) is fully unit-testable without Docker, and so
 a bug in that logic is caught long before anything is launched. Unit coverage
 lives in `tests/runtime-manifest.test.ts` and `tests/runtime-helpers.test.ts`.
+
+## P2 — the Docker-backed supervisor + REST
+
+P1 stops at preparing inputs; **P2 runs them**. The `PackRuntimeSupervisor`
+(`src/server/runtimes/pack-runtime-supervisor.ts`) is the **single place** that
+shells out to Docker for managed pack runtimes, and the REST surface in
+`server.ts` exposes its lifecycle to the UI/API. The split exists for the same
+reason as the P1/P2 boundary itself: all trust-critical *preparation* stays pure
+and unit-testable, and the one module that touches a real daemon is small,
+audited, and fully mockable.
+
+`src/server/runtimes/index.ts` is the barrel that re-exports the supervisor and
+its public types/helpers.
+
+### Supervisor lifecycle
+
+The supervisor is constructed once per server with a
+`PackContributionResolver` (to look up active runtimes by project scope) plus
+the injectable seams below. Its surface:
+
+| Method | Docker command | Returns |
+|---|---|---|
+| `list(projectId?)` | one `compose ps` per active runtime | `PackRuntimeStatus[]` |
+| `status(packId, runtimeId, projectId?)` | `compose ps --format json` | `PackRuntimeStatus` |
+| `ensureRuntime(packId, runtimeId, {projectId, mode})` | fast-path `ps`, else `up -d` | `PackRuntimeStatus` |
+| `start(packId, runtimeId, {projectId, mode})` | `compose up -d` + health poll | `PackRuntimeStatus` |
+| `stop(packId, runtimeId, {projectId})` | `compose stop` | `PackRuntimeStatus` |
+| `restart(packId, runtimeId, {projectId, mode})` | `stop` then `start` | `PackRuntimeStatus` |
+| `logs(packId, runtimeId, {projectId, tail})` | `compose logs --tail N` | `string` |
+
+**`ensureRuntime` is idempotent and the intended entry point** for "make sure
+this is up". It first calls `status`; if the runtime is already `running` it
+returns immediately without touching Docker again, and if Docker is unavailable
+it returns the `docker-unavailable` status verbatim rather than falling through
+to a noisier `start`. Otherwise it delegates to a **deduplicated** start.
+
+**Concurrent starts collapse to one `compose up`.** A `_startInFlight` map keyed
+by `projectId\0packId\0runtimeId\0mode` holds the in-flight start promise; later
+callers for the same key await the same promise, and the entry is cleared on
+settle so a subsequent call can retry. This mirrors `sandbox-manager.ts`'s
+`_ensureInFlight` discipline and prevents a burst of UI calls from racing
+multiple `up -d` invocations. The selected `mode` is part of the key on purpose:
+two explicit `start` calls requesting *different* modes must not collapse onto
+the first request's promise (which would silently ignore the second mode), while
+mode-agnostic `ensureRuntime` callers pass the same (usually `undefined`) mode
+and still share one key.
+
+**Startup health polling.** After `up -d`, `start` polls `compose ps` every
+`pollIntervalMs` (default 1 s) until services report ready or `startupTimeoutMs`
+(default 60 s) elapses. Service rows are mapped to a single state by
+`mapServicesToState`:
+
+- any service `unhealthy` → `unhealthy`
+- all services `running` and (no healthcheck **or** `healthy`) → `running`
+- any service `running`/`created`/`restarting`/`starting` → `starting`
+- otherwise → `stopped`
+
+If the timeout is hit while still `starting`, the result is `unhealthy` with a
+`"runtime did not become healthy within <N>ms"` message — startup never blocks
+forever.
+
+### Status states
+
+`PackRuntimeStatus.status` is one of:
+
+| State | Meaning |
+|---|---|
+| `docker-unavailable` | the Docker executable was not found (`ENOENT`) |
+| `stopped` | no services running (or `ps` returned none) |
+| `starting` | services created/running but not yet healthy |
+| `running` | all owned services running and healthy |
+| `unhealthy` | a service reported `unhealthy`, or startup timed out |
+
+The status also carries the descriptor (`id`, `packId`, `runtimeId`,
+`packName?`, `title?`, `description?`), the resolved `composeProject`, the
+selected `mode?`, the parsed `services?`, and an optional human `message`.
+
+### REST routes
+
+Wired in `server.ts::handleApiRoute()`, **admin-bearer only** (gated before the
+route runs). The `:id` path segment is the URL-safe
+`encodePackRuntimeId(packId, runtimeId)` (`encodeURIComponent(packId) + ":" +
+encodeURIComponent(runtimeId)`), which the route reverses via
+`decodePackRuntimeId`.
+
+| Route | Method | Response |
+|---|---|---|
+| `/api/pack-runtimes?projectId=` | GET | `{ runtimes: PackRuntimeStatus[] }` |
+| `/api/pack-runtimes/:id/start` | POST | `PackRuntimeStatus` (after ensure/start) |
+| `/api/pack-runtimes/:id/stop` | POST | `PackRuntimeStatus` (after stop) |
+| `/api/pack-runtimes/:id/restart` | POST | `PackRuntimeStatus` (after restart) |
+| `/api/pack-runtimes/:id/logs?tail=` | GET | `{ logs, status?, message? }` |
+
+- The optional `projectId` query param scopes the runtime lookup to a project.
+- `start`/`restart` accept an **optional** `mode` in the JSON body. An **empty**
+  body is valid (default mode). A non-empty but malformed-JSON body, or a
+  present-but-non-string/empty `mode`, is a client error → **400** (the route
+  never silently treats garbage as `{}` and mutates the default mode). `stop`
+  ignores `mode`.
+- Error mapping: `PackRuntimeNotFoundError` → **404**, `PackRuntimeBadRequestError`
+  (malformed id/mode/tail, invalid manifest, failed invocation) → **400**, other
+  errors → **500**. When the supervisor failed to construct at boot, every route
+  answers **503** (`"pack runtime supervisor unavailable"`).
+- The GET-list and mutation routes always re-derive the returned `id` from
+  `{packId, runtimeId}` so it round-trips cleanly through `decodePackRuntimeId`.
+
+**Docker-unavailable behavior.** Status-returning methods (`list`, `status`,
+`ensureRuntime`, `start`, `stop`) translate an `ENOENT` from the executor into a
+`docker-unavailable` status — they never throw for a missing Docker install. The
+`logs` method is the exception: it returns a raw string, so it throws
+`PackRuntimeDockerUnavailableError` on `ENOENT`. The logs route catches that and
+answers a **200** with a consistent shape `{ logs: "", status:
+"docker-unavailable", message }` rather than hiding the missing install behind an
+empty body or a generic 500. `tail` is validated/clamped by the supervisor
+(`clampTail`): non-numeric → 400, otherwise clamped to `[1, 5000]`, default 200.
+
+### Docker Compose command discipline
+
+Every Docker invocation goes through one private `_exec` seam, and the
+discipline is uniform:
+
+- **`execFile`, never a shell string.** Args are passed as an array via the
+  injectable `DockerExecutor` (defaults to a promisified `execFile`), so
+  pack-authored values can never be interpreted by a shell. This matches the
+  project-wide sandbox `execFile` discipline.
+- **`DOCKER_BIN` override.** The executable defaults to
+  `process.env.DOCKER_BIN || "docker"`, so a non-standard Docker location can be
+  configured without code changes.
+- **MSYS env neutralization.** Each call sets `MSYS_NO_PATHCONV=1` and
+  `MSYS2_ARG_CONV_EXCL=*` in the child env so Git-Bash/MSYS on Windows does not
+  rewrite `:`-bearing arguments (compose project names, ports, paths) into
+  mangled Windows paths.
+- **Compose project name + collision guard.** Every command carries `-p
+  bobbit-pack-<packId>-<serverIdentitySuffix>` (`composeProjectFor`). The
+  per-server `serverIdentitySuffix` (sanitized, or a random 4-byte hex when
+  unset) is appended so two gateways — or two servers sharing a host — never
+  collide on the same compose project for the same pack (design §15.5). Tokens
+  are sanitized to `[a-z0-9_-]` and length-capped by `sanitizeComposeToken`.
+- **Compose file + env file on every call.** Commands always pass `-f
+  <composeFile> --env-file <envFile>`, not just `up`. Both are derived from the
+  **validated** `RuntimeInvocation`, so `status`/`stop`/`logs` inspect/control
+  the exact same compose context `start` used — regardless of the gateway's
+  current working directory.
+- **Per-runtime service scoping.** `ps`/`stop`/`logs` are scoped to the
+  services this runtime owns (the union of every mode's `services`, from
+  `_servicesForManifest`), so sibling runtimes that share one pack-scoped compose
+  project can never read, stop, or have their health reflected by another
+  runtime. The empty (project-wide) service list is reserved **exclusively** for
+  a successfully validated manifest that genuinely declares no services — a
+  manifest validation/invocation failure propagates (→ 400/500) instead of
+  silently degrading to an unscoped whole-pack command.
+
+**Read/control paths reuse persisted ports verbatim.** When building the compose
+context for `status`/`stop`/`logs`, the supervisor resolves env with
+`reusePersisted: true`: the stored host port is used **without** a bindability
+probe. While a runtime is running its ports are bound, so a revalidating
+allocation would find them un-bindable, rotate to fresh ports, and rewrite
+`ports.json` + the env file — desyncing the persisted port from the live
+container and breaking the next restart.
+
+### Runtime state persistence
+
+Production state lives under `<stateDir>/state/pack-runtimes/`:
+
+- **Rendered `.env` files**, one per compose project, at
+  `<runtimeDataDir>/<composeProject>/<runtimeId>.env` (mode 0600 — see P1's
+  `renderRuntimeEnvFile`).
+- **`ports.json`** — the file-backed `FilePortStore` of allocated host ports.
+  Read/write errors are swallowed (best-effort), so a corrupt file degrades to
+  fresh allocation rather than crashing the supervisor.
+- **Generated secrets** persist through the production `SecretsStore`.
+
+**Pack/runtime-namespaced persistence keys.** Generated secrets and allocated
+ports persist under `packRuntimePersistKey(packId, runtimeId, rawKey)` =
+`pack-runtime:<packId>:<runtimeId>:<rawKey>`. Two unrelated runtimes that both
+declare, say, `PORT` or `DB_PASSWORD` would otherwise collide on the raw
+manifest key in the shared global store and overwrite each other's value. The
+**raw** manifest key is still used for the rendered env-var name and for reading
+**user-configured** secrets (intentionally global/shared — a user configures one
+LLM key once across runtimes); only the persisted storage slot for
+auto-generated secrets and allocated ports is namespaced.
+
+**Archive allowlist.** `state/pack-runtimes/` is listed in
+`GATEWAY_OWNED_FILES` (`src/server/agent/bobbit-archive.ts`). When a user's
+chosen project root happens to be the gateway's own working directory, the
+archiver skips this subtree because it holds the rendered env files and
+`ports.json` for **live** Docker runtimes — archiving it out from under a running
+container would desync the persisted ports/secrets from the live stack.
+
+### Testing & mocking
+
+**Docker is never executed in automated tests** — only in manual integration.
+Two seams make this enforceable:
+
+- **Injectable executor.** `PackRuntimeSupervisorOptions.executor` replaces the
+  real `execFile` with a mock that returns canned `{ stdout, stderr }` (or throws
+  an `ENOENT`-shaped error) per command, so unit tests drive every status walk
+  without a daemon. `now`/`sleep` are also injectable for deterministic timeout
+  tests, and `serverIdentitySuffix` is injected so the compose project name is
+  predictable.
+- **Supervisor factory seam.** `registerPackRuntimeSupervisorFactory(factory)`
+  in `server.ts` lets API E2E tests inject a fully-mocked supervisor so the
+  `/api/pack-runtimes/*` routes can be exercised end-to-end with no Docker. The
+  factory is consulted fresh per request (never cached), so passing `null`
+  immediately reverts to the production instance — no stale mock leaks across
+  in-process E2E tests.
+
+Coverage:
+
+- `tests/pack-runtime-supervisor.test.ts` (unit) — status walk (empty → stopped,
+  running/healthy → running, unhealthy → unhealthy), health timeout → unhealthy,
+  `ENOENT` → docker-unavailable (never throws), concurrent `ensureRuntime` → one
+  `compose up`, `stop` → `compose stop`, compose project name contains the
+  injected suffix, MSYS env on the exec, plus id encode/decode, tail clamp, ps
+  parse, and up-invocation arg/env-file shape.
+- `tests/e2e/pack-runtimes-api.spec.ts` (API E2E) — the REST surface against the
+  injected fake supervisor: list with round-trippable ids, start/stop/restart,
+  logs with tail clamping, and the 400/404 error mappings.
 
 ## Related
 

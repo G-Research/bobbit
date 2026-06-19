@@ -52,6 +52,16 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
+import {
+	PackRuntimeSupervisor,
+	FilePortStore,
+	encodePackRuntimeId,
+	decodePackRuntimeId,
+	PackRuntimeNotFoundError,
+	PackRuntimeBadRequestError,
+	PackRuntimeDockerUnavailableError,
+	type PackRuntimeStatus,
+} from "./runtimes/index.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
@@ -932,6 +942,48 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Pack managed-runtime supervisor seam (P2 — see docs design "P2
+// PackRuntimeSupervisor + REST"). The concrete Docker-backed supervisor + its
+// id encode/decode helpers + error classes live in ./runtimes (imported above).
+// The REST routes depend on the structural seam below so test harnesses can
+// inject a fully-mocked supervisor (no Docker daemon) via
+// registerPackRuntimeSupervisorFactory(); production builds the real
+// PackRuntimeSupervisor in start().
+
+/** The structural contract the REST routes depend on (the concrete
+ *  PackRuntimeSupervisor implements a superset). Unknown-runtime failures surface
+ *  as {@link PackRuntimeNotFoundError} (→ 404); malformed id/mode/tail as
+ *  {@link PackRuntimeBadRequestError} (→ 400); anything else → 500. */
+export interface PackRuntimeSupervisorLike {
+	list(projectId?: string): Promise<PackRuntimeStatus[]>;
+	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
+	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
+	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
+}
+
+export interface PackRuntimeSupervisorDeps {
+	packContributionRegistry: PackContributionRegistry;
+	stateDir: string;
+	defaultCwd: string;
+}
+
+export type PackRuntimeSupervisorFactory = (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike | undefined;
+
+let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
+
+/**
+ * Register an alternative pack-runtime-supervisor factory. Called by test
+ * harnesses to inject a fully-mocked supervisor (no Docker daemon) so the
+ * /api/pack-runtimes/* routes can be exercised end-to-end. Pass `null` to clear.
+ * When unset, production builds the real PackRuntimeSupervisor in start().
+ */
+export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {
+	_packRuntimeSupervisorFactory = factory;
+}
+
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -1256,6 +1308,16 @@ export function createGateway(config: GatewayConfig) {
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
+	// P2: pack managed-runtime supervisor (Docker-backed). Built from the same
+	// pack-contribution registry. This closure holds ONLY the production (real)
+	// supervisor; a registered test factory is consulted FRESH per-request below
+	// and never cached here. That way registerPackRuntimeSupervisorFactory(null)
+	// immediately reverts to the production instance (or 503) with no stale mock
+	// left in the closure across in-process E2E tests. The real supervisor is
+	// loaded lazily in start() (dynamic import keeps this wiring compilable even
+	// before the supervisor module is merged — routes then return 503).
+	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
 	configCascade.setPackActivationProvider({
@@ -1529,7 +1591,15 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			// P2: a registered pack-runtime-supervisor factory is authoritative — in-
+			// process test harnesses register a (mocked) one AFTER gateway start, so it
+			// must override the real supervisor built in start(). Derived FRESH each
+			// request (never cached), so clearing the factory reverts to the production
+			// instance with no stale mock. No-op in production (factory stays null).
+			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
+				? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
+				: realPackRuntimeSupervisor;
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1953,6 +2023,27 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
+			// P2: build the real pack-runtime supervisor unless a test factory already
+			// supplied a (mocked) one. All Docker execution is encapsulated in the
+			// supervisor; rendered env files live under the server state dir.
+			if (!realPackRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
+				try {
+					const { SecretsStore } = await import("./agent/secrets-store.js");
+					const runtimeDataDir = path.join(stateDir, "pack-runtimes");
+					// Production-safe resolver context: declared generated secrets are
+					// created+persisted via SecretsStore and declared host ports via a
+					// file-backed FilePortStore, so real pack runtimes (e.g. Hindsight)
+					// resolve their env refs instead of throwing before Docker starts.
+					realPackRuntimeSupervisor = new PackRuntimeSupervisor({
+						registry: packContributionRegistry,
+						runtimeDataDir,
+						secretsStore: new SecretsStore(stateDir),
+						portStore: new FilePortStore(path.join(runtimeDataDir, "ports.json")),
+					});
+				} catch (err) {
+					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
+				}
+			}
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
 
@@ -2555,6 +2646,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5837,6 +5929,111 @@ async function handleApiRoute(
 			routeNames: p.routes?.names ?? [],
 		}));
 		json({ packs });
+		return;
+	}
+
+	// ── P2: pack managed-runtime (Docker-backed) supervisor REST surface ──────
+	// GET  /api/pack-runtimes?projectId=          → { runtimes: PackRuntimeStatus[] }
+	// POST /api/pack-runtimes/:id/start           → status (after ensure/start)
+	// POST /api/pack-runtimes/:id/stop            → status (after stop)
+	// POST /api/pack-runtimes/:id/restart         → status (after restart)
+	// GET  /api/pack-runtimes/:id/logs?tail=      → { logs, status? }
+	// The `:id` is the URL-safe encodePackRuntimeId(packId, runtimeId). Admin-bearer
+	// only (gated before handleApiRoute). All Docker execution lives in the
+	// supervisor; tests inject a fully-mocked supervisor (no daemon).
+	if (url.pathname === "/api/pack-runtimes" && req.method === "GET") {
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		try {
+			const statuses = await packRuntimeSupervisor.list(projectId);
+			// Re-derive the API id from {packId, runtimeId} so it always round-trips
+			// through decodePackRuntimeId regardless of the supervisor's internal id.
+			const runtimes = statuses.map((s) => ({ ...s, id: encodePackRuntimeId(s.packId, s.runtimeId) }));
+			json({ runtimes });
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
+	if (packRuntimeMatch) {
+		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
+		const wantsGet = action === "logs";
+		if (wantsGet ? req.method !== "GET" : req.method !== "POST") {
+			json({ error: "method not allowed" }, 405);
+			return;
+		}
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+
+		// Map supervisor failures to status codes: NotFound → 404, BadRequest → 400.
+		const handleErr = (err: unknown): void => {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		};
+
+		// Decode the URL-safe id (raw path segment — decodePackRuntimeId percent-
+		// decodes the halves itself). Malformed → PackRuntimeBadRequestError → 400.
+		let packId: string;
+		let runtimeId: string;
+		try {
+			({ packId, runtimeId } = decodePackRuntimeId(packRuntimeMatch[1]));
+		} catch (err) { handleErr(err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		if (action === "logs") {
+			// Tail validation/clamping is owned by the supervisor (clampTail): a
+			// non-numeric tail throws PackRuntimeBadRequestError → 400; out-of-range
+			// values are clamped. Pass the raw query value through.
+			const rawTail = url.searchParams.get("tail");
+			const tail = rawTail !== null && rawTail !== "" ? (Number(rawTail) as number) : undefined;
+			try {
+				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
+				json({ logs });
+			} catch (err) {
+				// Surface a missing-Docker install as a consistent docker-unavailable
+				// shape (200 with empty logs + status) rather than hiding it behind an
+				// empty body or a generic 500.
+				if (err instanceof PackRuntimeDockerUnavailableError) {
+					json({ logs: "", status: "docker-unavailable", message: err.message });
+					return;
+				}
+				handleErr(err);
+			}
+			return;
+		}
+
+		// start | stop | restart — optional `mode` from the POST body. An EMPTY body
+		// is valid (default mode); a NON-EMPTY but malformed-JSON body is a client
+		// error — answer 400 and do NOT invoke the supervisor (never silently treat
+		// garbage as `{}` and mutate the default mode).
+		const bodyText = await readBodyText(req);
+		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+		let body: Record<string, unknown> = {};
+		const trimmedBody = bodyText.trim();
+		if (trimmedBody.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(trimmedBody); } catch { json({ error: "malformed JSON body" }, 400); return; }
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
+			body = parsed as Record<string, unknown>;
+		}
+		let mode: string | undefined;
+		if (action !== "stop") {
+			const rawMode = (body as { mode?: unknown }).mode;
+			if (rawMode !== undefined && rawMode !== null) {
+				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
+				mode = rawMode;
+			}
+		}
+		try {
+			const status = action === "stop"
+				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
+				: action === "start"
+					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode })
+					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode });
+			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+		} catch (err) { handleErr(err); }
 		return;
 	}
 
@@ -13680,15 +13877,22 @@ export function bodyLimitExceeded(
 	return Number.isFinite(len) && len > maxBytes;
 }
 
-export function readBody(
+/**
+ * Read the raw request body as text. Resolves the decoded string for a complete
+ * body (the empty string when no body was sent), or `null` when the body was
+ * oversized/aborted/errored. Unlike {@link readBody} it does NOT attempt to
+ * JSON-parse, so callers can distinguish an EMPTY body (valid — treat as `{}`)
+ * from a NON-EMPTY but malformed-JSON body (client error → 400).
+ */
+export function readBodyText(
 	req: http.IncomingMessage,
 	maxBytes: number = MAX_REQUEST_BODY_BYTES,
-): Promise<any> {
+): Promise<string | null> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
 		let settled = false;
-		const finish = (value: any): void => {
+		const finish = (value: string | null): void => {
 			if (settled) return;
 			settled = true;
 			resolve(value);
@@ -13697,12 +13901,11 @@ export function readBody(
 			if (settled) return;
 			total += chunk.length;
 			if (total > maxBytes) {
-				// Oversized body: reject BEFORE Buffer.concat()/JSON.parse() so a
-				// huge payload is never fully materialised in memory. Drop buffered
-				// chunks, tear down the stream, and resolve null — handlers treat a
-				// null body as a malformed request (400); the request-handler's
-				// Content-Length precheck returns a definitive 413 for the common
-				// case where the length is declared up front.
+				// Oversized body: reject BEFORE Buffer.concat() so a huge payload is
+				// never fully materialised in memory. Drop buffered chunks, tear down
+				// the stream, and resolve null — handlers treat a null body as a
+				// malformed request (400); the request-handler's Content-Length
+				// precheck returns a definitive 413 when the length is declared up front.
 				chunks.length = 0;
 				try { req.destroy(); } catch { /* best-effort */ }
 				finish(null);
@@ -13710,15 +13913,26 @@ export function readBody(
 			}
 			chunks.push(chunk);
 		});
-		req.on("end", () => {
-			try {
-				finish(JSON.parse(Buffer.concat(chunks).toString()));
-			} catch {
-				finish(null);
-			}
-		});
+		req.on("end", () => finish(Buffer.concat(chunks).toString()));
 		req.on("error", () => finish(null));
 		req.on("aborted", () => finish(null));
+	});
+}
+
+export function readBody(
+	req: http.IncomingMessage,
+	maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<any> {
+	return readBodyText(req, maxBytes).then((text) => {
+		// Preserve the historical contract: a null (oversized/aborted) OR
+		// unparseable/empty body resolves to null. Callers that must distinguish an
+		// empty body from a malformed one read the raw text via readBodyText instead.
+		if (text === null) return null;
+		try {
+			return JSON.parse(text);
+		} catch {
+			return null;
+		}
 	});
 }
 
