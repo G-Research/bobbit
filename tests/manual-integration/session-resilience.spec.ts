@@ -28,6 +28,7 @@ import {
 import { join, resolve, normalize } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 
@@ -628,7 +629,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(180_000);
 		port = await freePort();
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		dir = join(tmp, `.bobbit-manual-${port}`);
 		rmSync(dir, { recursive: true, force: true });
 		initRepo(dir);
@@ -766,7 +767,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 	// ---------------------------------------------------------------
 	test("A2. multi-project sessions and goal", async ({ page }) => {
 		// 1. Create a separate git repo for the second project
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		proj2Dir = join(tmp, `.bobbit-manual-proj2-${port}`);
 		rmSync(proj2Dir, { recursive: true, force: true });
 		mkdirSync(proj2Dir, { recursive: true });
