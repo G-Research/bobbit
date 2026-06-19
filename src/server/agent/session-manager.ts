@@ -3412,14 +3412,17 @@ export class SessionManager {
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
-		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0
-			? ps.allowedTools
-			: undefined;
+		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
+		// from absent (`undefined` = fall back to role/cascade). Only a missing /
+		// non-array value falls back; an emptied allowlist (recursion-stripped
+		// delegate, bobbit.disabledTools) must NOT silently re-acquire role defaults
+		// on respawn/restart.
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
 		const sessionGrants = this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools);
 
 		// Persisted allow-lists are true session-scoped constraints (delegate/read-only
-		// children, explicit createSession overrides). Preserve them exactly, with any
-		// live grants layered on top.
+		// children, explicit createSession overrides, incl. an explicit empty `[]`).
+		// Preserve them exactly, with any live grants layered on top.
 		if (persistedAllowedTools) {
 			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
 		}
@@ -4072,7 +4075,13 @@ export class SessionManager {
 		// Restore tool activation. Roleless normal sessions still use the general
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
-		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0 ? ps.allowedTools : undefined;
+		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
+		// from absent (`undefined` = fall back to role defaults). Only a missing /
+		// non-array value falls back; `[]` must survive restore so a restricted
+		// session (e.g. allowlist emptied by bobbit.disabledTools) does not silently
+		// re-acquire role-default tools on restart.
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
+		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
 			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4093,14 +4102,15 @@ export class SessionManager {
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
-		// distinction. `effectiveAllowed` is `[]` ONLY for a genuinely
-		// unrestricted session (role-less / no toolManager) — that resolves to
-		// `undefined` (all tools). When there WAS an allowlist that
-		// `bobbit.disabledTools` removed entirely, `restoredFiltered` is `[]`
-		// and must stay `[]` (NO tools) — never collapse it to `undefined`,
-		// which would re-grant every tool on restart.
+		// distinction. A genuinely unrestricted session (role-less / no
+		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
+		// to `[]` and must map to `undefined` (all tools). But when there WAS an
+		// explicit allowlist source — a persisted/override `[]`, or an allowlist
+		// `bobbit.disabledTools` removed entirely — `restoredFiltered` is `[]` and
+		// must stay `[]` (NO tools); never collapse it to `undefined`, which would
+		// re-grant every tool on restart.
 		const restoredAllowedTools: EffectiveTool[] | undefined =
-			effectiveAllowed.length > 0 ? restoredFiltered : undefined;
+			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];

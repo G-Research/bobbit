@@ -531,8 +531,12 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	let effectiveAllowedTools: EffectiveTool[] | undefined = plan.effectiveAllowedTools;
 
-	// Fall back to general role's allowed tools
-	if ((!effectiveAllowedTools || effectiveAllowedTools.length === 0) && ctx.roleManager) {
+	// Fall back to the role's allowed tools ONLY when no allowlist was supplied
+	// (`undefined`). An EXPLICIT empty allowlist (`[]` = NO tools, e.g. a
+	// recursion-stripped delegate or a session emptied by bobbit.disabledTools)
+	// must be preserved so lower activation sees zero tools — never widened back
+	// to the general/role default on first spawn.
+	if (effectiveAllowedTools === undefined && ctx.roleManager) {
 		// Use cascade-resolved role when a projectId is available
 		const roleName = plan.roleName || "general";
 		let role = ctx.roleManager.getRole(roleName);
@@ -901,7 +905,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
 				projectId: plan.projectId,
-				goalId: plan.goalId,
+				// Effective goal (own goal else team/parent goal) so sandbox token
+				// scoping and the container-worktree goalProvisioned dispatch resolve
+				// the SAME inherited metadata for members/delegates as for the lead.
+				goalId: effectiveGoalId(plan),
 				sandboxBranch: plan.sandboxBranch,
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
@@ -1108,7 +1115,10 @@ export async function executeWorktreeAsync(
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
 				projectId: plan.projectId,
-				goalId: plan.goalId,
+				// Effective goal (own goal else team/parent goal) so sandbox token
+				// scoping and the container-worktree goalProvisioned dispatch resolve
+				// the SAME inherited metadata for members/delegates as for the lead.
+				goalId: effectiveGoalId(plan),
 				sandboxBranch: plan.sandboxBranch,
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
