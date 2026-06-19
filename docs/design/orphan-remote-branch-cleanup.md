@@ -83,11 +83,14 @@ async function deleteRemoteGoalBranches(
             });
             console.log(`[api] Deleted remote branch: ${branch}`);
         } catch (err) {
+            if (isMissingRemoteRefDeleteError(err)) return;
             console.warn(`[api] Failed to delete remote branch ${branch}:`, err);
         }
     }
 }
 ```
+
+Missing remote refs are success for archive cleanup: GitHub may already have deleted the branch after PR merge, so `remote ref does not exist` means the desired final state is already true. Other delete failures remain warnings because they can leave remote branches behind.
 
 Caller (`server.ts:2754-2776`):
 

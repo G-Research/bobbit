@@ -259,38 +259,11 @@ export function resolveCommandStepTimeoutSec(step: Pick<VerifyStep, "type" | "co
 	return isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;
 }
 
-/** Command steps are the expensive OS-level work; keep them serialized within
- * a phase so frozen workflows don't run full unit/E2E suites concurrently.
- * Non-command steps keep the legacy parallel behavior.
- */
-export function shouldSerializeVerificationStepWithinPhase(step: Pick<VerifyStep, "type">): boolean {
-	return step.type === "command";
-}
-
 export async function runVerificationPhaseSteps<T, R>(
 	phaseSteps: readonly T[],
 	runStep: (phaseStep: T) => Promise<R>,
-	options: { shouldSerialize?: (phaseStep: T) => boolean } = {},
 ): Promise<R[]> {
-	const shouldSerialize = options.shouldSerialize ?? (() => false);
-	const parallelSteps: Array<{ phaseStep: T; order: number }> = [];
-	const serializedSteps: Array<{ phaseStep: T; order: number }> = [];
-	phaseSteps.forEach((phaseStep, order) => {
-		if (shouldSerialize(phaseStep)) serializedSteps.push({ phaseStep, order });
-		else parallelSteps.push({ phaseStep, order });
-	});
-
-	const results = new Array<R>(phaseSteps.length);
-	const parallelPromise = Promise.all(parallelSteps.map(async ({ phaseStep, order }) => {
-		results[order] = await runStep(phaseStep);
-	}));
-	const serializedPromise = (async () => {
-		for (const { phaseStep, order } of serializedSteps) {
-			results[order] = await runStep(phaseStep);
-		}
-	})();
-	await Promise.all([parallelPromise, serializedPromise]);
-	return results;
+	return Promise.all(phaseSteps.map(phaseStep => runStep(phaseStep)));
 }
 
 export interface VerificationPushSafetyVars {
@@ -2322,39 +2295,44 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group active steps by phase (default 0), execute phases sequentially.
-			// Within a phase, command steps are serialized to avoid test-suite
-			// contention; non-command steps still run in parallel. Skipped optional
-			// steps are excluded.
+			// Active steps are grouped by phase (default 0), and phases execute sequentially.
+			// All steps within a phase run concurrently by default. Skipped optional steps
+			// are excluded.
 			const phaseGroups = groupStepsByPhase(activeSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
 			// Sync the goal worktree with the latest commits before running verification.
 			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
 			if (goalBranch) {
+				const { execFile: execFileCb } = await import("node:child_process");
+				const { promisify } = await import("node:util");
+				const execFileAsync = promisify(execFileCb);
+				let hasOriginRemote = false;
 				try {
-					const { execFile: execFileCb } = await import("node:child_process");
-					const { promisify } = await import("node:util");
-					const execFileAsync = promisify(execFileCb);
-					await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-					await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-					console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
-				} catch (err) {
-					// Non-fatal — local-only repos without a remote will fail fetch
-					console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+					await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
+					hasOriginRemote = true;
+				} catch {
+					// Local-only repositories are valid verification targets; skip remote sync quietly.
 				}
 
-				// Also fetch the review baseline branch so origin/<base> is up-to-date for
-				// implementation-gate diff baselines. Non-fatal on failure (offline / no remote).
-				const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
-				if (reviewBaselineBranch) {
+				if (hasOriginRemote) {
 					try {
-						const { execFile: execFileCb } = await import("node:child_process");
-						const { promisify } = await import("node:util");
-						const execFileAsync = promisify(execFileCb);
-						await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+						await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+						await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+						console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
 					} catch (err) {
-						console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
+						console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+					}
+
+					// Also fetch the review baseline branch so origin/<base> is up-to-date for
+					// implementation-gate diff baselines. Non-fatal on failure (offline / remote issue).
+					const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
+					if (reviewBaselineBranch) {
+						try {
+							await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+						} catch (err) {
+							console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
+						}
 					}
 				}
 			}
@@ -2413,8 +2391,8 @@ export class VerificationHarness {
 					phase, stepIndices,
 				});
 
-				// Run safe work in parallel, but serialize command steps in this
-				// phase to avoid harness-induced full-suite contention.
+				// Run every step in this phase concurrently. Sequencing is expressed
+				// only by assigning steps to different phase numbers.
 				const phaseResults = await runVerificationPhaseSteps(
 					phaseSteps,
 					async ({ step, index }) => {
@@ -2763,7 +2741,6 @@ export class VerificationHarness {
 						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
 					},
-					{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 				);
 
 				// Store phase results

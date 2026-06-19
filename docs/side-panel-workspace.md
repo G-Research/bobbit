@@ -44,7 +44,7 @@ Every committed mutation increments `revision`, persists the whole workspace thr
 
 | Kind | Tab id shape | Source identity | Notes |
 |---|---|---|---|
-| Preview | `preview:entry:<encoded-entry>` or `preview:entry:<encoded-entry>:v:<N>` | `entry`, `artifactId?`, `contentHash?`, `version?`, `live?`, `historical?` | Live preview tabs update in place. Historical preview tabs represent immutable artifacts or restored older cards. |
+| Preview | `preview:entry:<encoded-entry>` or `preview:entry:<encoded-entry>:v:<N>` | `entry`, `artifactId?`, `contentHash?`, `path?`, `url?`, `version?`, `live?`, `historical?`; state may include `mtime` | Live preview tabs update in place and restore from persisted tab metadata after restart. Historical preview tabs represent immutable artifacts or restored older cards. |
 | Pack | `pack:<encoded-packId>:<encoded-panelId>:<encoded-instanceKey>` | `packId`, `panelId`, `instanceKey`, `params?` | Covers PR walkthrough and artifact viewer pack panels. `instanceKey` is part of identity. |
 | Proposal | `proposal:<type>` or `proposal:<type>:rev:<N>` | `proposalType`, `rev?`, `historical?` | Types are `goal`, `project`, `role`, `tool`, and `staff`. Current revisions update the current tab; historical revs open only by explicit reopen. |
 | Review | `review:<encoded-documentId>` | stable `documentId`, display `title` | Title is metadata. Renames do not change identity. Closing the tab preserves content/annotations for explicit reopen. |
@@ -60,12 +60,13 @@ Because those legacy files are superseded by pack artifact panels, they are excl
 
 `preview_open` still writes the per-session preview mount and streams updates via preview SSE. Workspace tab creation is separate:
 
-- explicit preview open/tool actions open or focus the current preview tab;
+- explicit preview open/tool actions open or focus the current preview tab and persist render metadata such as `entry`, `mtime`, `contentHash`, `path`, `url`, and `artifactId` when available;
+- gateway restart restores the active preview iframe from that persisted workspace tab; the client does not need a fresh tool call or a mount bootstrap to recreate the tab;
 - historical card Open buttons explicitly open a versioned preview tab or focus an equivalent current tab when hashes match;
 - `GET /api/preview/mount` bootstrap, `preview-changed` SSE events, and mount metadata refreshes patch metadata only for already-open tabs;
 - closing a preview tab removes only the workspace tab, not the live mount or immutable artifacts.
 
-This split prevents navigation, reload, or reconnect from resurrecting a preview tab just because a preview mount still exists. A later explicit preview Open action can reopen it.
+This split prevents navigation, reload, restart, or reconnect from resurrecting a preview tab just because a preview mount still exists. A later explicit preview Open action can reopen it.
 
 ### Proposal lifecycle
 
@@ -213,6 +214,9 @@ Useful checks:
 - `revision` should increase after every committed mutation;
 - duplicate artifact pack panels should differ by `source.instanceKey`;
 - review tab ids should include document ids, not mutable titles;
-- stale localStorage should not change the workspace after `migratedFromLocalStorageAt` is set.
+- stale localStorage should not change the workspace after `migratedFromLocalStorageAt` is set;
+- preview restart restore should show the active preview tab in the workspace after gateway restart, and a user-closed preview tab should stay absent even while `GET /api/preview/mount` still succeeds.
 
-Related docs: [architecture.md](architecture.md#side-panel-workspace), [preview-architecture.md](preview-architecture.md#side-panel-workspace-integration), [extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel), [rest-api.md](rest-api.md#side-panel-workspace), and [websocket-protocol.md](websocket-protocol.md#server--client).
+Regression coverage: `tests/e2e/ui/preview-durable-restart.spec.ts`.
+
+Related docs: [architecture.md](architecture.md#side-panel-workspace), [preview-architecture.md](preview-architecture.md#restart-restore), [extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel), [rest-api.md](rest-api.md#side-panel-workspace), and [websocket-protocol.md](websocket-protocol.md#server--client).

@@ -164,6 +164,18 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
+### Team restart restoration
+
+Team state is restored from each project's `team-state.json` so live teams survive gateway restarts without losing their lead/worker wiring. The restart path is restorative only:
+
+- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state.
+- After `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for those restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
+- Restart does **not** scan team-mode goals and call `startTeam()` for goals that lack a restored team entry. A teamless existing goal stays teamless even if its persisted `autoStartTeam` flag is `true`.
+
+This distinction matters because `autoStartTeam` is a creation/setup affordance, not a supervisor. Goals created with `autoStartTeam: false` and goals explicitly stopped through `teardownTeam()` have no active team-store entry after setup/teardown, so they remain manual-start goals across restart. The UI should show "Start Team" rather than a silently recreated lead.
+
+Regression coverage pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and that start → teardown → restart leaves the goal teamless until manual start.
+
 ### Verification architecture
 
 The verification system is split into two modules:
@@ -753,6 +765,8 @@ Bobbit creates four classes of remote branch and is responsible for deleting eac
 
 **Test-mode gate:** every push-delete call - existing (`cleanupWorktree`) and new (`deleteRemoteGoalBranches`, `eagerDeleteRemoteSessionBranch`) - short-circuits when `shouldSkipRemotePush()` returns true (`BOBBIT_TEST_NO_PUSH=1`). The eager session helper checks this flag *before* invoking `git merge-base --is-ancestor`, so test mode never touches git at all.
 
+**Goal delete errors are best effort:** `deleteRemoteGoalBranches` runs after the goal has been archived, and cleanup failures must not change the archive API result. When GitHub or a human has already deleted the goal branch, Git reports phrases such as `remote ref does not exist` or `unable to delete '<branch>': remote ref does not exist`; the handler treats that as an idempotent no-op and emits no warning. Auth, permission, network, timeout, and unknown Git failures still warn because they may leave remote branches behind.
+
 **Merge check (sessions only):** `eagerDeleteRemoteSessionBranch` runs `git merge-base --is-ancestor <branch> origin/<primary>` and only push-deletes on exit 0. If `origin/<primary>` is stale locally the check is conservative (skip delete) and `purgeExpiredArchives` mops up after 7 days. Local worktree cleanup remains in `purgeOneSession` so the archived-session review experience is preserved.
 
 **Why the goal handler snapshots eagerly:** `teamStore.get(id)` returns the live `PersistedTeamEntry`; `teardownTeam → dismissRole` calls `entry.agents.splice(...)` on that same object. Reading `teamEntry.agents` *after* teardown sees an empty array and only the team-lead branch gets deleted - every per-role branch leaks. The fix copies branch names into a fresh `readonly string[]` before teardown.
@@ -798,24 +812,28 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 
 **Why split settings from runtime state**: Users reopening an archived session usually want to resume the task, not resurrect the exact environment. The old worktree may be gone, the sandbox container may have been pruned, and the branch may be merged or abandoned. Continue-Archived gives them the same tools (model, role, sandbox/worktree flags) in a fresh runtime, with the prior conversation available as context only.
 
+For worktree-backed archived sessions, the archived `worktreePath` is provenance only: it says the source had worktree mode enabled. Continue never stats, repairs, revives, or reuses that path, and it never checks out the archived `branch`. The new session creates a fresh `session/<new-id8>` branch and worktree from the currently registered project configuration. Archived cwd/worktree values may be used only as old values to replace in runtime-only transcript metadata.
+
+Non-sandboxed continues use the same worktree allocation path as normal session creation: claim from the project worktree pool first, then fall back to cold `createWorktree` / `createWorktreeSet` if the pool is empty, returns `null`, or `claim()` throws. Sandboxed continues bypass the host-side pool explicitly because their worktrees live inside the project sandbox container. Single-repo and multi-repo capability is resolved through the same `resolveWorktreeSupport` path as `POST /api/sessions`, so there is no Continue-specific multi-repo rule.
+
 **What is copied:**
 
 - `projectId`
 - `modelProvider`, `modelId` (applied post-create via `setModel` + persisted immediately; worktree sessions set the model once the agent is ready)
 - `role` (resolved via `roleManager.getRole()`, so prompt/accessory/tool policies are re-applied fresh)
 - `sandboxed` flag (new container state per normal per-project sandbox rules)
-- `worktreePath` presence - if the source had a worktree, the new session gets one via the standard pipeline (pool claim or `git worktree add`)
+- `worktreePath` presence - if the source had a worktree, the new session requests a fresh worktree via the standard create-session pipeline against the current project repo/base ref, including normal pool claim/fallback semantics for non-sandboxed sessions
 
 **What is explicitly NOT copied:**
 
-- Working directory, worktree path, branch, uncommitted changes
+- Working directory, worktree path, branch, uncommitted changes (including deleted/stale archived worktree paths or branches)
 - Sandbox container identity or in-container state (the new session joins the project's container per normal semantics)
 - `goalId`, `teamGoalId`, `teamLeadSessionId`, `delegateOf` - guaranteed absent because the scope gate rejects those source types up front
 - Task/gate signals, streaming state, tool state
 
 **Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted — the new session inherits `assistantType`, `role`, and `accessory`, and the source's proposal-draft directory is cloned into the new session's slot so the resumed agent picks up the in-progress draft. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the assistant-continue flow.
 
-**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
+**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Conversation and user-visible transcript content remain lossless, with no byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata inside the JSONL, such as Pi `session` cwd records or `system`/`init` cwd records, may be rebased so the clone can load in the fresh runtime. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
@@ -827,10 +845,12 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
    - **host↔sandbox** or **cross-project sandboxed**: throws `CrossRealmCopyError` → handler returns **422**.
    Other copy failures unlink the destination and return **500** with cleanup.
 4. Best-effort `copyToolContentDirIfPresent(srcId, dstId, stateDir)` recursively copies `<stateDir>/tool-content/<srcId>/` if present. The directory does not exist on disk today - `GET /api/sessions/:id/tool-content/:mi/:bi` reads through `rpcClient.getMessages()` from the JSONL - but the helper is shipped as defensive forward-compat for any future on-disk cache.
-5. Build `createSession` opts with `preExistingAgentSessionFile: <destPath>`. The `seedContext` / `seedContextSourceId` opts have been removed entirely - they had no other callers.
-6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` - the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
+5. Build `createSession` opts with `preExistingAgentSessionFile: <destPath>`. The `seedContext` / `seedContextSourceId` opts have been removed entirely - they had no other callers. If the archived source was worktree-backed, the handler derives `worktreeOpts` from current project components via `resolveWorktreeSupport` and sets `awaitWorktreeSetup` so fresh-worktree failures are returned synchronously. It sets `bypassWorktreePool` only for sandboxed continues.
+6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. Worktree-backed continues allocate a new `session/<new-id8>` branch/worktree from the current project base ref. Non-sandboxed sessions first call `worktreePool.claim(targetBranch)` and use the claimed path when it succeeds; `null` or thrown claims fall through to the existing cold worktree path. The archived source `worktreePath` and `branch` are not inputs to this allocation. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline rebases eligible runtime-only cwd metadata, then issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` - the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
 
-**Worktree-cwd slug rebase**: Step 2 computes `destJsonl` against `proj.rootPath` because that's the only `cwd` known at request time. For worktree-backed sources, however, the agent CLI boots with `cwd = offsetCwd` (the per-branch worktree container), and `formatAgentSessionFilePath` embeds a `slugify(cwd)` segment in the path - so a clone left under the project-root slug-dir is invisible to the agent CLI and `switch_session` fails. To bridge this, `executeWorktreeAsync` in `src/server/agent/session-setup.ts` rebases the cloned `.jsonl` after `plan.cwd` is finalised to the worktree path and before `switch_session` is issued: it re-derives the correct path via `formatAgentSessionFilePath(plan.cwd, Date.now(), session.id)`, moves the file (host-side `fs.promises.rename` with a `copyFile + unlink` cross-device fallback for non-sandboxed sessions; container-side `sessionFileCopy + sessionFileDelete` for sandboxed sessions), `mkdir { recursive: true }`s the target dir, and updates both `plan.preExistingAgentSessionFile` and the persisted `agentSessionFile` field so a hard kill in the post-spawn window restores the right path. The rebase only fires on the worktree branch when `plan.preExistingAgentSessionFile` is set; the non-worktree continue path is untouched. Regression test: `tests/e2e/continue-archived-worktree.spec.ts`.
+**Worktree-cwd slug rebase**: Step 2 computes `destJsonl` against `proj.rootPath` because that's the only `cwd` known at request time. For worktree-backed sources, however, the agent CLI boots with `cwd = offsetCwd` (the per-branch worktree container), and `formatAgentSessionFilePath` embeds a `slugify(cwd)` segment in the path - so a clone left under the project-root slug-dir is invisible to the agent CLI and `switch_session` fails. To bridge this, `executeWorktreeAsync` in `src/server/agent/session-setup.ts` rebases the cloned `.jsonl` after `plan.cwd` is finalised to the worktree path and before `switch_session` is issued: it re-derives the correct path via `formatAgentSessionFilePath(plan.cwd, Date.now(), session.id)`, moves the file (host-side `fs.promises.rename` with a `copyFile + unlink` cross-device fallback for non-sandboxed sessions; container-side `sessionFileCopy + sessionFileDelete` for sandboxed sessions), `mkdir { recursive: true }`s the target dir, and updates both `plan.preExistingAgentSessionFile` and the persisted `agentSessionFile` field so a hard kill in the post-spawn window restores the right path. After the move and before `switch_session`, `rebaseAgentTranscriptCwdMetadataFile` may rewrite runtime-only Pi cwd/session metadata. Today that means top-level `cwd` on Pi `session` records, `system`/`init` records, or legacy `system` records with no subtype is rewritten from archived `ps.cwd`/`ps.worktreePath` values to the fresh `plan.cwd`; message content is not inspected or rewritten. The rebase only fires on the worktree branch when `plan.preExistingAgentSessionFile` is set; the non-worktree continue path is untouched. Regression tests: `tests/e2e/continue-archived-worktree.spec.ts` and `tests/e2e/continue-archived-worktree-stale-source.spec.ts`.
+
+**Fresh worktree failure reporting**: If the source was worktree-backed and the current project repo/base ref is invalid, Continue returns the fresh-create failure from the current project setup path. Pool miss, `claim()` returning `null`, and `claim()` throwing are not surfaced as API errors; they fall back to cold creation first. The final error, if any, should mention the current repo/base/worktree problem, not the archived source `worktreePath` or `branch`, because those archived fields are not dependencies. Regression test: `tests/e2e/continue-archived-worktree-invalid-base.spec.ts`.
 
 **Title**: The new session is titled `Continued: <original title>` and marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
 
@@ -842,6 +862,7 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 - `src/server/server.ts` - `POST /api/sessions/:archivedId/continue` handler (scope gate, copy, session creation, cleanup-on-failure).
 - `src/server/agent/session-manager.ts` - `recoverSessionFile` is public; `createSession` opts carry `preExistingAgentSessionFile?: string` (no `seedContext` plumbing).
 - `src/server/agent/session-setup.ts` - `SessionSetupPlan.preExistingAgentSessionFile`; both `spawnAgent` and `executeWorktreeAsync` issue `switch_session` after `rpcClient.start()` succeeds, before `persistSessionMetadata`. `persistOnce` writes the path up front.
+- `src/server/agent/transcript-sanitizer.ts` - runtime-only cwd metadata rebase plus blank user-message sanitizer at the rehydration boundary.
 - `src/server/agent/system-prompt.ts` - `seedContext` / `seedContextSource` and the `## Prior Session Transcript` section have been removed from `PromptParts`.
 - `src/ui/components/AgentInterface.ts` - footer renderer, keyed by `[data-continue-archived-footer]`.
 - `src/ui/components/ContinueSessionChooser.ts` - confirm-only modal (no mode radio, no large-transcript warning, empty POST body).
@@ -904,8 +925,8 @@ The collapsed (icon-only) sidebar buckets staff under their owning project group
 - **Global visibility toggle**: The bottom-bar "See Archived" button (localStorage `bobbit-show-archived`, state `state.showArchived`) still controls whether any archived content is rendered at all. It is global, not per-project - one toggle flips every per-project Archived subsection at once. This keeps the user-visible UX contract of the pre-existing toggle unchanged.
 - **Per-project collapse state**: Each project's Archived subsection defaults to **expanded** when `showArchived` is on; users can collapse individual projects' subsections independently. Collapsed project IDs are persisted in localStorage `bobbit-archived-collapsed-projects` (mirrors `bobbit-collapsed-ungrouped` / `bobbit-collapsed-staff`). Access via `isArchivedSectionExpanded(projectId)` / `setArchivedSectionExpanded(projectId, value)` in `state.ts`. Default-expanded is deliberate: before the per-project split there was no intermediate "collapsed but visible" state, so expanded-by-default preserves the old behaviour of "See Archived on = archived items are visible".
 - **Orphaned-item fallback**: Archived goals or sessions whose `projectId` is missing or does not resolve to a registered project are bucketed into the first project's Archived subsection so they remain visible to the user rather than silently disappearing. This is a UI rendering fallback for data inconsistencies - it does not imply a runtime default project on the server side. On desktop the fallback emits a `console.warn` to make the inconsistency debuggable; on mobile (via `bucketArchivedByProject` in `render-helpers.ts`) the fallback is silent.
-- **Pagination (v1)**: Archived goals and sessions are still fetched globally (not per-project) via `GET /api/goals?archived=true` and `GET /api/sessions?include=archived`. The "Load more archived goals..." / "Load more archived sessions..." buttons are rendered **once**, below the project list, not per project. Per-project pagination would require server-side `projectId` filters on those endpoints and is intentionally deferred. On mobile the pagination buttons are additionally hidden while a search query is active, since search results collapse the per-project layout.
-- **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour is unchanged - a search match inside any archived item still forces `state.showArchived` on globally. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all.
+- **Pagination**: Archived goals and sessions are fetched through the archived list endpoints: `GET /api/goals?archived=true` and `GET /api/sessions?include=archived`. With no sidebar query, the "Load more archived goals..." / "Load more archived sessions..." buttons are rendered **once**, below the project list, not per project, and page by `archivedAt` recency. With an active sidebar query, normal archive pagination is replaced by query-aware pagination against `q`-filtered results; the controls become "Load more matching archived goals..." / "Load more matching archived sessions..." and keep the active query instead of loading arbitrary non-matching pages.
+- **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour opens archived sections globally when the sidebar query is non-empty. Live sessions/goals/staff and already-loaded archived rows are filtered instantly in the client, but full-corpus archived lookup is debounced and backed by `GET /api/goals?archived=true&q=<query>` plus `GET /api/sessions?include=archived&q=<query>`. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all. See [Sidebar Archived Search](sidebar-archived-search.md).
 - **Collapsed sidebar**: `renderCollapsedSidebar` is unchanged - archived goals continue to render inline with live goals in the icon-only rail.
 
 ### Sidebar keyboard navigation
@@ -1319,6 +1340,24 @@ Why no MCP-specific builtin denials: MCP servers should have the same baseline a
 
 Disruptive servers (e.g. headed Chromium from `@playwright/mcp`) are opted out at the **role** layer instead — see `defaults/roles/qa-tester.yaml`, which sets `toolPolicies: { mcp__playwright: never }`. Roles that need the tool inherit the `allow` default; roles that shouldn't have it block it locally.
 
+### Refresh agent and MCP policy changes
+
+`Refresh agent` respawns the agent through the same restore path used for session recovery, but normal role-derived sessions do **not** reuse the previous live `session.allowedTools` as the authority. That array is a runtime cache of whatever was active when the agent was first spawned. On refresh, Bobbit recomputes the role-derived tool surface from the current role, tool default, group policy, and MCP server policy cascade.
+
+This matters for MCP policy edits made in the Tools page:
+
+- Changing an MCP group from `never` to `ask` makes the refreshed session register the relevant `mcp_<server>` meta-tool. Calls then hit the guard extension and broadcast the normal `tool_permission_needed` card.
+- Changing an MCP group from `never` to `allow` makes the refreshed session register the meta-tool and execute it without a permission card.
+- An explicit role-level `never` still wins over group defaults. For example, a role with `toolPolicies: { mcp__mock: never }` still blocks `mcp_mock` after the group default changes to `ask` or `allow`.
+
+Only genuinely session-scoped tool state is carried across the respawn:
+
+- persisted session allow-lists, such as delegate/read-only constraints or explicit creation-time overrides, remain authoritative and are preserved exactly;
+- `session-only` grants are re-applied in memory so they survive refresh without becoming durable role policy;
+- `one-time` grants are re-applied only for the interrupted turn and are still revoked on `agent_end`.
+
+Regression coverage lives in `tests/e2e/mcp-tool-permission.spec.ts`: the refresh scenario pins `never` → `ask` registration plus the permission-card broadcast, and the role-deny scenario pins role-level `mcp__mock: never` precedence over group `allow`.
+
 ### REST API
 
 - `PUT /api/roles/:name` - accepts `toolPolicies` (Record of tool/group name → `allow` | `ask` | `never`)
@@ -1702,17 +1741,19 @@ Indexes are a rebuildable cache; the source-of-truth stores repopulate automatic
 
 ### Two-mode search UX
 
-**1. Filter mode (sidebar):** Instant client-side filtering - no API calls. Filters goals by title, sessions by title and agent role, and staff by name using case-insensitive substring matching. Archived sections auto-expand on a match and auto-collapse when cleared. A "Full Search" link navigates to the full search page with the current query. Key file: `SearchBox.ts`; filtering lives in `Sidebar.ts`.
+**1. Filter mode (sidebar):** Live sessions, live goals, staff, and already-loaded archived rows are filtered instantly in the browser using case-insensitive substring matching on goal titles, session titles/roles, and staff names. Archived full-corpus lookup is the exception: when the sidebar query is non-empty and archived rows are visible or auto-opened, the client debounces `q`-backed calls to the archived sessions/goals endpoints so matches beyond the first archive page can appear without loading non-matching pages. Archived sections auto-open for search and auto-collapse when the query is cleared if search opened them. A "Full Search" link navigates to the full search page with the current query. Key files: `src/ui/components/SearchBox.ts`, `src/app/sidebar.ts`, and `src/app/api.ts`; detailed behavior is in [Sidebar Archived Search](sidebar-archived-search.md).
 
-**2. Full search page (`#/search`):** The sole consumer of `GET /api/search`. Large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with `<b>`-highlighted snippets, relative timestamps, archived badges, and "Load More" pagination. Key file: `search-page.ts`.
+**2. Full search page (`#/search`):** The sole consumer of `GET /api/search` / the FTS index. Large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with `<b>`-highlighted snippets, relative timestamps, archived badges, and "Load More" pagination. Key file: `search-page.ts`.
 
 > **Design note - gate content:** Gate content (design specs, review findings) is not currently indexed. Tracked for future work; adding it requires bumping `SCHEMA_VERSION` or `CONTENT_POLICY_VERSION` to force a rebuild.
 
 ### Paginated archives
 
-- `GET /api/goals?archived=true&limit=50&after=<cursor>` - cursor is `archivedAt` timestamp
-- `GET /api/sessions?include=archived&limit=50&after=<cursor>`
-- Live data uses generation-based polling (`?since=N`)
+- `GET /api/goals?archived=true&limit=50&after=<cursor>` — cursor is an `archivedAt` timestamp.
+- `GET /api/sessions?include=archived&limit=50&after=<cursor>` — cursor is an `archivedAt` timestamp.
+- Add `q=<query>` to either archived endpoint for sidebar archived search. The server applies case-insensitive substring matching across the full archived corpus before pagination: session `title`/`role` for sessions, and goal `title` or affiliated non-child session `title`/`role` for goals.
+- Query-aware archive pagination is separate from normal Show Archived pagination: "Load more matching archived..." keeps `q` and pages only matching archived rows.
+- Live data uses generation-based polling (`?since=N`).
 
 ---
 
@@ -2655,6 +2696,59 @@ The bg-wait endpoint was the second consumer and originally shipped without the 
 
 ---
 
+## Markdown rendering invariant
+
+Bobbit renders user- and agent-authored markdown through the global `<markdown-block>` custom element. The element is used in chat messages, proposal previews, goal dashboards, staff prompts, skill chips, thinking blocks, gate/verification outputs, and markdown artifacts. Because these surfaces can display untrusted model output, source snippets, and math in the same document, markdown rendering is a UI security and correctness boundary rather than a cosmetic helper.
+
+### Owned implementation
+
+`src/ui/lazy/markdown-block.ts` is the only public loader. It dynamically imports Bobbit's `src/ui/lazy/safe-markdown-block.ts`, which defines the `<markdown-block>` element. Bobbit owns this implementation instead of importing `@mariozechner/mini-lit/dist/MarkdownBlock.js` directly for three reasons:
+
+- **Correctness for code.** Markdown code spans and fenced code must be parsed as code before math handling sees dollar signs. The upstream implementation's custom code preservation and dollar-math path regressed on TypeScript template literals such as `` `^${foo}$` ``, causing trailing markdown to break. The local renderer lets `marked` own code tokenization and renders fenced code through `<code-block>` with encoded source.
+- **One sanitizer policy.** Link handling is centralized so every markdown surface applies the same href allow-list and obfuscation normalization.
+- **Lazy loading stays intact.** KaTeX, marked, highlight.js, and `<code-block>` remain out of the main UI chunk until a markdown surface is encountered.
+
+Consumers must not import the upstream MarkdownBlock module directly. A direct import bypasses Bobbit's code/math guarantees, href policy, and bundle boundary.
+
+### Registration contract
+
+Any component or renderer that emits `<markdown-block>` must call `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts` in `connectedCallback()`, the constructor, or the first `render()` path before returning the template. The helper is idempotent: the first call starts the dynamic import, later calls are no-ops, and existing unknown `<markdown-block>` nodes upgrade in place when the custom element definition lands.
+
+Do not rely on another page or earlier component having registered the element. That creates navigation-order bugs where markdown appears as raw text until an unrelated surface triggers the lazy import. The debugging entry for this symptom is [debugging.md — Markdown not rendering in chat / proposal panel](debugging.md#markdown-not-rendering-in-chat--proposal-panel).
+
+### Code and math guarantees
+
+`<markdown-block>` preserves literal dollar signs and backticks inside code:
+
+- Fenced code keeps source text such as ``const x = `^${foo}$`;`` exactly as code content.
+- Inline code keeps source text such as `` `^${foo}$` `` literally.
+- Dollar signs inside fenced or inline code are never treated as KaTeX delimiters.
+- Template-literal backticks inside fenced code do not terminate markdown parsing.
+
+Math still renders through KaTeX outside code for these delimiters:
+
+- inline dollar math: `$x$`
+- display dollar math: `$$...$$`
+- inline LaTeX math: `\(...\)`
+- display LaTeX math: `\[...\]`
+
+If KaTeX rejects an expression, the renderer falls back to escaped text for that expression rather than letting raw HTML through.
+
+### Link href policy
+
+Markdown links are allowed only when their normalized href is safe for a new browser tab:
+
+- allowed: `http:`, `https:`, `mailto:`, relative paths, root-relative paths, and same-document anchors (`#section`)
+- rejected: protocol-relative URLs (`//host/path`) and every other explicit scheme, including `javascript:`, `data:`, `vbscript:`, and `file:`
+
+Before scheme allow-listing, the sanitizer decodes HTML character references and removes ASCII control characters and whitespace from the scheme candidate. This catches browser-equivalent obfuscations such as `&#106;avascript:`, `jav&#x61;script:`, and `java&#10;script:`. Rejected links render as escaped link text, not as `<a>` elements. Allowed links receive `target="_blank"` and `rel="noopener noreferrer"`.
+
+### Regression coverage
+
+`tests/markdown-dollar-template.spec.ts` is the pinning browser/file fixture. It covers the minimal TypeScript template-literal repro, inline-code dollar preservation, supported math delimiters outside code, and href sanitizer cases including entity/control-obfuscated schemes. Add new markdown safety regressions there unless they require a full application route.
+
+---
+
 ## Chat surface UI invariants
 
 Two surfaces in the chat client previously relied on time-based heuristics that gave intermittent, hard-to-repro misbehaviour (scroll snap-back / vibration in idle sessions, stale messages trailing after newer ones on session navigate). Both have been replaced with deterministic invariants the implementation must preserve.
@@ -2781,7 +2875,11 @@ When extending transcript handling: every new transcript mutation goes through a
 
 When an assistant `message_end` carries tool calls, the streaming container in `AgentInterface.ts` keeps owning the rendered card until the next event arrives, while the same message is also appended to `state.messages` by the reducer. The visible-messages filter hides the duplicate by id-equality (`m.id !== streamingMessageId`). Real LLM streams sometimes deliver `message_end` without a string `id` (undefined / null / numeric / `0` / `""`); the historical inline check `typeof msg.id === "string" ? msg.id : undefined` demoted `streamingMessageId` to `undefined`, the `!streamingMessageId` short-circuit opened the filter, and the card rendered twice - each instance with its own `<bg-process-renderer>` and its own `Date.now()` start time, diverging visibly during a parked `bash_bg.wait` where no further events arrive to reconcile.
 
+Tool-call turns can also arrive as a final assistant `message_end` without any prior `message_update`. That frame is still a valid source for live streaming state: when `RemoteAgent` sees tool calls on the final message, it sets `state.streamingMessage` from that message, computes `streamingMessageId`, and stamps any synthetic reducer-row id from the same helper before dispatching the reducer action. Without this, the row can be hidden from `MessageList` by `streamingMessageId` while the streaming container has no message to render, so a long-running `bash_bg wait` card appears only after refresh or snapshot replay.
+
 The canonical key is computed by `computeStreamingMessageId(msg)` in `src/app/streaming-message-id.ts`: prefer a non-empty string `msg.id`, otherwise fall back to `synth:tc:<firstToolCallId>` (toolCall ids are stable across `message_update` deltas), otherwise `undefined`. Both sites in `src/app/remote-agent.ts` - the `streamingMessageId` field assignment **and** the `id` stamped onto the reducer entry before the `live-event` action - must go through the helper, or the two diverge and the filter's id-equality check fails. The defensive `if (streamingMessage && m === streamingMessage) return false` guard in `AgentInterface.renderMessages` is belt-and-braces for the case where the streaming message is the same object reference as a row in `messages`; it does not replace the id-equality path because production hits the separate-objects case via the reducer's `live-event` append.
+
+`AgentInterface` syncs `StreamingMessageContainer` on every `message_end`: set it to the current `state.streamingMessage` when present, or clear it when absent (for non-tool messages that should render only through `MessageList`). This preserves the single visible owner invariant. Tool-call messages render immediately through the streaming container while the reducer row is filtered by the matching id; non-tool messages clear the container so the finalized row is not duplicated.
 
 Follow-up not in this fix: `BgProcessRenderer.getCallStart` keys its start-time WeakMap on the `params` object identity rather than on `bgId`. Two render paths produce two distinct `params` objects → two start times. Re-keying on `bgId` would mask the *visible* dual-timer symptom even if the dual-render itself recurred for some other reason - worth doing as defence in depth, but a separate goal.
 

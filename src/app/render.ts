@@ -46,7 +46,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls } from "./sidebar.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
@@ -345,17 +345,6 @@ function renderClientDebugButton() {
 
 /** Compact session row for mobile — mirrors sidebar row with always-visible buttons */
 
-// Mobile search handlers (shared logic with sidebar but separate scope)
-function _handleMobileSearchInput(query: string): void {
-	state.searchQuery = query;
-	renderApp();
-}
-
-function _handleMobileSearchClear(): void {
-	state.searchQuery = "";
-	renderApp();
-}
-
 function renderMobileLanding() {
 	const sidebarData = getSidebarData();
 	let { ungroupedSessions, liveGoals } = sidebarData;
@@ -446,8 +435,8 @@ function renderMobileLanding() {
 				<search-box
 					.query=${state.searchQuery}
 					.showControls=${!!state.searchQuery}
-					@search-input=${(e: CustomEvent) => { _handleMobileSearchInput(e.detail.query); }}
-					@search-clear=${() => { _handleMobileSearchClear(); }}
+					@search-input=${(e: CustomEvent) => { handleSidebarSearchInput(e.detail.query); }}
+					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
 				${state.sessionsLoading
@@ -612,6 +601,7 @@ function renderMobileLanding() {
 												</div>
 											`;
 										})}
+										${renderArchivedSearchControls()}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
 											<div class="border-t border-border/30 my-1 mx-2"></div>
 											<div class="flex flex-col gap-0.5 px-2">
@@ -2159,28 +2149,27 @@ export function doRenderApp(): void {
 	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
 		const sid = activeSessionId() || "";
-		const v = state.previewPanelMtime || 0;
-		// Derive artifactId and entry from the active panel tab rather than
-		// mirroring them in global state. Many code paths (SSE preview-changed,
-		// bootstrap fetch, PreviewRenderer, session-manager) update
-		// `previewPanelEntry` without knowing about artifactId; reading directly
-		// from the active tab keeps entry+artifactId always paired.
+		// Derive artifactId, entry, and mtime from the active panel tab rather than
+		// requiring global preview mirrors to be populated. After a gateway restart,
+		// the server-persisted workspace tab can be restored before the session's
+		// transient previewPanelEntry mirror is repopulated.
 		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 		const panelTabs = unifiedPanelContentTabs();
 		const activeTab = panelTabs.find((t) => t.id === activeId);
 		let artifactId = "";
-		let entry = state.previewPanelEntry || "inline.html";
+		let entry = state.previewPanelEntry || "";
+		let tabMtime = 0;
 		if (activeTab && activeTab.kind === "preview") {
 			const tabState = (activeTab.state || {}) as Record<string, unknown>;
 			const source = activeTab.source as Record<string, unknown>;
+			const tabEntry = previewEntryFromTab(activeTab);
+			if (tabEntry) entry = tabEntry;
+			if (typeof tabState.mtime === "number" && Number.isFinite(tabState.mtime)) tabMtime = tabState.mtime;
 			const isLiveTab = isLivePreviewTab(activeTab);
-			if (!isLiveTab) {
-				artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
-				const tabEntry = previewEntryFromTab(activeTab);
-				if (tabEntry) entry = tabEntry;
-			}
+			if (!isLiveTab) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 		}
-		if (!sid || !state.previewPanelEntry) {
+		const v = state.previewPanelMtime || tabMtime || 0;
+		if (!sid || !entry) {
 			// Empty-state until the first SSE `preview-changed` event lands.
 			return html`
 				<div class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">

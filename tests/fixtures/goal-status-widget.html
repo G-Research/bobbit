@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<title>GoalStatusWidget fixture</title>
+	<style>
+		:root {
+			--background: #101018;
+			--foreground: #f8fafc;
+			--card: #181827;
+			--border: #34344a;
+			--muted: #27272a;
+			--muted-foreground: #a1a1aa;
+			--primary: #3b82f6;
+			--destructive: #ef4444;
+		}
+		body { margin: 24px; font-family: sans-serif; background: var(--background); color: var(--foreground); }
+		.flex { display: flex; }
+		.inline-flex { display: inline-flex; }
+		.items-center { align-items: center; }
+		.justify-between { justify-content: space-between; }
+		.justify-end { justify-content: flex-end; }
+		.flex-col { flex-direction: column; }
+		.gap-1 { gap: 0.25rem; }
+		.gap-1\.5 { gap: 0.375rem; }
+		.gap-2 { gap: 0.5rem; }
+		.mb-2 { margin-bottom: 0.5rem; }
+		.mt-1 { margin-top: 0.25rem; }
+		.pt-2 { padding-top: 0.5rem; }
+		.p-2 { padding: 0.5rem; }
+		.p-3 { padding: 0.75rem; }
+		.px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+		.py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+		.rounded-md { border-radius: 0.375rem; }
+		.rounded-lg { border-radius: 0.5rem; }
+		.rounded-full { border-radius: 9999px; }
+		.border { border: 1px solid var(--border); }
+		.border-t { border-top: 1px solid var(--border); }
+		.bg-card { background: var(--card); }
+		.text-foreground { color: var(--foreground); }
+		.text-muted-foreground { color: var(--muted-foreground); }
+		.font-medium { font-weight: 500; }
+		.text-sm { font-size: 0.875rem; }
+		.shrink-0 { flex-shrink: 0; }
+		.min-w-0 { min-width: 0; }
+		.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.fixed { position: fixed; }
+		.z-\[9999\] { z-index: 9999; }
+	</style>
+	<script src="./goal-status-widget-bundle.js"></script>
+</head>
+<body>
+	<div id="container"></div>
+</body>
+</html>

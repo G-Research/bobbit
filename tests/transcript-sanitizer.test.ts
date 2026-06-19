@@ -24,6 +24,7 @@ import path from "node:path";
 import {
 	sanitizeTranscriptContent,
 	sanitizeAgentTranscriptFile,
+	rebaseTranscriptCwdMetadataContent,
 	isWithinAgentSessionsDir,
 	resolveSafeSessionsPath,
 } from "../src/server/agent/transcript-sanitizer.ts";
@@ -148,6 +149,98 @@ describe("sanitizeTranscriptContent", () => {
 		const { content, changed } = sanitizeTranscriptContent("");
 		assert.equal(changed, false);
 		assert.equal(content, "");
+	});
+});
+
+describe("rebaseTranscriptCwdMetadataContent", () => {
+	const oldCwd = "C:/Users/test/bobbit-wt/session-old123";
+	const otherOldCwd = "C:/Users/test/bobbit-wt/session-other456";
+	const newCwd = "C:/Users/test/bobbit-wt/session-new789";
+
+	function rebase(content: string) {
+		return rebaseTranscriptCwdMetadataContent(content, { oldCwds: [oldCwd, otherOldCwd], newCwd });
+	}
+
+	it("rewrites system init cwd metadata from an old cwd to the new cwd", () => {
+		const line = JSON.stringify({ type: "system", subtype: "init", cwd: oldCwd, session_id: "old123" });
+		const { content, changed, rewritten } = rebase(line);
+		assert.equal(changed, true);
+		assert.equal(rewritten, 1);
+		assert.deepEqual(JSON.parse(content), { type: "system", subtype: "init", cwd: newCwd, session_id: "old123" });
+	});
+
+	it("rewrites Pi-style session cwd metadata and is idempotent", () => {
+		const line = JSON.stringify({
+			type: "session",
+			version: 3,
+			id: "019ed586-a59a-7d8a-a518-3d4d5e4c6e54",
+			timestamp: "2026-06-17T12:20:31.770Z",
+			cwd: oldCwd,
+		});
+
+		const once = rebase(line);
+		assert.equal(once.changed, true);
+		assert.equal(once.rewritten, 1);
+		assert.deepEqual(JSON.parse(once.content), {
+			type: "session",
+			version: 3,
+			id: "019ed586-a59a-7d8a-a518-3d4d5e4c6e54",
+			timestamp: "2026-06-17T12:20:31.770Z",
+			cwd: newCwd,
+		});
+
+		const twice = rebase(once.content);
+		assert.equal(twice.changed, false);
+		assert.equal(twice.rewritten, 0);
+		assert.equal(twice.content, once.content);
+	});
+
+	it("rewrites legacy system cwd metadata with no subtype", () => {
+		const line = JSON.stringify({ type: "system", cwd: oldCwd, note: "legacy init shape" });
+		const { content, changed, rewritten } = rebase(line);
+		assert.equal(changed, true);
+		assert.equal(rewritten, 1);
+		assert.deepEqual(JSON.parse(content), { type: "system", cwd: newCwd, note: "legacy init shape" });
+	});
+
+	it("leaves unrelated system cwd values unchanged", () => {
+		const unrelatedCwd = JSON.stringify({ type: "system", subtype: "init", cwd: "C:/Users/test/elsewhere" });
+		const nonInitSubtype = JSON.stringify({ type: "system", subtype: "summary", cwd: oldCwd });
+		const file = [unrelatedCwd, nonInitSubtype].join("\n");
+		const { content, changed, rewritten } = rebase(file);
+		assert.equal(changed, false);
+		assert.equal(rewritten, 0);
+		assert.equal(content, file);
+	});
+
+	it("leaves user and assistant message content byte-identical even when text mentions old paths", () => {
+		const system = JSON.stringify({ type: "system", subtype: "init", cwd: oldCwd });
+		const userLine = msg("user", [{ type: "text", text: `please inspect ${oldCwd}` }], "user-path");
+		const assistantLine = msg("assistant", [{ type: "text", text: `I saw ${otherOldCwd}` }], "assistant-path");
+		const file = [system, userLine, assistantLine].join("\n");
+
+		const { content, changed, rewritten } = rebase(file);
+		assert.equal(changed, true);
+		assert.equal(rewritten, 1);
+		const lines = content.split("\n");
+		assert.equal(JSON.parse(lines[0]).cwd, newCwd);
+		assert.equal(lines[1], userLine, "user-visible path mention must stay byte-identical");
+		assert.equal(lines[2], assistantLine, "assistant-visible path mention must stay byte-identical");
+	});
+
+	it("is idempotent after rebasing cwd metadata", () => {
+		const firstOld = JSON.stringify({ type: "system", subtype: "init", cwd: oldCwd });
+		const secondOld = JSON.stringify({ type: "system", cwd: otherOldCwd });
+		const file = [firstOld, secondOld, msg("user", `still mentions ${oldCwd}`, "u")].join("\n") + "\n";
+
+		const once = rebase(file);
+		assert.equal(once.changed, true);
+		assert.equal(once.rewritten, 2);
+		const twice = rebase(once.content);
+		assert.equal(twice.changed, false);
+		assert.equal(twice.rewritten, 0);
+		assert.equal(twice.content, once.content);
+		assert.ok(once.content.endsWith("\n"), "trailing newline preserved across rebase");
 	});
 });
 

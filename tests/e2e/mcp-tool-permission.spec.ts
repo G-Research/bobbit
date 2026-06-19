@@ -40,6 +40,37 @@ test.setTimeout(60_000);
 
 const ROLE_NAME = "mcp-perm-test-role";
 const DENIED_TOOL = "mcp__mock__echo";
+const MCP_GROUP_POLICY_KEY = "mcp__mock";
+const MCP_META_TOOL = "mcp_mock";
+const REFRESH_ROLE_NAME = "mcp-refresh-policy-role";
+const GROUP_DENY_ROLE_NAME = "mcp-group-deny-precedence-role";
+
+async function setMockMcpGroupPolicy(policy: "allow" | "ask" | "never" | null): Promise<void> {
+	const resp = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(MCP_GROUP_POLICY_KEY)}`, {
+		method: "PUT",
+		body: JSON.stringify({ policy }),
+	});
+	expect(resp.status).toBe(200);
+}
+
+function sessionAllowedTools(
+	gateway: { sessionManager?: { getSession(id: string): { allowedTools?: string[] } | undefined } },
+	sessionId: string,
+): string[] {
+	const session = gateway.sessionManager?.getSession(sessionId);
+	expect(session, `Expected live session ${sessionId} to exist`).toBeTruthy();
+	return session?.allowedTools ?? [];
+}
+
+async function waitForSessionIdle(
+	gateway: { sessionManager?: { getSession(id: string): { status?: string } | undefined } },
+	sessionId: string,
+): Promise<void> {
+	await expect.poll(
+		() => gateway.sessionManager?.getSession(sessionId)?.status,
+		{ timeout: 15_000, message: `session ${sessionId} should become idle` },
+	).toBe("idle");
+}
 
 test.beforeAll(async () => {
 	// 1. Write MCP config to point at the mock MCP server
@@ -78,8 +109,11 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-	// Clean up role
-	await apiFetch(`/api/roles/${ROLE_NAME}`, { method: "DELETE" }).catch(() => {});
+	// Clean up roles
+	for (const roleName of [ROLE_NAME, REFRESH_ROLE_NAME, GROUP_DENY_ROLE_NAME]) {
+		await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+	}
+	await setMockMcpGroupPolicy(null).catch(() => {});
 	// Clean up MCP config
 	const mcpConfigPath = join(bobbitDir(), "config", "mcp.json");
 	if (existsSync(mcpConfigPath)) {
@@ -95,6 +129,117 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 	let sessionId: string;
 	test.afterEach(async () => {
 		if (sessionId) { await deleteSession(sessionId); sessionId = ""; }
+	});
+
+	test("refresh recomputes MCP group policy from never to ask and broadcasts permission request", async ({ gateway }) => {
+		await apiFetch(`/api/roles/${REFRESH_ROLE_NAME}`, { method: "DELETE" }).catch(() => {});
+		await setMockMcpGroupPolicy("never");
+
+		const roleResp = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({
+				name: REFRESH_ROLE_NAME,
+				label: "MCP Refresh Policy Role",
+				promptTemplate: "Test role with no role-level MCP denial.",
+				toolPolicies: { Read: "allow" },
+			}),
+		});
+		expect(roleResp.status).toBe(201);
+
+		try {
+			const resp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), roleId: REFRESH_ROLE_NAME }),
+			});
+			expect(resp.status).toBe(201);
+			sessionId = (await resp.json()).id;
+			await waitForSessionIdle(gateway, sessionId);
+
+			const initialAllowed = sessionAllowedTools(gateway, sessionId);
+			expect(initialAllowed.length).toBeGreaterThan(0);
+			expect(initialAllowed).not.toContain(MCP_META_TOOL);
+
+			await setMockMcpGroupPolicy("ask");
+			const restartResp = await apiFetch(`/api/sessions/${sessionId}/restart`, { method: "POST" });
+			expect(restartResp.status).toBe(200);
+			await waitForSessionIdle(gateway, sessionId);
+
+			const refreshedAllowed = sessionAllowedTools(gateway, sessionId);
+			expect(
+				refreshedAllowed,
+				"MCP_REFRESH_ALLOWED_TOOLS_STALE: Refresh agent must recompute allowed tools after mcp__mock policy changes from never to ask",
+			).toContain(MCP_META_TOOL);
+
+			const conn = await connectWs(sessionId);
+			try {
+				const permissionReceived = conn.waitFor(
+					(m) => m.type === "tool_permission_needed" && m.toolName === DENIED_TOOL,
+					10_000,
+				);
+				const grantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+					method: "POST",
+					body: JSON.stringify({ toolName: DENIED_TOOL, toolGroup: "MCP: mock" }),
+				});
+
+				const permMsg = await permissionReceived;
+				expect(permMsg.group).toBe("MCP: mock");
+				expect(permMsg.roleName).toBe(REFRESH_ROLE_NAME);
+
+				conn.send({ type: "deny_tool_permission", toolName: DENIED_TOOL });
+				const grantResult = await grantPromise.then(r => r.json());
+				expect(grantResult.granted).toBe(false);
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await apiFetch(`/api/roles/${REFRESH_ROLE_NAME}`, { method: "DELETE" }).catch(() => {});
+			await setMockMcpGroupPolicy(null).catch(() => {});
+		}
+	});
+
+	test("role-level mcp__mock never overrides group allow for MCP calls", async ({ gateway }) => {
+		await apiFetch(`/api/roles/${GROUP_DENY_ROLE_NAME}`, { method: "DELETE" }).catch(() => {});
+		await setMockMcpGroupPolicy("allow");
+
+		const roleResp = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({
+				name: GROUP_DENY_ROLE_NAME,
+				label: "MCP Group Deny Precedence Role",
+				promptTemplate: "Test role with explicit MCP group denial.",
+				toolPolicies: { Read: "allow", [MCP_GROUP_POLICY_KEY]: "never" },
+			}),
+		});
+		expect(roleResp.status).toBe(201);
+
+		try {
+			const resp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), roleId: GROUP_DENY_ROLE_NAME }),
+			});
+			expect(resp.status).toBe(201);
+			sessionId = (await resp.json()).id;
+			await waitForSessionIdle(gateway, sessionId);
+
+			expect(sessionAllowedTools(gateway, sessionId)).not.toContain(MCP_META_TOOL);
+
+			const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${readE2EToken()}`,
+					"X-Bobbit-Session-Id": sessionId,
+				},
+				body: JSON.stringify({ tool: DENIED_TOOL, args: { message: "should be blocked" } }),
+			});
+			expect(callResp.status).toBe(403);
+			const callBody = await callResp.json();
+			expect(callBody.error).toMatch(/denied by policy/);
+			expect(callBody.reason).toBe("policy=never");
+		} finally {
+			await apiFetch(`/api/roles/${GROUP_DENY_ROLE_NAME}`, { method: "DELETE" }).catch(() => {});
+			await setMockMcpGroupPolicy(null).catch(() => {});
+		}
 	});
 
 	test("server broadcasts tool_permission_needed when denied MCP tool is used", async () => {

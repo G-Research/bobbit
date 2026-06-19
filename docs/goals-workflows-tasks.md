@@ -10,7 +10,9 @@ A **goal** is a unit of work with a title, spec (markdown), working directory, a
 
 `POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` inside a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
 
-Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). When enabled, the server automatically calls `teamManager.startTeam()` after worktree setup completes — no manual "Start Team" click needed. If auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable; the user can start the team manually. The retry-setup handler also respects this flag.
+Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). That flag is evaluated only during the goal creation / setup flow: after worktree setup completes, the server may call `teamManager.startTeam()` so no manual "Start Team" click is needed. The retry-setup handler also respects the same flag.
+
+`autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
 ### Workflows
 
@@ -29,6 +31,8 @@ Goal creation never assumes a workflow named `"general"` exists. The default-wor
 1. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
 2. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
 3. **No workflows at all** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
+
+These defaults are final goal-creation and user-side acceptance safety nets. They do **not** relax proposal seed validation for agents: when project workflows are resolvable and non-empty, `propose_goal` must name an explicit workflow ID (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
 
 No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
@@ -58,16 +62,19 @@ Validation now happens **at seed time**, the moment the proposal is written. The
 
 Rejections are structured `400` JSON so the agent can self-correct:
 
-- **`UNKNOWN_WORKFLOW`** — `workflow` is explicitly named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
-- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step. When `workflow` is omitted, `options` are validated against the project's default (first) workflow, consistent with [Default workflow resolution](#default-workflow-resolution).
+- **`MISSING_WORKFLOW`** — `workflow` is omitted or blank while the session has resolvable, non-empty project workflows. The body carries `availableWorkflows: [{id, name}]` and a `message` instructing the agent to re-call `propose_goal` with one of those IDs.
+- **`UNKNOWN_WORKFLOW`** — `workflow` is named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
+- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step.
 
-**Validation is skipped** (no error) when:
+**Validation is skipped** (no error) only when there is genuinely nothing to validate against:
 
-- The session has no resolvable `projectId` — workflows can't be resolved, so there is nothing to check.
-- The project has **zero workflows** — the empty-workflows state is preserved (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)); the UI dropdown supplies a default.
-- `workflow` is **empty or omitted** — not an error; the UI dropdown supplies the default, so only explicitly-named unknown IDs are rejected.
+- The session has no resolvable `projectId`, so project workflows can't be found.
+- Workflow resolution itself is unavailable for the session/project context.
+- The resolved workflow list is empty, preserving the zero-workflow state (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)).
 
-On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
+The proposal panel and final user-side Accept flow may still display or normalize to a safe valid workflow after workflows load. That UI fallback protects manual acceptance from stale or phantom selections; it is not a default the agent may rely on. Agent-side `propose_goal` seed validation must include an explicit valid `workflow` whenever project workflows are resolvable and non-empty.
+
+On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the missing/available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
 
 #### Phantom workflow IDs in the proposal panel
 
@@ -419,7 +426,7 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 | Implementation & later | `origin/<primary>...HEAD`                 | All other verify-bearing gates        |
 | `ready-to-merge`       | `origin/<primary>` via `git merge-base`   | Hardcoded in workflow YAML            |
 
-**Why `origin/<primary>` and not local `<primary>`:** local refs are only as fresh as the last `git pull` on the host. Goal worktrees are created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work. The harness runs `git fetch origin <primary>` before each review so `origin/<primary>` is current.
+**Why `origin/<primary>` and not local `<primary>`:** in remote-backed projects, local refs are only as fresh as the last `git pull` on the host. Goal worktrees are normally created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work. Before verification, the harness checks whether an `origin` remote exists. If it does, it syncs the goal worktree from `origin/<branch>` and fetches the baseline branch so `origin/<primary>` / `origin/{{baseBranch}}` is current. If the repository is local-only and has no `origin`, remote sync and baseline fetch are skipped quietly, and verification continues from the current local worktree state.
 
 **Why pre-implementation gates skip the diff entirely:** a design-doc or issue-analysis gate, by workflow construction, runs before any code is committed. A branch with zero goal-unique commits is the normal expected state. Running a diff produces noise at best, and — if local `<primary>` is stale — false positives at worst. The reviewer prompt explicitly forbids `git diff` / `git log` for these gates.
 
@@ -443,11 +450,11 @@ Do not use bare forms such as `git push origin {{branch}}` in verification. Bare
 
 #### Phased verification
 
-Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, command steps are **serialized** while non-command steps still run in parallel. This prevents the harness from launching multiple full build/test commands against the same worktree at once, which is especially expensive on Windows under concurrent verification load.
+Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, steps run concurrently by default, including `type: command` steps. If two command checks must not overlap, put them in different phases instead of relying on step type for ordering.
 
 If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with `skipped: true` on `GateSignalStep` and output `"Skipped — earlier phase failed"`. The `skipped` flag persists to disk so the UI can distinguish skipped steps from passed/failed ones after page reload.
 
-This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while also avoiding command-suite contention inside phase 0. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
+This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while keeping the `phase` field as the sole source of verification ordering. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
 
 ```yaml
 verify:
@@ -468,7 +475,7 @@ verify:
       Review for correctness, completeness, and code quality.
 ```
 
-**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work without migration. Non-command steps keep the legacy parallel behavior; command steps in the same phase now serialize as a contention-control measure.
+**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work without migration. Same-phase steps run concurrently by default; explicit ordering between command checks should be represented with different `phase` values.
 
 **WebSocket events:** The server broadcasts `gate_verification_phase_started` before each phase begins, including the phase number and which step indices belong to it. Step-level events (`gate_verification_step_started`, `gate_verification_step_complete`) include an optional `phase` field. The goal dashboard uses these to show phase progression in real time.
 

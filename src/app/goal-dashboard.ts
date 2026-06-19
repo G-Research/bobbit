@@ -21,12 +21,14 @@ import { isSubgoalsEnabled } from "./subgoals-flag.js";
 import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 import { ensureGitStatusWidget } from "./lazy-widgets.js";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 
 // Module-init trigger — `goal-dashboard.ts` is itself a lazy route chunk,
 // so this runs when the user first navigates to a goal dashboard. The
 // widget chunk loads in parallel with the dashboard chunk; by the time
 // the first `<git-status-widget>` is rendered it's already upgraded.
 void ensureGitStatusWidget();
+void ensureMarkdownBlock();
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)

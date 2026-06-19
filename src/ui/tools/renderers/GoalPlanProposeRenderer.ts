@@ -17,6 +17,7 @@ import { DefaultRenderer } from "./DefaultRenderer.js";
 import { isSubgoalsEnabled } from "../../../app/subgoals-flag.js";
 import { getResult, truncate, parseParams, classificationBadge, resolveGoalId } from "./children-renderer-helpers.js";
 import { parseRevFromResult } from "./proposal-rev-marker.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import "../../../ui/components/ExpandableSection.js";
 
 const fallback = new DefaultRenderer("goal_plan_propose");
@@ -62,6 +63,7 @@ function renderSteps(steps: any[], streamingTrailer = false) {
 export class GoalPlanProposeRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean, ctx?: ToolRenderContext): ToolRenderResult {
 		if (!isSubgoalsEnabled()) return fallback.render(params, result, isStreaming);
+		ensureMarkdownBlock();
 
 		const state = getToolState(result, isStreaming);
 		const fields = parseParams(params) || {};

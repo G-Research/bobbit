@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "metricName": "unit-browser",
+  "kind": "unit-browser",
+  "createdAt": "2026-06-17T22:23:40.463Z",
+  "startedAt": "2026-06-17T22:20:43.432Z",
+  "status": "passed",
+  "exitCode": 0,
+  "signal": null,
+  "command": {
+    "command": "npx.cmd",
+    "args": [
+      "playwright",
+      "test",
+      "--config",
+      "tests/playwright.config.ts",
+      "--workers",
+      "4",
+      "--reporter=json"
+    ],
+    "cwd": "."
+  },
+  "durationMs": 177016,
+  "cpu": {
+    "estimatedCpuMs": 29209422,
+    "averageCpuPercent": 20417.44,
+    "peakCpuPercent": 2865698,
+    "sampleMs": 1000
+  },
+  "memory": {
+    "peakRssBytes": 8926425088
+  },
+  "tests": {
+    "total": 1449,
+    "passed": 1447,
+    "failed": 0,
+    "skipped": 2,
+    "flaky": 0,
+    "durationMs": 418783,
+    "projects": {
+      "unknown": {
+        "total": 1449,
+        "passed": 1447,
+        "failed": 0,
+        "skipped": 2,
+        "flaky": 0,
+        "durationMs": 418783
+      }
+    }
+  }
+}

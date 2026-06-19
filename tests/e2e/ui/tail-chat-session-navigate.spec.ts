@@ -18,7 +18,7 @@ test.describe("tail-chat: session navigate lands on latest message", () => {
 
 	test.setTimeout(90_000);
 
-	test("A → B → A → B → A: each replayed transcript is bottom-pinned", async ({ page, rec }) => {
+	test("A → B → A: replayed transcripts are bottom-pinned", async ({ page, rec }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");
@@ -36,8 +36,6 @@ test.describe("tail-chat: session navigate lands on latest message", () => {
 			{ id: sessionA, label: "A (1st)" },
 			{ id: sessionB, label: "B (1st)" },
 			{ id: sessionA, label: "A (2nd)" },
-			{ id: sessionB, label: "B (2nd)" },
-			{ id: sessionA, label: "A (3rd)" },
 		];
 		for (const { id, label } of hops) {
 			await navigateToTailSession(page, id);

@@ -20,7 +20,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -310,7 +310,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
@@ -439,10 +439,6 @@ export function buildMarketToolRootsForProject(options: {
 }
 
 /**
- * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
- */
-/**
  * Clamp a thinking-level token against a role's pinned model (if any).
  * - Validates that the token is in the canonical set; returns undefined otherwise.
  * - When `modelStr` is set in canonical `provider/modelId` form, clamps the
@@ -462,6 +458,28 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
 }
 
+export function isMissingRemoteRefDeleteError(err: unknown): boolean {
+	const texts: string[] = [];
+	const addText = (value: unknown) => {
+		if (typeof value === "string") texts.push(value);
+		else if (Buffer.isBuffer(value)) texts.push(value.toString("utf-8"));
+	};
+
+	addText(err);
+	if (err instanceof Error) addText(err.message);
+	if (err && typeof err === "object") {
+		const record = err as Record<string, unknown>;
+		addText(record.stderr);
+		addText(record.message);
+	}
+
+	return texts.some(text => /\bremote\s+ref\s+does\s+not\s+exist\b/i.test(text));
+}
+
+/**
+ * Delete remote branches associated with a goal (integration + agent worktree branches).
+ * Fire-and-forget — errors are logged but never block the archive flow.
+ */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
@@ -490,6 +508,7 @@ async function deleteRemoteGoalBranches(
 			});
 			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
+			if (isMissingRemoteRefDeleteError(err)) return;
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
@@ -2092,6 +2111,7 @@ export function createGateway(config: GatewayConfig) {
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
 					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthGoogleAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
 					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
@@ -4077,6 +4097,30 @@ async function handleApiRoute(
 		return result;
 	}
 
+	function normalizedArchivedQuery(value: string | null): string {
+		return (value || "").trim().toLowerCase();
+	}
+
+	function archivedSessionMatchesQuery(session: any, query: string): boolean {
+		if (!query) return true;
+		return String(session?.title || "").toLowerCase().includes(query)
+			|| String(session?.role || "").toLowerCase().includes(query);
+	}
+
+	function isArchivedQueryChildSession(session: any): boolean {
+		return !!(session?.parentSessionId || session?.delegateOf);
+	}
+
+	function archivedGoalMatchesQuery(goal: PersistedGoal, sessions: any[], query: string): boolean {
+		if (!query) return true;
+		if (String(goal.title || "").toLowerCase().includes(query)) return true;
+		return sessions.some(s =>
+			(s?.goalId === goal.id || s?.teamGoalId === goal.id)
+			&& !isArchivedQueryChildSession(s)
+			&& archivedSessionMatchesQuery(s, query),
+		);
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = projectContextManager.getSessionGeneration();
@@ -4099,6 +4143,7 @@ async function handleApiRoute(
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Collect archived sessions across all project contexts
 			const allArchived: typeof sessions = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -4109,10 +4154,11 @@ async function handleApiRoute(
 			}
 			// Sort by archivedAt descending
 			allArchived.sort((a: any, b: any) => ((b as any).archivedAt ?? 0) - ((a as any).archivedAt ?? 0));
-			// Apply projectId filter if present
-			const filteredArchived = filterProjectId
+			// Apply projectId and query filters before pagination.
+			const filteredArchived = (filterProjectId
 				? allArchived.filter((s: any) => s.projectId === filterProjectId)
-				: allArchived;
+				: allArchived
+			).filter((s: any) => archivedSessionMatchesQuery(s, archivedQuery));
 
 			// Collect ALL archived sessions for BFS enrichment (not just delegates)
 			const allArchivedForBfs: typeof sessions = [];
@@ -4951,11 +4997,23 @@ async function handleApiRoute(
 			const afterParam = url.searchParams.get("after");
 			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Aggregate archived goals across all project contexts
 			let allArchived: PersistedGoal[] = [];
+			const sessionsForGoalQuery: any[] = [];
+			for (const liveSession of sessionManager.listSessions()) {
+				if (filterProjectId && liveSession.projectId !== filterProjectId) continue;
+				sessionsForGoalQuery.push(liveSession);
+			}
 			for (const ctx of projectContextManager.visible()) {
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
+				for (const s of ctx.sessionStore.getArchived()) {
+					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+				}
+			}
+			if (archivedQuery) {
+				allArchived = allArchived.filter(g => archivedGoalMatchesQuery(g, sessionsForGoalQuery, archivedQuery));
 			}
 			allArchived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
 			const total = allArchived.length;
@@ -10064,11 +10122,16 @@ async function handleApiRoute(
 		const wantWorktree = !!ps.worktreePath;
 		let worktreeOpts: { repoPath: string } | undefined;
 		if (wantWorktree) {
-			try {
-				if (await isGitRepo(projCwd)) {
-					worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-				}
-			} catch { /* ignore — no worktree */ }
+			const projCtx = projectContextManager.getOrCreate(ps.projectId);
+			const components = projCtx?.projectConfigStore.getComponents() ?? [];
+			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd);
+			if (!support.supported || !support.repoPath) {
+				json({
+					error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
+				}, 500);
+				return;
+			}
+			worktreeOpts = { repoPath: support.repoPath };
 		}
 
 		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
@@ -10111,12 +10174,21 @@ async function handleApiRoute(
 		}
 
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
+			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
 			sessionId: newSessionId,
 			projectId: ps.projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			preExistingAgentSessionOldCwds: oldTranscriptCwds,
+			// Continue must surface fresh worktree/base-ref setup failures synchronously;
+			// the archived source worktree/branch remain provenance only. Non-sandboxed
+			// continues use the normal project worktree-pool claim/fallback path; sandboxed
+			// continues keep bypassing the host-side pool because container worktrees are isolated.
+			awaitWorktreeSetup: !!worktreeOpts,
+			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
@@ -10147,7 +10219,11 @@ async function handleApiRoute(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
 		} catch (err) {
-			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			const failedRecord = sessionManager.getPersistedSession(newSessionId);
+			cleanupFailedContinue(failedRecord?.agentSessionFile || destJsonl, newSessionId, bobbitStateDir());
+			if (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl) {
+				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			}
 			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
@@ -10722,6 +10798,20 @@ async function handleApiRoute(
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/oauth/logout — clear/revoke a single provider's OAuth credential.
+	// Provider-partitioned: never touches other providers or API-key entries,
+	// and never echoes token material back to the client.
+	if (url.pathname === "/api/oauth/logout" && req.method === "POST") {
+		try {
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthLogout(body?.provider);
+			json(result);
+		} catch (err) {
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -13529,11 +13619,11 @@ async function handleApiRoute(
  * null if valid. Pure — caller resolves the workflow list (see seed handler).
  *
  * Rules (see docs/design — Validate goal workflow):
- * - Zero workflows ⇒ no validation (UI supplies a default; empty-state preserved).
- * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
+ * - Zero workflows ⇒ no validation (nothing available to validate against).
+ * - Empty/omitted `workflow` ⇒ MISSING_WORKFLOW when workflows are available.
  * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
  * - `options` (comma-separated optional-step names) validated against the chosen
- *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   explicit workflow — matched ONLY by the canonical step.name of
  *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
  *   the UI both key on step.name, so accepting optionalLabel/label here would be a
  *   false-success path that later fails to enable the step.
@@ -13546,19 +13636,30 @@ function validateGoalProposalWorkflow(
 
 	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
 	const available = workflows.map(w => ({ id: w.id, name: w.name }));
+	const availableIds = available.map(w => w.id).join(", ");
 
-	// 1. Unknown explicit workflow id.
-	if (wfArg && !workflows.some(w => w.id === wfArg)) {
+	// 1. Workflow id is required when this session has resolvable workflows.
+	if (!wfArg) {
 		return {
 			ok: false,
-			code: "UNKNOWN_WORKFLOW",
-			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${available.map(w => w.id).join(", ")}. Re-call propose_goal with one of these IDs (or omit workflow to use the default).`,
+			code: "MISSING_WORKFLOW",
+			message: `Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: ${availableIds}.`,
 			availableWorkflows: available,
 		};
 	}
 
-	// 2. Validate optional-step names against the chosen workflow (or default = first).
-	const chosen = wfArg ? workflows.find(w => w.id === wfArg)! : workflows[0];
+	// 2. Unknown explicit workflow id.
+	if (!workflows.some(w => w.id === wfArg)) {
+		return {
+			ok: false,
+			code: "UNKNOWN_WORKFLOW",
+			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${availableIds}. Re-call propose_goal with one of these IDs.`,
+			availableWorkflows: available,
+		};
+	}
+
+	// 3. Validate optional-step names against the chosen explicit workflow.
+	const chosen = workflows.find(w => w.id === wfArg)!;
 	const optsArg = typeof args.options === "string" ? args.options : "";
 	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
 	if (requested.length > 0) {

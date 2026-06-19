@@ -1,6 +1,6 @@
 {
   "name": "bobbit",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -34,6 +34,18 @@
     "test:manual": "npm run build && npx playwright test --config playwright-manual.config.ts",
     "test:unit-coverage": "npx c8 --reporter=text --temp-directory=coverage/unit-tmp --reports-dir=coverage/unit --src=src/server npx tsx --test --test-force-exit tests/*.test.ts",
     "test:coverage": "npm run build:server && shx rm -rf coverage && node scripts/run-coverage.mjs",
+    "metrics:smoke": "node scripts/metrics/smoke.mjs",
+    "metrics:coverage": "node scripts/metrics/coverage.mjs",
+    "metrics:unit:node": "node scripts/metrics/unit-node.mjs",
+    "metrics:unit:browser": "node scripts/metrics/unit-browser.mjs",
+    "metrics:e2e:api": "node scripts/metrics/e2e-project.mjs api",
+    "metrics:e2e:browser": "node scripts/metrics/e2e-project.mjs browser",
+    "metrics:e2e:all": "node scripts/metrics/e2e-all.mjs",
+    "metrics:slice:renderer": "node scripts/metrics/slice.mjs renderer",
+    "metrics:slice:scroll": "node scripts/metrics/slice.mjs scroll",
+    "metrics:slice:sidebar": "node scripts/metrics/slice.mjs sidebar",
+    "metrics:baseline": "node scripts/metrics/baseline.mjs",
+    "metrics:check": "node scripts/metrics/check.mjs",
     "test": "npm run build && npm run test:unit && npm run test:e2e:run --",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",

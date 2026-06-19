@@ -57,3 +57,87 @@ test.describe("ModelSelector Opus ordering", () => {
 			.toBe("anthropic/claude-opus-4-8");
 	});
 });
+
+test.describe("ModelSelector unauthenticated tooltip (Settings-drift regression)", () => {
+	test.beforeEach(async ({ page }) => {
+		await loadFixture(page);
+	});
+
+	// Pins the acceptance criterion: an unauthenticated model must NOT point users
+	// at the dead "Settings > Providers" path. It must reference the real current
+	// Settings locations (Account / Models).
+	test("locked model row tooltip avoids the dead 'Settings > Providers' path", async ({ page }) => {
+		await page.evaluate(() => (window as any).__setModelSelectorModels([
+			{
+				id: "gemini-2.5-pro",
+				name: "Gemini 2.5 Pro",
+				provider: "google",
+				api: "google-generative-ai",
+				contextWindow: 1_000_000,
+				maxTokens: 64_000,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: false,
+			},
+		]));
+		await page.evaluate(() => (window as any).__openModelSelectorFixture());
+
+		const row = page.locator('agent-model-selector [data-model-id="gemini-2.5-pro"]');
+		await expect(row).toBeVisible({ timeout: 10_000 });
+
+		const title = (await row.getAttribute("title")) ?? "";
+		expect(title).not.toContain("Settings > Providers");
+		expect(title).toContain("Settings → Account");
+		expect(title).toContain("Settings → Models");
+
+		// The KeyRound icon's tooltip is the generic "Authentication required".
+		const keyTitles = await row.locator("span[title]").evaluateAll((nodes) =>
+			nodes.map((n) => (n as HTMLElement).getAttribute("title")),
+		);
+		expect(keyTitles).toContain("Authentication required");
+		expect(keyTitles).not.toContain("API key required");
+	});
+});
+
+test.describe("ModelSelector session-unavailable gating (Google Code Assist)", () => {
+	test.beforeEach(async ({ page }) => {
+		await loadFixture(page);
+	});
+
+	// Pins the gap mitigation: an authenticated-but-unrunnable account model
+	// (google-gemini-cli Code Assist) must render visibly unavailable-for-sessions
+	// and must NOT be selectable when clicked.
+	test("renders google-gemini-cli model disabled and refuses to select it", async ({ page }) => {
+		await page.evaluate(() => (window as any).__setModelSelectorModels([
+			{
+				id: "gemini-2.5-pro",
+				name: "Gemini 2.5 Pro (Google account)",
+				provider: "google-gemini-cli",
+				api: "google-code-assist",
+				contextWindow: 1_000_000,
+				maxTokens: 64_000,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+				sessionSelectable: false,
+				sessionUnavailableReason: "Signed in, but Google account (Code Assist) models can't run in agent sessions yet.",
+			},
+		]));
+		await page.evaluate(() => (window as any).__openModelSelectorFixture());
+
+		const row = page.locator('agent-model-selector [data-model-id="gemini-2.5-pro"]');
+		await expect(row).toBeVisible({ timeout: 10_000 });
+
+		// Marked unavailable-for-sessions and visibly disabled.
+		expect(await row.getAttribute("data-session-unavailable")).toBe("true");
+		expect(await row.getAttribute("class")).toContain("cursor-not-allowed");
+		expect((await row.getAttribute("title")) ?? "").toContain("can't run in agent sessions");
+
+		// Clicking it must NOT select the model.
+		await row.dispatchEvent("click");
+		await page.waitForTimeout(100);
+		expect(await page.evaluate(() => (window as any).__getSelectedModel())).toBeNull();
+	});
+});
