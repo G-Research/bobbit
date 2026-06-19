@@ -62,7 +62,7 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes";
+	exportKind: "actions" | "routes" | "providers";
 	/** The member (action/route name) to invoke — pre-validated by the dispatcher. */
 	member: string;
 	/** The FULL handler context. Its `host` (a live ServerHostApi) stays in the
@@ -186,20 +186,27 @@ export class ModuleHost {
 		const limit = timeoutMs ?? this.defaultTimeoutMs;
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
-		const serCtx = {
-			sessionId: req.ctx?.sessionId,
-			toolUseId: req.ctx?.toolUseId,
-			tool: req.ctx?.tool,
-			workingDir: req.ctx?.workingDir,
-			hostVersion: (host as { version?: number } | undefined)?.version,
-			hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-			capabilities: {
-				callRoute: capSrc?.callRoute === true,
-				session: capSrc?.session === true,
-				store: capSrc?.store === true,
-				agents: capSrc?.agents === true,
-			},
-		};
+		const providerCtx = req.ctx as unknown as Record<string, unknown>;
+		const serCtx = req.exportKind === "providers"
+			? {
+				...providerCtx,
+				workingDir: providerCtx.workingDir ?? req.workingDir,
+				capabilities: { callRoute: false, session: false, store: false, agents: false },
+			}
+			: {
+				sessionId: req.ctx?.sessionId,
+				toolUseId: req.ctx?.toolUseId,
+				tool: req.ctx?.tool,
+				workingDir: req.ctx?.workingDir,
+				hostVersion: (host as { version?: number } | undefined)?.version,
+				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+				capabilities: {
+					callRoute: capSrc?.callRoute === true,
+					session: capSrc?.session === true,
+					store: capSrc?.store === true,
+					agents: capSrc?.agents === true,
+				},
+			};
 
 		const worker = new Worker(this.bootstrapUrl(), {
 			// No `env` option: the worker inherits a full copy of the gateway env

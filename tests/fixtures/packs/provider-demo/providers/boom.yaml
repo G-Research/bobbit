@@ -1,0 +1,6 @@
+id: boom
+kind: generic
+module: ../lib/provider-throws.mjs
+hooks: [sessionSetup]
+budget: { maxTokens: 512, timeoutMs: 1000 }
+defaultEnabled: true

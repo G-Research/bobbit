@@ -53,6 +53,8 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions } from "./agent/pack-contributions.js";
+import { LifecycleHub } from "./agent/lifecycle-hub.js";
+import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -1233,7 +1235,22 @@ export function createGateway(config: GatewayConfig) {
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
 	);
+	sessionManager.lifecycleHub = new LifecycleHub({
+		registry: packContributionRegistry,
+		moduleHost,
+		trace: new ContextTraceStore(bobbitStateDir()),
+		gatewayInfo: () => {
+			try {
+				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				return { baseUrl, token };
+			} catch {
+				return { baseUrl: "", token: "" };
+			}
+		},
+	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
@@ -6742,7 +6759,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6770,7 +6787,7 @@ async function handleApiRoute(
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
 			} catch { /* metadata is optional; listName is the stable key */ }
-			return {
+			const baseCatalogue = {
 				roles: [...c.roles],
 				tools: concreteTools.tools,
 				skills: [...c.skills],
@@ -6781,6 +6798,20 @@ async function handleApiRoute(
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never
 				// from the runtime-filtered /api/tools or /api/ext/contributions.
+				descriptions,
+			};
+			if ((entry.manifest.schema ?? 1) < 2) return baseCatalogue;
+			return {
+				roles: baseCatalogue.roles,
+				tools: baseCatalogue.tools,
+				skills: baseCatalogue.skills,
+				entrypoints: baseCatalogue.entrypoints,
+				providers: [...(c.providers ?? [])],
+				hooks: [...(c.hooks ?? [])],
+				mcp: [...(c.mcp ?? [])],
+				piExtensions: [...(c.piExtensions ?? [])],
+				runtimes: [...(c.runtimes ?? [])],
+				workflows: [...(c.workflows ?? [])],
 				descriptions,
 			};
 		};
@@ -6813,7 +6844,7 @@ async function handleApiRoute(
 			// catalogue (drop refs for entities the pack does not declare).
 			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
 			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -6823,6 +6854,12 @@ async function handleApiRoute(
 				tools: normaliseKind("tools", new Set(catalogue.tools)),
 				skills: normaliseKind("skills", new Set(catalogue.skills)),
 				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
+				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
+				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
+				mcp: normaliseKind("mcp", new Set(catalogue.mcp ?? [])),
+				piExtensions: normaliseKind("piExtensions", new Set(catalogue.piExtensions ?? [])),
+				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
