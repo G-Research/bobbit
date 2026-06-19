@@ -308,6 +308,30 @@ describe("loadRuntimes (P1 runtime manifest)", () => {
 		assert.equal(reg.getPack(undefined, "runtime-pack")!.runtimes.length, 1);
 		assert.equal(reg.getRuntime(undefined, "runtime-pack", "hindsight")!.listName, "hindsight");
 	});
+
+	it("activation filtering: a disabled runtime is dropped from getPack/getRuntime and re-enabled by removing the ref", () => {
+		const root = packRoot("rt7", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "other.yaml"), "id: other\ncomposeFile: ../runtime/compose.yaml\n");
+		const m = { ...manifest("runtime-pack", { runtimes: ["hindsight", "other"] }), schema: 2 };
+		// No activation override → both runtimes present.
+		const enabled = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(enabled.getPack(undefined, "runtime-pack")!.runtimes.map((r) => r.id).sort(), ["hindsight", "other"]);
+		// Disable `hindsight` by listName → absent from getPack().runtimes and getRuntime;
+		// the sibling runtime stays present.
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined,
+			(_scope, _pid, packName) => (packName === "runtime-pack" ? ["hindsight"] : []),
+		);
+		const pack = filtered.getPack(undefined, "runtime-pack")!;
+		assert.deepEqual(pack.runtimes.map((r) => r.id), ["other"]);
+		assert.equal(filtered.getRuntime(undefined, "runtime-pack", "hindsight"), undefined);
+		assert.equal(filtered.getRuntime(undefined, "runtime-pack", "other")!.listName, "other");
+		// Removing the ref restores it (no stale filtering between instances).
+		const restored = new PackContributionRegistry(() => [entry(root, "server", m)], undefined, undefined, undefined, () => []);
+		assert.equal(restored.getRuntime(undefined, "runtime-pack", "hindsight")!.listName, "hindsight");
+	});
 });
 
 // ── Hard conflicts (§5.4) ──────────────────────────────────────────

@@ -82,12 +82,17 @@ export class PackContributionRegistry implements PackContributionResolver {
 	 *                   scope, low→high precedence, already deduped-on-path
 	 *                   (mirrors `marketToolRoots`).
 	 * @param disabledEntrypoints  Activation override lookup (§7). Absent ⇒ all enabled.
+	 * @param disabledRuntimes  Disabled-runtime activation override lookup (DisabledRefs.runtimes).
+	 *                          A disabled runtime is dropped from `getPack().runtimes` /
+	 *                          `getRuntime`, so the supervisor's registry lookup 404s and
+	 *                          runtime listings omit it. Absent ⇒ all enabled.
 	 */
 	constructor(
 		private readonly enumerate: (projectId: string | undefined) => PackEntry[],
 		private readonly disabledEntrypoints?: DisabledEntrypointsLookup,
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
+		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -188,6 +193,18 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
+			}
+			// Runtimes: drop entries disabled via pack_activation (DisabledRefs.runtimes
+			// kill-switch), keyed by listName — mirrors the entrypoint/provider toggles.
+			// A disabled managed runtime is absent from `getPack().runtimes` /
+			// `getRuntime`, so the PackRuntimeSupervisor's registry lookup 404s
+			// (start/stop/capabilities reject) and runtime listings omit it; managed
+			// runtime dormancy is a deliberate activation decision.
+			const disabledRuntimes = this.disabledRuntimes
+				? new Set(this.disabledRuntimes(e.scope, projectId, contrib.packName))
+				: undefined;
+			if (disabledRuntimes && disabledRuntimes.size > 0) {
+				contrib = { ...contrib, runtimes: contrib.runtimes.filter((r) => !disabledRuntimes.has(r.listName)) };
 			}
 			loaded.push(contrib);
 		}

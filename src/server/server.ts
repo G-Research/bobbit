@@ -1031,6 +1031,29 @@ export function resolveRuntimeStartPlan(
 }
 
 /**
+ * Whether a pack exposes a managed-runtime DEPLOYMENT SURFACE — i.e. a provider
+ * whose EFFECTIVE config actually carries a deployment `mode` (external / managed
+ * / managed-external-postgres), or whose activation links to that mode
+ * (`activeWhenConfig.mode`). Merely HAVING a provider is NOT enough: a pack with an
+ * unrelated provider (one with no deployment mode) has no external/managed concept,
+ * so it must behave EXACTLY like a provider-less runtime pack — its `on-enable`
+ * runtime starts in the manifest DEFAULT (Docker) mode and the consent disclosure
+ * shows that default, rather than being suppressed to / disclosed as the external
+ * (no-Docker) setup path. Shared by the marketplace activation path, the REST
+ * `/api/pack-runtimes/:id/start` guard, and the `/capabilities` disclosure so the
+ * three can never diverge.
+ */
+export function providerCarriesDeploymentMode(
+	provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
+	effectiveConfig?: Record<string, unknown>,
+): boolean {
+	const config = effectiveConfig ?? provider.config ?? {};
+	if (typeof config.mode === "string" && config.mode.length > 0) return true;
+	const activeWhen = provider.activation?.activeWhenConfig;
+	return !!activeWhen && Object.prototype.hasOwnProperty.call(activeWhen, "mode");
+}
+
+/**
  * P3 managed-runtime context resolution — the SINGLE source of truth shared by
  * BOTH the LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE
  * dispatch path (`/api/ext/route/:name`), so a managed provider and its sibling
@@ -1384,6 +1407,10 @@ export function createGateway(config: GatewayConfig) {
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
+		// Disabled-runtime activation override (DisabledRefs.runtimes): a runtime
+		// disabled via pack_activation is dropped from the pack's contributions, so the
+		// supervisor's registry lookup 404s and runtime listings omit it.
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
 	// P2 pack managed-runtime supervisor handle (Docker-backed). Declared HERE — before
 	// the LifecycleHub — so the hub's runtime-context resolver can consult it lazily at
@@ -6148,21 +6175,43 @@ async function handleApiRoute(
 		// a custom `dataDir` bind path — rather than schema defaults that would diverge
 		// from what activation actually mounts.
 		const deploymentConfig: Record<string, unknown> = {};
+		let hasDeploymentSurface = false;
 		{
 			const pack = packContributionRegistry.getPack(projectId, packId);
 			for (const p of pack?.providers ?? []) {
-				Object.assign(deploymentConfig, p.config ?? {});
+				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+				Object.assign(deploymentConfig, merged);
+				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
 			}
 		}
-		const deploymentMode = requestedMode ?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0 ? deploymentConfig.mode : "external");
+		// Resolve the EFFECTIVE deployment mode. With NO deployment surface (a provider-
+		// less runtime pack, or a pack whose only provider carries no deployment mode)
+		// there is no external/managed concept to honour, so the disclosure must show the
+		// runtime's manifest DEFAULT (Docker) mode/services/ports — the SAME no-surface
+		// fallback the activation/start paths use (they start such runtimes in the
+		// manifest default mode). Only fall back to `external` when a deployment surface
+		// exists but selects no managed mode.
+		const deploymentMode = requestedMode
+			?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
+				? deploymentConfig.mode
+				: (hasDeploymentSurface ? "external" : undefined));
 		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
 		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
 			managed: "managed-postgres",
 			"managed-external-postgres": "external-postgres",
 		};
 		try {
+			if (deploymentMode === undefined) {
+				// No deployment surface: disclose the runtime's manifest DEFAULT (Docker)
+				// mode/services/ports (capabilitySummary with no mode picks the first
+				// manifest mode). dockerRequired:true mirrors the start path bringing this
+				// runtime up in its default mode.
+				const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, config: deploymentConfig });
+				json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
+				return;
+			}
 			if (deploymentMode === "external") {
 				// External: derive descriptor/trust from the default manifest mode but disclose
 				// NO services/ports and flag dockerRequired:false, so the UI shows setup
@@ -6299,10 +6348,14 @@ async function handleApiRoute(
 			{
 				const pack = packContributionRegistry.getPack(projectId, packId);
 				for (const p of pack?.providers ?? []) {
-					hasDeploymentSurface = true;
-					Object.assign(deploymentConfig, p.config ?? {});
+					const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-					if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+					if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+					Object.assign(deploymentConfig, merged);
+					// A deployment surface requires a provider that ACTUALLY carries a
+					// deployment mode — an unrelated provider (no mode) must behave like a
+					// provider-less runtime so the no-surface fallback below applies.
+					if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
 				}
 			}
 			const plan = resolveRuntimeStartPlan(deploymentConfig);
@@ -7222,18 +7275,22 @@ async function handleApiRoute(
 			// (ProviderContribution.config) overlaid with its persisted store config.
 			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
 			const deploymentConfig: Record<string, unknown> = {};
+			let hasDeploymentSurface = false;
 			for (const p of contribs.providers) {
-				Object.assign(deploymentConfig, p.config ?? {});
+				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+				Object.assign(deploymentConfig, merged);
+				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
 			}
-			// `hasDeploymentSurface` = the pack exposes a provider whose config carries
-			// the deployment mode (external/managed/…). A runtime-only pack with NO
-			// provider has no external/managed concept, so its `on-enable` runtime starts
-			// in the runtime's default mode rather than being suppressed by the
-			// external-default start plan (mirrors the REST start path's no-surface
-			// fallback so activation and `/api/pack-runtimes/:id/start` never diverge).
-			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface: contribs.providers.length > 0 };
+			// `hasDeploymentSurface` = the pack exposes a provider whose config ACTUALLY
+			// carries the deployment mode (external/managed/…). A runtime-only pack with NO
+			// provider — OR a pack whose only provider has no deployment mode — has no
+			// external/managed concept, so its `on-enable` runtime starts in the runtime's
+			// default mode rather than being suppressed by the external-default start plan
+			// (mirrors the REST start path's no-surface fallback so activation and
+			// `/api/pack-runtimes/:id/start` never diverge).
+			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface };
 		};
 
 		// Deployment-mode → runtime start plan mapping is the module-level

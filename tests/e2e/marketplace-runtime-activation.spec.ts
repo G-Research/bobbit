@@ -162,6 +162,53 @@ function writeProviderlessRuntimePack(root: string, packName: string): string {
 	return packDir;
 }
 
+/** A schema-v2 pack declaring a managed runtime (startPolicy: on-enable) AND a
+ *  provider — but a provider that carries NO deployment `mode` (an UNRELATED
+ *  provider). Per finding #2 this must behave EXACTLY like a provider-less runtime
+ *  pack: `hasDeploymentSurface` is false (a provider alone is not a deployment
+ *  surface), so the `on-enable` runtime starts in the manifest DEFAULT mode. */
+function writeNoModeProviderRuntimePack(root: string, packName: string): string {
+	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
+	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
+	fs.mkdirSync(path.join(packDir, "runtime"), { recursive: true });
+	fs.mkdirSync(path.join(packDir, "lib"), { recursive: true });
+	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2",
+		`name: ${packName}`,
+		"description: No-mode provider runtime e2e",
+		"version: 1.0.0",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		"  skills: []",
+		"  entrypoints: []",
+		"  providers: [aux]",
+		"  runtimes: [hindsight]",
+	].join("\n") + "\n", "utf-8");
+	writeMeta(packDir, packName);
+	// Provider with NO `mode` and NO activeWhenConfig.mode → not a deployment surface.
+	fs.writeFileSync(path.join(packDir, "providers", "aux.yaml"), [
+		"id: aux",
+		"kind: generic",
+		"module: ../lib/provider.mjs",
+		"hooks: [beforePrompt]",
+		"config:",
+		"  label: { type: string, default: hello }",
+	].join("\n") + "\n", "utf-8");
+	fs.writeFileSync(path.join(packDir, "runtimes", "hindsight.yaml"), [
+		"id: hindsight",
+		"title: Hindsight",
+		"startPolicy: on-enable",
+		"composeFile: ../runtime/compose.yaml",
+		"modes:",
+		"  managed-postgres: { services: [api, web, db] }",
+	].join("\n") + "\n", "utf-8");
+	fs.writeFileSync(path.join(packDir, "runtime", "compose.yaml"), "services:\n  api: { image: hindsight/api }\n", "utf-8");
+	fs.writeFileSync(path.join(packDir, "lib", "provider.mjs"), "export default {};\n", "utf-8");
+	return packDir;
+}
+
 async function setDisabledRuntimes(packName: string, runtimes: string[]) {
 	return apiFetch("/api/marketplace/pack-activation", {
 		method: "PUT",
@@ -262,6 +309,90 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 			expect(Array.isArray(body.runtimes)).toBe(true);
 			expect(body.runtimes[0].status).toBe("running");
 		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("unrelated-provider runtime pack: an on-enable runtime starts in the DEFAULT mode — a provider with no deployment mode is NOT a deployment surface (finding #2)", async ({ gateway }) => {
+		// A pack with a provider that carries no deployment `mode` has no external/managed
+		// concept, so it must behave like a provider-less runtime pack: the no-deployment-
+		// surface fallback starts the `on-enable` runtime in the manifest DEFAULT mode
+		// (mode undefined) rather than being suppressed by the external-default plan.
+		const packName = `rt-nomode-${Date.now()}`;
+		const packDir = writeNoModeProviderRuntimePack(gateway.bobbitDir, packName);
+		try {
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			calls.length = 0;
+			const enable = await setDisabledRuntimes(packName, []);
+			expect(enable.status).toBe(200);
+			const startCalls = calls.filter((c) => c.op === "start");
+			expect(startCalls.length).toBe(1);
+			expect(startCalls[0].runtimeId).toBe("hindsight");
+			// No deployment surface → no mode forwarded; the supervisor picks the default.
+			expect(startCalls[0].opts?.mode).toBeUndefined();
+			const body = await enable.json();
+			expect(body.runtimes[0].status).toBe("running");
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("capabilities for a provider-less runtime pack disclose the manifest DEFAULT Docker mode/services — not external/no-Docker (finding #1)", async ({ gateway }) => {
+		// With no deployment surface the disclosure must show the manifest default (Docker)
+		// mode/services so the consent UI matches what activation/start actually brings up,
+		// rather than collapsing to the external (no-Docker) setup path.
+		const packName = `rt-cap-providerless-${Date.now()}`;
+		const packDir = writeProviderlessRuntimePack(gateway.bobbitDir, packName);
+		try {
+			const id = encodePackRuntimeId(packName, "hindsight");
+			const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
+			expect(res.status).toBe(200);
+			const body = await res.json();
+			expect(body.dockerRequired).toBe(true);
+			expect(body.mode).toBe("managed-postgres");
+			expect(body.services).toEqual(["api", "web", "db"]);
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("capabilities for an unrelated-provider runtime pack also disclose the default Docker mode (finding #1)", async ({ gateway }) => {
+		const packName = `rt-cap-nomode-${Date.now()}`;
+		const packDir = writeNoModeProviderRuntimePack(gateway.bobbitDir, packName);
+		try {
+			const id = encodePackRuntimeId(packName, "hindsight");
+			const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
+			expect(res.status).toBe(200);
+			const body = await res.json();
+			expect(body.dockerRequired).toBe(true);
+			expect(body.mode).toBe("managed-postgres");
+			expect(body.services).toEqual(["api", "web", "db"]);
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("disabled runtime: the runtime REST 404s (registry no longer resolves it) (finding #3)", async ({ gateway }) => {
+		// Disabling a runtime via pack_activation drops it from the pack's contributions,
+		// so the supervisor's registry lookup misses → 404 on capabilities/start. Use the
+		// REAL (registry-backed) supervisor here: the fake supervisor never consults the
+		// registry, so the rejection must come from the registry filtering itself.
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-disabled-rest-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			// Disable the runtime (fake supervisor present → harmless stop).
+			const disable = await setDisabledRuntimes(packName, ["hindsight"]);
+			expect(disable.status).toBe(200);
+			// Switch to the real, registry-backed supervisor so the lookup is registry-driven.
+			mod.registerPackRuntimeSupervisorFactory(null);
+			const id = encodePackRuntimeId(packName, "hindsight");
+			const caps = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
+			expect(caps.status).toBe(404);
+			const start = await apiFetch(`/api/pack-runtimes/${id}/start`, { method: "POST", body: JSON.stringify({ mode: "managed-postgres" }) });
+			expect(start.status).toBe(404);
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}
 	});
