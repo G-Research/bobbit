@@ -1502,6 +1502,7 @@ export class SessionManager {
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
 			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+			includeGoogleAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
 			scope: opts?.projectId,
 		});
 
@@ -7010,7 +7011,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
