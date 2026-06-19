@@ -1792,6 +1792,41 @@ export class SessionManager {
 	}
 
 	/**
+	 * Dispatch the `goalProvisioned` lifecycle hook for a worktree provisioned
+	 * OUTSIDE the GoalManager / session-setup provisioning paths — specifically
+	 * the team-manager member worktrees, which `createWorktree()`s directly and
+	 * hands a pre-built cwd to `createSession` (so session-setup's provisioning
+	 * dispatch never fires for them). Resolves the member's EFFECTIVE goal
+	 * metadata through the single resolver (no ad-hoc ancestry walk) so
+	 * metadata-driven filesystem treatments land on every normal member worktree,
+	 * symmetric with the goal/cold-create/pool paths. Non-fatal — never blocks
+	 * a spawn. No-op when no lifecycle hub, no goal, or no worktree.
+	 */
+	async dispatchGoalProvisionedForWorktree(opts: {
+		goalId: string | undefined;
+		projectId?: string;
+		worktreePath: string;
+		cwd: string;
+		branch?: string;
+	}): Promise<void> {
+		if (!this.lifecycleHub) return;
+		if (!opts.goalId || !opts.worktreePath) return;
+		try {
+			const metadata = this.resolveEffectiveGoalMetadataForSession(opts.goalId, opts.projectId);
+			await this.lifecycleHub.dispatchGoalProvisioned({
+				goalId: opts.goalId,
+				projectId: opts.projectId,
+				worktreePath: opts.worktreePath,
+				cwd: opts.cwd,
+				branch: opts.branch,
+				metadata,
+			});
+		} catch (err) {
+			console.warn(`[session-manager] goalProvisioned dispatch for member worktree ${opts.worktreePath} (goal ${opts.goalId}) failed (non-fatal):`, err);
+		}
+	}
+
+	/**
 	 * Lower-cased set of tool names disabled via the `bobbit.disabledTools`
 	 * metadata convention for a session's effective goal; undefined when none.
 	 * Mirrors session-setup.ts::disabledToolsFromMetadata so the restore /

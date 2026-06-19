@@ -520,7 +520,21 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push({ label: "Goal", content: header + "\n\n" + parts.goalSpec.trim() });
 	}
 	if (parts.rolePrompt?.trim()) {
-		sections.push({ label: "Role", content: parts.rolePrompt.trim() });
+		// Backward compatibility: historically the role prompt rendered INSIDE the
+		// `# Goal` section. When there is no goal spec AND no explicit
+		// `bobbit.promptSectionOrder`, a role-only session must keep that exact
+		// shape (a `# Goal` header preceding the role prompt) so absent-metadata
+		// output is byte-identical to before. When metadata supplies a section
+		// order, `Role` stays a standalone, independently-reorderable section.
+		const hasOrder = !!parts.sectionOrder && parts.sectionOrder.length > 0;
+		const needsGoalHeader = !parts.goalSpec?.trim() && !hasOrder;
+		const roleHeader = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		const roleContent = needsGoalHeader
+			? roleHeader + "\n\n" + parts.rolePrompt.trim()
+			: parts.rolePrompt.trim();
+		sections.push({ label: "Role", content: roleContent });
 	}
 
 	// 5.5. Goal nesting context — three stanzas for team-lead sessions

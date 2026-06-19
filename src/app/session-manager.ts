@@ -522,14 +522,25 @@ function sanitizeMetadataRows(raw: unknown): Array<[string, string]> {
  * Mirror the optional per-goal `metadata` object from a proposal/slot into the
  * form-mirror metadata rows the goal-assistant panel renders from. Shared by all
  * goal-proposal mirror paths so a propose_goal-seeded assistant proposal carries
- * its `metadata` through acceptance, not just title/spec/cwd/workflow. Absent or
- * empty metadata leaves the existing rows untouched.
+ * its `metadata` through acceptance, not just title/spec/cwd/workflow.
+ *
+ * A present metadata object (including an authoritative empty `{}`) is mirrored
+ * exactly, so an empty object clears any stale rows. When `metadata` is absent
+ * (the field is not carried by this source), the rows are cleared only for an
+ * AUTHORITATIVE source (the merged/slot proposal fields, which represent the
+ * full current proposal) — that way a previous proposal's metadata can never be
+ * submitted by accident. Non-authoritative raw streaming tool-use partials, which
+ * may simply not have streamed the `metadata` field yet, leave the rows untouched.
  */
-function mirrorGoalSetupFields(src: { metadata?: unknown }): void {
-	if (src.metadata && typeof src.metadata === "object" && !Array.isArray(src.metadata)
-		&& Object.keys(src.metadata as Record<string, unknown>).length > 0) {
-		state.previewMetadataRows = metadataObjectToRows(src.metadata);
+function mirrorGoalSetupFields(src: { metadata?: unknown }, opts?: { authoritative?: boolean }): void {
+	const m = src.metadata;
+	if (m !== null && typeof m === "object" && !Array.isArray(m)) {
+		// Present (incl. empty {}) — mirror exactly. metadataObjectToRows({}) ⇒ [].
+		state.previewMetadataRows = metadataObjectToRows(m);
+		return;
 	}
+	// Absent / non-object: clear stale rows only for an authoritative source.
+	if (opts?.authoritative) state.previewMetadataRows = [];
 }
 
 function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
@@ -540,7 +551,9 @@ function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
 	if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 	if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 	if (g.workflow) setSelectedWorkflowId(g.workflow);
-	mirrorGoalSetupFields(g);
+	// Slot fields are the authoritative current proposal — clear stale rows when
+	// they carry no metadata.
+	mirrorGoalSetupFields(g, { authoritative: true });
 	state.assistantHasProposal = true;
 	if (state.assistantTab === "chat" && !isDesktop()) state.assistantTab = "preview";
 	saveGoalDraft(sessionId);
@@ -1831,7 +1844,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 				if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 				if (g.workflow) setSelectedWorkflowId(g.workflow);
-				mirrorGoalSetupFields(g);
+				// `merged` is the authoritative post-merge proposal — clear stale rows
+				// when it carries no metadata.
+				mirrorGoalSetupFields(g, { authoritative: true });
 				saveGoalDraft(sessionId);
 			}
 			renderApp();

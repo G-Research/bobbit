@@ -1095,9 +1095,14 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
-		// Register all six file builtins, no bobbit extensions.
+		// Register all six file builtins, no bobbit extensions — but still honour
+		// `bobbit.disabledTools` so a goal-metadata disablement applies to fallback
+		// builtins (incl. built-in file tools), matching the resolved path below.
 		console.warn("[tool-activation] No ToolManager provided — using fallback (all base tools, no extensions)");
-		for (const name of FILE_TOOL_BUILTIN_NAMES) builtinsToRegister.add(name);
+		for (const name of FILE_TOOL_BUILTIN_NAMES) {
+			if (disabledTools && disabledTools.has(name.toLowerCase())) continue;
+			builtinsToRegister.add(name);
+		}
 		env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");
 		if (mcpExtensionPaths) {
 			for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
