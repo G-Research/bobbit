@@ -315,18 +315,28 @@ Validation rules: `name`, `description`, `version` must be non-empty; `name` mus
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
-Schema 2 is the first step of the **Extension Platform** workstream. It is deliberately
-**additive and inert**: schema 2 widens what a `pack.yaml` may declare and adds a loader for
-one new contribution type (**providers**), but **nothing dispatches providers yet** — there is
-zero runtime behaviour and zero behaviour change for existing schema-1 (v1) packs. A pack opts
-in with a top-level `schema:` field; absent (or `1`) keeps the exact v1 semantics.
 
-Why ship the schema ahead of the runtime? The Extension Platform lands as a sequence of
+Schema 2 is the **Extension Platform** workstream's manifest tier. It began as a deliberately
+**additive** change — schema 2 widens what a `pack.yaml` may declare and adds a loader for one
+new contribution type (**providers**) — and remains **fully back-compatible**: existing
+schema-1 (v1) packs see zero behaviour change. A pack opts in with a top-level `schema:` field;
+absent (or `1`) keeps the exact v1 semantics.
+
+**Providers now dispatch through the Lifecycle Hub.** What began as a manifest-only step is
+live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforePrompt` /
+`beforeCompact` (via a generated provider-bridge pi extension) plus the server-side `afterTurn`
+/ `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
+contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). No
+built-in production provider ships yet (G1.6), so an out-of-the-box install contributes nothing
+until you add a provider pack.
+
+Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
 independently-mergeable PRs. Defining the manifest surface and the per-entity activation
-plumbing first means later PRs (the lifecycle hub that actually *runs* providers, plus loaders
-for the other reserved contribution types) only add dispatch — they never have to re-open the
-manifest format or the activation REST. Authors can also start shipping provider files now and
-have them load, validate, and toggle, even though they do nothing until the dispatch PR lands.
+plumbing first meant later PRs (the lifecycle hub that actually *runs* providers, plus loaders
+for the other reserved contribution types) only added dispatch — they never had to re-open the
+manifest format or the activation REST. Authors could start shipping provider files before the
+dispatch PRs landed and have them load, validate, and toggle in the meantime.
+
 
 #### The `schema` field and back-compat
 
@@ -435,13 +445,16 @@ Field rules and defaults:
   may run.
 - **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
-**The `sessionSetup` hook is wired; the rest of the dispatch is not.** The loader validates
-providers and the registry indexes them, and the `LifecycleHub` that runs a provider's `hook` on
-the worker tier and applies its `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)) is now called
-during session setup: a provider that declares `sessionSetup` and is installed + active + enabled
-for the session's scope contributes a **Dynamic Context** prompt section. The per-turn
-`beforePrompt` dispatch is still pending (G1.4), and **no built-in production provider ships yet**
-(G1.6) — so an out-of-the-box install contributes nothing until you add a provider pack.
+
+**All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
+indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
+`budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
+is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
+section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
+extension and `afterTurn` / `sessionShutdown` fire server-side. **No built-in production provider
+ships yet** (G1.6) — so an out-of-the-box install contributes nothing until you add a provider
+pack.
+
 
 #### Why providers are pack-scoped, *not* name-merged
 

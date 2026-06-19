@@ -27,6 +27,16 @@ import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
 
+// Canonicalize TMPDIR so os.tmpdir() returns the REAL path in every spawned test
+// worker. On macOS os.tmpdir() yields /var/folders/... which reaches /private/var
+// through a symlink; node-logic tests that register a project under os.tmpdir()
+// then trip the server's `symlink_root` guard (rootPath !== realpath(rootPath)).
+// The E2E phase already canonicalizes rootPaths in tests/e2e/e2e-setup.ts; this is
+// the node-logic-phase equivalent, applied once at the entry point and inherited
+// by both spawned runners. Tests that deliberately exercise the symlink guard
+// create their own explicit symlinks and are unaffected.
+try { process.env.TMPDIR = realpathSync(tmpdir()); } catch { /* leave default */ }
+
 const GENERATED_ARTIFACTS = [
 	"market-packs/artifacts/lib/ArtifactViewerPanel.js",
 	"market-packs/pr-walkthrough/lib/yaml-to-cards.mjs",

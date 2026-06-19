@@ -1,13 +1,15 @@
 # The Lifecycle Hub
 
-> **Status — `sessionSetup` wired (Extension Platform G1.3); per-turn hooks still pending.**
-> New sessions now dispatch the `sessionSetup` hook through the `LifecycleHub`, and the blocks
-> it returns render as a **Dynamic Context** prompt section — see
-> [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` dispatch
-> and the `afterTurn` / `beforeCompact` / `sessionShutdown` dispatches are still **not wired**
-> (G1.4 and later). **No built-in production provider ships yet** (G1.6), so an out-of-the-box
-> install produces no Dynamic Context section; the behaviour is proven by a fixture pack. This
-> page documents the Hub core and its first session wiring.
+> **Status — all five hooks wired (Extension Platform G1.3 + G1.4).**
+> New sessions dispatch `sessionSetup` through the `LifecycleHub`, and the blocks it returns
+> render as a **Dynamic Context** prompt section — see
+> [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
+> `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
+> `sessionShutdown` fire from the gateway's own agent-event stream — see
+> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). **No built-in production
+> provider ships yet** (G1.6), so an out-of-the-box install produces no Dynamic Context section;
+> the behaviour is proven by a fixture pack. This page documents the Hub core and its session
+> wiring.
 
 ## What it is, and why
 
@@ -53,17 +55,26 @@ The three core modules live under `src/server/agent/`:
 
 A **lifecycle hook** is a named moment in a session's life. The hook set is:
 
-| Hook | Dispatch point | Wiring goal | Status |
-|---|---|---|---|
-| `sessionSetup` | Once, when a session is created — seed durable context. | G1.3 | **wired** |
-| `beforePrompt` | Before each user prompt is sent to the model. | G1.4 | pending |
-| `afterTurn` | After a turn completes. | later | pending |
-| `beforeCompact` | Before transcript compaction. | later | pending |
-| `sessionShutdown` | When a session is torn down. | later | pending |
+| Hook | Dispatch point | How it fires | Wiring goal | Status |
+|---|---|---|---|---|
+| `sessionSetup` | Once, when a session is created — seed durable context. | Server-side, in the session-setup pipeline. | G1.3 | **wired** |
+| `beforePrompt` | Before each turn's prompt reaches the model. | In-process **provider-bridge** extension → `before-prompt` endpoint. | G1.4 | **wired** |
+| `beforeCompact` | Before transcript compaction. | In-process **provider-bridge** extension → `before-compact` endpoint. | G1.4 | **wired** |
+| `afterTurn` | After a turn completes. | Server-side, from the gateway's `agent_end` event. | G1.4 | **wired** |
+| `sessionShutdown` | When a session is torn down. | Server-side, from the session archive path. | G1.4 | **wired** |
 
 A provider declares which hooks it wants in its YAML `hooks:` list; the Hub only dispatches a
-hook to providers that declared it. **Only `sessionSetup` is wired into the session runtime**
-(see below); the remaining rows record *intent*, not current behaviour.
+hook to providers that declared it. The hooks split by **where** they fire:
+
+- **Server-side hooks** (`sessionSetup`, `afterTurn`, `sessionShutdown`) dispatch directly from
+  the gateway with no agent round-trip — they observe lifecycle moments but cannot amend the
+  outgoing turn.
+- **Per-turn hooks** (`beforePrompt`, `beforeCompact`) must run *inside* the agent process so
+  they can observe/amend the turn, so they fire via a Bobbit-generated
+  [provider-bridge pi extension](#the-provider-bridge-extension) that calls back into the
+  gateway.
+
+The selector hooks `beforeGoalCreate` / `beforeSessionSpawn` remain a separate, later goal (G8).
 
 ## The `ContextBlock` contract
 
@@ -331,6 +342,163 @@ approach of pointing `BOBBIT_BUILTIN_PACKS_DIR` at the fixtures dir wiped the bu
 the whole worker-scoped gateway and broke sibling specs. Installing any schema-2 pack that ships a
 `sessionSetup` provider will likewise contribute a Dynamic Context section.
 
+## Per-turn + lifecycle wiring (G1.4)
+
+G1.4 wires the remaining four hooks. They divide cleanly by **where they have to run**, and that
+division dictates the mechanism:
+
+| Hook | Mechanism | Why |
+|---|---|---|
+| `afterTurn` | Gateway-internal, fire-and-forget. | A turn-complete signal; nothing to inject, so no agent round-trip is needed. |
+| `sessionShutdown` | Gateway-internal, awaited-with-timeout. | Lets providers flush durable state before teardown; the gateway already owns the archive path. |
+| `beforePrompt` | In-process provider-bridge extension. | Must inject ambient recall into *this turn's* prompt, which only the agent process can see. |
+| `beforeCompact` | In-process provider-bridge extension. | Must fire at the agent's compaction moment, which the gateway does not observe directly. |
+
+### Server-side hooks: `afterTurn` and `sessionShutdown`
+
+These fire from the gateway's existing agent-event stream — no agent round-trip and no public
+endpoint (they are not reachable over REST by design; only the gateway dispatches them):
+
+- **`afterTurn`** — dispatched from `handleAgentLifecycle`'s `agent_end` branch in
+  `session-manager.ts`. pi does not surface a granular `turn_end` in the gateway's event stream,
+  so `agent_end` (turn complete) is the dispatch point. It is **fire-and-forget**: the dispatch
+  is `void`-ed (never awaited into the event path) and its rejection is caught and logged, so a
+  slow or throwing provider can never stall the lifecycle. The `turn.index` passed is the
+  session's running completed-turn count. Per-provider timeouts are still enforced inside the
+  Hub.
+- **`sessionShutdown`** — dispatched from the session archive path (`archiveWithCascade` and the
+  `terminateSession` archive path) in `session-manager.ts`, **awaited with a timeout** so
+  providers get a bounded window to flush before teardown proceeds. Failures are caught and
+  logged; archive always proceeds.
+
+### Per-turn hooks: the provider-bridge extension
+
+The per-turn hooks need to run *inside* the agent process so they can amend the outgoing turn.
+The gateway can't reach into that process, so Bobbit **generates a pi-coding-agent extension**
+that subscribes to pi's per-turn events and calls back into the gateway. See
+[The provider-bridge extension](#the-provider-bridge-extension) below for the codegen, transport,
+and the non-negotiable injection invariant.
+
+### The REST surface
+
+Three endpoints back the per-turn hooks and diagnostics. They live in one contiguous block in
+`server.ts`, modeled on `POST /api/sessions/:id/tool-grant-request`, and **inherit the
+admin-bearer auth gate enforced before `handleApiRoute`** — no extra auth code. All are keyed by
+session id and `404` when the session is unknown (neither live nor persisted).
+
+| Method + path | Caller | Behaviour |
+|---|---|---|
+| `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ tail, blocks }`. |
+| `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
+| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
+
+**`before-prompt` response shape.** `tail` is the fenced blocks joined inside the
+dynamic-context delimiters, or `""` when no block survived budgeting:
+
+```
+\n<!-- bobbit:dynamic-context:start -->
+<context-block …>…</context-block>
+
+<context-block …>…</context-block>
+<!-- bobbit:dynamic-context:end -->
+```
+
+`blocks` is **metadata-only** — each entry is `{ id, providerId, title, tokenEstimate }`. The
+full block content lives inside the fenced `tail`; the metadata array exists for the inspector
+and for diagnostics without re-sending the body. After dispatch the endpoint also refreshes the
+persisted prompt-sections snapshot **best-effort** (non-fatal: a failure is logged and the
+response still returns) so `GET /api/sessions/:id/prompt-sections` reflects the turn's
+dynamic-context tail.
+
+When no `LifecycleHub` is configured, `before-prompt` returns `{ tail: "", blocks: [] }` and
+`before-compact` returns `{}` — the turn proceeds unchanged.
+
+## The provider-bridge extension
+
+`provider-bridge-extension.ts` generates a small pi-coding-agent extension
+(`generateProviderBridgeExtension(sessionId): string` → TS source;
+`writeProviderBridgeExtension(sessionId): string | undefined` → file path). It mirrors
+`tool-guard-extension.ts`'s codegen, caching, and content-addressed file handling — the file is
+written under `.bobbit/state/provider-bridge/<contentHash>/bridge.ts` and de-duplicated by
+hash.
+
+The generated extension subscribes to two pi events:
+
+- **`before_agent_start`** (per turn) → POST `…/provider-hooks/before-prompt` with
+  `{ prompt: event.prompt }`, with an `AbortController` timeout of **2500 ms**. On success it
+  returns `{ systemPrompt: stripDelimitedTail(event.systemPrompt) + resp.tail }`. On **any**
+  failure (transport, timeout/abort, non-2xx, parse error) it returns `undefined` and the turn
+  proceeds with the unmodified prompt.
+- **`session_before_compact`** → POST `…/provider-hooks/before-compact`, with a timeout of
+  **5000 ms**. The result is ignored (compaction output is not amended here); all failures are
+  swallowed.
+
+Transport and auth are identical to the tool-guard: read `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`
+from the environment, falling back to `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and
+`fetch` the gateway with a bearer token. A missing gateway URL short-circuits to "proceed
+unchanged".
+
+### The injection invariant (non-negotiable)
+
+> **The user's message text is NEVER mutated.** Per-turn recall is injected only into the
+> outgoing **system-prompt tail**.
+
+This is a hard correctness boundary, not a style preference. Mutating the user prompt would
+corrupt the transcript echo and re-open the comms-stack optimistic-reconciliation **duplicate**
+class. The bridge forwards `event.prompt` to the gateway **read-only** and only ever returns a
+modified `systemPrompt`. A test pins that the user's message text is byte-identical with and
+without the bridge.
+
+pi's `before_agent_start` event exposes both `prompt: string` and `systemPrompt: string`, and
+`BeforeAgentStartEventResult` accepts `systemPrompt?: string`, so the bridge takes the simple,
+verified path: read `event.systemPrompt`, strip any prior delimited tail, append the fresh tail,
+return `{ systemPrompt }`.
+
+### Idempotent, delimited tail
+
+The dynamic-context region is wrapped in delimiters that **must stay byte-identical** between
+`provider-bridge-extension.ts` and the `before-prompt` endpoint in `server.ts`:
+
+```
+<!-- bobbit:dynamic-context:start -->
+…fenced context-blocks…
+<!-- bobbit:dynamic-context:end -->
+```
+
+Each turn the bridge calls `stripDelimitedTail(systemPrompt)` to remove any prior region
+(including a truncated, end-delimiter-less one) and then appends the fresh tail. Applying
+strip-then-append repeatedly yields **exactly one** delimited region — the tail never grows
+turn-over-turn. This idempotency is unit-pinned. The strip helper is duplicated (host-side TS
+export + inlined JS in the generated extension) precisely so the two copies can be kept in sync;
+the delimiters are the contract between them.
+
+### Activation — generated only when a provider wants it
+
+The bridge is generated and pushed onto the agent's `--extension` spawn args **only when at least
+one enabled provider for the session's project declares `beforePrompt` or `beforeCompact`**
+(`hasProviderBridgeHooks(hub, projectId)`, which delegates to `hub.hasProvidersForHooks(...)` so
+activation filtering stays centralized in the registry). Disabled providers are dropped by the
+registry before this check, so toggling a provider off is a working kill switch — the next spawn
+omits the bridge entirely.
+
+When no provider is interested, nothing is generated or pushed: **zero overhead and spawn args
+byte-identical to the no-provider baseline** (pinned by the codegen test). The activation check
+lives in two places that both spawn agents — `session-setup.ts::resolveToolActivation` (initial
+spawn, after the tool-guard `--extension` push) and the respawn/restore path in
+`session-manager.ts`. **Both** re-run the check so the bridge is **restored on respawn and
+gateway restart**; otherwise per-turn hooks would silently stop firing after a restart. The
+`.bobbit/state/provider-bridge/` directory is on the archive allowlist so the generated bridge
+survives session archive/restore.
+
+### Security note — TLS
+
+The generated bridge **does not touch TLS verification**. It relies on the spawner's inherited
+environment: the local gateway's CA cert is pinned via `NODE_EXTRA_CA_CERTS` when present (with
+the spawner's existing fallback only when no CA cert exists). An earlier revision set a
+process-wide TLS downgrade in the generated code; that was removed because it would defeat the
+pinned-CA path and disable verification for **all** of the agent's outbound HTTPS — not just the
+gateway callback. Never reintroduce a global TLS downgrade in the bridge.
+
 ## The trace store
 
 `ContextTraceStore` records each dispatch as one JSON line, so you can reconstruct exactly what
@@ -369,14 +537,15 @@ ambient context a session received and why blocks were dropped.
   `dispatch("sessionSetup", …)` during session setup, rendering kept blocks as the
   `PromptParts.dynamicContext` → **Dynamic Context** system-prompt section — see
   [Session-setup wiring (G1.3)](#session-setup-wiring-g13).
-- **G1.4** adds the per-turn `beforePrompt` dispatch and the REST/provider-bridge surface
-  (`/provider-hooks/*`, `/context-trace`).
+- **G1.4 (done)** wires the remaining four hooks: the per-turn `beforePrompt` / `beforeCompact`
+  via the generated [provider-bridge extension](#the-provider-bridge-extension), and the
+  server-side `afterTurn` / `sessionShutdown` from the gateway's agent-event stream; plus the
+  REST surface (`/provider-hooks/*`, `/context-trace`) — see
+  [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14).
 - **G1.6** ships the first built-in production provider; until then only fixture / installed
-  packs contribute blocks.
+  packs contribute blocks. Production behaviour is unchanged until then — with no enabled
+  provider, no Dynamic Context section is added and the per-turn bridge is never spawned.
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
-
-The `afterTurn` / `beforeCompact` / `sessionShutdown` dispatches remain unwired — a provider may
-declare those hooks for forward compatibility, but the Hub is not yet called at those moments.
 
 ## See also
 
