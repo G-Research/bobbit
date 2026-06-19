@@ -199,6 +199,73 @@ test.describe("Pack runtimes REST API", () => {
 		expect(calls.some((c) => c.op === "start")).toBe(false);
 	});
 
+	test("POST start with a malformed JSON body → 400 (no start)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/start`, {
+			method: "POST",
+			body: "{not valid json",
+		});
+		// A non-empty but unparseable body must NOT be silently coerced to `{}` and
+		// mutate the default mode — it is a client error and the supervisor is never
+		// invoked.
+		expect(res.status).toBe(400);
+		expect(calls.some((c) => c.op === "start")).toBe(false);
+	});
+
+	test("POST restart with a malformed JSON body → 400 (no restart)", async () => {
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/restart`, {
+			method: "POST",
+			body: "not-json-at-all",
+		});
+		expect(res.status).toBe(400);
+		expect(calls.some((c) => c.op === "restart")).toBe(false);
+	});
+
+	test("POST start with an empty body still uses the default mode (200)", async () => {
+		// An EMPTY body is valid (no mode override) and must not be rejected.
+		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
+		const res = await apiFetch(`/api/pack-runtimes/${id}/start`, { method: "POST" });
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.status).toBe("running");
+		expect(data.mode).toBe("default");
+	});
+
+	test("clearing the factory (null) drops the cached mock — no stale supervisor", async () => {
+		const mod = await import("../../dist/server/server.js");
+		const SENTINEL = "sentinel-pack-xyz";
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async list() {
+				return [{ ...baseStatus("running"), packId: SENTINEL, runtimeId: "r" }];
+			},
+		}));
+		try {
+			const seen = await apiFetch("/api/pack-runtimes");
+			expect(seen.status).toBe(200);
+			const seenData = await seen.json();
+			expect(seenData.runtimes.some((r: { packId: string }) => r.packId === SENTINEL)).toBe(true);
+
+			// Clear the factory — the previously-served mock must NOT linger in the
+			// server closure. The route reverts to the production supervisor (or none
+			// when unwired). The mock returns 200 + sentinel and never throws, so the
+			// sole invariant is that the sentinel is no longer served: a 200 must not
+			// contain it, and any non-200 (503 unwired / 500 from the real supervisor)
+			// equally proves the stale mock is gone.
+			mod.registerPackRuntimeSupervisorFactory(null);
+			const after = await apiFetch("/api/pack-runtimes");
+			if (after.status === 200) {
+				const afterData = await after.json();
+				expect(afterData.runtimes.some((r: { packId: string }) => r.packId === SENTINEL)).toBe(false);
+			} else {
+				expect(after.status).not.toBe(200);
+			}
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+		}
+	});
+
 	test("non-numeric tail → 400 (no log read)", async () => {
 		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
 		const res = await apiFetch(`/api/pack-runtimes/${id}/logs?tail=abc`);

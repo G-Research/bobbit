@@ -28,6 +28,7 @@ import {
 	FilePortStore,
 	encodePackRuntimeId,
 	decodePackRuntimeId,
+	packRuntimePersistKey,
 	clampTail,
 	parseComposePs,
 	mapServicesToState,
@@ -715,18 +716,24 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		const st = await sup.start("envpack", "svc");
 		assert.equal(st.status, "running");
 
-		// Generated secret was created+persisted.
-		assert.ok((secrets.data.GEN_SECRET ?? "").length > 0);
-		// Port was allocated+persisted.
-		assert.ok(typeof portStore.get("WEB_PORT") === "number");
+		// Generated secret was created+persisted under a pack/runtime-NAMESPACED key
+		// (NOT the raw `GEN_SECRET`), guarding against cross-runtime collisions.
+		const genKey = packRuntimePersistKey("envpack", "svc", "GEN_SECRET");
+		assert.ok((secrets.data[genKey] ?? "").length > 0);
+		assert.equal(secrets.data.GEN_SECRET, undefined); // raw key is never used for generated secrets
+		// Port was allocated+persisted under the namespaced key too.
+		const portKey = packRuntimePersistKey("envpack", "svc", "WEB_PORT");
+		assert.ok(typeof portStore.get(portKey) === "number");
+		assert.equal(portStore.get("WEB_PORT"), undefined);
 
-		// Rendered env file carries the resolved values (no unresolved refs).
+		// Rendered env file carries the resolved values keyed by the RAW manifest
+		// names (no unresolved refs).
 		const project = "bobbit-pack-envpack-testsuffix";
 		const envFile = path.join(tmp, "envpack-data", project, "svc.env");
 		const body = fs.readFileSync(envFile, "utf-8");
 		assert.match(body, /USER_KEY="configured-llm-key"/);
 		assert.match(body, /GEN_SECRET="/);
-		assert.match(body, new RegExp(`WEB_PORT="${portStore.get("WEB_PORT")}"`));
+		assert.match(body, new RegExp(`WEB_PORT="${portStore.get(portKey)}"`));
 	});
 
 	it("status/logs/stop after start reuse the persisted port (no churn while bound)", async () => {
@@ -760,7 +767,8 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 
 		const st = await sup.start("envpack", "svc");
 		assert.equal(st.status, "running");
-		const allocatedPort = portStore.get("WEB_PORT");
+		const portKey = packRuntimePersistKey("envpack", "svc", "WEB_PORT");
+		const allocatedPort = portStore.get(portKey);
 		assert.equal(typeof allocatedPort, "number");
 		const setsAfterStart = portStore.sets;
 		assert.equal(setsAfterStart, 1);
@@ -782,7 +790,7 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		}
 
 		// Persisted port never rotated and no replacement allocation happened.
-		assert.equal(portStore.get("WEB_PORT"), allocatedPort);
+		assert.equal(portStore.get(portKey), allocatedPort);
 		assert.equal(portStore.sets, setsAfterStart);
 
 		// The re-rendered env file still carries the SAME resolved port/secret values.
@@ -793,7 +801,7 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 		assert.match(body, /USER_KEY="configured-llm-key"/);
 	});
 
-	it("a missing required user secret rejects with a clear error (not silent)", async () => {
+	it("a missing required user secret rejects as PackRuntimeBadRequestError (→ 400, not 500)", async () => {
 		const docker = makeDocker({ up: () => ok(), ps: () => ok("") });
 		const contribution = makeEnvContribution();
 		const sup = new PackRuntimeSupervisor({
@@ -804,7 +812,13 @@ describe("PackRuntimeSupervisor production resolver context", () => {
 			secretsStore: inMemorySecrets(), // USER_KEY absent
 			portStore: new FilePortStore(path.join(tmp, "envpack-ports2.json")),
 		});
-		await assert.rejects(() => sup.start("envpack", "svc"), /USER_KEY/);
+		// buildRuntimeInvocation's unmet-requireEnv error is a CONFIG/user fault — the
+		// supervisor must wrap it as PackRuntimeBadRequestError so REST answers 400,
+		// not a misleading 500. The original message (mentioning the key) is preserved.
+		await assert.rejects(
+			() => sup.start("envpack", "svc"),
+			(err: unknown) => err instanceof PackRuntimeBadRequestError && /USER_KEY/.test((err as Error).message),
+		);
 		assert.equal(docker.countSub("up"), 0);
 	});
 });
@@ -909,5 +923,162 @@ describe("PackRuntimeSupervisor start mode dedupe", () => {
 		assert.equal(a.status, "running");
 		assert.equal(b.status, "running");
 		assert.equal(docker.countSub("up"), 1);
+	});
+});
+
+// ── Cross-runtime persistence isolation (namespaced generated secrets + ports) ─
+
+describe("PackRuntimeSupervisor cross-runtime persistence isolation", () => {
+	const ISO_PACK = "iso";
+
+	/** Two runtimes under ONE pack that both declare the SAME raw keys. */
+	function makeIsoContribution(id: string): RuntimeContribution {
+		const packRoot = path.join(tmp, "packs", ISO_PACK);
+		return {
+			id,
+			title: id,
+			description: id,
+			listName: id,
+			sourceFile: path.join(packRoot, "runtimes", `${id}.yaml`),
+			packRoot,
+			manifest: {
+				id,
+				composeFile: "compose.yaml",
+				secrets: [{ key: "DB_PASSWORD", generate: true }],
+				ports: [{ key: "WEB_PORT", container: 8080 }],
+				env: { DB_PASSWORD: { generate: "DB_PASSWORD" }, WEB_PORT: { port: "WEB_PORT" } },
+				modes: { default: { services: [id] } },
+			},
+		} as RuntimeContribution;
+	}
+
+	function makeIsoRegistry(contribs: RuntimeContribution[]): PackContributionResolver {
+		const pack = {
+			packId: ISO_PACK,
+			packName: "Iso",
+			packRoot: contribs[0]!.packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: contribs,
+		};
+		const byId = new Map(contribs.map((c) => [c.id, c]));
+		const resolver = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === ISO_PACK ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === ISO_PACK ? byId.get(runtimeId) : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		};
+		return resolver as unknown as PackContributionResolver;
+	}
+
+	function inMemorySecrets(seed: Record<string, string> = {}) {
+		const data: Record<string, string> = { ...seed };
+		return { get: (k: string) => data[k], set: (k: string, v: string) => { data[k] = v; }, data };
+	}
+
+	it("namespaces generated secrets + ports so two same-key runtimes never collide", async () => {
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"x","State":"running","Health":"healthy"}'),
+		});
+		const secrets = inMemorySecrets();
+		const portStore = new FilePortStore(path.join(tmp, "iso-ports.json"));
+		const sup = new PackRuntimeSupervisor({
+			registry: makeIsoRegistry([makeIsoContribution("alpha"), makeIsoContribution("beta")]),
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "iso-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore,
+		});
+
+		await sup.start(ISO_PACK, "alpha");
+		await sup.start(ISO_PACK, "beta");
+
+		const aPwd = packRuntimePersistKey(ISO_PACK, "alpha", "DB_PASSWORD");
+		const bPwd = packRuntimePersistKey(ISO_PACK, "beta", "DB_PASSWORD");
+		const aPort = packRuntimePersistKey(ISO_PACK, "alpha", "WEB_PORT");
+		const bPort = packRuntimePersistKey(ISO_PACK, "beta", "WEB_PORT");
+
+		// Distinct namespaced store slots — the raw shared key is NEVER written, so
+		// beta's start cannot overwrite alpha's persisted secret/port (and vice versa).
+		assert.notEqual(aPwd, bPwd);
+		assert.equal(secrets.data.DB_PASSWORD, undefined);
+		assert.ok((secrets.data[aPwd] ?? "").length > 0);
+		assert.ok((secrets.data[bPwd] ?? "").length > 0);
+		// Independent generated values (not a single shared secret).
+		assert.notEqual(secrets.data[aPwd], secrets.data[bPwd]);
+
+		assert.equal(portStore.get("WEB_PORT"), undefined);
+		assert.equal(typeof portStore.get(aPort), "number");
+		assert.equal(typeof portStore.get(bPort), "number");
+	});
+
+	it("keeps USER-CONFIGURED secrets on their RAW (shared) key across runtimes", async () => {
+		// A runtime that references a user-configured `secret:` reads it by the RAW
+		// key (intentionally global) — namespacing only applies to GENERATED secrets.
+		const packRoot = path.join(tmp, "packs", "isouser");
+		const contribution = {
+			id: "svc",
+			title: "svc",
+			description: "svc",
+			listName: "svc",
+			sourceFile: path.join(packRoot, "runtimes", "svc.yaml"),
+			packRoot,
+			manifest: {
+				id: "svc",
+				composeFile: "compose.yaml",
+				env: { SHARED_KEY: { secret: "SHARED_KEY" } },
+				modes: { default: { services: ["svc"], requireEnv: ["SHARED_KEY"] } },
+			},
+		} as RuntimeContribution;
+		const pack = {
+			packId: "isouser",
+			packName: "IsoUser",
+			packRoot,
+			panels: [],
+			entrypoints: [],
+			providers: [],
+			runtimes: [contribution],
+		};
+		const registry = {
+			list: () => [pack],
+			getPack: (_p: string | undefined, packId: string) => (packId === "isouser" ? pack : undefined),
+			getRuntime: (_p: string | undefined, packId: string, runtimeId: string) =>
+				packId === "isouser" && runtimeId === "svc" ? contribution : undefined,
+			getPanel: () => undefined,
+			getEntrypoint: () => undefined,
+			listProviders: () => [],
+			hasRoute: () => false,
+		} as unknown as PackContributionResolver;
+
+		const docker = makeDocker({
+			up: () => ok(),
+			ps: () => ok('{"Service":"svc","State":"running","Health":"healthy"}'),
+		});
+		const secrets = inMemorySecrets({ SHARED_KEY: "global-value" }); // raw key seeded
+		const sup = new PackRuntimeSupervisor({
+			registry,
+			executor: docker.executor,
+			serverIdentitySuffix: "testsuffix",
+			runtimeDataDir: path.join(tmp, "isouser-data"),
+			startupTimeoutMs: 50,
+			pollIntervalMs: 20,
+			secretsStore: secrets,
+			portStore: new FilePortStore(path.join(tmp, "isouser-ports.json")),
+		});
+
+		const st = await sup.start("isouser", "svc");
+		assert.equal(st.status, "running");
+		// Resolved from the RAW key (no namespaced lookup for user secrets).
+		const envFile = path.join(tmp, "isouser-data", "bobbit-pack-isouser-testsuffix", "svc.env");
+		assert.match(fs.readFileSync(envFile, "utf-8"), /SHARED_KEY="global-value"/);
 	});
 });

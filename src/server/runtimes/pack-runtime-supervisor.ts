@@ -220,6 +220,20 @@ export function encodePackRuntimeId(packId: string, runtimeId: string): string {
 	return `${encodeURIComponent(packId)}:${encodeURIComponent(runtimeId)}`;
 }
 
+/**
+ * Namespace a GENERATED-secret / HOST-port persistence key by pack+runtime
+ * identity. Two unrelated pack runtimes that both declare a key like `WEB_PORT`,
+ * `PORT`, or `DB_PASSWORD` would otherwise collide on the raw manifest key in the
+ * shared global `SecretsStore` / port store and overwrite each other's persisted
+ * value. The RAW manifest key is still used for the rendered env-var NAME and for
+ * reading USER-CONFIGURED secrets (which are intentionally global/shared — a user
+ * configures one LLM key once across runtimes), so only the persisted storage
+ * slot for auto-generated secrets and allocated ports is namespaced.
+ */
+export function packRuntimePersistKey(packId: string, runtimeId: string, rawKey: string): string {
+	return `pack-runtime:${encodeURIComponent(packId)}:${encodeURIComponent(runtimeId)}:${rawKey}`;
+}
+
 /** Reverse {@link encodePackRuntimeId}. Throws {@link PackRuntimeBadRequestError}. */
 export function decodePackRuntimeId(id: string): { packId: string; runtimeId: string } {
 	if (typeof id !== "string" || id.length === 0) {
@@ -561,7 +575,7 @@ export class PackRuntimeSupervisor {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
 
-		const { invocation, modeKey } = await this._buildInvocation(contribution, envFile, opts.mode);
+		const { invocation, modeKey } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode);
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 
@@ -777,7 +791,7 @@ export class PackRuntimeSupervisor {
 		// rewrite ports.json + the env file — desyncing the persisted port from the
 		// live container and breaking the NEXT restart. `reusePersisted: true` keeps
 		// the stored port without a bindability probe.
-		const { manifest, invocation } = await this._buildInvocation(contribution, envFile, undefined, {
+		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, undefined, {
 			reusePersisted: true,
 		});
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
@@ -800,6 +814,8 @@ export class PackRuntimeSupervisor {
 	 * throwing in `buildRuntimeInvocation` before Docker is ever invoked.
 	 */
 	private async _resolveContext(
+		packId: string,
+		runtimeId: string,
 		manifest: RuntimeManifest,
 		contribution: RuntimeContribution,
 		opts: { reusePersisted?: boolean } = {},
@@ -830,9 +846,13 @@ export class PackRuntimeSupervisor {
 		const secrets: Record<string, string> = {};
 		const generated: Record<string, string> = {};
 		const ports: Record<string, number> = {};
+		// Generated secrets + allocated ports persist under a pack/runtime-namespaced
+		// store key (collision guard); the returned context maps stay keyed by the RAW
+		// manifest key so env refs still resolve by their declared name. User-configured
+		// secrets are read by their RAW key (intentionally global/shared).
 		for (const key of generatedKeys) {
 			generated[key] = this.secretsStore
-				? getOrCreateRuntimeSecret(this.secretsStore, key)
+				? getOrCreateRuntimeSecret(this.secretsStore, packRuntimePersistKey(packId, runtimeId, key))
 				: generateSecretValue();
 		}
 		for (const key of userSecretKeys) {
@@ -845,22 +865,25 @@ export class PackRuntimeSupervisor {
 				ports[key] = await probeFreePort();
 				continue;
 			}
+			const storeKey = packRuntimePersistKey(packId, runtimeId, key);
 			if (opts.reusePersisted) {
 				// Reuse the persisted assignment verbatim (no bindability probe) so a
 				// running runtime's bound port is never rotated by a read/control call.
 				// Only when nothing valid is persisted do we allocate one.
-				const existing = this.portStore.get(key);
+				const existing = this.portStore.get(storeKey);
 				if (typeof existing === "number" && Number.isInteger(existing) && existing >= 1 && existing <= 65535) {
 					ports[key] = existing;
 					continue;
 				}
 			}
-			ports[key] = await allocateHostPort(this.portStore, key);
+			ports[key] = await allocateHostPort(this.portStore, storeKey);
 		}
 		return { secrets, generated, ports };
 	}
 
 	private async _buildInvocation(
+		packId: string,
+		runtimeId: string,
 		contribution: RuntimeContribution,
 		envFile: string,
 		mode?: string,
@@ -875,13 +898,32 @@ export class PackRuntimeSupervisor {
 		if (!modeKey) {
 			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} declares no modes`);
 		}
-		const ctx = await this._resolveContext(manifest, contribution, opts);
-		const invocation = buildRuntimeInvocation(manifest, modeKey, {
-			sourceFile: contribution.sourceFile,
-			packRoot: contribution.packRoot,
-			envFile,
-			ctx,
-		});
+		const ctx = await this._resolveContext(packId, runtimeId, manifest, contribution, opts);
+		let invocation: RuntimeInvocation;
+		try {
+			invocation = buildRuntimeInvocation(manifest, modeKey, {
+				sourceFile: contribution.sourceFile,
+				packRoot: contribution.packRoot,
+				envFile,
+				ctx,
+			});
+		} catch (err) {
+			// `buildRuntimeInvocation` rejects config/user errors (unresolved env refs,
+			// unmet requireEnv, compose-path containment, …) as plain `Error`. These are
+			// client/config faults, not server faults — surface them as a bad-request so
+			// the REST layer answers 400 instead of a misleading 500. Already-typed
+			// supervisor errors propagate unchanged.
+			if (
+				err instanceof PackRuntimeBadRequestError ||
+				err instanceof PackRuntimeNotFoundError ||
+				err instanceof PackRuntimeDockerUnavailableError
+			) {
+				throw err;
+			}
+			throw new PackRuntimeBadRequestError(
+				`runtime ${contribution.id} invocation failed: ${(err as Error)?.message ?? String(err)}`,
+			);
+		}
 		return { manifest, modeKey, invocation };
 	}
 

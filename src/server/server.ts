@@ -1309,13 +1309,14 @@ export function createGateway(config: GatewayConfig) {
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
 	// P2: pack managed-runtime supervisor (Docker-backed). Built from the same
-	// pack-contribution registry. Tests inject a fully-mocked supervisor via
-	// registerPackRuntimeSupervisorFactory(); otherwise the real supervisor is
+	// pack-contribution registry. This closure holds ONLY the production (real)
+	// supervisor; a registered test factory is consulted FRESH per-request below
+	// and never cached here. That way registerPackRuntimeSupervisorFactory(null)
+	// immediately reverts to the production instance (or 503) with no stale mock
+	// left in the closure across in-process E2E tests. The real supervisor is
 	// loaded lazily in start() (dynamic import keeps this wiring compilable even
 	// before the supervisor module is merged — routes then return 503).
-	let packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
-		? _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd })
-		: undefined;
+	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -1592,11 +1593,12 @@ export function createGateway(config: GatewayConfig) {
 			const _timingStart = _timingEnabled ? performance.now() : 0;
 			// P2: a registered pack-runtime-supervisor factory is authoritative — in-
 			// process test harnesses register a (mocked) one AFTER gateway start, so it
-			// must override the real supervisor built in start(). No-op in production
-			// (factory stays null).
-			if (_packRuntimeSupervisorFactory) {
-				packRuntimeSupervisor = _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? packRuntimeSupervisor;
-			}
+			// must override the real supervisor built in start(). Derived FRESH each
+			// request (never cached), so clearing the factory reverts to the production
+			// instance with no stale mock. No-op in production (factory stays null).
+			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
+				? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
+				: realPackRuntimeSupervisor;
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
@@ -2024,7 +2026,7 @@ export function createGateway(config: GatewayConfig) {
 			// P2: build the real pack-runtime supervisor unless a test factory already
 			// supplied a (mocked) one. All Docker execution is encapsulated in the
 			// supervisor; rendered env files live under the server state dir.
-			if (!packRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
+			if (!realPackRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
 				try {
 					const { SecretsStore } = await import("./agent/secrets-store.js");
 					const runtimeDataDir = path.join(stateDir, "pack-runtimes");
@@ -2032,7 +2034,7 @@ export function createGateway(config: GatewayConfig) {
 					// created+persisted via SecretsStore and declared host ports via a
 					// file-backed FilePortStore, so real pack runtimes (e.g. Hindsight)
 					// resolve their env refs instead of throwing before Docker starts.
-					packRuntimeSupervisor = new PackRuntimeSupervisor({
+					realPackRuntimeSupervisor = new PackRuntimeSupervisor({
 						registry: packContributionRegistry,
 						runtimeDataDir,
 						secretsStore: new SecretsStore(stateDir),
@@ -6002,8 +6004,20 @@ async function handleApiRoute(
 			return;
 		}
 
-		// start | stop | restart — optional `mode` from the POST body.
-		const body = (await readBody(req).catch(() => ({}))) ?? {};
+		// start | stop | restart — optional `mode` from the POST body. An EMPTY body
+		// is valid (default mode); a NON-EMPTY but malformed-JSON body is a client
+		// error — answer 400 and do NOT invoke the supervisor (never silently treat
+		// garbage as `{}` and mutate the default mode).
+		const bodyText = await readBodyText(req);
+		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+		let body: Record<string, unknown> = {};
+		const trimmedBody = bodyText.trim();
+		if (trimmedBody.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(trimmedBody); } catch { json({ error: "malformed JSON body" }, 400); return; }
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
+			body = parsed as Record<string, unknown>;
+		}
 		let mode: string | undefined;
 		if (action !== "stop") {
 			const rawMode = (body as { mode?: unknown }).mode;
@@ -13863,15 +13877,22 @@ export function bodyLimitExceeded(
 	return Number.isFinite(len) && len > maxBytes;
 }
 
-export function readBody(
+/**
+ * Read the raw request body as text. Resolves the decoded string for a complete
+ * body (the empty string when no body was sent), or `null` when the body was
+ * oversized/aborted/errored. Unlike {@link readBody} it does NOT attempt to
+ * JSON-parse, so callers can distinguish an EMPTY body (valid — treat as `{}`)
+ * from a NON-EMPTY but malformed-JSON body (client error → 400).
+ */
+export function readBodyText(
 	req: http.IncomingMessage,
 	maxBytes: number = MAX_REQUEST_BODY_BYTES,
-): Promise<any> {
+): Promise<string | null> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
 		let settled = false;
-		const finish = (value: any): void => {
+		const finish = (value: string | null): void => {
 			if (settled) return;
 			settled = true;
 			resolve(value);
@@ -13880,12 +13901,11 @@ export function readBody(
 			if (settled) return;
 			total += chunk.length;
 			if (total > maxBytes) {
-				// Oversized body: reject BEFORE Buffer.concat()/JSON.parse() so a
-				// huge payload is never fully materialised in memory. Drop buffered
-				// chunks, tear down the stream, and resolve null — handlers treat a
-				// null body as a malformed request (400); the request-handler's
-				// Content-Length precheck returns a definitive 413 for the common
-				// case where the length is declared up front.
+				// Oversized body: reject BEFORE Buffer.concat() so a huge payload is
+				// never fully materialised in memory. Drop buffered chunks, tear down
+				// the stream, and resolve null — handlers treat a null body as a
+				// malformed request (400); the request-handler's Content-Length
+				// precheck returns a definitive 413 when the length is declared up front.
 				chunks.length = 0;
 				try { req.destroy(); } catch { /* best-effort */ }
 				finish(null);
@@ -13893,15 +13913,26 @@ export function readBody(
 			}
 			chunks.push(chunk);
 		});
-		req.on("end", () => {
-			try {
-				finish(JSON.parse(Buffer.concat(chunks).toString()));
-			} catch {
-				finish(null);
-			}
-		});
+		req.on("end", () => finish(Buffer.concat(chunks).toString()));
 		req.on("error", () => finish(null));
 		req.on("aborted", () => finish(null));
+	});
+}
+
+export function readBody(
+	req: http.IncomingMessage,
+	maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<any> {
+	return readBodyText(req, maxBytes).then((text) => {
+		// Preserve the historical contract: a null (oversized/aborted) OR
+		// unparseable/empty body resolves to null. Callers that must distinguish an
+		// empty body from a malformed one read the raw text via readBodyText instead.
+		if (text === null) return null;
+		try {
+			return JSON.parse(text);
+		} catch {
+			return null;
+		}
 	});
 }
 
