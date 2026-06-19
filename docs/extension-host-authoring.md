@@ -42,7 +42,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
-| **Providers** *(schema 2; inert)* | `providers/<id>.yaml` (listed in `contents.providers`) | — not dispatched yet — | none yet (loaded + toggleable only) |
+| **Providers** *(schema 2; core landed, not yet wired)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
@@ -784,20 +784,29 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
   packs declaring the same `routeId` is a hard rejection at registry build). Panel ids referenced
   by `target.panelId` are pack-local.
 
-### Providers (`providers/<id>.yaml`) — schema 2, loaded but inert
+### Providers (`providers/<id>.yaml`) — schema 2; core landed, not yet wired into sessions
 
-**Status:** a `schema: 2` pack may ship **provider** contributions — a new pack-scoped
-contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes. Schema-1
-packs ignore `contents.providers` and keep the old activation-catalogue shape. In
-this PR they are **loaded, validated, catalogued, and per-entity toggleable, but never
-dispatched**: nothing imports a provider `module`, runs a `hook`, or applies its `budget`.
-Provider *dispatch* (the lifecycle hub) is a later Extension-Platform goal. Author them now to
-get validation + activation; expect no runtime effect yet.
+**Status:** a `schema: 2` pack may ship **provider** contributions — a pack-scoped
+contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes.
+Schema-1 packs ignore `contents.providers` and keep the old activation-catalogue shape.
 
-Unlike every other contribution in this guide, a provider has **no Host-API surface** — it is
-not reached through `ctx.host`. It is a forward-declared entity whose only observable behaviour
-today is that it appears in the activation catalogue and in
-`PackContributionRegistry.listProviders(projectId)` (installed + active + enabled).
+Provider **dispatch infrastructure now exists**: a server-core `LifecycleHub` can resolve
+enabled providers via `PackContributionRegistry.listProviders(projectId)`, run a named hook on
+the Extension Host worker tier with a per-provider timeout, collect the returned
+`ContextBlock`s, apply token budgets, fence the content, and record a trace. See
+[docs/lifecycle-hub.md](lifecycle-hub.md) for the full Hub contract.
+
+**But nothing calls the Hub from any session path yet, so authoring a provider still has no
+runtime effect in production today.** The `sessionSetup` wiring lands in a later goal (G1.3) and
+the per-turn `beforePrompt` wiring after that (G1.4). Author providers now to get validation,
+catalogue listing, and activation toggles — and to be ready for when the wiring lands — but
+expect no observable behaviour until then beyond appearing in `listProviders(projectId)`
+(installed + active + enabled).
+
+Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
+surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
+eventually dispatches it, the provider runs as a module on the worker tier and returns context
+blocks (see the [provider module contract](#provider-module-contract) below).
 
 Key author-facing rules (full reference, field table, defaults, and clamps live in
 [docs/marketplace.md → Provider contributions](marketplace.md#provider-contributions-providersidyaml)):
@@ -813,6 +822,46 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 - `hooks` must be a subset of `sessionSetup` / `beforePrompt` / `afterTurn` / `beforeCompact` /
   `sessionShutdown`; an unknown hook drops *that* provider (warn) and the rest of the pack
   still loads.
+- `budget` (`{ maxTokens, timeoutMs }`) bounds dispatch: `maxTokens` is clamped to `[64, 8192]`
+  (default 1600) and `timeoutMs` to `[100, 10000]` (default 1500). When the Hub dispatches, the
+  per-provider token max feeds the budget algorithm and the timeout bounds the worker call.
+- `config` is an opaque mapping handed to the hook verbatim as `ctx.config`.
+
+#### Provider module contract
+
+A provider `module` is authored as a **default-export object** whose members are the hook
+handlers — **not** a named `providers` export (this is what distinguishes the provider worker
+path from routes/actions). Each handler is `async (ctx) => ({ blocks: [...] })` and returns
+`ContextBlock`s (a bare `ContextBlock[]` is also accepted):
+
+```js
+// providers/memory.mjs
+export default {
+  async sessionSetup(ctx) {
+    // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, turn?,
+    //   budget.maxTokens (this provider's clamped allowance), config (the YAML `config`),
+    //   and gateway { baseUrl, token } for calling back into the gateway.
+    return {
+      blocks: [{
+        id: "recent-decisions",
+        title: "Project memory",        // → fence source="…"
+        authority: "memory",             // memory|skill|tool|workflow|role|generic
+        content: "…",                    // the text injected into the prompt
+        reason: "continuity across sessions",  // → fence reason="…"
+        priority: 10,                    // higher = kept first under budget pressure
+      }],
+    };
+  },
+  async beforePrompt(ctx) { /* … */ },
+};
+```
+
+The Hub **forces `providerId`** to your provider id and **recomputes `tokenEstimate`** from
+`content` host-side, so you cannot mis-attribute a block or under-report its size. Malformed
+blocks are dropped (not fatal); a throw or timeout becomes a diagnostic and never breaks other
+providers. Accepted blocks are wrapped in a `<context-block id=… source=… authority=…
+reason=…>` envelope (attribute values are newline-stripped and `"`-escaped). Full algorithm and
+trace details: [docs/lifecycle-hub.md](lifecycle-hub.md).
 
 ### `host.session.*` — transcript reads, posts, and live events
 

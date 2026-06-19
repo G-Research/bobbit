@@ -62,7 +62,7 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes";
+	exportKind: "actions" | "routes" | "providers";
 	/** The member (action/route name) to invoke — pre-validated by the dispatcher. */
 	member: string;
 	/** The FULL handler context. Its `host` (a live ServerHostApi) stays in the
