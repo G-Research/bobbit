@@ -1,6 +1,6 @@
 import { render } from "lit";
 import { renderSidebar, isProjectExpanded, toggleProjectExpanded } from "../../src/app/sidebar.js";
-import { navigateSidebar, installKeyboardNavOverrideClearListener } from "../../src/app/sidebar-nav.js";
+import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "../../src/app/sidebar-nav.js";
 import {
 	expandedGoals,
 	saveExpandedGoals,
@@ -16,8 +16,10 @@ import {
 } from "../../src/app/state.js";
 
 const PROJECT_ID = "sidebar-nav-fixture-project";
-const LIVE_GOAL_ID = "sidebar-nav-fixture-live-goal";
-const ARCHIVED_GOAL_ID = "sidebar-nav-fixture-archived-goal";
+const LIVE_GOAL_ID = "11111111-1111-4111-8111-111111111111";
+const ARCHIVED_GOAL_ID = "22222222-2222-4222-8222-222222222222";
+const GOAL_SESSION_ID = "sidebar-nav-fixture-goal-session";
+const LIVE_SESSION_ID = "sidebar-nav-fixture-live-session";
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -53,9 +55,36 @@ const ARCHIVED_GOAL: Goal = {
 	archivedAt: 3,
 };
 
+const GOAL_SESSION: GatewaySession = {
+	id: GOAL_SESSION_ID,
+	title: "Keyboard Fixture Goal Session",
+	cwd: PROJECT.rootPath,
+	projectId: PROJECT_ID,
+	goalId: LIVE_GOAL_ID,
+	status: "idle",
+	createdAt: 4,
+	lastActivity: 4,
+	clientCount: 0,
+};
+
+const LIVE_SESSION: GatewaySession = {
+	id: LIVE_SESSION_ID,
+	title: "Keyboard Fixture Ungrouped Session",
+	cwd: PROJECT.rootPath,
+	projectId: PROJECT_ID,
+	status: "idle",
+	createdAt: 5,
+	lastActivity: 5,
+	clientCount: 0,
+};
+
 const IDS = {
 	project: `project:${PROJECT_ID}`,
 	liveGoal: `goal:${LIVE_GOAL_ID}`,
+	goalSession: `session:${GOAL_SESSION_ID}`,
+	ungroupedHeader: `ungrouped-header:${PROJECT_ID}`,
+	liveSession: `session:${LIVE_SESSION_ID}`,
+	staffHeader: `staff-header:${PROJECT_ID}`,
 	archivedHeader: `archived-header:${PROJECT_ID}`,
 	archivedGoal: `goal:${ARCHIVED_GOAL_ID}`,
 };
@@ -95,12 +124,24 @@ function requestPath(input: RequestInfo | URL): string {
 	}
 }
 
+const SESSION_BY_ID = new Map<string, GatewaySession>([
+	[GOAL_SESSION_ID, GOAL_SESSION],
+	[LIVE_SESSION_ID, LIVE_SESSION],
+]);
+
 window.fetch = (async (input: RequestInfo | URL) => {
 	const url = requestPath(input);
 	if (url.startsWith("/api/goals?") && url.includes("archived=true")) {
 		return response({ goals: [{ ...ARCHIVED_GOAL }], total: 1, hasMore: false, nextCursor: null, archivedSessions: [] });
 	}
-	if (url.startsWith("/api/sessions?")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
+	if (url.startsWith("/api/sessions/")) {
+		const id = url.split("/")[3]?.split("?")[0];
+		const session = id ? SESSION_BY_ID.get(id) : undefined;
+		return session ? response({ ...session }) : response({ error: "not found" }, 404);
+	}
+	if (url.startsWith("/api/sessions?")) {
+		return response({ sessions: [{ ...GOAL_SESSION }, { ...LIVE_SESSION }], archivedDelegates: [], total: 2, hasMore: false, nextCursor: null });
+	}
 	if (url === "/api/staff" || url.startsWith("/api/staff?") || url === "/api/staff/orphaned") return response({ staff: [] });
 	if (url === "/api/projects") return response({ projects: [{ ...PROJECT }] });
 	if (url === "/api/preferences") return response({});
@@ -148,18 +189,36 @@ function installKeyboardDriver(): void {
 		if (event.key === "ArrowDown") {
 			event.preventDefault();
 			navigateSidebar("down");
+		} else if (event.key === "ArrowUp") {
+			event.preventDefault();
+			navigateSidebar("up");
+		} else if (event.key === "ArrowRight") {
+			event.preventDefault();
+			expandActiveSidebarItem(true);
+		} else if (event.key === "ArrowLeft") {
+			event.preventDefault();
+			expandActiveSidebarItem(false);
 		}
 	});
 }
 
-async function resetFixture(): Promise<void> {
+async function setShowArchived(showArchived: boolean): Promise<void> {
+	localStorage.setItem("bobbit-show-archived", showArchived ? "true" : "false");
+	state.showArchived = showArchived;
+	renderFixture();
+	await nextFrames();
+}
+
+async function resetFixture(options?: { showArchived?: boolean }): Promise<void> {
 	installFixtureStyle();
 	installKeyboardDriver();
-	localStorage.setItem("bobbit-show-archived", "false");
+	const showArchived = options?.showArchived === true;
+	localStorage.setItem("bobbit-show-archived", showArchived ? "true" : "false");
 	localStorage.setItem("bobbit-show-busy", "true");
 	localStorage.setItem("bobbit-show-read", "true");
 	setProjects([{ ...PROJECT }]);
 	expandedGoals.clear();
+	expandedGoals.add(LIVE_GOAL_ID);
 	saveExpandedGoals();
 	setArchivedSectionExpanded(PROJECT_ID, true);
 	setUngroupedExpanded(PROJECT_ID, true);
@@ -168,15 +227,16 @@ async function resetFixture(): Promise<void> {
 	Object.assign(state, {
 		appView: "authenticated",
 		connectionStatus: "connected",
-		gatewaySessions: [] as GatewaySession[],
+		gatewaySessions: [{ ...GOAL_SESSION }, { ...LIVE_SESSION }] as GatewaySession[],
 		archivedSessions: [] as GatewaySession[],
 		goals: [{ ...LIVE_GOAL }, { ...ARCHIVED_GOAL }],
 		selectedSessionId: null,
 		connectingSessionId: null,
 		keyboardNavActiveId: null,
+		goalDashboardId: null,
 		activeProjectId: PROJECT_ID,
 		sidebarCollapsed: false,
-		showArchived: false,
+		showArchived,
 		showBusy: true,
 		showRead: true,
 		filtersPopoverOpen: false,
@@ -204,5 +264,6 @@ setRenderApp(renderFixture);
 (window as any).__bobbitState = state;
 (window as any).__bobbitRenderSidebarFixture = renderFixture;
 (window as any).__resetSidebarKeyboardNavFixture = resetFixture;
+(window as any).__setSidebarKeyboardNavShowArchived = setShowArchived;
 (window as any).__sidebarKeyboardNavFixtureIds = IDS;
 (window as any).__sidebarKeyboardNavReady = true;

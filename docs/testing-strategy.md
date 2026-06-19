@@ -46,6 +46,28 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 
 **Manual integration** — The gold standard. Real agent, real Docker, real crash recovery. Tests 6 session variations × crash/restart cycle × browser verification. Catches bugs no other layer can reach.
 
+### Browser E2E placement policy
+
+Spawned-gateway browser E2E is the most expensive automated layer. Add it only when the behavior needs real app integration: browser routing, WebSocket/server wiring, persistence across reload, cross-client state, or layout that cannot be represented in deterministic fixtures.
+
+Default new coverage to the cheapest layer that can catch the bug:
+
+1. node unit tests for pure logic and data transforms;
+2. `file://` Playwright fixtures for renderer, panel, geometry, sidebar, and component-state matrices;
+3. API E2E for gateway contracts without a browser;
+4. spawned-gateway browser E2E for one or a few integration journeys.
+
+When reducing browser rows, add replacement fixture/API/unit coverage first, keep a small full-stack smoke, and update the split-suite coverage map in [`docs/testing-metrics/coverage-map.md`](testing-metrics/coverage-map.md). The metrics command reference and baseline rules live in [`docs/testing-metrics/README.md`](testing-metrics/README.md).
+
+### Split-suite metric reporting
+
+Use split-suite metrics to prove browser E2E changes without running expensive tiers repeatedly:
+
+- Use `npm run metrics:e2e:all` for final E2E validation. It runs the full E2E tier once and emits aggregate plus project-split artifacts under `.profiles/metrics/`.
+- Use `metrics:slice:renderer`, `metrics:slice:scroll`, or `metrics:slice:sidebar` for focused feedback before the full run.
+- Use `metrics:coverage` and scoped `metrics:check` when validating coverage non-regression without requiring every current metric file.
+- Compare current `.profiles/metrics/*.json` artifacts against committed `docs/testing-metrics/baseline-*.json` files. Update baselines only after intentional coverage movement is reviewed and documented.
+
 ### The Gap
 
 The manual integration tests catch bugs that the automated suite misses because they exercise **three things simultaneously** that no other test layer combines:
@@ -705,9 +727,9 @@ previously-named specs are now hardened and de-labelled.
 Recent stabilization work addressed contention at the scheduler, fixture, and
 suite-layout layers:
 
-- **Verification command scheduling.** Command verification steps serialize
-  within a phase while non-command steps remain parallel. This prevents one gate
-  from starting multiple full suites against the same worktree at the same time.
+- **Verification command scheduling.** Verification phases are the sole ordering
+  mechanism: same-phase steps run concurrently by default, including command
+  steps, and explicit sequencing should use different `phase` values.
   Component-linked `command: unit` steps also default to 1200s when no explicit
   timeout is set; other command steps keep the generic 300s default. Pinned by
   `tests/verification-harness-command-scheduling.test.ts`.
@@ -724,8 +746,9 @@ suite-layout layers:
   child-process work.
 
 For pack-specific UI changes, keep durable validation tied to the persistent
-coverage contract: a focused browser E2E should pin the changed interaction, and
-the implementation gate should still run build, type-check, unit, and the full
+coverage contract: prefer node, fixture, or API coverage for matrices and add a
+focused browser E2E only when the changed interaction needs real app integration.
+The implementation gate should still run build, type-check, unit, and the full
 E2E command before merge.
 
 ### Playwright transform-cache isolation

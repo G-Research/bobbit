@@ -44,7 +44,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
+| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
@@ -54,7 +54,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a byte-for-byte clone of the archived session's `.jsonl`. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
@@ -73,6 +73,35 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ tail, blocks }` — `tail` is the delimited, fenced dynamic-context region appended to the system-prompt tail (or `""`), `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. `404` for unknown session; `{ tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
+
+### Archived session list and query search
+
+`GET /api/sessions?include=archived` keeps the live session list in the same response and adds archived sessions from visible project contexts. This powers Show Archived and the sidebar's server-backed archived filter; see [Sidebar Archived Search](sidebar-archived-search.md).
+
+Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `include=archived` | Enables archived session rows. Without it, only live sessions are returned, plus `archivedDelegates` needed for live nesting. |
+| `q` | Optional archived-only search query. The server trims and lowercases it, then applies case-insensitive substring matching to archived session `title` and `role`. Live sessions are not filtered by this parameter. |
+| `limit` | Optional archived page size, clamped to `1..200`. When present, pagination metadata is returned for the matching archived corpus. |
+| `after` | Optional `archivedAt` cursor from the previous response's `nextCursor`; returns older matching archived rows. |
+| `projectId` | Optional project filter applied to live and archived rows. |
+
+With `limit`, the response shape is:
+
+```ts
+{
+  generation: number,
+  sessions: GatewaySession[],
+  total: number,
+  hasMore: boolean,
+  nextCursor?: number,
+  archivedDelegates: GatewaySession[]
+}
+```
+
+`total`, `hasMore`, and `nextCursor` describe only the filtered archived corpus. `sessions` contains the current live sessions followed by the requested archived page, so clients that need only archived results should filter for `archived === true` or `status === "archived"`. `q` is applied before pagination so older matching archived sessions can be found without loading non-matching pages.
 
 ### Side-panel workspace
 
@@ -113,6 +142,8 @@ Success returns `200`:
 ```
 
 Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, reattaches clients, and switches the new process back to the existing transcript file. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
+
+For normal role-derived sessions, restart recomputes allowed tools from the current role/tool/group/MCP policy cascade instead of reusing the previous live allow-list. This is why an MCP group changed from `never` to `ask` or `allow` takes effect after `Refresh agent`. Persisted session allow-list constraints and live `session-only` / `one-time` grants are still carried across where appropriate, and explicit role-level `never` policies still take precedence over group defaults.
 
 Stable error codes:
 
@@ -203,7 +234,7 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
-| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing — unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}` (skipped when the session has no project, the project has zero workflows, or `workflow` is empty). See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
@@ -266,7 +297,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/goals` | List all goals. `?archived=true` returns archived goals with an `archivedSessions` field. Supports `?since=N` generation counter for conditional fetch |
+| `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
@@ -278,6 +309,34 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+### Archived goal list and query search
+
+`GET /api/goals?archived=true` aggregates archived goals across visible project contexts. It is used by Show Archived and by the sidebar's server-backed archived filter; see [Sidebar Archived Search](sidebar-archived-search.md).
+
+Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `archived=true` | Selects archived goals instead of live goals. |
+| `q` | Optional archived-goal query. The server trims and lowercases it, then applies case-insensitive substring matching to goal `title`, or to `title` / `role` on an affiliated non-child session. |
+| `limit` | Archived page size, default `50`, clamped to `1..200`. |
+| `after` | Optional `archivedAt` cursor from the previous response's `nextCursor`; returns older matching archived goals. |
+| `projectId` | Optional project filter for archived goals and affiliated sessions considered during matching. |
+
+Response shape:
+
+```ts
+{
+  goals: Goal[],
+  total: number,
+  hasMore: boolean,
+  nextCursor?: number,
+  archivedSessions: GatewaySession[]
+}
+```
+
+`q` is applied before pagination across the full archived goal corpus. `total`, `hasMore`, and `nextCursor` describe the filtered goal corpus, not the `archivedSessions` side payload. `archivedSessions` contains archived sessions affiliated with goals in the returned page, plus related archived child/delegate rows needed for sidebar nesting.
 
 ### Goal GitHub link endpoint
 
@@ -337,6 +396,8 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
+
+Restart semantics: boot restores persisted active team entries and re-subscribes their sessions; it does not call `/team/start` implicitly for existing teamless goals. After `/team/teardown`, or after creating a goal with `autoStartTeam: false`, the goal remains teamless across restart and this explicit start route remains the manual recovery path.
 
 ### Orchestration routes (child agents)
 
@@ -687,16 +748,17 @@ Outbound requests that these endpoints make to the configured/tested AI Gateway 
 
 ### OAuth
 
-Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic` and `openai-codex`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
+Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic`, `openai-codex`, and `google-gemini-cli`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires? }`. |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires?, email? }`. |
 | `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. |
 | `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true }` (200) or `{ success: false, error }` (400). |
 | `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error? }`. |
+| `POST` | `/api/oauth/logout` | Revoke/clear one provider's stored credential. Body: `{ provider }`. Returns `{ success, provider }`, never echoing token material. |
 
-**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; an unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider".
+**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token), `openai-codex` (ChatGPT subscription → bearer token), and `google-gemini-cli` (Google account → Gemini Code Assist bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; for the Google path it also accepts the inbound aliases `google` and `gemini` and collapses them to canonical `google-gemini-cli` (plain `google` stays the Google AI Studio API-key provider elsewhere). An unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider". See [Google OAuth & Gemini models](google-oauth-models.md) for the full account-vs-API-key split.
 
 **Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
 
@@ -708,7 +770,9 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 
 The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
 
-**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" }`. Returns:
+The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`); it is never a token.
+
+**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" | "google-gemini-cli" }`. Returns:
 
 ```json
 {
@@ -721,7 +785,7 @@ The response intentionally does **not** echo the bearer token / API key — stri
 ```
 
 - `url`: opens in a system browser; the provider's redirect lands on Bobbit's callback handler.
-- `callbackServer`: `true` for OAuth providers that complete via the embedded callback server (e.g. `openai-codex`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`).
+- `callbackServer`: `true` for OAuth providers that complete via an embedded/loopback callback server (e.g. `openai-codex`, and `google-gemini-cli` via a loopback server on `http://localhost:<ephemeral-port>/oauth2callback`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`). The Google flow also accepts the manual paste path for remote-gateway setups where the browser cannot reach the gateway loopback.
 - `instructions`: optional human-readable string the UI may render alongside the URL.
 
 **`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider, so the body does not repeat it). Returns:
@@ -755,7 +819,9 @@ Response contract:
 
 `provider` is recommended as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
 
-See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md#add--debug-per-provider-oauth) for the file map and the Settings → Account UI walkthrough.
+**`POST /api/oauth/logout`** body: `{ provider }`. Normalizes the provider, optionally revokes the upstream token (Google posts to `oauth2.googleapis.com/revoke`; logout does not fail if revoke is transiently unavailable), deletes **only** that canonical provider's `auth.json` entry, and clears the OAuth cache. Returns `200 { success: true, provider }`. Provider-partitioned: logging out `google-gemini-cli` never touches `anthropic`, `openai-codex`, or the API-key-only `google` credential, and no response or log echoes token material.
+
+See [Google OAuth & Gemini models](google-oauth-models.md) for the account-vs-API-key provider split, the Code Assist runtime, and the current session-selectability limitation.
 
 ### Image generation
 
@@ -1344,9 +1410,13 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a byte-for-byte clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus a verbatim copy of the source `.jsonl`, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless, no byte budget, no system-prompt injection.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless user-visible transcript content, no byte budget, no system-prompt injection.
+
+For archived worktree-backed sources, the persisted `worktreePath` is only a provenance marker that enables worktree mode for the continued session. The endpoint does not require that path or the archived `branch` to exist, and it does not reuse them. The continued session gets its own `session/<new-id8>` branch/worktree from the currently registered project repo and configured base ref. Archived cwd/worktree values may be used only as old values when rebasing runtime-only Pi cwd metadata in the cloned transcript.
+
+Non-sandboxed worktree-backed continues use the normal session worktree allocation path: claim a ready project worktree-pool entry when available, and fall back to cold `createWorktree` / `createWorktreeSet` if the pool is empty, returns `null`, or `claim()` throws. Sandboxed continues explicitly bypass the host-side pool because their worktrees live inside the project sandbox container. Single-repo and multi-repo projects use the same worktree-support resolver as `POST /api/sessions`, so Continue-Archived does not have a separate capability rule.
 
 **Request body**: empty (or absent). A legacy `mode` field is tolerated but ignored — there is no Summary vs Full distinction any more, and no transcript truncation. See [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) for the design rationale.
 
@@ -1364,7 +1434,9 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 }
 ```
 
-The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over.
+The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over. If the source was worktree-backed, the returned `cwd` points at the newly claimed or cold-created worktree path, not the archived source path.
+
+Before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
 
 **Error responses**:
 
@@ -1374,7 +1446,7 @@ The new session's title is marked as generated, which prevents the first-message
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
 | `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set) — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
-| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied) — the destination file is unlinked and no session row (including any partially-cloned proposal-drafts directory) is created. See server logs. |
+| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied), or fresh session/worktree creation failed against the current project repo/base ref after any pool fallback. Clone failures unlink the destination file and create no session row; create-session failures clean up the cloned transcript and any copied proposal/tool-content directories. A pool miss, `null` claim, or claim exception is not an API error by itself. Errors for worktree setup should identify the current project/base/worktree problem, not the archived source path or branch. See server logs. |
 
 **Scope gate**: The endpoint refuses goal-linked, delegate, and team-member sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead. Assistant sessions (`assistantType` set) are explicitly **not** in this gate — see the previous paragraph for the carry-over semantics.
 

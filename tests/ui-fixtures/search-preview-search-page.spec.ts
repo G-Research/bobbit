@@ -73,13 +73,13 @@ function session(id: string, title: string, score = 4): Result {
 	};
 }
 
-function message(id: string, sessionId: string, token: string, score = 3): Result {
+function message(id: string, sessionId: string, token: string, score = 3, sessionTitle = "Grouped Session"): Result {
 	return {
 		type: "message",
 		id,
 		title: `Message ${id}`,
 		sessionId,
-		sessionTitle: "Grouped Session",
+		sessionTitle,
 		snippet: `<b>${token}</b> body ${id}`,
 		timestamp: NOW - 2000,
 		archived: false,
@@ -112,6 +112,37 @@ test.describe("Search page grouped-results fixture", () => {
 		await card.locator('[data-role="group-chevron"]').click();
 		await expect(card).toHaveAttribute("data-expanded", "true");
 		await expect(card.locator('[data-role="result-child"]')).toHaveCount(5);
+	});
+
+	test("message-only groups and rows use the resolved parent session title", async ({ page }) => {
+		const rows = [message("goal-message", "goal-session", "GoalTok", 3, "Fix Search Titles: Grouped Session")];
+		await setupSearch(page, rows, "GoalTok");
+
+		const card = page.locator('[data-role="result-group"][data-key="session:goal-session"]');
+		await expect(card).toBeVisible({ timeout: 10_000 });
+		await expect(card.locator("span").filter({ hasText: "Fix Search Titles: Grouped Session" }).first()).toBeVisible();
+		await expect(card, "message-derived session card should not fall back to Untitled").not.toContainText(/Untitled(?: session)?/i);
+		await expect(card.locator('[data-role="result-child"]').first()).toContainText("Fix Search Titles: Grouped Session");
+	});
+
+	test("nested message rows inherit the direct parent session title context", async ({ page }) => {
+		const rawMessageTitle = "Raw Message Row Title";
+		const rows: Result[] = [
+			session("parent-session", "Grouped Session", 4),
+			{
+				...message("parent-message", "parent-session", "ParentTok", 3, undefined),
+				title: rawMessageTitle,
+				sessionTitle: undefined,
+			},
+		];
+		await setupSearch(page, rows, "ParentTok");
+
+		const card = page.locator('[data-role="result-group"][data-key="session:parent-session"]');
+		await expect(card).toHaveAttribute("data-expanded", "false", { timeout: 10_000 });
+		await card.locator('[data-role="group-chevron"]').click();
+		const child = card.locator('[data-role="result-child"]').first();
+		await expect(child, "expanded message rows should use parent session title context").toContainText("Grouped Session");
+		await expect(child, "expanded message rows should not render the raw message row title").not.toContainText(rawMessageTitle);
 	});
 
 	test("a group with exactly one total match auto-expands", async ({ page }) => {

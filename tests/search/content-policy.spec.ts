@@ -17,8 +17,8 @@ import {
 } from "../../src/server/search/content-policy.ts";
 
 test.describe("CONTENT_POLICY_VERSION", () => {
-	test("is exported and equals 1", () => {
-		expect(CONTENT_POLICY_VERSION).toBe(1);
+	test("is exported and equals 3", () => {
+		expect(CONTENT_POLICY_VERSION).toBe(3);
 	});
 	test("limit constants match design", () => {
 		expect(MAX_TOOL_RESULT_INPUT_CHARS).toBe(32_768);

@@ -315,6 +315,7 @@ Validation rules: `name`, `description`, `version` must be non-empty; `name` mus
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
+
 Schema 2 is the **Extension Platform** workstream's manifest tier. It began as a deliberately
 **additive** change — schema 2 widens what a `pack.yaml` may declare and adds a loader for one
 new contribution type (**providers**) — and remains **fully back-compatible**: existing
@@ -335,6 +336,7 @@ plumbing first meant later PRs (the lifecycle hub that actually *runs* providers
 for the other reserved contribution types) only added dispatch — they never had to re-open the
 manifest format or the activation REST. Authors could start shipping provider files before the
 dispatch PRs landed and have them load, validate, and toggle in the meantime.
+
 
 #### The `schema` field and back-compat
 
@@ -443,6 +445,7 @@ Field rules and defaults:
   may run.
 - **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
+
 **All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
 indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
 `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
@@ -451,6 +454,7 @@ section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated prov
 extension and `afterTurn` / `sessionShutdown` fire server-side. **No built-in production provider
 ships yet** (G1.6) — so an out-of-the-box install contributes nothing until you add a provider
 pack.
+
 
 #### Why providers are pack-scoped, *not* name-merged
 

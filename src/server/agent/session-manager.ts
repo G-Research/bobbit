@@ -62,6 +62,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
+import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -322,7 +323,9 @@ export interface SessionInfo {
 		seq: number;
 		ts: number;
 	};
-	/** Tools granted via "one-time" mode — revoked on agent_end */
+	/** Tools granted via "session-only" mode — re-applied across Refresh agent, not persisted to disk. */
+	sessionOnlyGrantedTools?: string[];
+	/** Tools granted via "one-time" mode — re-applied across Refresh agent and revoked on agent_end. */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
 	setupComplete?: boolean;
@@ -1504,6 +1507,7 @@ export class SessionManager {
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
 			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+			includeGoogleAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
 			scope: opts?.projectId,
 		});
 
@@ -1732,6 +1736,18 @@ export class SessionManager {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
 		}
 		return [];
+	}
+
+	private mergeToolNames(existing: string[] | undefined, additions: string[] | undefined): string[] | undefined {
+		const merged: string[] = [];
+		const seen = new Set<string>();
+		for (const name of [...(existing ?? []), ...(additions ?? [])]) {
+			const key = name.toLowerCase();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			merged.push(name);
+		}
+		return merged.length > 0 ? merged : undefined;
 	}
 
 	private buildToolActivationArgs(
@@ -2835,6 +2851,7 @@ export class SessionManager {
 		// emits one row per text / tool_use / tool_result block.
 		if (event.type === "message_end" && event.message) {
 			try {
+				const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 				this.resolveSearchIndex(session).indexMessage({
 					sessionId: session.id,
 					sessionTitle: session.title,
@@ -2842,6 +2859,7 @@ export class SessionManager {
 					timestamp: Date.now(),
 					projectId: session.projectId || undefined,
 					goalId: session.goalId,
+					goalTitle,
 				});
 			} catch {
 				// Non-critical — don't break message flow
@@ -3089,7 +3107,7 @@ export class SessionManager {
 	 *
 	 * @param mode - Grant persistence mode:
 	 *   - "persistent" (default): updates role YAML permanently
-	 *   - "session-only": adds to session.allowedTools in memory only (survives until session ends/restarts)
+	 *   - "session-only": adds to session.allowedTools in memory only (survives Refresh agent, not gateway restart)
 	 *   - "one-time": adds to session.allowedTools + tracks for revocation on agent_end
 	 */
 	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: "persistent" | "session-only" | "one-time"): Promise<string[]> {
@@ -3147,13 +3165,14 @@ export class SessionManager {
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
-			session.oneTimeGrantedTools = [...(session.oneTimeGrantedTools || []), ...newTools];
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
+			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
@@ -3250,6 +3269,28 @@ export class SessionManager {
 		pending.resolve({ granted: false });
 	}
 
+	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0
+			? ps.allowedTools
+			: undefined;
+		const sessionGrants = this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools);
+
+		// Persisted allow-lists are true session-scoped constraints (delegate/read-only
+		// children, explicit createSession overrides). Preserve them exactly, with any
+		// live grants layered on top.
+		if (persistedAllowedTools) {
+			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
+		}
+
+		// Normal sessions derive their tool surface from the current role/group/MCP
+		// policy cascade. Only one-time/session-only grants are carried across the
+		// respawn; the old live session.allowedTools is just a stale cache.
+		if (!sessionGrants) return undefined;
+		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
+		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole).map(t => t.name);
+		return this.mergeToolNames(recomputedAllowed, sessionGrants);
+	}
+
 	/**
 	 * Restart a session's agent process so it picks up updated role/tools.
 	 * Stops the current agent, then restores from the persisted session file
@@ -3260,19 +3301,18 @@ export class SessionManager {
 		if (!ps) return;
 
 		// Save in-memory grant state that restoreSession doesn't persist.
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
-				// restoreSession normally derives allowedTools from role YAML; session-only
-				// and one-time grants need the augmented list to round-trip.
-				(p as any)._overrideAllowedTools = savedAllowedTools;
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
 			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		}
 	}
@@ -3381,15 +3421,18 @@ export class SessionManager {
 			throw zombieErr;
 		}
 
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
-			mutatePs: p => { (p as any)._overrideAllowedTools = savedAllowedTools; },
+			mutatePs: p => {
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		} else {
 			throw new Error("Failed to restore session after restart");
@@ -3461,12 +3504,20 @@ export class SessionManager {
 				testSearchIndex.open({ goalStore, sessionStore: this._testStore });
 				// Wire index update callbacks
 				goalStore.onIndexUpdate = (goal) => {
-					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+					try {
+						testSearchIndex.indexGoal(goal, goal.projectId || "");
+						for (const session of this._testStore?.getAll() ?? []) {
+							if (session.goalId !== goal.id) continue;
+							testSearchIndex.indexSession(session, goal.title, session.projectId || "");
+							testSearchIndex.reindexMessagesForSession(session, goal.title, session.projectId || "");
+						}
+					} catch (err) { console.error("[search] Failed to index goal:", err); }
 				};
 				this._testStore.onIndexUpdate = (session) => {
 					try {
 						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 						testSearchIndex.indexSession(session, goalTitle, session.projectId || "");
+						testSearchIndex.reindexMessagesForSession(session, goalTitle, session.projectId || "");
 					} catch (err) { console.error("[search] Failed to index session:", err); }
 				};
 			} catch (err) {
@@ -3628,7 +3679,7 @@ export class SessionManager {
 		try {
 			sessionStore = this.getSessionStore(ps.projectId);
 		} catch {
-			console.warn(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
 			return;
 		}
 		// Generalized boot-reap for ANY child linked by parentSessionId+childKind
@@ -4175,7 +4226,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4226,7 +4277,7 @@ export class SessionManager {
 			// inside the container via ProjectSandbox.createWorktree, and the
 			// host-side worktree pool isn't reachable from the container.
 			const targetBranch = `session/${uuid8}`;
-			const poolForCreate = (!opts?.sandboxed && projectId) ? this.worktreePools.get(projectId) : undefined;
+			const poolForCreate = (!opts?.sandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
 			const claimed = poolForCreate ? await poolForCreate.claim(targetBranch).catch((err) => {
 				console.warn(`[session-manager] pool.claim failed for ${id}, falling back to createWorktree: ${err instanceof Error ? err.message : err}`);
 				return null;
@@ -4252,7 +4303,7 @@ export class SessionManager {
 				isCompacting: false,
 				titleGenerated: false,
 				goalId,
-				assistantType: undefined,
+				assistantType,
 				taskId: opts?.taskId,
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
@@ -4291,6 +4342,7 @@ export class SessionManager {
 				title: opts?.title || "New session",
 				cwd,
 				goalId,
+				assistantType,
 				taskId: opts?.taskId,
 				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
 				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
@@ -4321,6 +4373,7 @@ export class SessionManager {
 				initialModel: opts?.initialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
 			};
 
@@ -4333,19 +4386,37 @@ export class SessionManager {
 			}
 			this.notifySessionCreated(session);
 
-			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
-			// pass its path so executeWorktreeAsync skips createWorktree.
-			executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
+			// Finish the pipeline. Most callers keep the historical preparing-session UX
+			// and let setup complete in the background. Continue-Archived opts in to
+			// awaiting setup so fresh worktree/base-ref failures are returned by the POST
+			// instead of surfacing later as an asynchronously archived session.
+			const setupPromise = executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
-				// agent may rotate its session file mid-run.
+				// agent may rotate its session file mid-run. Continue/Fork rehydration
+				// already adopted a cloned transcript and may have sanitized runtime-only
+				// metadata in that file; avoid a redundant get_state that can drop it.
+				if (plan.preExistingAgentSessionFile) return;
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
-			}).catch((err) => {
-				handleSetupFailure(session, plan, err, ctx);
 			});
+
+			if (opts?.awaitWorktreeSetup) {
+				try {
+					await setupPromise;
+				} catch (err) {
+					const setupError = err instanceof Error ? err : new Error(String(err));
+					handleSetupFailure(session, plan, setupError, ctx);
+					throw setupError;
+				}
+			} else {
+				setupPromise.catch((err) => {
+					const setupError = err instanceof Error ? err : new Error(String(err));
+					handleSetupFailure(session, plan, setupError, ctx);
+				});
+			}
 
 			return session;
 		}
@@ -4385,6 +4456,7 @@ export class SessionManager {
 			initialModel: opts?.initialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
 		};
 
@@ -4392,10 +4464,14 @@ export class SessionManager {
 		if (projectId) session.projectId = projectId;
 		this.notifySessionCreated(session);
 
-		// Persist session metadata (fire-and-forget, but tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		// Persist session metadata (fire-and-forget, but tracked for terminate).
+		// Rehydrated sessions already have a cloned/adopted transcript path recorded;
+		// avoid a redundant get_state that can rewrite runtime-only metadata.
+		if (!plan.preExistingAgentSessionFile) {
+			session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+			}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}
 
 		return session;
 	}
@@ -4813,12 +4889,14 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				// Skip models that can't run in an agent session (e.g. google-gemini-cli
+				// Code Assist) so a role override doesn't pin an unrunnable provider.
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4868,11 +4946,11 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4886,7 +4964,12 @@ export class SessionManager {
 		// matching the contract used for review/QA sessions: if a user explicitly
 		// pinned a model on a role and it cannot be bound, surface the failure.
 		const roleModel = this.resolveRoleModel(session);
-		if (roleModel) {
+		if (roleModel && !isSessionSelectableModelString(roleModel)) {
+			// A role pinned a model that can't run in an agent session (e.g.
+			// google-gemini-cli Code Assist). Binding it would hard-fail the session,
+			// so skip it and fall through to the default/aigw selection instead.
+			console.warn(`[session-manager] Role model "${roleModel}" is not session-selectable for ${session.id} (role=${session.role}); skipping role override.`);
+		} else if (roleModel) {
 			try {
 				await applyModelString(session.rpcClient, roleModel, {
 					sessionManager: this,
@@ -4915,7 +4998,12 @@ export class SessionManager {
 
 		// Check explicit preference first (works for both aigw and public providers)
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref) {
+		if (sessionModelPref && !isSessionSelectableModelString(sessionModelPref)) {
+			// A stale/restored preference points at a not-session-runnable model
+			// (e.g. google-gemini-cli Code Assist). Skip it and fall through to aigw
+			// auto-selection rather than attempting an unrunnable bind.
+			console.warn(`[session-manager] default.sessionModel "${sessionModelPref}" is not session-selectable for ${session.id}; falling back.`);
+		} else if (sessionModelPref) {
 			const slash = sessionModelPref.indexOf("/");
 			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);
@@ -7017,7 +7105,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

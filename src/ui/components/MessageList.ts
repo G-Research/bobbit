@@ -32,9 +32,9 @@ import {
  *  resolve via IntersectionObserver as the user scrolls up. */
 const DEFER_EAGER_TAIL = 8;
 
-/** Per-message height heuristic for placeholder `min-height`. Rough — a
- *  10–20px mismatch causes a tiny layout shift when the block resolves, but
- *  resolution fires 500px outside the viewport so the shift is invisible. */
+/** Per-message height heuristic for placeholder `min-height`. Rough — when
+ *  it misses, <deferred-block> preserves scroll anchoring for above-viewport
+ *  swaps and preloads far enough ahead to keep visible shifts rare. */
 function estimateMessageHeight(msg: any): number {
 	if (!msg || typeof msg !== "object") return 80;
 	if (msg.role === "user" || msg.role === "user-with-attachments") return 60;

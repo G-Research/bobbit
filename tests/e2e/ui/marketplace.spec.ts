@@ -296,9 +296,14 @@ test.describe("Marketplace UI", () => {
 		expect(mk).toBeGreaterThan(wf);
 		expect(ng).toBeGreaterThan(mk);
 
-		// Opening navigates to #/market and renders the marketplace sub-tabs.
+		// Opening navigates to #/market and renders the research-preview banner + marketplace sub-tabs.
 		await marketBtn.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/market");
+		const previewBanner = page.locator('[data-testid="market-research-preview-banner"]');
+		await expect(previewBanner).toBeVisible({ timeout: 10_000 });
+		await expect(previewBanner).toContainText("Research Preview");
+		await expect(previewBanner).toContainText("The extension API is still subject to change");
+		await expect(previewBanner).toContainText("Bobbit extensions may need to be re-written against the final extension API in the next release.");
 		// Three sub-tabs: Installed (default), Browse, Sources. Each tab shows its
 		// own panel; only one panel is visible at a time.
 		await expect(page.locator('[data-testid="market-tab-installed"]')).toBeVisible({ timeout: 10_000 });

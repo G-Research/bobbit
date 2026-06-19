@@ -135,6 +135,39 @@ test.describe("follow-tail scroll preservation", () => {
 		expect(stuck).toBe(false);
 	});
 
+	test("shrink while sticky is a no-op and does not force a scrollTop write", async ({ page }) => {
+		const count = await page.evaluate(() => {
+			(window as any).__appendContent(40, 30);
+			(window as any).__reconcile();
+			(window as any).__setScrollTopSpy();
+			(window as any).__shrinkContent(15);
+			(window as any).__reconcile();
+			return (window as any).__getScrollTopSetCount();
+		});
+		expect(count).toBe(0);
+	});
+
+	test("shrink while released preserves user viewport instead of jumping to tail", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			(window as any).__appendContent(50, 30);
+			(window as any).__reconcile();
+			const el = document.getElementById("scroll")!;
+			el.dispatchEvent(new WheelEvent("wheel", { deltaY: -800, bubbles: true }));
+			(window as any).__scrollTo(220);
+			el.dispatchEvent(new Event("scroll"));
+			const before = el.scrollTop;
+			(window as any).__shrinkContent(8);
+			(window as any).__reconcile();
+			return {
+				before,
+				after: el.scrollTop,
+				distance: el.scrollHeight - el.scrollTop - el.clientHeight,
+			};
+		});
+		expect(result.after).toBe(result.before);
+		expect(result.distance).toBeGreaterThan(100);
+	});
+
 	test("programmatic-scroll echo does NOT flip stickToBottom", async ({ page }) => {
 		// Append, reconcile (programmatic scroll to bottom). The synthetic scroll
 		// event is consumed by the latch — stickToBottom should remain true.

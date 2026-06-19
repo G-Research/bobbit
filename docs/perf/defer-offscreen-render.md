@@ -23,13 +23,16 @@ not yet see.
   covers the visible viewport on a typical desktop with a small headroom
   for the next scroll-up gesture.
 - Older messages render a height-preserving placeholder (cheap text
-  approximation of the rendered height). The DOM is correctly-sized at
+  approximation of the rendered height). The DOM is approximately-sized at
   first paint so scrollbar position is stable.
 - Each placeholder observes itself with `IntersectionObserver(rootMargin:
-  500px)` and swaps in the real content via `requestIdleCallback({
+  2000px)` and swaps in the real content via `requestIdleCallback({
   timeout: 50 })` (with `setTimeout(0)` fallback) when it approaches the
-  viewport. The 500px rootMargin pre-resolves blocks slightly before they
+  viewport. The larger rootMargin pre-resolves blocks well before they
   scroll into view to hide the swap latency.
+- If the measured real height differs from the placeholder estimate, the
+  block preserves the scroll anchor for content above the viewport so
+  loading older history does not visibly push the current reading position.
 
 ## Correctness escape hatch
 
@@ -65,10 +68,10 @@ flags accumulate configuration sprawl.
 
 Behaviour is pinned by:
 
-- `tests/defer-offscreen-render.spec.ts` (7 cases) — eager path, deferred
-  placeholder, IntersectionObserver promotion, `Ctrl+F` force-resolve,
-  flag-off zero wrappers, flag-on eager / placeholder split, edge case
-  where N messages ≤ `DEFER_EAGER_TAIL`.
+- `tests/defer-offscreen-render.spec.ts` — eager path, deferred
+  placeholder, IntersectionObserver promotion, scroll-anchor preservation,
+  `Ctrl+F` force-resolve, flag-off zero wrappers, flag-on eager / placeholder
+  split, edge case where N messages ≤ `DEFER_EAGER_TAIL`.
 - `tests/e2e/ui/transcript-fidelity.spec.ts` — the canonical correctness
   test. Asserts the live streaming DOM equals the post-refresh DOM after
   multi-cycle streaming bursts; calls `DeferredBlock.forceResolveAll()`

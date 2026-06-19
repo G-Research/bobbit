@@ -307,15 +307,33 @@ export function startCanvasEyeAnimation(
 	// This bypasses every clock-arithmetic edge case (mount time, document
 	// timeline epoch, negative-delay semantics): we don't compute the phase,
 	// we observe the same one CSS observes.
+	//
+	// Perf: getAnimations() enumerates + allocates an array of every Animation on
+	// the element on each call. Calling it once per rAF frame per sprite was a
+	// measurable renderer hotspot (~8.5% CPU under sidebar churn). The target
+	// Animation is a persistent object that lives as long as the CSS animation
+	// runs, so we resolve it once and cache the reference, reusing it across
+	// frames — .currentTime is read live off the cached object each frame, giving
+	// a value identical to re-querying. We only re-enumerate when the cache is
+	// empty or the cached animation has gone stale (no longer running, so its
+	// currentTime reads null — e.g. it was cancelled or replaced).
+	let phaseAnim: Animation | null = null;
+	function resolvePhaseAnimation(): Animation | null {
+		// Fast path: the cached animation is still live (running/paused, with a
+		// readable clock). A finished/cancelled animation reports currentTime
+		// null here, forcing a single re-enumeration below.
+		if (phaseAnim && phaseAnim.currentTime != null) return phaseAnim;
+		phaseAnim = null;
+		for (const a of canvas.getAnimations()) {
+			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
+			if (dur === cycleDurationMs) { phaseAnim = a; break; }
+		}
+		return phaseAnim;
+	}
 	function readPhasePct(): number {
-		const anims = canvas.getAnimations();
 		// Pick the 10s-cycle animation; its currentTime already accounts for
 		// animation-delay (negative delays make it start positive).
-		let anim: Animation | undefined;
-		for (const a of anims) {
-			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
-			if (dur === cycleDurationMs) { anim = a; break; }
-		}
+		const anim = resolvePhaseAnimation();
 		if (!anim || anim.currentTime == null) return 0;
 		const raw = typeof anim.currentTime === "number"
 			? anim.currentTime
@@ -596,6 +614,42 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 // ============================================================================
 
 /**
+ * Data-URL caches for the sidebar sprite layers.
+ *
+ * `canvas.toDataURL()` is a synchronous, main-thread PNG encode (~5–9ms per
+ * call for these small canvases). The sidebar re-renders on every WS status
+ * tick, and each sprite issues up to 4 encodes (body + blink + eye + accessory),
+ * so an un-memoized sidebar with ~20 sessions burns ~200ms of blocking work per
+ * render event. Every data-URL here is a PURE FUNCTION of a small discrete input
+ * set (see each key below), so caching by that key collapses all repeat encodes
+ * to a single Map lookup — the canvas build + fillRect loop + encode only ever
+ * runs once per unique sprite layer.
+ *
+ * Bounded by construction: keys are tuples of a handful of enum/boolean
+ * dimensions (status bucket × a few booleans) plus the fixed accessory id set,
+ * so the total number of distinct entries is at most a few dozen across the
+ * whole app lifetime. No eviction needed — a plain Map is the right structure.
+ *
+ * NOTE: `hueRotate` and the saturate()/filter styles are NOT keyed here — they
+ * are applied as CSS on the <img> element (see filterStyle / accFilter below),
+ * never baked into the bitmap, so two sessions that differ only by hue share
+ * the same cached data-URL. Bitmaps are device-pixel-ratio-independent (fixed
+ * HI=8), so DPR is not a key dimension either.
+ */
+const sidebarBodyUrlCache = new Map<string, string>();
+const sidebarBlinkUrlCache = new Map<string, string>();
+const sidebarEyeUrlCache = new Map<string, string>();
+const sidebarAccessoryUrlCache = new Map<string, string>();
+
+/** Discrete status bucket — the only aspect of `status` that affects pixels
+ *  (it selects the palette). Everything else (idle/streaming) drives CSS only. */
+function sidebarStatusBucket(status: string): "starting" | "terminated" | "canonical" {
+	if (status === "starting") return "starting";
+	if (status === "terminated") return "terminated";
+	return "canonical";
+}
+
+/**
  * Render a sidebar bobbit to a canvas-based <img> element.
  * Draws body, eyes, and accessories to off-screen canvases displayed via <img>.
  * Animations (bob, shimmer, eye blink) still use CSS on the container.
@@ -629,17 +683,33 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	// Draw body to canvas at HI× scale
 	const eyeColor = isSelected ? p.main : p.eye;
 	const bodyGaze = unread ? "right" : "center";
-	const bodyPixels = resolveBodyPixels(p, bodyGaze, isSleeping, eyeColor);
-	const bodyCanvas = document.createElement("canvas");
-	bodyCanvas.width = BODY_WIDTH * HI;
-	bodyCanvas.height = BODY_HEIGHT * HI;
-	const bodyCtx = bodyCanvas.getContext("2d")!;
-	bodyCtx.imageSmoothingEnabled = false;
-	for (const [x, y, color] of bodyPixels) {
-		bodyCtx.fillStyle = color;
-		bodyCtx.fillRect(x * HI, y * HI, HI, HI);
+	const statusBucket = sidebarStatusBucket(status);
+	// Body pixels are a pure function of EXACTLY four things: the palette
+	// (status bucket), the eye color (isSelected → p.main vs p.eye), the gaze
+	// (bodyGaze, derived from unread), and whether the eyes are closed
+	// (isSleeping). isSleeping MUST be in the key directly — NOT folded into the
+	// status bucket — because the bucket collapses "idle"/"streaming"/"busy"/…
+	// all to "canonical", yet only "idle" sleeps; keying on the bucket alone
+	// would let an idle (eyes-closed) sprite and a streaming (eyes-open) sprite
+	// collide on one cache entry. Keying on the resolved isSleeping value is both
+	// exact and minimal: any two opts yielding the same (bucket, eyeColor, gaze,
+	// sleeping) tuple resolve to pixel-identical body bitmaps.
+	const bodyKey = `${statusBucket}|${isSelected ? 1 : 0}|${bodyGaze}|${isSleeping ? 1 : 0}`;
+	let bodyUrl = sidebarBodyUrlCache.get(bodyKey);
+	if (bodyUrl === undefined) {
+		const bodyPixels = resolveBodyPixels(p, bodyGaze, isSleeping, eyeColor);
+		const bodyCanvas = document.createElement("canvas");
+		bodyCanvas.width = BODY_WIDTH * HI;
+		bodyCanvas.height = BODY_HEIGHT * HI;
+		const bodyCtx = bodyCanvas.getContext("2d")!;
+		bodyCtx.imageSmoothingEnabled = false;
+		for (const [x, y, color] of bodyPixels) {
+			bodyCtx.fillStyle = color;
+			bodyCtx.fillRect(x * HI, y * HI, HI, HI);
+		}
+		bodyUrl = bodyCanvas.toDataURL();
+		sidebarBodyUrlCache.set(bodyKey, bodyUrl);
 	}
-	const bodyUrl = bodyCanvas.toDataURL();
 
 	// Unread state: pre-render a second body image with the eyes blinked
 	// (right gaze, blink=true). The CSS class `bobbit-sidebar-unread-blink`
@@ -647,37 +717,53 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	// to produce a periodic blink.
 	let blinkUrl = "";
 	if (unread) {
-		const blinkPixels = resolveBodyPixels(p, "right", true, eyeColor);
-		const blinkCanvas = document.createElement("canvas");
-		blinkCanvas.width = BODY_WIDTH * HI;
-		blinkCanvas.height = BODY_HEIGHT * HI;
-		const blinkCtx = blinkCanvas.getContext("2d")!;
-		blinkCtx.imageSmoothingEnabled = false;
-		for (const [x, y, color] of blinkPixels) {
-			blinkCtx.fillStyle = color;
-			blinkCtx.fillRect(x * HI, y * HI, HI, HI);
+		// Blink pixels depend only on the palette (status bucket) and eye color
+		// (isSelected) — gaze is fixed "right" and blink is fixed true here.
+		const blinkKey = `${statusBucket}|${isSelected ? 1 : 0}`;
+		let cached = sidebarBlinkUrlCache.get(blinkKey);
+		if (cached === undefined) {
+			const blinkPixels = resolveBodyPixels(p, "right", true, eyeColor);
+			const blinkCanvas = document.createElement("canvas");
+			blinkCanvas.width = BODY_WIDTH * HI;
+			blinkCanvas.height = BODY_HEIGHT * HI;
+			const blinkCtx = blinkCanvas.getContext("2d")!;
+			blinkCtx.imageSmoothingEnabled = false;
+			for (const [x, y, color] of blinkPixels) {
+				blinkCtx.fillStyle = color;
+				blinkCtx.fillRect(x * HI, y * HI, HI, HI);
+			}
+			cached = blinkCanvas.toDataURL();
+			sidebarBlinkUrlCache.set(blinkKey, cached);
 		}
-		blinkUrl = blinkCanvas.toDataURL();
+		blinkUrl = cached;
 	}
 
 	// Eye overlay at HI× (only when selected)
 	let eyeUrl = "";
 	if (isSelected) {
-		const eyePos = EYE_POSITIONS["center"];
-		const eyePixels: SpritePixel[] = [
-			[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
-			[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
-		];
-		const eyeCanvas = document.createElement("canvas");
-		eyeCanvas.width = BODY_WIDTH * HI;
-		eyeCanvas.height = BODY_HEIGHT * HI;
-		const eyeCtx = eyeCanvas.getContext("2d")!;
-		eyeCtx.imageSmoothingEnabled = false;
-		for (const [x, y, color] of eyePixels) {
-			eyeCtx.fillStyle = color;
-			eyeCtx.fillRect(x * HI, y * HI, HI, HI);
+		// The overlay eye pixels use only the palette eye color (p.eye) at the
+		// fixed center gaze, so they depend solely on the status bucket.
+		const eyeKey = statusBucket;
+		let cached = sidebarEyeUrlCache.get(eyeKey);
+		if (cached === undefined) {
+			const eyePos = EYE_POSITIONS["center"];
+			const eyePixels: SpritePixel[] = [
+				[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
+				[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
+			];
+			const eyeCanvas = document.createElement("canvas");
+			eyeCanvas.width = BODY_WIDTH * HI;
+			eyeCanvas.height = BODY_HEIGHT * HI;
+			const eyeCtx = eyeCanvas.getContext("2d")!;
+			eyeCtx.imageSmoothingEnabled = false;
+			for (const [x, y, color] of eyePixels) {
+				eyeCtx.fillStyle = color;
+				eyeCtx.fillRect(x * HI, y * HI, HI, HI);
+			}
+			cached = eyeCanvas.toDataURL();
+			sidebarEyeUrlCache.set(eyeKey, cached);
 		}
-		eyeUrl = eyeCanvas.toDataURL();
+		eyeUrl = cached;
 	}
 
 	// Accessory at HI× scale
@@ -696,18 +782,26 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 			const yShift = Math.min(0, minY);
 			const srcW = maxX + 1;
 			const srcH = maxY - yShift + 1;
+			// CSS geometry is derived from the (static) pixel bounds — cheap to
+			// recompute. Only the data-URL encode is cached, keyed by accessory
+			// id alone since each accessory's pixels are immutable.
 			accCssW = srcW * S;
 			accCssH = srcH * S;
-			const accCanvas = document.createElement("canvas");
-			accCanvas.width = srcW * HI;
-			accCanvas.height = srcH * HI;
-			const accCtx = accCanvas.getContext("2d")!;
-			accCtx.imageSmoothingEnabled = false;
-			for (const [x, y, color] of spriteData.pixels) {
-				accCtx.fillStyle = color;
-				accCtx.fillRect(x * HI, (y - yShift) * HI, HI, HI);
+			let cached = sidebarAccessoryUrlCache.get(acc.id);
+			if (cached === undefined) {
+				const accCanvas = document.createElement("canvas");
+				accCanvas.width = srcW * HI;
+				accCanvas.height = srcH * HI;
+				const accCtx = accCanvas.getContext("2d")!;
+				accCtx.imageSmoothingEnabled = false;
+				for (const [x, y, color] of spriteData.pixels) {
+					accCtx.fillStyle = color;
+					accCtx.fillRect(x * HI, (y - yShift) * HI, HI, HI);
+				}
+				cached = accCanvas.toDataURL();
+				sidebarAccessoryUrlCache.set(acc.id, cached);
 			}
-			accUrl = accCanvas.toDataURL();
+			accUrl = cached;
 		}
 	}
 

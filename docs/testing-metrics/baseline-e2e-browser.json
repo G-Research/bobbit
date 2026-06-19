@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "metricName": "e2e-browser",
+  "kind": "e2e-project-split-from-full",
+  "createdAt": "2026-06-17T22:34:13.976Z",
+  "status": "passed",
+  "exitCode": 0,
+  "derivedFrom": "e2e-full",
+  "durationMs": 1332614,
+  "attribution": {
+    "attributionMethod": "project-duration-share-largest-remainder",
+    "sourceMetric": "e2e-full",
+    "sourceReport": ".profiles\\metrics\\playwright-e2e-all.json",
+    "weightSource": "durationMs",
+    "projectDurationMs": 1332614,
+    "totalProjectDurationMs": 1771743,
+    "projectTestCount": 475,
+    "projectDurationShare": 0.752149,
+    "totalProjectWeight": 1771743,
+    "note": "CPU and RSS are attributed from the single full E2E process-tree measurement by project active-work share from the same Playwright JSON report; projects are not rerun."
+  },
+  "cpu": {
+    "estimatedCpuMs": 3727860,
+    "averageCpuPercent": 279.74,
+    "peakCpuPercent": 115665.81,
+    "sampleMs": 1000,
+    "attributionMethod": "project-duration-share-largest-remainder",
+    "sourceMetric": "e2e-full.cpu.estimatedCpuMs",
+    "sourceEstimatedCpuMs": 4956281,
+    "projectDurationShare": 0.752149
+  },
+  "memory": {
+    "peakRssBytes": 4114520145,
+    "attributionMethod": "project-duration-share-largest-remainder",
+    "sourceMetric": "e2e-full.memory.peakRssBytes",
+    "sourcePeakRssBytes": 5470355456,
+    "projectDurationShare": 0.752149
+  },
+  "tests": {
+    "total": 475,
+    "passed": 471,
+    "failed": 0,
+    "skipped": 4,
+    "flaky": 3,
+    "durationMs": 1332614
+  }
+}

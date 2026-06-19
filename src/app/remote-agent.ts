@@ -2602,8 +2602,12 @@ export class RemoteAgent {
 
 						// Mark this id as the streaming-preview message so the render
 						// layer can hide it from message-list while the streaming
-						// container still owns it. When there are no tool calls the
-						// streaming container will be cleared by AgentInterface.
+						// container owns it. Some tool-only turns (notably parked
+						// `bash_bg wait`) arrive as `message_end` without a prior
+						// `message_update`; in that case this final message is the first
+						// thing the streaming container can render. When there are no
+						// tool calls the streaming container will be cleared by
+						// AgentInterface.
 						if (hasToolCalls) {
 							const sid = computeStreamingMessageId(msg);
 							this.streamingMessageId = sid;
@@ -2615,6 +2619,7 @@ export class RemoteAgent {
 							if (sid && (typeof msg.id !== "string" || msg.id.length === 0)) {
 								msg = { ...msg, id: sid };
 							}
+							this._state.streamingMessage = msg;
 						} else {
 							this._state.streamingMessage = null;
 							this.streamingMessageId = undefined;

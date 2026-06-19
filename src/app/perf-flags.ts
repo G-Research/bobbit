@@ -30,7 +30,7 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"Phase 2 Opt-A (SHIPPED, default-ON) — defer markdown / tool-call " +
 			"rendering of off-screen transcript messages. The bottom tail renders " +
 			"eagerly; older messages render a cheap height-preserving placeholder " +
-			"until an `IntersectionObserver` (rootMargin: 500px) sees them " +
+			"until an `IntersectionObserver` (rootMargin: 2000px) sees them " +
 			"approach the viewport, at which point they swap in via " +
 			"`requestIdleCallback`. A/B (n=5) on the realistic-large fixture cut " +
 			"paint.first p95 -37ms (-33%), nav.session.ready p95 -95ms (-29%), " +

@@ -579,6 +579,20 @@ function renderNavBar(): TemplateResult {
 	`;
 }
 
+function renderResearchPreviewBanner(): TemplateResult {
+	return html`
+		<div class="market-research-preview-banner" data-testid="market-research-preview-banner">
+			<div class="market-research-preview-icon">${icon(AlertTriangle, "sm")}</div>
+			<div>
+				<div class="market-research-preview-title">Research Preview</div>
+				<div class="market-research-preview-copy">
+					The extension API is still subject to change. Bobbit extensions may need to be re-written against the final extension API in the next release.
+				</div>
+			</div>
+		</div>
+	`;
+}
+
 function renderTabBar(): TemplateResult {
 	const tab = (mode: MarketTab, label: string, tabIcon: IconNode, count?: number) => {
 		const isActive = activeTab === mode;
@@ -1223,6 +1237,7 @@ export function renderMarketplacePage(): TemplateResult {
 		return html`
 			<div class="flex-1 flex flex-col h-full">
 				${renderNavBar()}
+				${renderResearchPreviewBanner()}
 				<div class="flex-1 flex items-center justify-center">
 					<div class="text-sm text-muted-foreground">Loading marketplace…</div>
 				</div>
@@ -1240,6 +1255,7 @@ export function renderMarketplacePage(): TemplateResult {
 	return html`
 		<div class="flex-1 flex flex-col h-full">
 			${renderNavBar()}
+			${renderResearchPreviewBanner()}
 			${renderTabBar()}
 			<div class="flex-1 overflow-y-auto">
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">

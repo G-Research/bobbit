@@ -49,6 +49,30 @@ test.describe("GateInspectRenderer", () => {
 		expect(result.branch).toBe("skipped");
 	});
 
+	test("top-right argument summary formats inspect modes", async ({ page }) => {
+		const summaries = await page.evaluate(() => {
+			const longPattern = "really-long-error-pattern|failed-with-a-very-specific-message|timeout";
+			return {
+				grep: (window as any).formatInspectArgSummary({ mode: "grep", pattern: "error|failed", context: 2, max_results: 10 }),
+				grepDisplay: (window as any).formatInspectArgSummary({ mode: "grep", pattern: longPattern }, undefined, { truncatePattern: true }),
+				grepTooltip: (window as any).formatInspectArgSummary({ mode: "grep", pattern: longPattern }),
+				slice: (window as any).formatInspectArgSummary({ mode: "slice", from: 120, to: 180 }),
+				tail: (window as any).formatInspectArgSummary(
+					{ mode: "tail", lines: 80 },
+					{ selection: { mode: "tail", range: { from: 41, to: 120 } } },
+				),
+				step: (window as any).formatInspectArgSummary({ section: "verification", step: "E2E tests", mode: "tail", lines: 120 }),
+			};
+		});
+
+		expect(summaries.grep).toBe('grep "error|failed" · ctx 2 · max 10');
+		expect(summaries.grepDisplay).toBe('grep "really-long-error-pattern|failed-with-a…"');
+		expect(summaries.grepTooltip).toBe('grep "really-long-error-pattern|failed-with-a-very-specific-message|timeout"');
+		expect(summaries.slice).toBe("slice 120–180");
+		expect(summaries.tail).toBe("tail 41–120");
+		expect(summaries.step).toBe("step E2E tests · tail 120 lines");
+	});
+
 	// ── section="content" ────────────────────────────────────────────
 
 	test("content section with text renders hasContent=true", async ({ page }) => {

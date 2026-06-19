@@ -117,6 +117,34 @@ test.describe("DeferredBlock — defer path", () => {
 		await page.evaluate(() => (window as any).__forceResolveAll());
 		await expect(page.locator("[data-real-content]")).toHaveCount(2);
 	});
+
+	test("resolving an above-viewport placeholder preserves the visible scroll anchor", async ({ page }) => {
+		await gotoAndWait(page);
+		const before = await page.evaluate(async () => {
+			const slot = document.getElementById("slot")!;
+			slot.innerHTML = `
+				<div id="scroller" style="height:200px;overflow-y:auto;overflow-anchor:none;border:0;">
+					<div id="lazy"></div>
+					<div id="anchor" style="height:40px;">ANCHOR</div>
+					<div style="height:1000px;"></div>
+				</div>
+			`;
+			(window as any).__mountDeferredBlock("lazy", { eager: false, estHeight: 20, realHeight: 160, text: "TALL" });
+			await new Promise((r) => queueMicrotask(() => r(null)));
+			const scroller = document.getElementById("scroller")!;
+			scroller.scrollTop = 80;
+			return document.getElementById("anchor")!.getBoundingClientRect().top;
+		});
+
+		await page.evaluate(async () => {
+			const ok = (window as any).__triggerIntersection("deferred-block", true);
+			if (!ok) throw new Error("IO callback not registered on deferred-block");
+		});
+		await expect(page.locator("deferred-block [data-real-content]")).toContainText("TALL");
+
+		const after = await page.evaluate(() => document.getElementById("anchor")!.getBoundingClientRect().top);
+		expect(Math.abs(after - before)).toBeLessThan(2);
+	});
 });
 
 test.describe("MessageList — perf-flag gating", () => {

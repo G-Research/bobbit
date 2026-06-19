@@ -9,9 +9,17 @@
 import { test, expect } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
-const OUT_DIR = path.resolve(".bobbit/tmp/tests/message-editor-pack-slash");
+const WORKER_SUFFIX = [
+	process.env.TEST_WORKER_INDEX ?? "worker",
+	process.env.TEST_PARALLEL_INDEX ?? "parallel",
+	String(process.pid),
+	Date.now().toString(36),
+	Math.random().toString(36).slice(2),
+].join("-").replace(/[^a-zA-Z0-9_-]/g, "_");
+const OUT_DIR = path.resolve(".bobbit/tmp/tests/message-editor-pack-slash", WORKER_SUFFIX);
 const FIXTURE = path.join(OUT_DIR, "message-editor-pack-slash.html");
 const BUNDLE = path.join(OUT_DIR, "message-editor-pack-slash-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/message-editor-pack-slash-entry.ts");
@@ -33,11 +41,49 @@ test.beforeAll(() => {
 `, "utf-8");
 });
 
-const PAGE = `file://${FIXTURE}`;
+const PAGE = pathToFileURL(FIXTURE).href;
 
 async function ready(page: any) {
+	const consoleMessages: string[] = [];
+	const pageErrors: string[] = [];
+	page.on("console", (msg: any) => consoleMessages.push(`${msg.type()}: ${msg.text()}`));
+	page.on("pageerror", (err: Error) => pageErrors.push(err.stack || err.message));
+
 	await page.goto(PAGE);
-	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
+	try {
+		await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 15_000 });
+	} catch (err) {
+		const diagnostics = await page.evaluate(() => ({
+			ready: (window as any).__ready,
+			url: location.href,
+			scripts: Array.from(document.scripts).map((script) => script.src || script.textContent?.slice(0, 80) || "<inline>"),
+			bodyText: document.body?.innerText?.slice(0, 500) ?? "",
+		})).catch((evalErr: Error) => ({
+			ready: undefined,
+			url: page.url(),
+			scripts: [`diagnostic evaluate failed: ${evalErr.stack || evalErr.message}`],
+			bodyText: "",
+		}));
+		const bundleStat = (() => {
+			try {
+				const stat = fs.statSync(BUNDLE);
+				return `${BUNDLE} (${stat.size} bytes, mtime ${new Date(stat.mtimeMs).toISOString()})`;
+			} catch (statErr: any) {
+				return `${BUNDLE} (stat failed: ${statErr?.message || statErr})`;
+			}
+		})();
+		throw new Error([
+			`Timed out waiting for message-editor pack slash fixture readiness: ${err}`,
+			`page: ${PAGE}`,
+			`window.__ready: ${String(diagnostics.ready)}`,
+			`url: ${diagnostics.url}`,
+			`bundle: ${bundleStat}`,
+			`scripts: ${diagnostics.scripts.join(", ") || "<none>"}`,
+			`body: ${diagnostics.bodyText}`,
+			`console: ${consoleMessages.slice(-20).join("\n") || "<none>"}`,
+			`pageerror: ${pageErrors.slice(-20).join("\n") || "<none>"}`,
+		].join("\n"));
+	}
 }
 
 async function sendTypedComposerValue(page: any, text: string) {

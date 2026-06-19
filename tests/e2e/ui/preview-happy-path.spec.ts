@@ -1,35 +1,17 @@
 /**
- * WP-E URL-shape regression: when the unified preview panel renders the
- * Preview tab, its iframe `src` must point at the per-session content
- * mount with the correct `?mtime=<n>` cache-buster.
+ * Retained full-stack preview smoke: drive the real UI + spawned gateway from
+ * preview mode through mount, iframe display, new-tab href, and Refresh.
  *
- * This test is intentionally minimal — full asset-loading coverage lives
- * in preview-mount-route.spec.ts and preview-new-tab.spec.ts. We just
- * validate that the Preview tab now produces a `/preview/<sid>/<entry>?mtime=<n>`
- * iframe and not the legacy `/api/preview/render` (file mode) or `srcdoc=`
- * (inline mode) shapes.
+ * Cheaper fixture/API coverage owns fullscreen controls, reopen semantics,
+ * archived snapshots, and content-origin details.
  */
 import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI } from "./ui-helpers.js";
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-test.describe("Preview panel iframe URL (WP-E)", () => {
-	// FIXME: Fails deterministically on origin/master HEAD 130595bb (4/4 attempts).
-	// NOT introduced by this branch — verified by running on a fresh worktree of
-	// origin/master with the same Playwright config; same symptom reproduces.
-	// Symptom: iframe `src` resolves to `/preview/<sid>/_artifact/<id>/<entry>?mtime=<n>`
-	// but the test expects `/preview/<sid>/<entry>?mtime=<n>`.
-	// Suspected culprit: `htmlPreviewContent` / `selectHtmlPreviewTab` interaction —
-	// the live tab id is `preview:entry:<file>` (from `previewTabIdentityForContent`),
-	// not `preview:live`, so the `isLiveTab` check in render.ts::htmlPreviewContent
-	// returns false and the artifactId is folded into the iframe URL.
-	// Likely a real product bug introduced by the recent master chain:
-	//   98f7f0ce Chrome-style panel tab strip with SortableJS drag-and-drop
-	//   122f76fc Editable historical proposal tabs + render-time override
-	//   dac36684 Update tests + docs for Chrome-style tab system
-	// Restore to `test(...)` once those bugs are fixed on master.
-	test("iframe src is /preview/<sid>/<entry>?mtime=<n>", async ({ page }) => {
+test.describe("Preview panel retained full-stack smoke", () => {
+	test("opens mounted preview and refreshes iframe cache-buster", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 

@@ -29,6 +29,10 @@
  *                           bash_bg.wait toolCall in an assistant
  *                           message_end with NO `id` field, parks for
  *                           <ms> ms, then closes. No real bg process.
+ *  BG_WAIT_END_ONLY:<ms>    Emits one bash_bg.wait toolCall in an
+ *                           assistant message_end with no preceding
+ *                           message_update, then parks for <ms> ms.
+ *                           Reproduces the hidden-until-refresh card bug.
  *
  * Bursts
  * ------
@@ -301,7 +305,7 @@ export class MockAgentCore {
 		if (text.includes("GOAL_PROPOSAL_PARITY_EDIT")) {
 			return {
 				tool: "propose_goal",
-				input: { title: "Parity Goal A — edited", spec: "Body B." },
+				input: { title: "Parity Goal A — edited", workflow: "general", spec: "Body B." },
 				output: "Goal proposal partial submitted.",
 			};
 		}
@@ -790,6 +794,38 @@ export class MockAgentCore {
 			this.emit({ type: "message_end", message: assistantMsg });
 			// Park here — no further events until waitMs elapses, mirroring a real
 			// `bash_bg.wait` that sits indefinitely.
+			await this.tick(waitMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// BG_WAIT_END_ONLY:<ms> — emit an assistant message_end with a
+		// bash_bg.wait toolCall but no preceding message_update. This reproduces
+		// the live UI hole where RemoteAgent hides the finalized row via
+		// streamingMessageId, but the streaming container has no message to own
+		// until a later refresh/snapshot/agent_end clears the transient id.
+		const bgWaitEndOnlyMatch = text.match(/BG_WAIT_END_ONLY:(\d+)/);
+		if (bgWaitEndOnlyMatch) {
+			const waitMs = parseInt(bgWaitEndOnlyMatch[1], 10);
+			const toolId = "tc-bg-wait-end-only-1";
+			const assistantMsg = {
+				id: "msg-bg-wait-end-only-1",
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: "bash_bg", arguments: { action: "wait", id: "bg-end-only-1" }, input: { action: "wait", id: "bg-end-only-1" } },
+				],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			// Park here — no further events until waitMs elapses, mirroring a real
+			// `bash_bg.wait` that remains pending long enough for live UI assertions.
 			await this.tick(waitMs);
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
 				this.currentAbortController = null;
@@ -2290,6 +2326,8 @@ export class MockAgentCore {
 				// forked/continued sessions would open empty in the E2E tier (the
 				// real CLI loads it; the mock previously no-op'd here). The file is
 				// written by `get_state` as newline-delimited {type:"message",message}.
+				// The real CLI also validates runtime cwd metadata before accepting the
+				// transcript; stale archived worktree paths must fail here.
 				try {
 					const sp = msg.sessionPath;
 					if (sp && fs.existsSync(sp)) {
@@ -2299,6 +2337,9 @@ export class MockAgentCore {
 							if (!trimmed) continue;
 							try {
 								const parsed = JSON.parse(trimmed);
+								if (parsed && (parsed.type === "system" || parsed.type === "session") && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
+									return { success: false, error: `Stored session working directory does not exist: ${parsed.cwd}` };
+								}
 								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);
 							} catch { /* skip malformed line */ }
 						}

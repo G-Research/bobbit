@@ -2,6 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { ChevronRight } from "lucide";
+import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 
 @customElement("thinking-block")
 export class ThinkingBlock extends LitElement {
@@ -14,6 +15,7 @@ export class ThinkingBlock extends LitElement {
 	}
 
 	override connectedCallback(): void {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		this.style.display = "block";
 	}

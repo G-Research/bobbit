@@ -481,7 +481,14 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		const POLL_MAX_DELAY_MS = 8000;
 		const POLL_MAX_TOTAL_MS = 5 * 60 * 1000;
 
-		const providerName = provider === "openai-codex" || provider === "openai" ? "OpenAI" : "Anthropic";
+		// Canonical Google account OAuth id is `google-gemini-cli`; `google`/`gemini`
+		// are inbound aliases the server collapses to it. Label all three "Google".
+		const providerName =
+			provider === "google-gemini-cli" || provider === "google" || provider === "gemini"
+				? "Google"
+				: provider === "openai-codex" || provider === "openai"
+					? "OpenAI"
+					: "Anthropic";
 
 		const cleanup = (result: boolean) => {
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
