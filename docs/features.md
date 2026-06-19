@@ -105,6 +105,24 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 The PR walkthrough panel is a guided pull-request or changeset review surface. It ships as a **built-in first-party pack** (`market-packs/pr-walkthrough/`) that is auto-resolved active-by-default — there is no manual install. The pack owns the viewer surfaces and the reviewer tools under `tools/pr-walkthrough/`; `pack.yaml` advertises the `pr-walkthrough` tool group, and Market expands it into concrete tool toggles. Three pack launchers (git-widget button / composer-slash / command palette) all do the **same** thing on click: they call the pack's `run` route, which mints a **separate, isolated, read-only reviewer child** (`host.agents.spawn`, role `pr-reviewer`, `title: "PR Walkthrough"`) — it never drives the user's current agent — and then **auto-switch the view to that child session**, opening the panel there. There is **no owner-session panel** and **no manual "Run PR walkthrough" / "Load walkthrough" buttons**. A no-PR / spawn failure surfaces as an **inline error in the git-status-widget dropdown**, spawning nothing and not switching the view; every click is a fresh reviewer (no dedup). The reviewer publishes cards only through validated `submit_pr_walkthrough_yaml`, and on submit it is **not** dismissed — it stays live and selectable until the user terminates it. The run path is GitHub-PR-only. Disabling the pack from the Market built-in section makes the feature unavailable (the deep-link degrades to an empty state). See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract, [pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md) for the launch model, and [built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the pack model.
 
+## Hindsight Memory
+
+The **Hindsight** built-in first-party pack (`market-packs/hindsight/`) gives agents persistent,
+cross-session memory backed by a Hindsight instance: it recalls relevant past memories into the
+prompt and retains a compact summary of each turn. It ships **active but dormant** — nothing
+happens (no network, no prompt drift) until a Hindsight URL is configured, so opted-out users pay
+no cost.
+
+Configuration is done from a **native config/status panel** (Extension Platform P4), opened from
+the command palette (**Hindsight Memory**) or the deep link `#/ext/hindsight`. The panel picks the
+deployment mode (external / managed / managed-external-postgres), writes config through the pack's
+`config` route (with server-side validation and write-only secret redaction), shows a runtime
+status card (connected/unreachable/starting, retry-queue depth, last error), and searches memory
+via the `recall` route. It replaces the earlier store-seeding path, which is now a test-only seam.
+See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and
+[managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed
+Docker/Postgres runtime.
+
 ## Assistant Registry
 
 A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Builtin definitions ship in `defaults/roles/assistant/` (user overrides in `.bobbit/config/roles/assistant/`), falling back to hardcoded defaults:

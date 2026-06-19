@@ -495,6 +495,10 @@ A separate defensive unit test calls the provider hooks directly with no `extern
 
 ## 11. Non-goals (tracked elsewhere)
 
-- Explicit agent tools `hindsight_recall/retain/reflect` + native panel + entrypoints — **G2.3**.
-- Managed Docker runtime + Postgres + `~/.hindsight` + deployment-mode selection — **G3**.
+- Explicit agent tools `hindsight_recall/retain/reflect` — **G2.3**. (The **native panel +
+  entrypoints** half of G2.3 shipped in **P4** — see
+  [hindsight-memory.md → Native config & status panel](../hindsight-memory.md#native-config--status-panel)
+  and [hindsight-panel-p4-implementation.md](hindsight-panel-p4-implementation.md).)
+- Managed Docker runtime + Postgres + `~/.hindsight` + deployment-mode selection — **G3** (shipped
+  in **P3**; see [managed-runtimes.md](../managed-runtimes.md#p3--deployment-modes-consent--lifecycle)).
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
