@@ -1,7 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
-import type { SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, refreshAgentSession, type SidebarCopyLinkTitle } from "./api.js";
+import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
 
@@ -109,7 +110,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			run: staffId
 				? (event: Event) => {
 					event.stopPropagation();
-					void import("./routing.js").then(({ setHashRoute }) => setHashRoute("staff-edit", staffId));
+					setHashRoute("staff-edit", staffId);
 				}
 				: (event: Event) => {
 					event.stopPropagation();
@@ -234,7 +235,6 @@ async function runRefreshAgentSession(session: GatewaySession, onRefreshStateCha
 	_refreshingAgentSessionIds.add(session.id);
 	onRefreshStateChanged?.();
 	try {
-		const { refreshAgentSession } = await import("./api.js");
 		await refreshAgentSession(session.id, { force });
 	} finally {
 		_refreshingAgentSessionIds.delete(session.id);
@@ -243,7 +243,6 @@ async function runRefreshAgentSession(session: GatewaySession, onRefreshStateCha
 }
 
 async function defaultCopySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
-	const { copySidebarLink } = await import("./api.js");
 	await copySidebarLink(url, title);
 }
 
