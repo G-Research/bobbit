@@ -87,17 +87,37 @@ export function effectiveSubgoalsAllowed(
 	return true;
 }
 
-/** Effective per-goal max depth. System is the ceiling. */
+/**
+ * Effective per-goal max depth. System is the ceiling AND every ancestor's
+ * own override is a ceiling too — descendants can only tighten, never loosen.
+ *
+ * When a `lookup` is supplied we walk the full `parentGoalId` chain and take
+ * the MIN of the system cap and every goal's own override along the way. This
+ * is what makes a *retroactive* tightening of an ancestor bite an already-
+ * created descendant: even though the descendant's stored `maxNestingDepth`
+ * is stale (e.g. 3), its effective cap is recomputed dynamically against the
+ * now-lowered ancestor (e.g. 2). Without `lookup` (back-compat) only the goal's
+ * own override is considered.
+ */
 export function effectiveMaxNestingDepth(
 	goal: PersistedGoal | undefined,
 	prefs: SubgoalNestingPrefs,
+	lookup?: (id: string) => PersistedGoal | undefined,
 ): number {
-	const sys = prefs.maxNestingDepth;
-	const own = goal?.maxNestingDepth;
-	if (typeof own === "number" && Number.isFinite(own)) {
-		return Math.min(sys, clampMaxDepth(own));
+	let cap = prefs.maxNestingDepth;
+	let cur: PersistedGoal | undefined = goal;
+	const seen = new Set<string>();
+	while (cur && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		const own = cur.maxNestingDepth;
+		if (typeof own === "number" && Number.isFinite(own)) {
+			cap = Math.min(cap, clampMaxDepth(own));
+		}
+		if (!lookup || !cur.parentGoalId) break;
+		if (seen.size >= 64) break; // safety bound against a corrupt cycle
+		cur = lookup(cur.parentGoalId);
 	}
-	return sys;
+	return cap;
 }
 
 export type NestingCheckResult =
@@ -134,7 +154,7 @@ export function checkCanSpawnChild(
 	if (parent.subgoalsAllowed === false) {
 		return { ok: false, code: "PARENT_SUBGOALS_DISABLED" };
 	}
-	const maxDepth = effectiveMaxNestingDepth(parent, prefs);
+	const maxDepth = effectiveMaxNestingDepth(parent, prefs, lookup);
 	const currentDepth = nestingDepth(parent, lookup);
 	if (currentDepth + 1 > maxDepth) {
 		return { ok: false, code: "NESTING_DEPTH_EXCEEDED", currentDepth, maxDepth };
@@ -151,9 +171,10 @@ export function checkCanSpawnChild(
 export function inheritedChildOverrides(
 	parent: PersistedGoal,
 	prefs: SubgoalNestingPrefs,
+	lookup?: (id: string) => PersistedGoal | undefined,
 ): { subgoalsAllowed: boolean; maxNestingDepth: number } {
 	return {
 		subgoalsAllowed: effectiveSubgoalsAllowed(parent, prefs),
-		maxNestingDepth: effectiveMaxNestingDepth(parent, prefs),
+		maxNestingDepth: effectiveMaxNestingDepth(parent, prefs, lookup),
 	};
 }

@@ -60,7 +60,7 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 	const parent = goal.parentGoalId
 		? state.goals.find(g => g.id === goal.parentGoalId)
 		: undefined;
-	const maxDepth = parent ? effectiveMaxNestingDepthOf(parent as any) : systemCap;
+	const maxDepth = parent ? effectiveMaxNestingDepthOf(parent as any, state.goals as any) : systemCap;
 	const atCap = minDepth > maxDepth;         // no room for any sub-goals
 	const depthFixed = !atCap && minDepth === maxDepth;
 	const allowed = goal.subgoalsAllowed !== false && !atCap;

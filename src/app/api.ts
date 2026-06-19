@@ -1641,9 +1641,15 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
  * Update an existing goal's per-goal sub-goal policy via
  * `PATCH /api/goals/:id/policy`. Used by the existing-goal Sub-goals settings
  * control on the goal dashboard so a user can turn on sub-goals for a parent
- * that was created with the toggle off. Backend authz (team-lead-only on the
- * /policy route) is preserved server-side; this just forwards the request with
- * the session credentials. Returns true on success.
+ * that was created with the toggle off. Backend authz is split server-side
+ * (see nested-goal-routes.ts /policy handler): a body carrying ONLY the
+ * sub-goal opt-in fields (`subgoalsAllowed` / `maxNestingDepth`) is
+ * OPERATOR-class, so a verified human cookie is accepted (else team-lead
+ * match); only bodies that touch orchestration fields
+ * (`divergencePolicy` / `maxConcurrentChildren`) stay team-lead-only. This
+ * helper only ever sends the two sub-goal fields, so it rides the operator
+ * path. It just forwards the request with the session credentials. Returns
+ * true on success.
  */
 export async function patchGoalSubgoalPolicy(
 	id: string,

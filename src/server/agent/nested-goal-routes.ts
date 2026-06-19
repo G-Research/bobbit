@@ -644,7 +644,7 @@ export async function tryHandleNestedGoalRoute(
 
 			// Propagate the parent's EFFECTIVE nesting limits onto the child so
 			// descendants cannot loosen what an ancestor has tightened.
-			const childOverrides = inheritedChildOverrides(parent, nestingPrefs);
+			const childOverrides = inheritedChildOverrides(parent, nestingPrefs, getGoalAcrossProjects);
 			const child = await goalManager.createGoal(title, childCwd, {
 				spec,
 				workflowId,
@@ -1407,7 +1407,7 @@ export async function tryHandleNestedGoalRoute(
 				? getGoalAcrossProjects(goal.parentGoalId)
 				: undefined;
 			const ceiling = parent
-				? effectiveMaxNestingDepth(parent, prefs)
+				? effectiveMaxNestingDepth(parent, prefs, getGoalAcrossProjects)
 				: prefs.maxNestingDepth;
 			updates.maxNestingDepth = Math.min(clampMaxDepth(raw), ceiling);
 		}

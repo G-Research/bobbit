@@ -58,7 +58,7 @@ import {
 } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { parentHostEligibility } from "./subgoal-eligibility.js";
+import { parentHostEligibility, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
@@ -682,7 +682,14 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 	// for children) and above by the inherited system cap.
 	const proposedDepth = config.parentGoalId ? computeGoalDepth(config.parentGoalId, state.goals) + 1 : 1;
 	const minDepth = proposedDepth + 1;             // need ≥1 level below to host children
-	const maxDepth = systemCap;                     // inherited absolute cap
+	// Inherited absolute cap: a child goal can never widen past its parent's
+	// EFFECTIVE cap (system ∩ parent.own ∩ … up the tree) — only a top-level
+	// goal gets the full system cap. Mirrors the server clamp in
+	// nested-goal-routes.ts so the control never offers a range the server will
+	// reject (the previous `maxDepth = systemCap` ignored the parent's cap, so a
+	// parent capped at 2 still let the child be configured at 3).
+	const selectedParent = config.parentGoalId ? state.goals.find(g => g.id === config.parentGoalId) : undefined;
+	const maxDepth = selectedParent ? effectiveMaxNestingDepthOf(selectedParent as any, state.goals as any) : systemCap;
 	const atGlobalCap = minDepth > maxDepth;        // no room for any sub-goals
 	const depthFixed = !atGlobalCap && minDepth === maxDepth; // exactly one value fits
 	const allowed = !atGlobalCap && (config.subgoalsAllowedValue ?? false);
@@ -713,7 +720,7 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 			Controls the goal you're creating — not the selected parent. To let an existing parent host children, open its dashboard → Children tab.
 		</p>
 		${atGlobalCap
-			? infoPanel(`This goal sits at depth ${proposedDepth}, at the global nesting cap of ${systemCap}. It cannot host sub-goals — pick a shallower parent to allow nesting.`, "goal-form-subgoals-at-cap")
+			? infoPanel(`This goal sits at depth ${proposedDepth}, at the inherited nesting cap of ${maxDepth}. It cannot host sub-goals — pick a shallower parent to allow nesting.`, "goal-form-subgoals-at-cap")
 			: allowed ? html`
 			<label class="flex items-center gap-1.5 text-xs ${depthFixed ? "opacity-60" : "text-muted-foreground"}">
 				<span>Max nesting depth</span>
@@ -750,12 +757,12 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						@click=${() => config.onMaxNestingDepthChange?.(Math.min(maxDepth, depthValue + 1))}
 					>${icon(Plus, "xs")}</button>
 				</span>
-				<span title=${`The deepest nesting level allowed in this tree. The inherited cap is ${systemCap}; this goal sits at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`}
+				<span title=${`The deepest nesting level allowed in this tree. The inherited cap is ${maxDepth}; this goal sits at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`}
 					class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 			</label>
 			${depthFixed
-				? infoPanel(`The inherited cap is ${systemCap} and this goal sits at depth ${proposedDepth}, so only one nesting level fits below it — max depth is fixed at ${maxDepth}.`, "goal-form-max-depth-fixed")
-				: infoPanel(`Deepest nesting level allowed in this tree (inherited cap ${systemCap}). This goal is at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`, "goal-form-max-depth-help")}
+				? infoPanel(`The inherited cap is ${maxDepth} and this goal sits at depth ${proposedDepth}, so only one nesting level fits below it — max depth is fixed at ${maxDepth}.`, "goal-form-max-depth-fixed")
+				: infoPanel(`Deepest nesting level allowed in this tree (inherited cap ${maxDepth}). This goal is at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`, "goal-form-max-depth-help")}
 		` : ""}
 		</div>
 	`;
