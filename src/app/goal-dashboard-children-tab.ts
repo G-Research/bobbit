@@ -7,7 +7,7 @@ import { setHashRoute } from "./routing.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { patchGoalSubgoalPolicy } from "./api.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { nestingDepthOf } from "./subgoal-eligibility.js";
+import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
 
 /** Minimal cost-breakdown shape consumed by the Children tab. */
 export interface ChildTreeCostBreakdown {
@@ -53,7 +53,14 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 	const systemCap = getSystemMaxNestingDepth();
 	const goalDepth = nestingDepthOf(goal.id, state.goals);
 	const minDepth = goalDepth + 1;            // need ≥1 level below to host children
-	const maxDepth = systemCap;                // inherited absolute cap
+	// Inherited absolute cap: a CHILD goal can never widen past its parent's
+	// effective cap (system ∩ parent.own ∩ … up the tree), only the system cap
+	// for a root. Mirrors the server clamp in nested-goal-routes.ts so the
+	// control never offers a range the server will reject.
+	const parent = goal.parentGoalId
+		? state.goals.find(g => g.id === goal.parentGoalId)
+		: undefined;
+	const maxDepth = parent ? effectiveMaxNestingDepthOf(parent as any) : systemCap;
 	const atCap = minDepth > maxDepth;         // no room for any sub-goals
 	const depthFixed = !atCap && minDepth === maxDepth;
 	const allowed = goal.subgoalsAllowed !== false && !atCap;
@@ -68,7 +75,7 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 			<div style="font-weight:600;font-size:13px;color:var(--foreground);">Sub-goal settings</div>
 			${atCap ? html`
 				<div style="font-size:11px;color:var(--muted-foreground);line-height:1.4;" data-testid="goal-subgoal-settings-at-cap">
-					This goal sits at depth ${goalDepth}, at the global nesting cap of ${systemCap}. It cannot host sub-goals.
+					This goal sits at depth ${goalDepth}, at the inherited nesting cap of ${maxDepth}. It cannot host sub-goals.
 				</div>
 			` : html`
 				<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--foreground);${disabled ? "opacity:0.6;pointer-events:none;" : ""}">
@@ -108,7 +115,7 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 						</span>
 					</label>
 					<div style="font-size:11px;color:var(--muted-foreground);line-height:1.4;" data-testid="goal-subgoal-settings-depth-help">
-						Deepest nesting level allowed in this tree (inherited cap ${systemCap}). This goal is at depth ${goalDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.${depthFixed ? " Only one value fits, so it's fixed." : ""}
+						Deepest nesting level allowed in this tree (inherited cap ${maxDepth}). This goal is at depth ${goalDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.${depthFixed ? " Only one value fits, so it's fixed." : ""}
 					</div>
 				` : nothing}
 			`}

@@ -335,3 +335,71 @@ test.describe("PATCH /policy — narrowed operator vs orchestration auth", () =>
 		}
 	});
 });
+
+/**
+ * SERVER-AUTHORITY GUARD — `PATCH /api/goals/:id/policy` must clamp a CHILD
+ * goal's `maxNestingDepth` to its PARENT's effective cap, not merely the
+ * system ceiling. Descendants can only tighten, never widen past the inherited
+ * tree cap. Without this, a child stamped with the parent's effective cap (2)
+ * could be re-widened to 3 via /policy and silently re-open a forbidden
+ * grandchild tier.
+ */
+test.describe("PATCH /policy — child maxNestingDepth cannot widen past inherited parent cap", () => {
+	test.afterEach(async () => {
+		await setSubgoalsEnabled(true);
+	});
+
+	test("root cap=2 → child inherits 2; PATCH child to 3 is clamped to 2 and grandchild stays blocked", async () => {
+		await setSubgoalsEnabled(true);
+		const rootTitle = `widen-root ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const rootId = await createParent(rootTitle, true);
+		let childId: string | undefined;
+		try {
+			// Tighten the root to a 2-level tree via the operator path.
+			const rootHeaders = seedTeamLeadHeader(gw, rootId);
+			const rootPatch = await rawApiFetch(`/api/goals/${rootId}/policy`, {
+				method: "PATCH",
+				headers: { "X-Bobbit-Session-Secret": rootHeaders["X-Bobbit-Session-Secret"] },
+				body: JSON.stringify({ maxNestingDepth: 2 }),
+			});
+			expect(rootPatch.status).toBe(200);
+			const rootAfter = await (await apiFetch(`/api/goals/${rootId}`)).json();
+			expect(rootAfter.maxNestingDepth).toBe(2);
+
+			// Create a child — it is stamped with the parent's EFFECTIVE cap (2).
+			const childResp = await apiFetch("/api/goals", {
+				method: "POST",
+				body: await childBody(rootId),
+			});
+			expect(childResp.status).toBe(201);
+			const childCreated = await childResp.json();
+			childId = childCreated.id as string;
+			const child = await (await apiFetch(`/api/goals/${childId}`)).json();
+			expect(child.maxNestingDepth).toBe(2);
+
+			// Attempt to WIDEN the child past the inherited cap — server must clamp.
+			const childHeaders = seedTeamLeadHeader(gw, childId);
+			const widen = await rawApiFetch(`/api/goals/${childId}/policy`, {
+				method: "PATCH",
+				headers: { "X-Bobbit-Session-Secret": childHeaders["X-Bobbit-Session-Secret"] },
+				body: JSON.stringify({ maxNestingDepth: 3 }),
+			});
+			expect(widen.status).toBe(200);
+			const childWidened = await (await apiFetch(`/api/goals/${childId}`)).json();
+			// Clamped to the parent effective cap, NOT widened to 3.
+			expect(childWidened.maxNestingDepth).toBe(2);
+
+			// Grandchild (depth 3) creation under the child stays blocked by depth.
+			const grandResp = await apiFetch("/api/goals", {
+				method: "POST",
+				body: await childBody(childId),
+			});
+			expect(grandResp.status).not.toBe(201);
+			const grandBody = await grandResp.json().catch(() => ({} as any));
+			expect(grandBody.code).toBe("NESTING_DEPTH_EXCEEDED");
+		} finally {
+			if (childId) await deleteGoal(childId);
+			await deleteGoal(rootId);
+		}
+	});
+});

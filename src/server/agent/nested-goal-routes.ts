@@ -33,6 +33,7 @@ import {
 	checkCanSpawnChild,
 	inheritedChildOverrides,
 	clampMaxDepth,
+	effectiveMaxNestingDepth,
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
@@ -1390,15 +1391,25 @@ export async function tryHandleNestedGoalRoute(
 		}
 		if (body.maxNestingDepth !== undefined) {
 			// Per-goal nesting cap. Route clamping through the SSOT helper and
-			// cap to the system ceiling — descendants can only tighten, never
-			// widen beyond the system-wide `maxNestingDepth`.
+			// cap to the INHERITED ceiling — descendants can only tighten, never
+			// widen. For a root goal the ceiling is the system-wide
+			// `maxNestingDepth`; for a child goal it is the parent's *effective*
+			// cap (`effectiveMaxNestingDepth(parent, prefs)` = system ∩ parent.own),
+			// so a child can never widen past its parent/ancestor tree cap. Server
+			// authority is mandatory here — the UI range is advisory.
 			const raw = Number(body.maxNestingDepth);
 			if (!Number.isFinite(raw)) {
 				json({ error: "maxNestingDepth must be a finite number" }, 400);
 				return true;
 			}
-			const systemCeiling = getSubgoalNestingPrefs().maxNestingDepth;
-			updates.maxNestingDepth = Math.min(clampMaxDepth(raw), systemCeiling);
+			const prefs = getSubgoalNestingPrefs();
+			const parent = goal.parentGoalId
+				? getGoalAcrossProjects(goal.parentGoalId)
+				: undefined;
+			const ceiling = parent
+				? effectiveMaxNestingDepth(parent, prefs)
+				: prefs.maxNestingDepth;
+			updates.maxNestingDepth = Math.min(clampMaxDepth(raw), ceiling);
 		}
 		if (body.maxConcurrentChildren !== undefined) {
 			// C4: integer clamp. A fractional value (e.g. 1.5) would otherwise be
