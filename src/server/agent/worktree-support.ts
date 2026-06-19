@@ -31,6 +31,7 @@ import {
 	isGitRepo as defaultIsGitRepo,
 	getRepoRoot as defaultGetRepoRoot,
 	isGitRepoRoot as defaultIsGitRepoRoot,
+	hasResolvedHead as defaultHasResolvedHead,
 } from "../skills/git.js";
 
 export interface WorktreeSupport {
@@ -43,6 +44,8 @@ export interface WorktreeSupportDeps {
 	isGitRepo: (cwd: string) => Promise<boolean>;
 	getRepoRoot: (cwd: string) => Promise<string>;
 	isGitRepoRoot: (dir: string) => Promise<boolean>;
+	/** True iff the repo has a commit-resolved HEAD; optional for legacy injected tests. */
+	hasResolvedHead?: (repoPath: string) => Promise<boolean>;
 }
 
 /**
@@ -61,9 +64,11 @@ export async function resolveWorktreeSupport(
 		isGitRepo: defaultIsGitRepo,
 		getRepoRoot: defaultGetRepoRoot,
 		isGitRepoRoot: defaultIsGitRepoRoot,
+		hasResolvedHead: defaultHasResolvedHead,
 	},
 ): Promise<WorktreeSupport> {
 	const multiRepo = components.some(c => c.repo !== ".");
+	const hasResolvedHead = deps.hasResolvedHead ?? (async () => true);
 
 	if (multiRepo) {
 		// Multi-repo worktrees anchor at `projectRoot` ONLY. Supported iff at
@@ -80,7 +85,7 @@ export async function resolveWorktreeSupport(
 					if (distinct.has(c.repo)) continue;
 					distinct.add(c.repo);
 					const repoSrc = path.join(projectRoot, c.repo === "." ? "" : c.repo);
-					if (await deps.isGitRepoRoot(repoSrc)) {
+					if (await deps.isGitRepoRoot(repoSrc) && await hasResolvedHead(repoSrc)) {
 						return { supported: true, repoPath: projectRoot, multiRepo: true };
 					}
 				}
@@ -94,7 +99,9 @@ export async function resolveWorktreeSupport(
 
 	try {
 		if (!(await deps.isGitRepo(cwd))) return { supported: false, multiRepo };
-		return { supported: true, repoPath: await deps.getRepoRoot(cwd), multiRepo };
+		const repoPath = await deps.getRepoRoot(cwd);
+		if (!(await hasResolvedHead(repoPath))) return { supported: false, multiRepo };
+		return { supported: true, repoPath, multiRepo };
 	} catch {
 		return { supported: false, multiRepo };
 	}

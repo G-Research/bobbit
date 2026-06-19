@@ -40,7 +40,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -312,7 +312,7 @@ export function nextBackoffDelay(
 
 export async function withRetry<T>(
 	fn: () => Promise<T>,
-	opts: { retries: number; delays: number[]; label: string; sessionId: string },
+	opts: { retries: number; delays: number[]; label: string; sessionId: string; nonRetryable?: (err: Error) => boolean },
 ): Promise<T> {
 	let lastError: Error | undefined;
 	for (let attempt = 0; attempt <= opts.retries; attempt++) {
@@ -320,6 +320,7 @@ export async function withRetry<T>(
 			return await fn();
 		} catch (err) {
 			lastError = err as Error;
+			if (opts.nonRetryable?.(lastError)) throw lastError;
 			if (attempt < opts.retries) {
 				const delay = opts.delays[attempt] ?? opts.delays[opts.delays.length - 1];
 				console.warn(
@@ -873,13 +874,19 @@ export async function executeWorktreeAsync(
 				}));
 			}
 		} else {
-			worktreeCwd = await withRetry(
-				async () => {
-					const result = await createWorktree(plan.repoPath!, plan.branch!, { configuredBaseRef });
-					return result.worktreePath;
-				},
-				{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
-			);
+			try {
+				worktreeCwd = await withRetry(
+					async () => {
+						const result = await createWorktree(plan.repoPath!, plan.branch!, { configuredBaseRef });
+						return result.worktreePath;
+					},
+					{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
+				);
+			} catch (err) {
+				if (!isUnresolvedHeadWorktreeError(err)) throw err;
+				noWorktreeFallback = true;
+				console.warn(`[session-setup] ${err.message}; running without a worktree in ${plan.cwd}`);
+			}
 		}
 
 		// Per-component setup — non-fatal on failure. Routes through the canonical
