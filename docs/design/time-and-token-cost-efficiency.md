@@ -657,7 +657,7 @@ same — a $1 verifier still makes you wait three minutes — so latency needs i
 investigation surfaced an **inherent architectural root cause** that several §3 symptoms
 (F2 resident floor, F5 verifier economics) trace back to. All numbers here are a 2026-06-19
 snapshot of `.bobbit/state` (326 sessions, $1,069, 1.16B cache-read) on the primary dev machine;
-the *shapes* corroborate §1's 2026-06-10 snapshot. Repro recipes in §9.6.
+the *shapes* corroborate §1's 2026-06-10 snapshot. Repro recipes in §9.7.
 
 ### 9.1 The surprise: per-request latency is *not* where Bobbit loses
 
@@ -811,7 +811,33 @@ are the quick wins; do them first.** Behaviour-affecting items are BENCH-GATED o
 | CE-G8.5 | visibility | makes coordination/startup dead-time a dashboard number (blocker for tuning) |
 | CE-G8.6 | wall-clock | low-risk goals skip orchestration entirely |
 
-### 9.6 Reproduction recipes (latency)
+### 9.6 Parallelism & swarms — the serial→parallel lever (forward-looking)
+
+Every lever in §6/§9.5 makes a *serial* step cheaper; none removes the **serialization** that
+§9.2 identified as the real wall-clock tax. The one lever that does is **parallelism**: fan a
+goal out to many small specialised agents (Claude Code's in-process swarm) and, for
+decisions/quality, add a **reconciliation/council** step
+([karpathy/llm-council](https://github.com/karpathy/llm-council); hermes'
+`mixture_of_agents_tool.py`). N independent ~3-min sub-tasks then cost ~3 min, not 3N; and
+peer cross-review folds part of the verification tax (F13/F5) *into* the parallel wave instead
+of a serial downstream gate.
+
+The blocker is cost: a swarm of *cold OS processes* (§9.3) amplifies the process-per-agent tax
+(F14) by the swarm width — a net loss. The unlock is the imminent **single-container Bobbit**
+change (per-agent sandboxing becomes redundant → members run as cheap **in-process /
+worker_thread forks** that inherit the parent's warm cache, CE-G8.4) and, later, **federation**
+across connected Bobbits via the gateway. Because it composes from machinery already on the
+roadmap (capability registry, Lifecycle Hub, model-selector pack, workflow templates), it's a
+**pack + capability** feature, not core surgery.
+
+This is large enough to warrant its own doc — see
+**[agent-swarm-and-reconciliation.md](agent-swarm-and-reconciliation.md)** (workstream **SW**:
+fan-out swarm, council/reconciliation, the cheap-spawning dependency chain, federation, and a
+BENCH-gated phased plan SW-G0–G4). It is *gated on* this doc's CE-G8.4 (warm-cache reuse) +
+the sandbox change, and reuses CE-G0.3/CE-G8.5 (bench + wall-clock metrics) as its measuring
+stick.
+
+### 9.7 Reproduction recipes (latency)
 
 ```bash
 # Verifier vs work session counts + cache-write share (the inverted economics)

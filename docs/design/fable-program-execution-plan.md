@@ -18,6 +18,7 @@ The workstreams (each doc owns its *content* — tasks, contracts, acceptance; t
 | **AI** autoimprovement | [autoimprovement.md](autoimprovement.md) | [autoimprovement-implementation-plan.md](autoimprovement-implementation-plan.md) |
 | **GA** gap-analysis easy wins | [harness-gap-analysis.md](harness-gap-analysis.md) | [gap-easy-wins-implementation-plan.md](gap-easy-wins-implementation-plan.md) |
 | **CI** code intelligence | [code-intelligence.md](code-intelligence.md) | [code-intelligence-implementation-plan.md](code-intelligence-implementation-plan.md) |
+| **SW** agent swarms & reconciliation | [agent-swarm-and-reconciliation.md](agent-swarm-and-reconciliation.md) (exploratory) | same doc, §7 (SW-G0–G4; gated on single-container sandbox + CE-G8.4) |
 
 **An implementer agent receives exactly one goal ID and reads: the execution-authority doc's
 goal section → the contracts it cites → §1 below. Nothing else is required.**
