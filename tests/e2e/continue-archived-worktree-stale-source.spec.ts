@@ -85,19 +85,46 @@ function findClonedJsonl(slugDir: string, sessionId: string): string | null {
 	}
 }
 
-function readRuntimeCwds(jsonlPath: string): string[] {
-	const cwds: string[] = [];
+type RuntimeCwdRecord = { type: "system" | "session"; cwd: string };
+
+function readRuntimeCwdRecords(jsonlPath: string): RuntimeCwdRecord[] {
+	const records: RuntimeCwdRecord[] = [];
 	for (const line of readFileSync(jsonlPath, "utf8").split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
 			const parsed = JSON.parse(trimmed);
-			if (parsed?.type === "system" && typeof parsed.cwd === "string") cwds.push(parsed.cwd);
+			if ((parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string") {
+				records.push({ type: parsed.type, cwd: parsed.cwd });
+			}
 		} catch {
 			// Ignore malformed transcript lines; the mock agent does the same.
 		}
 	}
-	return cwds;
+	return records;
+}
+
+function readRuntimeCwds(jsonlPath: string): string[] {
+	return readRuntimeCwdRecords(jsonlPath).map((record) => record.cwd);
+}
+
+function hasRuntimeCwdRecord(jsonlPath: string, type: RuntimeCwdRecord["type"], cwd: string): boolean {
+	return readRuntimeCwdRecords(jsonlPath).some((record) => record.type === type && record.cwd === cwd);
+}
+
+function ensureStaleRuntimeCwdMetadata(jsonlPath: string, cwd: string, sessionId: string): void {
+	if (!hasRuntimeCwdRecord(jsonlPath, "system", cwd)) {
+		appendFileSync(jsonlPath, `${JSON.stringify({ type: "system", subtype: "init", cwd })}\n`);
+	}
+	if (!hasRuntimeCwdRecord(jsonlPath, "session", cwd)) {
+		appendFileSync(jsonlPath, `${JSON.stringify({
+			type: "session",
+			version: 3,
+			id: `pi-style-${sessionId}`,
+			timestamp: "2026-06-17T12:20:31.770Z",
+			cwd,
+		})}\n`);
+	}
 }
 
 test.describe("Continue-Archived stale worktree source", () => {
@@ -145,8 +172,9 @@ test.describe("Continue-Archived stale worktree source", () => {
 				intervalMs: 100,
 				label: "source session jsonl exists",
 			});
-			appendFileSync(sourceJsonl, `${JSON.stringify({ type: "system", subtype: "init", cwd: srcRec.worktreePath })}\n`);
-			expect(readRuntimeCwds(sourceJsonl), "source transcript should contain stale runtime cwd metadata before archive").toContain(srcRec.worktreePath);
+			ensureStaleRuntimeCwdMetadata(sourceJsonl, srcRec.worktreePath, srcId);
+			expect(readRuntimeCwdRecords(sourceJsonl), "source transcript should contain stale system cwd metadata before archive").toContainEqual({ type: "system", cwd: srcRec.worktreePath });
+			expect(readRuntimeCwdRecords(sourceJsonl), "source transcript should contain stale Pi-style session cwd metadata before archive").toContainEqual({ type: "session", cwd: srcRec.worktreePath });
 
 			const seedProposal = await apiFetch(`/api/sessions/${srcId}/proposal/role/seed`, {
 				method: "POST",
@@ -171,10 +199,9 @@ test.describe("Continue-Archived stale worktree source", () => {
 				intervalMs: 100,
 				label: "archived source session jsonl exists",
 			});
-			if (!readRuntimeCwds(archivedSourceJsonl).includes(srcRec.worktreePath)) {
-				appendFileSync(archivedSourceJsonl, `${JSON.stringify({ type: "system", subtype: "init", cwd: srcRec.worktreePath })}\n`);
-			}
-			expect(readRuntimeCwds(archivedSourceJsonl), "archived source transcript should retain stale runtime cwd metadata").toContain(srcRec.worktreePath);
+			ensureStaleRuntimeCwdMetadata(archivedSourceJsonl, srcRec.worktreePath, srcId);
+			expect(readRuntimeCwdRecords(archivedSourceJsonl), "archived source transcript should retain stale system cwd metadata").toContainEqual({ type: "system", cwd: srcRec.worktreePath });
+			expect(readRuntimeCwdRecords(archivedSourceJsonl), "archived source transcript should retain stale Pi-style session cwd metadata").toContainEqual({ type: "session", cwd: srcRec.worktreePath });
 
 			removeWorktreeIfPresent(repoPath, srcRec.worktreePath);
 			deleteBranchIfPresent(repoPath, srcRec.branch);
@@ -220,9 +247,10 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(clonedAtProj, "cloned .jsonl must not live under the project-root slug").toBeNull();
 			expect(clonedAtWt, "cloned .jsonl must live under the new worktree-cwd slug").toBeTruthy();
 			expect(readFileSync(clonedAtWt!, "utf8"), "cloned transcript should include the source marker").toContain(transcriptMarker);
-			const clonedRuntimeCwds = readRuntimeCwds(clonedAtWt!);
-			expect(clonedRuntimeCwds, "continued runtime cwd metadata should be rebased off the deleted source worktree").not.toContain(srcRec.worktreePath);
-			expect(clonedRuntimeCwds, "continued runtime cwd metadata should reference the fresh worktree cwd").toContain(newRec.worktreePath);
+			const clonedRuntimeCwdRecords = readRuntimeCwdRecords(clonedAtWt!);
+			expect(readRuntimeCwds(clonedAtWt!), "continued runtime cwd metadata should be rebased off the deleted source worktree").not.toContain(srcRec.worktreePath);
+			expect(clonedRuntimeCwdRecords, "continued system cwd metadata should reference the fresh worktree cwd").toContainEqual({ type: "system", cwd: newRec.worktreePath });
+			expect(clonedRuntimeCwdRecords, "continued Pi-style session cwd metadata should reference the fresh worktree cwd").toContainEqual({ type: "session", cwd: newRec.worktreePath });
 
 			const proposalResp = await apiFetch(`/api/sessions/${newId}/proposal/role`);
 			const proposalBody = await proposalResp.text();

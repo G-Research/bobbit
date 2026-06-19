@@ -5,9 +5,10 @@
  *
  * See docs/design — "Validate goal workflow at proposal time" (Requirement 1,
  * tool surfacing). The seed endpoint returns a structured 400 body
- * `{ ok:false, code:"UNKNOWN_WORKFLOW", message, availableWorkflows }` when an
- * agent names a workflow the project doesn't have; the agent must SEE that
- * message (with the corrective list) rather than a false success.
+ * `{ ok:false, code:"MISSING_WORKFLOW"|"UNKNOWN_WORKFLOW", message, availableWorkflows }`
+ * when an agent omits a required workflow or names one the project doesn't
+ * have; the agent must SEE that message (with the corrective list) rather
+ * than a false success.
  *
  * Contract pinned:
  *   - propose_goal.execute → isError:true, text carries the server `message`.
@@ -75,7 +76,25 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 		globalThis.fetch = realFetch;
 	});
 
-	it("returns isError with the server message + available workflows on 400", async () => {
+	it("returns isError with the server MISSING_WORKFLOW message + available workflows on 400", async () => {
+		globalThis.fetch = (async () => fakeResponse(400, {
+			ok: false,
+			code: "MISSING_WORKFLOW",
+			message: "Workflow is required for this project. Re-call propose_goal with one of: general, feature.",
+			availableWorkflows: [{ id: "general", name: "General" }, { id: "feature", name: "Feature" }],
+		})) as any;
+
+		const result = await getExecute("propose_goal")("tu-1", { title: "G", spec: "s" });
+		assert.equal(result?.isError, true, "rejection must surface as isError");
+		const text = textOf(result);
+		assert.match(text, /Workflow is required/);
+		assert.match(text, /general, feature/);
+		// Must NOT masquerade as a successful submission.
+		assert.doesNotMatch(text, /Proposal submitted/);
+		assert.doesNotMatch(text, /__proposal_rev_v1__/);
+	});
+
+	it("returns isError with the server UNKNOWN_WORKFLOW message + available workflows on 400", async () => {
 		globalThis.fetch = (async () => fakeResponse(400, {
 			ok: false,
 			code: "UNKNOWN_WORKFLOW",
@@ -83,7 +102,7 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 			availableWorkflows: [{ id: "general", name: "General" }, { id: "feature", name: "Feature" }],
 		})) as any;
 
-		const result = await getExecute("propose_goal")("tu-1", { title: "G", spec: "s", workflow: "nope" });
+		const result = await getExecute("propose_goal")("tu-2", { title: "G", spec: "s", workflow: "nope" });
 		assert.equal(result?.isError, true, "rejection must surface as isError");
 		const text = textOf(result);
 		assert.match(text, /Unknown workflow/);

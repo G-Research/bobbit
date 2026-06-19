@@ -35,6 +35,24 @@ export interface HookCtx {
 	gateway: { baseUrl: string; token: string };
 }
 
+/** Managed-runtime context injected into `ctx.runtime` for an ACTIVE managed
+ *  provider invocation. Resolved by the host WITHOUT starting Docker. */
+export interface RuntimeContext {
+	baseUrl: string;
+	headers: Record<string, string>;
+	status: string;
+}
+
+/** Resolves the managed-runtime context for a provider declaring `runtime`. Returns
+ *  `undefined` when there is no managed runtime to link (external mode, supervisor
+ *  unavailable, runtime not running / API port unknown). NEVER starts Docker. */
+export type RuntimeContextResolver = (opts: {
+	packId: string;
+	runtimeId: string;
+	projectId?: string;
+	config: Record<string, unknown>;
+}) => Promise<RuntimeContext | undefined> | RuntimeContext | undefined;
+
 export interface HubDiagnostic {
 	providerId: string;
 	hook: LifecycleHook;
@@ -59,6 +77,7 @@ export class LifecycleHub {
 	private readonly gatewayInfo: () => { baseUrl: string; token: string };
 	private readonly globalMaxTokens: number;
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+	private readonly runtimeResolver?: RuntimeContextResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -72,6 +91,10 @@ export class LifecycleHub {
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
 		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Resolves `ctx.runtime` for providers declaring a `runtime` linkage (managed
+	 *  deployment modes). Consulted per provider invocation; NEVER starts Docker.
+	 *  Omitted ⇒ providers run without `ctx.runtime` (managed modes stay dormant). */
+		runtimeResolver?: RuntimeContextResolver;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -79,6 +102,7 @@ export class LifecycleHub {
 		this.gatewayInfo = deps.gatewayInfo;
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 		this.providerHostApi = deps.providerHostApi;
+		this.runtimeResolver = deps.runtimeResolver;
 	}
 
 	/**
@@ -102,17 +126,36 @@ export class LifecycleHub {
 		const traceStates = new Map<string, ProviderTraceState>();
 
 		for (const provider of providers) {
+			const packId = packIdFromRoot(provider.packRoot);
+			// Managed-runtime context (P3): for a provider linked to a runtime, resolve
+			// `ctx.runtime` (baseUrl/headers/status) WITHOUT starting Docker. Absent for
+			// external mode / a stopped runtime / when no resolver is wired — the provider
+			// then stays dormant via its own isActive(cfg, ctx.runtime) gate.
+			let runtime: RuntimeContext | undefined;
+			if (provider.runtime && this.runtimeResolver) {
+				try {
+					runtime = (await this.runtimeResolver({
+						packId,
+						runtimeId: provider.runtime,
+						projectId: base.projectId,
+						config: provider.config ?? {},
+					})) ?? undefined;
+				} catch {
+					runtime = undefined; // resolution failure is non-fatal — provider stays dormant
+				}
+			}
 			const hookCtx: HookCtx = {
 				...base,
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
+				...(runtime ? { runtime } : {}),
 			};
 			// Provider-scoped, store-only host (least privilege). The LIVE object stays
 			// in the parent (module-host-worker strips it before serialization) and
 			// services the worker's proxied store calls — the durable retain queue /
 			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot) });
+			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;

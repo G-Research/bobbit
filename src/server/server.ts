@@ -20,7 +20,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -60,9 +60,11 @@ import {
 	PackRuntimeNotFoundError,
 	PackRuntimeBadRequestError,
 	PackRuntimeDockerUnavailableError,
+	readRuntimeStartPolicy,
 	type PackRuntimeStatus,
+	type PackRuntimeCapabilitySummary,
 } from "./runtimes/index.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -320,7 +322,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
@@ -449,10 +451,6 @@ export function buildMarketToolRootsForProject(options: {
 }
 
 /**
- * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
- */
-/**
  * Clamp a thinking-level token against a role's pinned model (if any).
  * - Validates that the token is in the canonical set; returns undefined otherwise.
  * - When `modelStr` is set in canonical `provider/modelId` form, clamps the
@@ -472,6 +470,28 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
 }
 
+export function isMissingRemoteRefDeleteError(err: unknown): boolean {
+	const texts: string[] = [];
+	const addText = (value: unknown) => {
+		if (typeof value === "string") texts.push(value);
+		else if (Buffer.isBuffer(value)) texts.push(value.toString("utf-8"));
+	};
+
+	addText(err);
+	if (err instanceof Error) addText(err.message);
+	if (err && typeof err === "object") {
+		const record = err as Record<string, unknown>;
+		addText(record.stderr);
+		addText(record.message);
+	}
+
+	return texts.some(text => /\bremote\s+ref\s+does\s+not\s+exist\b/i.test(text));
+}
+
+/**
+ * Delete remote branches associated with a goal (integration + agent worktree branches).
+ * Fire-and-forget — errors are logged but never block the archive flow.
+ */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
@@ -500,6 +520,7 @@ async function deleteRemoteGoalBranches(
 			});
 			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
+			if (isMissingRemoteRefDeleteError(err)) return;
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
@@ -958,9 +979,11 @@ export interface GatewayConfig {
 export interface PackRuntimeSupervisorLike {
 	list(projectId?: string): Promise<PackRuntimeStatus[]>;
 	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
-	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
 	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
-	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
+	down(packId: string, runtimeId: string, opts?: { projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<PackRuntimeStatus>;
+	capabilitySummary(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeCapabilitySummary>;
 	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
 }
 
@@ -1282,6 +1305,19 @@ export function createGateway(config: GatewayConfig) {
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
 	);
+	// P2 pack managed-runtime supervisor handle (Docker-backed). Declared HERE — before
+	// the LifecycleHub — so the hub's runtime-context resolver can consult it lazily at
+	// dispatch time. The production instance is built lazily in start(); a registered
+	// test factory is consulted FRESH per call so registerPackRuntimeSupervisorFactory(null)
+	// reverts cleanly with no stale mock cached. Boot/install/update/list/status never
+	// start Docker (see the design invariants); the runtime resolver only READS status
+	// + the already-persisted API host port to inject ctx.runtime for managed providers.
+	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+	const getActivePackRuntimeSupervisor = (): PackRuntimeSupervisorLike | undefined =>
+		_packRuntimeSupervisorFactory
+			? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
+			: realPackRuntimeSupervisor;
+
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -1305,6 +1341,37 @@ export function createGateway(config: GatewayConfig) {
 				return { baseUrl: "", token: "" };
 			}
 		},
+		// P3 — managed-runtime context injection. For a provider declaring a `runtime`
+		// linkage in a MANAGED deployment mode, resolve ctx.runtime from the supervisor
+		// WITHOUT starting Docker: read the runtime status + the already-persisted API
+		// host port (from the pure capability summary). External mode / a stopped runtime
+		// / an unknown port ⇒ undefined, and the provider stays dormant via its own gate.
+		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) => {
+			const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
+			if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
+			const sup = getActivePackRuntimeSupervisor();
+			if (!sup) return undefined;
+			let status: PackRuntimeStatus;
+			try {
+				status = await sup.status(packId, runtimeId, projectId);
+			} catch {
+				return undefined;
+			}
+			let apiPort: number | undefined;
+			try {
+				const cap = await sup.capabilitySummary(packId, runtimeId, { projectId });
+				const apiSpec =
+					cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
+					cap.ports[0];
+				if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
+			} catch {
+				return undefined;
+			}
+			if (apiPort === undefined) return undefined;
+			const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
+			const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+			return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
+		},
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
@@ -1315,8 +1382,9 @@ export function createGateway(config: GatewayConfig) {
 	// immediately reverts to the production instance (or 503) with no stale mock
 	// left in the closure across in-process E2E tests. The real supervisor is
 	// loaded lazily in start() (dynamic import keeps this wiring compilable even
-	// before the supervisor module is merged — routes then return 503).
-	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+	// before the supervisor module is merged — routes then return 503). The handle
+	// itself + the getActivePackRuntimeSupervisor() resolver are declared above (before
+	// the LifecycleHub, which consults the resolver for ctx.runtime injection).
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -1595,10 +1663,9 @@ export function createGateway(config: GatewayConfig) {
 			// process test harnesses register a (mocked) one AFTER gateway start, so it
 			// must override the real supervisor built in start(). Derived FRESH each
 			// request (never cached), so clearing the factory reverts to the production
-			// instance with no stale mock. No-op in production (factory stays null).
-			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
-				? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
-				: realPackRuntimeSupervisor;
+			// instance with no stale mock. No-op in production (factory stays null). Shares
+			// the same resolver the LifecycleHub uses so the route + ctx.runtime paths agree.
+			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = getActivePackRuntimeSupervisor();
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
@@ -2173,6 +2240,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 
 				const sandboxTokenEntries = cfg.getSandboxTokens();
+				const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
 				return {
 					projectId,
 					projectDir,
@@ -2182,7 +2250,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
-					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthAllowed: sandboxAuthPolicy.includeCodexAuth,
+					sandboxAgentAuthGoogleAllowed: sandboxAuthPolicy.includeGoogleAuth,
 					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
@@ -4169,6 +4238,30 @@ async function handleApiRoute(
 		return result;
 	}
 
+	function normalizedArchivedQuery(value: string | null): string {
+		return (value || "").trim().toLowerCase();
+	}
+
+	function archivedSessionMatchesQuery(session: any, query: string): boolean {
+		if (!query) return true;
+		return String(session?.title || "").toLowerCase().includes(query)
+			|| String(session?.role || "").toLowerCase().includes(query);
+	}
+
+	function isArchivedQueryChildSession(session: any): boolean {
+		return !!(session?.parentSessionId || session?.delegateOf);
+	}
+
+	function archivedGoalMatchesQuery(goal: PersistedGoal, sessions: any[], query: string): boolean {
+		if (!query) return true;
+		if (String(goal.title || "").toLowerCase().includes(query)) return true;
+		return sessions.some(s =>
+			(s?.goalId === goal.id || s?.teamGoalId === goal.id)
+			&& !isArchivedQueryChildSession(s)
+			&& archivedSessionMatchesQuery(s, query),
+		);
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = projectContextManager.getSessionGeneration();
@@ -4191,6 +4284,7 @@ async function handleApiRoute(
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Collect archived sessions across all project contexts
 			const allArchived: typeof sessions = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -4201,10 +4295,11 @@ async function handleApiRoute(
 			}
 			// Sort by archivedAt descending
 			allArchived.sort((a: any, b: any) => ((b as any).archivedAt ?? 0) - ((a as any).archivedAt ?? 0));
-			// Apply projectId filter if present
-			const filteredArchived = filterProjectId
+			// Apply projectId and query filters before pagination.
+			const filteredArchived = (filterProjectId
 				? allArchived.filter((s: any) => s.projectId === filterProjectId)
-				: allArchived;
+				: allArchived
+			).filter((s: any) => archivedSessionMatchesQuery(s, archivedQuery));
 
 			// Collect ALL archived sessions for BFS enrichment (not just delegates)
 			const allArchivedForBfs: typeof sessions = [];
@@ -4838,7 +4933,8 @@ async function handleApiRoute(
 				// Single source of truth shared with the staff path
 				// (staff-manager.ts) and goal path (goal-manager.ts).
 				const components = projCtx?.projectConfigStore.getComponents() ?? [];
-				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef });
 				if (support.supported && support.repoPath) {
 					worktreeOpts = { repoPath: support.repoPath };
 				}
@@ -5043,11 +5139,23 @@ async function handleApiRoute(
 			const afterParam = url.searchParams.get("after");
 			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
+			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Aggregate archived goals across all project contexts
 			let allArchived: PersistedGoal[] = [];
+			const sessionsForGoalQuery: any[] = [];
+			for (const liveSession of sessionManager.listSessions()) {
+				if (filterProjectId && liveSession.projectId !== filterProjectId) continue;
+				sessionsForGoalQuery.push(liveSession);
+			}
 			for (const ctx of projectContextManager.visible()) {
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
+				for (const s of ctx.sessionStore.getArchived()) {
+					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+				}
+			}
+			if (archivedQuery) {
+				allArchived = allArchived.filter(g => archivedGoalMatchesQuery(g, sessionsForGoalQuery, archivedQuery));
 			}
 			allArchived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
 			const total = allArchived.length;
@@ -5956,6 +6064,99 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET  /api/pack-runtimes/:id/capabilities?projectId=&mode= → capability summary
+	//   Pre-start consent disclosure (P3 §8): images/services, host ports, the
+	//   managed data/volume path, the start policy, and the memory/trust copy. Pure
+	//   (no Docker), so the Market UI can render it BEFORE the user consents.
+	const packRuntimeCapMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/capabilities$/);
+	if (packRuntimeCapMatch) {
+		if (req.method !== "GET") { json({ error: "method not allowed" }, 405); return; }
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		let packId: string, runtimeId: string;
+		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeCapMatch[1])); }
+		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const rawMode = url.searchParams.get("mode");
+		const requestedMode = rawMode !== null && rawMode.trim().length > 0 ? rawMode.trim() : undefined;
+		// The disclosure is DEPLOYMENT-mode aware (external / managed / managed-external-
+		// postgres). The caller may pass an explicit mode; absent that, resolve the
+		// EFFECTIVE deployment mode from the pack's provider config so the external
+		// (no-Docker) setup path is reachable even when the UI does not know the mode.
+		// Build the EFFECTIVE deployment config the SAME way the activation path does
+		// (each provider's flat schema defaults overlaid with its persisted store
+		// config), so the consent disclosure reflects custom settings — most importantly
+		// a custom `dataDir` bind path — rather than schema defaults that would diverge
+		// from what activation actually mounts.
+		const deploymentConfig: Record<string, unknown> = {};
+		{
+			const pack = packContributionRegistry.getPack(projectId, packId);
+			for (const p of pack?.providers ?? []) {
+				Object.assign(deploymentConfig, p.config ?? {});
+				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+			}
+		}
+		const deploymentMode = requestedMode ?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0 ? deploymentConfig.mode : "external");
+		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
+		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
+			managed: "managed-postgres",
+			"managed-external-postgres": "external-postgres",
+		};
+		try {
+			if (deploymentMode === "external") {
+				// External: derive descriptor/trust from the default manifest mode but disclose
+				// NO services/ports and flag dockerRequired:false, so the UI shows setup
+				// guidance instead of a Docker start disclosure. Works without Docker.
+				const base = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId });
+				json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
+				return;
+			}
+			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
+			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
+			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
+		} catch (err) {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/pack-runtimes/:id/down { volumes?: boolean, removeState?: boolean }
+	//   `docker compose down`. Default (no volumes/removeState) preserves bind-mounted
+	//   data — the uninstall primitive. `volumes: true` + `removeState: true` is the
+	//   explicit purge. Admin-bearer only (gated before handleApiRoute).
+	const packRuntimeDownMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/down$/);
+	if (packRuntimeDownMatch) {
+		if (req.method !== "POST") { json({ error: "method not allowed" }, 405); return; }
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		let packId: string, runtimeId: string;
+		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeDownMatch[1])); }
+		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const bodyText = await readBodyText(req);
+		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+		let body: Record<string, unknown> = {};
+		const trimmed = bodyText.trim();
+		if (trimmed.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(trimmed); } catch { json({ error: "malformed JSON body" }, 400); return; }
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
+			body = parsed as Record<string, unknown>;
+		}
+		const volumes = body.volumes === true;
+		const removeState = body.removeState === true;
+		try {
+			const status = await packRuntimeSupervisor.down(packId, runtimeId, { projectId, volumes, removeState });
+			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+		} catch (err) {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
 	if (packRuntimeMatch) {
 		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
@@ -6859,6 +7060,72 @@ async function handleApiRoute(
 			return ctxs;
 		};
 
+		// ── Managed-runtime activation/consent wiring (P3) ─────────
+		// Resolve a pack's SERVER-DERIVED packId + its runtime contributions + the
+		// effective deployment config carried by its providers, so the supervisor
+		// (start/stop/down) can be addressed by {packId, runtimeId}. Mirrors
+		// buildActivationCatalogue's on-disk entry resolution (works for built-in
+		// first-party packs too). Returns null when the pack is not resolvable.
+		const resolvePackRuntimeContext = (
+			scope: InstallScope,
+			projectBase: string | undefined,
+			store: PackOrderStore,
+			packName: string,
+		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown> } | null => {
+			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
+			if (base === undefined) return null;
+			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
+			let entry = entries.find((e) => e.manifest?.name === packName);
+			if ((!entry || !entry.manifest) && scope === "server") {
+				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+			}
+			if (!entry || !entry.manifest) return null;
+			const packId = packIdFromRoot(entry.path);
+			if (!packId) return null;
+			let contribs;
+			try { contribs = loadPackContributions(entry.path, entry.manifest); }
+			catch { return { packId, runtimes: [], deploymentConfig: {} }; }
+			// Effective deployment config = each provider's FLAT schema defaults
+			// (ProviderContribution.config) overlaid with its persisted store config.
+			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
+			const deploymentConfig: Record<string, unknown> = {};
+			for (const p of contribs.providers) {
+				Object.assign(deploymentConfig, p.config ?? {});
+				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
+			}
+			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig };
+		};
+
+		// Map a deployment `mode` to a runtime start plan. `external` (and the
+		// absent/default) is a NON-Docker setup path — the provider talks to an
+		// operator-supplied URL, so NO container starts. `managed` runs the fully
+		// managed stack (managed-postgres); `managed-external-postgres` runs the API/web
+		// only against an operator Postgres (external-postgres), remapping the provider's
+		// `externalDatabaseUrl` onto the manifest's HINDSIGHT_API_DATABASE_URL secret.
+		const resolveRuntimeStartPlan = (
+			deploymentConfig: Record<string, unknown>,
+		): { start: boolean; mode?: string; config: Record<string, unknown> } => {
+			const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
+			const config: Record<string, unknown> = { ...deploymentConfig };
+			if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0) {
+				config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
+			}
+			// The managed Hindsight runtime declares its LLM API key as a USER-configured
+			// secret env ref (HINDSIGHT_API_LLM_API_KEY). Remap the provider's `llmApiKey`
+			// deployment-config field onto that env key so the supervisor's config overlay
+			// satisfies it without requiring the operator to also seed the global secret
+			// store. (A value set directly under HINDSIGHT_API_LLM_API_KEY still wins.)
+			if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0) {
+				config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
+			}
+			switch (mode) {
+				case "managed": return { start: true, mode: "managed-postgres", config };
+				case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
+				default: return { start: false, config };
+			}
+		};
+
 		// ── Sources ───────────────────────────────────────────────
 		// GET /api/marketplace/sources
 		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
@@ -6998,6 +7265,44 @@ async function handleApiRoute(
 			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			// P3 — tear down this pack's managed runtimes BEFORE removing it, preserving
+			// bind-mounted data (no `-v`, no state removal). A missing Docker install is
+			// tolerated (down returns a docker-unavailable STATUS, never throws), so an
+			// uninstall on a Docker-less host still proceeds. A REAL teardown failure (down
+			// throws) is reported and the uninstall is ABORTED — never silently swallowed.
+			if (packRuntimeSupervisor) {
+				const teardownFailures: string[] = [];
+				try {
+					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
+					if (rtCtx && rtCtx.runtimes.length > 0) {
+						const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+						// Only managed deployment modes have a Docker stack to tear down. The
+						// external (non-Docker) mode (plan.start === false) never created one and
+						// has no managed compose env — calling down would force the supervisor to
+						// resolve a managed invocation (requiring HINDSIGHT_API_LLM_API_KEY) that an
+						// external setup never configured, failing the uninstall before Docker is
+						// even consulted. Skip it so external no-Docker uninstall always proceeds.
+						const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
+						if (plan.start) {
+							for (const rc of rtCtx.runtimes) {
+								try {
+									await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
+								} catch (err) {
+									teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+								}
+							}
+						}
+					}
+				} catch (err) {
+					// Resolving the pack's runtime context failed (e.g. the pack is no longer
+					// resolvable on disk) — there is nothing to tear down; proceed.
+					console.warn(`[pack-runtimes] uninstall runtime teardown skipped: ${(err as Error)?.message ?? err}`);
+				}
+				if (teardownFailures.length > 0) {
+					json({ error: "runtime teardown failed; pack not uninstalled", details: teardownFailures }, 502);
+					return;
+				}
+			}
 			try {
 				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
@@ -7175,9 +7480,132 @@ async function handleApiRoute(
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
+			const prevActivation = cfgStore.getPackActivation(scope as PackOrderScope, packName);
+			const prevDisabledRuntimes = new Set(prevActivation.runtimes ?? []);
+
+			// P3 — managed-runtime activation side effects. Enabling a
+			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit
+			// user start action; disabling (enabled → disabled) stops it. The external
+			// (non-Docker) deployment mode never starts a container. Toggling any other
+			// entity — or a pack with no runtimes — is inert here, so install/update/
+			// list/status never start Docker.
+			//
+			// CRITICAL ordering: the Docker side effects run BEFORE the activation state
+			// is persisted, and a side effect that MATTERS (start/stop throwing, or a
+			// start that fails to come up) aborts the whole PUT WITHOUT persisting — so
+			// Bobbit never records "enabled"/"disabled" while Docker did the opposite. A
+			// graceful `docker-unavailable` status is TOLERATED (there is nothing to
+			// start/stop on a Docker-less host; the provider is defensive and the toggle
+			// is just metadata), so it persists and is reported, not treated as a hard
+			// failure. Stop is best-effort: only a thrown stop blocks a disable.
+			const runtimeStatuses: Array<Record<string, unknown>> = [];
+			const sideEffectFailures: string[] = [];
+			if (packRuntimeSupervisor && (catalogue.runtimes?.length ?? 0) > 0) {
+				const nextDisabledRuntimes = new Set(normalized.runtimes);
+				const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, packName);
+				if (rtCtx && rtCtx.runtimes.length > 0) {
+					const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
+					for (const rc of rtCtx.runtimes) {
+						const ref = rc.listName;
+						const wasDisabled = prevDisabledRuntimes.has(ref);
+						const nowDisabled = nextDisabledRuntimes.has(ref);
+						const policy = readRuntimeStartPolicy(rc.manifest);
+						try {
+							if (wasDisabled && !nowDisabled) {
+								// disabled → enabled: explicit enable. Only `on-enable` runtimes
+								// auto-start, and only when the deployment mode is a managed
+								// (Docker) mode — external mode avoids the Docker start entirely.
+								if (policy === "on-enable" && plan.start) {
+									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: plan.mode, config: plan.config });
+									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+									// A managed enable that does not come up running (and is not a
+									// tolerated docker-unavailable) is a real failure: don't persist
+									// "enabled" while the container is unhealthy/down.
+									if (status.status !== "running" && status.status !== "starting" && status.status !== "docker-unavailable") {
+										sideEffectFailures.push(`${rtCtx.packId}:${rc.id} failed to start (${status.status}${status.message ? `: ${status.message}` : ""})`);
+									}
+								}
+							} else if (!wasDisabled && nowDisabled) {
+								// enabled → disabled: stop the managed container (idempotent — no-op
+								// if not running). The external (non-Docker) deployment mode
+								// (plan.start === false) never started a container and has no managed
+								// compose env, so skip the side effect entirely: calling stop would
+								// force the supervisor to resolve a managed invocation (requiring
+								// HINDSIGHT_API_LLM_API_KEY) that an external setup never configured,
+								// which would 502 and block persisting the disable.
+								if (plan.start) {
+									const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
+									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+								}
+							}
+						} catch (err) {
+							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
+							// failure: abort the PUT so persisted state matches Docker reality.
+							runtimeStatuses.push({
+								id: encodePackRuntimeId(rtCtx.packId, rc.id),
+								packId: rtCtx.packId,
+								runtimeId: rc.id,
+								status: "error",
+								message: (err as Error)?.message ?? String(err),
+							});
+							sideEffectFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+						}
+					}
+				}
+			}
+
+			// A side effect that matters failed → do NOT persist (state is unchanged) and
+			// surface the failure with the prior activation so the client/UI reverts the
+			// toggle instead of believing the change took effect.
+			if (sideEffectFailures.length > 0) {
+				json({
+					scope,
+					packName,
+					catalogue,
+					disabled: prevActivation,
+					runtimes: runtimeStatuses,
+					error: `runtime activation failed: ${sideEffectFailures.join("; ")}`,
+				}, 502);
+				return;
+			}
+
 			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
-			json({ scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) });
+
+			const activationResponse: Record<string, unknown> = { scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) };
+			if (runtimeStatuses.length > 0) activationResponse.runtimes = runtimeStatuses;
+			json(activationResponse);
+			return;
+		}
+
+		// ── purge a managed runtime (P3 explicit purge) ───────────
+		// POST /api/marketplace/purge-runtime { packName, scope, runtimeId, projectId? }
+		//   `compose down -v` + remove supervisor-owned runtime state (rendered env,
+		//   persisted generated secrets + allocated ports). Bind-mounted DATA is
+		//   preserved by the supervisor — only Docker volumes + bookkeeping are removed.
+		if (url.pathname === "/api/marketplace/purge-runtime" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string" || !body.packName) { json({ error: "packName is required" }, 400); return; }
+			if (typeof body?.runtimeId !== "string" || !body.runtimeId) { json({ error: "runtimeId is required" }, 400); return; }
+			if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
+			if (!rtCtx) { json({ error: "pack not installed at this scope" }, 404); return; }
+			const rc = rtCtx.runtimes.find((r) => r.id === body.runtimeId || r.listName === body.runtimeId);
+			if (!rc) { json({ error: `unknown runtime ${body.runtimeId}` }, 404); return; }
+			const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+			try {
+				const status = await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: true, removeState: true });
+				json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+			} catch (err) {
+				if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+				if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+				jsonError(500, err);
+			}
 			return;
 		}
 
@@ -10261,29 +10689,17 @@ async function handleApiRoute(
 		const wantWorktree = !!ps.worktreePath;
 		let worktreeOpts: { repoPath: string } | undefined;
 		if (wantWorktree) {
-			let projectIsGitRepo = false;
-			try {
-				projectIsGitRepo = await isGitRepo(projCwd);
-			} catch (err) {
-				jsonError(500, err, {
-					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
-				});
-				return;
-			}
-			if (!projectIsGitRepo) {
+			const projCtx = projectContextManager.getOrCreate(ps.projectId);
+			const components = projCtx?.projectConfigStore.getComponents() ?? [];
+			const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef });
+			if (!support.supported || !support.repoPath) {
 				json({
-					error: "failed to resolve current project repository for fresh continue worktree creation: project root is not a git repository",
+					error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
 				}, 500);
 				return;
 			}
-			try {
-				worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-			} catch (err) {
-				jsonError(500, err, {
-					error: `failed to resolve current project repository for fresh continue worktree creation: ${err instanceof Error ? err.message : String(err)}`,
-				});
-				return;
-			}
+			worktreeOpts = { repoPath: support.repoPath };
 		}
 
 		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
@@ -10336,9 +10752,11 @@ async function handleApiRoute(
 			preExistingAgentSessionFile: destJsonl,
 			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
-			// the archived source worktree/branch remain provenance only.
+			// the archived source worktree/branch remain provenance only. Non-sandboxed
+			// continues use the normal project worktree-pool claim/fallback path; sandboxed
+			// continues keep bypassing the host-side pool because container worktrees are isolated.
 			awaitWorktreeSetup: !!worktreeOpts,
-			bypassWorktreePool: !!worktreeOpts,
+			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
@@ -10948,6 +11366,20 @@ async function handleApiRoute(
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/oauth/logout — clear/revoke a single provider's OAuth credential.
+	// Provider-partitioned: never touches other providers or API-key entries,
+	// and never echoes token material back to the client.
+	if (url.pathname === "/api/oauth/logout" && req.method === "POST") {
+		try {
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthLogout(body?.provider);
+			json(result);
+		} catch (err) {
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -13755,11 +14187,11 @@ async function handleApiRoute(
  * null if valid. Pure — caller resolves the workflow list (see seed handler).
  *
  * Rules (see docs/design — Validate goal workflow):
- * - Zero workflows ⇒ no validation (UI supplies a default; empty-state preserved).
- * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
+ * - Zero workflows ⇒ no validation (nothing available to validate against).
+ * - Empty/omitted `workflow` ⇒ MISSING_WORKFLOW when workflows are available.
  * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
  * - `options` (comma-separated optional-step names) validated against the chosen
- *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   explicit workflow — matched ONLY by the canonical step.name of
  *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
  *   the UI both key on step.name, so accepting optionalLabel/label here would be a
  *   false-success path that later fails to enable the step.
@@ -13772,19 +14204,30 @@ function validateGoalProposalWorkflow(
 
 	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
 	const available = workflows.map(w => ({ id: w.id, name: w.name }));
+	const availableIds = available.map(w => w.id).join(", ");
 
-	// 1. Unknown explicit workflow id.
-	if (wfArg && !workflows.some(w => w.id === wfArg)) {
+	// 1. Workflow id is required when this session has resolvable workflows.
+	if (!wfArg) {
 		return {
 			ok: false,
-			code: "UNKNOWN_WORKFLOW",
-			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${available.map(w => w.id).join(", ")}. Re-call propose_goal with one of these IDs (or omit workflow to use the default).`,
+			code: "MISSING_WORKFLOW",
+			message: `Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: ${availableIds}.`,
 			availableWorkflows: available,
 		};
 	}
 
-	// 2. Validate optional-step names against the chosen workflow (or default = first).
-	const chosen = wfArg ? workflows.find(w => w.id === wfArg)! : workflows[0];
+	// 2. Unknown explicit workflow id.
+	if (!workflows.some(w => w.id === wfArg)) {
+		return {
+			ok: false,
+			code: "UNKNOWN_WORKFLOW",
+			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${availableIds}. Re-call propose_goal with one of these IDs.`,
+			availableWorkflows: available,
+		};
+	}
+
+	// 3. Validate optional-step names against the chosen explicit workflow.
+	const chosen = workflows.find(w => w.id === wfArg)!;
 	const optsArg = typeof args.options === "string" ? args.options : "";
 	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
 	if (requested.length > 0) {

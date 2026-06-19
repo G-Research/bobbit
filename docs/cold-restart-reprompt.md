@@ -87,10 +87,11 @@ leak across restarts.
 ## Boot-resume nudge path
 
 `TeamManager._bootResumeIdleTeamLeads` runs on boot, after teams are
-re-subscribed. For each team whose lead is idle and has concrete outstanding work
-(and which is not paused / complete / shelved / archived / already nudge-pending),
-it dispatches a `[BOOT-RESUME]` nudge so progress resumes without waiting for the
-stuck-sweep tick.
+re-subscribed. It only iterates restored active teams from the team store; it does
+not start a new lead for a sessionless goal. For each restored team whose lead is
+idle and has concrete outstanding work (and which is not paused / complete /
+shelved / archived / already nudge-pending), it dispatches a `[BOOT-RESUME]`
+nudge so progress resumes without waiting for the stuck-sweep tick.
 
 The nudge is dispatched via `SessionManager.enqueuePrompt(sessionId, msg,
 { isSteered: true, coldStart: true })`. The `coldStart: true` option threads down

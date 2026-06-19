@@ -1,10 +1,15 @@
 # Managed runtimes
 
-> This page covers two layers: **P1**, the pure manifest + helper layer
-> (no Docker), and **P2**, the Docker-backed supervisor + REST surface that runs
-> the prepared inputs. P1 is documented first; jump to
+> This page covers three layers: **P1**, the pure manifest + helper layer
+> (no Docker); **P2**, the Docker-backed supervisor + REST surface that runs
+> the prepared inputs; and **P3**, the deployment-mode / consent / lifecycle
+> wiring that decides *when* a runtime starts and links it to a provider. P1 is
+> documented first; jump to
 > [P2 — the Docker-backed supervisor + REST](#p2--the-docker-backed-supervisor--rest)
-> for lifecycle, routes, and command discipline.
+> for lifecycle, routes, and command discipline, or to
+> [P3 — deployment modes, consent & lifecycle](#p3--deployment-modes-consent--lifecycle)
+> for modes, explicit-consent start, disable/uninstall/purge, and `ctx.runtime`
+> injection.
 
 Bobbit packs can ship **managed runtimes**: a declarative description of a
 containerised service stack (images, env, secrets, ports, launch modes) that
@@ -607,9 +612,262 @@ Coverage:
   injected fake supervisor: list with round-trippable ids, start/stop/restart,
   logs with tail clamping, and the 400/404 error mappings.
 
+## P3 — deployment modes, consent & lifecycle
+
+P1 prepares inputs and P2 runs them, but neither answers two product questions:
+*when* may Bobbit start a container on the user's machine, and *how* does the
+memory provider reach the managed stack once it is up? **P3 wires the runtime to
+the Hindsight memory provider, gates every start behind explicit user consent,
+and defines the disable / uninstall / purge semantics.** It is the layer that
+turns the raw supervisor into a safe, opt-in managed deployment.
+
+The governing principle is **explicit consent**: an installed or enabled pack
+must *never* spin up Docker on its own — not on boot, install, update, or any
+read. A container starts only from a deliberate user action. This matters
+because a managed runtime pulls images, binds host ports, and writes to a host
+data directory; doing any of that implicitly (e.g. just because a first-party
+pack ships enabled by default) would be a surprising, resource-consuming side
+effect the user never asked for.
+
+### Deployment modes
+
+The Hindsight memory provider exposes a single `mode` config field
+(`market-packs/hindsight/providers/memory.yaml`) with three **deployment
+modes**. These are distinct from the runtime manifest's **launch modes**
+(`managed-postgres` / `external-postgres`); P3 maps one onto the other so the
+provider config is the single user-facing knob.
+
+| Deployment mode (`config.mode`) | What Bobbit runs | Runtime launch mode | Docker? |
+|---|---|---|---|
+| `external` (default) | nothing — points at a Hindsight you already host | — | No |
+| `managed` | Hindsight API + web **+ Postgres** | `managed-postgres` | Yes |
+| `managed-external-postgres` | Hindsight API + web only; DB is yours | `external-postgres` | Yes |
+
+- **`external`** — the unchanged, no-Docker data-plane path documented in
+  [hindsight-memory.md](hindsight-memory.md). The provider talks directly to
+  `externalUrl` with an optional `apiKey`, `namespace`, and `bank`. No runtime is
+  started; all managed side effects are skipped.
+- **`managed`** — Bobbit brings up the whole stack (`api`, `web`, `db`) with a
+  generated Postgres password and a host **bind mount** for the data dir
+  (default `~/.hindsight`, overridable via `dataDir`).
+- **`managed-external-postgres`** — Bobbit runs only `api` + `web` (the
+  `external-postgres` launch mode omits `db`) and injects the operator-supplied
+  `HINDSIGHT_API_DATABASE_URL` from the `externalDatabaseUrl` config secret.
+
+The deployment-mode → launch-mode mapping lives in `resolveRuntimeStartPlan`
+(`server.ts`), which also decides whether a start is even attempted:
+
+```text
+external                  → { start: false }            # no Docker
+managed                   → { start: true,  mode: managed-postgres }
+managed-external-postgres → { start: true,  mode: external-postgres }
+```
+
+`start: false` for `external` is what makes the external path a pure *setup*
+flow: disable, uninstall, and the consent card all branch on it to avoid forcing
+a managed compose invocation that an external setup never configured.
+
+### Activation policy — `startPolicy: on-enable`
+
+A runtime descriptor declares **when enabling it is allowed to start it** via
+`startPolicy` (parsed by `readRuntimeStartPolicy` in
+`src/server/runtimes/pack-runtime-supervisor.ts`):
+
+- **`manual`** (the default for any descriptor that omits the field, and the
+  only value a non-literal/garbage value resolves to) — the runtime *never*
+  starts implicitly. A user must call `POST /api/pack-runtimes/:id/start`.
+- **`on-enable`** — flipping the pack's marketplace activation toggle from
+  **disabled → enabled** counts as the explicit user start. This is the **only**
+  implicit-start trigger, and it still fires only for a managed deployment mode
+  (`plan.start === true`); an `external` enable starts nothing.
+
+The shipped Hindsight runtime sets `startPolicy: on-enable`. Crucially, boot,
+built-in pack discovery, install, update, `list`, and `status` must **never**
+`compose up`. This is pinned, not just asserted in prose:
+`tests/pack-runtime-supervisor.test.ts` ("no-auto-start (P3)") proves `status()`
+and `list()` issue zero `compose up`, and
+`tests/e2e/marketplace-runtime-activation.spec.ts` proves reads (GET
+pack-activation / GET pack-runtimes) and an `external`-mode enable issue no
+start.
+
+### `ctx.runtime` injection — linking the provider to the managed stack
+
+A provider links to a runtime descriptor via the `runtime:` key in its YAML
+(`providers/memory.yaml` → `runtime: hindsight`). For a **managed** deployment
+mode the host injects a `ctx.runtime` object into every provider hook so the
+provider knows where the managed API is listening:
+
+```ts
+ctx.runtime = {
+  baseUrl: "http://127.0.0.1:<apiHostPort>",  // loopback only
+  headers: { Authorization: "Bearer <apiKey>" } | {},
+  status: "running" | "starting" | "stopped" | "unhealthy" | "docker-unavailable",
+}
+```
+
+This is resolved by the `runtimeResolver` wired into the `LifecycleHub`
+(`server.ts`). It is **read-only with respect to Docker**: it calls the
+supervisor's `status` and the **pure** `capabilitySummary` to read the
+already-persisted API host port, and **never starts a container**. The resolver
+returns `undefined` when the mode is `external`, when no supervisor is present,
+or when the API port is not yet known — so a provider can ask for memory before
+the stack is up without triggering a start.
+
+Activation linkage closes the loop. External mode activates the provider via the
+`requiresConfig: [externalUrl]` gate (dormant until a URL is set); the two
+managed modes activate it via the `activeWhenConfig: { mode: [managed,
+managed-external-postgres] }` escape hatch, which bridges the provider regardless
+of `externalUrl`. The provider's own `isActive(cfg, ctx.runtime)` gate
+(`market-packs/hindsight/src/shared.ts`) then keeps every hook dormant — no
+client, no network — until `ctx.runtime.status` reports the managed stack is
+actually `running`. The provider **never** starts Docker itself.
+
+### Disable / uninstall / purge semantics
+
+The three teardown verbs differ deliberately in how much they remove, because a
+user's accrued memory lives in a host bind mount that must survive routine
+operations:
+
+| Action | Docker command | Bind-mounted data | Supervisor state (env/ports/secrets) |
+|---|---|---|---|
+| **Disable** (enabled → disabled toggle) | `compose stop` | Kept | Kept |
+| **Uninstall** (`down`, default) | `compose down` | **Kept** (bind mount is outside compose volumes) | Kept |
+| **Purge** (`down -v` + `removeState`) | `compose down -v` | **Kept** (bind mount is not a compose volume) | **Removed** |
+
+- **Disable** stops the containers but leaves the compose project, networks,
+  anonymous volumes, and all state in place, so re-enabling is fast and lossless.
+- **Uninstall** removes the project's containers + networks but **not** named or
+  anonymous compose volumes, and the bind-mounted Postgres data dir lives
+  *outside* compose-managed volumes entirely — so an uninstall → reinstall keeps
+  the user's memory.
+- **Purge** (`POST /api/marketplace/purge-runtime`, or the supervisor's
+  `down({ volumes: true, removeState: true })`) is the explicit destructive
+  path: `compose down -v` plus deletion of the supervisor's own bookkeeping (the
+  rendered `.env`, persisted generated secrets, and allocated host ports,
+  all namespaced by `packRuntimePersistKey`). Even purge **never** deletes the
+  bind-mounted data dir — that is the user's data, removed only by them.
+
+**External mode skips every managed side effect.** Because
+`resolveRuntimeStartPlan` returns `start: false` for `external`, disable and
+uninstall short-circuit before calling `stop` / `down`. Calling them would force
+the supervisor to resolve a *managed* invocation (which requires
+`HINDSIGHT_API_LLM_API_KEY`) that an external setup never configured, 502-ing the
+operation. Skipping keeps the external no-Docker path always operable.
+
+**Side effects run before activation is persisted.** In the marketplace
+activation `PUT`, the Docker start/stop runs *before* the new activation state is
+written, and a side effect that matters aborts the whole request without
+persisting — so Bobbit never records "enabled" while the container failed to come
+up, or "disabled" while a `stop` threw. A graceful `docker-unavailable` status is
+tolerated (nothing to start/stop on a Docker-less host; the provider is
+defensive), so it persists and is reported rather than treated as a hard failure.
+These branches are pinned across `tests/e2e/marketplace-runtime-activation.spec.ts`
+(enable-failure → 502 + no persist, stop-failure → 502, docker-unavailable
+tolerated, external disable/uninstall skip the side effect, managed uninstall
+tears down without volumes, purge runs `down -v` + state removal).
+
+### Secrets & config mapping
+
+Managed modes pull two extra fields off the provider config and map them onto the
+runtime's env (`resolveRuntimeStartPlan`):
+
+| Provider config key | Runtime env | Notes |
+|---|---|---|
+| `llmApiKey` | `HINDSIGHT_API_LLM_API_KEY` | The managed API's LLM key — the runtime's *only* user-configured secret. Required to start a managed mode; never used by the provider client itself. A value set directly in the global secret store under the same key also works (the direct value wins). |
+| `externalDatabaseUrl` | `HINDSIGHT_API_DATABASE_URL` | Operator Postgres URL for `managed-external-postgres`; unused in `external`/`managed`. |
+
+Both, plus `apiKey`, are **secrets** and are redacted on the `config` GET surface
+(`redactConfig` in `market-packs/hindsight/src/shared.ts`): the raw value is never
+echoed and collapses to a boolean — `apiKeySet`, `externalDatabaseUrlSet`,
+`llmApiKeySet`. The managed Postgres password (`HINDSIGHT_DB_PASSWORD`) and the
+API session secret (`HINDSIGHT_API_SECRET`) are **generated and persisted** by
+the supervisor, never user-supplied.
+
+The **data directory** (`dataDir`, default `~/.hindsight`) and the **allocated
+host ports** are *disclosed*, not secret — they are surfaced on the consent card
+below so the user sees exactly what will be bound and where data will be written.
+
+### Enable-card capability summary (consent disclosure, §8)
+
+Before the user consents to a start, the Market UI renders a **capability
+summary** from `GET /api/pack-runtimes/:id/capabilities` (the supervisor's
+`capabilitySummary`). It is **pure** — derived only from the validated manifest,
+the selected/effective deployment mode, and any *already-persisted* host ports —
+so it **never starts Docker and never allocates new ports or secrets**, making it
+safe to render pre-consent. It discloses, per design §8:
+
+- **Images / services** brought up for the selected mode (after `omitServices`).
+- **Host ports** that will be bound (with the persisted host port when known, or
+  "allocated on enable" otherwise — never a loopback URL on the container port).
+- **Volume path** — the effective managed-Postgres bind-mount path, reflecting a
+  custom `dataDir` exactly as activation will mount it (not a schema default).
+- **Start policy** (`on-enable` vs `manual`) and the **memory/trust disclosure**
+  copy (a first-party trust note explaining what is stored and that disable keeps
+  data while purge removes volumes + state).
+
+For **external** mode the route returns the descriptor/trust copy but **no**
+services/ports/volume and `dockerRequired: false`, so the UI shows no-Docker
+setup guidance instead of a Docker start disclosure. Coverage:
+`tests/marketplace-runtime-consent.spec.ts` (managed discloses
+services/ports/volume/trust; external shows setup guidance; missing summary falls
+back to static copy; master-toggle counts include the `runtimes` array).
+
+### `updatePack` and data survival
+
+Updating a managed pack must not cost the user their memory. `updatePack` swaps
+only the pack **contents** dir (atomic rename: stage → swap → drop), never the
+bind-mounted Postgres data dir nor the supervisor's runtime-state dir. So across
+a disable → `updatePack` → re-enable cycle the persisted host port, generated
+secrets, and Postgres data all survive, and a re-enable reuses them. The
+supervisor state subtree (`state/pack-runtimes/`) is additionally on the
+`GATEWAY_OWNED_FILES` archive allowlist (see P2) so the archiver never moves live
+runtime bookkeeping out from under a running container.
+
+### Manual Docker integration test
+
+Automated tests never touch Docker — `ctx.runtime` injection, the no-auto-start
+invariant, mode mapping, and consent disclosure are all driven against mocks. The
+full managed lifecycle against **real Docker** is verified manually by
+`tests/manual-integration/hindsight-runtime.test.ts`. It drives the real
+supervisor over the shipped manifest/compose through:
+
+```text
+enable (compose up, managed-postgres) → wait healthy → retain/recall round-trip
+  → disable (compose stop) → bind data survives → updatePack → state + data survive
+  → re-enable → recall still finds the marker
+```
+
+It isolates everything under a per-run temp dir (rendered env, generated secrets,
+allocated ports, the Postgres bind dir) with a unique bank/namespace/marker, and
+tears down (`down -v` + `rm`) in `finally` — so it never touches the user's
+`~/.hindsight` or the production `bobbit` bank. It **skips cleanly** (never fails)
+when Docker is unavailable, when `HINDSIGHT_API_LLM_API_KEY` is unset, or when the
+digest-pinned images are not pullable — keeping the manual suite green everywhere
+while doing real work only where a managed Hindsight can actually start.
+
+```bash
+HINDSIGHT_API_LLM_API_KEY=<key> npm run build \
+  && node --import tsx --test tests/manual-integration/hindsight-runtime.test.ts
+```
+
+### P3 REST surface
+
+Beyond the P2 routes above, P3 adds (admin-bearer only):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/pack-runtimes/:id/capabilities?projectId=&mode=` | GET | Pure pre-start consent disclosure. Deployment-mode aware; `external` ⇒ `dockerRequired: false` + empty services/ports. |
+| `/api/pack-runtimes/:id/down` | POST | `compose down`. Body `{ volumes?, removeState? }`: default preserves bind data (uninstall primitive); `volumes:true + removeState:true` is purge. |
+| `/api/marketplace/purge-runtime` | POST | `{ packName, scope, runtimeId, projectId? }` → `down -v` + state removal. |
+| `PUT /api/marketplace/pack-activation` | PUT | Toggling an `on-enable` runtime's pack disabled→enabled starts it (managed modes only); enabled→disabled stops it. Side effects run before persistence; a real failure → **502** with the prior activation so the UI reverts the toggle. |
+
 ## Related
 
 - [marketplace.md](marketplace.md) — packs, `contents`, activation, precedence.
+- [hindsight-memory.md](hindsight-memory.md) — the memory provider this runtime
+  backs: deployment modes, config keys, dormancy, and the provider lifecycle.
+- [lifecycle-hub.md](lifecycle-hub.md) — the hub that injects `ctx.runtime` and
+  dispatches the provider hooks.
 - [extension-host-authoring.md](extension-host-authoring.md) — the sibling
   contribution kinds (entrypoints, panels, routes) whose loader patterns the
   runtime loader follows.

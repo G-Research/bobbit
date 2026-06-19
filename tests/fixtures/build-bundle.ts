@@ -82,7 +82,8 @@ export function buildBundle(opts: BuildBundleOptions): void {
 		return;
 	}
 
-	fs.mkdirSync(path.dirname(outfile), { recursive: true });
+	const outDir = path.dirname(outfile);
+	fs.mkdirSync(outDir, { recursive: true });
 
 	const lockDir = `${outfile}.lock`;
 	const start = Date.now();
@@ -92,6 +93,13 @@ export function buildBundle(opts: BuildBundleOptions): void {
 			fs.mkdirSync(lockDir);
 			break; // acquired the lock
 		} catch (err: any) {
+			if (err.code === "ENOENT") {
+				// Playwright may delete test-results between our parent mkdir and
+				// lock acquisition. Recreate the parent and retry the same atomic
+				// mkdir lock; do not fall back to a non-atomic check-then-create.
+				fs.mkdirSync(outDir, { recursive: true });
+				continue;
+			}
 			if (err.code !== "EEXIST") throw err;
 			// Another worker holds the lock. If it's stale (process crashed),
 			// force-release.

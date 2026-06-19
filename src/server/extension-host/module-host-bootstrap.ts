@@ -121,6 +121,10 @@ interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
 	tool: string;
+	/** The calling session's project id (when resolvable) so a route handler can
+	 *  scope to the real project instead of fabricating one. Absent for
+	 *  global/server-scope sessions. Serialized by `module-host-worker.ts`. */
+	projectId?: string;
 	workingDir?: string;
 	hostVersion?: number;
 	hostContractVersion?: number;
@@ -483,6 +487,9 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				sessionId: msg.ctx.sessionId,
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
+				// Plumb the serialized projectId so route handlers (e.g. Hindsight
+				// project-scoped recall) scope to the real project rather than dropping it.
+				projectId: msg.ctx.projectId,
 				workingDir: msg.ctx.workingDir,
 			};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);

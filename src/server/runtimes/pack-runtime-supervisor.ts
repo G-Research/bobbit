@@ -30,6 +30,7 @@ import {
 	generateSecretValue,
 	allocateHostPort,
 	probeFreePort,
+	substitutePlaceholders,
 	type RuntimeInvocation,
 	type RuntimeResolveContext,
 	type SecretLike,
@@ -69,6 +70,58 @@ export interface PackRuntimeStatus extends PackRuntimeDescriptor {
 	composeProject: string;
 	services?: PackRuntimeServiceStatus[];
 	message?: string;
+}
+
+/**
+ * Start policy for a managed runtime (P3 — consent/activation layer).
+ *
+ * - `manual`   : the runtime NEVER starts implicitly. A user must explicitly
+ *                start it (runtime UI / `POST /api/pack-runtimes/:id/start`).
+ * - `on-enable`: enabling the runtime via the marketplace pack-activation toggle
+ *                IS the explicit user start action — and the ONLY implicit-start
+ *                trigger. Boot, install, update, list and status must still never
+ *                bring the runtime up.
+ *
+ * Existing descriptors with no declared policy default to `manual` (no
+ * auto-start), preserving the P2 behaviour.
+ */
+export type PackRuntimeStartPolicy = "manual" | "on-enable";
+
+/** One declared host port in a {@link PackRuntimeCapabilitySummary}. */
+export interface PackRuntimeCapabilityPort {
+	/** Manifest persistence/env key (e.g. HINDSIGHT_API_PORT). */
+	key: string;
+	/** Env var name the chosen host port is exposed under, when declared. */
+	env?: string;
+	/** Informational container-side port. */
+	container?: number;
+	/** Allocated/persisted host port when one is already known (never allocates). */
+	host?: number;
+}
+
+/**
+ * Pre-start consent disclosure for a managed runtime (P3 §8). Derived purely
+ * from the validated manifest + selected mode + already-persisted ports — it
+ * NEVER touches Docker and NEVER allocates new ports/secrets, so it is safe to
+ * render before the user has consented to a start.
+ */
+export interface PackRuntimeCapabilitySummary extends PackRuntimeDescriptor {
+	/** Selected (or default) runtime mode the summary describes. */
+	mode: string;
+	/** Whether enabling this runtime starts it (`on-enable`) or not (`manual`). */
+	startPolicy: PackRuntimeStartPolicy;
+	/** Collision-guarded compose project name. */
+	composeProject: string;
+	/** Compose services started for the selected mode (after `omitServices`). */
+	services: string[];
+	/** Service/image names disclosed to the user (currently the service list). */
+	images: string[];
+	/** Declared host ports + their persisted host assignment when known. */
+	ports: PackRuntimeCapabilityPort[];
+	/** Effective data/volume path for managed data (e.g. ~/.hindsight). */
+	volumePath?: string;
+	/** First-party memory/trust disclosure copy. */
+	trust: string;
 }
 
 /** Options/result shapes for the injectable Docker executor. */
@@ -204,6 +257,17 @@ export class FilePortStore implements PortStore {
 
 	set(key: string, value: number): void {
 		this.data[key] = value;
+		this._persist();
+	}
+
+	/** Drop a persisted port assignment (purge path). Best-effort persistence. */
+	remove(key: string): void {
+		if (!(key in this.data)) return;
+		delete this.data[key];
+		this._persist();
+	}
+
+	private _persist(): void {
 		try {
 			fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
 			fs.writeFileSync(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf-8");
@@ -211,6 +275,16 @@ export class FilePortStore implements PortStore {
 			/* best effort */
 		}
 	}
+}
+
+/**
+ * Read a runtime's declared {@link PackRuntimeStartPolicy} from its RAW manifest
+ * object (the un-validated `RuntimeContribution.manifest`). Anything other than
+ * the literal `"on-enable"` — including an absent field — resolves to `manual`,
+ * so existing descriptors keep their no-auto-start P2 behaviour.
+ */
+export function readRuntimeStartPolicy(manifest: Record<string, unknown> | undefined): PackRuntimeStartPolicy {
+	return manifest?.startPolicy === "on-enable" ? "on-enable" : "manual";
 }
 
 // ── Id encoding (URL-safe, reversible) ───────────────────────────────────────
@@ -469,7 +543,7 @@ export class PackRuntimeSupervisor {
 	async start(
 		packId: string,
 		runtimeId: string,
-		opts: { projectId?: string; mode?: string } = {},
+		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> } = {},
 	): Promise<PackRuntimeStatus> {
 		return this._startDeduped(packId, runtimeId, opts);
 	}
@@ -502,7 +576,7 @@ export class PackRuntimeSupervisor {
 	async restart(
 		packId: string,
 		runtimeId: string,
-		opts: { projectId?: string; mode?: string } = {},
+		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> } = {},
 	): Promise<PackRuntimeStatus> {
 		await this.stop(packId, runtimeId, { projectId: opts.projectId });
 		return this.start(packId, runtimeId, opts);
@@ -535,7 +609,218 @@ export class PackRuntimeSupervisor {
 		}
 	}
 
+	/**
+	 * Tear a runtime down (`docker compose down`). Unlike {@link stop} (which
+	 * `compose stop`s the runtime's services but leaves the compose project,
+	 * networks and ANONYMOUS volumes in place), `down` removes the project's
+	 * containers + networks. It is the uninstall/purge primitive:
+	 *
+	 * - `volumes: false` (default) — `compose down`. Bind-mounted data (e.g. the
+	 *   managed Postgres data dir) is OUTSIDE compose-managed volumes and SURVIVES,
+	 *   so an uninstall→reinstall keeps the user's memory. This is the uninstall path.
+	 * - `volumes: true` — `compose down -v`. Removes named/anonymous compose volumes
+	 *   too. The explicit PURGE path.
+	 * - `removeState: true` — additionally delete supervisor-owned local runtime
+	 *   state (rendered env file + persisted generated secrets + allocated ports).
+	 *   Bind-mounted DATA is never deleted here.
+	 *
+	 * A missing Docker install surfaces as a `docker-unavailable` status (never a
+	 * throw) so an uninstall on a Docker-less host still proceeds; local state
+	 * removal still runs when requested.
+	 */
+	async down(
+		packId: string,
+		runtimeId: string,
+		opts: { projectId?: string; volumes?: boolean; removeState?: boolean } = {},
+	): Promise<PackRuntimeStatus> {
+		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
+		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
+		const composeProject = this.composeProjectFor(packId);
+		const { target } = await this._composeContext(packId, runtimeId, contribution);
+		const downArgs = this._composeArgs(target, "down", ...(opts.volumes ? ["-v"] : []));
+		try {
+			await this._exec(downArgs);
+		} catch (err) {
+			if (isEnoent(err)) {
+				// Docker is unavailable — local state removal is still meaningful (the
+				// rendered env / persisted ports/secrets live on the host FS).
+				if (opts.removeState) this._removeRuntimeState(packId, runtimeId, contribution, composeProject);
+				return { ...descriptor, status: "docker-unavailable", composeProject, message: "docker is not available" };
+			}
+			throw err;
+		}
+		if (opts.removeState) this._removeRuntimeState(packId, runtimeId, contribution, composeProject);
+		// `compose down` removed the project's containers — the runtime is stopped.
+		return { ...descriptor, status: "stopped", composeProject };
+	}
+
+	/**
+	 * Pre-start consent disclosure (P3 §8). PURE w.r.t. Docker — derived only from
+	 * the validated manifest, the selected mode, and any ALREADY-persisted host
+	 * ports (never allocates). Safe to render before the user consents to a start.
+	 */
+	async capabilitySummary(
+		packId: string,
+		runtimeId: string,
+		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> } = {},
+	): Promise<PackRuntimeCapabilitySummary> {
+		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
+		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
+		const manifest = this._resolveManifest(contribution);
+		const modeKeys = Object.keys(manifest.modes ?? {});
+		if (opts.mode !== undefined && !manifest.modes?.[opts.mode]) {
+			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} has no mode ${JSON.stringify(opts.mode)}`);
+		}
+		const modeKey = opts.mode ?? modeKeys[0];
+		if (!modeKey) {
+			throw new PackRuntimeBadRequestError(`runtime ${contribution.id} declares no modes`);
+		}
+		const modeSpec = manifest.modes![modeKey];
+		const omit = new Set(modeSpec.omitServices ?? []);
+		const services = (modeSpec.services ?? []).filter((s) => !omit.has(s));
+		const ports: PackRuntimeCapabilityPort[] = (manifest.ports ?? []).map((spec) => {
+			const p: PackRuntimeCapabilityPort = { key: spec.key };
+			if (spec.env) p.env = spec.env;
+			if (typeof spec.container === "number") p.container = spec.container;
+			// Disclose the persisted host port WITHOUT allocating a new one.
+			const host = this.portStore?.get(packRuntimePersistKey(packId, runtimeId, spec.key));
+			if (typeof host === "number" && Number.isInteger(host)) p.host = host;
+			return p;
+		});
+		const volumePath = this._resolveVolumePath(manifest, modeSpec, opts.config);
+		return {
+			...descriptor,
+			mode: modeKey,
+			startPolicy: readRuntimeStartPolicy(contribution.manifest),
+			composeProject: this.composeProjectFor(packId),
+			services,
+			images: [...services],
+			ports,
+			...(volumePath ? { volumePath } : {}),
+			trust:
+				"Enabling this managed runtime lets Bobbit store and recall agent memory " +
+				"(conversation summaries and project/goal/session tags) in the configured bank. " +
+				"Disabling stops the containers but keeps the data on disk; purge removes Docker " +
+				"volumes and supervisor-owned runtime state.",
+		};
+	}
+
+	/** The runtime's declared start policy (defaults to `manual`). No Docker. */
+	startPolicyFor(packId: string, runtimeId: string, projectId?: string): PackRuntimeStartPolicy {
+		const { contribution } = this._lookup(packId, runtimeId, projectId);
+		return readRuntimeStartPolicy(contribution.manifest);
+	}
+
 	// ── internals ────────────────────────────────────────────────────────────
+
+	/**
+	 * Best-effort resolution of the managed data/volume path for the consent
+	 * disclosure. Scans the merged (manifest + mode) env for a literal `value` ref
+	 * whose env NAME ends in `_DATA_DIR`, substituting any config-overlay vars so a
+	 * `${dataDir:-~/.hindsight}` default resolves. Falls back to a configured
+	 * `dataDir`. PURE.
+	 */
+	private _resolveVolumePath(
+		manifest: RuntimeManifest,
+		modeSpec: { env?: Record<string, unknown> },
+		configOverlay?: Record<string, unknown>,
+	): string | undefined {
+		const vars: Record<string, string> = {};
+		if (configOverlay) {
+			for (const [k, v] of Object.entries(configOverlay)) {
+				if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") vars[k] = String(v);
+			}
+		}
+		const merged: Record<string, unknown> = { ...(manifest.env ?? {}), ...(modeSpec.env ?? {}) };
+		for (const [name, value] of Object.entries(merged)) {
+			if (!/_DATA_DIR$/.test(name)) continue;
+			const raw =
+				typeof value === "string"
+					? value
+					: value && typeof value === "object" && typeof (value as { value?: unknown }).value === "string"
+						? (value as { value: string }).value
+						: undefined;
+			if (raw === undefined) continue;
+			const resolved = substitutePlaceholders(raw, vars);
+			if (resolved) return resolved;
+		}
+		const dataDir = configOverlay?.dataDir;
+		return typeof dataDir === "string" && dataDir.length > 0 ? dataDir : undefined;
+	}
+
+	/**
+	 * Delete supervisor-owned LOCAL runtime state for a purge: the rendered env
+	 * file (and the compose-project env dir when it becomes empty), persisted
+	 * generated secrets, and allocated host ports — all namespaced by
+	 * {@link packRuntimePersistKey}. Bind-mounted DATA (e.g. HINDSIGHT_DATA_DIR) is
+	 * NEVER touched here; only the supervisor's own bookkeeping. Best-effort.
+	 */
+	private _removeRuntimeState(
+		packId: string,
+		runtimeId: string,
+		contribution: RuntimeContribution,
+		composeProject: string,
+	): void {
+		// 1. Rendered .env file + persisted config sidecar + the (now-empty) dir.
+		try {
+			fs.rmSync(this._envFilePath(composeProject, runtimeId), { force: true });
+		} catch {
+			/* best effort */
+		}
+		try {
+			fs.rmSync(this._runtimeConfigPath(composeProject, runtimeId), { force: true });
+		} catch {
+			/* best effort */
+		}
+		try {
+			const dir = path.join(this.runtimeDataDir, composeProject);
+			if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+		} catch {
+			/* best effort */
+		}
+
+		// 2. Persisted generated secrets + allocated ports. Compute the keys from the
+		//    manifest (same collection logic as `_resolveContext`) and drop their
+		//    namespaced persistence slots. Structural `remove` calls keep us decoupled
+		//    from the concrete SecretsStore / FilePortStore types.
+		let manifest: RuntimeManifest | null = null;
+		try {
+			manifest = this._resolveManifest(contribution);
+		} catch {
+			manifest = null;
+		}
+		if (!manifest) return;
+		const generatedKeys = new Set<string>();
+		const portKeys = new Set<string>();
+		for (const spec of manifest.secrets ?? []) {
+			if (spec.generate) generatedKeys.add(spec.key);
+		}
+		for (const spec of manifest.ports ?? []) portKeys.add(spec.key);
+		const envMaps = [manifest.env, ...Object.values(manifest.modes ?? {}).map((m) => m.env)];
+		for (const env of envMaps) {
+			for (const value of Object.values(env ?? {})) {
+				if (!value || typeof value !== "object") continue;
+				if (typeof value.generate === "string") generatedKeys.add(value.generate);
+				if (typeof value.port === "string") portKeys.add(value.port);
+			}
+		}
+		const secretsRemover = this.secretsStore as unknown as { remove?: (key: string) => void } | undefined;
+		for (const key of generatedKeys) {
+			try {
+				secretsRemover?.remove?.(packRuntimePersistKey(packId, runtimeId, key));
+			} catch {
+				/* best effort */
+			}
+		}
+		const portRemover = this.portStore as unknown as { remove?: (key: string) => void } | undefined;
+		for (const key of portKeys) {
+			try {
+				portRemover?.remove?.(packRuntimePersistKey(packId, runtimeId, key));
+			} catch {
+				/* best effort */
+			}
+		}
+	}
 
 	/**
 	 * Dedupe key for an in-flight start. The selected `mode` is part of the key so
@@ -551,7 +836,7 @@ export class PackRuntimeSupervisor {
 	private _startDeduped(
 		packId: string,
 		runtimeId: string,
-		opts: { projectId?: string; mode?: string },
+		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> },
 	): Promise<PackRuntimeStatus> {
 		const key = this._runtimeKey(packId, runtimeId, opts.projectId, opts.mode);
 		const inFlight = this._startInFlight.get(key);
@@ -568,16 +853,24 @@ export class PackRuntimeSupervisor {
 	private async _doStart(
 		packId: string,
 		runtimeId: string,
-		opts: { projectId?: string; mode?: string },
+		opts: { projectId?: string; mode?: string; config?: Record<string, unknown> },
 	): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
 
-		const { invocation, modeKey } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode);
+		const { invocation, modeKey } = await this._buildInvocation(packId, runtimeId, contribution, envFile, opts.mode, {
+			configOverlay: opts.config,
+		});
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
+		// Persist the effective mode + config overlay used for THIS start so later
+		// read/control commands (status/stop/logs/down) can rebuild the SAME compose
+		// env. Without this, a runtime started with config-only secrets/placeholders
+		// (e.g. an LLM key or external DB URL supplied via deployment config, not the
+		// global secret store) would fail to re-resolve its env on control/teardown.
+		this._persistRuntimeConfig(composeProject, runtimeId, modeKey, opts.config);
 
 		const target: ComposeTarget = {
 			composeProject,
@@ -753,6 +1046,58 @@ export class PackRuntimeSupervisor {
 		return path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.env`);
 	}
 
+	/**
+	 * Sidecar path persisting the effective mode + config overlay used at start.
+	 * Lives beside the rendered `.env` file (one per compose project) and is
+	 * removed by the purge path ({@link _removeRuntimeState}).
+	 */
+	private _runtimeConfigPath(composeProject: string, runtimeId: string): string {
+		return path.join(this.runtimeDataDir, composeProject, `${sanitizeComposeToken(runtimeId)}.config.json`);
+	}
+
+	/**
+	 * Persist the effective start `mode` + config overlay (0600, same posture as the
+	 * rendered env file) so later read/control commands rebuild the SAME compose env.
+	 * Best-effort: a write failure degrades to the prior no-overlay behaviour rather
+	 * than failing the start.
+	 */
+	private _persistRuntimeConfig(
+		composeProject: string,
+		runtimeId: string,
+		mode: string,
+		config?: Record<string, unknown>,
+	): void {
+		try {
+			const file = this._runtimeConfigPath(composeProject, runtimeId);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, `${JSON.stringify({ mode, config: config ?? {} })}\n`, { mode: 0o600 });
+			fs.chmodSync(file, 0o600);
+		} catch {
+			/* best effort — control commands fall back to no overlay */
+		}
+	}
+
+	/** Load the persisted start mode + config overlay (best-effort; `{}` on miss). */
+	private _loadRuntimeConfig(
+		composeProject: string,
+		runtimeId: string,
+	): { mode?: string; config?: Record<string, unknown> } {
+		try {
+			const file = this._runtimeConfigPath(composeProject, runtimeId);
+			if (!fs.existsSync(file)) return {};
+			const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+			const out: { mode?: string; config?: Record<string, unknown> } = {};
+			if (typeof raw.mode === "string" && raw.mode.length > 0) out.mode = raw.mode;
+			if (raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)) {
+				out.config = raw.config as Record<string, unknown>;
+			}
+			return out;
+		} catch {
+			return {};
+		}
+	}
+
 	/** Base `docker compose` args carrying the project + `-f`/`--env-file`. */
 	private _composeArgs(target: ComposeTarget, ...rest: string[]): string[] {
 		return [
@@ -785,14 +1130,31 @@ export class PackRuntimeSupervisor {
 	): Promise<{ target: ComposeTarget; services: string[] }> {
 		const composeProject = this.composeProjectFor(packId);
 		const envFile = this._envFilePath(composeProject, runtimeId);
+		// Reuse the mode + config overlay persisted at start so read/control commands
+		// rebuild the SAME compose env: config-only secrets/placeholders (LLM key,
+		// external DB URL, dataDir) re-resolve instead of throwing on teardown. A
+		// persisted mode that no longer exists after an updatePack falls back to the
+		// default mode.
+		const persisted = this._loadRuntimeConfig(composeProject, runtimeId);
+		let mode = persisted.mode;
+		if (mode) {
+			let modes: Record<string, unknown> | undefined;
+			try {
+				modes = this._resolveManifest(contribution).modes as Record<string, unknown> | undefined;
+			} catch {
+				modes = undefined;
+			}
+			if (!modes || !modes[mode]) mode = undefined;
+		}
 		// Read/control paths MUST reuse persisted port allocations as-is. While the
 		// runtime is running its host ports are bound, so a revalidating allocation
 		// (`allocateHostPort`) would find them un-bindable, rotate to fresh ports, and
 		// rewrite ports.json + the env file — desyncing the persisted port from the
 		// live container and breaking the NEXT restart. `reusePersisted: true` keeps
 		// the stored port without a bindability probe.
-		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, undefined, {
+		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, mode, {
 			reusePersisted: true,
+			configOverlay: persisted.config,
 		});
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
 		return {
@@ -818,7 +1180,7 @@ export class PackRuntimeSupervisor {
 		runtimeId: string,
 		manifest: RuntimeManifest,
 		contribution: RuntimeContribution,
-		opts: { reusePersisted?: boolean } = {},
+		opts: { reusePersisted?: boolean; configOverlay?: Record<string, unknown> } = {},
 	): Promise<RuntimeResolveContext> {
 		if (this.buildContext) return this.buildContext(manifest, contribution);
 
@@ -878,7 +1240,32 @@ export class PackRuntimeSupervisor {
 			}
 			ports[key] = await allocateHostPort(this.portStore, storeKey);
 		}
-		return { secrets, generated, ports };
+
+		// Configuration overlay (P3): the effective pack/provider config (e.g. the
+		// Hindsight deployment config — dataDir, externalDatabaseUrl, …) is mapped
+		// GENERICALLY onto the resolve context. Every scalar config entry is exposed
+		// as a placeholder var under its own key (so a literal env `value` ref like
+		// `${dataDir:-~/.hindsight}` resolves), AND, when a USER-configured secret
+		// ref's key is unresolved by the secret store, a config value of the same
+		// key fills it (so `secret: HINDSIGHT_API_DATABASE_URL` can be satisfied from
+		// config without persisting it to the global secret store). Generated secrets
+		// and allocated ports are never overridden by config.
+		const vars: Record<string, string> = {};
+		if (opts.configOverlay) {
+			for (const [k, v] of Object.entries(opts.configOverlay)) {
+				if (v === undefined || v === null) continue;
+				if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+					vars[k] = String(v);
+				}
+			}
+			for (const key of userSecretKeys) {
+				if (generatedKeys.has(key)) continue;
+				if (secrets[key] !== undefined) continue;
+				const v = opts.configOverlay[key];
+				if (typeof v === "string" && v.length > 0) secrets[key] = v;
+			}
+		}
+		return { secrets, generated, ports, vars };
 	}
 
 	private async _buildInvocation(
@@ -887,7 +1274,7 @@ export class PackRuntimeSupervisor {
 		contribution: RuntimeContribution,
 		envFile: string,
 		mode?: string,
-		opts: { reusePersisted?: boolean } = {},
+		opts: { reusePersisted?: boolean; configOverlay?: Record<string, unknown> } = {},
 	): Promise<{ manifest: RuntimeManifest; modeKey: string; invocation: RuntimeInvocation }> {
 		const manifest = this._resolveManifest(contribution);
 		const modeKeys = Object.keys(manifest.modes ?? {});

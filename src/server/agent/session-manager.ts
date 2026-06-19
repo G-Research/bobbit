@@ -49,7 +49,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -62,6 +62,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
+import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -322,7 +323,9 @@ export interface SessionInfo {
 		seq: number;
 		ts: number;
 	};
-	/** Tools granted via "one-time" mode — revoked on agent_end */
+	/** Tools granted via "session-only" mode — re-applied across Refresh agent, not persisted to disk. */
+	sessionOnlyGrantedTools?: string[];
+	/** Tools granted via "one-time" mode — re-applied across Refresh agent and revoked on agent_end. */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
 	setupComplete?: boolean;
@@ -1485,12 +1488,18 @@ export class SessionManager {
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
 		if (opts?.sandboxBranch) {
-			const worktreePath = await sandbox.createWorktree(
-				opts.sandboxBranch,
-				opts.sandboxBranch,
-				opts.sandboxBaseBranch,
-			);
-			bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+			try {
+				const worktreePath = await sandbox.createWorktree(
+					opts.sandboxBranch,
+					opts.sandboxBranch,
+					opts.sandboxBaseBranch,
+				);
+				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+			} catch (err) {
+				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
+				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);
+				bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts.sandboxCwdOffset);
+			}
 		} else if (!isSandboxContainerPath(bridgeOptions.cwd)) {
 			// Regular no-worktree sessions run from the project clone in /workspace.
 			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
@@ -1505,9 +1514,11 @@ export class SessionManager {
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
+		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
+			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
 			scope: opts?.projectId,
 		});
 
@@ -1736,6 +1747,18 @@ export class SessionManager {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
 		}
 		return [];
+	}
+
+	private mergeToolNames(existing: string[] | undefined, additions: string[] | undefined): string[] | undefined {
+		const merged: string[] = [];
+		const seen = new Set<string>();
+		for (const name of [...(existing ?? []), ...(additions ?? [])]) {
+			const key = name.toLowerCase();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			merged.push(name);
+		}
+		return merged.length > 0 ? merged : undefined;
 	}
 
 	private buildToolActivationArgs(
@@ -3105,7 +3128,7 @@ export class SessionManager {
 	 *
 	 * @param mode - Grant persistence mode:
 	 *   - "persistent" (default): updates role YAML permanently
-	 *   - "session-only": adds to session.allowedTools in memory only (survives until session ends/restarts)
+	 *   - "session-only": adds to session.allowedTools in memory only (survives Refresh agent, not gateway restart)
 	 *   - "one-time": adds to session.allowedTools + tracks for revocation on agent_end
 	 */
 	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: "persistent" | "session-only" | "one-time"): Promise<string[]> {
@@ -3163,13 +3186,14 @@ export class SessionManager {
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
-			session.oneTimeGrantedTools = [...(session.oneTimeGrantedTools || []), ...newTools];
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
+			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
@@ -3266,6 +3290,28 @@ export class SessionManager {
 		pending.resolve({ granted: false });
 	}
 
+	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0
+			? ps.allowedTools
+			: undefined;
+		const sessionGrants = this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools);
+
+		// Persisted allow-lists are true session-scoped constraints (delegate/read-only
+		// children, explicit createSession overrides). Preserve them exactly, with any
+		// live grants layered on top.
+		if (persistedAllowedTools) {
+			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
+		}
+
+		// Normal sessions derive their tool surface from the current role/group/MCP
+		// policy cascade. Only one-time/session-only grants are carried across the
+		// respawn; the old live session.allowedTools is just a stale cache.
+		if (!sessionGrants) return undefined;
+		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
+		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole).map(t => t.name);
+		return this.mergeToolNames(recomputedAllowed, sessionGrants);
+	}
+
 	/**
 	 * Restart a session's agent process so it picks up updated role/tools.
 	 * Stops the current agent, then restores from the persisted session file
@@ -3276,19 +3322,18 @@ export class SessionManager {
 		if (!ps) return;
 
 		// Save in-memory grant state that restoreSession doesn't persist.
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
-				// restoreSession normally derives allowedTools from role YAML; session-only
-				// and one-time grants need the augmented list to round-trip.
-				(p as any)._overrideAllowedTools = savedAllowedTools;
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
 			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		}
 	}
@@ -3397,15 +3442,18 @@ export class SessionManager {
 			throw zombieErr;
 		}
 
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
-			mutatePs: p => { (p as any)._overrideAllowedTools = savedAllowedTools; },
+			mutatePs: p => {
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		} else {
 			throw new Error("Failed to restore session after restart");
@@ -4862,12 +4910,14 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				// Skip models that can't run in an agent session (e.g. google-gemini-cli
+				// Code Assist) so a role override doesn't pin an unrunnable provider.
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4917,11 +4967,11 @@ export class SessionManager {
 		if (role && this.configCascade) {
 			try {
 				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 			} catch { /* fall through */ }
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -4935,7 +4985,12 @@ export class SessionManager {
 		// matching the contract used for review/QA sessions: if a user explicitly
 		// pinned a model on a role and it cannot be bound, surface the failure.
 		const roleModel = this.resolveRoleModel(session);
-		if (roleModel) {
+		if (roleModel && !isSessionSelectableModelString(roleModel)) {
+			// A role pinned a model that can't run in an agent session (e.g.
+			// google-gemini-cli Code Assist). Binding it would hard-fail the session,
+			// so skip it and fall through to the default/aigw selection instead.
+			console.warn(`[session-manager] Role model "${roleModel}" is not session-selectable for ${session.id} (role=${session.role}); skipping role override.`);
+		} else if (roleModel) {
 			try {
 				await applyModelString(session.rpcClient, roleModel, {
 					sessionManager: this,
@@ -4964,7 +5019,12 @@ export class SessionManager {
 
 		// Check explicit preference first (works for both aigw and public providers)
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref) {
+		if (sessionModelPref && !isSessionSelectableModelString(sessionModelPref)) {
+			// A stale/restored preference points at a not-session-runnable model
+			// (e.g. google-gemini-cli Code Assist). Skip it and fall through to aigw
+			// auto-selection rather than attempting an unrunnable bind.
+			console.warn(`[session-manager] default.sessionModel "${sessionModelPref}" is not session-selectable for ${session.id}; falling back.`);
+		} else if (sessionModelPref) {
 			const slash = sessionModelPref.indexOf("/");
 			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);
@@ -7066,7 +7126,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

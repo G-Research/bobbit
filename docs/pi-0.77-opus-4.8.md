@@ -119,9 +119,10 @@ The generated auth file follows sandbox token policy:
 
 - if `sandbox_tokens` is unset, Bobbit preserves the legacy permissive fallback and may include Codex auth;
 - if `sandbox_tokens` is set, Codex auth is included only when an enabled `OPENAI_CODEX_AUTH` or `OPENAI_API_KEY` entry is present;
-- when policy denies Codex auth, the mounted file is `{}` so Pi sees an expected auth path but no secret.
+- Google OAuth auth is stricter: it is included only when policy explicitly enables `GOOGLE_CLOUD_ACCESS_TOKEN`, even when `sandbox_tokens` is unset;
+- when policy denies an auth entry, the mounted file is `{}` so Pi sees an expected auth path but no secret.
 
-When Codex auth is allowed, preference-backed credentials win first: `providerKey.openai-codex` becomes an `openai-codex` API-key entry. If no preference key is set, Bobbit copies a sanitized host `openai-codex` credential from auth.json, then falls back to legacy ChatGPT OAuth stored under `openai`. Only the credential fields Pi needs are copied (`type`, API key, OAuth access, refresh, and expires).
+When Codex auth is allowed, preference-backed credentials win first: `providerKey.openai-codex` becomes an `openai-codex` API-key entry. If no preference key is set, Bobbit copies a sanitized host `openai-codex` credential from auth.json, then falls back to legacy ChatGPT OAuth stored under `openai`. Only the credential fields Pi needs are copied (`type`, API key, OAuth access, refresh, and expires). Google OAuth follows the separate `google-gemini-cli` sandbox propagation path described in [Google OAuth & Gemini models](google-oauth-models.md#token--sandbox-propagation-high-level).
 
 ## Transcript compatibility: `active_tools_change`
 

@@ -202,7 +202,8 @@ export class StaffManager {
 		// sub-repos) resolves `supported:true`, `repoPath = projectRoot`,
 		// `multiRepo:true` — identical to a regular session. A project with no
 		// worktree-able git repo resolves `supported:false` (graceful no-worktree).
-		const support = await resolveWorktreeSupport(components, ctx.project.rootPath, cwd);
+		const configuredBaseRef = ctx.projectConfigStore.get("base_ref") || undefined;
+		const support = await resolveWorktreeSupport(components, ctx.project.rootPath, cwd, undefined, { configuredBaseRef });
 		return { ...support, components };
 	}
 

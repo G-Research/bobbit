@@ -11,6 +11,25 @@ import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js"
 const execFile = promisify(execFileCb);
 const primaryBranchFallbackWarningCwds = new Set<string>();
 
+export const UNRESOLVED_HEAD_WORKTREE_CODE = "WORKTREE_UNRESOLVED_HEAD";
+
+export function unresolvedHeadWorktreeMessage(repoPath: string): string {
+	return `Cannot create worktree for ${repoPath}: repository HEAD is unresolved/unborn. Make an initial commit to enable worktrees.`;
+}
+
+export class UnresolvedHeadWorktreeError extends Error {
+	readonly code = UNRESOLVED_HEAD_WORKTREE_CODE;
+	constructor(readonly repoPath: string) {
+		super(unresolvedHeadWorktreeMessage(repoPath));
+		this.name = "UnresolvedHeadWorktreeError";
+	}
+}
+
+export function isUnresolvedHeadWorktreeError(err: unknown): err is UnresolvedHeadWorktreeError {
+	return err instanceof UnresolvedHeadWorktreeError
+		|| (err instanceof Error && (err as { code?: unknown }).code === UNRESOLVED_HEAD_WORKTREE_CODE);
+}
+
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
 	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
@@ -381,6 +400,26 @@ export async function refExistsInRepo(repoPath: string, ref: string): Promise<bo
 	}
 }
 
+/** True iff the repository has a resolved HEAD commit. Never throws. */
+export async function hasResolvedHead(repoPath: string): Promise<boolean> {
+	try {
+		await execGit(["rev-parse", "--verify", "HEAD"], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Exec-injected variant for sandbox/container git callers. Never throws. */
+export async function hasResolvedHeadWithExec(exec: (args: string[]) => Promise<string>): Promise<boolean> {
+	try {
+		await exec(["rev-parse", "--verify", "HEAD"]);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Check if a directory is inside a git repository. */
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	try {
@@ -542,13 +581,18 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 	let startPoint = opts?.startPoint;
 	let startPointFromConfiguredBase = false;
+	let startPointFromImplicitFallback = false;
 	if (!startPoint) {
 		if (configuredBaseRefTrimmed) {
 			startPoint = parseBaseRef(configuredBaseRefTrimmed).ref;
 			startPointFromConfiguredBase = true;
 		} else {
 			startPoint = await resolveRemotePrimary(repoPath);
+			startPointFromImplicitFallback = true;
 		}
+	}
+	if (startPoint === "HEAD" && startPointFromImplicitFallback && !(await hasResolvedHead(repoPath))) {
+		throw new UnresolvedHeadWorktreeError(repoPath);
 	}
 
 	// Fetch the start point to ensure it's up to date. Test harnesses must never
@@ -701,6 +745,7 @@ export async function createWorktreeSet(
 	if (repos.length === 0) repos.push(".");  // defensive — empty components → single-repo
 
 	const slug = branchToSlug(branchName);
+	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 
 	// Single-repo path collapses to existing behavior. `configuredBaseRef`
 	// flows through `createWorktree`, which handles start-point resolution and
@@ -730,7 +775,12 @@ export async function createWorktreeSet(
 	const repoList: string[] = [];
 	for (const repo of repos) {
 		const repoSrc = path.join(rootPath, repo === "." ? "" : repo);
-		if (await isGitRepoRoot(repoSrc)) repoList.push(repo);
+		if (!(await isGitRepoRoot(repoSrc))) continue;
+		// When no explicit start point/base_ref is configured, this component would
+		// fall back to literal HEAD. Skip unborn repos before git worktree sees an
+		// invalid start point; explicit base refs still surface their normal errors.
+		if (!baseBranch && !configuredBaseRefTrimmed && !(await hasResolvedHead(repoSrc))) continue;
+		repoList.push(repo);
 	}
 
 	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
@@ -749,8 +799,6 @@ export async function createWorktreeSet(
 	if (!fs.existsSync(container)) {
 		fs.mkdirSync(container, { recursive: true });
 	}
-
-	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 
 	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
 	for (const repo of repoList) {

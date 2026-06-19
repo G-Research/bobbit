@@ -156,3 +156,10 @@ When the agent finishes a turn, the browser client notifies the user via:
 4. **Favicon badge + sidebar unread dot** — Persists until the user opens the session
 
 These cues are scoped to **human attention**: standalone sessions notify on idle (as before), team members and delegates stay silent (they escalate to their team lead, not the user), and a team lead notifies when the goal is `complete`, needs immediate human action, or is persistently stuck. One-shot beeps do not fire merely because a team lead went idle to wait for workers or verification. Notification surfaces consult the predicates in `src/app/notification-policy.ts`. See [design/notification-policy.md](design/notification-policy.md).
+
+## Model Authentication
+
+Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider.
+
+- **Anthropic** and **OpenAI** account login work as before.
+- **Google** has two intentionally separate paths: account OAuth (`google-gemini-cli`, via the official Gemini Code Assist API) and a Google AI Studio API key (`google`, the session-usable Gemini path). Today, account-backed Gemini models are authenticated but **not yet selectable for agent sessions** — session-usable Gemini requires the API key. See [google-oauth-models.md](google-oauth-models.md) for the full split, propagation model, and current limitation.

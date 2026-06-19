@@ -7,6 +7,7 @@ import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
+import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
 
 ensurePiAiBedrockHeadersPatch();
 
@@ -150,6 +151,23 @@ export async function completeModelText(
 	},
 	completeFn: CompleteSimpleFn = completeSimple,
 ): Promise<string> {
+	// Google account (Code Assist / OAuth) models speak a different wire protocol
+	// than pi-ai's API-key `google` provider, so route them through the Bearer
+	// Code Assist adapter instead of completeSimple. The API-key `google` provider
+	// path below is unchanged.
+	if (model.provider === GOOGLE_GEMINI_CLI_PROVIDER) {
+		return codeAssistComplete({
+			model: model.id,
+			systemPrompt: args.systemPrompt,
+			userPrompt: args.userPrompt,
+			maxTokens: args.maxTokens ?? 500,
+			...(args.thinkingLevel ? { thinkingLevel: args.thinkingLevel } : {}),
+			// Honor the caller's deadline so Code Assist completions can't hang past
+			// it; mirrors the timeoutMs handed to pi-ai for normal providers below.
+			timeoutMs: args.timeoutMs ?? 30_000,
+		});
+	}
+
 	const apiKey = await resolveProviderApiKey(prefs, model.provider);
 	const providerHeaders = resolveProviderHeaders(model.provider);
 	const options: Record<string, any> = {

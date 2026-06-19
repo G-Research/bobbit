@@ -184,6 +184,79 @@ describe("LifecycleHub", () => {
 		}
 	});
 
+	it("injects ctx.runtime for a provider with a runtime linkage and omits it otherwise", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			// Each provider echoes its received ctx.runtime so the test can assert injection.
+			const echo = `export default { async sessionSetup(ctx) { return { blocks: [{ id: "rt", title: "rt", authority: "memory", priority: 1, reason: "r", content: JSON.stringify(ctx.runtime ?? null) }] }; } };`;
+			const linked = fixtureProvider(tmp, "linked", echo);
+			linked.runtime = "hindsight";
+			linked.config = { mode: "managed", apiKey: "tok" };
+			const unlinked = fixtureProvider(tmp, "unlinked", echo);
+
+			const calls: Array<{ packId: string; runtimeId: string; config: Record<string, unknown> }> = [];
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([linked, unlinked]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "t" }),
+				runtimeResolver: async ({ packId, runtimeId, config }) => {
+					calls.push({ packId, runtimeId, config });
+					return { baseUrl: "http://127.0.0.1:48080", headers: { Authorization: "Bearer tok" }, status: "running" };
+				},
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			const byId = new Map(result.blocks.map((b) => [b.providerId, JSON.parse(b.content)]));
+			assert.deepEqual(byId.get("linked"), { baseUrl: "http://127.0.0.1:48080", headers: { Authorization: "Bearer tok" }, status: "running" });
+			assert.equal(byId.get("unlinked"), null, "a provider without a runtime linkage receives no ctx.runtime");
+			// The resolver is consulted ONLY for the linked provider, with its runtimeId + config.
+			assert.equal(calls.length, 1);
+			assert.equal(calls[0].runtimeId, "hindsight");
+			assert.equal(calls[0].config.mode, "managed");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("a runtime resolver that returns undefined / throws leaves ctx.runtime unset (non-fatal)", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const echo = `export default { async sessionSetup(ctx) { return { blocks: [{ id: "rt", title: "rt", authority: "memory", priority: 1, reason: "r", content: JSON.stringify(ctx.runtime ?? null) }] }; } };`;
+			const absent = fixtureProvider(tmp, "absent", echo);
+			absent.runtime = "hindsight";
+			const boom = fixtureProvider(tmp, "boom", echo);
+			boom.runtime = "hindsight";
+
+			const hubAbsent = new LifecycleHub({
+				registry: registry([absent]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "t" }),
+				runtimeResolver: async () => undefined,
+			});
+			const r1 = await hubAbsent.dispatch("sessionSetup", base(tmp));
+			assert.equal(JSON.parse(r1.blocks[0].content), null, "undefined resolution leaves ctx.runtime unset");
+
+			const hubThrow = new LifecycleHub({
+				registry: registry([boom]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "t" }),
+				runtimeResolver: async () => { throw new Error("supervisor blew up"); },
+			});
+			const r2 = await hubThrow.dispatch("sessionSetup", base(tmp));
+			assert.deepEqual(r2.diagnostics, [], "a resolver throw is non-fatal");
+			assert.equal(JSON.parse(r2.blocks[0].content), null, "a resolver throw leaves ctx.runtime unset");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("records one trace entry per dispatch", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

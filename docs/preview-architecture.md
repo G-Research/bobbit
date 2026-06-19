@@ -8,11 +8,11 @@ per-session side-panel workspace shared by regular and assistant sessions.
 
 ## Mental model
 
-Four pieces, one mount, one URL shape:
+Five pieces, one mount, one URL shape:
 
 1. **Per-session mount on disk** — `<bobbitStateDir>/preview/<sid>/` holds the
    entry HTML and any sibling assets (images, CSS, video, …). Single source of
-   truth for what the panel shows.
+   truth for rendered bytes.
 2. **Content origin** — the gateway serves the mount at `/preview/<sid>/<path>`.
    Same shape for the iframe `src`, the "Open in new tab" button, and any link
    the user clicks inside the preview.
@@ -22,6 +22,10 @@ Four pieces, one mount, one URL shape:
 4. **SSE hot reload** — `GET /api/sessions/:sid/preview-events` streams a
    `preview-changed` event whenever the gateway repopulates the mount. The panel
    bumps `#mtime=<n>` on the iframe `src` to force a reload.
+5. **Server-backed workspace tab** — successful mount/open events persist the
+   active preview tab identity and small render metadata. This is what restores
+   the side-panel tab after a gateway restart; the mount/artifact files still
+   serve the bytes.
 
 Every populated mount also has a `contentHash`: a lowercase SHA-256 identity for
 that mounted preview tree. The hash represents rendered content identity, not a
@@ -50,7 +54,9 @@ preview mount, immutable artifact, bootstrap response, or SSE event may update
 content caches, but it must not resurrect a closed tab. Explicit preview tool
 mount/open events and historical preview-card Open buttons create or focus tabs;
 bootstrap and SSE updates patch only already-open tabs when they are not an
-explicit open. Full workspace rules live in
+explicit open. After a gateway restart, the client renders the active preview
+iframe from the hydrated server workspace tab, not from transient preview mirrors
+or mount discovery. Full workspace rules live in
 [`side-panel-workspace.md`](./side-panel-workspace.md).
 
 Preview tab identity:
@@ -159,6 +165,46 @@ When the user clicks **Open** on a historical `preview_open` tool card
 | v3 without `artifactId`, with `html` / `file` original params | `POST /api/preview/mount {html\|file}` | Remount the original; the POST response's `artifactId` and `contentHash` are attached to the tab. Same collapse rule. |
 | v3 without `artifactId` and no remount body | None (recorded entry / mtime / url) | Select the recorded entry; iframe points at the existing mount path. Best-effort. |
 | Legacy v1 / v2 | `POST /api/preview/mount {html\|file}` | Stays historical even when the response includes `contentHash`. |
+
+### Restart restore
+
+A successful `POST /api/preview/mount` opens or updates the current preview
+workspace tab unless the caller opts out with `workspaceTab: false`,
+`openWorkspaceTab: false`, or an internal restore flag. The tab persists enough
+small metadata to render after restart:
+
+- source identity: `entry`, `contentHash`, `path`, `url`, and `artifactId` when a
+  matching artifact exists;
+- tab state: `entry`, `mtime`, `path`, `url`, `contentHash`, `artifactId`, and
+  `origin: "preview-mount"`;
+- workspace state: tab id/order and `activeTabId`.
+
+On gateway restart, `sidePanelWorkspace` is loaded with the session. When the
+browser reloads or returns to the session, the side-panel shell renders the
+active preview tab and the iframe derives `entry`, `mtime`, and `artifactId` from
+that tab before transient preview mirrors are repopulated. Live tabs point at
+`/preview/<sid>/<entry>?mtime=<n>`; artifact-backed historical tabs point at
+`/preview/<sid>/_artifact/<artifactId>/<entry>?mtime=<n>`.
+
+Bootstrap (`GET /api/preview/mount`) and `preview-changed` SSE metadata may later
+refresh already-open tabs, but they are not tab-creation sources. If the user
+closed the preview tab before restart, the persisted workspace has no preview
+tab, so reload/reconnect/bootstrap must leave the side panel closed until a new
+explicit `preview_open` / mount event or historical-card **Open** action occurs.
+
+The preview header follows the same restore source as the iframe. Its controls
+are visible when the active workspace tab has preview metadata, even if the
+transient preview mirrors have not been repopulated yet. This keeps direct
+navigation/reload behavior consistent: the restored iframe, **Open preview in new
+tab**, and **Refresh preview** all appear immediately from the persisted tab. The
+new-tab action uses the tab-derived preview URL, so live and artifact-backed tabs
+open the same URL the iframe is showing. Refresh remains a local cache-buster: it
+bumps the preview mtime used in the iframe URL, but it does not create a tab or
+revive one the user closed.
+
+Pinned by `tests/e2e/ui/preview-durable-restart.spec.ts`, including the
+regression that the refresh button is visible immediately after restoring an
+active preview tab.
 
 ## Per-session mount
 

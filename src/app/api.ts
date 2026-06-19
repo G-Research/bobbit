@@ -640,10 +640,7 @@ export function archivedSessionsLoaded(): boolean {
 /** Check whether archived goals have been loaded via the dedicated paginated
  *  fetch. NOT the same as `state.goals.some(g => g.archived)` — archived goal
  *  entries can also arrive piggy-backed on `refreshSessions`' `archivedDelegates`
- *  field, which leaves the dedicated archived-goals page unfetched. The search
- *  auto-fetch path uses this flag to decide whether to kick the dedicated
- *  endpoint, so a search inside the sidebar reliably surfaces archived goals
- *  even if some archived sessions were already merged in via the live poll. */
+ *  field, which leaves the dedicated archived-goals page unfetched. */
 export function archivedGoalsLoaded(): boolean {
 	return _archivedGoalsLoaded;
 }
@@ -653,11 +650,16 @@ export function clearArchivedSessionsState(): void {
 	_archivedSessionsLoaded = false;
 	_archivedGoalsLoaded = false;
 	state.archivedSessions = [];
+	clearArchivedSearchState();
 	clearGoalChildrenFetchedCache();
 }
 
 /** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
+	if (state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	_archivedSessionsLoaded = true;
 	// Reset pagination state and load first page — but don't clear archivedSessions
 	// to preserve BFS-enriched delegates from the live poll
@@ -665,6 +667,164 @@ export async function fetchArchivedSessions(): Promise<void> {
 	state.archivedSessionsHasMore = false;
 	state.archivedSessionsTotal = 0;
 	await fetchArchivedSessionsPaginated();
+}
+
+const ARCHIVED_SEARCH_DEBOUNCE_MS = 250;
+let _archivedSearchTimer: ReturnType<typeof setTimeout> | null = null;
+let _archivedSearchRunId = 0;
+
+function resetArchivedSearchPagination(query = ""): void {
+	state.archivedSearchQuery = query;
+	state.archivedSearchGoalsCursor = null;
+	state.archivedSearchGoalsHasMore = false;
+	state.archivedSearchGoalsTotal = 0;
+	state.archivedSearchGoalsLoading = false;
+	state.archivedSearchSessionsCursor = null;
+	state.archivedSearchSessionsHasMore = false;
+	state.archivedSearchSessionsTotal = 0;
+	state.archivedSearchSessionsLoading = false;
+}
+
+export function clearArchivedSearchState(): void {
+	if (_archivedSearchTimer) {
+		clearTimeout(_archivedSearchTimer);
+		_archivedSearchTimer = null;
+	}
+	_archivedSearchRunId++;
+	resetArchivedSearchPagination();
+}
+
+function mergeArchivedGoalsIntoState(goals: Goal[]): void {
+	if (goals.length === 0) return;
+	const incoming = new Map(goals.map((g) => [g.id, g]));
+	const seen = new Set<string>();
+	state.goals = state.goals.map((g) => {
+		const next = incoming.get(g.id);
+		if (!next) return g;
+		seen.add(g.id);
+		return next;
+	});
+	for (const goal of goals) {
+		if (!seen.has(goal.id)) state.goals.push(goal);
+	}
+}
+
+function isArchivedSessionRecord(session: GatewaySession): boolean {
+	return session.archived === true || session.status === "archived";
+}
+
+function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
+	if (sessions.length === 0) return;
+	const incoming = new Map(sessions.map((s) => [s.id, s]));
+	const seen = new Set<string>();
+	state.archivedSessions = state.archivedSessions.map((s) => {
+		const next = incoming.get(s.id);
+		if (!next) return s;
+		seen.add(s.id);
+		return next;
+	});
+	for (const session of sessions) {
+		if (!seen.has(session.id)) state.archivedSessions.push(session);
+	}
+}
+
+function archivedSearchStillCurrent(query: string, runId: number): boolean {
+	return runId === _archivedSearchRunId
+		&& state.showArchived
+		&& state.searchQuery.trim() === query;
+}
+
+export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEARCH_DEBOUNCE_MS): void {
+	const trimmed = query.trim();
+	if (_archivedSearchTimer) {
+		clearTimeout(_archivedSearchTimer);
+		_archivedSearchTimer = null;
+	}
+	if (!trimmed || !state.showArchived) {
+		clearArchivedSearchState();
+		return;
+	}
+	const runId = ++_archivedSearchRunId;
+	if (state.archivedSearchQuery !== trimmed) {
+		resetArchivedSearchPagination(trimmed);
+	}
+	state.archivedSearchQuery = trimmed;
+	state.archivedSearchGoalsLoading = true;
+	state.archivedSearchSessionsLoading = true;
+	_archivedSearchTimer = setTimeout(() => {
+		_archivedSearchTimer = null;
+		void Promise.all([
+			fetchArchivedSearchGoalsPage(50, undefined, trimmed, runId),
+			fetchArchivedSearchSessionsPage(50, undefined, trimmed, runId),
+		]);
+	}, delay);
+}
+
+export async function fetchArchivedSearchGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	const query = state.searchQuery.trim();
+	if (!query || !state.showArchived) return;
+	state.archivedSearchQuery = query;
+	await fetchArchivedSearchGoalsPage(limit, afterCursor, query, _archivedSearchRunId);
+}
+
+export async function fetchArchivedSearchSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	const query = state.searchQuery.trim();
+	if (!query || !state.showArchived) return;
+	state.archivedSearchQuery = query;
+	await fetchArchivedSearchSessionsPage(limit, afterCursor, query, _archivedSearchRunId);
+}
+
+async function fetchArchivedSearchGoalsPage(limit: number, afterCursor: number | undefined, query: string, runId: number): Promise<void> {
+	state.archivedSearchGoalsLoading = true;
+	renderApp();
+	try {
+		const params = new URLSearchParams({ archived: "true", limit: String(limit), q: query });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/goals?${params}`);
+		if (!res.ok || !archivedSearchStillCurrent(query, runId)) return;
+		const data = await res.json();
+		if (!archivedSearchStillCurrent(query, runId)) return;
+		const goals: Goal[] = (data.goals || []).filter((g: Goal) => g.archived === true);
+		mergeArchivedGoalsIntoState(goals);
+		const affiliatedSessions: GatewaySession[] = (data.archivedSessions || []).filter(isArchivedSessionRecord);
+		mergeArchivedSessionsIntoState(affiliatedSessions);
+		state.archivedSearchGoalsTotal = data.total ?? goals.length;
+		state.archivedSearchGoalsHasMore = data.hasMore ?? false;
+		state.archivedSearchGoalsCursor = data.nextCursor ?? null;
+	} catch {
+		// Silently fail; local already-loaded archive filtering still works.
+	} finally {
+		if (archivedSearchStillCurrent(query, runId)) {
+			state.archivedSearchGoalsLoading = false;
+			renderApp();
+		}
+	}
+}
+
+async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: number | undefined, query: string, runId: number): Promise<void> {
+	state.archivedSearchSessionsLoading = true;
+	renderApp();
+	try {
+		const params = new URLSearchParams({ include: "archived", limit: String(limit), q: query });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/sessions?${params}`);
+		if (!res.ok || !archivedSearchStillCurrent(query, runId)) return;
+		const data = await res.json();
+		if (!archivedSearchStillCurrent(query, runId)) return;
+		const sessions: GatewaySession[] = (data.sessions || []).filter(isArchivedSessionRecord);
+		const archivedDelegates: GatewaySession[] = (data.archivedDelegates || []).filter(isArchivedSessionRecord);
+		mergeArchivedSessionsIntoState([...sessions, ...archivedDelegates]);
+		state.archivedSearchSessionsTotal = data.total ?? sessions.length;
+		state.archivedSearchSessionsHasMore = data.hasMore ?? false;
+		state.archivedSearchSessionsCursor = data.nextCursor ?? null;
+	} catch {
+		// Silently fail; local already-loaded archive filtering still works.
+	} finally {
+		if (archivedSearchStillCurrent(query, runId)) {
+			state.archivedSearchSessionsLoading = false;
+			renderApp();
+		}
+	}
 }
 
 // ============================================================================
@@ -1000,13 +1160,16 @@ export async function promoteProject(id: string, name?: string): Promise<Project
 // ============================================================================
 
 export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	try {
 		const params = new URLSearchParams({ archived: "true", limit: String(limit) });
 		if (afterCursor !== undefined) params.set("after", String(afterCursor));
 		const res = await gatewayFetch(`/api/goals?${params}`);
 		if (!res.ok) return;
-		// Mark the dedicated archived-goals page as fetched. Used by the sidebar
-		// search auto-fetch gate (see archivedGoalsLoaded() above).
+		// Mark the dedicated archived-goals page as fetched for non-search archive pagination.
 		_archivedGoalsLoaded = true;
 		const data = await res.json();
 		const goals: Goal[] = data.goals || [];
@@ -1043,6 +1206,10 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 }
 
 export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	try {
 		const params = new URLSearchParams({ include: "archived", limit: String(limit) });
 		if (afterCursor !== undefined) params.set("after", String(afterCursor));
@@ -2868,15 +3035,24 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 // /api/ext/contributions — so a disabled entity stays visible + re-enableable.
 // ============================================================================
 
-/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`. */
+/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`.
+ *  The schema-v2 arrays (`providers`/`hooks`/`mcp`/`piExtensions`/`runtimes`/
+ *  `workflows`) are present only for schema≥2 packs; absent = all enabled. */
 export interface DisabledRefs {
 	roles?: string[];
 	tools?: string[];
 	skills?: string[];
 	entrypoints?: string[];
+	providers?: string[];
+	hooks?: string[];
+	mcp?: string[];
+	piExtensions?: string[];
+	runtimes?: string[];
+	workflows?: string[];
 }
 
-/** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
+/** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). The
+ *  schema-v2 arrays are emitted only for schema≥2 packs (P3 runtimes etc.). */
 export interface PackActivationCatalogue {
 	roles: string[];
 	/** Concrete tool names, not manifest tool-group directory names. */
@@ -2888,6 +3064,14 @@ export interface PackActivationCatalogue {
 		kind?: PackEntrypointWire["kind"];
 		routeId?: string;
 	}>;
+	/** Schema-v2 contribution basenames (loader-resolved listNames). */
+	providers?: string[];
+	hooks?: string[];
+	mcp?: string[];
+	piExtensions?: string[];
+	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
+	runtimes?: string[];
+	workflows?: string[];
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }
@@ -2908,4 +3092,90 @@ export function getPackActivation(scope: MarketScope, packName: string, projectI
 
 export function setPackActivation(opts: { scope: MarketScope; projectId?: string; packName: string; disabled: DisabledRefs }): Promise<MarketResult<PackActivationResponse>> {
 	return marketFetch("/api/marketplace/pack-activation", jsonInit("PUT", opts));
+}
+
+// ============================================================================
+// PACK MANAGED RUNTIMES (P3 — modes/consent design §8)
+//
+// Docker-backed runtimes a pack ships are consent-gated: the enable card must
+// disclose images/services, host ports, the data/volume path and the
+// memory/trust copy BEFORE the runtime starts. `startPolicy: on-enable` runtimes
+// start ONLY from the explicit pack-activation enable action — never on
+// boot/install/update. The capability summary is derived from the validated
+// manifest + selected mode (no Docker required), so the disclosure renders even
+// when Docker is unavailable or the runtime is stopped. External mode is a
+// non-Docker setup path and reports `dockerRequired: false`.
+// ============================================================================
+
+/** One exposed host port for the enable-card disclosure. Mirrors the server's
+ *  `PackRuntimeCapabilityPort` shape (pack-runtime-supervisor.ts) — there is no
+ *  human `label`; the env var name / manifest key serve as the label. */
+export interface PackRuntimePortInfo {
+	/** Manifest persistence/env key (e.g. `HINDSIGHT_API_PORT`). */
+	key: string;
+	/** Env var name the chosen host port is exposed under, when declared. */
+	env?: string;
+	/** Informational container-side port the service listens on. */
+	container?: number;
+	/** Allocated/persisted host port when one is already known (loopback-bound). */
+	host?: number;
+}
+
+/** Capability disclosure for a managed runtime, derived from the manifest +
+ *  selected mode (design §8). Used to render the consent enable-card. */
+export interface PackRuntimeCapabilitySummary {
+	packId: string;
+	runtimeId: string;
+	/** Resolved deployment mode the summary describes (e.g. `managed-postgres`). */
+	mode?: string;
+	/** Service/image names that will run for the selected mode (post-omit). */
+	services: string[];
+	/** Exposed host ports (loopback) the runtime will bind. */
+	ports: PackRuntimePortInfo[];
+	/** Effective host data/volume path for managed modes (e.g. `~/.hindsight`). */
+	volumePath?: string;
+	/** True for Docker-managed modes; false for the external (no-Docker) path. */
+	dockerRequired?: boolean;
+	/** First-party memory/trust disclosure copy. */
+	trust?: string;
+}
+
+/** Build the URL-safe runtime API id (`<packId>:<runtimeId>`) the
+ *  `/api/pack-runtimes/:id/*` routes expect (mirrors the server's
+ *  encodePackRuntimeId). `packId` is the pack's structural id (== packName for
+ *  first-party built-ins). */
+export function encodeRuntimeApiId(packId: string, runtimeId: string): string {
+	return `${encodeURIComponent(packId)}:${encodeURIComponent(runtimeId)}`;
+}
+
+/** GET capability disclosure for the consent enable-card. Best-effort: returns a
+ *  MarketResult so the UI degrades gracefully (static copy) when the route is
+ *  unavailable. `mode` selects the deployment mode to summarise. */
+export function getPackRuntimeCapabilities(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeCapabilitySummary>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	if (opts.mode) params.set("mode", opts.mode);
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/capabilities${qs ? `?${qs}` : ""}`);
+}
+
+/** POST `docker compose down` for a managed runtime. `volumes`+`removeState`
+ *  effect an explicit PURGE (down -v + runtime-state removal); without them this
+ *  is the uninstall-grade down that preserves bind-mounted data. */
+export function downPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<MarketResult<{ status: string }>> {
+	// `projectId` goes on the query string (the server's down route reads it from
+	// the query, not the JSON body); only `volumes`/`removeState` ride the body.
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	const body: Record<string, unknown> = {};
+	if (opts.volumes) body.volumes = true;
+	if (opts.removeState) body.removeState = true;
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/down${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
+}
+
+/** POST explicit purge for a pack runtime: `down -v` + runtime-state removal
+ *  (removes Docker volumes and supervisor-owned state). Destructive. */
+export function purgePackRuntime(opts: { scope: MarketScope; packName: string; runtimeId: string; projectId?: string }): Promise<MarketResult<{ status?: string }>> {
+	return marketFetch("/api/marketplace/purge-runtime", jsonInit("POST", opts));
 }
