@@ -32,6 +32,7 @@ import { parseAcceptanceCriteria } from "../../shared/parse-acceptance-criteria.
 import {
 	checkCanSpawnChild,
 	inheritedChildOverrides,
+	clampMaxDepth,
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
@@ -523,6 +524,13 @@ export async function tryHandleNestedGoalRoute(
 		if (!nestingCheck.ok) {
 			if (nestingCheck.code === "SUBGOALS_DISABLED") {
 				json({ error: "Subgoals are disabled for this goal tree", code: "SUBGOALS_DISABLED" }, 403);
+				return true;
+			}
+			if (nestingCheck.code === "PARENT_SUBGOALS_DISABLED") {
+				json({
+					error: `Parent goal "${parent.title}" doesn't allow sub-goals`,
+					code: "PARENT_SUBGOALS_DISABLED",
+				}, 403);
 				return true;
 			}
 			json({
@@ -1337,13 +1345,40 @@ export async function tryHandleNestedGoalRoute(
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const goalManager = getGoalManagerForGoal(id);
-		const updates: { divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number } = {};
+		const updates: {
+			divergencePolicy?: "strict" | "balanced" | "autonomous";
+			maxConcurrentChildren?: number;
+			subgoalsAllowed?: boolean;
+			maxNestingDepth?: number;
+		} = {};
 		if (body.divergencePolicy !== undefined) {
 			if (body.divergencePolicy !== "strict" && body.divergencePolicy !== "balanced" && body.divergencePolicy !== "autonomous") {
 				json({ error: "divergencePolicy must be one of strict|balanced|autonomous" }, 400);
 				return true;
 			}
 			updates.divergencePolicy = body.divergencePolicy;
+		}
+		if (body.subgoalsAllowed !== undefined) {
+			// Per-goal opt-in toggle. The SYSTEM pref remains the master gate
+			// (see subgoal-nesting-limit.ts) — flipping this to `true` only has
+			// effect when the system pref `subgoalsEnabled` is also ON.
+			if (typeof body.subgoalsAllowed !== "boolean") {
+				json({ error: "subgoalsAllowed must be a boolean" }, 400);
+				return true;
+			}
+			updates.subgoalsAllowed = body.subgoalsAllowed;
+		}
+		if (body.maxNestingDepth !== undefined) {
+			// Per-goal nesting cap. Route clamping through the SSOT helper and
+			// cap to the system ceiling — descendants can only tighten, never
+			// widen beyond the system-wide `maxNestingDepth`.
+			const raw = Number(body.maxNestingDepth);
+			if (!Number.isFinite(raw)) {
+				json({ error: "maxNestingDepth must be a finite number" }, 400);
+				return true;
+			}
+			const systemCeiling = getSubgoalNestingPrefs().maxNestingDepth;
+			updates.maxNestingDepth = Math.min(clampMaxDepth(raw), systemCeiling);
 		}
 		if (body.maxConcurrentChildren !== undefined) {
 			// C4: integer clamp. A fractional value (e.g. 1.5) would otherwise be
@@ -1375,6 +1410,8 @@ export async function tryHandleNestedGoalRoute(
 			goalId: id,
 			...(updatedGoal?.divergencePolicy !== undefined ? { divergencePolicy: updatedGoal.divergencePolicy } : {}),
 			...(updatedGoal?.maxConcurrentChildren !== undefined ? { maxConcurrentChildren: updatedGoal.maxConcurrentChildren } : {}),
+			...(updatedGoal?.subgoalsAllowed !== undefined ? { subgoalsAllowed: updatedGoal.subgoalsAllowed } : {}),
+			...(updatedGoal?.maxNestingDepth !== undefined ? { maxNestingDepth: updatedGoal.maxNestingDepth } : {}),
 		});
 		json({ ok: true });
 		return true;

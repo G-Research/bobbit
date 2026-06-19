@@ -5204,6 +5204,13 @@ async function handleApiRoute(
 						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
 						return;
 					}
+					if (nestResult.code === "PARENT_SUBGOALS_DISABLED") {
+						json({
+							error: `Parent goal "${resolvedParentGoal.title}" doesn't allow sub-goals`,
+							code: "PARENT_SUBGOALS_DISABLED",
+						}, 422);
+						return;
+					}
 					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
 						json({
 							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,

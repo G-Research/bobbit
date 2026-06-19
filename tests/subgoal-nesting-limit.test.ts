@@ -199,12 +199,14 @@ describe("checkCanSpawnChild", () => {
 		assert.equal((r as any).code, "SUBGOALS_DISABLED");
 	});
 
-	it("per-goal subgoalsAllowed=false blocks even when system ON", async () => {
+	it("per-goal subgoalsAllowed=false blocks even when system ON → PARENT_SUBGOALS_DISABLED", async () => {
 		const { gm, store } = makeManager();
 		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "parent", subgoalsAllowed: false });
 		const r = checkCanSpawnChild(root, prefsOn3, (id) => store.get(id));
 		assert.equal(r.ok, false);
-		assert.equal((r as any).code, "SUBGOALS_DISABLED");
+		// System pref is ON, so the block is parent-scoped and MUST be distinct
+		// from the system-off SUBGOALS_DISABLED code.
+		assert.equal((r as any).code, "PARENT_SUBGOALS_DISABLED");
 	});
 
 	it("accepts when child depth would equal maxDepth", async () => {

@@ -4756,6 +4756,9 @@ export class VerificationHarness {
 					if (_check.code === "SUBGOALS_DISABLED") {
 						return { passed: false, output: `Subgoal spawn blocked: subgoals are disabled for this goal tree.` };
 					}
+					if (_check.code === "PARENT_SUBGOALS_DISABLED") {
+						return { passed: false, output: `Subgoal spawn blocked: parent goal "${parent.title}" doesn't allow sub-goals.` };
+					}
 					return {
 						passed: false,
 						output: `Subgoal spawn blocked: nesting depth limit reached (${_check.currentDepth}/${_check.maxDepth}).`,
