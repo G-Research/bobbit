@@ -129,6 +129,13 @@ async function setDisabledRuntimes(packName: string, runtimes: string[]) {
 	});
 }
 
+/** The persisted disabled-runtime refs for a pack (server scope). */
+async function getDisabledRuntimes(packName: string): Promise<string[]> {
+	const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(packName)}`);
+	const body = await res.json();
+	return (body?.disabled?.runtimes ?? []) as string[];
+}
+
 test.describe("marketplace managed-runtime activation (P3)", () => {
 	test.beforeAll(async () => {
 		const mod = await import("../../dist/server/server.js");
@@ -295,6 +302,112 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 			// A docker-unavailable STATUS (graceful, no throw) must not block uninstall.
 			expect(res.status).toBe(204);
 			expect(calls.filter((c) => c.op === "down").length).toBe(1);
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("enable FAILURE (start throws) returns 502 and does NOT persist enabled (finding #2)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-enable-throw-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			// Start disabled (persisted), then make start() throw on the re-enable.
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			expect(await getDisabledRuntimes(packName)).toContain("hindsight");
+			mod.registerPackRuntimeSupervisorFactory(() => ({
+				...fakeSupervisor,
+				async start(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+					calls.push({ op: "start", packId, runtimeId, opts });
+					throw new Error("compose up exploded");
+				},
+			}));
+			const enable = await setDisabledRuntimes(packName, []);
+			// A thrown start aborts the PUT — never a swallowed 200.
+			expect(enable.status).toBe(502);
+			const body = await enable.json();
+			expect(String(body.error)).toContain("compose up exploded");
+			expect(body.runtimes[0].status).toBe("error");
+			// State is unchanged: the runtime is STILL disabled (the enable did not take).
+			expect(body.disabled.runtimes).toContain("hindsight");
+			expect(await getDisabledRuntimes(packName)).toContain("hindsight");
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("enable FAILURE (start returns unhealthy) returns 502 and does NOT persist enabled (finding #2)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-enable-unhealthy-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			mod.registerPackRuntimeSupervisorFactory(() => ({
+				...fakeSupervisor,
+				async start(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+					calls.push({ op: "start", packId, runtimeId, opts });
+					return statusFor(packId, runtimeId, "unhealthy", opts?.mode as string | undefined);
+				},
+			}));
+			const enable = await setDisabledRuntimes(packName, []);
+			expect(enable.status).toBe(502);
+			const body = await enable.json();
+			expect(String(body.error)).toContain("failed to start");
+			expect(await getDisabledRuntimes(packName)).toContain("hindsight");
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("disable FAILURE (stop throws) returns 502 and does NOT persist disabled (finding #2)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-disable-throw-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			// Runtime starts enabled (empty disabled set). Make stop() throw on disable.
+			expect(await getDisabledRuntimes(packName)).not.toContain("hindsight");
+			mod.registerPackRuntimeSupervisorFactory(() => ({
+				...fakeSupervisor,
+				async stop(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+					calls.push({ op: "stop", packId, runtimeId, opts });
+					throw new Error("compose stop exploded");
+				},
+			}));
+			const disable = await setDisabledRuntimes(packName, ["hindsight"]);
+			expect(disable.status).toBe(502);
+			const body = await disable.json();
+			expect(String(body.error)).toContain("compose stop exploded");
+			// The runtime is STILL enabled — a failed stop must not record it disabled.
+			expect(body.disabled.runtimes ?? []).not.toContain("hindsight");
+			expect(await getDisabledRuntimes(packName)).not.toContain("hindsight");
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("enable TOLERATES docker-unavailable: persists enabled, reports status, no 502 (finding #2)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-enable-nodocker-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			mod.registerPackRuntimeSupervisorFactory(() => ({
+				...fakeSupervisor,
+				async start(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+					calls.push({ op: "start", packId, runtimeId, opts });
+					return statusFor(packId, runtimeId, "docker-unavailable", opts?.mode as string | undefined);
+				},
+			}));
+			const enable = await setDisabledRuntimes(packName, []);
+			// docker-unavailable is graceful — the enable persists and is reported (not a 502).
+			expect(enable.status).toBe(200);
+			const body = await enable.json();
+			expect(body.runtimes[0].status).toBe("docker-unavailable");
+			expect(await getDisabledRuntimes(packName)).not.toContain("hindsight");
 		} finally {
 			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
 			fs.rmSync(packDir, { recursive: true, force: true });

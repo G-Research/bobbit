@@ -30,6 +30,7 @@ import { buildRuntimeInvocation, type RuntimeResolveContext } from "../src/serve
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACK_ROOT = path.join(REPO_ROOT, "market-packs", "hindsight");
 const MANIFEST_FILE = path.join(PACK_ROOT, "runtimes", "hindsight.yaml");
+const COMPOSE_FILE = path.join(PACK_ROOT, "runtime", "compose.yaml");
 
 /** Parse the REAL shipped Hindsight runtime manifest (fails loudly on drift). */
 function loadManifest(): RuntimeManifest {
@@ -95,6 +96,36 @@ describe("Hindsight runtime manifest — mode → services mapping", () => {
 			ctx: ctxFor({ vars: { dataDir: "/srv/hindsight-data" } }),
 		});
 		assert.equal(inv.env.HINDSIGHT_DATA_DIR, "/srv/hindsight-data");
+	});
+
+	it("the compose db bind mount interpolates the RENDERED env key, not the raw `dataDir` config (finding #1)", () => {
+		// Regression: the bind mount used `${dataDir:-~/.hindsight}`, but the manifest
+		// renders the managed data dir under HINDSIGHT_DATA_DIR — `dataDir` is a provider
+		// CONFIG field and is NEVER written to the compose env file. So compose always
+		// fell back to ~/.hindsight and a configured custom data dir was silently ignored.
+		// The bind mount MUST reference the exact env var the manifest renders.
+		const manifest = loadManifest();
+		const inv = buildRuntimeInvocation(manifest, "managed-postgres", {
+			sourceFile: MANIFEST_FILE,
+			packRoot: PACK_ROOT,
+			envFile: ENV_FILE,
+			ctx: ctxFor({ vars: { dataDir: "/srv/hindsight-data" } }),
+		});
+		// The manifest renders the managed data path under this key.
+		assert.equal(inv.env.HINDSIGHT_DATA_DIR, "/srv/hindsight-data");
+
+		const compose = fs.readFileSync(COMPOSE_FILE, "utf-8");
+		const bindLine = compose
+			.split(/\r?\n/)
+			.find((l) => l.includes("/postgres:/var/lib/postgresql/data"));
+		assert.ok(bindLine, "compose must declare the managed Postgres bind mount");
+		// Honours the rendered env key …
+		assert.match(bindLine!, /\$\{HINDSIGHT_DATA_DIR(:-[^}]*)?\}\/postgres/);
+		// … and never the raw config field name, which would always fall back to the default.
+		assert.ok(
+			!/\$\{dataDir(:-[^}]*)?\}/.test(bindLine!),
+			"compose bind mount must not reference the raw `dataDir` config field (never written to env)",
+		);
 	});
 
 	it("external-postgres subtracts db (omitServices) and injects the configured url", () => {
