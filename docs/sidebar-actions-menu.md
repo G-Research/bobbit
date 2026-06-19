@@ -2,7 +2,7 @@
 
 The Sidebar Actions Menu makes row actions discoverable without removing the fast hover buttons that experienced users already rely on. It applies to live session rows, team-lead rows, and goal rows in the desktop sidebar.
 
-The feature lives at the seam between the app shell (`src/app/` row rendering and route helpers), Lit UI components (`src/ui/components/SidebarActionsPopover.ts`), and gateway REST endpoints for fork-session and GitHub-link resolution. API details are also listed in [REST API](rest-api.md).
+The feature lives at the seam between the app shell (`src/app/` row rendering and route helpers), Lit UI components (`src/ui/components/SidebarActionsPopover.ts`), and gateway REST endpoints for fork-session and GitHub-link resolution. Session rows consume the shared model in `src/app/session-actions.ts`; see [Unified Session Actions](session-actions.md) for cross-surface header/sidebar behavior. API details are also listed in [REST API](rest-api.md).
 
 ## Desktop behavior
 
@@ -36,20 +36,21 @@ The menu supports roving focus:
 
 Menu key events stop propagation so they do not race the sidebar's global `Ctrl+↑` / `Ctrl+↓` navigation described in [Sidebar keyboard navigation](sidebar-keyboard-navigation.md).
 
-## Mobile v1 behavior
+## Mobile sidebar-row behavior
 
-Mobile suppresses the hamburger entirely. Existing inline quick actions stay visible and clickable in mobile rows.
+Mobile landing/sidebar rows suppress the sidebar hamburger. Existing inline quick actions stay visible and clickable in mobile rows.
 
-Menu-only actions are intentionally desktop-only in v1:
+Menu-only sidebar-row actions remain desktop-only in the mobile landing list:
 
 - Session `Copy link`
 - Session `Open in new window`
 - Session `Refresh agent`
 - Session `Fork`
+- Session `View System Prompt`
 - Goal `Copy link`
 - Goal `Open on GitHub`
 
-This avoids adding a redundant dense tap target on mobile, where the quick actions are already always visible. Browser E2E pins this as intentional behavior rather than a regression.
+Open-session mobile view is different: its header exposes the full canonical session action set through a `Session actions` hamburger. See [Unified Session Actions](session-actions.md#mobile-open-session-header).
 
 ## Session actions
 
@@ -61,12 +62,15 @@ This avoids adding a redundant dense tap target on mobile, where the quick actio
 | `Edit staff` | Quick + menu | Staff-backed live session | Navigates to that staff page. |
 | `Terminate` | Quick + menu | Plain live session | Opens the existing terminate confirmation. |
 | `End team` | Quick + menu | Team-lead session | Opens the existing team-end confirmation with goal context. |
-| `Copy link` | Menu only | Live session / team-lead row | Copies an absolute hash route for the session. |
-| `Open in new window` | Menu only | Live session / team-lead row | Opens the session's deep link in a new browser window/tab (see [Open in new window](#open-in-new-window-and-middle-click)). |
 | `Refresh agent` | Menu only | Live, interactive session / team-lead row (see [Refresh agent](#refresh-agent)) | Restarts that session's agent process without clearing its transcript. |
 | `Fork` | Menu only | Forkable live session (see [Forkability policy](#forkability-policy)) | Clones the session's conversation history into a new session and connects to it. Carries an inline **New worktree** checkbox (see below). |
+| `Copy link` | Menu only | Live session / team-lead row | Copies an absolute path-style route for the session. |
+| `View System Prompt` | Menu only | Live session / team-lead row | Opens the System Prompt Inspector for the session. |
+| `Open in new window` | Menu only | Live session / team-lead row | Opens the session's path-style deep link in a new browser window/tab (see [Open in new window](#open-in-new-window-and-middle-click)). |
 
 Archived sessions and unsupported live session kinds do not expose `Refresh agent` or `Fork`. The server also enforces this for both actions so clients cannot bypass UI availability checks.
+
+This table follows the canonical session action order defined in [Unified Session Actions](session-actions.md#built-in-order).
 
 #### Refresh agent
 
@@ -96,7 +100,7 @@ See [REST API — Restart session agent endpoint](rest-api.md#restart-session-ag
 
 Forkability is one policy enforced in two places, and they **must agree** — otherwise the UI offers a Fork that the server rejects with `422` (or hides one the server would accept):
 
-- **Client** — `canForkSidebarSession()` in `src/app/render-helpers.ts` decides whether the `Fork` menu item renders.
+- **Client** — `canForkSession()` in `src/app/session-actions.ts` decides whether canonical `Fork` descriptors render in sidebar and header surfaces.
 - **Server** — `isUnsupportedForkSource()` in `src/server/server.ts` is the authority; the `POST /api/sessions/:id/fork` handler calls it and returns `422` for unsupported sources.
 
 A live session is forkable **unless** it is one of the genuinely non-forkable kinds:
@@ -121,33 +125,33 @@ The `Fork` row has a trailing `New worktree` checkbox (`role="menuitemcheckbox"`
 
 ### Copy link and toast
 
-Session copy uses the canonical hash route:
+Session copy uses the canonical path-style share URL:
 
 ```text
-${location.origin}${location.pathname}${location.search}#/session/<sessionId>
+${location.origin}/session/<sessionId>
 ```
 
-The `Copy link` menu item uses the lucide `Link` icon, matching the session header's copy affordance. On select, `copySidebarLink` copies the URL and flashes a `Link copied` toast — it does **not** open a modal.
+The `Copy link` menu item uses the lucide `Link` icon and the same `sessionPathDeepLink(sessionId)` helper as the open-session header. On select, `copySidebarLink` copies the URL and flashes a `Link copied` toast — it does **not** open a modal.
 
 Copying is resilient to insecure contexts:
 
 1. It first calls `navigator.clipboard.writeText`.
 2. If the async clipboard API is unavailable or rejects (for example over plain `http://`), it falls back to a hidden `<textarea>` plus `document.execCommand("copy")` so the link still copies.
 
-The toast reuses the session header's `showHeaderToast` mechanism (`data-testid="header-toast"`). When no session header is mounted, a standalone toast element is mounted so the confirmation still appears. The `CopyLinkFallbackDialog` modal is no longer used by the sidebar copy path.
+The toast reuses the app-shell `showHeaderToast` mechanism (`data-testid="header-toast"`), which is rendered in every top-level view. The `CopyLinkFallbackDialog` modal is no longer used by the sidebar copy path.
 
 ### Open in new window and middle-click
 
 Bobbit is single-page — clicking a session row swaps the active session in place. `Open in new window` lets the user keep their current session open while viewing another, which is useful for comparing two sessions or watching a team-lead and a delegate side by side.
 
-The `Open in new window` menu item uses the lucide `ExternalLink` icon (matching the session header's open-in-new-tab affordance) and sits right after `Copy link`. Selecting it opens the session's deep link (`#/session/<id>`) in a new browser window/tab. Both paths go through the same helpers in `src/app/render-helpers.ts`:
+The `Open in new window` menu item uses the lucide `ExternalLink` icon and is ordered by the canonical session action model. Selecting it opens the session's path-style deep link (`/session/<id>`) in a new browser window/tab through `sessionPathDeepLink(sessionId)`:
 
-- `openSessionInNewWindow(sessionId)` → `openExternalUrl(sessionDeepLink(sessionId))`.
+- `src/app/session-actions.ts::openSessionInNewWindow(sessionId)` → `openExternalUrl(sessionPathDeepLink(sessionId))`.
 - `openExternalUrl(url)` calls `window.open(url, "_blank", "noopener")` and nulls out `opener`, so the popup cannot reach back into the originating window.
 
-The same action is bound to **middle-click** anywhere on a session row. The row root carries an `@auxclick` handler that fires on `event.button === 1`, calls `preventDefault()` / `stopPropagation()` so the row's normal left-click navigation does **not** also run, and then opens the new window. The result: middle-clicking a row opens that session in a new window/tab *without* changing the currently active session in the current window — matching the browser-wide convention that middle-click opens links in the background.
+A related **middle-click** shortcut is bound anywhere on a session row. The row root carries an `@auxclick` handler that fires on `event.button === 1`, calls `preventDefault()` / `stopPropagation()` so the row's normal left-click navigation does **not** also run, and then opens the row's hash deep link. The result is the same user contract: middle-clicking a row opens that session in a new window/tab *without* changing the currently active session in the current window — matching the browser-wide convention that middle-click opens links in the background.
 
-Both the menu item and the middle-click shortcut are wired for regular session rows and team-lead rows (`buildSessionSidebarActions()` / `buildTeamLeadSidebarActions()` for the menu item; the `@auxclick` handlers on the row roots in `renderSessionRow()` / `renderTeamLeadRow()`), so child/delegate rows that render through `renderSessionRow` get it too.
+The menu item is supplied by `buildSessionActions()` and adapted by both `buildSessionSidebarActions()` / `buildTeamLeadSidebarActions()` and the open-session header. The middle-click shortcut remains wired on the row roots in `renderSessionRow()` / `renderTeamLeadRow()`, so child/delegate rows that render through `renderSessionRow` get the shortcut too.
 
 This is intentionally **mouse-only** — there is no keyboard shortcut and no entry in `shortcut-registry.ts`, so the menu label carries no `shortcutHint()`.
 
@@ -250,7 +254,7 @@ For changes to this feature, run the focused coverage first:
 
 ```bash
 npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/sidebar-actions-flip.test.ts
-npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/session-restart-api.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts tests/e2e/ui/sidebar-refresh-agent.spec.ts
+npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/session-restart-api.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts tests/e2e/ui/sidebar-refresh-agent.spec.ts tests/e2e/ui/session-actions.spec.ts tests/e2e/ui/copy-session-link.spec.ts tests/e2e/ui/open-session-new-window.spec.ts
 ```
 
 Then run the broader validation expected for UI + server changes:
@@ -261,4 +265,4 @@ npm run test:unit
 npm run test:e2e
 ```
 
-The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), `Refresh agent` visibility/targeting/feedback/busy confirmation, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut both opening the session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`; the restart REST contract is covered by `tests/e2e/session-restart-api.spec.ts`.
+The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, sidebar/header canonical action parity, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), path-style copied/opened session links, hash-route canonicalization, `Refresh agent` visibility/targeting/feedback/busy confirmation, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut opening a session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, mobile sidebar-row hamburger suppression, and mobile open-session header hamburger coverage. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`; the restart REST contract is covered by `tests/e2e/session-restart-api.spec.ts`.

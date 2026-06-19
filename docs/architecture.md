@@ -26,7 +26,7 @@ Bobbit has three layers:
 Bobbit's browser UI is primarily hash-routed so it can run as a static single-page app behind the gateway, Vite, or a remote reverse proxy. Session routes support both forms:
 
 - `#/session/<session-id>` — the normal in-app route used by sidebar and hash navigation.
-- `/session/<session-id>` — a path-style external/shareable deep link used by the session header's copy-link action.
+- `/session/<session-id>` — a path-style external/shareable deep link used by unified session actions such as Copy link and Open in new window.
 
 Path-style session links are intentionally valid entrypoints. Opening or reloading `/session/<session-id>` after a full page load selects the same session as the hash route, so copied links continue to work when pasted into a fresh browser tab. Auth query parameters are also supported; for example, `/session/<id>?token=...` can authenticate the browser and still open `<id>`.
 
