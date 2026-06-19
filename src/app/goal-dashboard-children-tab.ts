@@ -7,7 +7,7 @@ import { setHashRoute } from "./routing.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { patchGoalSubgoalPolicy } from "./api.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
+import { nestingDepthOf, effectiveMaxNestingDepthOf, resolveDepthControl } from "./subgoal-eligibility.js";
 
 /** Minimal cost-breakdown shape consumed by the Children tab. */
 export interface ChildTreeCostBreakdown {
@@ -52,22 +52,29 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 	if (!isSubgoalsEnabled()) return nothing;
 	const systemCap = getSystemMaxNestingDepth();
 	const goalDepth = nestingDepthOf(goal.id, state.goals);
-	const minDepth = goalDepth + 1;            // need ≥1 level below to host children
 	// Inherited absolute cap: a CHILD goal can never widen past its parent's
 	// effective cap (system ∩ parent.own ∩ … up the tree), only the system cap
 	// for a root. Mirrors the server clamp in nested-goal-routes.ts so the
-	// control never offers a range the server will reject.
+	// control never offers a range the server will reject. `resolveDepthControl`
+	// is the SSOT shared with the proposal panel.
 	const parent = goal.parentGoalId
 		? state.goals.find(g => g.id === goal.parentGoalId)
 		: undefined;
-	const maxDepth = parent ? effectiveMaxNestingDepthOf(parent as any, state.goals as any) : systemCap;
-	const atCap = minDepth > maxDepth;         // no room for any sub-goals
-	const depthFixed = !atCap && minDepth === maxDepth;
+	const inheritedCap = parent ? effectiveMaxNestingDepthOf(parent as any, state.goals as any) : systemCap;
+	const { minDepth, maxDepth, atGlobalCap: atCap, depthFixed, depthValue, levelsBelow } =
+		resolveDepthControl(goalDepth, inheritedCap, goal.maxNestingDepth ?? null);
 	const allowed = goal.subgoalsAllowed !== false && !atCap;
-	const depthValue = atCap
-		? maxDepth
-		: Math.min(maxDepth, Math.max(minDepth, goal.maxNestingDepth ?? maxDepth));
-	const levelsBelow = Math.max(0, depthValue - goalDepth);
+	// Enabling sub-goals must also persist a VALID max-nesting-depth when the
+	// stored value is missing or outside the current [minDepth, maxDepth] band —
+	// otherwise the toggle PATCHes `{ subgoalsAllowed: true }` while the server
+	// keeps a stale/too-low cap that still blocks hosting, and the UI's clamped
+	// display silently disagrees with what's persisted. `depthValue` is the
+	// clamped value the stepper shows, so we send it alongside the toggle.
+	const storedDepth = goal.maxNestingDepth;
+	const storedDepthValid = typeof storedDepth === "number" && Number.isFinite(storedDepth)
+		&& storedDepth >= minDepth && storedDepth <= maxDepth;
+	const enableUpdates: { subgoalsAllowed: boolean; maxNestingDepth?: number } =
+		storedDepthValid ? { subgoalsAllowed: true } : { subgoalsAllowed: true, maxNestingDepth: depthValue };
 	const disabled = _savingSubgoalPolicy;
 	return html`
 		<div class="subgoal-settings" data-testid="goal-subgoal-settings"
@@ -83,7 +90,10 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 						.checked=${allowed}
 						?disabled=${disabled}
 						data-testid="goal-subgoal-settings-allow-toggle"
-						@change=${(e: Event) => saveSubgoalPolicy(goal.id, { subgoalsAllowed: (e.target as HTMLInputElement).checked })} />
+						@change=${(e: Event) => {
+							const checked = (e.target as HTMLInputElement).checked;
+							saveSubgoalPolicy(goal.id, checked ? enableUpdates : { subgoalsAllowed: false });
+						}} />
 					<span style="font-weight:500;">Allow sub-goals</span>
 				</label>
 				<div style="font-size:11px;color:var(--muted-foreground);line-height:1.4;">

@@ -128,4 +128,87 @@ test.describe("Existing-goal Sub-goals settings", () => {
 			await setSubgoalsEnabled(true);
 		}
 	});
+
+	// FIX #2 (stale persisted depth) — enabling sub-goals must ALSO persist a
+	// valid clamped maxNestingDepth when the stored value is outside the current
+	// [minDepth, maxDepth] band. Repro: a top-level parent stored with a too-low
+	// maxNestingDepth (1) and sub-goals OFF. The settings control's clamped
+	// display shows a valid value (2), but the OLD toggle PATCHed only
+	// `{ subgoalsAllowed: true }`, leaving the blocking cap of 1 persisted — so
+	// the parent still could not host a child even though the UI looked enabled.
+	test("enabling sub-goals on a parent with a stale too-low max-depth persists a valid cap, then a child can be created", async ({ page }) => {
+		await setSubgoalsEnabled(true);
+		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const parent = await createGoal({
+			title: `stale-depth ${stamp}`,
+			spec: PARENT_SPEC,
+			team: false,
+			subgoalsAllowed: false,
+			maxNestingDepth: 1, // too low: a depth-1 goal needs ≥2 to host children
+		});
+		const parentId = parent.id;
+		let childId: string | undefined;
+
+		try {
+			// Starting state: sub-goals OFF and the blocking cap persisted.
+			const before = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(before.subgoalsAllowed).toBe(false);
+			expect(before.maxNestingDepth).toBe(1);
+
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${parentId}`);
+			await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
+			await page.locator('[data-testid="tab-children"]').click();
+
+			const allowToggle = page.locator('[data-testid="goal-subgoal-settings-allow-toggle"]');
+			await expect(allowToggle).toBeVisible({ timeout: 10_000 });
+			await expect(allowToggle).not.toBeChecked();
+
+			// Toggle ON — must persist BOTH subgoalsAllowed:true AND a clamped depth.
+			await allowToggle.check();
+
+			await expect.poll(async () => {
+				const g = await (await apiFetch(`/api/goals/${parentId}`)).json();
+				return { allowed: g.subgoalsAllowed, depth: g.maxNestingDepth };
+			}, { timeout: 10_000 }).toEqual({ allowed: true, depth: 2 });
+
+			// Persistence across a full reload.
+			await page.reload();
+			await expect(
+				page.locator("button").filter({ hasText: "Settings" }).first(),
+			).toBeVisible({ timeout: 20_000 });
+			await navigateToHash(page, `#/goal/${parentId}`);
+			await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
+			await page.locator('[data-testid="tab-children"]').click();
+			await expect(
+				page.locator('[data-testid="goal-subgoal-settings-allow-toggle"]'),
+			).toBeChecked({ timeout: 10_000 });
+			await expect(page.locator('[data-testid="goal-subgoal-settings-depth"]'))
+				.toHaveValue("2", { timeout: 10_000 });
+
+			// The unblock: a child can now be created under the parent (would have
+			// failed with the stale cap of 1 still persisted).
+			const childResp = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `child under fixed-depth parent ${stamp}`,
+					cwd: nonGitCwd(),
+					worktree: false,
+					autoStartTeam: false,
+					workflowId: "feature",
+					spec: PARENT_SPEC,
+					projectId: await defaultProjectId(),
+					parentGoalId: parentId,
+				}),
+			});
+			expect(childResp.status).toBe(201);
+			const childBody = await childResp.json();
+			childId = childBody.id as string;
+			expect(childBody.parentGoalId).toBe(parentId);
+		} finally {
+			if (childId) await deleteGoal(childId).catch(() => {});
+			await deleteGoal(parentId).catch(() => {});
+			await setSubgoalsEnabled(true);
+		}
+	});
 });
