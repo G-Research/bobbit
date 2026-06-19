@@ -414,6 +414,7 @@ const goalDraft = createDraftManager({
 		previewTitleEdited: state.previewTitleEdited,
 		previewSpecEdited: state.previewSpecEdited,
 		previewCwdEdited: state.previewCwdEdited,
+		previewMetadataEdited: state.previewMetadataEdited,
 		hasReceivedProposal: state.assistantHasProposal,
 		goalAssistantTab: state.assistantTab,
 		previewMetadataRows: state.previewMetadataRows,
@@ -470,6 +471,7 @@ const goalDraft = createDraftManager({
 			state.previewTitleEdited = false;
 			state.previewSpecEdited = false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.previewMetadataEdited = false;
 			state.assistantHasProposal = false;
 			state.previewMetadataRows = sanitizeMetadataRows(draft.previewMetadataRows);
 		} else {
@@ -480,6 +482,7 @@ const goalDraft = createDraftManager({
 			state.previewTitleEdited = draft.previewTitleEdited ?? false;
 			state.previewSpecEdited = draft.previewSpecEdited ?? false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.previewMetadataEdited = draft.previewMetadataEdited ?? false;
 			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
 			state.previewMetadataRows = sanitizeMetadataRows(draft.previewMetadataRows);
 		}
@@ -531,8 +534,14 @@ function sanitizeMetadataRows(raw: unknown): Array<[string, string]> {
  * full current proposal) — that way a previous proposal's metadata can never be
  * submitted by accident. Non-authoritative raw streaming tool-use partials, which
  * may simply not have streamed the `metadata` field yet, leave the rows untouched.
+ *
+ * Once the user has manually edited the rows (`previewMetadataEdited`), the mirror
+ * is a no-op regardless of source — their entries win, exactly like the
+ * title/spec/cwd `*Edited` guards — so an authoritative reconcile with no metadata
+ * can never wipe in-progress user input.
  */
 function mirrorGoalSetupFields(src: { metadata?: unknown }, opts?: { authoritative?: boolean }): void {
+	if (state.previewMetadataEdited) return;
 	const m = src.metadata;
 	if (m !== null && typeof m === "object" && !Array.isArray(m)) {
 		// Present (incl. empty {}) — mirror exactly. metadataObjectToRows({}) ⇒ [].
@@ -1163,6 +1172,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitleEdited = false;
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
+		state.previewMetadataEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
@@ -2242,6 +2252,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewTitleEdited = false;
 					state.previewCwdEdited = false;
 					state.previewSpecEdited = false;
+					state.previewMetadataEdited = false;
 					state.assistantHasProposal = false;
 					// Keep previewProjectId if set by showGoalDialog (pre-filled from project button)
 					// Only clear if not already set

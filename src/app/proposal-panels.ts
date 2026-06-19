@@ -473,8 +473,14 @@ interface GoalFormConfig {
 	/** Ordered [key, value] string rows for the per-goal metadata editor. Values
 	 *  are JSON-parsed at submit when possible, otherwise kept as strings. */
 	metadataRows: Array<[string, string]>;
-	/** Replace the full row set (used for key/value edits, add, and remove). */
-	onMetadataRowsChange: (rows: Array<[string, string]>) => void;
+	/** Apply an update to the row set. The updater receives the LIVE current rows
+	 *  (not the render-time snapshot) so rapid successive edits — key then value
+	 *  of the same row, or an Add immediately after a fill — compose correctly
+	 *  even though renderApp() is rAF-throttled. A plain replacement array is also
+	 *  accepted for convenience. */
+	onMetadataRowsChange: (
+		update: Array<[string, string]> | ((prev: Array<[string, string]>) => Array<[string, string]>),
+	) => void;
 
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
@@ -594,21 +600,21 @@ function renderGoalMetadataEditor(config: GoalFormConfig): TemplateResult {
 							<input class=${inputCls} data-testid="goal-metadata-key" placeholder="key" .value=${k}
 								@input=${(e: Event) => {
 									const val = (e.target as HTMLInputElement).value;
-									config.onMetadataRowsChange(rows.map((p, j): [string, string] => j === i ? [val, p[1]] : p));
+									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [val, p[1]] : p));
 								}} />
 							<input class="${inputCls} font-mono" data-testid="goal-metadata-value" placeholder="value (JSON or text)" .value=${v}
 								@input=${(e: Event) => {
 									const val = (e.target as HTMLInputElement).value;
-									config.onMetadataRowsChange(rows.map((p, j): [string, string] => j === i ? [p[0], val] : p));
+									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [p[0], val] : p));
 								}} />
 							<button class="text-muted-foreground hover:text-foreground text-sm px-1.5 shrink-0" title="Remove metadata entry"
 								data-testid="goal-metadata-remove"
-								@click=${() => config.onMetadataRowsChange(rows.filter((_, j) => j !== i))}>✕</button>
+								@click=${() => config.onMetadataRowsChange((prev) => prev.filter((_, j) => j !== i))}>✕</button>
 						</div>
 					`)}
 			</div>
 			<button class="self-start text-[11px] text-primary hover:underline" data-testid="goal-metadata-add"
-				@click=${() => config.onMetadataRowsChange([...rows, ["", ""]])}>+ Add metadata</button>
+				@click=${() => config.onMetadataRowsChange((prev) => [...prev, ["", ""]])}>+ Add metadata</button>
 		</div>
 	`;
 }
@@ -1485,6 +1491,7 @@ function goalPreviewPanel() {
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
 		state.previewMetadataRows = [];
+		state.previewMetadataEdited = false;
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1581,8 +1588,13 @@ function goalPreviewPanel() {
 				autoStartTeam: _goalAutoStartTeam,
 				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
 				metadataRows: state.previewMetadataRows,
-				onMetadataRowsChange: (rows) => {
-					state.previewMetadataRows = rows;
+				onMetadataRowsChange: (update) => {
+					// Resolve against the LIVE rows so rapid edits compose across the
+					// rAF-throttled render (see the updater contract on GoalFormConfig).
+					state.previewMetadataRows = typeof update === "function" ? update(state.previewMetadataRows) : update;
+					// Mark as user-edited so an authoritative proposal reconcile can't
+					// clobber these rows (mirrors the title/spec/cwd *Edited guards).
+					state.previewMetadataEdited = true;
 					const sid = activeSessionId();
 					if (sid) saveGoalDraft(sid);
 					renderApp();
@@ -3156,7 +3168,10 @@ function goalProposalPanel() {
 		autoStartTeam: _proposalAutoStartTeam,
 		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
 		metadataRows: _proposalMetadataRows,
-		onMetadataRowsChange: (rows) => { _proposalMetadataRows = rows; renderApp(); },
+		onMetadataRowsChange: (update) => {
+			_proposalMetadataRows = typeof update === "function" ? update(_proposalMetadataRows) : update;
+			renderApp();
+		},
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },

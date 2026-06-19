@@ -396,6 +396,10 @@ export const state = {
 	previewTitleEdited: false,
 	previewCwdEdited: false,
 	previewSpecEdited: false,
+	// Set once the user manually edits the metadata key/value rows so an
+	// authoritative proposal reconcile can't clobber their entries (mirrors
+	// previewTitleEdited/previewSpecEdited/previewCwdEdited).
+	previewMetadataEdited: false,
 	hasReceivedProposal: false,
 	previewProjectId: "" as string,
 	// Per-goal metadata editor (assistant goal-draft flow). Ordered [key, value]
