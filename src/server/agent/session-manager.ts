@@ -48,7 +48,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -1483,12 +1483,18 @@ export class SessionManager {
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
 		if (opts?.sandboxBranch) {
-			const worktreePath = await sandbox.createWorktree(
-				opts.sandboxBranch,
-				opts.sandboxBranch,
-				opts.sandboxBaseBranch,
-			);
-			bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+			try {
+				const worktreePath = await sandbox.createWorktree(
+					opts.sandboxBranch,
+					opts.sandboxBranch,
+					opts.sandboxBaseBranch,
+				);
+				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+			} catch (err) {
+				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
+				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);
+				bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts.sandboxCwdOffset);
+			}
 		} else if (!isSandboxContainerPath(bridgeOptions.cwd)) {
 			// Regular no-worktree sessions run from the project clone in /workspace.
 			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
@@ -1503,10 +1509,11 @@ export class SessionManager {
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
+		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
-			includeGoogleAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
+			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
+			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
 			scope: opts?.projectId,
 		});
 
@@ -7027,7 +7034,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

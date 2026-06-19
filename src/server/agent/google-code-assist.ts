@@ -19,6 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
+import { redactSensitive } from "../auth/redact.js";
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ async function codeAssistPost(method: string, token: string, body: unknown, fetc
 	}
 	const text = await res.text();
 	if (!res.ok) {
-		throw new Error(`Code Assist ${method} failed: HTTP ${res.status} ${text.slice(0, 256)}`);
+		throw new Error(`Code Assist ${method} failed: HTTP ${res.status} ${redactSensitive(text).slice(0, 256)}`);
 	}
 	try {
 		return text ? JSON.parse(text) : {};

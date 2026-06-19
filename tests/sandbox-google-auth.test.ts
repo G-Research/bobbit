@@ -8,6 +8,7 @@ import { buildDockerRunArgs } from "../src/server/agent/docker-args.js";
 import {
 	buildSandboxAgentAuthJson,
 	resolveHostTokenValue,
+	resolveSandboxAgentAuthPolicy,
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsCodexAuth,
 	sandboxTokenPolicyAllowsGoogleAuth,
@@ -121,6 +122,13 @@ describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 		assert.equal(sandboxTokenPolicyAllowsGoogleAuth([{ key: "GEMINI_API_KEY", enabled: true }]), false);
 		// The Google key must not trip the Codex policy and vice-versa.
 		assert.equal(sandboxTokenPolicyAllowsCodexAuth([{ key: "GOOGLE_CLOUD_ACCESS_TOKEN", enabled: true }]), false);
+	});
+
+	it("requires explicit Google sandbox auth opt-in while preserving Codex legacy default", () => {
+		assert.deepEqual(resolveSandboxAgentAuthPolicy([]), { includeCodexAuth: true, includeGoogleAuth: false });
+		assert.deepEqual(resolveSandboxAgentAuthPolicy(undefined), { includeCodexAuth: true, includeGoogleAuth: false });
+		assert.deepEqual(resolveSandboxAgentAuthPolicy([{ key: "GOOGLE_CLOUD_ACCESS_TOKEN", enabled: true }]), { includeCodexAuth: false, includeGoogleAuth: true });
+		assert.deepEqual(resolveSandboxAgentAuthPolicy([{ key: "OPENAI_CODEX_AUTH", enabled: true }]), { includeCodexAuth: true, includeGoogleAuth: false });
 	});
 
 	it("resolves GOOGLE_CLOUD_ACCESS_TOKEN from the stored OAuth credential, env overrides it", () => {

@@ -23,7 +23,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs } from "./docker-args.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
-import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
+import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
@@ -302,12 +302,16 @@ export class ProjectSandbox {
 		// chain when unset. See `docs/design/base-ref.md` §6.
 		let startPoint = baseBranch;
 		const configuredBaseRef = this.options.baseRefResolver?.();
+		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
 		if (!startPoint) {
 			const exec = async (args: string[]): Promise<string> => {
 				return this._dockerExec(containerId, ["git", ...args], { cwd: "/workspace" });
 			};
 			const { ref } = await resolveBaseRefWithExec(exec, configuredBaseRef);
 			startPoint = ref || "origin/master";
+			if (startPoint === "HEAD" && !configuredBaseRefTrimmed && !(await hasResolvedHeadWithExec(exec))) {
+				throw new UnresolvedHeadWorktreeError("/workspace");
+			}
 		}
 
 		// Create the worktree
@@ -345,7 +349,6 @@ export class ProjectSandbox {
 		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
 		// Non-fatal in the sandbox — host-side save-time validation already
 		// guarantees the ref resolves; this is defence-in-depth.
-		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
 		if (configuredBaseRefTrimmed) {
 			try {
 				await this._dockerExec(containerId,
@@ -419,6 +422,10 @@ export class ProjectSandbox {
 				};
 				const { ref } = await resolveBaseRefWithExec(exec, configuredBaseRef);
 				startPoint = ref || "origin/master";
+				if (startPoint === "HEAD" && !configuredBaseRefTrimmed && !(await hasResolvedHeadWithExec(exec))) {
+					console.warn(`[project-sandbox] Skipping worktree ${name}/${repo}: ${new UnresolvedHeadWorktreeError(repoSrc).message}`);
+					continue;
+				}
 			}
 
 			try {
@@ -457,6 +464,11 @@ export class ProjectSandbox {
 			}
 
 			out.push({ repo, worktreePath: wtPath });
+		}
+
+		if (out.length === 0) {
+			console.warn(`[project-sandbox] No worktree-able repo remained for ${name}; running without sandbox worktrees`);
+			return { container, worktrees: [] };
 		}
 
 		// Per-component setup hook — sequential, runs inside the container at
