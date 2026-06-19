@@ -2280,7 +2280,7 @@ export class RemoteAgent {
 						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
 						return tabTitle === title;
 					});
-					if (!hasOpenWorkspaceTab && (!isLive || isReviewSubmitted(this._sessionId))) return;
+					if (!hasOpenWorkspaceTab && !isLive) return;
 				}
 				// If the user already submitted this review, suppress reopening it on
 				// REPLAY paths (snapshot loop / non-live message_end). The submitted
