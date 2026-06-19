@@ -2819,15 +2819,21 @@ export class SessionManager {
 			// match the handler's stash, don't replace it.
 			const reason = (event as any).reason;
 			if (reason !== "manual" && !(session as any)._pendingCompactionStart) {
+				// Generate the compactionId ONCE at start so the sidecar entry id,
+				// the broadcast end-event, and the client's live `compact_active`
+				// card all share the same id. The live card uses it to mount the
+				// pre-compaction-history affordance in-session (no reload needed).
+				const startedAtMs = Date.now();
 				(session as any)._pendingCompactionStart = {
-					startedAtMs: Date.now(),
+					startedAtMs,
 					trigger: reason === "overflow" ? "overflow" as const : "auto" as const,
+					compactionId: makeCompactionId(startedAtMs),
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
 			session.isCompacting = false;
 			const pending = (session as any)._pendingCompactionStart as
-				| { startedAtMs: number; trigger: "auto" | "overflow" }
+				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
 				| undefined;
 			const reason = (event as any).reason;
 			// Manual path is handled in ws/handler.ts. Auto/overflow path writes
@@ -2841,9 +2847,13 @@ export class SessionManager {
 				const errorMessage = (event as any).errorMessage as string | undefined;
 				const success = !!result && !aborted && !errorMessage;
 				try {
+					// Append the sidecar SYNCHRONOUSLY before refreshAfterCompaction
+					// so the post-compaction snapshot (and the live card's affordance
+					// fetch) see the orphan boundary immediately. Reuse the start-time
+					// compactionId so it matches the id we broadcast on the end event.
 					appendCompactionSidecarEntry(session.id, {
 						schemaVersion: 1,
-						id: makeCompactionId(pending.startedAtMs),
+						id: pending.compactionId,
 						trigger: pending.trigger,
 						tokensBefore: result?.tokensBefore ?? null,
 						tokensAfter: null,
@@ -2857,6 +2867,22 @@ export class SessionManager {
 				} catch (err) {
 					console.warn(`[session-manager] Failed to append compaction sidecar for ${session.id}:`, err);
 				}
+				// Stamp the broadcast end-event with the shared compactionId so the
+				// client stamps its live `compact_active` card with it (the card the
+				// user is looking at then mounts the affordance immediately). The
+				// event object is forwarded to clients verbatim by emitSessionEvent
+				// after this handler returns. Only when the compaction succeeded —
+				// a failed compaction has no orphan boundary to recover.
+				if (success) (event as any).compactionId = pending.compactionId;
+			}
+			// Manual path: ws/handler.ts owns the sidecar append but stashes the
+			// shared compactionId on the session synchronously before the RPC, so
+			// the agent-emitted manual compaction_end can carry it to the client.
+			if (reason === "manual") {
+				const manualId = (session as any)._manualCompactionId as string | undefined;
+				const manualAborted = !!(event as any).aborted;
+				if (manualId && !manualAborted) (event as any).compactionId = manualId;
+				(session as any)._manualCompactionId = undefined;
 			}
 			(session as any)._pendingCompactionStart = undefined;
 			if (!(event as any).aborted) this.refreshAfterCompaction(session);
