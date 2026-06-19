@@ -230,6 +230,18 @@ It may have been deleted on the remote since the project was configured.
 Run 'git fetch origin' to refresh, then update the base_ref setting if the branch was renamed.
 ```
 
+#### Unborn `HEAD` and local-only repos
+
+When `base_ref` is unset and remote-primary detection cannot find `origin/HEAD`, the resolver falls back to literal `HEAD`. That is valid for a local-only repo after its first commit, so committed local-only projects still get worktrees from local `HEAD`.
+
+A fresh `git init` repo has an **unborn** `HEAD`: the symbolic name exists, but there is no commit for `git worktree add` to branch from. Before any implicit-`HEAD` worktree path runs, Bobbit checks `git rev-parse --verify HEAD`. If it fails, worktree support is treated as temporarily unavailable:
+
+- regular session setup runs from the original project directory with no `worktreePath`;
+- worktree pool prefill skips the repo and logs `Make an initial commit to enable worktrees` rather than retrying `git worktree add ... HEAD`;
+- staff and goal paths use the same support helper, so they either choose no-worktree or fall back clearly instead of hanging on setup.
+
+Configured `base_ref` remains an explicit start point. A valid configured ref can create worktrees even while local `HEAD` is unborn. A stale configured ref is **not** downgraded to no-worktree; it surfaces the configured-base error above so the user fixes or removes the setting.
+
 **Out of scope:** `src/server/agent/team-manager.ts:885` is **deliberately
 unchanged**. Team members branch off `origin/<goal-branch>` by hierarchical
 design — there is an explicit `git fetch origin <goal-branch>` immediately
@@ -473,6 +485,7 @@ Every user-visible failure path has an explicit, actionable message:
 | Save non-origin prefix | 400 | `base_ref only supports the 'origin' remote today. Got: <value>. If you need a different primary remote, configure it as 'origin' in your local clone.` |
 | Save ref missing in N components | 400 | `base_ref '<value>' is not present in N of M component repos` + per-component `details[]` |
 | Component path isn't a git repo | warning in success response | `base_ref validation skipped for component '<name>': not a git repo at <path>` |
+| Worktree creation: implicit `HEAD` is unborn | no-worktree fallback / warning | `Cannot create worktree for <repo>: repository HEAD is unresolved/unborn. Make an initial commit to enable worktrees.` |
 | Worktree creation: ref deleted | runtime error | `Failed to create worktree: base_ref '<value>' no longer exists in repo '<name>'. ...` |
 | `set-upstream-to` fails | runtime error | `Failed to set upstream for branch '<branch>' to '<value>': <git stderr>. Check that the ref is still a valid branch.` |
 

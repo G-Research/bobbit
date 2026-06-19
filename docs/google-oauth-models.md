@@ -148,8 +148,8 @@ API-key-only `google` provider look usable.
 ## Token & sandbox propagation (high level)
 
 Spawned/sandboxed agent sessions receive Google credentials through the same partitioned
-credential-propagation path as the other account providers, but **only when policy opts in**
-(least privilege; default is no Google credential in the sandbox):
+credential-propagation path as the other account providers, but **only when policy explicitly opts in**
+(least privilege; default is no Google credential in the sandbox). This Google rule is stricter than Codex: Codex keeps its legacy permissive fallback when `sandbox_tokens` is unset, but Google OAuth is never mounted by default.
 
 - **Env var.** `src/server/agent/host-tokens.ts` maps provider `google-gemini-cli` to the
   sandbox env var `GOOGLE_CLOUD_ACCESS_TOKEN` (the var the Gemini CLI / google-auth honor for
