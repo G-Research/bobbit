@@ -65,7 +65,7 @@ import {
 	type PackRuntimeCapabilitySummary,
 } from "./runtimes/index.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
-import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
@@ -993,6 +993,49 @@ export interface PackRuntimeSupervisorDeps {
 	defaultCwd: string;
 }
 
+/**
+ * P3 managed-runtime context resolution — the SINGLE source of truth shared by
+ * BOTH the LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE
+ * dispatch path (`/api/ext/route/:name`), so a managed provider and its sibling
+ * routes always agree on the runtime linkage they receive.
+ *
+ * For a provider/route in a MANAGED deployment mode (`managed` /
+ * `managed-external-postgres`), it READS the supervisor's runtime status + the
+ * already-persisted API host port (from the pure capability summary) and builds
+ * the `ctx.runtime` linkage `{ baseUrl, headers, status }`. It NEVER starts
+ * Docker. External mode / no supervisor / a stopped runtime / an unknown API
+ * port ⇒ `undefined`, and the consumer stays dormant via its own gate.
+ */
+export async function resolveManagedRuntimeContext(
+	supervisor: PackRuntimeSupervisorLike | undefined,
+	opts: { packId: string; runtimeId: string; projectId?: string; config: Record<string, unknown> },
+): Promise<RuntimeContext | undefined> {
+	const { packId, runtimeId, projectId, config: providerConfig } = opts;
+	const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
+	if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
+	if (!supervisor) return undefined;
+	let status: PackRuntimeStatus;
+	try {
+		status = await supervisor.status(packId, runtimeId, projectId);
+	} catch {
+		return undefined;
+	}
+	let apiPort: number | undefined;
+	try {
+		const cap = await supervisor.capabilitySummary(packId, runtimeId, { projectId });
+		const apiSpec =
+			cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
+			cap.ports[0];
+		if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
+	} catch {
+		return undefined;
+	}
+	if (apiPort === undefined) return undefined;
+	const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
+	const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+	return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
+}
+
 export type PackRuntimeSupervisorFactory = (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike | undefined;
 
 let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
@@ -1346,32 +1389,8 @@ export function createGateway(config: GatewayConfig) {
 		// WITHOUT starting Docker: read the runtime status + the already-persisted API
 		// host port (from the pure capability summary). External mode / a stopped runtime
 		// / an unknown port ⇒ undefined, and the provider stays dormant via its own gate.
-		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) => {
-			const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
-			if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
-			const sup = getActivePackRuntimeSupervisor();
-			if (!sup) return undefined;
-			let status: PackRuntimeStatus;
-			try {
-				status = await sup.status(packId, runtimeId, projectId);
-			} catch {
-				return undefined;
-			}
-			let apiPort: number | undefined;
-			try {
-				const cap = await sup.capabilitySummary(packId, runtimeId, { projectId });
-				const apiSpec =
-					cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
-					cap.ports[0];
-				if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
-			} catch {
-				return undefined;
-			}
-			if (apiPort === undefined) return undefined;
-			const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
-			const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-			return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
-		},
+		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) =>
+			resolveManagedRuntimeContext(getActivePackRuntimeSupervisor(), { packId, runtimeId, projectId, config: providerConfig }),
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
@@ -6722,6 +6741,29 @@ async function handleApiRoute(
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
+		// P3/P4 — managed-runtime context injection for pack ROUTES. Mirror the
+		// LifecycleHub provider-hook path: if the routed pack has a provider declaring a
+		// `runtime` linkage and its EFFECTIVE config selects a managed deployment mode,
+		// resolve `ctx.runtime` from the supervisor WITHOUT starting Docker so the route
+		// handlers reach the locally-running managed runtime (e.g. Hindsight status/recall).
+		// External mode / no runtime / a stopped runtime ⇒ undefined, and the route stays
+		// dormant via its own `isActive(cfg, ctx.runtime)` gate. Resolution failure is
+		// non-fatal (the route just runs without runtime).
+		let routeRuntime: RuntimeContext | undefined;
+		try {
+			const pack = packContributionRegistry.getPack(routeSessionProjectId, ident.packId);
+			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
+			if (runtimeProvider?.runtime) {
+				routeRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
+					packId: ident.packId,
+					runtimeId: runtimeProvider.runtime,
+					projectId: routeSessionProjectId,
+					config: runtimeProvider.config ?? {},
+				});
+			}
+		} catch {
+			routeRuntime = undefined; // non-fatal — the route runs without ctx.runtime
+		}
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
@@ -6732,7 +6774,7 @@ async function handleApiRoute(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir },
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, ...(routeRuntime ? { runtime: routeRuntime } : {}) },
 				{ method, query, body: init.body },
 			);
 			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);

@@ -23,9 +23,20 @@ import { ModuleHost } from "./module-host-worker.js";
 import { isPackPathWithinRoot } from "./path-guard.js";
 import type { PackContributionResolver } from "./pack-contribution-registry.js";
 
+/** Managed-runtime linkage injected into a route ctx for an ACTIVE managed
+ *  provider's pack (P3/P4). Resolved by the host WITHOUT starting Docker; absent
+ *  in external mode and whenever the managed runtime is not running. Mirrors the
+ *  provider-hook `ctx.runtime` shape (lifecycle-hub `RuntimeContext`). */
+export interface RouteRuntimeContext {
+	baseUrl: string;
+	headers: Record<string, string>;
+	status: string;
+}
+
 /** The verified context handed to a route handler. Reuses the action ctx shape
- *  (design §5 B3.1: `RouteHandlerCtx = ActionHandlerCtx`). */
-export type RouteHandlerCtx = ActionHandlerCtx;
+ *  (design §5 B3.1: `RouteHandlerCtx = ActionHandlerCtx`), plus the optional
+ *  managed-runtime linkage the route endpoint resolves for managed-mode packs. */
+export type RouteHandlerCtx = ActionHandlerCtx & { runtime?: RouteRuntimeContext };
 
 /** The single typed request a route handler receives (design §5 B3.1 / v1
  *  `HostRouteInit`): method + optional query/body. No raw path/URL. */
