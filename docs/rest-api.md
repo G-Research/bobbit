@@ -745,16 +745,17 @@ Outbound requests that these endpoints make to the configured/tested AI Gateway 
 
 ### OAuth
 
-Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic` and `openai-codex`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
+Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic`, `openai-codex`, and `google-gemini-cli`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires? }`. |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires?, email? }`. |
 | `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. |
 | `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true }` (200) or `{ success: false, error }` (400). |
 | `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error? }`. |
+| `POST` | `/api/oauth/logout` | Revoke/clear one provider's stored credential. Body: `{ provider }`. Returns `{ success, provider }`, never echoing token material. |
 
-**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; an unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider".
+**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token), `openai-codex` (ChatGPT subscription → bearer token), and `google-gemini-cli` (Google account → Gemini Code Assist bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; for the Google path it also accepts the inbound aliases `google` and `gemini` and collapses them to canonical `google-gemini-cli` (plain `google` stays the Google AI Studio API-key provider elsewhere). An unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider". See [Google OAuth & Gemini models](google-oauth-models.md) for the full account-vs-API-key split.
 
 **Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
 
@@ -766,7 +767,9 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 
 The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
 
-**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" }`. Returns:
+The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`); it is never a token.
+
+**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" | "google-gemini-cli" }`. Returns:
 
 ```json
 {
@@ -779,7 +782,7 @@ The response intentionally does **not** echo the bearer token / API key — stri
 ```
 
 - `url`: opens in a system browser; the provider's redirect lands on Bobbit's callback handler.
-- `callbackServer`: `true` for OAuth providers that complete via the embedded callback server (e.g. `openai-codex`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`).
+- `callbackServer`: `true` for OAuth providers that complete via an embedded/loopback callback server (e.g. `openai-codex`, and `google-gemini-cli` via a loopback server on `http://localhost:<ephemeral-port>/oauth2callback`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`). The Google flow also accepts the manual paste path for remote-gateway setups where the browser cannot reach the gateway loopback.
 - `instructions`: optional human-readable string the UI may render alongside the URL.
 
 **`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider, so the body does not repeat it). Returns:
@@ -813,7 +816,9 @@ Response contract:
 
 `provider` is recommended as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
 
-See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md#add--debug-per-provider-oauth) for the file map and the Settings → Account UI walkthrough.
+**`POST /api/oauth/logout`** body: `{ provider }`. Normalizes the provider, optionally revokes the upstream token (Google posts to `oauth2.googleapis.com/revoke`; logout does not fail if revoke is transiently unavailable), deletes **only** that canonical provider's `auth.json` entry, and clears the OAuth cache. Returns `200 { success: true, provider }`. Provider-partitioned: logging out `google-gemini-cli` never touches `anthropic`, `openai-codex`, or the API-key-only `google` credential, and no response or log echoes token material.
+
+See [Google OAuth & Gemini models](google-oauth-models.md) for the account-vs-API-key provider split, the Code Assist runtime, and the current session-selectability limitation.
 
 ### Image generation
 

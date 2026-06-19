@@ -247,4 +247,35 @@ test.describe("Settings Models tab redesign", () => {
 		const dialogExists = await page.evaluate(() => !!document.querySelector("aigw-models-dialog"));
 		expect(dialogExists).toBe(true);
 	});
+
+	// Settings-drift acceptance: the live Models tab must expose a Provider API
+	// Keys entry point (the API-key fallback) so users are not directed to a
+	// nonexistent screen. The Google AI Studio key path (`google`) must be present.
+	test("Provider API Keys section is discoverable with a Google key input", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate((opts) => (window as any).__resetModelsTab(opts), {
+			aigwConfigured: false,
+			allModels: ALL_MODELS,
+		});
+
+		const section = page.locator('[data-testid="provider-keys-section"]');
+		await expect(section).toBeVisible();
+		await expect(section).toContainText(/Provider API Keys/);
+		await expect(section).toContainText(/Google AI Studio/);
+
+		// The Google AI Studio key input wrapper + its provider-key-input element render.
+		const googleKey = page.locator('[data-testid="provider-key-input-google"]');
+		await expect(googleKey).toBeVisible();
+		await expect(googleKey.locator("provider-key-input")).toHaveCount(1);
+		// The component renders its (capitalized) provider name in the label.
+		await expect(googleKey).toContainText(/google/i);
+
+		// Provider API Keys appears after Default Models in document order.
+		const order = await page.evaluate(() => {
+			const d = document.querySelector('[data-testid="defaults-section"]')!;
+			const k = document.querySelector('[data-testid="provider-keys-section"]')!;
+			return (d.compareDocumentPosition(k) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+		});
+		expect(order).toBe(true);
+	});
 });

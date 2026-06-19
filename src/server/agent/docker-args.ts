@@ -89,6 +89,8 @@ export interface DockerRunConfig {
 	toolManager?: ToolManager;
 	/** Whether sandbox policy permits mounting host OpenAI Codex auth into auth.json. */
 	sandboxAgentAuthAllowed?: boolean;
+	/** Whether sandbox policy permits mounting the Google account (Gemini Code Assist) OAuth credential into auth.json. */
+	sandboxAgentAuthGoogleAllowed?: boolean;
 	/** Preferences store used to include preference-backed OpenAI Codex credentials when policy allows. */
 	sandboxAgentAuthPrefs?: PreferencesStore | null;
 	/** Scope for the generated auth.json file; defaults to projectId when present. */
@@ -234,6 +236,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const sandboxAuthJson = ensureSandboxAgentAuthFile({
 		prefs: config.sandboxAgentAuthPrefs,
 		includeCodexAuth: config.sandboxAgentAuthAllowed === true,
+		includeGoogleAuth: config.sandboxAgentAuthGoogleAllowed === true,
 		scope: config.sandboxAgentAuthScope || projectId,
 	});
 	args.push("-v", `${toDockerPath(sandboxAuthJson)}:/home/node/.bobbit/agent/auth.json:ro`);

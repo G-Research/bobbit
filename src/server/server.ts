@@ -20,7 +20,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -309,7 +309,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth, sandboxTokenPolicyAllowsGoogleAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
@@ -2089,6 +2089,7 @@ export function createGateway(config: GatewayConfig) {
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
 					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthGoogleAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsGoogleAuth(sandboxTokenEntries),
 					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
@@ -10623,6 +10624,20 @@ async function handleApiRoute(
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/oauth/logout — clear/revoke a single provider's OAuth credential.
+	// Provider-partitioned: never touches other providers or API-key entries,
+	// and never echoes token material back to the client.
+	if (url.pathname === "/api/oauth/logout" && req.method === "POST") {
+		try {
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthLogout(body?.provider);
+			json(result);
+		} catch (err) {
+			jsonError(400, err);
 		}
 		return;
 	}
