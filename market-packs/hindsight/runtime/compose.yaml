@@ -31,7 +31,11 @@ services:
       - "127.0.0.1:${HINDSIGHT_WEB_PORT:-3000}:3000"
 
   # Managed Postgres. Selected only in `managed-postgres` mode. The data
-  # directory is bind-mounted from the host, defaulting to ${dataDir:-~/.hindsight}.
+  # directory is bind-mounted from the host. The path comes from the rendered
+  # env var HINDSIGHT_DATA_DIR (the manifest resolves it from the provider
+  # `dataDir` config, defaulting to ~/.hindsight); compose interpolates THAT
+  # rendered key — NOT the raw `dataDir` config field, which is never written to
+  # the env file — so a configured custom data dir is actually honoured here.
   db:
     image: docker.io/library/postgres@sha256:3b2c8f6c262a2aa333b3b750e5a821aeb6b1a14dd57189b9f172d903ecdaec27
     restart: unless-stopped
@@ -40,4 +44,4 @@ services:
       POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD}
       POSTGRES_DB: hindsight
     volumes:
-      - "${dataDir:-~/.hindsight}/postgres:/var/lib/postgresql/data"
+      - "${HINDSIGHT_DATA_DIR:-~/.hindsight}/postgres:/var/lib/postgresql/data"

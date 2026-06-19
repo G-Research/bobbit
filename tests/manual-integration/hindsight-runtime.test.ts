@@ -7,8 +7,9 @@
  * the ground-truth check for the P3 managed-mode lifecycle:
  *
  *   enable (compose up, managed-postgres) → wait healthy → retain/recall round-trip
- *   → disable (compose stop) → bind-mounted data survives → re-enable → recall still
- *   finds the marker.
+ *   → disable (compose stop) → bind-mounted data survives → updatePack (atomic pack
+ *   swap) → bind data + runtime state survive → re-enable → recall still finds the
+ *   marker.
  *
  * It NEVER touches the user's ~/.hindsight: every byte of state (rendered env,
  * generated secrets, allocated ports, the Postgres bind dir) lives under a
@@ -49,8 +50,7 @@ import type { PackContributionResolver } from "../../src/server/extension-host/p
 const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const PACK_ROOT = path.join(REPO_ROOT, "market-packs", "hindsight");
-const RUNTIME_FILE = path.join(PACK_ROOT, "runtimes", "hindsight.yaml");
+const SOURCE_PACK_ROOT = path.join(REPO_ROOT, "market-packs", "hindsight");
 
 const PACK_ID = "hindsight";
 const RUNTIME_ID = "hindsight";
@@ -67,21 +67,27 @@ async function dockerAvailable(): Promise<boolean> {
 	}
 }
 
-/** A single-runtime registry backed by the REAL shipped Hindsight manifest. */
-function makeRegistry(): PackContributionResolver {
-	const raw = parseYaml(fs.readFileSync(RUNTIME_FILE, "utf-8")) as Record<string, unknown>;
+/**
+ * A single-runtime registry backed by the REAL shipped Hindsight manifest, read
+ * from a WORKING COPY at `packRoot` (so the updatePack swap below can replace the
+ * pack contents without touching the repo). The resolver re-reads the manifest
+ * file on every lookup so a mid-test pack swap is reflected.
+ */
+function makeRegistry(packRoot: string): PackContributionResolver {
+	const runtimeFile = path.join(packRoot, "runtimes", "hindsight.yaml");
+	const raw = parseYaml(fs.readFileSync(runtimeFile, "utf-8")) as Record<string, unknown>;
 	const contribution: RuntimeContribution = {
 		id: RUNTIME_ID,
 		title: "Hindsight",
 		listName: "hindsight",
-		sourceFile: RUNTIME_FILE,
-		packRoot: PACK_ROOT,
+		sourceFile: runtimeFile,
+		packRoot,
 		manifest: raw,
 	};
 	const pack = {
 		packId: PACK_ID,
 		packName: "Hindsight",
-		packRoot: PACK_ROOT,
+		packRoot,
 		panels: [],
 		entrypoints: [],
 		providers: [],
@@ -101,6 +107,30 @@ function makeRegistry(): PackContributionResolver {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Faithfully reproduce the filesystem operation `MarketplaceInstaller.updatePack`
+ * performs: copy the current pack contents to a staging dir, then atomically
+ * rename-swap it into place (old aside → publish staging → drop old). This is the
+ * exact mutation an update applies to the installed pack dir. It touches ONLY the
+ * pack CONTENTS dir — never the bind-mounted Postgres data dir nor the supervisor
+ * state dir — which is precisely why managed data must survive an update.
+ */
+function simulateUpdatePack(packRoot: string): void {
+	const parent = path.dirname(packRoot);
+	const name = path.basename(packRoot);
+	const staging = path.join(parent, `.tmp-${name}-${Math.random().toString(36).slice(2, 10)}`);
+	const backup = path.join(parent, `.tmp-old-${name}-${Math.random().toString(36).slice(2, 10)}`);
+	fs.cpSync(packRoot, staging, { recursive: true });
+	fs.renameSync(packRoot, backup);
+	try {
+		fs.renameSync(staging, packRoot);
+	} catch (err) {
+		fs.renameSync(backup, packRoot);
+		throw err;
+	}
+	fs.rmSync(backup, { recursive: true, force: true });
+}
 
 interface FetchResult { status: number; ok: boolean; body: any }
 async function fetchJson(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<FetchResult> {
@@ -132,12 +162,15 @@ describe("hindsight managed runtime (real Docker)", () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "hindsight-rt-it-"));
 		const dataDir = path.join(tmp, "data");
 		const runtimeDataDir = path.join(tmp, "pack-runtimes");
+		// A WORKING COPY of the shipped pack so the updatePack swap never mutates the repo.
+		const packRoot = path.join(tmp, "pack");
 		fs.mkdirSync(dataDir, { recursive: true });
 		fs.mkdirSync(runtimeDataDir, { recursive: true });
+		fs.cpSync(SOURCE_PACK_ROOT, packRoot, { recursive: true });
 
 		const portStore = new FilePortStore(path.join(runtimeDataDir, "ports.json"));
 		const supervisor = new PackRuntimeSupervisor({
-			registry: makeRegistry(),
+			registry: makeRegistry(packRoot),
 			dockerBin: DOCKER_BIN,
 			// A stable suffix so re-enable in this run addresses the SAME compose project.
 			serverIdentitySuffix: `it-${Date.now().toString(36)}`,
@@ -209,13 +242,32 @@ describe("hindsight managed runtime (real Docker)", () => {
 			const stopped = await supervisor.stop(PACK_ID, RUNTIME_ID);
 			assert.ok(stopped.status === "stopped" || stopped.status === "starting", `unexpected post-stop status ${stopped.status}`);
 
-			// 4. Data survives the stop (and would survive an updatePack, which never
-			//    touches the bind dir): the Postgres bind mount is still populated.
+			// 4. Data survives the stop: the Postgres bind mount is still populated.
 			const pgDir = path.join(dataDir, "postgres");
 			assert.ok(fs.existsSync(pgDir) && fs.readdirSync(pgDir).length > 0, "managed Postgres bind data must survive disable");
 
-			// 5. Re-enable: the SAME persisted port/secret/state are reused, and recall
-			//    still finds the marker proving the data round-tripped across a stop.
+			// 5. updatePack: atomically swap the installed pack contents (exactly as
+			//    MarketplaceInstaller.updatePack does). An update must NEVER delete the
+			//    bind-mounted data nor the supervisor's runtime state, so both must still
+			//    be present afterward (the design's data-survives-updatePack requirement).
+			simulateUpdatePack(packRoot);
+			assert.ok(
+				fs.existsSync(pgDir) && fs.readdirSync(pgDir).length > 0,
+				"managed Postgres bind data must survive an updatePack",
+			);
+			assert.ok(
+				fs.existsSync(path.join(runtimeDataDir, "ports.json")),
+				"supervisor-owned runtime state (persisted ports) must survive an updatePack",
+			);
+			assert.equal(
+				portStore.get(packRuntimePersistKey(PACK_ID, RUNTIME_ID, "HINDSIGHT_API_PORT")),
+				apiPort,
+				"the persisted API host port must survive an updatePack",
+			);
+
+			// 6. Re-enable after the update: the SAME persisted port/secret/state are
+			//    reused, and recall still finds the marker proving the data round-tripped
+			//    across disable → updatePack → re-enable.
 			const reup = await supervisor.start(PACK_ID, RUNTIME_ID, { mode: "managed-postgres", config: startConfig });
 			assert.equal(reup.status, "running", `re-enable failed: ${reup.message ?? reup.status}`);
 			assert.equal(
@@ -223,7 +275,7 @@ describe("hindsight managed runtime (real Docker)", () => {
 				apiPort,
 				"re-enable must reuse the persisted host port",
 			);
-			assert.equal(await recallFinds(), true, `recall lost ${marker} after disable→re-enable — data did not survive`);
+			assert.equal(await recallFinds(), true, `recall lost ${marker} after disable→updatePack→re-enable — data did not survive`);
 		} finally {
 			// Tear down ONLY this run's compose project + volumes + temp state.
 			try { if (started) await supervisor.down(PACK_ID, RUNTIME_ID, { volumes: true, removeState: true }); } catch { /* best-effort */ }

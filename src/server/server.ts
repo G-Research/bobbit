@@ -7404,9 +7404,8 @@ async function handleApiRoute(
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const prevDisabledRuntimes = new Set(cfgStore.getPackActivation(scope as PackOrderScope, packName).runtimes ?? []);
-			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
-			invalidateResolverCaches();
+			const prevActivation = cfgStore.getPackActivation(scope as PackOrderScope, packName);
+			const prevDisabledRuntimes = new Set(prevActivation.runtimes ?? []);
 
 			// P3 — managed-runtime activation side effects. Enabling a
 			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit
@@ -7414,7 +7413,17 @@ async function handleApiRoute(
 			// (non-Docker) deployment mode never starts a container. Toggling any other
 			// entity — or a pack with no runtimes — is inert here, so install/update/
 			// list/status never start Docker.
+			//
+			// CRITICAL ordering: the Docker side effects run BEFORE the activation state
+			// is persisted, and a side effect that MATTERS (start/stop throwing, or a
+			// start that fails to come up) aborts the whole PUT WITHOUT persisting — so
+			// Bobbit never records "enabled"/"disabled" while Docker did the opposite. A
+			// graceful `docker-unavailable` status is TOLERATED (there is nothing to
+			// start/stop on a Docker-less host; the provider is defensive and the toggle
+			// is just metadata), so it persists and is reported, not treated as a hard
+			// failure. Stop is best-effort: only a thrown stop blocks a disable.
 			const runtimeStatuses: Array<Record<string, unknown>> = [];
+			const sideEffectFailures: string[] = [];
 			if (packRuntimeSupervisor && (catalogue.runtimes?.length ?? 0) > 0) {
 				const nextDisabledRuntimes = new Set(normalized.runtimes);
 				const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, packName);
@@ -7434,6 +7443,12 @@ async function handleApiRoute(
 								if (policy === "on-enable" && plan.start) {
 									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: plan.mode, config: plan.config });
 									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+									// A managed enable that does not come up running (and is not a
+									// tolerated docker-unavailable) is a real failure: don't persist
+									// "enabled" while the container is unhealthy/down.
+									if (status.status !== "running" && status.status !== "starting" && status.status !== "docker-unavailable") {
+										sideEffectFailures.push(`${rtCtx.packId}:${rc.id} failed to start (${status.status}${status.message ? `: ${status.message}` : ""})`);
+									}
 								}
 							} else if (!wasDisabled && nowDisabled) {
 								// enabled → disabled: stop (idempotent — no-op if not running).
@@ -7441,6 +7456,8 @@ async function handleApiRoute(
 								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
 							}
 						} catch (err) {
+							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
+							// failure: abort the PUT so persisted state matches Docker reality.
 							runtimeStatuses.push({
 								id: encodePackRuntimeId(rtCtx.packId, rc.id),
 								packId: rtCtx.packId,
@@ -7448,10 +7465,29 @@ async function handleApiRoute(
 								status: "error",
 								message: (err as Error)?.message ?? String(err),
 							});
+							sideEffectFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
 						}
 					}
 				}
 			}
+
+			// A side effect that matters failed → do NOT persist (state is unchanged) and
+			// surface the failure with the prior activation so the client/UI reverts the
+			// toggle instead of believing the change took effect.
+			if (sideEffectFailures.length > 0) {
+				json({
+					scope,
+					packName,
+					catalogue,
+					disabled: prevActivation,
+					runtimes: runtimeStatuses,
+					error: `runtime activation failed: ${sideEffectFailures.join("; ")}`,
+				}, 502);
+				return;
+			}
+
+			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			invalidateResolverCaches();
 
 			const activationResponse: Record<string, unknown> = { scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) };
 			if (runtimeStatuses.length > 0) activationResponse.runtimes = runtimeStatuses;
