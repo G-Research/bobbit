@@ -662,11 +662,17 @@ export class PackRuntimeSupervisor {
 	): Promise<PackRuntimeStatus> {
 		const { contribution, packName } = this._lookup(packId, runtimeId, opts.projectId);
 		const descriptor = this._descriptor(contribution, packId, runtimeId, packName);
-		// Derive the compose target + this runtime's owned services from the
-		// validated invocation. A manifest validation/invocation failure propagates
-		// (it never degrades to an unscoped whole-pack `stop`); the service list is
-		// empty ONLY for a valid manifest that truly declares no services.
-		const { target, services } = await this._composeContext(packId, runtimeId, contribution);
+		// READ-ONLY compose target — like `down`/`logs`, `stop` never rebuilds a full
+		// start invocation. Rebuilding one resolves deployment secrets (e.g. the
+		// start-only HINDSIGHT_API_LLM_API_KEY) / renders a fresh env file, which
+		// would make disable/stop FAIL for a never-started or default managed runtime
+		// whose start-only inputs aren't configured yet. The minimal target carries
+		// the collision-guarded project + contained compose file + this runtime's
+		// owned services, reusing an already-rendered `.env` ONLY when a prior start
+		// left one. A manifest validation/containment failure still propagates (it
+		// never degrades to an unscoped whole-pack `stop`); the service list is empty
+		// ONLY for a valid manifest that truly declares no services.
+		const { target, services } = this._readonlyComposeContext(packId, runtimeId, contribution);
 		try {
 			await this._exec(this._composeArgs(target, "stop", ...services));
 		} catch (err) {
@@ -989,11 +995,12 @@ export class PackRuntimeSupervisor {
 		const healthPort = healthcheck ? ctx.ports?.[healthcheck.port] : undefined;
 
 		renderRuntimeEnvFile(invocation.envFile, invocation.env);
-		// Persist the effective mode + config overlay used for THIS start so later
-		// read/control commands (status/stop/logs/down) can rebuild the SAME compose
-		// env. Without this, a runtime started with config-only secrets/placeholders
-		// (e.g. an LLM key or external DB URL supplied via deployment config, not the
-		// global secret store) would fail to re-resolve its env on control/teardown.
+		// Record the effective mode + config overlay used for THIS start beside the
+		// rendered env file. Read/control commands (status/stop/logs/down) reuse the
+		// rendered `.env` file itself (config-only secrets/placeholders — an LLM key or
+		// external DB URL supplied via deployment config — are already baked into it),
+		// so they never re-resolve start-only inputs on teardown. The persisted config
+		// is diagnostic state the purge path ({@link _removeRuntimeState}) cleans up.
 		this._persistRuntimeConfig(composeProject, runtimeId, modeKey, opts.config);
 
 		const target: ComposeTarget = {
@@ -1200,9 +1207,9 @@ export class PackRuntimeSupervisor {
 	 * The empty (project-wide) list is reserved EXCLUSIVELY for a successfully
 	 * validated manifest that genuinely declares no services. Manifest validation
 	 * failures must NEVER reach here as `[]` — they propagate from
-	 * {@link _resolveManifest}/{@link _buildInvocation} (callers go through
-	 * {@link _composeContext}), so an invalid/uncontained manifest can never
-	 * silently broaden a `stop`/`logs` to the whole pack project.
+	 * {@link _resolveManifest} (callers go through {@link _readonlyComposeContext}),
+	 * so an invalid/uncontained manifest can never silently broaden a `stop`/`logs`
+	 * to the whole pack project.
 	 */
 	private _servicesForManifest(manifest: RuntimeManifest): string[] {
 		const set = new Set<string>();
@@ -1248,27 +1255,6 @@ export class PackRuntimeSupervisor {
 		}
 	}
 
-	/** Load the persisted start mode + config overlay (best-effort; `{}` on miss). */
-	private _loadRuntimeConfig(
-		composeProject: string,
-		runtimeId: string,
-	): { mode?: string; config?: Record<string, unknown> } {
-		try {
-			const file = this._runtimeConfigPath(composeProject, runtimeId);
-			if (!fs.existsSync(file)) return {};
-			const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
-			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-			const out: { mode?: string; config?: Record<string, unknown> } = {};
-			if (typeof raw.mode === "string" && raw.mode.length > 0) out.mode = raw.mode;
-			if (raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)) {
-				out.config = raw.config as Record<string, unknown>;
-			}
-			return out;
-		} catch {
-			return {};
-		}
-	}
-
 	/**
 	 * Base `docker compose` args carrying the project + `-f composeFile`, plus
 	 * `--env-file` ONLY when the target has a rendered env file. The read-only
@@ -1311,61 +1297,6 @@ export class PackRuntimeSupervisor {
 		const persistedEnv = fs.existsSync(envFile) ? envFile : undefined;
 		return {
 			target: { composeProject, composeFile, ...(persistedEnv ? { envFile: persistedEnv } : {}) },
-			services: this._servicesForManifest(manifest),
-		};
-	}
-
-	/**
-	 * Build the compose target (project + resolved `composeFile` + rendered
-	 * `envFile`) and the runtime's owned service list for read/control commands
-	 * (`status`/`stop`/`logs`). Derives everything from the VALIDATED runtime
-	 * invocation so these commands address the same compose context `start` uses
-	 * regardless of the gateway cwd, and so a manifest validation/invocation
-	 * failure propagates (→ 400/500) instead of silently falling back to an
-	 * unscoped whole-pack command. The default mode supplies the env file (the
-	 * compose file is mode-independent; the owned-service list is the union of all
-	 * modes).
-	 */
-	private async _composeContext(
-		packId: string,
-		runtimeId: string,
-		contribution: RuntimeContribution,
-	): Promise<{ target: ComposeTarget; services: string[] }> {
-		const composeProject = this.composeProjectFor(packId);
-		const envFile = this._envFilePath(composeProject, runtimeId);
-		// Reuse the mode + config overlay persisted at start so read/control commands
-		// rebuild the SAME compose env: config-only secrets/placeholders (LLM key,
-		// external DB URL, dataDir) re-resolve instead of throwing on teardown. A
-		// persisted mode that no longer exists after an updatePack falls back to the
-		// default mode.
-		const persisted = this._loadRuntimeConfig(composeProject, runtimeId);
-		let mode = persisted.mode;
-		if (mode) {
-			let modes: Record<string, unknown> | undefined;
-			try {
-				modes = this._resolveManifest(contribution).modes as Record<string, unknown> | undefined;
-			} catch {
-				modes = undefined;
-			}
-			if (!modes || !modes[mode]) mode = undefined;
-		}
-		// Read/control paths MUST reuse persisted port allocations as-is. While the
-		// runtime is running its host ports are bound, so a revalidating allocation
-		// (`allocateHostPort`) would find them un-bindable, rotate to fresh ports, and
-		// rewrite ports.json + the env file — desyncing the persisted port from the
-		// live container and breaking the NEXT restart. `reusePersisted: true` keeps
-		// the stored port without a bindability probe.
-		const { manifest, invocation } = await this._buildInvocation(packId, runtimeId, contribution, envFile, mode, {
-			reusePersisted: true,
-			configOverlay: persisted.config,
-		});
-		renderRuntimeEnvFile(invocation.envFile, invocation.env);
-		return {
-			target: {
-				composeProject,
-				composeFile: invocation.composeFile,
-				envFile: invocation.envFile,
-			},
 			services: this._servicesForManifest(manifest),
 		};
 	}

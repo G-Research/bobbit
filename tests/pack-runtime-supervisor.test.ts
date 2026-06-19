@@ -599,17 +599,21 @@ describe("PackRuntimeSupervisor docker-unavailable", () => {
 // ── Stop / restart ───────────────────────────────────────────────────────────
 
 describe("PackRuntimeSupervisor.stop / restart", () => {
-	it("stop issues `compose stop` and reports stopped", async () => {
-		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
+	it("stop issues `compose stop`, reuses the started env, and reports stopped", async () => {
+		const docker = makeDocker({ up: () => ok(), stop: () => ok(), ps: () => ok("") });
 		const sup = makeSupervisor(docker.executor);
+		// Start once so the READ-ONLY stop target reuses the rendered env file. Like
+		// down/logs, stop never rebuilds a full start invocation (which would re-resolve
+		// start-only secrets and fail a default/never-started managed runtime).
+		await sup.start(PACK_ID, RUNTIME_ID);
 		const st = await sup.stop(PACK_ID, RUNTIME_ID);
 		assert.equal(st.status, "stopped");
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
 		const project = `bobbit-pack-${PACK_ID}-testsuffix`;
 		const composeAbs = path.join(tmp, "packs", PACK_ID, "runtimes", "compose.yaml");
 		const envFile = path.join(tmp, "data", project, `${RUNTIME_ID}.env`);
-		// Carries the compose file/env file AND is scoped to this runtime's service
-		// (`db`) — not the whole pack project.
+		// Carries the compose file/env file (reused from start) AND is scoped to this
+		// runtime's service (`db`) — not the whole pack project.
 		assert.deepEqual(stopCall.args, [...composeBase(project, composeAbs, envFile), "stop", "db"]);
 	});
 
@@ -797,9 +801,13 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.stop(MULTI_PACK, "alpha");
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
+		// READ-ONLY stop on a never-started runtime carries the project + compose file
+		// but NO `--env-file` (none rendered yet) — like down/logs it never rebuilds a
+		// full start invocation. Still scoped to alpha's own services.
 		assert.deepEqual(stopCall.args, [
-			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("alpha")), "stop", "a1", "a2",
+			"compose", "-p", PROJECT, "-f", COMPOSE_ABS, "stop", "a1", "a2",
 		]);
+		assert.ok(!stopCall.args.includes("--env-file"));
 		// Sibling runtime's services are never passed.
 		assert.ok(!stopCall.args.includes("b1"));
 		assert.ok(!stopCall.args.includes("b2"));
@@ -827,9 +835,12 @@ describe("PackRuntimeSupervisor service scoping (multi-runtime pack)", () => {
 		const sup = makeMultiSupervisor(docker.executor);
 		await sup.logs(MULTI_PACK, "alpha", { tail: 10 });
 		const logCall = docker.calls.find((c) => c.args.includes("logs"))!;
+		// READ-ONLY logs on a never-started runtime: NO `--env-file` (none rendered
+		// yet), still scoped to alpha's own services.
 		assert.deepEqual(logCall.args, [
-			...composeBase(PROJECT, COMPOSE_ABS, envFileFor("alpha")), "logs", "--tail", "10", "a1", "a2",
+			"compose", "-p", PROJECT, "-f", COMPOSE_ABS, "logs", "--tail", "10", "a1", "a2",
 		]);
+		assert.ok(!logCall.args.includes("--env-file"));
 		assert.ok(!logCall.args.includes("b1"));
 	});
 });
@@ -938,9 +949,10 @@ describe("PackRuntimeSupervisor invalid-manifest handling", () => {
 		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
 		const project = `bobbit-pack-${BAD_PACK}-testsuffix`;
 		const composeAbs = path.join(tmp, "packs", BAD_PACK, "runtimes", "compose.yaml");
-		const envFile = path.join(tmp, "bad-data", project, "bad.env");
-		// Compose file/env file still present; no trailing service args.
-		assert.deepEqual(stopCall.args, [...composeBase(project, composeAbs, envFile), "stop"]);
+		// READ-ONLY stop on a never-started runtime: compose file present, NO
+		// `--env-file` (none rendered yet), and no trailing service args (the valid
+		// manifest genuinely declares no services → whole-project scope).
+		assert.deepEqual(stopCall.args, ["compose", "-p", project, "-f", composeAbs, "stop"]);
 	});
 });
 
@@ -1815,6 +1827,31 @@ describe("PackRuntimeSupervisor.down without start-only secrets/sidecar", () => 
 		assert.equal(st.status, "stopped");
 		const downCall = docker.calls.find((c) => c.args.includes("down"))!;
 		assert.deepEqual(downCall.args, ["compose", "-p", PROJECT, "-f", COMPOSE_ABS, "down", "-v"]);
+	});
+
+	it("stops a never-started managed runtime WITHOUT resolving the missing secret or a sidecar", async () => {
+		const docker = makeDocker({ stop: () => ok(), ps: () => ok("") });
+		const sup = makeSecretSupervisor(docker.executor);
+		// Never started: no env file, no config sidecar, no LLM_KEY in any store.
+		// A full start invocation would throw on the unresolved `secret: LLM_KEY`;
+		// stop must use the read-only target and issue `compose stop` regardless.
+		const st = await sup.stop("secretpack", "svc");
+		assert.equal(st.status, "stopped");
+		assert.equal(st.composeProject, PROJECT);
+		const stopCall = docker.calls.find((c) => c.args.includes("stop"))!;
+		// Minimal read-only target: project + compose file + scoped services, NO
+		// --env-file (none rendered yet), and no fresh env render on disk.
+		assert.deepEqual(stopCall.args, ["compose", "-p", PROJECT, "-f", COMPOSE_ABS, "stop", "api", "db"]);
+		assert.ok(!stopCall.args.includes("--env-file"), "never-started stop carries no env file");
+	});
+
+	it("stop surfaces docker-unavailable (ENOENT) for a never-started managed runtime", async () => {
+		const enoent = Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" });
+		const docker = makeDocker({ stop: () => { throw enoent; } });
+		const sup = makeSecretSupervisor(docker.executor);
+		const st = await sup.stop("secretpack", "svc");
+		assert.equal(st.status, "docker-unavailable");
+		assert.equal(st.composeProject, PROJECT);
 	});
 });
 

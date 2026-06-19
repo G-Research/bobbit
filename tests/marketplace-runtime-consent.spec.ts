@@ -171,7 +171,7 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		await gotoAndWait(page);
 		const html = await page.evaluate(() => (window as any).__renderCard("hindsight", null) as string);
 		// Defaults so the consent surface is never blank.
-		expect(html).toContain("api, web, db");
+		expect(html).toContain("api, db");
 		expect(html).toContain("~/.hindsight");
 		const trust = await page.locator('[data-testid="market-runtime-trust"]').innerText();
 		expect(trust.toLowerCase()).toContain("memory");

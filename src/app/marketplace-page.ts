@@ -1372,7 +1372,7 @@ export function renderRuntimeConsentCardView(runtimeId: string, cap: PackRuntime
 			return `${prefix}allocated on enable`;
 		}).join(", ")
 		: "loopback ports allocated on enable";
-	const serviceText = services.length ? services.join(", ") : "api, web, db";
+	const serviceText = services.length ? services.join(", ") : "api, db";
 
 	return html`
 		<div class="market-runtime-card" data-testid="market-runtime-card-${runtimeId}">
