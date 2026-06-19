@@ -7204,7 +7204,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown> } | null => {
+		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown>; hasDeploymentSurface: boolean } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -7217,7 +7217,7 @@ async function handleApiRoute(
 			if (!packId) return null;
 			let contribs;
 			try { contribs = loadPackContributions(entry.path, entry.manifest); }
-			catch { return { packId, runtimes: [], deploymentConfig: {} }; }
+			catch { return { packId, runtimes: [], deploymentConfig: {}, hasDeploymentSurface: false }; }
 			// Effective deployment config = each provider's FLAT schema defaults
 			// (ProviderContribution.config) overlaid with its persisted store config.
 			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
@@ -7227,7 +7227,13 @@ async function handleApiRoute(
 				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
 				if (persisted && typeof persisted === "object") Object.assign(deploymentConfig, persisted);
 			}
-			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig };
+			// `hasDeploymentSurface` = the pack exposes a provider whose config carries
+			// the deployment mode (external/managed/…). A runtime-only pack with NO
+			// provider has no external/managed concept, so its `on-enable` runtime starts
+			// in the runtime's default mode rather than being suppressed by the
+			// external-default start plan (mirrors the REST start path's no-surface
+			// fallback so activation and `/api/pack-runtimes/:id/start` never diverge).
+			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface: contribs.providers.length > 0 };
 		};
 
 		// Deployment-mode → runtime start plan mapping is the module-level
@@ -7619,6 +7625,14 @@ async function handleApiRoute(
 				if (rtCtx && rtCtx.runtimes.length > 0) {
 					const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
 					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
+					// A runtime-only pack with NO provider deployment-config surface has no
+					// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
+					// external (start:false) and would wrongly suppress its `on-enable` start.
+					// Mirror the REST start path's no-surface fallback: enabling such a runtime
+					// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
+					// the manifest default). When a deployment surface exists, honour plan.start.
+					const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
+					const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
 					for (const rc of rtCtx.runtimes) {
 						const ref = rc.listName;
 						const wasDisabled = prevDisabledRuntimes.has(ref);
@@ -7629,8 +7643,9 @@ async function handleApiRoute(
 								// disabled → enabled: explicit enable. Only `on-enable` runtimes
 								// auto-start, and only when the deployment mode is a managed
 								// (Docker) mode — external mode avoids the Docker start entirely.
-								if (policy === "on-enable" && plan.start) {
-									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: plan.mode, config: plan.config });
+								// A provider-less runtime pack has no such gate (startWhenEnabled).
+								if (policy === "on-enable" && startWhenEnabled) {
+									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: startMode, config: plan.config });
 									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
 									// A managed enable that does not come up running (and is not a
 									// tolerated docker-unavailable) is a real failure: don't persist

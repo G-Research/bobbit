@@ -211,6 +211,47 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		expect(keys.structural).toContain("hindsight-memory");
 	});
 
+	test("consent disclosure refetches after the server deployment mode changes (finding #1: no stale consent before enable)", async ({ page }) => {
+		// REGRESSION: the capability cache is keyed by scope/packId/runtimeId/projectId
+		// but NOT by deployment mode/config revision. If the user changes the Hindsight
+		// deployment mode (external → managed) in the panel and returns to the
+		// marketplace, the stale `external` disclosure must NOT be shown right before the
+		// enable toggle. A marketplace (re)load invalidates the cache so the consent card
+		// refetches and shows the CURRENT (managed) disclosure.
+		await gotoAndWait(page);
+
+		// 1. Server is in external mode. Prime the cache and render the consent card:
+		//    it must show the no-Docker external guidance.
+		await page.evaluate(() => (window as any).__ensureCaps());
+		await page.waitForFunction(() => ((window as any).__consentHtml() as string).includes("market-runtime-external-guidance"), null, { timeout: 5_000 });
+		const fetchesAfterExternal = await page.evaluate(() => (window as any).__capabilityFetches() as number);
+		expect(fetchesAfterExternal).toBeGreaterThanOrEqual(1);
+
+		// 2. The user switches the deployment mode to managed elsewhere (panel writes the
+		//    provider config). WITHOUT invalidation the cached external card would persist.
+		await page.evaluate(() => (window as any).__setServerMode("managed"));
+		const stillExternal = await page.evaluate(() => (window as any).__consentHtml() as string);
+		expect(stillExternal).toContain("market-runtime-external-guidance");
+
+		// 3. Returning to the marketplace invalidates the cache (loadMarketplaceData calls
+		//    invalidateRuntimeCapabilities). The consent card now refetches and shows the
+		//    managed Docker disclosure — matching current server config BEFORE enable.
+		await page.evaluate(() => { (window as any).__invalidateCaps(); (window as any).__ensureCaps(); });
+		// "api, web, db" only appears in the FETCHED managed disclosure — the static
+		// cache-miss fallback uses "api, db", so this proves the refetched summary is
+		// shown, not a fallback card.
+		await page.waitForFunction(() => {
+			const html = (window as any).__consentHtml() as string;
+			return html.includes("api, web, db") && !html.includes("market-runtime-external-guidance");
+		}, null, { timeout: 5_000 });
+		const managedHtml = await page.evaluate(() => (window as any).__consentHtml() as string);
+		expect(managedHtml).toContain("api, web, db");
+		expect(managedHtml).toContain("/managed/data/path");
+		// A genuine refetch happened (not stale-served): the fetch count advanced.
+		const fetchesAfterManaged = await page.evaluate(() => (window as any).__capabilityFetches() as number);
+		expect(fetchesAfterManaged).toBeGreaterThan(fetchesAfterExternal);
+	});
+
 	test("master-toggle counts include the schema-v2 arrays (runtimes)", async ({ page }) => {
 		await gotoAndWait(page);
 		const counts = await page.evaluate(() => {

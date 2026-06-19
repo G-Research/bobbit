@@ -128,6 +128,40 @@ function writeRuntimePack(root: string, packName: string, mode: "external" | "ma
 	return packDir;
 }
 
+/** A schema-v2 pack declaring a managed runtime (startPolicy: on-enable) but NO
+ *  provider — i.e. no deployment-config surface. resolveRuntimeStartPlan({})
+ *  defaults to external/no-start, so without the no-surface fallback the
+ *  `on-enable` runtime would never start. */
+function writeProviderlessRuntimePack(root: string, packName: string): string {
+	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
+	fs.mkdirSync(path.join(packDir, "runtime"), { recursive: true });
+	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2",
+		`name: ${packName}`,
+		"description: Provider-less runtime activation e2e",
+		"version: 1.0.0",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		"  skills: []",
+		"  entrypoints: []",
+		"  providers: []",
+		"  runtimes: [hindsight]",
+	].join("\n") + "\n", "utf-8");
+	writeMeta(packDir, packName);
+	fs.writeFileSync(path.join(packDir, "runtimes", "hindsight.yaml"), [
+		"id: hindsight",
+		"title: Hindsight",
+		"startPolicy: on-enable",
+		"composeFile: ../runtime/compose.yaml",
+		"modes:",
+		"  managed-postgres: { services: [api, web, db] }",
+	].join("\n") + "\n", "utf-8");
+	fs.writeFileSync(path.join(packDir, "runtime", "compose.yaml"), "services:\n  api: { image: hindsight/api }\n", "utf-8");
+	return packDir;
+}
+
 async function setDisabledRuntimes(packName: string, runtimes: string[]) {
 	return apiFetch("/api/marketplace/pack-activation", {
 		method: "PUT",
@@ -199,6 +233,34 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 			expect(startCalls.length).toBe(1);
 			const config = startCalls[0].opts?.config as Record<string, unknown> | undefined;
 			expect(config?.HINDSIGHT_API_LLM_API_KEY).toBe("test-llm-key");
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("provider-less runtime pack: enabling an on-enable runtime starts it in the default mode (finding #2 — no deployment surface)", async ({ gateway }) => {
+		// A runtime-only pack has NO provider deployment config, so the start plan
+		// defaults to external/no-start. The activation path must mirror the REST start
+		// path's no-deployment-surface fallback: an `on-enable` runtime starts in the
+		// runtime's DEFAULT mode (mode undefined ⇒ supervisor picks the manifest default),
+		// rather than being suppressed by the external default.
+		const packName = `rt-providerless-${Date.now()}`;
+		const packDir = writeProviderlessRuntimePack(gateway.bobbitDir, packName);
+		try {
+			// Disable then re-enable to drive the explicit disabled → enabled start path.
+			await setDisabledRuntimes(packName, ["hindsight"]);
+			calls.length = 0;
+			const enable = await setDisabledRuntimes(packName, []);
+			expect(enable.status).toBe(200);
+			const startCalls = calls.filter((c) => c.op === "start");
+			expect(startCalls.length).toBe(1);
+			expect(startCalls[0].runtimeId).toBe("hindsight");
+			// No deployment surface → no managed/external mode forwarded; the supervisor
+			// resolves the runtime's default mode itself.
+			expect(startCalls[0].opts?.mode).toBeUndefined();
+			const body = await enable.json();
+			expect(Array.isArray(body.runtimes)).toBe(true);
+			expect(body.runtimes[0].status).toBe("running");
 		} finally {
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}

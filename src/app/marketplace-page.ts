@@ -217,6 +217,12 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 		loading = true;
 		renderApp();
 	}
+	// Drop cached runtime capability disclosures so the consent enable-card refetches
+	// against the server's CURRENT deployment config. The user may have changed the
+	// Hindsight deployment mode (e.g. external → managed) in the panel since this view
+	// was last open; without this the stale disclosure would be shown right before the
+	// enable toggle (see invalidateRuntimeCapabilities).
+	invalidateRuntimeCapabilities();
 	const projectId = currentProjectId();
 
 	const [srcRes, instRes, confRes] = await Promise.all([
@@ -333,11 +339,25 @@ export function runtimeCapabilityCacheKey(
 	return `${scope}:${packId}:${runtimeId}:${projectId ?? ""}`;
 }
 
+/** Drop every cached runtime capability disclosure (and any in-flight guard) so
+ *  the consent enable-card refetches fresh from the server. The disclosure is a
+ *  function of the SERVER's current deployment config (mode/dataDir/…), which the
+ *  user changes elsewhere (the Hindsight panel writes the provider config). The
+ *  cache key cannot encode that revision, so a stale `external` disclosure would
+ *  otherwise survive a switch to `managed` and be shown immediately before the
+ *  enable. Called whenever the marketplace view (re)loads, so the consent text
+ *  always matches current server config before the user toggles enable. */
+export function invalidateRuntimeCapabilities(): void {
+	runtimeCapabilities.clear();
+	runtimeCapabilitiesInFlight.clear();
+}
+
 /** Lazily fetch + cache the capability disclosure for a managed runtime so the
  *  consent enable-card can render images/services, ports, volume path and trust
  *  copy. Best-effort: a missing route / error caches `null` and the card falls
- *  back to static copy. Repaints once resolved. */
-function ensureRuntimeCapabilities(pack: InstalledPackWire, runtimeId: string): void {
+ *  back to static copy. Repaints once resolved. Exported for the staleness
+ *  regression test (drives the fetch/cache via a stubbed window.fetch). */
+export function ensureRuntimeCapabilities(pack: InstalledPackWire, runtimeId: string): void {
 	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
 	const restPackId = runtimeRestPackId(pack);
 	// Cache key tracks the STRUCTURAL pack id + the projectId the fetch is scoped
@@ -1362,8 +1382,9 @@ function renderRuntimeRow(pack: InstalledPackWire, runtimeId: string, checked: b
 }
 
 /** The consent enable-card for a managed runtime (looks up the cached capability
- *  summary, then defers to the pure {@link renderRuntimeConsentCardView}). */
-function renderRuntimeConsentCard(pack: InstalledPackWire, runtimeId: string): TemplateResult {
+ *  summary, then defers to the pure {@link renderRuntimeConsentCardView}).
+ *  Exported for the staleness regression test. */
+export function renderRuntimeConsentCard(pack: InstalledPackWire, runtimeId: string): TemplateResult {
 	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
 	const key = runtimeCapabilityCacheKey(pack.scope, runtimeRestPackId(pack), runtimeId, projectId);
 	return renderRuntimeConsentCardView(runtimeId, runtimeCapabilities.get(key));
