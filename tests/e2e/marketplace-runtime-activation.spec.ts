@@ -15,6 +15,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch } from "./e2e-setup.js";
+import { encodePackRuntimeId } from "../../dist/server/runtimes/index.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -52,8 +53,13 @@ const fakeSupervisor = {
 		return statusFor(packId, runtimeId, "stopped");
 	},
 	async logs() { return ""; },
-	async capabilitySummary(packId: string, runtimeId: string) {
-		return { ...statusFor(packId, runtimeId, "stopped"), mode: "managed-postgres", startPolicy: "on-enable", services: ["api", "web", "db"], images: ["api", "web", "db"], ports: [], trust: "x" };
+	async capabilitySummary(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+		// Echo the effective deployment config's dataDir into volumePath so a test can
+		// prove the route forwards the SAME effective config used by activation (e.g. a
+		// custom bind path), not just schema defaults.
+		const config = (opts?.config ?? {}) as Record<string, unknown>;
+		const volumePath = typeof config.dataDir === "string" && config.dataDir.length > 0 ? config.dataDir : "~/.hindsight";
+		return { ...statusFor(packId, runtimeId, "stopped"), mode: (opts?.mode as string | undefined) ?? "managed-postgres", startPolicy: "on-enable", services: ["api", "web", "db"], images: ["api", "web", "db"], ports: [], volumePath, trust: "x" };
 	},
 };
 
@@ -74,7 +80,7 @@ function writeMeta(packDir: string, packName: string): void {
 
 /** A schema-v2 pack declaring a managed runtime (startPolicy: on-enable) and a
  *  memory provider carrying the deployment `mode` (drives the start plan). */
-function writeRuntimePack(root: string, packName: string, mode: "external" | "managed" | "managed-external-postgres", opts: { extraProviderConfig?: string[] } = {}): string {
+function writeRuntimePack(root: string, packName: string, mode: "external" | "managed" | "managed-external-postgres", opts: { extraProviderConfig?: string[]; dataDir?: string } = {}): string {
 	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
@@ -103,7 +109,7 @@ function writeRuntimePack(root: string, packName: string, mode: "external" | "ma
 		"config:",
 		`  mode: { type: enum, values: [external, managed, managed-external-postgres], default: ${mode} }`,
 		"  externalUrl: { type: string, optional: true }",
-		"  dataDir: { type: string, default: ~/.hindsight }",
+		`  dataDir: { type: string, default: ${opts.dataDir ?? "~/.hindsight"} }`,
 		...(opts.extraProviderConfig ?? []),
 	].join("\n") + "\n", "utf-8");
 	// Minimal but realistic runtime descriptor (raw manifest is carried verbatim;
@@ -211,6 +217,107 @@ test.describe("marketplace managed-runtime activation (P3)", () => {
 			// No runtime status surfaced because no supervisor action was taken.
 			const body = await enable.json();
 			expect(body.runtimes).toBeUndefined();
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("external mode: DISABLING never calls stop and persists the disable without a managed runtime (review finding #1)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-external-disable-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "external");
+		// A supervisor whose stop() THROWS stands in for the real one: external mode has
+		// no managed runtime and no persisted start config, so stop() would have to build
+		// a default managed invocation (requiring HINDSIGHT_API_LLM_API_KEY) and blow up.
+		// The activation hook must SKIP the side effect entirely for external mode.
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async stop(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+				calls.push({ op: "stop", packId, runtimeId, opts });
+				throw new Error("managed env resolution required HINDSIGHT_API_LLM_API_KEY");
+			},
+		}));
+		try {
+			// Runtime starts enabled (empty disabled set).
+			expect(await getDisabledRuntimes(packName)).not.toContain("hindsight");
+			const disable = await setDisabledRuntimes(packName, ["hindsight"]);
+			// External disable must NOT touch Docker — no stop call, no 502.
+			expect(disable.status).toBe(200);
+			expect(calls.some((c) => c.op === "stop")).toBe(false);
+			// The disable persisted despite the absence of any managed runtime/secret.
+			expect(await getDisabledRuntimes(packName)).toContain("hindsight");
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("external mode: UNINSTALL never calls down and does not require a managed runtime (review finding #2)", async ({ gateway }) => {
+		const mod = await import("../../dist/server/server.js");
+		const packName = `rt-external-uninstall-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "external");
+		// A down() that THROWS simulates the real supervisor failing to resolve a managed
+		// compose env for an external install. Uninstall must SKIP down for external mode,
+		// so a Docker-less external install always uninstalls cleanly.
+		mod.registerPackRuntimeSupervisorFactory(() => ({
+			...fakeSupervisor,
+			async down(packId: string, runtimeId: string, opts?: Record<string, unknown>) {
+				calls.push({ op: "down", packId, runtimeId, opts });
+				throw new Error("managed env resolution required HINDSIGHT_API_LLM_API_KEY");
+			},
+		}));
+		try {
+			const res = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "server", packName }),
+			});
+			// External uninstall proceeds without ever calling down.
+			expect(res.status).toBe(204);
+			expect(calls.some((c) => c.op === "down")).toBe(false);
+			// The pack is gone from the install ledger.
+			const listed = await apiFetch("/api/marketplace/installed");
+			const installed = (await listed.json()).installed as Array<{ packName: string; scope: string }>;
+			expect(installed.some((p) => p.packName === packName && p.scope === "server")).toBe(false);
+		} finally {
+			mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor);
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("managed mode: UNINSTALL still tears the runtime down (review finding #2 — managed unchanged)", async ({ gateway }) => {
+		const packName = `rt-managed-uninstall-${Date.now()}`;
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed");
+		try {
+			const res = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "server", packName }),
+			});
+			expect(res.status).toBe(204);
+			const downCalls = calls.filter((c) => c.op === "down");
+			expect(downCalls.length).toBe(1);
+			expect(downCalls[0].opts?.volumes).toBe(false);
+			expect(downCalls[0].opts?.removeState).toBe(false);
+		} finally {
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("capabilities for managed mode discloses the CUSTOM dataDir bind path activation uses (review finding #3)", async ({ gateway }) => {
+		const packName = `rt-capabilities-datadir-${Date.now()}`;
+		const customPath = "/srv/custom-hindsight-data";
+		// Managed mode with a non-default dataDir. The capabilities route must resolve the
+		// SAME effective deployment config activation uses and forward it, so the consent
+		// disclosure shows the custom bind path — not the schema default.
+		const packDir = writeRuntimePack(gateway.bobbitDir, packName, "managed", { dataDir: customPath });
+		try {
+			// packId for a server-scope disk pack under market-packs/<name> is <name>.
+			const id = encodePackRuntimeId(packName, "hindsight");
+			const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities`);
+			expect(res.status).toBe(200);
+			const body = await res.json();
+			expect(body.mode).toBe("managed-postgres");
+			expect(body.dockerRequired).toBe(true);
+			expect(body.volumePath).toBe(customPath);
 		} finally {
 			fs.rmSync(packDir, { recursive: true, force: true });
 		}
