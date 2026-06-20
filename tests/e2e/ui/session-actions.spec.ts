@@ -279,7 +279,7 @@ test.describe("unified session actions", () => {
 		);
 	});
 
-	test("mobile session header keeps back/title usable and exposes full actions through hamburger", async ({ page }) => {
+	test("mobile session header shows icon-only quick actions and opens the remaining menu with FLIP sources", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionsToDelete.add(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
@@ -289,10 +289,60 @@ test.describe("unified session actions", () => {
 		await expect(page.getByTitle("Back to session list")).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".mobile-header-title").first()).toBeVisible({ timeout: 5_000 });
 		await expect(headerTrigger(page), "mobile session view must expose the unified session actions menu").toBeVisible({ timeout: 5_000 });
-		await expect(page.locator(HEADER_ACTION_SELECTOR), "mobile should suppress individual header action buttons").toHaveCount(0);
+
+		const directIds = await page.locator(HEADER_ACTION_SELECTOR).evaluateAll((els) =>
+			els.map((el) => (el as HTMLElement).dataset.sessionActionId || "").filter(Boolean),
+		);
+		expect(directIds, "mobile header should render exactly the icon-only quick actions next to the hamburger").toEqual(["modify", "terminate"]);
+		for (const actionId of ["modify", "terminate"] as const) {
+			const button = headerDirectAction(page, actionId);
+			await expect(button, `${actionId} quick action should be visible in the mobile header`).toBeVisible({ timeout: 5_000 });
+			await expect(button).toHaveAttribute("aria-label", actionId === "modify" ? /Edit|Modify/ : /Terminate|End team/);
+			const visibleLabelText = await button.evaluate((el) => {
+				const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+				const visible: string[] = [];
+				while (walker.nextNode()) {
+					const node = walker.currentNode as Text;
+					const text = node.textContent?.trim();
+					if (!text) continue;
+					const parent = node.parentElement;
+					if (!parent) continue;
+					const style = getComputedStyle(parent);
+					if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue;
+					const range = document.createRange();
+					range.selectNodeContents(node);
+					const rect = range.getBoundingClientRect();
+					range.detach();
+					if (rect.width > 2 && rect.height > 2) visible.push(text);
+				}
+				return visible.join(" ");
+			});
+			expect(visibleLabelText, `${actionId} quick action should not expose a visible text label on mobile`).toBe("");
+		}
+
+		await page.evaluate(() => {
+			const original = Element.prototype.animate;
+			(window as any).__mobileHeaderActionAnimations = [];
+			Element.prototype.animate = function(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
+				const el = this as HTMLElement;
+				(window as any).__mobileHeaderActionAnimations.push({
+					actionId: el.dataset.sidebarActionId || el.dataset.sessionActionId || "",
+					quick: el.dataset.sidebarActionQuick || "",
+					keyframes,
+					options,
+				});
+				return original.call(this, keyframes, options);
+			};
+		});
 
 		await openHeaderActions(page);
-		expect(await popoverActionIds(page)).toEqual(CANONICAL_SESSION_ACTION_IDS);
+		const overflowIds = await popoverActionIds(page);
+		expect(overflowIds).toEqual(CANONICAL_SESSION_ACTION_IDS);
+		const sourceIds = await page.locator("sidebar-actions-popover").first().evaluate((el) => ((el as any).sourceRects || []).map((rect: { actionId: string }) => rect.actionId));
+		expect(sourceIds, "mobile header hamburger should capture quick-action source rects for FLIP").toEqual(expect.arrayContaining(["modify", "terminate"]));
+		await expect.poll(() => page.evaluate(() => (window as any).__mobileHeaderActionAnimations
+			.filter((call: any) => ["modify", "terminate"].includes(call.actionId) && call.quick === "true" && JSON.stringify(call.keyframes).includes("translate"))
+			.map((call: any) => call.actionId)), { timeout: 5_000 }).toEqual(expect.arrayContaining(["modify", "terminate"]));
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow, "mobile header must not create horizontal document overflow").toBeLessThanOrEqual(1);
 	});

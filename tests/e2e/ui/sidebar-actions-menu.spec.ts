@@ -642,7 +642,7 @@ test.describe("Sidebar actions menu", () => {
 		).toHaveCount(0, { timeout: 5_000 });
 	});
 
-	test.skip("fixture-covered: mobile v1 hides hamburger while keeping existing inline quick actions visible", async ({ page }) => {
+	test("mobile sidebar rows keep quick actions and open full hamburger menus without row navigation", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 820 });
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
@@ -653,16 +653,29 @@ test.describe("Sidebar actions menu", () => {
 		await openApp(page);
 		const sRow = sessionRow(page, sessionId);
 		await expect(sRow).toBeVisible({ timeout: 10_000 });
-		await expect(triggerFor(sRow, "session", sessionId)).toHaveCount(0);
 		await expect(sRow.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(sRow.locator('[data-sidebar-action-id="terminate"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(sRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
+		const startingHash = await page.evaluate(() => window.location.hash);
+		await expect(triggerFor(sRow, "session", sessionId), "mobile session rows must expose a hamburger actions trigger").toBeVisible();
+		await triggerFor(sRow, "session", sessionId).click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]));
+		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "session hamburger should not select/navigate its row" }).toBe(startingHash);
+		await page.keyboard.press("Escape");
+		await expectNoPopover(page);
 
 		const gRow = await ensureGoalExpanded(page, goal.id as string);
-		await expect(triggerFor(gRow, "goal", goal.id as string)).toHaveCount(0);
-		await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt is popover-only and not an inline quick action").toHaveCount(0);
 		await expect(gRow.locator('[data-sidebar-action-id="archive"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(gRow.locator('[data-sidebar-action-id="dashboard"][data-sidebar-action-quick="true"]')).toBeVisible();
+		await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt remains popover-only, not an inline quick action").toHaveCount(0);
 		await expect(gRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
+		await expect(triggerFor(gRow, "goal", goal.id as string), "mobile goal rows must expose a hamburger actions trigger").toBeVisible();
+		const expandedBefore = await page.evaluate((id) => (window as any).__bobbitExpandedGoals?.has?.(id), goal.id);
+		await triggerFor(gRow, "goal", goal.id as string).click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Re-attempt", "Copy link"]));
+		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "goal hamburger should not navigate its row" }).toBe(startingHash);
+		await expect.poll(() => page.evaluate((id) => (window as any).__bobbitExpandedGoals?.has?.(id), goal.id), { message: "goal hamburger should not toggle expansion" }).toBe(expandedBefore);
 	});
 });

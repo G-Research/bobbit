@@ -34,6 +34,7 @@ import {
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildSessionActions, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
+import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 // Lazy wrapper for the proposal-panels chunk. Static import here keeps
 // the wrapper itself in the entry bundle while the ~80 kB body of
 // goal/role/tool/staff/project preview panels lands on first view.
@@ -681,7 +682,13 @@ function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobil
 	const directLimit = firstTrailingActionIndex >= 0
 		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
 		: headerDirectSessionActionLimit();
-	const directCount = mobile ? 0 : Math.min(actions.length, directLimit);
+	if (mobile) {
+		return {
+			directActions: actions.filter((action) => action.quick),
+			overflowActions: actions,
+		};
+	}
+	const directCount = Math.min(actions.length, directLimit);
 	return {
 		directActions: actions.slice(0, directCount),
 		overflowActions: actions.slice(directCount),
@@ -731,6 +738,7 @@ async function openHeaderSessionActionsPopover(input: {
 	trigger: HTMLElement;
 	actions: SessionActionDescriptor[];
 	refresh: () => SessionActionDescriptor[];
+	sourceRects: SidebarActionsFlipRect[];
 }): Promise<void> {
 	if (isHeaderSessionActionsPopoverOpen(input.sessionId)) {
 		closeHeaderSessionActionsPopover();
@@ -743,7 +751,7 @@ async function openHeaderSessionActionsPopover(input: {
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
 	element.items = toHeaderPopoverItems(input.actions);
-	element.sourceRects = [];
+	element.sourceRects = input.sourceRects;
 	element.open = true;
 	const handleResize = () => refreshOpenHeaderSessionActionsPopover();
 	window.addEventListener("resize", handleResize);
@@ -775,19 +783,26 @@ async function openHeaderSessionActionsPopover(input: {
 	renderApp();
 }
 
-function renderHeaderSessionActionButton(action: SessionActionDescriptor) {
+function renderHeaderSessionActionButton(action: SessionActionDescriptor, mobile = false) {
 	const danger = action.tone === "danger";
 	return html`
 		<button
 			type="button"
-			class="h-7 px-2 rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground ${danger ? "hover:text-destructive" : ""}"
+			class="${mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground ${danger ? "hover:text-destructive" : ""}"
 			data-session-action-surface="header"
 			data-session-action-id=${String(action.id)}
-			@click=${(event: Event) => { closeHeaderSessionActionsPopover(false); void action.run(event); }}
+			data-sidebar-action-id=${String(action.id)}
+			data-sidebar-action-quick=${action.quick ? "true" : "false"}
+			@click=${(event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				closeHeaderSessionActionsPopover(false);
+				void action.run(event);
+			}}
 			title=${action.title || action.label}
 			aria-label=${action.label}
 		>
-			<span class="inline-flex items-center gap-1">${action.icon}<span class="text-xs hidden md:inline">${action.label}</span></span>
+			<span class="inline-flex items-center gap-1">${action.icon}${mobile ? html`` : html`<span class="text-xs hidden md:inline">${action.label}</span>`}</span>
 		</button>
 	`;
 }
@@ -815,6 +830,7 @@ function renderHeaderSessionActions(input: {
 		event.preventDefault();
 		event.stopPropagation();
 		const trigger = event.currentTarget as HTMLElement;
+		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
 		resetSessionForkNewWorktree();
 		const currentOverflowActions = () => partitionHeaderSessionActions(buildActions(), input.mobile).overflowActions;
 		void openHeaderSessionActionsPopover({
@@ -822,23 +838,26 @@ function renderHeaderSessionActions(input: {
 			trigger,
 			actions: currentOverflowActions(),
 			refresh: currentOverflowActions,
+			sourceRects: row ? captureSidebarActionSourceRects(row) : [],
 		});
 	};
 	return html`
-		<div class="flex items-center gap-1 shrink-0 relative" data-session-action-surface="header">
-			${input.mobile ? html`` : directActions.map(renderHeaderSessionActionButton)}
-			${showOverflow ? html`
-				<button
-					type="button"
-					class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
-					data-testid="session-actions-trigger"
-					aria-label="Session actions"
-					aria-haspopup="menu"
-					aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}
-					title="Session actions"
-					@click=${openFromTrigger}
-				>${icon(Menu, "xs")}</button>
-			` : html``}
+		<div class="flex items-center gap-1 shrink-0 relative" data-session-action-surface="header" data-sidebar-actions-row-root>
+			<div class="sidebar-actions flex items-center gap-1">
+				${directActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
+				${showOverflow ? html`
+					<button
+						type="button"
+						class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
+						data-testid="session-actions-trigger"
+						aria-label="Session actions"
+						aria-haspopup="menu"
+						aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}
+						title="Session actions"
+						@click=${openFromTrigger}
+					>${icon(Menu, "xs")}</button>
+				` : html``}
+			</div>
 		</div>
 	`;
 }

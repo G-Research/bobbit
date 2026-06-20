@@ -544,10 +544,12 @@ function renderSidebarActionsTrigger(input: {
 	btnPad: string;
 	refresh: () => SidebarActionItem[];
 	onBeforeOpen?: () => void;
-}): TemplateResult | typeof nothing {
-	if (input.mobile) return nothing;
+}): TemplateResult {
 	const expanded = isSidebarActionsPopoverOpen(input.kind, input.entityId);
 	const label = input.kind === "session" ? "Session actions" : "Goal actions";
+	const className = input.mobile
+		? `${input.btnPad} rounded text-muted-foreground active:bg-secondary/80`
+		: `${input.btnPad} rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground`;
 	const openFromTrigger = (event: Event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -566,7 +568,7 @@ function renderSidebarActionsTrigger(input: {
 	};
 	return html`
 		<button
-			class="${input.btnPad} rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground"
+			class=${className}
 			data-testid="sidebar-actions-trigger"
 			data-sidebar-actions-kind=${input.kind}
 			data-sidebar-actions-id=${input.entityId}
