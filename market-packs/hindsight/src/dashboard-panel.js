@@ -70,9 +70,24 @@ function hostOf(url) {
 
 /** Read the deterministic test timeout hook (tests set a tiny value); production
  *  has no hook and uses {@link DEFAULT_IFRAME_TIMEOUT_MS}. */
-function iframeTimeoutMs() {
+function iframeTimeoutMs(uiUrl = "") {
 	const v = globalThis.__bobbitHindsightIframeTimeoutMs;
-	return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : DEFAULT_IFRAME_TIMEOUT_MS;
+	if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+	const raw = String(uiUrl || "");
+	const rawMatch = raw.match(/[?&](?:amp;)?__bobbit_hindsight_timeout_ms=(\d+)/);
+	if (rawMatch) return Number(rawMatch[1]);
+	try {
+		const fromUrl = Number(new URL(raw).searchParams.get("__bobbit_hindsight_timeout_ms"));
+		if (Number.isFinite(fromUrl) && fromUrl >= 0) return fromUrl;
+	} catch { /* noop */ }
+	return DEFAULT_IFRAME_TIMEOUT_MS;
+}
+
+function forceIframeTimeout(uiUrl = "") {
+	if (globalThis.__bobbitHindsightIframeForceTimeout === true) return true;
+	const raw = String(uiUrl || "");
+	if (/[?&](?:amp;)?__bobbit_hindsight_force_timeout=1(?:&|$)/.test(raw)) return true;
+	try { return new URL(raw).searchParams.get("__bobbit_hindsight_force_timeout") === "1"; } catch { return false; }
 }
 
 export default function createDashboardPanel({ html, nothing }) {
@@ -133,7 +148,7 @@ export default function createDashboardPanel({ html, nothing }) {
 		entry.frameArmedFor = uiUrl;
 		entry.frameLoaded = false;
 		entry.frameTimedOut = false;
-		const ms = iframeTimeoutMs();
+		const ms = iframeTimeoutMs(uiUrl);
 		entry.frameTimer = setTimeout(() => {
 			const e = get(key);
 			if (!e) return;
@@ -145,6 +160,7 @@ export default function createDashboardPanel({ html, nothing }) {
 	const onFrameLoad = (host, key) => {
 		const entry = get(key);
 		if (!entry) return;
+		if (forceIframeTimeout(entry.uiUrl)) return;
 		clearTimer(entry);
 		entry.frameLoaded = true;
 		entry.frameTimedOut = false;

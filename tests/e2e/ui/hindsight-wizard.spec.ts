@@ -185,6 +185,9 @@ async function assertManagedStartContract(page: Page, mode: "managed" | "managed
 	await modeCard(wizard, mode).click();
 	await wizard.locator('[data-testid="market-hindsight-wizard-next"]').click();
 	await expect(wizard.locator('[data-testid="market-hindsight-wizard-llmapikey"]')).toBeVisible({ timeout: 15_000 });
+	if (mode === "managed-external-postgres") {
+		await wizard.locator('[data-testid="market-hindsight-wizard-externaldburl"]').fill("postgresql://hindsight:secret@localhost:5432/hindsight_test");
+	}
 	await wizard.locator('[data-testid="market-hindsight-wizard-llmapikey"]').fill("sk-managed-test");
 	await wizard.locator('[data-testid="market-hindsight-wizard-next"]').click();
 

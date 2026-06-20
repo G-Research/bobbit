@@ -29,6 +29,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchContributions, type PackContributionsWire } from "./api.js";
+import { getRouteFromHash } from "./routing.js";
 import { state, renderApp } from "./state.js";
 import {
 	DEFAULT_PACK_PANEL_INSTANCE_KEY,
@@ -451,11 +452,16 @@ function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown
 		// already updated when control returns here — we then mount the tab and render
 		// so it is present + active under the target. Without a switcher (unit
 		// fixtures) fall back to the bare assignment exactly as v1 did.
-		if (sessionId && sessionId !== s.selectedSessionId) {
-			if (sessionSwitcher) {
-				try { sessionSwitcher(sessionId); } catch { /* switch best-effort */ }
-			} else {
-				s.selectedSessionId = sessionId;
+		if (sessionId) {
+			let routeView = "";
+			try { routeView = getRouteFromHash().view; } catch { /* routing unavailable in fixtures */ }
+			const shouldSwitch = sessionId !== s.selectedSessionId || routeView !== "session";
+			if (shouldSwitch) {
+				if (sessionSwitcher) {
+					try { sessionSwitcher(sessionId); } catch { /* switch best-effort */ }
+				} else {
+					s.selectedSessionId = sessionId;
+				}
 			}
 		}
 		const sid = sessionId || s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;

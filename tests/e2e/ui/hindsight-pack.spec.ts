@@ -58,7 +58,7 @@ const CONFIG_KEY = "provider-config:memory";
 // that the embedded dashboard loads the UI URL verbatim — never a value fabricated
 // from the API URL.
 const EX_UI_URL = "http://127.0.0.1:19177/banks/hermes?view=data";
-const UNREACHABLE_UI_URL = "http://127.0.0.1:1/banks/hermes?view=data";
+const UNREACHABLE_UI_URL = "http://127.0.0.1:1/banks/hermes?view=data&__bobbit_hindsight_timeout_ms=50&__bobbit_hindsight_force_timeout=1";
 
 // Static skip-guard: the NEW embedded-dashboard panel bundle + descriptor must exist
 // before this suite means anything. On this (test-only) branch the parallel coder
@@ -234,7 +234,7 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 		// load-timeout means the deterministic warning never fires within the test.
 		await page.addInitScript(() => { (window as any).__bobbitHindsightIframeTimeoutMs = 60_000; });
 
-		await mountDashboard(page, contribution!);
+		const sid = await mountDashboard(page, contribution!);
 
 		// The embedded iframe mounts with src === the configured UI URL — verbatim.
 		await expect(frame(page), "the entry embeds the dashboard iframe").toBeVisible({ timeout: 15_000 });
@@ -246,7 +246,8 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 		// PERSISTENCE: a full reload + the bare deep link re-opens the SAME embedded
 		// dashboard (config persisted server-side; still not a config surface).
 		const token = await readE2ETokenAsync();
-		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/`);
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await reconcile(page);
 		await expect.poll(async () => {
 			await reconcile(page);
@@ -297,7 +298,6 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 		// A reachable-shaped but framing-refused / unreachable UI URL. The parent cannot
 		// detect XFO/CSP refusal, so the panel uses a load-timeout. Drive it deterministically.
 		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", uiUrl: UNREACHABLE_UI_URL });
-		await page.addInitScript(() => { (window as any).__bobbitHindsightIframeTimeoutMs = 50; });
 		await mountDashboard(page, contribution!);
 
 		// The frame still mounts (src is set) but the load never completes → the warning.

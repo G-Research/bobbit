@@ -120,7 +120,7 @@ const runtimeCapabilitiesInFlight = new Set<string>();
 const HINDSIGHT_PACK = "hindsight";
 const HINDSIGHT_RUNTIME = "hindsight";
 const HINDSIGHT_PANEL_ID = "hindsight.panel";
-const HINDSIGHT_DASHBOARD_PANEL_ID = "hindsight.dashboard";
+const HINDSIGHT_DASHBOARD_ROUTE = "#/ext/hindsight";
 
 /** Subset of the Hindsight `status` route response the marketplace needs. The
  *  `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are additive (Partition C)
@@ -1965,7 +1965,7 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 		<div class="market-hindsight-actions flex items-center gap-1.5 flex-wrap mt-2" data-testid="market-hindsight-actions">
 			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" aria-expanded=${hindsightConfigFormOpen ? "true" : "false"} @click=${() => toggleHindsightConfigForm(pack)}>${icon(Settings, "xs")} Configure</button>
 			<button class="market-btn" data-testid="market-hindsight-test" ?disabled=${testing || !configured} @click=${() => handleHindsightTest()}>${icon(Plug, "xs", testing ? "animate-spin" : "")} Test connection</button>
-			<button class="market-btn" data-testid="market-hindsight-open-ui" @click=${() => openHindsightDashboard()}>${icon(ExternalLink, "xs")} Open Hindsight UI</button>
+			<a class="market-btn" data-testid="market-hindsight-open-ui" href=${HINDSIGHT_DASHBOARD_ROUTE}>${icon(ExternalLink, "xs")} Open Hindsight UI</a>
 			${s?.uiUrl
 				? html`<a class="market-btn" data-testid="market-hindsight-open-ui-external" href=${s.uiUrl} target="_blank" rel="noopener noreferrer" title="Open the dashboard in an external browser tab">${icon(ExternalLink, "xs")} Open externally</a>`
 				: ""}
@@ -1991,13 +1991,6 @@ function openHindsightPanel(): void {
 }
 void openHindsightPanel; // retained: the in-session panel path is unchanged.
 
-/** Open the embedded Hindsight dashboard as a first-class in-app side-panel tab.
- *  This is the primary "Open Hindsight UI" action — the dashboard renders the
- *  configured `uiUrl` in a sandboxed iframe (or a helpful empty state when unset),
- *  so the user never leaves Bobbit. The external anchor is a secondary fallback. */
-function openHindsightDashboard(): void {
-	void import("./pack-panels.js").then((m) => m.openPackPanel({ panelId: HINDSIGHT_DASHBOARD_PANEL_ID }, HINDSIGHT_PACK));
-}
 
 /** Default the inline form values (used when the config read hasn't populated a field). */
 function defaultHindsightForm(): HindsightConfigFormValues {

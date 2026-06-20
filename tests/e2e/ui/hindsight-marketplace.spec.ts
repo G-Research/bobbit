@@ -251,10 +251,12 @@ describe("Hindsight pack — Marketplace state + actions (config home + embedded
 		const row = await openMarketRow(page);
 		await expect(stateBadge(row)).toHaveAttribute("data-state", "external-connected", { timeout: 20_000 });
 
-		// The primary Open Hindsight UI is a BUTTON (not an anchor that navigates away).
+		// The primary Open Hindsight UI is an in-app route link (not an external
+		// target=_blank/window.open escape hatch).
 		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
 		await expect(openUi, "Open Hindsight UI is surfaced with a configured UI URL").toBeVisible({ timeout: 15_000 });
-		await expect.poll(async () => (await openUi.evaluate((el) => el.tagName)).toLowerCase()).toBe("button");
+		await expect(openUi).toHaveAttribute("href", /#\/ext\/hindsight$/);
+		await expect(openUi).not.toHaveAttribute("target", "_blank");
 
 		// The secondary external-browser fallback carries the uiUrl verbatim.
 		const external = row.locator('[data-testid="market-hindsight-open-ui-external"]');
