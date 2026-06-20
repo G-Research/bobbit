@@ -300,6 +300,33 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 		await expect(configCard(page), "the deep link must not open a config card").toHaveCount(0);
 	});
 
+	test("the embedded dashboard iframe fills the panel height (not collapsed to the ~320px min-height floor)", async ({ page }) => {
+		const contribution = await resolveDashboardContribution();
+		test.skip(!contribution, "Hindsight embedded-dashboard contribution is not served in this environment");
+
+		// A standard desktop viewport. The bug: the iframe collapsed to its wrap's
+		// `min-height` floor (~320px) instead of filling the panel, because the
+		// height chain to the `height:100%` iframe was not DEFINITE end-to-end.
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", uiUrl: EX_UI_URL });
+		await page.addInitScript(() => { (window as any).__bobbitHindsightIframeTimeoutMs = 60_000; });
+		await mountDashboard(page, contribution!);
+
+		const f = frame(page);
+		await expect(f).toBeVisible({ timeout: 15_000 });
+
+		// Measure the ACTUAL rendered height — not mere visibility. The frame must be
+		// TALL (a high fraction of the panel), proving the definite height chain.
+		const box = await f.boundingBox();
+		expect(box, "the iframe has a bounding box").not.toBeNull();
+		expect(box!.height, `iframe collapsed to ${Math.round(box!.height)}px — must fill the panel`).toBeGreaterThan(500);
+
+		// Cross-check it actually tracks the panel container, not a fixed pixel value.
+		const panelBox = await page.locator('[data-testid="pack-panel-root"]').first().boundingBox();
+		expect(panelBox, "the pack panel root has a bounding box").not.toBeNull();
+		expect(box!.height, "the iframe fills most of the panel height").toBeGreaterThan(panelBox!.height * 0.7);
+	});
+
 	test("a secondary external fallback link points at the same uiUrl (target=_blank, rel=noopener)", async ({ page }) => {
 		const contribution = await resolveDashboardContribution();
 		test.skip(!contribution, "Hindsight embedded-dashboard contribution is not served in this environment");
