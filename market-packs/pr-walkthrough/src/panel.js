@@ -1155,7 +1155,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const paramKey = boundSessionId || paramJobId || "__session__";
 			const baseSha = params && params.baseSha;
 			const headSha = params && params.headSha;
-			const entry = byJob.get(paramKey) || { status: "idle" };
+			const hasExplicitRouteRef = Boolean(paramJobId || baseSha || headSha);
+			let entry = byJob.get(paramKey) || { status: "idle" };
+			if (!hasExplicitRouteRef && !entry.bundle && (entry.status === "error" || entry.status === "missing")) {
+				byJob.delete(paramKey);
+				entry = { status: "idle" };
+			}
 			const status = entry.status || "idle";
 			const displayJob = entry.jobId || paramJobId || "current session";
 
@@ -1293,7 +1298,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					return;
 				}
 				if (recovered && recovered.code === "PRW_REVIEW_MISSING" && recovered.error) {
-					storeEntry(paramKey, { status: "missing", error: structuredRouteMessage(recovered), code: recovered.code, jobId: paramJobId, mountKicked: true });
+					storeEntry(paramKey, hasExplicitRouteRef
+						? { status: "missing", error: structuredRouteMessage(recovered), code: recovered.code, jobId: paramJobId, mountKicked: true }
+						: { status: "empty", mountKicked: true });
 					if (host.requestRender) host.requestRender();
 					return;
 				}

@@ -345,6 +345,11 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 			const secret = reviewerSecret(gateway, child);
+			const reviewerIndex = await getPackStore().get(PACK_ID, `reviewers/${child}`);
+			expect(reviewerIndex?.jobId).toBe(started.jobId);
+			const scopedBinding = await getPackStore().get(PACK_ID, `reviews/${started.jobId}/binding/${child}`);
+			expect(scopedBinding?.jobId).toBe(started.jobId);
+			expect(await getPackStore().get(PACK_ID, `binding/${child}`)).toBeNull();
 
 			// No secret → 403 (REQUIRED; does not degrade to sandboxScope).
 			const noSecret = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
