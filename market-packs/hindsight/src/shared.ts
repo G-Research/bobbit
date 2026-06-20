@@ -160,7 +160,7 @@ export const CONFIG_DEFAULTS: EffectiveConfig = {
 	autoRecall: true,
 	autoRetain: true,
 	recallBudget: 1200,
-	recallMaxInputChars: 1200,
+	recallMaxInputChars: 3000,
 	timeoutMs: 1500,
 };
 

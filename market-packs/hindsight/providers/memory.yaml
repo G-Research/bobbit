@@ -46,7 +46,7 @@ config:
   # API caps queries at 500 tokens and returns HTTP 400 ("Query too long") for
   # longer queries; clamping keeps non-trivial turns working. Mirrors Hermes'
   # recall_max_input_chars. <= 0 disables clamping.
-  recallMaxInputChars: { type: number, default: 1200 }
+  recallMaxInputChars: { type: number, default: 3000 }
   timeoutMs: { type: number, default: 1500 }
 activation:
   # EXTERNAL-mode dormancy gate: the host omits the provider entirely (no bridge
