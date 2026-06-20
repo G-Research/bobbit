@@ -2513,6 +2513,11 @@ export class SessionManager {
 					session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
 				}
 				this.broadcastQueue(session, { includeInFlightSteers: true });
+				// A steer rejection can race with abort settlement: agent_end may have
+				// already broadcast idle and run its one drain before this catch puts the
+				// row back. Redrain immediately in that settled-idle case so the recovered
+				// steer is not parked until the next user prompt.
+				if (session.status === "idle" && !session.lastTurnErrored) this.drainQueue(session);
 			} else {
 				this.persistInFlightSteerLedger(session);
 				console.warn(`[session-manager] _dispatchSteer failed for ${session.id} after in-flight ledger was already reconciled; not re-enqueueing duplicate steer`);

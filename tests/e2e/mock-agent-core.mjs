@@ -2333,7 +2333,10 @@ export class MockAgentCore {
 				// but the message never surfaces as a <user-message>. Default
 				// mock immediately runs handlePrompt(steeredText), which always
 				// surfaces the message; that hides this real-agent failure mode.
-				if (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently) {
+				// MOCK_STEER_QUEUE_DROP=always is a deterministic test-harness mode
+				// for abort-reconcile specs: accept the steer RPC but leave Bobbit's
+				// in-flight steer ledger as the only source that can recover it.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "always" || (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently)) {
 					return { success: true };
 				}
 
