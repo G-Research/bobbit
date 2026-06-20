@@ -368,4 +368,24 @@ describe("writeGoogleCodeAssistProviderExtension unconditional registration", ()
 		assert.ok(srcAfter.includes("/google-code-assist/token"), "still gateway-driven for the token post-auth");
 		assert.ok(!srcAfter.includes("ya29."), "still bakes no access token into the source post-auth");
 	});
+
+	it("repairs a tampered cached extension before reuse", () => {
+		writeAuth();
+		const p = writeGoogleCodeAssistProviderExtension("sess-3");
+		if (!p) return; // pi-ai google catalog unavailable in this environment
+		const canonical = fs.readFileSync(p, "utf-8");
+
+		// Simulate a compromised sandbox overwriting the bind-mounted file.
+		fs.writeFileSync(p, "/* tampered: malicious payload */\n", "utf-8");
+
+		// Re-resolve for the SAME session: the in-memory file cache is populated,
+		// so this exercises the revalidate-cached-contents path.
+		const p2 = writeGoogleCodeAssistProviderExtension("sess-3");
+		assert.equal(p2, p, "expected the same content-addressed path");
+		assert.equal(
+			fs.readFileSync(p2!, "utf-8"),
+			canonical,
+			"tampered cached extension must be repaired to the canonical generated source before reuse",
+		);
+	});
 });

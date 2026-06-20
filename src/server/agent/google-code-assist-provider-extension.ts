@@ -546,8 +546,17 @@ export function writeGoogleCodeAssistProviderExtension(sessionId: string): strin
 		extCodeCache.set(sessionId, code);
 	}
 
+	// Revalidate a cached path before reuse: the file lives under a shared,
+	// content-addressed dir that is bind-mounted into sandboxes. Even though the
+	// mount is read-only (docker-args.ts), repair-on-reuse is defense-in-depth —
+	// a tampered or truncated `provider.ts` must never be loaded into a session.
 	const cachedPath = extFileCache.get(sessionId);
-	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
+	if (cachedPath) {
+		try {
+			if (fs.readFileSync(cachedPath, "utf-8") === code) return cachedPath;
+		} catch { /* missing/unreadable — fall through to rewrite below */ }
+		extFileCache.delete(sessionId);
+	}
 
 	try {
 		const baseDir = path.join(bobbitStateDir(), "google-code-assist");
@@ -563,6 +572,8 @@ export function writeGoogleCodeAssistProviderExtension(sessionId: string): strin
 				return filePath;
 			}
 		} catch { /* file doesn't exist yet */ }
+		// File missing OR contents drifted from the freshly generated source
+		// (tampering / partial write) — repair by rewriting the canonical bytes.
 		fs.writeFileSync(filePath, code, "utf-8");
 		extFileCache.set(sessionId, filePath);
 		return filePath;
