@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, it, after, beforeEach, afterEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
@@ -111,6 +111,13 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 		assert.ok(source.includes("functionDeclarations"), "expected tool declaration conversion");
 	});
 
+	it("forwards maxTokens to generationConfig.maxOutputTokens and toolChoice to functionCallingConfig.mode", () => {
+		assert.ok(source.includes("options.maxTokens"), "expected options.maxTokens to be read");
+		assert.ok(source.includes("maxOutputTokens"), "expected generationConfig.maxOutputTokens mapping");
+		assert.ok(source.includes("toolChoiceMode"), "expected a toolChoice → mode mapper");
+		assert.ok(source.includes("functionCallingConfig"), "expected toolConfig.functionCallingConfig");
+	});
+
 	it("does NOT downgrade TLS verification process-wide", () => {
 		assert.ok(
 			!source.includes("NODE_TLS_REJECT_UNAUTHORIZED"),
@@ -157,6 +164,132 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 		assert.equal(registered.config.api, "google-code-assist");
 		assert.equal(typeof registered.config.streamSimple, "function");
 		assert.ok(Array.isArray(registered.config.models) && registered.config.models.length === 1);
+	});
+});
+
+describe("convertContext request mapping (maxTokens / toolChoice)", () => {
+	// Drive the generated streamSimple handler end-to-end with a stubbed fetch so
+	// we can inspect the actual Code Assist request body it produces. This proves
+	// convertContext forwards options.maxTokens and options.toolChoice, not just
+	// that the source string mentions them.
+	const prevFetch = globalThis.fetch;
+	const prevGwUrl = process.env.BOBBIT_GATEWAY_URL;
+	const prevGwTok = process.env.BOBBIT_TOKEN;
+	let streamSimple: (model: any, context: any, options: any) => any;
+	let captured: { body?: any };
+	let modDir: string;
+
+	before(async () => {
+		modDir = fs.mkdtempSync(path.join(os.tmpdir(), "gca-conv-"));
+		// gwUrl/gwToken are read at module-import time from these env vars.
+		process.env.BOBBIT_GATEWAY_URL = "http://gw.test";
+		process.env.BOBBIT_TOKEN = "gw-token";
+
+		// pi-ai stub: a stream whose push/end forward to global hooks so the test
+		// can await completion of the async streamSimple body.
+		const stubDir = path.join(modDir, "node_modules", "@earendil-works", "pi-ai");
+		fs.mkdirSync(stubDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(stubDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.0.0", main: "index.js" }),
+			"utf-8",
+		);
+		fs.writeFileSync(
+			path.join(stubDir, "index.js"),
+			"exports.createAssistantMessageEventStream = () => ({ push() {}, end() { if (globalThis.__gcaOnEnd) globalThis.__gcaOnEnd(); } });\n",
+			"utf-8",
+		);
+
+		const src = generateGoogleCodeAssistProviderExtension("sess-conv", sampleModels);
+		const transpiled = ts.transpileModule(src, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		});
+		const file = path.join(modDir, "gca-conv.cjs");
+		fs.writeFileSync(file, transpiled.outputText, "utf-8");
+		const mod = await import(pathToFileURL(file).href);
+		let config: any = {};
+		mod.default({ registerProvider: (_name: string, c: any) => { config = c; } });
+		streamSimple = config.streamSimple;
+	});
+
+	after(() => {
+		globalThis.fetch = prevFetch;
+		if (prevGwUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+		else process.env.BOBBIT_GATEWAY_URL = prevGwUrl;
+		if (prevGwTok === undefined) delete process.env.BOBBIT_TOKEN;
+		else process.env.BOBBIT_TOKEN = prevGwTok;
+		try { fs.rmSync(modDir, { recursive: true, force: true }); } catch { /* ok */ }
+	});
+
+	/** Run one streamSimple turn and return the request body it POSTed. */
+	async function run(options: any): Promise<any> {
+		captured = {};
+		globalThis.fetch = (async (url: any, init: any) => {
+			const u = String(url);
+			if (u.includes("/google-code-assist/token")) {
+				return { status: 200, ok: true, json: async () => ({ token: "tok", project: "proj" }) } as any;
+			}
+			captured.body = JSON.parse(init.body);
+			// No streaming body → handler falls back to res.text() SSE parsing.
+			return {
+				ok: true,
+				status: 200,
+				body: undefined,
+				text: async () =>
+					'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hi"}]}}]}\n',
+			} as any;
+		}) as any;
+
+		const done = new Promise<void>((resolve) => { (globalThis as any).__gcaOnEnd = resolve; });
+		const model = { id: "gemini-2.5-pro", provider: "google-gemini-cli", input: ["text"], cost: {} };
+		const context = { messages: [{ role: "user", content: "hello" }], tools: [{ name: "t", description: "d", parameters: { type: "object" } }] };
+		streamSimple(model, context, options);
+		await done;
+		delete (globalThis as any).__gcaOnEnd;
+		return captured.body;
+	}
+
+	it("forwards options.maxTokens to request.generationConfig.maxOutputTokens", async () => {
+		const body = await run({ maxTokens: 1234 });
+		assert.equal(body.request.generationConfig.maxOutputTokens, 1234);
+	});
+
+	it("omits maxOutputTokens when maxTokens is absent or non-positive", async () => {
+		const body = await run({});
+		assert.ok(!body.request.generationConfig || body.request.generationConfig.maxOutputTokens === undefined);
+		const body2 = await run({ maxTokens: 0 });
+		assert.ok(!body2.request.generationConfig || body2.request.generationConfig.maxOutputTokens === undefined);
+	});
+
+	it("maps options.toolChoice to request.toolConfig.functionCallingConfig.mode", async () => {
+		for (const [choice, mode] of [["auto", "AUTO"], ["any", "ANY"], ["none", "NONE"]] as const) {
+			const body = await run({ toolChoice: choice });
+			assert.equal(body.request.toolConfig.functionCallingConfig.mode, mode, `toolChoice ${choice}`);
+		}
+	});
+
+	it("omits toolConfig when toolChoice is absent", async () => {
+		const body = await run({});
+		assert.equal(body.request.toolConfig, undefined);
+	});
+
+	it("does not set toolConfig when there are no tools (mirrors server helper)", async () => {
+		captured = {};
+		globalThis.fetch = (async (url: any, init: any) => {
+			const u = String(url);
+			if (u.includes("/google-code-assist/token")) {
+				return { status: 200, ok: true, json: async () => ({ token: "tok", project: "proj" }) } as any;
+			}
+			captured.body = JSON.parse(init.body);
+			return { ok: true, status: 200, body: undefined, text: async () => 'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hi"}]}}]}\n' } as any;
+		}) as any;
+		const done = new Promise<void>((resolve) => { (globalThis as any).__gcaOnEnd = resolve; });
+		const model = { id: "gemini-2.5-pro", provider: "google-gemini-cli", input: ["text"], cost: {} };
+		streamSimple(model, { messages: [{ role: "user", content: "hi" }] }, { toolChoice: "auto" });
+		await done;
+		delete (globalThis as any).__gcaOnEnd;
+		assert.equal(captured.body.request.toolConfig, undefined);
+		assert.equal(captured.body.request.tools, undefined);
 	});
 });
 
