@@ -115,11 +115,11 @@ When a component calls `save`, the store ensures the new generation strictly exc
 
 #### 4. LRU Eviction & Size Caps
 - **Per-Namespace LRU**: `save` operations automatically enforce the `maxEntries` constraint by evicting the oldest entries (sorted by `updatedAt` first, with tombstones evicted ahead of live drafts). It never evicts the key currently being written.
-- **Oversize Byte Protection**: To prevent browser quota exhaustion and protect performance, writes exceeding `maxEntryBytes` (default 32 KB) are dropped. An alert is logged to the developer console once per namespace.
+- **Oversize Byte Protection**: To prevent browser quota exhaustion and protect performance, writes exceeding `maxEntryBytes` (default 32 KB) are dropped. A warning is logged to the developer console once per namespace.
 - **Tombstone Sweeping**: Expired tombstones are swept lazily from the storage pool upon subsequent reads or writes in the namespace.
 
 #### 5. Fault Tolerance
-All localStorage and sessionStorage accesses are wrapped in `try/catch` scopes. If a browser blocks storage access (e.g., inside Safari private browsing, sandboxed iframes, or when storage quotas are exceeded), the store gracefully degrades to a memory-backed map. It **never** throws or disrupts the runtime.
+All localStorage and sessionStorage accesses are wrapped in `try/catch` scopes. If a browser blocks storage access (e.g., inside Safari private browsing, sandboxed iframes, or when storage quotas are exceeded), the store gracefully degrades to no-op reads/writes for that operation. It **never** throws or disrupts the runtime.
 
 ---
 
@@ -199,7 +199,7 @@ Pins the low-level behavior of `TransientDraftStore` inside a browser environmen
 - **Tombstone Behavior**: Assures `clear()` blocks write operations of equal/lesser generation, while `forget()` deletes the tombstone and lets fresh saves through.
 - **Last-Write-Wins (`gen`)**: Confirms that writes with stale generations are discarded.
 - **LRU and Size Protection**: Confirms oldest keys are evicted when limits are reached, and that oversize entries are discarded without throwing exceptions.
-- **Degradation**: Assures that when `Storage` is disabled, the store falls back to a memory-backed map.
+- **Degradation**: Assures that when `Storage` is disabled or throws, store methods safely no-op without surfacing exceptions.
 
 ### 6.2 Widget Element Unit Tests (`tests/ask-user-choices-widget.spec.ts`)
 Validates `<ask-user-choices-widget>` lifecycle hooks, Lit rendering outputs, tab selections, and keyboard navigation.
