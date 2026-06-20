@@ -95,6 +95,8 @@ provider reads.
 | `autoRecall` | boolean | `true` | When false, the recall hooks contribute no blocks. |
 | `autoRetain` | boolean | `true` | When false, the retain hooks store nothing. |
 | `retainEveryNTurns` | number | `5` | Cadence for background memory extraction. Bobbit runs an expensive LLM extraction once every N turns to optimize cost. |
+| `retainMaxDelayMs` | number | `1800000` | Hook-observed timeout in milliseconds (30m) to flush buffered turns, preventing memories from staling in long-running or inactive sessions. `0` disables time-based flush. |
+| `retainOverlapTurns` | number | `2` | Number of previous turn summaries to carry forward as bounded context/overlap into the next batch. |
 | `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
 | `recallTypes` | array of `observation` \| `world` \| `experience` | `["observation", "world", "experience"]` | Filters memory recall to bias toward consolidated/stable knowledge over Turn chatter. |
 | `retainMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's extraction logic on what durable knowledge to keep and what noise to ignore. |
@@ -178,12 +180,22 @@ Hindsight uses explicit prompts to guide memory extraction, observation consolid
 These are applied idempotently to the Hindsight bank config API. A signature of the current missions is cached in the pack store, avoiding redundant PATCH calls on every turn.
 
 ### 2. Batched Retain Cadence
-- **`retainEveryNTurns` (default: 5)**: Instead of dispatching an extraction request on *every* turn, Bobbit holds turn summaries in a durable per-session buffer. A full LLM extraction is run only once every `N` turns. At $N=5$, this yields an immediate **80% reduction in routine extraction LLM calls**.
-- **Buffering vs. Sampling**: This is a deterministic sequence count buffer per session, not random sampling, guaranteeing that all conversations are processed linearly.
-- **`retainMaxDelayMs` (default: 30 minutes)**: To prevent memories from staling in extremely long-running or inactive sessions, this threshold acts as a hook-observed timeout to flush buffered turns.
-- **`retainOverlapTurns` (default: 2)**: Preserves overlapping turn context at the boundaries of compactions to maintain thread continuity across batches.
-- **Compaction Safety (`beforeCompact`)**: Before the gateway compacts a session's history (discarding the oldest context), the provider intercepts the event via `beforeCompact` and performs a **synchronous flush/retain** of the about-to-be-lost history span, bypassing the `retainEveryNTurns` cadence to guarantee zero context loss.
-- **Session Shutdown**: On `sessionShutdown`, Bobbit performs a best-effort best-practice queue drain to flush remaining unsaved turns.
+- **Durable Per-Session Pending Buffer**: Instead of running an expensive LLM extraction request on *every* turn, Bobbit holds turn summaries in a durable `PendingBuffer` JSON structure inside the pack-scoped store. Because provider workers terminate after every hook invocation, this state is saved to disk per session, ensuring that all conversations are processed linearly without memory loss (never randomly sampled).
+- **`retainEveryNTurns` (default: 5)**: A full LLM extraction is run only once every `N` primary turns. At the default of $N=5$, this yields an immediate **80% reduction in routine extraction LLM calls** and associated token costs.
+- **`retainMaxDelayMs` (default: 1,800,000 ms / 30 minutes)**: To prevent memories from staling in long-running or inactive sessions, this threshold acts as a max delay timeout to trigger an aggregate flush.
+  - *Hook-Observed evaluation*: This timer is **not** an exact system-level idle sweeper or background thread interval. Instead, it is evaluated defensively per session on the invocation of provider hooks (such as `afterTurn`), by checking whether the oldest pending turn in the buffer has aged past `retainMaxDelayMs` relative to the current timestamp.
+- **Aggregate Flush Semantics**:
+  - *Triggering*: An aggregate flush occurs when the count of pending primary turns reaches `retainEveryNTurns` OR the age of the oldest pending turn exceeds `retainMaxDelayMs`.
+  - *Content Composition*: The aggregate content joins any carried-forward overlap context from the previous flush (`Earlier context (overlap):` followed by the summaries) with the pending primary turns, separated by the aggregate separator.
+  - *Durable Queueing on Failure*: If the aggregate retain request fails (e.g. network timeout or backend unavailability), the entire built aggregate is enqueued to the durable retry queue so it is never dropped, and a non-fatal error is logged.
+  - *Buffer Advancement*: In both success and failure cases, the buffer is immediately advanced: the primary turns are cleared (so the turn count resets and advances), and the last `retainOverlapTurns` summaries of the primary turns are carried forward as a bounded `overlap` context for the next batch. Carrying forward only the primary summaries prevents previous overlaps from accumulating indefinitely.
+- **`retainOverlapTurns` (default: 2)**: Preserves overlapping turn context at batch boundaries, carrying forward the last `K` summaries of the primary turns as bounded context to maintain thread continuity.
+- **Compaction Safety (`beforeCompact`)**: Before the gateway compacts a session's history and discards the oldest context, the provider intercepts this event via `beforeCompact` to guarantee zero context loss:
+  - *Synchronous Flush*: It first performs a **synchronous flush/retain** (`sync: true`) of any pending turns currently held in the session buffer to ensure they land in Hindsight before context is pruned.
+  - *Synchronous Retain*: It then performs a **synchronous, batch-exempt retain** (`sync: true`, "compaction" kind) of the compaction summary itself, ensuring the about-to-be-lost history span is durably written to Hindsight.
+- **Session Shutdown**: On `sessionShutdown`, Bobbit performs a best-effort best-practice:
+  - First, it flushes any remaining buffered turns (`flushPending`, `sync: false`) to Hindsight.
+  - Then, it triggers a **one-pass full drain** (`drainQueueAll`) of the durable retry queue to flush any remaining unsaved items.
 
 ## Provider lifecycle behaviour
 
@@ -196,9 +208,9 @@ a slow or unhealthy backend never blocks or fails a session — recalls skip and
 |---|---|
 | `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`). On error/timeout ⇒ no block + a diagnostic. |
 | `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On failure, enqueue for retry. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. Failure ⇒ enqueue. |
-| `sessionShutdown` | Best-effort **one-pass** drain of the retry queue. Never throws. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars), append to the pending buffer, and trigger a batched flush as an async aggregate retain if the turn count or max delay limits are exceeded. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
+| `beforeCompact` | If `autoRetain`: synchronously flush any pending buffered turns. Then, build and synchronously retain a compaction summary of the about-to-be-lost span (batch-exempt) so all memory lands in Hindsight before context is pruned. Failure ⇒ enqueue. |
+| `sessionShutdown` | If `autoRetain`: flush any remaining buffered turns, then perform a best-effort **one-pass** drain of the retry queue. Never throws. |
 
 The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
 (see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Each block is titled "Relevant memory",
