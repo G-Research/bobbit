@@ -172,6 +172,15 @@ test.describe("Existing-goal Sub-goals settings", () => {
 				return { allowed: g.subgoalsAllowed, depth: g.maxNestingDepth };
 			}, { timeout: 10_000 }).toEqual({ allowed: true, depth: 2 });
 
+			// PR #818 review regression: the LIVE dashboard control must reflect the
+			// persisted (server-clamped) values IMMEDIATELY, with no full reload. The
+			// open dashboard renders from the separate `currentGoal` record, so the
+			// policy PATCH must re-sync it — otherwise the toggle/depth would keep
+			// showing the stale pre-PATCH state (unchecked / depth 1) until reload.
+			await expect(allowToggle).toBeChecked({ timeout: 10_000 });
+			await expect(page.locator('[data-testid="goal-subgoal-settings-depth"]'))
+				.toHaveValue("2", { timeout: 10_000 });
+
 			// Persistence across a full reload.
 			await page.reload();
 			await expect(
