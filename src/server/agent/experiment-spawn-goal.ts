@@ -248,6 +248,9 @@ async function createReservedChildGoal(
 		if (check.code === "SUBGOALS_DISABLED") {
 			throw new SpawnGoalError("SUBGOALS_DISABLED", "subgoals are disabled for this goal tree");
 		}
+		if (check.code === "PARENT_SUBGOALS_DISABLED") {
+			throw new SpawnGoalError("SUBGOALS_DISABLED", "this goal does not allow sub-goals");
+		}
 		throw new SpawnGoalError(
 			"NESTING_DEPTH_EXCEEDED",
 			`subgoal spawn blocked: nesting depth limit reached (${check.currentDepth}/${check.maxDepth})`,
