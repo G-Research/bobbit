@@ -30,6 +30,21 @@ export interface OrderedMessage {
 	_origin: MessageOrigin;
 	/** Sort secondary. Monotonic counter incremented on every reduce. */
 	_insertionTick: number;
+	/**
+	 * Durable marker set by `settle-optimistic`: an `_origin:"optimistic"` row
+	 * whose turn terminated WITHOUT a reconciling server user echo. Its `_order`
+	 * has been re-stamped ONCE, out of the far-future tail sentinel into
+	 * chronological position (`highestSeq + epsilon` captured at turn-end — just
+	 * after the latest live message we had consumed). That value sorts AFTER any
+	 * negative-order snapshot transcript, which is exactly right: a failed prompt
+	 * was sent AFTER the persisted history, so it belongs after it. The marker is
+	 * durable so the snapshot survivor pass keeps the row VISIBLE and at that
+	 * settled position: it must NOT be consumed by the same-text dedup budget
+	 * (that budget is for PENDING rows awaiting echo reconciliation) and must NOT
+	 * be re-stamped into older history. The row stays `_origin:"optimistic"` with
+	 * its `optimistic_` id so a late server echo can still reconcile it in place.
+	 */
+	_settled?: boolean;
 }
 
 export interface ReducerState {
@@ -53,12 +68,16 @@ export type Action =
 	| { type: "mutation-pending"; message: any }
 	| { type: "mutation-update"; messageId: string; patch: Record<string, unknown> }
 	| { type: "error"; message: any }
+	| { type: "settle-optimistic" }
 	| { type: "deny-permission-filter"; messageId: string }
 	| { type: "replace-messages"; messages: any[] }
 	| { type: "reset" };
 
 export const SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
 const OPTIMISTIC_ORDER_BASE = Number.MAX_SAFE_INTEGER - 1_000_000_000;
+/** Fractional nudge used to land a settled optimistic row just-after the latest
+ *  consumed live seq (`highestSeq + epsilon`) without colliding with it. */
+const SETTLE_EPSILON = 0.5;
 
 export function initialState(): ReducerState {
 	return { messages: [], nextTick: 1, highestSeq: 0 };
@@ -649,12 +668,29 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					// Optimistic prompts/steers normally survive — the server echo
 					// reconciles via id/text on a later live-event.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
-					// Step 4a (S18): dedup a same-text optimistic row against a snapshot
-					// that arrived BEFORE the live echo. Consume the same multiset budget
-					// the server-origin survivors use, so a snapshot user row
-					// representing this prompt drops the optimistic instead of leaving
-					// both. Multiset-counted → two genuinely-distinct same-text prompts
-					// still both survive.
+					// A SETTLED optimistic row (turn terminated, never echoed) must
+					// stay VISIBLE and keep its chronological position. Its settle
+					// `_order` (`highestSeq + epsilon`) already sits AFTER any
+					// negative-order snapshot transcript, so it correctly sorts after
+					// the persisted history — the failed prompt was sent after that
+					// transcript (reviewer issue 2: a `serverMaxOrder - epsilon`
+					// re-stamp wrongly inserted it INTO older history). It must also
+					// NOT be consumed by the same-text dedup budget below (reviewer
+					// issue 1: that budget is for PENDING rows awaiting echo
+					// reconciliation; a settled row sharing text with an old snapshot
+					// row would otherwise be silently dropped, breaking the
+					// stays-visible contract). Survive untouched. A late echo can
+					// still reconcile it in place via the id-match drop above.
+					if (m._settled === true) {
+						survivors.push(m);
+						continue;
+					}
+					// Step 4a (S18): dedup a same-text PENDING optimistic row against a
+					// snapshot that arrived BEFORE the live echo. Consume the same
+					// multiset budget the server-origin survivors use, so a snapshot
+					// user row representing this prompt drops the optimistic instead of
+					// leaving both. Multiset-counted → two genuinely-distinct same-text
+					// prompts still both survive.
 					if (isPlainTextRow(m)) {
 						const key = plainTextEquivKey(m);
 						const remaining = serverPlainTextCounts.get(key) ?? 0;
@@ -987,6 +1023,34 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: state.highestSeq,
 			};
+		}
+
+		case "settle-optimistic": {
+			// Turn termination (error / agent_end). Any `_origin:"optimistic"`
+			// row STILL pinned at the far-future tail sentinel
+			// (`_order > OPTIMISTIC_ORDER_BASE`) was never reconciled by a server
+			// user echo — the turn died before the prompt was persisted/echoed
+			// (e.g. an immediate model 404). Left at the sentinel it sorts after
+			// every server-ordered message and strands at the transcript bottom.
+			//
+			// Re-stamp it into chronological position: `highestSeq + epsilon`
+			// (just after the latest live message we've consumed) and flag it
+			// `_settled` so the snapshot survivor pass can keep it before later
+			// snapshot tails. Keep `_origin:"optimistic"` + the `optimistic_` id
+			// so a late server echo still reconciles in place (no duplicate).
+			// Already-settled / already-reconciled rows are untouched, so this is
+			// a pure no-op on the happy path and idempotent on re-dispatch.
+			let changed = false;
+			const settleOrder = state.highestSeq + SETTLE_EPSILON;
+			const messages = state.messages.map((m) => {
+				if (m._origin === "optimistic" && m._order > OPTIMISTIC_ORDER_BASE) {
+					changed = true;
+					return { ...m, _order: settleOrder, _settled: true };
+				}
+				return m;
+			});
+			if (!changed) return state;
+			return { ...state, messages: sortMessages(messages) };
 		}
 	}
 }
