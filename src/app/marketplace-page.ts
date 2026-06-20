@@ -2039,8 +2039,16 @@ async function loadHindsightConfigForm(pack: InstalledPackWire): Promise<void> {
 	const ov = hindsightProjectOverride;
 	hindsightOverrideForm = { recallScope: ov?.recallScope ?? "", bank: ov?.bank ?? "" };
 	hindsightOverrideResult = null;
-	if (res.ok && res.data?.config) {
-		const c = res.data.config;
+	// Hydrate the GLOBAL inline Configure fields (Bank, Recall scope, …) from
+	// `globalConfig` when the route exposes it — NOT from `config`, which is the
+	// overlay-resolved EFFECTIVE config. If a per-project override is active, `config`
+	// reflects the override, so seeding the global form from it would show project
+	// values as global and risk silently writing them back as global. `config` is for
+	// the effective summary/status row only. Fall back to `config` when the route
+	// predates the overlay contract (no `globalConfig`).
+	const globalCfg = res.ok ? (res.data?.globalConfig ?? res.data?.config) : undefined;
+	if (res.ok && globalCfg) {
+		const c = globalCfg;
 		const form: HindsightConfigFormValues = {
 			mode: c.mode ?? base.mode,
 			externalUrl: c.externalUrl ?? "",

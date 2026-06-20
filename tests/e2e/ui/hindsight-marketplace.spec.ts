@@ -442,6 +442,13 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		// The read-only summary now flags the active project override.
 		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge appears").toBeVisible({ timeout: 20_000 });
 
+		// The GLOBAL inline Configure field must keep showing the GLOBAL value (`project`,
+		// the default — global config seeded no recallScope), NOT the project override
+		// (`all`). The global form hydrates from `globalConfig`, never the overlay-resolved
+		// effective `config`; otherwise the override would masquerade as a global setting
+		// and risk being written back as global.
+		await expect(form.locator('[data-testid="market-hindsight-form-recallscope"]'), "the global recall-scope field shows the global value, not the project override").toHaveValue("project", { timeout: 15_000 });
+
 		// Reload the whole page — the project override must survive (sessionless read).
 		await page.reload();
 		row = await openMarketRow(page);
