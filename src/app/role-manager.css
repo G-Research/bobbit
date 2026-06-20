@@ -114,7 +114,9 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
-	max-width: 600px;
+	/* Widened from 600px so full model names + source/origin text are readable
+	 * without ellipsising the key info (Option A). */
+	max-width: 880px;
 	margin: 0 auto;
 }
 
@@ -146,7 +148,7 @@
 }
 
 .role-row-info {
-	flex: 0 1 220px;
+	flex: 0 0 190px;
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
@@ -161,6 +163,15 @@
 	white-space: nowrap;
 }
 
+/* Slug + origin badge on one line: only the slug ellipsises; the origin badge
+ * (Built-in / Custom / pack) is shrink-0 so it is never reduced to "…". */
+.role-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
 .role-row-slug {
 	font-size: 11px;
 	font-family: var(--font-mono, monospace);
@@ -168,6 +179,12 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	min-width: 0;
+}
+
+.role-meta .config-origin-badge,
+.role-meta [data-testid="origin-pack-chip"] {
+	flex-shrink: 0;
 }
 
 .role-row-actions {
@@ -207,13 +224,13 @@
  * the edit/delete actions. Only the main Roles page supplies it.
  * -------------------------------------------------------------------------- */
 .role-row-model-control {
-	flex: 1 1 300px;
-	min-width: 0;
-	max-width: 360px;
+	flex: 1 1 340px;
+	min-width: 180px;
+	max-width: 520px;
 	display: flex;
 	flex-direction: column;
-	gap: 3px;
-	overflow: hidden;
+	gap: 4px;
+	min-height: 0;
 }
 
 /* Compact placement: hide the (empty) label column and hint paragraph that
@@ -250,79 +267,62 @@
 	background: color-mix(in oklch, var(--primary) 8%, var(--background));
 }
 
-/* Compact source line under the control: key + (effective value) + source badge. */
+/* ----------------------------------------------------------------------------
+ * Source caption under the control box (Option A).
+ * Flat, INFORMATIONAL text only — no pills, no borders, no hover, no button
+ * affordance. Communicates where each field's value comes from. Resets live in
+ * the control box (model × + thinking ×), never on this line.
+ * -------------------------------------------------------------------------- */
 .role-row-model-sources {
 	display: flex;
 	flex-wrap: wrap;
-	align-items: center;
-	gap: 3px 10px;
-	font-size: 11px;
-	line-height: 1.4;
+	align-items: baseline;
+	gap: 2px 14px;
+	font-size: 11.5px;
+	line-height: 1.45;
 	color: var(--muted-foreground);
+	cursor: default;
 }
 .rrm-src {
 	display: inline-flex;
-	align-items: center;
+	align-items: baseline;
+	flex-wrap: wrap;
 	gap: 4px;
 	min-width: 0;
 }
+.rrm-src-arrow {
+	opacity: 0.6;
+}
 .rrm-src-key {
 	font-weight: 600;
-	opacity: 0.75;
+	opacity: 0.7;
 }
+/* Resolved effective value — readable in the foreground colour, full text
+ * (wraps rather than truncating so key info is never reduced to "…"). */
 .rrm-src-val {
-	max-width: 120px;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 	color: var(--foreground);
+	min-width: 0;
+	word-break: break-word;
 }
-.rrm-badge {
+.rrm-src-from {
+	opacity: 0.85;
+}
+/* "Override" state marker: a quiet accent word + leading dot. Deliberately
+ * flat (no border/background) so it reads as a STATE, not a tappable chip. */
+.rrm-src-state {
 	display: inline-flex;
 	align-items: center;
-	padding: 1px 6px;
-	border-radius: 999px;
-	font-size: 10px;
-	font-weight: 500;
-	white-space: nowrap;
-	border: 1px solid transparent;
-}
-.rrm-badge--role {
+	gap: 5px;
 	color: var(--primary);
-	background: color-mix(in oklch, var(--primary) 12%, transparent);
-	border-color: color-mix(in oklch, var(--primary) 35%, transparent);
+	font-weight: 600;
 }
-.rrm-badge--inherited-role {
-	color: var(--foreground);
-	background: var(--secondary);
-	border-color: var(--border);
-}
-.rrm-badge--default,
-.rrm-badge--auto {
-	color: var(--muted-foreground);
-	background: var(--muted);
-}
-.rrm-badge--pack {
-	color: var(--muted-foreground);
-	background: var(--muted);
-	border-color: var(--border);
-}
-/* Independent thinking reset button on the source line. */
-.rrm-clear-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 1px;
-	border-radius: 4px;
-	border: none;
-	background: transparent;
-	color: var(--muted-foreground);
-	cursor: pointer;
-	transition: background 150ms, color 150ms;
-}
-.rrm-clear-btn:hover {
-	color: var(--foreground);
-	background: var(--secondary);
+.rrm-src-state::before {
+	content: "";
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--primary);
+	flex-shrink: 0;
 }
 
 /* Read-only pack rows: static effective-value summary, no pickers. */

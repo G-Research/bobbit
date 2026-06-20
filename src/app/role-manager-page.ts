@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Trash2, X } from "lucide";
+import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo, type RoleFieldSource } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
@@ -787,9 +787,8 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 
 	if (display.packReadonly) {
 		const reason = display.packName
-			? html`<span class="rrm-badge rrm-badge--pack"
-					title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName}</span>`
-			: html`<span class="rrm-badge rrm-badge--pack" title="This role is read-only in the current scope.">Read-only</span>`;
+			? html`<span class="rrm-src-from" title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName} — edit it in the Marketplace.</span>`
+			: html`<span class="rrm-src-from" title="This role is read-only in the current scope.">Read-only in this scope.</span>`;
 		return html`
 			<div class="role-row-model-control role-row-model-control--readonly"
 				data-testid="role-row-model-control" data-model-state="readonly"
@@ -798,7 +797,9 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					<div class="rrm-ro-row"><span class="rrm-ro-key">Model</span><span class="rrm-ro-val" title="${display.model.effectiveLabel}">${display.model.effectiveLabel}</span></div>
 					<div class="rrm-ro-row"><span class="rrm-ro-key">Thinking</span><span class="rrm-ro-val">${display.thinking.effectiveLabel}</span></div>
 				</div>
-				${reason}
+				<div class="role-row-model-sources">
+					<span class="rrm-src"><span class="rrm-src-arrow" aria-hidden="true">↳</span>${reason}</span>
+				</div>
 			</div>
 		`;
 	}
@@ -812,18 +813,27 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 	// an empty local field would be a confusing no-op (review findings #1, #2).
 	const overrides = currentScopeRoleOverrides(role);
 
-	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string, clearTestid?: string) => {
-		const currentOverride = f.kind === "role";
+	// Flat, informational source caption (Option A). NOT a pill/chip/button:
+	//  - Override field: "<Key> Role override" (quiet accent text + leading dot via
+	//    CSS). The value lives in the editable box; its reset is the in-box ×.
+	//  - Inherited field: "↳ <Key> <effective value> · <source>" — muted text with
+	//    the resolved value readable in the foreground colour, never ellipsised to
+	//    a bare "…" for the source/origin text.
+	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string) => {
+		if (f.kind === "role") {
+			return html`
+			<span class="rrm-src rrm-src--override" data-testid="${testid}">
+				<span class="rrm-src-key">${key}</span>
+				<span class="rrm-src-state">Role override</span>
+			</span>`;
+		}
 		return html`
-		<span class="rrm-src" data-testid="${testid}">
-			<span class="rrm-src-key">${key}</span>
-			${currentOverride ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
-			<span class="rrm-badge rrm-badge--${f.kind}">${f.badge}</span>
-			${clearTestid && currentOverride ? html`<button class="rrm-clear-btn" data-testid="${clearTestid}"
-				title="Reset thinking to default"
-				@click=${(e: Event) => { e.stopPropagation(); control.onThinkingChange(role, ""); }}>${icon(X, "xs")}</button>` : nothing}
-		</span>
-	`;
+			<span class="rrm-src" data-testid="${testid}">
+				<span class="rrm-src-arrow" aria-hidden="true">↳</span>
+				<span class="rrm-src-key">${key}</span>
+				<span class="rrm-src-val">${f.effectiveLabel}</span>
+				<span class="rrm-src-from">· ${f.badge}</span>
+			</span>`;
 	};
 
 	return html`
@@ -843,13 +853,20 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					"",
 					// Compact list placement: a fixed-width, non-fit-content thinking
 					// Select so its trigger never injects an inline min-width:180px
-					// (the source of the row-control chevron overflow).
-					{ fallbackLabel: "(use default)", thinkingWidth: "132px", thinkingFitContent: false },
+					// (the source of the row-control chevron overflow). `onThinkingClear`
+					// puts the thinking reset INSIDE the box next to the model reset, so
+					// both fields reset from the same place (no split-brain UX).
+					{
+						fallbackLabel: "(use default)",
+						thinkingWidth: "132px",
+						thinkingFitContent: false,
+						onThinkingClear: () => control.onThinkingChange(role, ""),
+					},
 				)}
 			</div>
 			<div class="role-row-model-sources">
 				${sourceLine("Model", display.model, "role-row-model-source")}
-				${sourceLine("Thinking", display.thinking, "role-row-thinking-source", "role-row-thinking-clear-btn")}
+				${sourceLine("Thinking", display.thinking, "role-row-thinking-source")}
 			</div>
 		</div>
 	`;
@@ -875,7 +892,10 @@ export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
 				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}${modelControl?.savedFlashRole === role.name ? html` <span class="role-row-saved-flash" data-testid="role-row-saved-flash">Saved</span>` : nothing}</span>
-				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides, (role as any).originPackName)}</span>
+				<span class="role-meta">
+					<span class="role-row-slug">${role.name}</span>
+					${renderOriginBadge(origin, overrides, (role as any).originPackName)}
+				</span>
 			</div>
 			${modelControl ? renderRoleRowModelControl(role, modelControl) : nothing}
 			<div class="role-row-actions">
