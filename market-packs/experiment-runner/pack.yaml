@@ -9,7 +9,10 @@ contents:
   roles: []
   tools: []
   skills: []
-  entrypoints: [experiment-runner-open, experiment-runner-palette, experiment-runner-route]
+  entrypoints:
+    - experiment-runner-open
+    - experiment-runner-palette
+    - experiment-runner-route
   providers: []
   hooks: []
   mcp: []
@@ -26,6 +29,19 @@ requires: []
 # to THIS pack.yaml and stays inside the pack root.
 routes:
   module: lib/routes.mjs
-  names: [defineExperiment, projectCost, launch, poll, collect, aggregate,
-          iterate, listExperiments, getExperiment, saveMetrics, saveDashboard,
-          report, listMetrics, listWidgets, cancel]
+  names:
+    - defineExperiment
+    - projectCost
+    - launch
+    - poll
+    - collect
+    - aggregate
+    - iterate
+    - listExperiments
+    - getExperiment
+    - saveMetrics
+    - saveDashboard
+    - report
+    - listMetrics
+    - listWidgets
+    - cancel

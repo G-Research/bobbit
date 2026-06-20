@@ -36,7 +36,7 @@ import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+const ROUTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
 const PROVIDER_HOOKS = new Set([
 	"sessionSetup",
