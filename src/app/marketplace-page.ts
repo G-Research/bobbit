@@ -53,6 +53,7 @@ import {
 	getPackRuntimeCapabilities,
 	getPackRuntimeLogs,
 	listPackRuntimes,
+	readBuiltinPackRoute,
 	startPackRuntime,
 	stopPackRuntime,
 	type BrowsePackWire,
@@ -117,7 +118,6 @@ const runtimeCapabilitiesInFlight = new Set<string>();
 const HINDSIGHT_PACK = "hindsight";
 const HINDSIGHT_RUNTIME = "hindsight";
 const HINDSIGHT_PANEL_ID = "hindsight.panel";
-const HINDSIGHT_LAUNCHER_ID = "hindsight.palette";
 
 /** Subset of the Hindsight `status` route response the marketplace needs. The
  *  `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are additive (Partition C)
@@ -334,27 +334,28 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 }
 
 /** Best-effort load of the built-in Hindsight row's live state: the runtime list
- *  (`GET /api/pack-runtimes`, admin-bearer) plus the pack `status` route (read via the
- *  pack launcher Host API, the same authed seam the panel uses). BOTH are pure reads —
- *  neither starts Docker. Only runs when the built-in `hindsight` pack is installed;
- *  silently degrades (state badge shows "Checking…"/"Unknown") when a read fails or no
- *  session is active to mint the route surface token. */
+ *  (`GET /api/pack-runtimes`, admin-bearer) plus the pack `status` route. BOTH are
+ *  pure reads — neither starts Docker. The `status` read goes through the SESSIONLESS
+ *  built-in pack-route seam ({@link readBuiltinPackRoute}) rather than the launcher
+ *  Host API: after `#/market` navigation there is no active chat session, so the
+ *  surface-token mint the Host API needs would 403 and the row would stay stuck on
+ *  "Unknown" (the production bug this fix targets). Only runs when the built-in
+ *  `hindsight` pack is installed; silently degrades (badge shows "Checking…"/"Unknown")
+ *  when a read fails. */
 async function loadHindsightState(): Promise<void> {
-	if (!installed.some((p) => p.builtin && p.packName === HINDSIGHT_PACK)) return;
+	const pack = installed.find((p) => p.builtin && p.packName === HINDSIGHT_PACK);
+	if (!pack) return;
 	const projectId = currentProjectId();
 	const runtimesRes = await listPackRuntimes(projectId);
 	if (runtimesRes.ok) hindsightRuntimes = runtimesRes.data.runtimes || [];
-	try {
-		const { getLauncherHost } = await import("./pack-panels.js");
-		const host = getLauncherHost(HINDSIGHT_PACK, HINDSIGHT_LAUNCHER_ID);
-		if (host?.capabilities?.callRoute) {
-			const status = await host.callRoute<HindsightStatusWire>("status", { method: "GET" });
-			hindsightStatus = status ?? null;
-			hindsightStatusLoaded = true;
-		}
-	} catch {
-		// No active session to mint a surface token, route unavailable, or the pack is
-		// dormant — leave status unloaded so the badge degrades to Unknown/Dormant.
+	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "status",
+		projectId: pack.scope === "project" ? projectId : undefined,
+	});
+	if (statusRes.ok) {
+		hindsightStatus = statusRes.data ?? null;
+		hindsightStatusLoaded = true;
 	}
 	renderApp();
 }
@@ -1740,20 +1741,24 @@ async function handleHindsightTest(): Promise<void> {
 	renderApp();
 	let ok = false;
 	let message = "Connection failed";
-	try {
-		const { getLauncherHost } = await import("./pack-panels.js");
-		const host = getLauncherHost(HINDSIGHT_PACK, HINDSIGHT_LAUNCHER_ID);
-		if (host?.capabilities?.callRoute) {
-			const status = await host.callRoute<HindsightStatusWire>("status", { method: "GET" });
+	const pack = installed.find((p) => p.builtin && p.packName === HINDSIGHT_PACK);
+	if (pack) {
+		// Re-read the pack `status` route over the SESSIONLESS built-in seam (pure read,
+		// no Docker) — the marketplace has no active chat session to mint a surface token.
+		const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+			packId: runtimeRestPackId(pack),
+			routeName: "status",
+			projectId: pack.scope === "project" ? currentProjectId() : undefined,
+		});
+		if (statusRes.ok) {
+			const status = statusRes.data;
 			hindsightStatus = status ?? null;
 			hindsightStatusLoaded = true;
 			ok = !!status?.healthy;
 			message = ok ? "Connected" : status?.configured ? "Not reachable" : "Not configured";
 		} else {
-			message = "Open a session to test";
+			message = statusRes.error || "Connection failed";
 		}
-	} catch {
-		ok = false;
 	}
 	busy.delete("hindsight:test");
 	hindsightActionResult = { kind: "test", ok, message };

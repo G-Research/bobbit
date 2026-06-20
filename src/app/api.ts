@@ -3278,3 +3278,17 @@ export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; pr
 	const qs = params.toString();
 	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
 }
+
+/** GET a BUILT-IN pack's read-only route output as a PURE, SESSIONLESS read
+ *  (`GET /api/ext/pack-route/:packId/:routeName`). The Marketplace uses this to read
+ *  built-in Hindsight `status`/`config` after `#/market` navigation has cleared the
+ *  active chat session — the surface-token path (`getLauncherHost` → `host.callRoute`)
+ *  would 403 there because minting a surface token requires an active session.
+ *  Admin-bearer + GET-only + built-in-pack-only on the server; it NEVER mutates and
+ *  NEVER starts Docker (status/capability reads only; the only Docker start path stays
+ *  the explicit {@link startPackRuntime} click). `packId` is the pack's STRUCTURAL id
+ *  (use the installed row's `packId`, which equals `packName` for first-party packs). */
+export function readBuiltinPackRoute<T = unknown>(opts: { packId: string; routeName: string; projectId?: string }): Promise<MarketResult<T>> {
+	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
+	return marketFetch<T>(`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`);
+}
