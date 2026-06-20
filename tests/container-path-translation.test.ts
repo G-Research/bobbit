@@ -43,6 +43,18 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		assert.equal(hostPath, expected);
 	});
 
+	it("translates the google-code-assist provider extension path", () => {
+		// The generated provider.ts lives under <stateDir>/google-code-assist/<hash>/
+		// and is bind-mounted at /bobbit-state/google-code-assist so sandboxed
+		// pi-coding-agent can load it via --extension.
+		const containerPath = "/bobbit-state/google-code-assist/abc123def456/provider.ts";
+		const hostPath = containerPathToHost(containerPath);
+		const expected = process.platform === "win32"
+			? "C:\\Users\\test\\project\\.bobbit\\state\\google-code-assist\\abc123def456\\provider.ts"
+			: "/home/test/project/.bobbit/state/google-code-assist/abc123def456/provider.ts";
+		assert.equal(hostPath, expected);
+	});
+
 	it("does NOT translate /bobbit-state root files (not mounted)", () => {
 		// sessions.json is at the state dir root — intentionally not exposed to containers
 		const containerPath = "/bobbit-state/sessions.json";

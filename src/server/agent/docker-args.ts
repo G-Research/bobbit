@@ -204,12 +204,37 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
+	//
+	// `google-code-assist` holds the generated pi-coding-agent provider
+	// extension (`<hash>/provider.ts`, written by
+	// google-code-assist-provider-extension.ts) that registers the
+	// `google-code-assist` API provider inside the spawned agent. Sandboxed
+	// sessions load it via `--extension`, whose host path remapArgsForContainer
+	// rewrites to `/bobbit-state/google-code-assist/...`; that container path
+	// only resolves if the subdir is bind-mounted here. The dir contains only
+	// generated extension source (no secrets — the runtime token is fetched
+	// per-request from the gateway), so mounting it is safe.
+	//
+	// `google-code-assist` is mounted READ-ONLY (`:ro`): the sandboxed agent
+	// only ever *loads* the generated `provider.ts` via `--extension`, never
+	// writes it. A writable mount would let a compromised sandbox tamper with
+	// the generated extension source, which is then reused (content-addressed,
+	// shared across sessions) for a subsequent run — a sandbox-escape vector.
+	// The `:ro` flag closes that hole at the kernel mount level; the gateway
+	// also revalidates cached contents before reuse as defense-in-depth
+	// (see google-code-assist-provider-extension.ts).
 	if (stateDir) {
-		const sandboxStateDirs = ["sessions", "tool-guard", "html-snapshots"];
-		for (const sub of sandboxStateDirs) {
+		const sandboxStateDirs: Array<{ sub: string; readOnly?: boolean }> = [
+			{ sub: "sessions" },
+			{ sub: "tool-guard" },
+			{ sub: "html-snapshots" },
+			{ sub: "google-code-assist", readOnly: true },
+		];
+		for (const { sub, readOnly } of sandboxStateDirs) {
 			const hostPath = path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
-			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}`);
+			const suffix = readOnly ? ":ro" : "";
+			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
 		}
 	}
 

@@ -41,6 +41,7 @@ import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -849,6 +850,19 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
 		}
+	}
+
+	// Register the Google account (Code Assist) provider INSIDE the agent process
+	// so `google-gemini-cli/*` models can run as session models. Written
+	// UNCONDITIONALLY (not credential-gated): a session spawned BEFORE Google
+	// sign-in must still be able to bind such a model after the user authenticates,
+	// since the agent's pi-ai otherwise has no `google-code-assist` api and binding
+	// would throw "No API provider registered for api: google-code-assist". The
+	// runtime Bearer token is fetched per request from the gateway, so registering
+	// without a credential is safe and selecting the model post-auth just works.
+	const codeAssistPath = writeGoogleCodeAssistProviderExtension(plan.id);
+	if (codeAssistPath) {
+		plan.bridgeOptions.args.push("--extension", codeAssistPath);
 	}
 }
 

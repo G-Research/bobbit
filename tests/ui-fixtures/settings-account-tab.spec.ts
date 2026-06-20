@@ -49,8 +49,13 @@ test.describe("Settings Account tab — Google OAuth row", () => {
 		// Logout button is hidden while unauthenticated.
 		await expect(page.locator('[data-testid="account-logout-btn-google-gemini-cli"]')).toHaveCount(0);
 
-		// Limitation note + API-key cross-link are present (Google-only affordances).
-		await expect(page.locator('[data-testid="account-google-gemini-cli-limit-note"]')).toContainText(/official model API/);
+		// Caution note retains the unofficial Code Assist / quota / terms warning and the
+		// API-key separation, but no longer claims account models can't run sessions.
+		const limitNote = page.locator('[data-testid="account-google-gemini-cli-limit-note"]');
+		await expect(limitNote).toContainText(/Code Assist/);
+		await expect(limitNote).toContainText(/quota/);
+		await expect(limitNote).toContainText(/Google AI Studio API key/);
+		await expect(limitNote).not.toContainText(/can't|cannot|does not make Gemini/i);
 		await expect(page.locator('[data-testid="account-apikey-link-google-gemini-cli"]')).toContainText(/Provider API Keys/);
 
 		// Anthropic/OpenAI rows still render (additive — peers unchanged).

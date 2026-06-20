@@ -15,8 +15,6 @@
  * hard-fail-on-mismatch contract as applyReviewModelOverrides.
  */
 
-import { isSessionSelectableModelString } from "./google-code-assist.js";
-
 interface ModelShape { id?: string; provider?: string }
 /**
  * The real RpcBridge.getState() resolves to `{ success, data: { model, ... } }`
@@ -104,18 +102,6 @@ export async function applyModelString(
 	}
 	const provider = modelString.slice(0, slash);
 	const modelId = modelString.slice(slash + 1);
-
-	// Central guard: refuse to bind models the agent runtime can't run (e.g.
-	// google-gemini-cli Code Assist, emitted with sessionSelectable:false). This is
-	// the single binding choke point for role overrides, default.sessionModel, the
-	// browser picker, and API writes, so rejecting here keeps the server-side
-	// sessionSelectable contract in lockstep with the UI picker. A clear error
-	// beats a confusing setModel read-back mismatch downstream.
-	if (!isSessionSelectableModelString(modelString)) {
-		throw new Error(
-			`${label}="${modelString}" cannot be bound to an agent session: provider "${provider}" is not session-selectable.`,
-		);
-	}
 
 	const maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
 	const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 250);

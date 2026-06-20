@@ -2930,7 +2930,7 @@ const ACCOUNT_PROVIDERS: Array<{
 	{
 		id: "google-gemini-cli",
 		title: "Google OAuth",
-		description: "Connect your Google account for Gemini (Code Assist) account credentials. Agent sessions can't run Gemini through your Google account yet — use a Google AI Studio API key for session-usable Gemini. Re-authenticate to refresh expired tokens or switch accounts.",
+		description: "Connect your Google account to run Gemini (Code Assist) in agent sessions. This account path is unofficial and depends on your account's Code Assist quota and Google's terms — separate from a Google AI Studio API key. Re-authenticate to refresh expired tokens or switch accounts.",
 		authenticatedLabel: "Authenticated",
 	},
 ];
@@ -3076,11 +3076,10 @@ export function renderAccountTab() {
 
 						${isGoogle
 							? html`<p class="text-xs text-muted-foreground" data-testid="account-${provider.id}-limit-note">
-								<span class="font-medium">ℹ Note:</span> Connecting your Google account does not make Gemini
-								usable in agent sessions yet — the agent runtime has no Code Assist provider. Google account
-								login authorizes Gemini models exposed by Google's official model API for account-backed
-								metadata and future server-side use. For session-usable Gemini today, add a Google AI Studio
-								API key under Models → Provider API Keys.
+								<span class="font-medium">ℹ Note:</span> Gemini through your Google account runs over the unofficial
+								Code Assist / Gemini CLI path — it depends on your account's Code Assist quota and Google's terms,
+								and sessions may be rate-limited or interrupted. This is separate from a Google AI Studio API key;
+								for the official key-based Gemini API, add a key under Models → Provider API Keys.
 							</p>`
 							: ""}
 

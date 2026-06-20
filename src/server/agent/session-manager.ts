@@ -47,6 +47,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -1948,6 +1949,16 @@ export class SessionManager {
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
 			}
+		}
+
+		// Google account (Code Assist) provider extension. Mirrors
+		// session-setup.ts::resolveToolActivation so respawn/restore paths keep the
+		// provider registered and `google-gemini-cli/*` models stay runnable after a
+		// gateway restart. Written unconditionally (not credential-gated) so a
+		// session spawned before Google sign-in can bind such a model after auth.
+		const codeAssistPath = writeGoogleCodeAssistProviderExtension(sessionId);
+		if (codeAssistPath) {
+			args.push("--extension", codeAssistPath);
 		}
 
 		return { args, env: activation.env };
