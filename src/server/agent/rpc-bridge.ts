@@ -810,6 +810,9 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
+		// Generated google-code-assist provider extension (provider.ts) — bind-mounted
+		// by docker-args.ts so sandboxed pi-coding-agent can load it via --extension.
+		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 
