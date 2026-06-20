@@ -395,6 +395,20 @@ function disabledToolsFromMetadata(meta: Record<string, unknown>): ReadonlySet<s
 	return names.length > 0 ? new Set(names) : undefined;
 }
 
+/**
+ * Drop `bobbit.disabledTools` entries from a resolved allowlist IN PLACE on the
+ * plan. CRITICAL: this preserves the `undefined` (unrestricted) vs `[]`
+ * (explicit no-tools) distinction — `undefined` stays `undefined` (never widened
+ * to a concrete list), and a list filtered down to nothing stays `[]` (never
+ * widened back to all tools). No-op when nothing is disabled. Idempotent, so it
+ * is safe to call before prompt assembly AND again during tool activation.
+ */
+function applyDisabledToolsFilter(plan: SessionSetupPlan, disabledTools: ReadonlySet<string> | undefined): void {
+	if (disabledTools && plan.effectiveAllowedTools) {
+		plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(t => !disabledTools.has(t.name.toLowerCase()));
+	}
+}
+
 /** Prompt section order from `bobbit.promptSectionOrder`; undefined when none. */
 function promptSectionOrderFromMetadata(meta: Record<string, unknown>): string[] | undefined {
 	const raw = meta["bobbit.promptSectionOrder"];
@@ -610,9 +624,19 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
 
+	const goalMeta = resolveEffectiveGoalMetadata(plan, ctx);
 	// Per-goal prompt section ordering (bobbit.promptSectionOrder). Undefined ⇒
 	// today's fixed order, byte-identical. Applies to every prompt variant.
-	const sectionOrder = promptSectionOrderFromMetadata(resolveEffectiveGoalMetadata(plan, ctx));
+	const sectionOrder = promptSectionOrderFromMetadata(goalMeta);
+	// Per-goal disabled tools (bobbit.disabledTools). Filter the resolved
+	// allowlist HERE — BEFORE the prompt / tool-docs / skills catalog are
+	// assembled and cached — so a disabled tool can never be advertised in the
+	// initial system prompt or the prompt-sections snapshot even though
+	// resolveToolActivation removes it from the live surface later. Undefined ⇒
+	// no-op; `[]` vs `undefined` is preserved (see applyDisabledToolsFilter).
+	const disabledTools = disabledToolsFromMetadata(goalMeta);
+	// Non-assistant branches use the allowlist resolveTools already produced.
+	applyDisabledToolsFilter(plan, disabledTools);
 
 	if (assistantDef) {
 		// Assistant sessions (goal/role/tool assistants)
@@ -646,6 +670,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			plan.effectiveAllowedTools = computeEffectiveAllowedTools(
 				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
 			);
+			// Re-filter: the assistant recompute above replaced the allowlist, so
+			// strip disabled tools again before the prompt/tool-docs are assembled.
+			applyDisabledToolsFilter(plan, disabledTools);
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
@@ -779,14 +806,14 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// tool call. `lookupRole` mirrors the cascade-first pattern used elsewhere.
 	const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
 
-	// Goal-metadata disabled tools (bobbit.disabledTools). Filter the resolved
-	// allowlist HERE — after assistant/delegate branches may have recomputed it
-	// in resolvePrompt — so the persisted/inspector `effectiveAllowedTools` and
-	// the generated activation/proxy/guard all agree. Undefined ⇒ no-op.
+	// Goal-metadata disabled tools (bobbit.disabledTools). resolvePrompt already
+	// filtered the allowlist before assembling the prompt/tool-docs; the disabled
+	// set is still needed here for the activation/proxy/guard builders so the live
+	// surface and persisted/inspector `effectiveAllowedTools` all agree.
 	const disabledTools = disabledToolsFromMetadata(resolveEffectiveGoalMetadata(plan, ctx));
-	if (disabledTools && plan.effectiveAllowedTools) {
-		plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(t => !disabledTools.has(t.name.toLowerCase()));
-	}
+	// Idempotent with the filtering already applied in resolvePrompt; this guard
+	// keeps activation correct even if invoked without a preceding resolvePrompt.
+	applyDisabledToolsFilter(plan, disabledTools);
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const mcpExtPaths = ctx.mcpManager
