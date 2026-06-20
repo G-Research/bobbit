@@ -118,6 +118,7 @@ export class GateSignalRenderer implements ToolRenderer {
 		const signalId = data?.signal?.id || "";
 		const goalId2 = data?.signal?.goalId || data?.goalId || "";
 		const signalStatus = data?.signal?.status || "";
+		const steps = data?.signal?.verification?.steps || data?.signal?.steps || [];
 
 		// Already completed — show static result.
 		// Don't duplicate the status in the header — the live component shows
@@ -131,6 +132,7 @@ export class GateSignalRenderer implements ToolRenderer {
 						.gateId=${gateId}
 						.signalId=${signalId}
 						.finalStatus=${signalStatus}
+						.initialSteps=${steps}
 					></gate-verification-live>
 				</div>`,
 				isCustom: false,
@@ -138,7 +140,6 @@ export class GateSignalRenderer implements ToolRenderer {
 		}
 
 		// Running — show live verification component
-		const steps = data?.signal?.steps || [];
 		return {
 			content: html`<div>
 				${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono">${gateId}</span>`)}
