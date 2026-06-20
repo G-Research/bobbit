@@ -280,13 +280,28 @@ function parseMetadataValue(raw: string): unknown {
 	}
 }
 
-/** Convert a metadata object into ordered editor rows. String values are shown
- *  verbatim; everything else is JSON-stringified so it round-trips through a
- *  text input. Non-object input yields no rows. */
+/** Render a single metadata value into its editor-row string so that feeding
+ *  the result back through `parseMetadataValue` reproduces the original value
+ *  exactly (type included). Plain strings are shown verbatim when they already
+ *  round-trip; strings that would be reparsed as JSON (e.g. `"false"`, `"42"`,
+ *  `'["x"]'`, or a whitespace-padded number) are JSON-quoted so they survive
+ *  as strings. Non-strings are JSON-stringified. */
+function renderMetadataValue(v: unknown): string {
+	if (typeof v !== "string") return JSON.stringify(v);
+	// A verbatim string is safe only when re-parsing yields the identical
+	// string; otherwise quote it so submit keeps it a string.
+	const reparsed = parseMetadataValue(v);
+	return reparsed === v ? v : JSON.stringify(v);
+}
+
+/** Convert a metadata object into ordered editor rows. Values are rendered so
+ *  that the editor round-trips losslessly back through `metadataRowsToObject`
+ *  (string values that look like JSON literals stay strings). Non-object input
+ *  yields no rows. */
 export function metadataObjectToRows(meta: unknown): MetadataRow[] {
 	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return [];
 	return Object.entries(meta as Record<string, unknown>).map(
-		([k, v]): MetadataRow => [k, typeof v === "string" ? v : JSON.stringify(v)],
+		([k, v]): MetadataRow => [k, renderMetadataValue(v)],
 	);
 }
 

@@ -137,6 +137,59 @@ describe("proposal-helpers — goal metadata editor", () => {
 		const rt = metadataRowsToObject(metadataObjectToRows(meta));
 		assert.deepEqual(rt, meta);
 	});
+
+	it("metadataObjectToRows quotes string values that would reparse as JSON literals", () => {
+		const rows = metadataObjectToRows({
+			falseStr: "false",
+			trueStr: "true",
+			numStr: "42",
+			nullStr: "null",
+			arrStr: '["x"]',
+			objStr: '{"x":1}',
+			quoted: '"already"',
+			paddedNum: "  42  ",
+		});
+		assert.deepEqual(rows, [
+			["falseStr", '"false"'],
+			["trueStr", '"true"'],
+			["numStr", '"42"'],
+			["nullStr", '"null"'],
+			["arrStr", '"[\\"x\\"]"'],
+			["objStr", '"{\\"x\\":1}"'],
+			["quoted", '"\\"already\\""'],
+			["paddedNum", '"  42  "'],
+		]);
+	});
+
+	it("string values that look like JSON literals round-trip as strings", () => {
+		const meta = {
+			falseStr: "false",
+			numStr: "42",
+			nullStr: "null",
+			arrStr: '["browser_navigate"]',
+			objStr: '{"x":1}',
+			quoted: '"already"',
+			paddedNum: "  42  ",
+			plain: "hello world",
+			empty: "",
+		};
+		const rt = metadataRowsToObject(metadataObjectToRows(meta));
+		assert.deepEqual(rt, meta);
+	});
+
+	it("mixed string and non-string values round-trip with types preserved", () => {
+		const meta = {
+			"hindsight.memory.enabled": false,
+			disabledStr: "false",
+			count: 7,
+			countStr: "7",
+			tags: ["a", "b"],
+			tagsStr: '["a","b"]',
+			label: "exp-1",
+		};
+		const rt = metadataRowsToObject(metadataObjectToRows(meta));
+		assert.deepEqual(rt, meta);
+	});
 });
 
 describe("proposal-helpers — dismissal fingerprint", () => {
