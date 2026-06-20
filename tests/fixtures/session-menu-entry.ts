@@ -41,6 +41,7 @@ function registerSessionMenu(): void {
 		[
 			{ id: "tp.route", packId: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
 			{ id: "sm.route", packId: "tp", kind: "session-menu", label: "Open Demo", target: { route: "demo.route", params: { itemId: "x1" } } },
+			{ id: "sm.missing", packId: "tp", kind: "session-menu", label: "Missing Route", target: { route: "missing.route" } },
 			{ id: "sm.spawn", packId: "tp", kind: "session-menu", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
 			{ id: "sm.fail", packId: "tp", kind: "session-menu", label: "Broken Walkthrough", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
 		] as any,

@@ -295,8 +295,8 @@ export function runLauncherEntrypoint(
 		onResult?.({ ok: true });
 		return;
 	}
-	navigateToTarget(l.target as RouteTarget, options?.sessionId ? { sessionId: options.sessionId } : undefined);
-	onResult?.({ ok: true });
+	const result = navigateToTarget(l.target as RouteTarget, options?.sessionId ? { sessionId: options.sessionId } : undefined);
+	onResult?.(result);
 }
 
 /** Within-gesture double-spawn guard, keyed by compound launcher key (replaces the
@@ -346,28 +346,36 @@ async function runSpawnLauncher(
  * looks the `route` up in the registry, filters `params` to the registered
  * `paramKeys`, optionally opens the resolved panel in an explicitly-bound session,
  * and hands the encoding to `routing.ts::setExtRoute` — the pack never constructs
- * a URL. An unknown `route` (e.g. owning pack uninstalled) is a no-op (no crash,
- * no raw URL).
+ * a URL. An unknown `route` (e.g. owning pack uninstalled) reports a structured
+ * failure to launcher surfaces (no crash, no raw URL, no view switch).
  */
-export function navigateToTarget(target: RouteTarget, options?: { sessionId?: string }): void {
+export function navigateToTarget(target: RouteTarget, options?: { sessionId?: string }): LauncherDispatchResult {
 	const routeId = target?.route;
-	if (typeof routeId !== "string" || !routeId) return;
+	if (typeof routeId !== "string" || !routeId) {
+		return { ok: false, error: "Launcher route is missing." };
+	}
 	const entry = routes.get(routeId);
 	if (!entry) {
 		// eslint-disable-next-line no-console
 		console.warn(`[pack-entrypoints] navigate: no registered route "${routeId}"`);
-		return;
+		return { ok: false, code: "ROUTE_NOT_FOUND", error: `Route "${routeId}" is unavailable.` };
 	}
-	const filtered: Record<string, unknown> = {};
-	if (target.params) {
-		for (const key of entry.paramKeys) {
-			if (key in target.params) filtered[key] = target.params[key];
+	try {
+		const filtered: Record<string, unknown> = {};
+		if (target.params) {
+			for (const key of entry.paramKeys) {
+				if (key in target.params) filtered[key] = target.params[key];
+			}
 		}
+		if (options?.sessionId) {
+			openPackPanel({ panelId: entry.targetPanelId, params: filtered, sessionId: options.sessionId }, entry.packId);
+		}
+		setExtRoute(routeId, filtered);
+		return { ok: true };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, code: "ROUTE_FAILED", error: message || `Could not open route "${routeId}".` };
 	}
-	if (options?.sessionId) {
-		openPackPanel({ panelId: entry.targetPanelId, params: filtered, sessionId: options.sessionId }, entry.packId);
-	}
-	setExtRoute(routeId, filtered);
 }
 
 /** Flatten the `entrypoints[]` of each pack contribution row into EntrypointInfo[]
