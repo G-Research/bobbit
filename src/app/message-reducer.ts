@@ -30,6 +30,18 @@ export interface OrderedMessage {
 	_origin: MessageOrigin;
 	/** Sort secondary. Monotonic counter incremented on every reduce. */
 	_insertionTick: number;
+	/**
+	 * Durable marker set by `settle-optimistic`: an `_origin:"optimistic"` row
+	 * whose turn terminated WITHOUT a reconciling server user echo. Its `_order`
+	 * has been re-stamped out of the far-future tail sentinel into chronological
+	 * position. The marker survives across reduces so the snapshot survivor pass
+	 * can keep re-stamping it relative to each new snapshot's max order (a naive
+	 * one-shot `highestSeq + epsilon` would still sort AFTER negative-order
+	 * snapshot rows that arrive later — see `settle-optimistic` + the snapshot
+	 * survivor branch). The row stays `_origin:"optimistic"` with its
+	 * `optimistic_` id so a late server echo can still reconcile it in place.
+	 */
+	_settled?: boolean;
 }
 
 export interface ReducerState {
@@ -53,12 +65,16 @@ export type Action =
 	| { type: "mutation-pending"; message: any }
 	| { type: "mutation-update"; messageId: string; patch: Record<string, unknown> }
 	| { type: "error"; message: any }
+	| { type: "settle-optimistic" }
 	| { type: "deny-permission-filter"; messageId: string }
 	| { type: "replace-messages"; messages: any[] }
 	| { type: "reset" };
 
 export const SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
 const OPTIMISTIC_ORDER_BASE = Number.MAX_SAFE_INTEGER - 1_000_000_000;
+/** Fractional nudge used to land settled/synthetic rows just-after/just-before a
+ *  neighbouring integer `_order` without colliding with it. */
+const SETTLE_EPSILON = 0.5;
 
 export function initialState(): ReducerState {
 	return { messages: [], nextTick: 1, highestSeq: 0 };
@@ -547,6 +563,25 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 							continue;
 						}
 					}
+					// A SETTLED optimistic row (turn already terminated, never
+					// echoed) must keep sorting BEFORE this snapshot's tail. Its
+					// settle `_order` was `highestSeq + epsilon` (a small/positive
+					// value), but an independent snapshot's rows live in the
+					// negative SNAPSHOT_ORDER_FLOOR range, so without a re-stamp the
+					// settled row would sort AFTER the whole snapshot — the team-
+					// session strand (case R2). Re-stamp it to just below the
+					// snapshot max so it lands at the tail but never past it. Only
+					// pull it down when it currently sorts after the snapshot;
+					// PENDING optimistic rows (no `_settled`) are untouched so the
+					// legitimate pending case (5) still sits at the sentinel.
+					if (
+						m._settled === true &&
+						Number.isFinite(serverMaxOrder) &&
+						m._order > serverMaxOrder
+					) {
+						survivors.push({ ...m, _order: serverMaxOrder - SETTLE_EPSILON });
+						continue;
+					}
 					survivors.push(m);
 					continue;
 				}
@@ -780,6 +815,34 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: state.highestSeq,
 			};
+		}
+
+		case "settle-optimistic": {
+			// Turn termination (error / agent_end). Any `_origin:"optimistic"`
+			// row STILL pinned at the far-future tail sentinel
+			// (`_order > OPTIMISTIC_ORDER_BASE`) was never reconciled by a server
+			// user echo — the turn died before the prompt was persisted/echoed
+			// (e.g. an immediate model 404). Left at the sentinel it sorts after
+			// every server-ordered message and strands at the transcript bottom.
+			//
+			// Re-stamp it into chronological position: `highestSeq + epsilon`
+			// (just after the latest live message we've consumed) and flag it
+			// `_settled` so the snapshot survivor pass can keep it before later
+			// snapshot tails. Keep `_origin:"optimistic"` + the `optimistic_` id
+			// so a late server echo still reconciles in place (no duplicate).
+			// Already-settled / already-reconciled rows are untouched, so this is
+			// a pure no-op on the happy path and idempotent on re-dispatch.
+			let changed = false;
+			const settleOrder = state.highestSeq + SETTLE_EPSILON;
+			const messages = state.messages.map((m) => {
+				if (m._origin === "optimistic" && m._order > OPTIMISTIC_ORDER_BASE) {
+					changed = true;
+					return { ...m, _order: settleOrder, _settled: true };
+				}
+				return m;
+			});
+			if (!changed) return state;
+			return { ...state, messages: sortMessages(messages) };
 		}
 	}
 }
