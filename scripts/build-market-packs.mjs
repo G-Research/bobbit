@@ -126,7 +126,13 @@ const PACKS = [
 			// CLIENT panel (browser): the native config/status surface (P4). `lit` stays
 			// external (host-injected); the bundle is a single self-contained ESM emitted
 			// to the shared lib/ dir, auto-discovered via panels/hindsight-memory.yaml.
+			// Retained as a NON-entry compatibility panel — the session-menu/route entries
+			// now target the embedded dashboard below.
 			{ in: "panel.js", out: "lib/HindsightPanel.js" },
+			// CLIENT panel (browser): the EMBEDDED DASHBOARD use surface. Opened by the
+			// session-menu entry + #/ext/hindsight; renders the configured human `uiUrl`
+			// in a sandboxed iframe. Auto-discovered via panels/hindsight-dashboard.yaml.
+			{ in: "dashboard-panel.js", out: "lib/HindsightDashboardPanel.js" },
 		],
 	},
 ];
