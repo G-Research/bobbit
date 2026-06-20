@@ -173,9 +173,18 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
 - Depth = parent hops + 1 (root = 1), cycle-guarded bounded walk.
 - System ceiling `maxNestingDepth` (default 3, clamp 1..10) is a hard cap;
   per-goal override can only **tighten**; children inherit parent's effective
-  flags. Team-lead at `depth == maxDepth` cannot spawn any child.
-- Server-side enforcement on both spawn paths: `403 SUBGOALS_DISABLED` /
-  `403 NESTING_DEPTH_EXCEEDED`.
+  flags. Team-lead at `depth == maxDepth` cannot spawn any child. The per-goal
+  `subgoalsAllowed` / `maxNestingDepth` overrides are **editable after creation**
+  via `PATCH /policy` (operator-class), re-clamped to the inherited ceiling on
+  every write; `effectiveMaxNestingDepth` recomputes against the live ancestor
+  chain so a retroactively tightened ancestor binds existing descendants.
+- Server-side enforcement on both spawn paths: `403 SUBGOALS_DISABLED`
+  (system pref OFF — master gate, always wins) / `403 PARENT_SUBGOALS_DISABLED`
+  (system ON but the specific parent has `subgoalsAllowed: false`; message names
+  the parent) / `403 NESTING_DEPTH_EXCEEDED`. The parent-disallowed case is a
+  **distinct code** from the system-off case so the UI doesn't mislabel a
+  per-goal opt-out as a broken system setting; wording is aligned across
+  `server.ts`, `nested-goal-routes.ts`, and `verification-harness.ts`.
 - System `subgoalsEnabled` is the master gate; **defaults OFF**, aligned with
   #497 (an earlier production deviation that flipped it ON has been reverted —
   unset/missing reads as disabled, only an explicit `true` enables it).
@@ -227,7 +236,8 @@ helpers so REST and the verification harness share one code path:
 - `POST /api/goals/:id/spawn-child` — body `{ planId, title, spec,
   dependsOn?: string[], workflowId?, suggestedRole?, inlineWorkflow?,
   inlineRoles? }`. Idempotent on `planId`. Errors: `409 GOAL_PAUSED`,
-  `400 SPEC_TOO_SHORT`, `403 SUBGOALS_DISABLED`,
+  `400 SPEC_TOO_SHORT`, `403 SUBGOALS_DISABLED` (system pref OFF),
+  `403 PARENT_SUBGOALS_DISABLED` (this parent has `subgoalsAllowed: false`),
   `403 NESTING_DEPTH_EXCEEDED {currentDepth,maxDepth}`,
   `400 SELF_DEPENDENCY|UNKNOWN_PLAN_ID|DEPENDS_ON_CYCLE`. Children inherit the
   root repo path (cwd derived via `path.relative` offset) and the parent's
@@ -251,16 +261,35 @@ helpers so REST and the verification harness share one code path:
   cancels in-flight verifications; resume re-enables spawns.
 - `POST /api/goals/:id/mutation/:requestId/decision` — body `{ approve }`;
   applies or rejects a pending plan mutation.
-- `PATCH /api/goals/:id/policy` — body `{ divergencePolicy?, maxConcurrentChildren? }`.
-  The route itself accepts **any goal id** and persists the fields on that
-  goal record: `divergencePolicy` (`strict`/`balanced`/`autonomous`) is a
-  **per-goal** setting consulted by that goal's own plan-mutation handler;
-  `maxConcurrentChildren` (validated `[1,8]`) is stored per-goal but **enforced
-  at the root** — the spawn scheduler resolves the *root's* value via
-  `resolve-root-max-concurrent-children` for the per-root semaphore, so in
-  practice operators set concurrency on the root (`goal_set_policy` is
-  documented root-oriented for that field). On success broadcasts
-  `goal_state_changed` with the new values.
+- `PATCH /api/goals/:id/policy` — body
+  `{ divergencePolicy?, maxConcurrentChildren?, subgoalsAllowed?, maxNestingDepth? }`.
+  The route accepts **any goal id** and persists the fields on that goal record.
+  A body with no recognized field is rejected `400 NO_POLICY_FIELDS`.
+  - `divergencePolicy` (`strict`/`balanced`/`autonomous`) is a **per-goal**
+    setting consulted by that goal's own plan-mutation handler.
+  - `maxConcurrentChildren` (validated `[1,8]`, floored to int) is stored
+    per-goal but **enforced at the root** — the spawn scheduler resolves the
+    *root's* value via `resolve-root-max-concurrent-children` for the per-root
+    semaphore, so in practice operators set concurrency on the root
+    (`goal_set_policy` is documented root-oriented for that field).
+  - `subgoalsAllowed` (boolean) and `maxNestingDepth` (clamped via the SSOT
+    `clampMaxDepth`, then capped to the **inherited** ceiling —
+    `effectiveMaxNestingDepth(parent)` for a child, the system cap for a root)
+    are the **per-goal sub-goal opt-in** fields driven by the goal dashboard's
+    Sub-goal settings card. They let a human enable sub-goals on a goal created
+    with the toggle off (the fix for the `PARENT_SUBGOALS_DISABLED` dead-end).
+    The system pref remains the master gate — flipping `subgoalsAllowed: true`
+    only has effect when `subgoalsEnabled` is also ON.
+
+  **Per-body authz classification (S1).** The handler classifies the request by
+  its fields: a body carrying any orchestration field
+  (`divergencePolicy` / `maxConcurrentChildren`) is **orchestration-class**
+  (team-lead-only, cookie does NOT bypass); a body carrying *exclusively* the
+  opt-in fields (`subgoalsAllowed` / `maxNestingDepth`) is **operator-class**
+  (verified human cookie accepted, else team-lead match). The stricter class
+  wins so the cookie can never piggyback an orchestration change behind a
+  sub-goal toggle. On success broadcasts `goal_state_changed` with the new
+  values (including `subgoalsAllowed` / `maxNestingDepth` when set).
 - `GET /api/goals/:id/descendants` — live + archived descendants for the Plan
   tab (independent of the sidebar's archived filter).
 - `GET /api/goals/:id/tree-cost` — cost/token rollup rooted at the requested
@@ -276,17 +305,19 @@ credentials, so they are guarded server-side by `authorizeChildrenMutation`
 server-issued `bobbit_session` cookie, the cookie is only a **weak human
 signal**. To shrink the blast radius the mutations are split into two classes:
 
-- **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`,
-  `policy`. The autonomous team-lead verbs (spawn child teams, rewrite the
-  plan, merge child branches, resize concurrency). The web UI never issues
-  these. They are **team-lead-only**: require an `X-Bobbit-Spawning-Session`
-  header matching the goal's authoritative team-lead, and the cookie does
-  **NOT** bypass. Refused on absent header / teamless goal / mismatch
-  (`403 NOT_TEAM_LEAD`).
-- **`operator`** — `pause`, `resume`, mutation `decision`, `archive-child`.
-  The human-in-the-loop verbs the web UI actually drives. A verified
-  `bobbit_session` cookie is accepted (human/UI), else the same team-lead
-  match applies.
+- **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`, and
+  `policy` bodies carrying `divergencePolicy` / `maxConcurrentChildren`. The
+  autonomous team-lead verbs (spawn child teams, rewrite the plan, merge child
+  branches, resize concurrency). The web UI never issues these. They are
+  **team-lead-only**: require an `X-Bobbit-Spawning-Session` header matching the
+  goal's authoritative team-lead, and the cookie does **NOT** bypass. Refused on
+  absent header / teamless goal / mismatch (`403 NOT_TEAM_LEAD`).
+- **`operator`** — `pause`, `resume`, mutation `decision`, `archive-child`, and
+  `policy` bodies carrying **exclusively** the per-goal sub-goal opt-in fields
+  (`subgoalsAllowed` / `maxNestingDepth`). The human-in-the-loop verbs the web
+  UI actually drives. A verified `bobbit_session` cookie is accepted (human/UI),
+  else the same team-lead match applies. A `policy` body that mixes in any
+  orchestration field is classified as orchestration (the stricter class wins).
 
 The header is never trusted as a bare claim — only compared for equality
 against `TeamManager.getTeamState(goalId)?.teamLeadSessionId`.
