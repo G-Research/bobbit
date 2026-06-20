@@ -113,6 +113,16 @@ const PACKS = [
 		],
 	},
 	{
+		pack: "experiment-runner",
+		entries: [
+			// CLIENT panel bundle: the four-view state-machine panel (mode-select →
+			// define → confirm → dashboard). Emits to lib/ (auto-discovered from
+			// panels/experiment-runner-panel.yaml). The hand-authored lib/routes.mjs +
+			// other server lib modules are relocated as-is — NOT bundled here.
+			{ in: "panel.js", out: "lib/panel.js" },
+		],
+	},
+	{
 		pack: "hindsight",
 		entries: [
 			// SERVER-side modules for the confined NODE worker (provider hooks + pack

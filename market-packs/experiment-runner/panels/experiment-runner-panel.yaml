@@ -1,0 +1,14 @@
+id: experiment-runner.panel
+title: Experiments
+# `entry` resolves relative to THIS yaml (panels/) and stays inside the pack
+# root. The built panel bundle lives in the shared lib/ dir (built from
+# src/panel.js by scripts/build-market-packs.mjs). The panel is a four-view state
+# machine (mode-select → define → confirm → dashboard) — see
+# docs/design/experiment-runner-panel-ux.md §2.
+#
+# SINGLETON identity: every launcher (composer-slash / command-palette) opens the
+# panel with NO instanceKey, so a parameterized panel would refuse to open from
+# those surfaces (packPanelInstanceKeyForTarget returns undefined). The panel is
+# therefore a single owner-session control surface that lists/selects experiments
+# internally; the deep-link `experimentId` param focuses one experiment on open.
+entry: ../lib/panel.js

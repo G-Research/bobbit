@@ -1,0 +1,19 @@
+name: experiment-runner
+description: >-
+  Data-driven experimentation + autonomous optimization. A/B comparison (safe,
+  bounded, default) and opt-in guard-railed Autoresearch, over goal metadata +
+  inlineRoles, with an editable metrics + dashboard spec.
+version: 1.0.0
+contents:
+  roles: []          # arms get inlineRoles per the definition; no shipped role needed
+  tools: []          # UI-only pack — no agent tools
+  skills: []
+  entrypoints:
+    - experiment-runner-open
+    - experiment-runner-palette
+    - experiment-runner-route
+routes:
+  module: lib/routes.mjs
+  names: [defineExperiment, projectCost, launch, poll, collect, aggregate,
+          iterate, listExperiments, getExperiment, saveMetrics, saveDashboard,
+          report, listMetrics, listWidgets, cancel]
