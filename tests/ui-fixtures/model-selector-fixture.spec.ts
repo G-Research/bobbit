@@ -100,6 +100,76 @@ test.describe("ModelSelector unauthenticated tooltip (Settings-drift regression)
 	});
 });
 
+test.describe("ModelSelector Claude Code local runtime", () => {
+	test.beforeEach(async ({ page }) => {
+		await loadFixture(page);
+	});
+
+	test("renders ready Claude Code rows with local-runtime labeling and searchable copy", async ({ page }) => {
+		await page.evaluate(() => (window as any).__setModelSelectorModels([
+			{
+				id: "sonnet",
+				name: "Claude Code Sonnet",
+				provider: "claude-code",
+				api: "claude-code-runtime",
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+				runtime: "claude-code",
+				localRuntime: true,
+				runtimeLabel: "Claude Code (local)",
+			},
+		]));
+		await page.evaluate(() => (window as any).__openModelSelectorFixture());
+
+		const row = page.locator('agent-model-selector [data-model-id="sonnet"]');
+		await expect(row).toBeVisible({ timeout: 10_000 });
+		await expect(row).toContainText("Claude Code Sonnet");
+		await expect(row).toContainText("Local runtime");
+		await expect(row).toContainText("Claude Code (local)");
+		expect(await row.getAttribute("title")).toContain("local Claude Code CLI");
+
+		await page.locator("agent-model-selector input").fill("local sonnet");
+		await expect(row).toBeVisible();
+	});
+
+	test("renders unavailable Claude Code rows with reason-specific badge and refuses selection", async ({ page }) => {
+		await page.evaluate(() => (window as any).__setModelSelectorModels([
+			{
+				id: "sonnet",
+				name: "Claude Code Sonnet",
+				provider: "claude-code",
+				api: "claude-code-runtime",
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: false,
+				sessionSelectable: false,
+				sessionUnavailableReason: "Claude Code CLI was not found. Set the executable path in Settings → Models → Claude Code.",
+				runtime: "claude-code",
+				localRuntime: true,
+				runtimeLabel: "Claude Code (local)",
+			},
+		]));
+		await page.evaluate(() => (window as any).__openModelSelectorFixture());
+
+		const row = page.locator('agent-model-selector [data-model-id="sonnet"]');
+		await expect(row).toBeVisible({ timeout: 10_000 });
+		await expect(row).toContainText("CLI missing");
+		expect(await row.getAttribute("data-session-unavailable")).toBe("true");
+		expect(await row.getAttribute("title")).toContain("Claude Code CLI was not found");
+
+		await row.dispatchEvent("click");
+		await page.waitForTimeout(100);
+		expect(await page.evaluate(() => (window as any).__getSelectedModel())).toBeNull();
+	});
+});
+
 test.describe("ModelSelector account model selectability (Google Code Assist)", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);

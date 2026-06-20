@@ -18,6 +18,36 @@ function modelsAreEqual(a: Model<any> | null | undefined, b: Model<any> | null |
 	return !!a && !!b && a.provider === b.provider && a.id === b.id;
 }
 
+type SessionRuntime = "pi" | "claude-code";
+
+function modelRuntime(model: any): SessionRuntime {
+	return model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
+}
+
+function isLocalRuntimeModel(model: any): boolean {
+	return modelRuntime(model) === "claude-code" || model?.localRuntime === true;
+}
+
+function modelProviderLabel(model: any, provider: string): string {
+	return typeof model?.runtimeLabel === "string" && model.runtimeLabel.trim()
+		? model.runtimeLabel
+		: isLocalRuntimeModel(model)
+			? "Claude Code (local)"
+			: provider;
+}
+
+function unavailableBadgeLabel(model: any): string {
+	const reason = String(model?.sessionUnavailableReason ?? model?.unavailableReason ?? model?.reason ?? "").toLowerCase();
+	if (reason.includes("cli_missing") || reason.includes("cli missing") || reason.includes("not found")) return "CLI missing";
+	if (reason.includes("auth_required") || reason.includes("login") || reason.includes("authenticated")) return "Login required";
+	if (reason.includes("probe_failed") || reason.includes("probe failed")) return "Probe failed";
+	return "Unavailable";
+}
+
+function modelDisplayName(model: any, id: string): string {
+	return isLocalRuntimeModel(model) && typeof model?.name === "string" && model.name.trim() ? model.name : id;
+}
+
 function claudeOpus4Minor(id: string): number | undefined {
 	// Keep in lockstep with src/server/agent/model-registry.ts. Limit the minor
 	// capture to version-looking values so date-only IDs like
@@ -259,7 +289,8 @@ export class ModelSelector extends DialogBase {
 		if (this.searchQuery) {
 			filteredModels = filteredModels.filter(({ provider, id, model }) => {
 				const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter((t) => t);
-				const searchText = `${provider} ${id} ${model.name}`.toLowerCase();
+				const runtimeWords = isLocalRuntimeModel(model) ? "local runtime claude code" : "";
+				const searchText = `${provider} ${id} ${model.name ?? ""} ${model.runtimeLabel ?? ""} ${runtimeWords}`.toLowerCase();
 				return searchTokens.every((token) => searchText.includes(token));
 			});
 		}
@@ -373,11 +404,16 @@ export class ModelSelector extends DialogBase {
 						const isSelected = index === this.selectedIndex;
 						const hasKey = model.authenticated ?? false;
 						const sessionUnavailable = this.isSessionUnavailable(model);
+						const localRuntime = isLocalRuntimeModel(model);
 						const dimmed = sessionUnavailable || !hasKey;
+						const providerLabel = modelProviderLabel(model, provider);
+						const displayName = modelDisplayName(model, id);
 						const rowTitle = sessionUnavailable
 							? (model.sessionUnavailableReason
 								?? "This model can't be used in agent sessions yet.")
-							: (hasKey ? "" : "API key or account login required — set up in Settings → Account, or add a key under Settings → Models.");
+							: localRuntime
+								? "Runs through your local Claude Code CLI and existing Claude Code login."
+								: (hasKey ? "" : "API key or account login required — set up in Settings → Account, or add a key under Settings → Models.");
 						return html`
 							<div
 								data-model-item
@@ -397,13 +433,15 @@ export class ModelSelector extends DialogBase {
 							>
 								<div class="flex items-center justify-between gap-2 mb-1">
 									<div class="flex items-center gap-2 flex-1 min-w-0">
-										<span class="text-sm font-medium text-foreground truncate">${id}</span>
+										<span class="text-sm font-medium text-foreground truncate">${displayName}</span>
+										${localRuntime && displayName !== id ? html`<span class="text-xs text-muted-foreground truncate">${id}</span>` : ""}
 										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
 									</div>
 									<div class="flex items-center gap-1.5">
-										${sessionUnavailable ? Badge("Account only", "secondary") : ""}
-										${!hasKey && !sessionUnavailable ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
-										${Badge(provider, "outline")}
+										${sessionUnavailable ? Badge(unavailableBadgeLabel(model), "secondary") : ""}
+										${localRuntime ? Badge("Local runtime", "secondary") : ""}
+										${!hasKey && !sessionUnavailable && !localRuntime ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
+										${Badge(providerLabel, "outline")}
 									</div>
 								</div>
 								<div class="flex items-center justify-between text-xs text-muted-foreground">

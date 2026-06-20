@@ -570,6 +570,7 @@ export class RemoteAgent {
 		this._state = {
 			systemPrompt: "",
 			model: { ...PLACEHOLDER_DEFAULT_MODEL, contextWindow: 0 },
+			runtime: "pi",
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],
@@ -1226,6 +1227,7 @@ export class RemoteAgent {
 
 	setModel(model: any): void {
 		this._state.model = model;
+		this._state.runtime = model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
 		state.chatPanel?.agentInterface?.requestUpdate();
 	}
@@ -1560,6 +1562,11 @@ export class RemoteAgent {
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
+				if (msg.data?.runtime === "claude-code" || msg.data?.runtime === "pi") this._state.runtime = msg.data.runtime;
+				if (typeof msg.data?.runtimeLabel === "string") this._state.runtimeLabel = msg.data.runtimeLabel;
+				if (typeof msg.data?.claudeCodeSessionId === "string") this._state.claudeCodeSessionId = msg.data.claudeCodeSessionId;
+				if (typeof msg.data?.claudeCodeModelAlias === "string") this._state.claudeCodeModelAlias = msg.data.claudeCodeModelAlias;
+				if (typeof msg.data?.claudeCodePermissionMode === "string") this._state.claudeCodePermissionMode = msg.data.claudeCodePermissionMode;
 				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
 					this._state.serverCost = msg.data.serverCost ?? null;
 					if (this._state.serverCost) {
