@@ -1,7 +1,7 @@
 // src/app/pack-entrypoints.ts
 //
 // CLIENT registry of pack-contributed ENTRYPOINTS — launcher surfaces
-// (composer slash-command / git-widget button / command-palette launcher) AND
+// (composer slash-command / session actions menu launcher) AND
 // deep-linkable client ROUTES (pack schema V1 §8.2; design
 // docs/design/pack-schema-v1-rationalisation.md). Entrypoints are now
 // PACK-scoped — each registered launcher/route carries the owning `packId`
@@ -39,10 +39,10 @@ import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api
 
 /** Launcher kinds (a clickable surface) PLUS the routable `route` kind (a
  *  deep-linkable client route with NO clickable surface). */
-export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-palette" | "route";
+export type EntrypointKind = "composer-slash" | "session-menu" | "route";
 
 /** The launcher kinds — those that render a clickable surface. */
-export type LauncherKind = "composer-slash" | "git-widget-button" | "command-palette";
+export type LauncherKind = "composer-slash" | "session-menu";
 
 /** A launcher that, on click, calls the owning pack's `route` (POST, empty body),
  *  then opens `panelId` in the returned `childSessionId` (auto-switching to it).
@@ -195,7 +195,7 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 			const paramKeys = Array.isArray(ep.paramKeys) ? ep.paramKeys.filter((k): k is string => typeof k === "string") : [];
 			nextRoutes.set(routeId, { routeId, targetPanelId: panelId, paramKeys, packId: ep.packId, projectId });
 		} else {
-			if (ep.kind !== "composer-slash" && ep.kind !== "git-widget-button" && ep.kind !== "command-palette") continue;
+			if (ep.kind !== "composer-slash" && ep.kind !== "session-menu") continue;
 			if (typeof ep.label !== "string" || !ep.label) continue;
 			// Accept a spawn launcher ({action,route,panelId}) FIRST — it carries a
 			// `panelId` like a PanelTarget but is dispatched via the pack `run` route,
@@ -232,7 +232,7 @@ export function lookupPackRoute(routeId: string): PackRouteEntry | undefined {
 }
 
 /** Enumerate the registered LAUNCHER entrypoints (optionally filtered by kind),
- *  for the host surfaces (composer slash list, git-widget, command palette) to
+ *  for the host surfaces (composer slash list and session actions menus) to
  *  render. Routes are NOT launchers and are never returned here. */
 export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher[] {
 	const out: RegisteredLauncher[] = [];
@@ -259,8 +259,8 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
  *
  * A SpawnLaunchTarget launcher calls its pack's `route` (POST) and, on `ok:true`,
  * opens the returned child's panel (auto-switching). The optional `onResult`
- * callback reports the dispatch outcome so a surface (e.g. GitStatusWidget) can
- * render a `NO_PR`/failure inline; it is invoked `{ok:true}` for the
+ * callback reports the dispatch outcome so a surface (e.g. session actions) can
+ * render a `NO_PR`/failure visibly; it is invoked `{ok:true}` for the
  * panel/route paths too. Callers that pass no callback still spawn + switch on
  * success (backward-compatible).
  */
@@ -373,7 +373,7 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 		for (const e of p.entrypoints) {
 			if (!e || typeof e !== "object") continue;
 			const id = typeof e.id === "string" ? e.id : undefined;
-			const kind = typeof e.kind === "string" ? e.kind : undefined;
+			const kind = typeof e.kind === "string" ? (e.kind as string) : undefined;
 			if (!id || !kind) continue;
 			if (kind === "route") {
 				const routeId = typeof e.routeId === "string" ? e.routeId : undefined;
@@ -384,7 +384,7 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 					? (e.paramKeys.filter((k): k is string => typeof k === "string"))
 					: [];
 				out.push({ id, packId, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys });
-			} else if (kind === "composer-slash" || kind === "git-widget-button" || kind === "command-palette") {
+			} else if (kind === "composer-slash" || kind === "session-menu") {
 				const label = typeof e.label === "string" ? e.label : undefined;
 				// Pass the launcher target through UNCHANGED — a PanelTarget, a RouteTarget,
 				// OR a SpawnLaunchTarget ({action,route,panelId}). We do not validate the

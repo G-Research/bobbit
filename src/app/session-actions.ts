@@ -1,7 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
-import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
+import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2, Zap } from "lucide";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, refreshAgentSession, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
+import { listLauncherEntrypoints, runLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
 import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -101,6 +102,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 	const staffId = input.staffId ?? session.staffId;
 	const isTeamLead = session.role === "team-lead";
 	const copyLink = input.copyLink ?? defaultCopySidebarLink;
+	const launcherActions = buildSessionMenuLauncherActions(onRefreshStateChanged);
 	const actions: SessionActionDescriptor[] = [
 		{
 			id: "modify",
@@ -207,6 +209,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			},
 		},
 	];
+	actions.push(...launcherActions);
 	return actions
 		.filter((action) => action.visible !== false)
 		.sort((a, b) => a.priority - b.priority);
@@ -214,6 +217,61 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 
 function isChildSession(session: GatewaySession): boolean {
 	return !!(session.parentSessionId || session.delegateOf);
+}
+
+function buildSessionMenuLauncherActions(onRefreshStateChanged?: () => void): SessionActionDescriptor[] {
+	let launchers: ReturnType<typeof listLauncherEntrypoints> = [];
+	try {
+		launchers = listLauncherEntrypoints("session-menu");
+	} catch {
+		return [];
+	}
+	return launchers.map((launcher, index) => {
+		const isSpawn = isSpawnLaunchTarget(launcher.target);
+		return {
+			id: launcher.key,
+			label: launcher.label,
+			title: isSpawn ? `Start ${launcher.label}` : launcher.label,
+			icon: icon(Zap, "xs"),
+			priority: 80 + index,
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (isSpawn) emitLauncherFeedback("pending", `Starting ${launcher.label}…`);
+				try {
+					runLauncherEntrypoint(launcher.key, (result) => {
+						if (result.ok) return;
+						emitLauncherFeedback("error", launcherFailureMessage(launcher.label, result));
+						onRefreshStateChanged?.();
+					});
+				} catch (error) {
+					emitLauncherFeedback("error", error instanceof Error ? error.message : `Could not run ${launcher.label}.`);
+				}
+			},
+		} satisfies SessionActionDescriptor;
+	});
+}
+
+function isSpawnLaunchTarget(target: unknown): target is SpawnLaunchTarget {
+	return !!target
+		&& (target as SpawnLaunchTarget).action === "spawn"
+		&& typeof (target as SpawnLaunchTarget).route === "string"
+		&& typeof (target as SpawnLaunchTarget).panelId === "string";
+}
+
+function launcherFailureMessage(label: string, result: LauncherDispatchResult): string {
+	if (result.error) return result.error;
+	if (result.code === "NO_PR") return "No pull request found for this branch.";
+	return `Could not start ${label}.`;
+}
+
+function emitLauncherFeedback(kind: "pending" | "error", message: string): void {
+	try {
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", { detail: { kind, message } }));
+	} catch {
+		// Non-DOM tests / SSR: feedback is best-effort.
+	}
 }
 
 function refreshAgentNeedsConfirmation(session: GatewaySession): boolean {
