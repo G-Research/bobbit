@@ -4,8 +4,8 @@
  * Covers (per the design-doc gate):
  *   (a) The session row's actions popover shows an "Open in new window" item
  *       (with an icon); clicking it calls window.open(deepLink, "_blank").
- *   (b) Middle-clicking a session row opens that session's deep link in a new
- *       window AND does NOT change the currently active session in-place.
+ *   (b) Middle-clicking a session row opens the same path-style session deep
+ *       link AND does NOT change the currently active session in-place.
  *
  * window.open is stubbed so the assertions inspect (url, target) rather than
  * relying on a real popup window.
@@ -65,10 +65,6 @@ function expectedPathDeepLink(page: Page, sessionId: string): Promise<string> {
 	return page.evaluate((id) => `${location.origin}/session/${id}`, sessionId);
 }
 
-function expectedHashDeepLink(page: Page, sessionId: string): Promise<string> {
-	return page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, sessionId);
-}
-
 test.describe("Open session in new window (UI)", () => {
 	const sessionIds: string[] = [];
 
@@ -114,7 +110,7 @@ test.describe("Open session in new window (UI)", () => {
 		await openSession(page, activeId);
 		const otherRow = sessionRow(page, otherId);
 		await expect(otherRow).toBeVisible({ timeout: 10_000 });
-		const otherDeepLink = await expectedHashDeepLink(page, otherId);
+		const otherDeepLink = await expectedPathDeepLink(page, otherId);
 		await stubWindowOpen(page);
 
 		// Root cause of the flake: Playwright's real middle-click

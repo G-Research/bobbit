@@ -251,6 +251,6 @@ function openExternalUrl(url: string): void {
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
 }
 
-function openSessionInNewWindow(sessionId: string): void {
+export function openSessionInNewWindow(sessionId: string): void {
 	openExternalUrl(sessionPathDeepLink(sessionId));
 }

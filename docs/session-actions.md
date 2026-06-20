@@ -78,7 +78,7 @@ The popover renders the toggle with `role="menuitemcheckbox"` and `aria-checked`
 
 ## Session links and routing
 
-Session `Copy link` and canonical `Open in new window` actions use path-style URLs:
+Session `Copy link`, canonical `Open in new window`, and session-row middle-click actions use path-style URLs:
 
 ```text
 /session/<sessionId>
@@ -106,7 +106,7 @@ Relevant coverage lives in:
 
 - `tests/e2e/ui/session-actions.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop overflow, mobile hamburger, Fork toggle accessibility, and header action reachability.
 - `tests/e2e/ui/copy-session-link.spec.ts` — path-style copy URL, direct `/session/<id>` load, hash canonicalization, reload behavior, and hash precedence.
-- `tests/e2e/ui/open-session-new-window.spec.ts` — open-in-new-window behavior and middle-click no-navigation regression coverage.
+- `tests/e2e/ui/open-session-new-window.spec.ts` — path-style open-in-new-window behavior and middle-click no-navigation regression coverage.
 - `tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts` — sidebar menu ordering/title contract in a fast browser fixture.
 - `tests/sidebar-actions-flip.test.ts` — popover FLIP layout helper unit coverage.
 

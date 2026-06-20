@@ -673,6 +673,21 @@ function headerDirectSessionActionLimit(): number {
 	return 4;
 }
 
+function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobile: boolean): {
+	directActions: SessionActionDescriptor[];
+	overflowActions: SessionActionDescriptor[];
+} {
+	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
+	const directLimit = firstTrailingActionIndex >= 0
+		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
+		: headerDirectSessionActionLimit();
+	const directCount = mobile ? 0 : Math.min(actions.length, directLimit);
+	return {
+		directActions: actions.slice(0, directCount),
+		overflowActions: actions.slice(directCount),
+	};
+}
+
 function toHeaderPopoverItems(actions: SessionActionDescriptor[]): SidebarActionsPopoverItem[] {
 	return actions.map(({ id, label, title, icon: actionIcon, tone, quick, trailingToggle }) => ({
 		id: String(id),
@@ -730,22 +745,9 @@ async function openHeaderSessionActionsPopover(input: {
 	element.items = toHeaderPopoverItems(input.actions);
 	element.sourceRects = [];
 	element.open = true;
-	const handleTrailingToggleKeydown = (event: KeyboardEvent) => {
-		if (event.key !== " " && event.key !== "Space" && event.key !== "Spacebar" && event.key !== "Enter") return;
-		const target = event.target;
-		const toggle = target instanceof HTMLElement
-			? target.closest<HTMLElement>("[data-sidebar-actions-toggle][data-session-action-id]")
-			: null;
-		if (!toggle || !element.contains(toggle)) return;
-		const actionId = toggle.dataset.sessionActionId || toggle.dataset.sidebarActionId || "";
-		const action = _openHeaderSessionActionsPopover?.actions.find((item) => String(item.id) === actionId);
-		if (!action?.trailingToggle) return;
-		event.preventDefault();
-		event.stopImmediatePropagation();
-		action.trailingToggle.onToggle();
-	};
-	window.addEventListener("keydown", handleTrailingToggleKeydown, true);
-	const cleanup = () => window.removeEventListener("keydown", handleTrailingToggleKeydown, true);
+	const handleResize = () => refreshOpenHeaderSessionActionsPopover();
+	window.addEventListener("resize", handleResize);
+	const cleanup = () => window.removeEventListener("resize", handleResize);
 	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
 		event.stopPropagation();
 		const current = _openHeaderSessionActionsPopover;
@@ -807,24 +809,19 @@ function renderHeaderSessionActions(input: {
 	}).slice().sort((a, b) => a.priority - b.priority);
 	const actions = buildActions();
 	if (!actions.length) return html``;
-	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
-	const directLimit = firstTrailingActionIndex >= 0
-		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
-		: headerDirectSessionActionLimit();
-	const directCount = input.mobile ? 0 : Math.min(actions.length, directLimit);
-	const directActions = actions.slice(0, directCount);
-	const overflowActions = actions.slice(directCount);
+	const { directActions, overflowActions } = partitionHeaderSessionActions(actions, input.mobile);
 	const showOverflow = input.mobile || overflowActions.length > 0;
 	const openFromTrigger = (event: Event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		const trigger = event.currentTarget as HTMLElement;
 		resetSessionForkNewWorktree();
+		const currentOverflowActions = () => partitionHeaderSessionActions(buildActions(), input.mobile).overflowActions;
 		void openHeaderSessionActionsPopover({
 			sessionId: input.session.id,
 			trigger,
-			actions: input.mobile ? buildActions() : buildActions().slice(directCount),
-			refresh: () => input.mobile ? buildActions() : buildActions().slice(directCount),
+			actions: currentOverflowActions(),
+			refresh: currentOverflowActions,
 		});
 	};
 	return html`

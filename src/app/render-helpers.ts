@@ -26,8 +26,8 @@ import {
 import { statusBobbit } from "./session-colors.js";
 import { connectToSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
-import { buildSessionActions, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
+import { buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -682,10 +682,6 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 function openExternalUrl(url: string): void {
 	const opened = window.open(url, "_blank", "noopener");
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
-}
-
-function openSessionInNewWindow(sessionId: string): void {
-	openExternalUrl(sessionDeepLink(sessionId));
 }
 
 function prefetchGoalGithubLink(goalId: string): void {
