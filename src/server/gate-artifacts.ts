@@ -39,8 +39,9 @@ export class GateArtifactResolutionError extends Error {
 	constructor(message: string, lookup: GateArtifactLookup) {
 		super(message);
 		this.name = "GateArtifactResolutionError";
-		this.validArtifactIds = [...new Set(lookup.index.files.map(file => file.id))];
-		this.validArtifacts = lookup.index.files.map(file => ({
+		const validArtifacts = lookup.entries.length ? lookup.entries : lookup.index.files;
+		this.validArtifactIds = [...new Set(validArtifacts.map(file => file.id))];
+		this.validArtifacts = validArtifacts.map(file => ({
 			id: file.id,
 			relativePath: file.relativePath,
 			retry: file.retry,
@@ -82,12 +83,35 @@ function artifactIdForMetadata(artifact: GateStepDiagnosticArtifactMetadata): { 
 		const parsed = artifactBaseSlug(errorContextMatch[1]);
 		return { ...parsed, collapsible: true };
 	}
-	const slug = artifactDirectorySlug(relativePath);
-	if (slug) {
-		const parsed = artifactBaseSlug(slug);
-		return { ...parsed, collapsible: false };
-	}
 	return { id: relativePath, collapsible: false };
+}
+
+const TEXT_INSPECTABLE_ARTIFACT_EXTENSIONS = new Set([
+	".css",
+	".csv",
+	".html",
+	".js",
+	".json",
+	".log",
+	".md",
+	".mjs",
+	".txt",
+	".ts",
+	".xml",
+	".yaml",
+	".yml",
+]);
+
+export function isTextInspectableArtifact(artifact: GateArtifactIndexFile): boolean {
+	const contentType = artifact.contentType?.toLowerCase();
+	if (contentType) {
+		return contentType.startsWith("text/")
+			|| contentType.includes("json")
+			|| contentType.includes("javascript")
+			|| contentType.includes("xml")
+			|| contentType.includes("yaml");
+	}
+	return TEXT_INSPECTABLE_ARTIFACT_EXTENSIONS.has(path.extname(artifact.relativePath).toLowerCase());
 }
 
 function metadataRow(artifact: GateStepDiagnosticArtifactMetadata, id: string, retry?: number): GateArtifactIndexFile {
@@ -183,13 +207,21 @@ export function resolveArtifactFromLookup(
 		throw new GateArtifactResolutionError(`Unknown artifact "${artifactTarget}".`, lookup);
 	}
 	if (retry !== undefined) {
-		const retryMatch = matches.find(entry => (entry.retry ?? 0) === retry);
-		if (!retryMatch) {
-			throw new GateArtifactResolutionError(`Unknown retry ${retry} for artifact "${artifactTarget}".`, lookup);
+		const retryMatches = matches.filter(entry => (entry.retry ?? 0) === retry);
+		if (retryMatches.length === 1) return retryMatches[0];
+		if (retryMatches.length > 1) {
+			throw new GateArtifactResolutionError(`Artifact "${artifactTarget}" retry ${retry} is ambiguous; use relativePath to select an exact file.`, lookup);
 		}
-		return retryMatch;
+		throw new GateArtifactResolutionError(`Unknown retry ${retry} for artifact "${artifactTarget}".`, lookup);
 	}
-	return matches.slice().sort((a, b) => (a.retry ?? 0) - (b.retry ?? 0))[0];
+
+	const primaryMatches = matches.filter(entry => entry.retry === undefined);
+	if (primaryMatches.length === 1) return primaryMatches[0];
+	if (primaryMatches.length > 1) {
+		throw new GateArtifactResolutionError(`Artifact "${artifactTarget}" is ambiguous; use relativePath to select an exact file.`, lookup);
+	}
+	if (matches.length === 1) return matches[0];
+	throw new GateArtifactResolutionError(`Artifact "${artifactTarget}" has multiple retries; pass retry or use relativePath to select an exact file.`, lookup);
 }
 
 export function isWithinDirectory(root: string, candidate: string): boolean {

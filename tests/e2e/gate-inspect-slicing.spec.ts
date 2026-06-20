@@ -379,13 +379,25 @@ test.describe("gate inspect slicing", () => {
 			).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 			expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(64 * 1024);
 
-			const artifact = body.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			const artifactFiles = body.steps[0].diagnostics.artifacts.files;
+			const artifact = artifactFiles.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			const traceArtifact = artifactFiles.find((file: any) => file.relativePath.endsWith("trace.zip"));
+			const screenshotArtifact = artifactFiles.find((file: any) => file.relativePath.endsWith("screenshot.png"));
 			expect(artifact).toMatchObject({
 				id: "retain-artifact-fixture",
 				relativePath: "test-results/retain-artifact-fixture/error-context.md",
 				kind: "test-results",
 				path: expect.stringContaining("gate-diagnostics"),
 			});
+			expect(traceArtifact).toMatchObject({
+				id: "test-results/retain-artifact-fixture/trace.zip",
+				relativePath: "test-results/retain-artifact-fixture/trace.zip",
+			});
+			expect(screenshotArtifact).toMatchObject({
+				id: "test-results/retain-artifact-fixture/screenshot.png",
+				relativePath: "test-results/retain-artifact-fixture/screenshot.png",
+			});
+			expect(artifactFiles.filter((file: any) => file.id === "retain-artifact-fixture")).toHaveLength(1);
 			expect(artifact).not.toHaveProperty("content");
 
 			const byIdRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
@@ -404,6 +416,14 @@ test.describe("gate inspect slicing", () => {
 			expect(byId.text).not.toContain("artifact detail line 100");
 			expect(byId.text).not.toContain("# Instructions");
 			expect(byId.selection).toMatchObject({ mode: "grep", matchCount: 1, shownMatches: 1 });
+
+			const traceRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				step: "playwright-style failure",
+				artifact: traceArtifact.id,
+				mode: "tail",
+			});
+			expect(traceRes.status).toBe(400);
+			expect((await traceRes.json()).error).toMatch(/not a text artifact/i);
 
 			const byPathRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",

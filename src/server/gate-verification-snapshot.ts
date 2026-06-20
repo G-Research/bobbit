@@ -238,7 +238,7 @@ function buildInspectHints(gateId: string, stepName: string, artifacts?: GateArt
 		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="slice", from=120, to=220)`,
 		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="tail", lines=200)`,
 	];
-	const artifact = artifacts?.files[0];
+	const artifact = artifacts?.files.find(file => file.relativePath === "error-context.md" || file.relativePath.endsWith("/error-context.md")) ?? artifacts?.files[0];
 	if (artifact) {
 		const encodedArtifact = artifact.id.replace(/"/g, '\\"');
 		hints.push(`gate_inspect(gate_id="${gateId}", section="artifact", step="${encodedStep}", artifact="${encodedArtifact}", mode="grep", pattern="Error|locator|failed", context=3)`);

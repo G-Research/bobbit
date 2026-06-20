@@ -62,6 +62,7 @@ import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./g
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
+	isTextInspectableArtifact,
 	resolveArtifactFromLookup,
 	stripPlaywrightErrorContextBoilerplate,
 	validateRetainedArtifactPath,
@@ -8174,6 +8175,7 @@ async function handleApiRoute(
 			}
 
 			const matches: Array<{ stepName: string; diagnostics: NonNullable<typeof candidateSteps[number]["diagnostics"]>; artifact: ReturnType<typeof resolveArtifactFromLookup> }> = [];
+			const resolutionErrors: Array<{ stepName: string; error: GateArtifactResolutionError }> = [];
 			const validSteps = candidateSteps.map(step => step.name);
 			const validArtifactsByStep = candidateSteps.map(step => {
 				const lookup = buildArtifactLookup(step.diagnostics);
@@ -8194,11 +8196,13 @@ async function handleApiRoute(
 					});
 				} catch (err) {
 					if (!(err instanceof GateArtifactResolutionError)) throw err;
+					resolutionErrors.push({ stepName: step.name, error: err });
 				}
 			}
 
 			if (matches.length === 0) {
-				json({ error: `Unknown artifact "${artifactTarget}".`, validSteps, validArtifactsByStep }, 400);
+				const nonUnknownError = resolutionErrors.find(({ error }) => !error.message.startsWith(`Unknown artifact "${artifactTarget}".`));
+				json({ error: nonUnknownError?.error.message ?? `Unknown artifact "${artifactTarget}".`, validSteps, validArtifactsByStep }, 400);
 				return;
 			}
 			if (matches.length > 1) {
@@ -8213,6 +8217,10 @@ async function handleApiRoute(
 			const match = matches[0];
 			try {
 				const retainedPath = validateRetainedArtifactPath(match.diagnostics, match.artifact);
+				if (!isTextInspectableArtifact(match.artifact)) {
+					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; use read(path) or inspect the file directly.`, validSteps, validArtifactsByStep }, 400);
+					return;
+				}
 				let text = fs.readFileSync(retainedPath, "utf8");
 				if (match.artifact.relativePath.endsWith("/error-context.md") || match.artifact.relativePath === "error-context.md") {
 					text = stripPlaywrightErrorContextBoilerplate(text);

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../src/server/gate-artifacts.ts";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../src/server/gate-verification-snapshot.ts";
 
 const tempDirs: string[] = [];
@@ -274,12 +275,111 @@ describe("gate verification retained diagnostics compactness", () => {
 		assert.equal(files![0].relativePath, `test-results/${baseSlug}/error-context.md`);
 	});
 
-	it("adds artifact retrieval examples to inspect hints when artifact metadata exists", () => {
-		const snapshot = makeDiagnosticsSnapshot({ mode: "full" });
+	it("keeps the stable Playwright slug exclusive to error-context.md artifacts", () => {
+		const slug = "retain-artifact-fixture";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: [
+				{ relativePath: `test-results/${slug}/trace.zip`, content: "trace placeholder" },
+				{ relativePath: `test-results/${slug}/screenshot.png`, content: "png placeholder" },
+				{ relativePath: `test-results/${slug}/error-context.md`, content: "# Error Context\nretained artifact marker\n" },
+			],
+		});
+		const files = snapshot.steps[0].diagnostics?.artifacts?.files as Array<any> | undefined;
+		assert.ok(files);
+		assert.equal(files!.length, 3);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/error-context.md"))?.id, slug);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/trace.zip"))?.id, `test-results/${slug}/trace.zip`);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/screenshot.png"))?.id, `test-results/${slug}/screenshot.png`);
+		assert.equal(files!.filter(file => file.id === slug).length, 1);
+	});
+
+	it("resolves slug ids to error-context.md when sibling trace and screenshot artifacts exist", () => {
+		const dir = makeTempDir();
+		const slug = "retain-artifact-fixture";
+		const relativePaths = [
+			`test-results/${slug}/trace.zip`,
+			`test-results/${slug}/screenshot.png`,
+			`test-results/${slug}/error-context.md`,
+		];
+		const artifacts = relativePaths.map(relativePath => {
+			const artifactPath = path.join(dir, "artifacts", ...relativePath.split("/"));
+			fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+			fs.writeFileSync(artifactPath, relativePath.endsWith("error-context.md") ? "# Error Context\nmarker\n" : "placeholder", "utf8");
+			return {
+				path: artifactPath,
+				relativePath,
+				sourcePath: path.join(dir, "source", ...relativePath.split("/")),
+				bytes: fs.statSync(artifactPath).size,
+				kind: "test-results" as const,
+				contentType: relativePath.endsWith("error-context.md") ? "text/markdown" : undefined,
+			};
+		});
+		const lookup = buildArtifactLookup({
+			type: "retained-command-diagnostics",
+			baseDir: dir,
+			artifacts,
+			createdAt: 1,
+		});
+
+		assert.equal(resolveArtifactFromLookup(lookup, slug).relativePath, `test-results/${slug}/error-context.md`);
+		assert.equal(resolveArtifactFromLookup(lookup, `test-results/${slug}/trace.zip`).relativePath, `test-results/${slug}/trace.zip`);
+		assert.equal(resolveArtifactFromLookup(lookup, `test-results/${slug}/screenshot.png`).relativePath, `test-results/${slug}/screenshot.png`);
+	});
+
+	it("rejects ambiguous duplicate artifact ids instead of picking the first match", () => {
+		const dir = makeTempDir();
+		const slug = "duplicate-artifact-fixture";
+		const artifacts = ["a", "b"].map(name => {
+			const relativePath = `test-results/${slug}/error-context.md`;
+			const artifactPath = path.join(dir, "artifacts", name, "error-context.md");
+			fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+			fs.writeFileSync(artifactPath, `# Error Context\n${name}\n`, "utf8");
+			return {
+				path: artifactPath,
+				relativePath,
+				sourcePath: path.join(dir, "source", name, "error-context.md"),
+				bytes: fs.statSync(artifactPath).size,
+				kind: "test-results" as const,
+				contentType: "text/markdown",
+			};
+		});
+		const lookup = buildArtifactLookup({
+			type: "retained-command-diagnostics",
+			baseDir: dir,
+			artifacts,
+			createdAt: 1,
+		});
+
+		assert.throws(
+			() => resolveArtifactFromLookup(lookup, slug),
+			(err: unknown) => {
+				assert.ok(err instanceof GateArtifactResolutionError);
+				assert.equal(err.status, 400);
+				assert.match(err.message, /ambiguous/i);
+				assert.equal(err.validArtifacts.length, 2);
+				return true;
+			},
+		);
+	});
+
+	it("adds artifact retrieval examples to inspect hints using error-context.md when artifact metadata exists", () => {
+		const slug = "hint-error-context-fixture";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: [
+				{ relativePath: `test-results/${slug}/trace.zip`, content: "trace placeholder" },
+				{ relativePath: `test-results/${slug}/error-context.md`, content: "# Error Context\nretained artifact marker\n" },
+			],
+		});
 		const hints = snapshot.steps[0].diagnostics?.inspectHints ?? [];
 		assert.ok(
-			hints.some(hint => /section="artifact"/.test(hint) && /artifact="case"/.test(hint) && /step="playwright command"/.test(hint)),
+			hints.some(hint => /section="artifact"/.test(hint) && new RegExp(`artifact="${slug}"`).test(hint) && /step="playwright command"/.test(hint)),
 			`expected artifact inspect hint, got: ${hints.join("\n")}`,
+		);
+		assert.ok(
+			hints.every(hint => !hint.includes(`artifact="test-results/${slug}/trace.zip"`)),
+			`artifact hints should prefer error-context.md, got: ${hints.join("\n")}`,
 		);
 	});
 });
