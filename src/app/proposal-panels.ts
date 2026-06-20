@@ -572,9 +572,9 @@ interface GoalFormConfig {
 	onCustomizeRole?: () => void;
 	onResetRole?: () => void;
 	onRoleDraftChange?: (patch: Partial<RoleEditorDraft>) => void;
-	onRoleEditorTabChange?: (tab: "prompt" | "tools" | "model") => void;
+	onRoleEditorTabChange?: (tab: "prompt" | "tools") => void;
 	onRoleToggleToolGroup?: (group: string) => void;
-	roleEditTab?: "prompt" | "tools" | "model";
+	roleEditTab?: "prompt" | "tools";
 	roleCollapsedGroups?: ReadonlySet<string>;
 	roleList?: RoleData[];
 	roleListLoading?: boolean;
@@ -2796,7 +2796,7 @@ let _proposalInlineRoles: Record<string, RoleData> = {};
 let _proposalSelectedRoleName: string | null = null;
 let _proposalCustomizingWorkflow = false;
 let _proposalCustomizingRole = false;
-let _proposalRoleEditTab: "prompt" | "tools" | "model" = "prompt";
+let _proposalRoleEditTab: "prompt" | "tools" = "prompt";
 let _proposalRoleCollapsedGroups = new Set<string>();
 let _proposalTabsInitializedFrom: string | null = null;
 // Role data caches for the modal, project-scoped: roles can be customised per

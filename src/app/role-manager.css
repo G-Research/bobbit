@@ -146,7 +146,7 @@
 }
 
 .role-row-info {
-	flex: 1;
+	flex: 0 1 220px;
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
@@ -199,6 +199,57 @@
 .role-row-action-btn.delete:hover {
 	color: var(--destructive);
 	background: color-mix(in oklch, var(--destructive) 10%, transparent);
+}
+
+/* ----------------------------------------------------------------------------
+ * Inline model + thinking control (list rows)
+ * Reuses the shared renderModelRow; placed in the gap between identity and
+ * the edit/delete actions. Only the main Roles page supplies it.
+ * -------------------------------------------------------------------------- */
+.role-row-model-control {
+	flex: 1 1 300px;
+	min-width: 180px;
+	max-width: 520px;
+}
+
+/* Compact placement: hide the (empty) label column and hint paragraph that
+ * renderModelRow emits, so the control fits a list row. Scoped to list rows
+ * only — global Settings model rows are untouched. */
+.role-row-model-control [data-testid="model-row"] > div:first-child > span:first-child {
+	display: none;
+}
+.role-row-model-control [data-testid="model-row"] > p {
+	display: none;
+}
+
+/* Inherited rows: dim the whole control and disable the thinking selector so a
+ * thinking-only change can't create an override (model picker stays active). */
+.role-row-model-control--inherited {
+	opacity: 0.7;
+}
+.role-row-model-control--inherited [data-testid="model-row"] {
+	color: var(--muted-foreground);
+}
+/* Disable just the thinking picker (last child inside the control box) so the
+ * model picker stays usable while inherited rows can't create a thinking-only
+ * override. */
+.role-row-model-control--inherited [data-testid="model-row"] > div:first-child > div:nth-child(2) > div:last-child {
+	pointer-events: none;
+	opacity: 0.6;
+}
+
+/* Override rows: accent the control border with a light primary tint. */
+.role-row-model-control--override [data-testid="model-row"] > div:first-child > div:nth-child(2) {
+	border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	background: color-mix(in oklch, var(--primary) 8%, var(--background));
+}
+
+/* "Saved" flash next to the role label after an inline auto-save. */
+.role-row-saved-flash {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--primary);
+	opacity: 0.9;
 }
 
 /* ============================================================================
@@ -445,9 +496,20 @@
 	.role-row {
 		padding: 8px 12px;
 		gap: 10px;
+		flex-wrap: wrap;
 	}
 	.role-row-slug {
 		display: none;
+	}
+	/* Let the inline model control drop beneath the label at narrow widths
+	 * while keeping the edit/delete actions reachable on the first line. */
+	.role-row-info {
+		flex: 1 1 auto;
+	}
+	.role-row-model-control {
+		flex: 1 1 100%;
+		order: 3;
+		max-width: none;
 	}
 	.role-row-action-btn {
 		width: 28px;

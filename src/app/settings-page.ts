@@ -1736,6 +1736,49 @@ export function formatModelPref(value: string, fallbackLabel: string = "Auto (be
 	return slash > 0 ? value.slice(slash + 1) : value;
 }
 
+// ============================================================================
+// ROLES PAGE — shared default-model display helpers
+//
+// Roles UI display heuristic (NOT authoritative runtime resolution). Inherited
+// role list rows need a deterministic at-a-glance default to show. Roles in
+// this allowlist display the review-model default; all other roles (including
+// custom) display the session-model default. Runtime model selection remains
+// contextual — verification/QA sessions use review defaults regardless of the
+// role name. Keep this allowlist deliberate; it is pinned by tests.
+// ============================================================================
+export const REVIEW_DEFAULT_ROLE_NAMES = new Set<string>([
+	"architect",
+	"code-reviewer",
+	"reviewer",
+	"security-reviewer",
+	"spec-auditor",
+	"qa-tester",
+]);
+
+export function getRoleDefaultModelPrefKey(roleName: string): "default.sessionModel" | "default.reviewModel" {
+	return REVIEW_DEFAULT_ROLE_NAMES.has(roleName) ? "default.reviewModel" : "default.sessionModel";
+}
+
+/** Effective default model + thinking a role inherits when it has no override. */
+export function getRoleDefaultModel(roleName: string): { model: string; thinking: string } {
+	return getRoleDefaultModelPrefKey(roleName) === "default.reviewModel"
+		? { model: prefReviewModel, thinking: prefReviewThinking }
+		: { model: prefSessionModel, thinking: prefSessionThinking };
+}
+
+/** Label for an inherited role row, e.g. "gpt-5.5 · default" or
+ *  "Auto (best available) · default" when the default pref is unset. */
+export function formatRoleDefaultModelLabel(roleName: string): string {
+	return `${formatModelPref(getRoleDefaultModel(roleName).model)} \u00b7 default`;
+}
+
+/** Ensure default model prefs + the model registry are loaded for the Roles
+ *  page even when the user opens Roles directly without visiting Settings.
+ *  loadModelsState() is idempotent and calls renderApp() once resolved. */
+export function ensureModelDefaultsLoaded(): void {
+	loadModelsState();
+}
+
 function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	// Build a pseudo-Model from the current pref so the selector can highlight it
 	let currentModel = null;
