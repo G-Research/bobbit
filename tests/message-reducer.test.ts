@@ -66,6 +66,92 @@ const toolResultMsg = (id: string, callId: string, text: string) => ({
 	timestamp: 0,
 });
 
+// --- Compaction ordering helpers (failing-first repro for the live-vs-reload
+// ordering divergence; see docs/design/fix-compaction-ordering.md §2–§3). ---
+const COMPACTION_TOOL = "__compaction_summary";
+const compactionArgs = (state: string, compactionId?: string) => ({
+	schemaVersion: 1,
+	trigger: "manual",
+	state,
+	success: true,
+	timestamp: "2026-05-12T00:00:01Z",
+	tokensBefore: 50_000,
+	tokensAfter: 5_000,
+	reductionPct: 90,
+	...(compactionId ? { compactionId } : {}),
+});
+// Live in-progress card (stable id `compact_active`, NO compactionId yet —
+// mirrors remote-agent's buildInProgressCompactionPayload).
+const liveInProgressCard = () => ({
+	id: "compact_active",
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: "compaction-summary:compact_active",
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("in-progress"),
+	}],
+});
+// Live terminal card (keeps id `compact_active` for DOM continuity, gains
+// `compactionId` only on the deferred transition).
+const liveTerminalCard = (compactionId: string) => ({
+	id: "compact_active",
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: "compaction-summary:compact_active",
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("complete", compactionId),
+	}],
+});
+const liveTerminalToolResult = () => ({
+	role: "toolResult",
+	toolCallId: "compaction-summary:compact_active",
+	toolName: COMPACTION_TOOL,
+	isError: false,
+	content: [{ type: "text", text: "ok" }],
+	timestamp: 0,
+});
+// Persisted sidecar card + paired toolResult as spliced (PREPENDED) into the
+// post-compaction snapshot by mergeCompactionSidecarIntoMessages. id = sidecar
+// compactionId (NOT `compact_active`); no explicit `_order`, so the reducer
+// stamps SNAPSHOT_ORDER_FLOOR+i (negative → before the preserved tail).
+const persistedSidecarCard = (compactionId: string) => ({
+	id: compactionId,
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: `compaction-summary:${compactionId}`,
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("complete", compactionId),
+	}],
+});
+const persistedSidecarToolResult = (compactionId: string) => ({
+	role: "toolResult",
+	toolCallId: `compaction-summary:${compactionId}`,
+	toolName: COMPACTION_TOOL,
+	isError: false,
+	content: [{ type: "text", text: "ok" }],
+	timestamp: 0,
+});
+const isCompactionCard = (m: any): boolean =>
+	m?.role === "assistant"
+	&& Array.isArray(m.content)
+	&& m.content.some((c: any) => c?.type === "toolCall" && c?.name === COMPACTION_TOOL);
+const isCompactionToolResult = (m: any): boolean =>
+	m?.role === "toolResult" && m?.toolName === COMPACTION_TOOL;
+// Normalised position key: collapses the live (`compact_active`) vs persisted
+// (sidecar id) card identities to a single token so live and reload sequences
+// compare equal regardless of which surface survived.
+const orderKey = (m: any): string => {
+	if (isCompactionCard(m)) return "compaction-card";
+	if (isCompactionToolResult(m)) return "compaction-toolResult";
+	return String(m.id);
+};
+
 describe("message-reducer", () => {
 	it("(1) in-order live events", () => {
 		const s = applyAll([
@@ -541,6 +627,268 @@ describe("message-reducer", () => {
 		);
 		assert.ok(tr, "paired toolResult must survive snapshot");
 		assert.equal((tr as any).details?.compactionId, sidecarId);
+	});
+
+	// ---------------------------------------------------------------------
+	// Compaction ORDERING regression family (live-vs-reload divergence).
+	// See docs/design/fix-compaction-ordering.md. These are failing-first:
+	// pre-fix the live `compact_active` card retains a positive `_order`
+	// (`highestSeq + 0.5`) while the preserved tail snapshot rows get
+	// negative `SNAPSHOT_ORDER_FLOOR + i`, so the card sorts AFTER the tail.
+	// Reload works because the persisted sidecar card is prepended and gets
+	// the most-negative snapshot order. The invariant pinned here: a live row
+	// retained in place of a snapshot-equivalent row inherits the snapshot
+	// row's `_order`, so live order == reload order.
+	// (Letter suffixes continue the (12x) family; (12e) is the overflow test.)
+	// ---------------------------------------------------------------------
+
+	it("(12f) terminal-before-snapshot: compaction card sorts before preserved tail", () => {
+		// Sub-case 1 (design §2.1): the deferred terminal `compaction-result`
+		// transition fires BEFORE the post-compaction snapshot lands. The
+		// snapshot's `liveCompactionIds` branch drops the persisted card+TR
+		// (live card already hosts the affordance), leaving the live card at
+		// `highestSeq + 0.5` (positive) above the negative-ordered tail.
+		const cid = "c_terminal_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			// Server post-compaction snapshot: persisted sidecar card + paired
+			// toolResult PREPENDED (server splice), then the preserved tail.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`compaction card+affordance must precede the preserved tail; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12g) snapshot-before-terminal: deferred transition still anchors card before tail", () => {
+		// Sub-case 2 (design §2.1): the post-compaction snapshot lands BEFORE
+		// the deferred terminal transition (card transition runs behind the
+		// COMPACT_CARD_MIN_DURATION timer). The persisted card initially
+		// survives with canonical negative order, but `compaction-result` then
+		// drops it by compactionId and re-pushes the live card at
+		// `highestSeq + 0.5` (positive) → card lands after the tail again.
+		const cid = "c_snapshot_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot arrives BEFORE the terminal transition.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+			// Deferred terminal transition fires last.
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+		]);
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`deferred terminal transition must inherit the persisted card's position; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12h) live ordering equals reload ordering (normalised card identity)", () => {
+		// The two states are built from the SAME logical post-compaction
+		// transcript. Live uses the `compact_active` card surface; reload uses
+		// the persisted sidecar card. After normalising that identity the
+		// ordered sequences must be identical — reload is the canonical order.
+		const cid = "c_live_reload";
+		const tail = [
+			userMsg("kept-user", "still relevant"),
+			assistantMsg("kept-asst", "carry forward"),
+		];
+		const live = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			{ type: "snapshot", messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail] },
+		]);
+		// RELOAD: a single snapshot with the prepended persisted card + tail,
+		// no live `compact_active` in state.
+		const reload = applyAll([
+			{ type: "snapshot", messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail] },
+		]);
+		const liveSeq = live.messages.map(orderKey);
+		const reloadSeq = reload.messages.map(orderKey);
+		assert.deepStrictEqual(
+			reloadSeq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`reload ordering sanity (card must lead); got: ${JSON.stringify(reloadSeq)}`,
+		);
+		assert.deepStrictEqual(
+			liveSeq,
+			reloadSeq,
+			`live order must equal reload order; live=${JSON.stringify(liveSeq)} reload=${JSON.stringify(reloadSeq)}`,
+		);
+	});
+
+	it("(12i) exactly one compaction card + adjacent toolResult after each timing path", () => {
+		// No-duplicate / adjacency invariant (preserves PR #817). Must stay
+		// green pre- AND post-fix across both timing sub-cases, guarding the
+		// ordering fix against re-introducing a stacked or detached card.
+		const cid = "c_dedupe";
+		const tail = [userMsg("kept-user", "x"), assistantMsg("kept-asst", "y")];
+		const snapshot: Action = {
+			type: "snapshot",
+			messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail],
+		};
+		const terminalFirst = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "x")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "y")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			snapshot,
+		]);
+		const snapshotFirst = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "x")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "y")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			snapshot,
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+		]);
+		for (const [label, st] of [["terminal-first", terminalFirst], ["snapshot-first", snapshotFirst]] as const) {
+			const cards = st.messages.filter(isCompactionCard);
+			const trs = st.messages.filter(isCompactionToolResult);
+			assert.strictEqual(cards.length, 1, `${label}: exactly one compaction summary card, got ${cards.length}`);
+			assert.strictEqual(trs.length, 1, `${label}: exactly one paired compaction toolResult, got ${trs.length}`);
+			const cardIdx = st.messages.findIndex(isCompactionCard);
+			const trIdx = st.messages.findIndex(isCompactionToolResult);
+			assert.strictEqual(trIdx, cardIdx + 1, `${label}: toolResult must be immediately adjacent to its card`);
+		}
+	});
+
+	it("(12j) new compaction placeholder removes prior compact_active card AND its paired toolResult", () => {
+		// Regression: `compaction-placeholder` filtered the prior `compact_active`
+		// assistant card by id but left its paired synthetic toolResult
+		// (`toolCallId === "compaction-summary:compact_active"`) behind. When a
+		// SECOND compaction starts in the same session, that orphaned toolResult
+		// lingers — a stale, detached row. The placeholder filter must drop it
+		// too, mirroring the `compaction-result` filter. Pinned here.
+		const cid1 = "c_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("u1", "hi")),
+			// First compaction completes → live card + paired toolResult.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid1), toolResult: liveTerminalToolResult(), success: true },
+			// A SECOND compaction begins.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+		]);
+		const orphanToolResults = s.messages.filter(
+			(m: any) => m.toolCallId === "compaction-summary:compact_active" && m.role === "toolResult",
+		);
+		assert.strictEqual(
+			orphanToolResults.length,
+			0,
+			`stale compact_active toolResult must be removed when a new placeholder starts; got ${orphanToolResults.length}`,
+		);
+		// Exactly one in-progress card survives (the new placeholder).
+		const activeCards = s.messages.filter((m: any) => m.id === "compact_active");
+		assert.strictEqual(activeCards.length, 1, "exactly one compact_active card after new placeholder");
+	});
+
+	it("(12k) interim snapshot-before-terminal: exactly one (live) card before tail", () => {
+		// HIGH finding (docs/design/fix-compaction-ordering.md §4.1): the window
+		// AFTER the post-compaction snapshot lands but BEFORE the deferred
+		// `compaction-result` fires. The live `compact_active` card is still
+		// in-progress (NO compactionId), so the cid-keyed snapshot dedup can't
+		// match it. Pre-fix the reducer kept BOTH the persisted sidecar card and
+		// the in-progress live card. The fix drops the persisted card, transfers
+		// its canonical (negative) order to the live card, and leaves exactly one
+		// card — the live `compact_active` — positioned before the preserved tail.
+		const cid = "c_interim";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot lands while the card is still in-progress (no compactionId),
+			// BEFORE the deferred terminal transition.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		// Exactly one compaction card, and it is the live `compact_active` surface.
+		const cards = s.messages.filter(isCompactionCard);
+		assert.strictEqual(cards.length, 1, `interim must show exactly one compaction card, got ${cards.length}`);
+		assert.strictEqual(cards[0].id, "compact_active", "the surviving interim card is the live compact_active card");
+		// Card precedes the preserved tail.
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "kept-user", "kept-asst"],
+			`interim live card must precede the preserved tail; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12l) interim with stale older sidecar: keep old card, do not consume it for the new in-progress card", () => {
+		// Verifiable race (review of PR #819): an OLDER compaction's persisted
+		// sidecar card already sits in state (e.g. from a prior reload). A NEW
+		// compaction starts — the live `compact_active` card is in-progress with
+		// NO compactionId. A refresh/snapshot arrives BEFORE the new compaction's
+		// sidecar row (`c_new`) has been written, so it carries ONLY the old card
+		// (`c_old`). The interim heuristic must NOT treat the stale `c_old` card
+		// as the current pending anchor: doing so would drop `c_old` and transfer
+		// its `_order` to the unrelated in-progress card. Expected: keep `c_old`
+		// AND show the new in-progress card separately (tail-anchored).
+		const cOld = "c_old";
+		const s = applyAll([
+			// Prior reload: persisted sidecar card for the OLD compaction is in
+			// state at its canonical (prepended) order, before a kept tail.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+			// A NEW compaction begins; live card in-progress (no compactionId).
+			// The placeholder filter only drops `compact_active`-id rows, so the
+			// reloaded `c_old` card (id = compactionId) survives in state.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot lands BEFORE the new sidecar (`c_new`) exists — it still
+			// carries only the old card.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		// The old persisted card must still be present (not consumed/dropped).
+		const oldCards = s.messages.filter(
+			(m: any) => isCompactionCard(m) && m.id === cOld,
+		);
+		assert.strictEqual(oldCards.length, 1, `old persisted card (${cOld}) must survive, got ${oldCards.length}`);
+		// The new in-progress live card must also be present, separately.
+		const liveCards = s.messages.filter((m: any) => m.id === "compact_active");
+		assert.strictEqual(liveCards.length, 1, "new in-progress live card must be present");
+		// Two distinct compaction cards exist (old + new in-progress); the old
+		// card was NOT merged/transferred into the new one.
+		const cards = s.messages.filter(isCompactionCard);
+		assert.strictEqual(cards.length, 2, `expected the old card AND the new in-progress card, got ${cards.length}`);
+		// The old card keeps its prepended (negative) anchor before the tail; the
+		// new in-progress card is tail-anchored (positive), since no matching
+		// pending sidecar exists yet.
+		const oldOrder = oldCards[0]._order;
+		const liveOrder = liveCards[0]._order;
+		assert.ok(oldOrder < 0, `old card retains its prepended anchor; got ${oldOrder}`);
+		assert.ok(liveOrder > oldOrder, `new in-progress card must not steal the old card's order; got live=${liveOrder} old=${oldOrder}`);
 	});
 
 	it("RE-07-style — preferences snapshot ordering preserved (stable by tick)", () => {
