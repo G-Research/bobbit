@@ -51,6 +51,18 @@ export function makeCompactionId(startedAtMs: number): string {
 	return `c_${startedAtMs}_${randomBytes(3).toString("hex")}`;
 }
 
+/** Recover the `startedAtMs` embedded in a `makeCompactionId` value, or null
+ *  if the id doesn't match the `c_<ms>_<rand>` shape. Lets the manual
+ *  `compaction_end` handler reconstruct an accurate `durationMs`/`startedAt`
+ *  without threading the start time through the session object. */
+export function parseCompactionStartMs(compactionId: string | undefined): number | null {
+	if (!compactionId) return null;
+	const m = /^c_(\d+)_/.exec(compactionId);
+	if (!m) return null;
+	const ms = Number(m[1]);
+	return Number.isFinite(ms) ? ms : null;
+}
+
 let _sidecarDir: string | undefined;
 
 /** Initialize the sidecar dir from the gateway state directory.

@@ -100,15 +100,15 @@ test.describe("ModelSelector unauthenticated tooltip (Settings-drift regression)
 	});
 });
 
-test.describe("ModelSelector session-unavailable gating (Google Code Assist)", () => {
+test.describe("ModelSelector account model selectability (Google Code Assist)", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
 	});
 
-	// Pins the gap mitigation: an authenticated-but-unrunnable account model
-	// (google-gemini-cli Code Assist) must render visibly unavailable-for-sessions
-	// and must NOT be selectable when clicked.
-	test("renders google-gemini-cli model disabled and refuses to select it", async ({ page }) => {
+	// Pins the post-runtime behavior: an authenticated google-gemini-cli account
+	// model (Code Assist) is now runnable in agent sessions, so it must render
+	// normally (not disabled) and be selectable when clicked.
+	test("renders authenticated google-gemini-cli account model selectable", async ({ page }) => {
 		await page.evaluate(() => (window as any).__setModelSelectorModels([
 			{
 				id: "gemini-2.5-pro",
@@ -121,8 +121,6 @@ test.describe("ModelSelector session-unavailable gating (Google Code Assist)", (
 				input: ["text", "image"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				authenticated: true,
-				sessionSelectable: false,
-				sessionUnavailableReason: "Signed in, but Google account (Code Assist) models can't run in agent sessions yet.",
 			},
 		]));
 		await page.evaluate(() => (window as any).__openModelSelectorFixture());
@@ -130,12 +128,45 @@ test.describe("ModelSelector session-unavailable gating (Google Code Assist)", (
 		const row = page.locator('agent-model-selector [data-model-id="gemini-2.5-pro"]');
 		await expect(row).toBeVisible({ timeout: 10_000 });
 
-		// Marked unavailable-for-sessions and visibly disabled.
+		// Not marked unavailable-for-sessions and not disabled.
+		expect(await row.getAttribute("data-session-unavailable")).toBe("false");
+		expect(await row.getAttribute("class")).toContain("cursor-pointer");
+		expect(await row.getAttribute("class")).not.toContain("cursor-not-allowed");
+
+		// Clicking it selects the model.
+		await row.dispatchEvent("click");
+		await expect.poll(() => page.evaluate(() => (window as any).__getSelectedModel()?.id)).toBe("gemini-2.5-pro");
+		await expect.poll(() => page.evaluate(() => (window as any).__getSelectedModel()?.provider)).toBe("google-gemini-cli");
+	});
+
+	// The generic session-unavailable mechanism still works for any model the server
+	// explicitly marks sessionSelectable=false (defense-in-depth for future cases).
+	test("still disables and refuses any model explicitly marked sessionSelectable=false", async ({ page }) => {
+		await page.evaluate(() => (window as any).__setModelSelectorModels([
+			{
+				id: "some-unrunnable-model",
+				name: "Unrunnable model",
+				provider: "some-provider",
+				api: "some-api",
+				contextWindow: 1_000_000,
+				maxTokens: 64_000,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+				sessionSelectable: false,
+				sessionUnavailableReason: "This model can't run in agent sessions.",
+			},
+		]));
+		await page.evaluate(() => (window as any).__openModelSelectorFixture());
+
+		const row = page.locator('agent-model-selector [data-model-id="some-unrunnable-model"]');
+		await expect(row).toBeVisible({ timeout: 10_000 });
+
 		expect(await row.getAttribute("data-session-unavailable")).toBe("true");
 		expect(await row.getAttribute("class")).toContain("cursor-not-allowed");
 		expect((await row.getAttribute("title")) ?? "").toContain("can't run in agent sessions");
 
-		// Clicking it must NOT select the model.
 		await row.dispatchEvent("click");
 		await page.waitForTimeout(100);
 		expect(await page.evaluate(() => (window as any).__getSelectedModel())).toBeNull();

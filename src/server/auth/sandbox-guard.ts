@@ -49,6 +49,13 @@ export function isSandboxAllowed(
 		// bg-processes: allowed for own session (spawns via docker exec inside container)
 		if (subpath.startsWith("/bg-processes")) return true;
 
+		// Google Code Assist runtime token — the registered provider extension
+		// loaded inside the sandbox fetches a fresh Bearer token + Code Assist
+		// project id per request from this endpoint. Read-only and own-session
+		// only (cross-session is already denied by the isOwnSession check above),
+		// so a sandboxed agent can never read another session's Google token.
+		if (m === "GET" && subpath === "/google-code-assist/token") return true;
+
 		if (m === "GET" && subpath === "") return true;       // session info
 		if (m === "PATCH" && subpath === "") return true;     // preview_open metadata
 		if (m === "DELETE" && subpath === "") return true;    // delegate cleanup

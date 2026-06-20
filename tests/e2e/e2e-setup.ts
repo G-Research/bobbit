@@ -426,23 +426,29 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 
 /**
  * The OPERATOR-class Children REST endpoints guarded by the S1 authz check
- * (`src/server/auth/children-mutation-authz.ts`): `pause`, `resume`, and
- * mutation `decision`. These are the human-in-the-loop verbs the web UI
- * drives, so a verified `bobbit_session` cookie authorizes them. A node
- * `apiFetch` carries no cookie, so without one these would 403; we therefore
- * auto-inject the gateway-minted cookie. (Browser-initiated requests carry the
- * cookie automatically and don't need this.) Tests that deliberately exercise
- * the agent/deny path use `rawApiFetch` with explicit headers.
+ * (`src/server/auth/children-mutation-authz.ts`): `pause`, `resume`,
+ * mutation `decision`, and `policy` (only when the PATCH body carries
+ * EXCLUSIVELY the per-goal sub-goal opt-in fields `subgoalsAllowed` /
+ * `maxNestingDepth` — see the split classifier in `nested-goal-routes.ts`).
+ * These are the human-in-the-loop verbs the web UI drives, so a verified
+ * `bobbit_session` cookie authorizes them. A node `apiFetch` carries no cookie,
+ * so without one these would 403; we therefore auto-inject the gateway-minted
+ * cookie. (Browser-initiated requests carry the cookie automatically and don't
+ * need this.) Tests that deliberately exercise the agent/deny path use
+ * `rawApiFetch` with explicit headers.
  *
  * NOTE: the ORCHESTRATION-class verbs (`spawn-child`, plan `PATCH`,
- * `integrate-child`, `policy`) are NOT in this set. The cookie does NOT bypass
- * an orchestration check (it is mintable by any holder of the shared admin
- * token), so auto-injecting it would not authorize them. Tests that drive
- * orchestration must authenticate as the goal's team-lead — see
- * `seedTeamLeadHeader()` below.
+ * `integrate-child`, and `policy` carrying `divergencePolicy` /
+ * `maxConcurrentChildren`) still require the team-lead secret. The cookie does
+ * NOT bypass an orchestration check (it is mintable by any holder of the shared
+ * admin token), so auto-injecting it would not authorize them — it is merely
+ * harmless. Tests that drive orchestration must authenticate as the goal's
+ * team-lead — see `seedTeamLeadHeader()` below. We include `policy` in the
+ * auto-inject set because the common (subgoal-only) case is operator-class;
+ * orchestration-class policy patches still need the secret regardless.
  */
 const CHILDREN_MUTATION_PATH =
-	/^\/api\/goals\/[^/]+\/(pause|resume|mutation\/[^/]+\/decision)$/;
+	/^\/api\/goals\/[^/]+\/(pause|resume|policy|mutation\/[^/]+\/decision)$/;
 
 /**
  * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan

@@ -4756,6 +4756,9 @@ export class VerificationHarness {
 					if (_check.code === "SUBGOALS_DISABLED") {
 						return { passed: false, output: `Subgoal spawn blocked: subgoals are disabled for this goal tree.` };
 					}
+					if (_check.code === "PARENT_SUBGOALS_DISABLED") {
+						return { passed: false, output: `Subgoal spawn blocked: parent goal "${parent.title}" doesn't allow sub-goals.` };
+					}
 					return {
 						passed: false,
 						output: `Subgoal spawn blocked: nesting depth limit reached (${_check.currentDepth}/${_check.maxDepth}).`,
@@ -4823,7 +4826,11 @@ export class VerificationHarness {
 					parentGoalId,
 					teamManager,
 				}).value;
-				const _childOverrides = inheritedChildOverrides(parent, _nestingPrefs);
+				const _childOverrides = inheritedChildOverrides(
+					parent,
+					_nestingPrefs,
+					(id) => this.projectContextManager?.getContextForGoal(id)?.goalStore.get(id),
+				);
 				// dependsOn scheduling enforcement (mirrors POST /spawn-child):
 				// resolve each declared dep planId to a sibling and check whether it
 				// has merged (state=complete). Children with unresolved deps are
