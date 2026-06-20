@@ -841,7 +841,10 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					overrides.thinkingLevel,
 					(v) => control.onThinkingChange(role, v),
 					"",
-					{ fallbackLabel: "(use default)" },
+					// Compact list placement: a fixed-width, non-fit-content thinking
+					// Select so its trigger never injects an inline min-width:180px
+					// (the source of the row-control chevron overflow).
+					{ fallbackLabel: "(use default)", thinkingWidth: "132px", thinkingFitContent: false },
 				)}
 			</div>
 			<div class="role-row-model-sources">
