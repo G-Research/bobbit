@@ -1,0 +1,11 @@
+id: experiment-runner.route
+kind: route
+routeId: experiment-runner
+target:
+  panelId: experiment-runner.panel
+# The kind:"route" DEEP-LINK: registering routeId:"experiment-runner" → the
+# panel, so #/ext/experiment-runner?experimentId=…&view=dashboard resolves through
+# the client pack route registry and reopens the panel rehydrated from
+# host.store.*. `experimentId` selects which experiment to focus; `view` restores
+# the panel view. paramKeys gate which query params survive navigation + reload.
+paramKeys: [experimentId, view]

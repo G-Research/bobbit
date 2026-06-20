@@ -86,12 +86,13 @@ describe("host.agents — capability flag + surface shape", () => {
 		assert.equal(host.capabilities.has("agents"), true);
 	});
 
-	it("exposes ONLY the six poll-based verbs (no blocking wait, no foreign-session method)", () => {
+	it("exposes the six poll-based verbs plus spawnGoal (no blocking wait, no foreign-session method)", () => {
 		const view = new FakeView();
 		view.owner("owner-1");
 		const host = makeHost("owner-1", makeCore(view), view);
 		const keys = Object.keys(host.agents).sort();
-		assert.deepEqual(keys, ["dismiss", "list", "prompt", "read", "spawn", "status"]);
+		// The 7th verb (experiment-runner seam) rides the same `agents` capability.
+		assert.deepEqual(keys, ["dismiss", "list", "prompt", "read", "spawn", "spawnGoal", "status"]);
 		// No blocking `wait`, and no method that targets the user / a foreign session.
 		const surface = host.agents as Record<string, unknown>;
 		assert.equal(surface.wait, undefined);

@@ -20,6 +20,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// experiment-runner is intentionally NOT shipped as a built-in: it is a
+// marketplace-installable pack (design requirement: clean install/uninstall), so
+// it must not be present as a builtin contribution that survives uninstall.
 const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";

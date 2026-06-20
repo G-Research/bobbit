@@ -1,0 +1,11 @@
+id: experiment-runner.open
+kind: composer-slash
+label: Experiments
+# A composer-slash LAUNCHER (the slash menu). Unlike the pr-walkthrough spawn
+# launcher this is a PANEL launcher (target.panelId, NOT action:"spawn"): clicking
+# opens the experiment panel in the CURRENT session at View 1 (mode-select). The
+# child-goal fan-out happens server-side later, when the user hits Launch (the
+# `launch` route calls host.agents.spawnGoal per arm). See
+# docs/design/experiment-runner-panel-ux.md §3.
+target:
+  panelId: experiment-runner.panel
