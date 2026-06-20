@@ -1186,12 +1186,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				storeEntry(targetKey, rendered);
 			};
 
-			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride, targetKey = paramKey) => {
+			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride, targetKey = paramKey, jobIdOverride) => {
 				const yamlText = rawYamlOf(toolCall);
 				const ref = deriveJobRef(yamlText, paramJobId);
-				const jobId = ref.jobId;
-				const effBaseSha = ref.baseSha || baseShaOverride || baseSha;
-				const effHeadSha = ref.headSha || headShaOverride || headSha;
+				const jobId = jobIdOverride || ref.jobId;
+				const effBaseSha = baseShaOverride || ref.baseSha || baseSha;
+				const effHeadSha = headShaOverride || ref.headSha || headSha;
 				if (yamlText && host.callRoute) {
 					const publishBody = { jobId, yaml: yamlText };
 					if (effBaseSha) publishBody.baseSha = effBaseSha;
@@ -1228,7 +1228,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						try {
 							const toolCall = { input: { yaml: st.yaml } };
 							if (st.finalized || st.finalizedAt) await loadBundle({ jobId: submittedJobId, baseSha: st.baseSha, headSha: st.headSha, targetKey: key, toolCall });
-							else await publishAndLoad(toolCall, st.baseSha, st.headSha, key);
+							else await publishAndLoad(toolCall, st.baseSha, st.headSha, key, submittedJobId);
 						} catch (e) {
 							storeEntry(key, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId: submittedJobId, mountKicked: true });
 						}
@@ -1275,7 +1275,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					try {
 						const toolCall = { input: { yaml: recovered.yaml } };
 						if (recovered.finalized || recovered.finalizedAt) await loadBundle({ jobId, baseSha: recovered.baseSha, headSha: recovered.headSha, targetKey: paramKey, toolCall });
-						else await publishAndLoad(toolCall, recovered.baseSha, recovered.headSha, paramKey);
+						else await publishAndLoad(toolCall, recovered.baseSha, recovered.headSha, paramKey, jobId);
 					} catch (e) {
 						storeEntry(paramKey, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId, mountKicked: true });
 					}

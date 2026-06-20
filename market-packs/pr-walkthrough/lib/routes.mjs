@@ -317,7 +317,7 @@ export const routes = {
 		}
 		const legacySubmitted = await store.get(submittedKey(binding.jobId));
 		if (legacySubmitted && typeof legacySubmitted === "object" && strOf(legacySubmitted.yaml)) {
-			return { phase: "submitted", yaml: legacySubmitted.yaml, baseSha: legacySubmitted.baseSha ?? binding.baseSha, headSha: legacySubmitted.headSha ?? binding.headSha, jobId: binding.jobId };
+			return { phase: "submitted", yaml: legacySubmitted.yaml, baseSha: binding.baseSha ?? legacySubmitted.baseSha, headSha: binding.headSha ?? legacySubmitted.headSha, jobId: binding.jobId };
 		}
 
 		const chunkSummary = await summarizeChunks(store, binding.jobId);
@@ -372,8 +372,8 @@ export const routes = {
 				found: true,
 				jobId: selfBinding.jobId,
 				yaml: legacySubmitted.yaml,
-				baseSha: legacySubmitted.baseSha ?? selfBinding.baseSha,
-				headSha: legacySubmitted.headSha ?? selfBinding.headSha,
+				baseSha: selfBinding.baseSha ?? legacySubmitted.baseSha,
+				headSha: selfBinding.headSha ?? legacySubmitted.headSha,
 			};
 		}
 		const chunkSummary = await summarizeChunks(store, selfBinding.jobId);
@@ -798,8 +798,8 @@ function defaultDisplayYaml(chunkIds, spaces) {
 async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 	const validation = validatePrWalkthroughYaml(yamlText, binding.target ? { target: binding.target } : undefined);
 	if (!validation.ok) throw prwError("PRW_SCHEMA_INVALID", "PR walkthrough YAML failed validation.", validation.summary);
-	let baseSha = strOf(body.baseSha) || strOf(binding.baseSha) || strOf(validation.document?.pr?.base_sha);
-	let headSha = strOf(body.headSha) || strOf(binding.headSha) || strOf(validation.document?.pr?.head_sha);
+	let baseSha = strOf(binding.baseSha) || strOf(body.baseSha) || strOf(validation.document?.pr?.base_sha);
+	let headSha = strOf(binding.headSha) || strOf(body.headSha) || strOf(validation.document?.pr?.head_sha);
 	let live;
 	if (baseSha && headSha) {
 		try { live = await resolveLocalChangeset(workerCwd(), baseSha, headSha); }
