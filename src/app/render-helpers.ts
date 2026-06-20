@@ -672,7 +672,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		const url = prBadge.url;
 		actions.push({
 			id: "open-github",
-			label: "Open on GitHub",
+			label: prBadge.number != null ? `Open #${prBadge.number} on GitHub` : "Open on GitHub",
 			title: "Open this goal's pull request on GitHub",
 			icon: goalPrIconSvg(prBadge.color, "1.2em"),
 			quick: false,
@@ -1203,6 +1203,7 @@ interface GoalPrBadge {
 	color: string;
 	url: string | null;
 	label: string;
+	number: number | null;
 	hasConflicts: boolean;
 }
 
@@ -1217,7 +1218,7 @@ interface GoalPrBadge {
  * preserve the PR badge fallback.
  */
 function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
-	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", hasConflicts: false };
+	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", number: null, hasConflicts: false };
 	const gs = state.gateStatusCache.get(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
 	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
@@ -1236,7 +1237,7 @@ function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
 		: "";
 	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
 	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-	return { show: true, color, url: pr.url ?? null, label, hasConflicts };
+	return { show: true, color, url: pr.url ?? null, label, number: pr.number ?? null, hasConflicts };
 }
 
 /** The goal-row pull-request SVG, in the state-derived stroke color. */
