@@ -42,6 +42,11 @@ config:
   autoRecall: { type: boolean, default: true }
   autoRetain: { type: boolean, default: true }
   recallBudget: { type: number, default: 1200 }
+  # Max characters of the recall QUERY sent to the data plane. The Hindsight recall
+  # API caps queries at 500 tokens and returns HTTP 400 ("Query too long") for
+  # longer queries; clamping keeps non-trivial turns working. Mirrors Hermes'
+  # recall_max_input_chars. <= 0 disables clamping.
+  recallMaxInputChars: { type: number, default: 1200 }
   timeoutMs: { type: number, default: 1500 }
 activation:
   # EXTERNAL-mode dormancy gate: the host omits the provider entirely (no bridge

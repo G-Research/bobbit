@@ -142,6 +142,11 @@ export interface EffectiveConfig {
 	autoRecall: boolean;
 	autoRetain: boolean;
 	recallBudget: number;
+	/** Max characters of the recall QUERY sent to the data plane. The Hindsight
+	 *  recall API caps queries at 500 tokens and returns HTTP 400 ("Query too long")
+	 *  for longer queries; clamping the query keeps non-trivial turns working.
+	 *  Mirrors Hermes' `recall_max_input_chars`. `<= 0` disables clamping. */
+	recallMaxInputChars: number;
 	timeoutMs: number;
 }
 
@@ -155,6 +160,7 @@ export const CONFIG_DEFAULTS: EffectiveConfig = {
 	autoRecall: true,
 	autoRetain: true,
 	recallBudget: 1200,
+	recallMaxInputChars: 1200,
 	timeoutMs: 1500,
 };
 
@@ -204,8 +210,18 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 		autoRecall: asBool(flat(raw, "autoRecall"), CONFIG_DEFAULTS.autoRecall),
 		autoRetain: asBool(flat(raw, "autoRetain"), CONFIG_DEFAULTS.autoRetain),
 		recallBudget: asNum(flat(raw, "recallBudget"), CONFIG_DEFAULTS.recallBudget),
+		recallMaxInputChars: asNum(flat(raw, "recallMaxInputChars"), CONFIG_DEFAULTS.recallMaxInputChars),
 		timeoutMs: asNum(flat(raw, "timeoutMs"), CONFIG_DEFAULTS.timeoutMs),
 	};
+}
+
+/** Clamp a recall QUERY to at most `maxChars` characters (the core fix for the
+ *  data plane's 500-token "Query too long" 400). Trims first; `maxChars <= 0`
+ *  disables clamping and returns the trimmed full string. Pure; never throws. */
+export function clampRecallQuery(query: string, maxChars: number): string {
+	const trimmed = (query ?? "").trim();
+	if (!Number.isFinite(maxChars) || maxChars <= 0) return trimmed;
+	return trimmed.length <= maxChars ? trimmed : trimmed.slice(0, maxChars);
 }
 
 /** The dormancy gate (the central invariant): the provider runs a hook's work
@@ -308,6 +324,18 @@ export async function recordError(store: StoreLike, e: unknown): Promise<void> {
 	}
 }
 
+/** Clear the sticky `lastError` after a SUCCESSFUL data-plane operation so a
+ *  transient failure (e.g. a since-fixed "Query too long" 400) does not show
+ *  stickily in the marketplace row / panel. Best-effort; never throws and is
+ *  NEVER called on failure. */
+export async function clearError(store: StoreLike): Promise<void> {
+	try {
+		await store.put(LAST_ERROR_KEY, null);
+	} catch {
+		/* diagnostics are non-fatal */
+	}
+}
+
 export function messageOf(e: unknown): string {
 	if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
 	return String(e);
@@ -378,7 +406,7 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 			else errors.push(`${key} must be a boolean`);
 		}
 	}
-	for (const key of ["recallBudget", "timeoutMs"] as const) {
+	for (const key of ["recallBudget", "recallMaxInputChars", "timeoutMs"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "number" && Number.isFinite(v) && v > 0) value[key] = v;

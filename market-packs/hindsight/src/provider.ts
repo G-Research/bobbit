@@ -12,6 +12,8 @@
 // unconfigured pack contributes no active provider at all.
 
 import {
+	clampRecallQuery,
+	clearError,
 	clientConfig,
 	enqueueRetain,
 	isActive,
@@ -109,12 +111,15 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	// bank (recallTagFilter / PROJECT_RECALL_TAGS_MATCH); `all` scope sends no filter.
 	const filter = recallTagFilter(cfg.recallScope, ctx.projectId !== undefined ? String(ctx.projectId) : undefined);
 	const store = getStore(ctx);
+	// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
+	const clampedQuery = clampRecallQuery(q, cfg.recallMaxInputChars);
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
-		const res = await client.recall(cfg.bank, q, {
+		const res = await client.recall(cfg.bank, clampedQuery, {
 			maxTokens: cfg.recallBudget,
 			...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 		});
+		if (store) await clearError(store);
 		const memories = res?.memories ?? [];
 		if (memories.length === 0) return [];
 		return [
@@ -178,6 +183,7 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
 		await client.retain(cfg.bank, summary, { tags, sync });
+		if (store) await clearError(store);
 	} catch (e) {
 		if (store) {
 			await enqueueRetain(store, { content: summary, tags, ts: Date.now() });

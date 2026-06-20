@@ -28,6 +28,8 @@
 // there). See docs/design/hindsight-pack-external.md §6/§8 + the P3 runtime modes.
 
 import {
+	clampRecallQuery,
+	clearError,
 	clientConfig,
 	isActive,
 	isConfigured,
@@ -186,12 +188,15 @@ export const routes = {
 		// (global/server-scope session) or scope is `all`, NO tag filter is applied
 		// (recall the whole bank) rather than a fabricated placeholder tag.
 		const filter = recallTagFilter(scope, ctx.projectId);
+		// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
+		const clampedQuery = clampRecallQuery(query, cfg.recallMaxInputChars);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.recall(cfg.bank, query, {
+			const res = await client.recall(cfg.bank, clampedQuery, {
 				maxTokens: cfg.recallBudget,
 				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 			});
+			await clearError(store);
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
 			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
@@ -222,6 +227,7 @@ export const routes = {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			await client.ensureBank(cfg.bank);
 			await client.retain(cfg.bank, content, { tags, sync });
+			await clearError(store);
 			return { ok: true, configured: true };
 		} catch (e) {
 			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e) };

@@ -14,8 +14,10 @@ import provider, { __setClientFactory } from "../market-packs/hindsight/src/prov
 import { routes } from "../market-packs/hindsight/src/routes.ts";
 import {
 	CONFIG_KEY,
+	LAST_ERROR_KEY,
 	PROJECT_RECALL_TAGS_MATCH,
 	QUEUE_KEY,
+	clampRecallQuery,
 	recallTagFilter,
 } from "../market-packs/hindsight/src/shared.ts";
 
@@ -40,6 +42,23 @@ test("recallTagFilter: 'all' scope, or project scope with no id ⇒ no tag filte
 	assert.equal(recallTagFilter("project", undefined), undefined);
 	assert.equal(recallTagFilter("project", ""), undefined);
 	assert.equal(recallTagFilter("project", "   "), undefined);
+});
+
+// ── clampRecallQuery — pure helper (core fix for the 500-token "Query too long") ─
+test("clampRecallQuery: short unchanged, long truncated, maxChars<=0 returns trimmed full", () => {
+	// Short query (and whitespace-trimmed) passes through unchanged.
+	assert.equal(clampRecallQuery("hello", 1200), "hello");
+	assert.equal(clampRecallQuery("  hello  ", 1200), "hello");
+	// Long query is sliced to at most maxChars characters.
+	const long = "x".repeat(5000);
+	assert.equal(clampRecallQuery(long, 1200).length, 1200);
+	assert.equal(clampRecallQuery(long, 50).length, 50);
+	// maxChars <= 0 (and non-finite) disables clamping ⇒ returns the trimmed full string.
+	assert.equal(clampRecallQuery(`  ${long}  `, 0), long);
+	assert.equal(clampRecallQuery(long, -10), long);
+	assert.equal(clampRecallQuery(long, Number.NaN), long);
+	// Never throws on nullish input.
+	assert.equal(clampRecallQuery(undefined as unknown as string, 100), "");
 });
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -145,6 +164,75 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 		assert.deepEqual(await provider.sessionShutdown(base), { blocks: [] });
 		assert.equal(factoryCalls, 0, "no client should be constructed while dormant");
 		assert.equal(store.map.size, 0, "no store writes while dormant");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("doRecall clamps a long query to recallMaxInputChars before calling the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const longPrompt = "q".repeat(5000);
+		const c = { config: { ...ACTIVE, recallMaxInputChars: 64 }, host: { store: makeStore() }, prompt: longPrompt };
+		await provider.beforePrompt(c);
+		assert.equal(calls.recall.length, 1);
+		assert.ok(calls.recall[0].query.length <= 64, "clamped query is at most recallMaxInputChars chars");
+		assert.equal(calls.recall[0].query.length, 64);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall clamps a long query to recallMaxInputChars before calling the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallMaxInputChars: 80 });
+		const longQuery = "z".repeat(5000);
+		await routes.recall({ host: { store } } as never, { body: { query: longQuery } } as never);
+		assert.equal(calls.recall.length, 1);
+		assert.ok(calls.recall[0].query.length <= 80, "route clamps the resolved query");
+		assert.equal(calls.recall[0].query.length, 80);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("sticky lastError is cleared after a SUCCESSFUL recall (provider + route)", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		// Provider: a prior error in the store is cleared on the next successful recall.
+		const pStore = makeStore();
+		await pStore.put(LAST_ERROR_KEY, { message: "Query too long", ts: 1 });
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: pStore }, prompt: "q" });
+		assert.equal(await pStore.get(LAST_ERROR_KEY), null, "provider clears lastError on recall success");
+
+		// Route: same behavior via the recall route.
+		const rStore = makeStore();
+		await rStore.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		await rStore.put(LAST_ERROR_KEY, { message: "Query too long", ts: 1 });
+		await routes.recall({ host: { store: rStore } } as never, { body: { query: "q" } } as never);
+		assert.equal(await rStore.get(LAST_ERROR_KEY), null, "route clears lastError on recall success");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("lastError is NOT cleared when recall fails", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.failRecall = true;
+		const store = makeStore();
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store }, prompt: "q" });
+		const err = (await store.get(LAST_ERROR_KEY)) as { message: string } | null;
+		assert.ok(err && /recall failed/.test(err.message), "failure records (does not clear) lastError");
 	} finally {
 		__setClientFactory(null);
 	}
