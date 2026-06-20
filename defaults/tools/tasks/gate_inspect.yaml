@@ -1,28 +1,30 @@
 name: gate_inspect
-description: "Fetch one bounded gate section: content, verification, or signals"
-summary: "Read bounded gate content, verification, or signals"
-params: ["gate_id", "section", "signal_index?", "step?", "mode?", "pattern?", "context?", "max_results?", "lines?", "from?", "to?"]
+description: "Fetch one bounded gate section: content, verification, artifact, or signals"
+summary: "Read bounded gate content, verification, artifacts, or signals"
+params: ["gate_id", "section", "signal_index?", "step?", "artifact?", "retry?", "mode?", "pattern?", "context?", "max_results?", "lines?", "from?", "to?"]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
 docs: >-
   Scoped read tool for gate data. Fetches one section per call: content,
-  verification, or signals. Output is bounded by default; use step-scoped grep,
-  slice, or tail before rare full output.
+  verification, artifact, or signals. Output is bounded by default; use
+  step-scoped grep, slice, or tail before rare full output.
 detail_docs: |-
   ## Purpose
 
-  Read detailed gate data by section. This is the Layer 3 content retrieval tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't have enough detail. Each call fetches exactly one piece of data and applies bounded text selection so large verification logs do not flood context. After verification has run, inspect this persisted gate data before re-running tests just to reproduce logs.
+  Read detailed gate data by section. This is the Layer 3 content retrieval tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't have enough detail. Each call fetches exactly one piece of data and applies bounded text selection so large content, logs, and retained artifacts do not flood context. After verification has run, inspect persisted gate data before re-running tests just to reproduce logs.
 
   ## Parameters
 
   | Name | Type | Required | Default | Description |
   |------|------|----------|---------|-------------|
   | `gate_id` | string | **Yes** | — | Gate ID (e.g. `"design-doc"`, `"implementation"`) |
-  | `section` | `"content"` / `"verification"` / `"signals"` | **Yes** | — | What to read |
+  | `section` | `"content"` / `"verification"` / `"artifact"` / `"signals"` | **Yes** | — | What to read |
   | `signal_index` | number | No | `-1` (latest) | Which signal. 0-based, negative from end. Ignored for `section="signals"`. |
-  | `step` | string | No | — | `section="verification"` only: scope to one step by name. Other sections → 400. |
+  | `step` | string | No | — | `section="verification"` or `section="artifact"`: scope to one verification step by name. Other sections → 400. |
+  | `artifact` | string | For `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id` or exact `relativePath`. |
+  | `retry` | number | No | — | `section="artifact"` only: fetch a specific Playwright retry for a collapsed artifact id. |
   | `mode` | `"full"` / `"grep"` / `"head"` / `"tail"` / `"slice"` | No | `"tail"` | Retrieval mode. Default output is a bounded tail, not full content. |
   | `pattern` | string | For `grep` | — | Regex to match. Invalid regexes return a validation error. |
   | `context` | number | No | `0` | Surrounding lines to include around each grep match. |
@@ -36,13 +38,13 @@ detail_docs: |-
   - `head` — show the first `lines` lines.
   - `slice` — show a 1-indexed inclusive line range. Selected lines are line-numbered.
   - `grep` — show regex matches, optionally with surrounding `context`. Matching excerpts are line-numbered and overlapping context is merged.
-  - `full` — request the full rendered text. This is still bounded by normal tool-result budgets and is marked as truncated when caps apply.
+  - `full` — request the full rendered text. This is still bounded by normal line, byte, and tool-result budgets and is marked as truncated when caps apply.
 
-  Default calls are intentionally bounded. When the implicit default tail omits lines, the response includes an agent-facing hint such as:
+  Default calls are intentionally bounded. For artifact fetches, omitted `mode` defaults to a bounded tail for one retained file; it never dumps the whole artifact unless `mode="full"` is explicit, and explicit full remains capped.
+
+  When an implicit default tail omits lines, the response includes an agent-facing hint such as:
 
   `[N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]`
-
-  Explicit `grep`, `head`, `tail`, `slice`, and `full` requests do not add this guidance hint beyond normal metadata and truncation markers.
 
   ## Returns
 
@@ -58,32 +60,36 @@ detail_docs: |-
 
   ### section="content" — Read gate content
 
-  Returns the selected markdown content from the specified signal.
+  Returns selected markdown content from the specified signal: `gateId`, `section`, `signalIndex`, `signalId`, `text`, and `selection`.
+
+  ### section="verification" — Read verification output and artifact metadata
+
+  Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned and the selection mode applies to that step's output; an unknown name returns a 400 listing available step names.
+
+  For failed command steps, explicit inspection may be backed by retained stdout/stderr logs and a retained artifact index. Artifact rows are metadata only and never include file `content`, including for Playwright `error-context.md` files. Use `section="artifact"` to fetch one artifact's content.
+
+  Common fields:
+
+  - `gateId`, `section`, `signalIndex`, `signalId`
+  - `steps[]` — verification step results with `name`, `type`, `status`, `passed`, `skipped`, `duration_ms`, selected `output`, and per-step `selection`
+  - `steps[].diagnostics.logs` — retained log paths, sizes, and truncation metadata when available
+  - `steps[].diagnostics.artifacts` — compact artifact index: `count`, `totalBytes`, `truncated`, and `files[]`
+  - `steps[].diagnostics.artifacts.files[]` — metadata such as `id`, `testName`, `relativePath`, retained `path`, `bytes`, `kind`, `retries`, `retry`, and `contentType`; no `content` field
+  - `selection` — optional top-level aggregate truncation metadata when the combined response is capped
+
+  ### section="artifact" — Read one retained artifact
+
+  Returns selected text from a single retained artifact file. `artifact` is required and accepts either an artifact `id` from verification metadata or an exact `relativePath`. Use `retry=N` to fetch a specific Playwright retry for a collapsed id; use exact `relativePath` for any retained file. Include `step="<name>"` when an id is ambiguous across verification steps.
 
   - `gateId` — gate identifier
-  - `section` — `"content"`
-  - `signalIndex` — resolved 0-based index
-  - `signalId` — signal identifier
-  - `text` — selected markdown content body, or `null` if no content
+  - `section` — `"artifact"`
+  - `signalIndex` / `signalId` — resolved signal
+  - `step` — verification step that owns the artifact
+  - `artifact` — selected artifact metadata, including retained `path`
+  - `text` — bounded selected artifact text
   - `selection` — text-selection metadata
 
-  ### section="verification" — Read verification output
-
-  Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned (single-element `steps[]`) and the selection mode applies to that step's output; an unknown name returns a 400 listing the available step names. For failed command steps, explicit inspection may be backed by retained stdout/stderr logs and artifact metadata (for example Playwright `test-results` or reports) that can survive restart and worktree cleanup; default/status views remain compact.
-
-  - `gateId` — gate identifier
-  - `section` — `"verification"`
-  - `signalIndex` — resolved 0-based index
-  - `signalId` — signal identifier
-  - `steps[]` — array of verification step results:
-    - `name` — step name
-    - `type` — step type (e.g. `"command"`, `"llm-review"`)
-    - `passed` — boolean
-    - `skipped` — boolean, if skipped
-    - `duration_ms` — execution time in milliseconds
-    - `output` — selected output text
-    - `selection` — per-step selection metadata
-  - `selection` — optional top-level aggregate truncation metadata when the combined response is capped
+  The retained `path` in verification metadata remains usable with `read(path)` as a fallback. Prefer `section="artifact"` for bounded, sandbox-checked reads.
 
   ### section="signals" — Browse signal history
 
@@ -91,18 +97,8 @@ detail_docs: |-
 
   - `gateId` — gate identifier
   - `section` — `"signals"`
-  - `signals[]` — bounded array of signal summaries:
-    - `index` — 0-based position
-    - `id` — signal identifier
-    - `timestamp` — when the signal was sent
-    - `sessionId` — which session sent it
-    - `commitSha` — git commit SHA, if provided
-    - `verdict` — `"passed"`, `"failed"`, or `"running"`
-    - `hasContent` — whether this signal included content
-    - `metadataKeys` — array of metadata key names
-  - `signalsTotal` — total signals in history
-  - `signalsShown` — number of summaries returned
-  - `signalsTruncated` — whether some summaries were omitted
+  - `signals[]` — bounded array of signal summaries
+  - `signalsTotal` / `signalsShown` / `signalsTruncated` — history counts
   - `text` — deterministic selected JSON-lines text form of the history
   - `selection` — text-selection metadata
 
@@ -110,7 +106,8 @@ detail_docs: |-
 
   - **Start with status** — call `gate_status(gate_id="...")` first; its verdict, `failedSteps`, and output tail are usually enough.
   - **Target failure lines** — use `mode="grep"` with `pattern="error|failed"` and `context=2` for large verification logs.
-  - **Focus one step** — pass `step="<name>"` to scope `section="verification"` to a single step (names come from `gate_list.failedSteps` or `gate_status.failedSteps`).
+  - **Focus one step** — pass `step="<name>"` to scope `section="verification"` to a single step.
+  - **Fetch one artifact** — first inspect `section="verification"` for `diagnostics.artifacts.files[]`, then call `section="artifact"` with the chosen `id` or `relativePath`.
   - **Inspect nearby output** — use `mode="tail"` or `mode="slice"` when grep shows where to look.
   - **Use retained diagnostics first** — do not re-run tests or spawn agents just to gather logs already available here; re-run only to validate new changes or when diagnostics are insufficient/stale.
   - **Read upstream content** — use `section="content"` when you need the gate's actual content.
@@ -136,20 +133,23 @@ detail_docs: |-
   # Scope to a single verification step by name, then grep it for failures
   gate_inspect(gate_id="implementation", section="verification", step="unit", mode="grep", pattern="error|failed", context=2)
 
-  # Inspect the latest tail with an explicit line count
-  gate_inspect(gate_id="implementation", section="verification", mode="tail", lines=80)
+  # Inspect artifact metadata from a failing E2E step; artifact contents are not inlined here
+  gate_inspect(gate_id="implementation", section="verification", step="E2E tests", mode="tail", lines=80)
 
-  # Inspect a specific 1-indexed line range
-  gate_inspect(gate_id="implementation", section="verification", mode="slice", from=120, to=180)
+  # Fetch one retained artifact by id and grep it
+  gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", mode="grep", pattern="Error|locator|failed", context=3)
+
+  # Fetch a specific Playwright retry for a collapsed artifact id
+  gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", retry=1, mode="tail", lines=120)
+
+  # Fetch an artifact by exact relativePath and slice it
+  gate_inspect(gate_id="implementation", section="artifact", artifact="test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md", mode="slice", from=40, to=120)
 
   # Rare escape hatch: request full rendered output, still bounded by tool budgets
   gate_inspect(gate_id="implementation", section="verification", mode="full")
 
   # Browse signal history with bounded output
   gate_inspect(gate_id="implementation", section="signals", mode="tail", lines=40)
-
-  # Read content from a specific earlier signal
-  gate_inspect(gate_id="implementation", section="content", signal_index=0)
 
   # Read verification from the second-to-last signal and grep errors
   gate_inspect(gate_id="implementation", section="verification", signal_index=-2, mode="grep", pattern="error|failed", context=2)
@@ -160,8 +160,9 @@ detail_docs: |-
   - `signal_index` defaults to `-1` (latest). Use `0` for the first signal, `-2` for second-to-last, etc.
   - `section="signals"` ignores `signal_index`; it reads history rather than one signal.
   - Default output is a bounded tail, not the full rendered payload.
-  - Verification inspection may read retained logs/artifacts for failed command steps; status/default responses stay compact.
+  - Verification inspection may read retained logs and returns artifact metadata for failed command steps; artifact content requires `section="artifact"`.
+  - Artifact metadata keeps retained `path`, so `read(path)` remains a fallback.
   - Retained diagnostics can survive restart and worktree cleanup, but selected output is still bounded and may be capped.
   - `mode="full"` can still be truncated by normal tool-result budgets; check `selection.truncated` and `selection.truncationReason`.
-  - Invalid regexes, missing slice bounds, non-integer ranges, ranges below 1, or `from > to` return clear validation errors.
-  - For triage, prefer `gate_status`, then step-scoped `gate_inspect(..., mode="grep", pattern="error|failed", context=2)`, then `tail` or `slice`.
+  - Invalid regexes, missing slice bounds, non-integer ranges, ranges below 1, unknown artifact ids, invalid retries, or `from > to` return clear validation errors.
+  - For triage, prefer `gate_status`, then step-scoped `gate_inspect(..., mode="grep", pattern="error|failed", context=2)`, then artifact-specific `grep`, `tail`, or `slice`.

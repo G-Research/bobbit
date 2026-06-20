@@ -60,6 +60,14 @@ import { fenceBlock } from "./agent/context-blocks.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
+import {
+	GateArtifactResolutionError,
+	buildArtifactLookup,
+	isTextInspectableArtifact,
+	resolveArtifactFromLookup,
+	stripPlaywrightErrorContextBoilerplate,
+	validateRetainedArtifactPath,
+} from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
@@ -8057,20 +8065,27 @@ async function handleApiRoute(
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 
 		const section = url.searchParams.get("section");
-		if (!section || !["content", "verification", "signals"].includes(section)) {
-			json({ error: "section query parameter is required: 'content', 'verification', or 'signals'" }, 400);
+		if (!section || !["content", "verification", "signals", "artifact"].includes(section)) {
+			json({ error: "section query parameter is required: 'content', 'verification', 'signals', or 'artifact'" }, 400);
 			return;
 		}
 
 		const stepName = url.searchParams.get("step") ?? undefined;
-		if (stepName !== undefined && section !== "verification") {
-			json({ error: "step is only valid with section='verification'" }, 400);
+		if (stepName !== undefined && section !== "verification" && section !== "artifact") {
+			json({ error: "step is only valid with section='verification' or section='artifact'" }, 400);
+			return;
+		}
+		if (url.searchParams.has("retry") && section !== "artifact") {
+			json({ error: "retry is only valid with section='artifact'" }, 400);
 			return;
 		}
 
 		let selectionOptions: TextSelectionOptions;
 		try {
 			selectionOptions = { ...parseGateInspectSelectionOptions(url.searchParams), includeDiagnostics: true };
+			if (section === "artifact" && selectionOptions.mode === undefined) {
+				selectionOptions = { ...selectionOptions, mode: "tail", lines: selectionOptions.lines ?? 200 };
+			}
 			selectText("", selectionOptions);
 		} catch (err) {
 			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
@@ -8133,6 +8148,107 @@ async function handleApiRoute(
 			} catch (err) {
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				if (err instanceof UnknownVerificationStepError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
+			return;
+		}
+
+		if (section === "artifact") {
+			const resolved = resolveSignal();
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			const artifactTarget = url.searchParams.get("artifact") ?? "";
+			if (!artifactTarget) {
+				json({ error: "artifact query parameter is required with section='artifact'" }, 400);
+				return;
+			}
+			let retry: number | undefined;
+			const rawRetry = url.searchParams.get("retry");
+			if (rawRetry !== null && rawRetry !== "") {
+				if (!/^\d+$/.test(rawRetry)) { json({ error: "retry must be a non-negative integer" }, 400); return; }
+				retry = Number(rawRetry);
+			}
+
+			const candidateSteps = resolved.signal.verification.steps.filter(step =>
+				step.type === "command"
+				&& step.diagnostics
+				&& step.diagnostics.artifacts
+				&& step.diagnostics.artifacts.length > 0
+				&& (stepName === undefined || step.name === stepName),
+			);
+			if (stepName !== undefined && candidateSteps.length === 0) {
+				json({
+					error: `Unknown verification step "${stepName}" with retained artifacts.`,
+					validSteps: resolved.signal.verification.steps
+						.filter(step => step.type === "command" && step.diagnostics?.artifacts?.length)
+						.map(step => step.name),
+				}, 400);
+				return;
+			}
+
+			const matches: Array<{ stepName: string; diagnostics: NonNullable<typeof candidateSteps[number]["diagnostics"]>; artifact: ReturnType<typeof resolveArtifactFromLookup> }> = [];
+			const resolutionErrors: Array<{ stepName: string; error: GateArtifactResolutionError }> = [];
+			const validSteps = candidateSteps.map(step => step.name);
+			const validArtifactsByStep = candidateSteps.map(step => {
+				const lookup = buildArtifactLookup(step.diagnostics);
+				return {
+					step: step.name,
+					validArtifactIds: [...new Set(lookup.index.files.map(file => file.id))],
+					validArtifacts: lookup.index.files.map(file => ({ id: file.id, relativePath: file.relativePath, retry: file.retry })),
+				};
+			});
+			for (const step of candidateSteps) {
+				if (!step.diagnostics) continue;
+				const lookup = buildArtifactLookup(step.diagnostics);
+				try {
+					matches.push({
+						stepName: step.name,
+						diagnostics: step.diagnostics,
+						artifact: resolveArtifactFromLookup(lookup, artifactTarget, retry),
+					});
+				} catch (err) {
+					if (!(err instanceof GateArtifactResolutionError)) throw err;
+					resolutionErrors.push({ stepName: step.name, error: err });
+				}
+			}
+
+			if (matches.length === 0) {
+				const nonUnknownError = resolutionErrors.find(({ error }) => !error.message.startsWith(`Unknown artifact "${artifactTarget}".`));
+				json({ error: nonUnknownError?.error.message ?? `Unknown artifact "${artifactTarget}".`, validSteps, validArtifactsByStep }, 400);
+				return;
+			}
+			if (matches.length > 1) {
+				json({
+					error: `Artifact "${artifactTarget}" is ambiguous across verification steps; pass step to disambiguate.`,
+					validSteps: matches.map(match => match.stepName),
+					validArtifacts: matches.map(match => ({ step: match.stepName, id: match.artifact.id, relativePath: match.artifact.relativePath, retry: match.artifact.retry })),
+				}, 400);
+				return;
+			}
+
+			const match = matches[0];
+			try {
+				const retainedPath = validateRetainedArtifactPath(match.diagnostics, match.artifact);
+				if (!isTextInspectableArtifact(match.artifact)) {
+					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; use read(path) or inspect the file directly.`, validSteps, validArtifactsByStep }, 400);
+					return;
+				}
+				let text = fs.readFileSync(retainedPath, "utf8");
+				if (match.artifact.relativePath.endsWith("/error-context.md") || match.artifact.relativePath === "error-context.md") {
+					text = stripPlaywrightErrorContextBoilerplate(text);
+				}
+				const selected = selectText(text, selectionOptions);
+				json({
+					gateId, section: "artifact",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					step: match.stepName,
+					artifact: match.artifact,
+					text: selected.text,
+					selection: selected.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				if (err instanceof Error) { json({ error: err.message, validSteps, validArtifactsByStep }, 400); return; }
 				throw err;
 			}
 			return;

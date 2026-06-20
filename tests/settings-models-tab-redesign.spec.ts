@@ -270,6 +270,12 @@ test.describe("Settings Models tab redesign", () => {
 		// The component renders its (capitalized) provider name in the label.
 		await expect(googleKey).toContainText(/google/i);
 
+		// OpenRouter key input wrapper + its provider-key-input element render too.
+		const openrouterKey = page.locator('[data-testid="provider-key-input-openrouter"]');
+		await expect(openrouterKey).toBeVisible();
+		await expect(openrouterKey.locator("provider-key-input")).toHaveCount(1);
+		await expect(openrouterKey).toContainText(/openrouter/i);
+
 		// Provider API Keys appears after Default Models in document order.
 		const order = await page.evaluate(() => {
 			const d = document.querySelector('[data-testid="defaults-section"]')!;
