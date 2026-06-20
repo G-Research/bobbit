@@ -105,8 +105,8 @@ export class LifecycleHub {
 	private readonly gatewayInfo: () => { baseUrl: string; token: string };
 	private readonly globalMaxTokens: number;
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
-	private readonly runtimeResolver?: RuntimeContextResolver;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
+	private readonly runtimeResolver?: RuntimeContextResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -135,8 +135,8 @@ export class LifecycleHub {
 		this.gatewayInfo = deps.gatewayInfo;
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 		this.providerHostApi = deps.providerHostApi;
-		this.runtimeResolver = deps.runtimeResolver;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
+		this.runtimeResolver = deps.runtimeResolver;
 	}
 
 	/**

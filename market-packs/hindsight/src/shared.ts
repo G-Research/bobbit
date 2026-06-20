@@ -121,6 +121,11 @@ export async function makeClient(cfg: ClientConfig): Promise<HindsightClientLike
 export interface EffectiveConfig {
 	mode: string;
 	externalUrl?: string;
+	/** Optional human-facing Hindsight dashboard URL. Purely informational: it is
+	 *  display/open-only (used by "Open Hindsight UI"), NEVER dialed by the client and
+	 *  NEVER influences activation/dormancy (which stay keyed on externalUrl). Not a
+	 *  secret. */
+	uiUrl?: string;
 	apiKey?: string;
 	/** External Postgres connection URL for `managed-external-postgres` mode. Maps
 	 *  onto the runtime env HINDSIGHT_API_DATABASE_URL; never used in external mode. */
@@ -180,6 +185,7 @@ function asNum(v: unknown, d: number): number {
 
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
+	const uiUrl = asString(flat(raw, "uiUrl"));
 	const apiKey = asString(flat(raw, "apiKey"));
 	const externalDatabaseUrl = asString(flat(raw, "externalDatabaseUrl"));
 	const llmApiKey = asString(flat(raw, "llmApiKey"));
@@ -187,6 +193,7 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
+		...(uiUrl ? { uiUrl } : {}),
 		...(apiKey ? { apiKey } : {}),
 		...(externalDatabaseUrl ? { externalDatabaseUrl } : {}),
 		...(llmApiKey ? { llmApiKey } : {}),
@@ -337,6 +344,22 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 			else if (v === null) value[key] = "";
 			else errors.push(`${key} must be a string`);
 		}
+	}
+	// Optional NON-secret dashboard URL; "" (or null) clears. When non-empty it must
+	// parse as an http(s) URL (it is opened by the UI, never dialed by the client).
+	if ("uiUrl" in body) {
+		const v = body.uiUrl;
+		if (v === null || v === "") value.uiUrl = "";
+		else if (typeof v === "string") {
+			let parsed: URL | undefined;
+			try {
+				parsed = new URL(v);
+			} catch {
+				parsed = undefined;
+			}
+			if (parsed && (parsed.protocol === "http:" || parsed.protocol === "https:")) value.uiUrl = v;
+			else errors.push("uiUrl must be an http(s) URL");
+		} else errors.push("uiUrl must be a string");
 	}
 	for (const key of ["bank", "namespace", "dataDir"] as const) {
 		if (key in body) {

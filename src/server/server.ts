@@ -7027,6 +7027,87 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin read of a
+	// BUILT-IN pack's read-only route (Hindsight UX polish). The Marketplace must
+	// read built-in Hindsight config/status as a PURE read, but after `#/market`
+	// navigation there is no active chat session, so the surface-token path
+	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
+	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
+	// so it cannot widen the extension threat model:
+	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
+	//   • GET only — the route's own mutation paths (e.g. `config` write) need a
+	//     POST + body, so this can never persist; it is a pure read.
+	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
+	//     this sessionless seam to read another pack's route output.
+	// `ctx.runtime` is resolved WITHOUT starting Docker (mirrors `/api/ext/route`),
+	// preserving the no-Docker-auto-start invariant.
+	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
+	if (packRouteMatch && req.method === "GET") {
+		const reqPackId = decodeURIComponent(packRouteMatch[1]);
+		const routeName = decodeURIComponent(packRouteMatch[2]);
+		const projectId = url.searchParams.get("projectId") || undefined;
+		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
+		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
+		const builtinPackIds = new Set(
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir())
+				.filter((e) => e.manifest)
+				.map((e) => packIdFromRoot(e.path)),
+		);
+		if (!builtinPackIds.has(reqPackId)) {
+			json({ error: "sessionless pack-route reads are available only to built-in packs" }, 403);
+			return;
+		}
+		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
+		if (!resolved) {
+			json({ error: `pack "${reqPackId}" declares no route "${routeName}"` }, 404);
+			return;
+		}
+		const host = createServerHostApi({
+			sessionId: "",
+			toolUseId: undefined,
+			packId: reqPackId,
+			contributionId: "",
+			packStore: getPackStore(),
+			orchestrationCore,
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			onStoreWrite: notePackStoreWrite,
+		});
+		// Managed-runtime context injection (NO Docker start) — mirror `/api/ext/route`.
+		let packRouteRuntime: RuntimeContext | undefined;
+		try {
+			const pack = packContributionRegistry.getPack(projectId, reqPackId);
+			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
+			if (runtimeProvider?.runtime) {
+				packRouteRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
+					packId: reqPackId,
+					runtimeId: runtimeProvider.runtime,
+					projectId,
+					config: runtimeProvider.config ?? {},
+				});
+			}
+		} catch {
+			packRouteRuntime = undefined; // non-fatal — the route runs without ctx.runtime
+		}
+		const start = Date.now();
+		try {
+			const result = await routeDispatcher.dispatch(
+				resolved.modulePath,
+				resolved.packRoot,
+				routeName,
+				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
+				{ method: "GET" },
+			);
+			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const status = err instanceof ActionError ? err.status : 500;
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, status);
+		}
+		return;
+	}
+
 	// NOTE: the C2 session WRITE (`host.session.postMessage`) is intentionally NOT an
 	// HTTP endpoint. It is driven over the TRUSTED session WebSocket
 	// (`ext_session_post` in src/server/ws/handler.ts) so that no capturable session

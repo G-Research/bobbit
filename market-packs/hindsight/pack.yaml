@@ -9,7 +9,7 @@ contents:
   roles: []
   tools: [hindsight] # explicit hindsight_recall/retain/reflect agent tools (P5)
   skills: []
-  entrypoints: [hindsight-palette, hindsight-route] # native config/status panel + deep link (P4)
+  entrypoints: [hindsight-palette, hindsight-route, hindsight-git] # native config/status panel + deep link (P4) + git-widget affordance
   providers: [memory] # → providers/memory.yaml
   hooks: []
   mcp: []

@@ -11,16 +11,25 @@ import { html, TemplateResult } from "lit";
 import {
 	AlertTriangle,
 	ArrowLeft,
+	CheckCircle2,
 	ChevronDown,
+	Circle,
 	Database,
 	Download,
+	ExternalLink,
 	GripVertical,
 	Package,
+	Play,
+	Plug,
 	Plus,
 	RotateCw,
+	ScrollText,
+	Settings,
 	ShoppingCart,
+	Square,
 	Store,
 	Trash2,
+	XCircle,
 } from "lucide";
 import type { IconNode } from "lucide";
 import { renderApp, state } from "./state.js";
@@ -42,6 +51,11 @@ import {
 	fetchContributions,
 	fetchTools,
 	getPackRuntimeCapabilities,
+	getPackRuntimeLogs,
+	listPackRuntimes,
+	readBuiltinPackRoute,
+	startPackRuntime,
+	stopPackRuntime,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
@@ -51,6 +65,7 @@ import {
 	type PackActivationResponse,
 	type PackEntityDescriptions,
 	type PackRuntimeCapabilitySummary,
+	type PackRuntimeStatus,
 } from "./api.js";
 
 // ============================================================================
@@ -95,6 +110,50 @@ const runtimeCapabilities = new Map<string, PackRuntimeCapabilitySummary | null>
 /** Guard so we issue at most one in-flight capability fetch per runtime key. */
 const runtimeCapabilitiesInFlight = new Set<string>();
 
+// ── Hindsight built-in row: live config/runtime state (design hindsight-ux-polish §5) ──
+// Read-only derivation feeding the richer state badge + action bar on the built-in
+// `hindsight` row. Fetching status / the runtime list is a PURE read — it NEVER starts
+// Docker (the only start path is the explicit Start-runtime click). Invalidated +
+// re-fetched alongside the other background loads in loadMarketplaceData.
+const HINDSIGHT_PACK = "hindsight";
+const HINDSIGHT_RUNTIME = "hindsight";
+const HINDSIGHT_PANEL_ID = "hindsight.panel";
+
+/** Subset of the Hindsight `status` route response the marketplace needs. The
+ *  `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are additive (Partition C)
+ *  and optional, so this works whether or not that partition has merged. */
+interface HindsightStatusWire {
+	configured?: boolean;
+	mode?: string;
+	bank?: string;
+	namespace?: string;
+	recallScope?: string;
+	autoRecall?: boolean;
+	autoRetain?: boolean;
+	queueDepth?: number;
+	healthy?: boolean;
+	// The route persists the last error as a `{ message, ts }` diagnostic object
+	// (market-packs/hindsight/src/shared.ts), but legacy/string shapes are tolerated.
+	// Render via `hindsightLastErrorText` so an object never stringifies to
+	// `[object Object]`.
+	lastError?: string | { message?: string; ts?: number } | null;
+	externalUrl?: string;
+	uiUrl?: string;
+	timeoutMs?: number;
+	recallBudget?: number;
+}
+
+let hindsightStatus: HindsightStatusWire | null = null;
+let hindsightStatusLoaded = false;
+let hindsightRuntimes: PackRuntimeStatus[] = [];
+/** Transient result lozenge for the Test connection / Start / Stop actions. */
+let hindsightActionResult: { kind: "test" | "start" | "stop"; ok: boolean; message: string } | null = null;
+/** Whether the explicit managed-Start consent disclosure is expanded (start stays a
+ *  second explicit click inside it — never auto-fired). */
+let hindsightStartConsentOpen = false;
+/** Inline runtime logs (View logs), fetched best-effort; null = not loaded. */
+let hindsightLogs: string | null = null;
+
 let newSourceUrl = "";
 let newSourceRef = "";
 let addingSource = false;
@@ -137,6 +196,12 @@ export function clearMarketplaceState(): void {
 	installedError = "";
 	conflicts = [];
 	activationByPack.clear();
+	hindsightStatus = null;
+	hindsightStatusLoaded = false;
+	hindsightRuntimes = [];
+	hindsightActionResult = null;
+	hindsightStartConsentOpen = false;
+	hindsightLogs = null;
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
@@ -262,8 +327,41 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	// Activation catalogues are fetched in the background (one GET per installed
 	// pack) so the page paints immediately; the toggles appear once they resolve.
 	void loadActivationForInstalled();
+	// Hindsight built-in row state (config + runtime) — background, best-effort, and a
+	// PURE read (never starts Docker). Reset transient action UI on a fresh load.
+	hindsightActionResult = null;
+	hindsightStartConsentOpen = false;
+	hindsightLogs = null;
+	void loadHindsightState();
 
 	if (selectedSourceId) await loadBrowse(selectedSourceId);
+}
+
+/** Best-effort load of the built-in Hindsight row's live state: the runtime list
+ *  (`GET /api/pack-runtimes`, admin-bearer) plus the pack `status` route. BOTH are
+ *  pure reads — neither starts Docker. The `status` read goes through the SESSIONLESS
+ *  built-in pack-route seam ({@link readBuiltinPackRoute}) rather than the launcher
+ *  Host API: after `#/market` navigation there is no active chat session, so the
+ *  surface-token mint the Host API needs would 403 and the row would stay stuck on
+ *  "Unknown" (the production bug this fix targets). Only runs when the built-in
+ *  `hindsight` pack is installed; silently degrades (badge shows "Checking…"/"Unknown")
+ *  when a read fails. */
+async function loadHindsightState(): Promise<void> {
+	const pack = installed.find((p) => p.builtin && p.packName === HINDSIGHT_PACK);
+	if (!pack) return;
+	const projectId = currentProjectId();
+	const runtimesRes = await listPackRuntimes(projectId);
+	if (runtimesRes.ok) hindsightRuntimes = runtimesRes.data.runtimes || [];
+	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "status",
+		projectId: pack.scope === "project" ? projectId : undefined,
+	});
+	if (statusRes.ok) {
+		hindsightStatus = statusRes.data ?? null;
+		hindsightStatusLoaded = true;
+	}
+	renderApp();
 }
 
 /** Fetch the UNFILTERED activation catalogue + disabled overrides for every
@@ -1107,7 +1205,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: html`${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
+				: html`${pack.packName === HINDSIGHT_PACK ? renderHindsightStatusStrip(pack) : ""}${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1441,6 +1539,291 @@ export function renderRuntimeConsentCardView(runtimeId: string, cap: PackRuntime
 			<p class="market-runtime-card-text" data-testid="market-runtime-trust">${trust}</p>
 		</div>
 	`;
+}
+
+// ============================================================================
+// HINDSIGHT BUILT-IN ROW — derived state badge + state-aware action bar
+// (design hindsight-ux-polish §5.2). Read-only derivation; the ONLY Docker-start
+// path is the explicit Start-runtime click gated behind the consent disclosure.
+// ============================================================================
+
+/** The eight-state model shared with the panel badge (design D1). `unknown` covers
+ *  the pre-load window (status not yet read / no active session to read it). */
+export type HindsightUiState =
+	| "disabled"
+	| "dormant"
+	| "external-connected"
+	| "external-unreachable"
+	| "managed-stopped"
+	| "managed-starting"
+	| "managed-running"
+	| "managed-unhealthy"
+	| "unknown";
+
+/** Pure derivation feeding the marketplace badge (and mirrored by the panel). Exported
+ *  for focused unit tests. Combines activation (Disabled), the pack `status` route
+ *  (Dormant / External connected|unreachable) and the managed runtime supervisor status
+ *  (Managed stopped|starting|running|unhealthy). NEVER starts Docker — pure projection. */
+export function deriveHindsightState(opts: {
+	enabled: boolean;
+	statusLoaded: boolean;
+	status: HindsightStatusWire | null;
+	runtime: PackRuntimeStatus | undefined;
+}): HindsightUiState {
+	if (!opts.enabled) return "disabled";
+	const s = opts.status;
+	if (!opts.statusLoaded || !s) return "unknown";
+	if (!s.configured) return "dormant";
+	const mode = s.mode || "external";
+	const managed = mode === "managed" || mode === "managed-external-postgres";
+	if (!managed) return s.healthy ? "external-connected" : "external-unreachable";
+	// Managed: prefer the live supervisor status; fall back to the health probe.
+	const rs = opts.runtime?.status;
+	if (rs === "running") return s.healthy === false ? "managed-unhealthy" : "managed-running";
+	if (rs === "starting") return "managed-starting";
+	if (rs === "unhealthy") return "managed-unhealthy";
+	if (rs === "stopped" || rs === "docker-unavailable") return "managed-stopped";
+	return s.healthy ? "managed-running" : "managed-stopped";
+}
+
+/** Badge presentation for a derived state. Colour is NEVER the only signal — each
+ *  state pairs a semantic theme token with a distinct icon + plain-language blurb. */
+function hindsightStateMeta(state: HindsightUiState): { label: string; token: string; icon: typeof Circle; blurb: string } {
+	switch (state) {
+		case "disabled":
+			return { label: "Disabled", token: "var(--muted-foreground)", icon: Circle, blurb: "Pack disabled — enable it to use memory." };
+		case "dormant":
+			return { label: "Not configured", token: "var(--warning, var(--chart-4))", icon: AlertTriangle, blurb: "Dormant until you configure a Hindsight deployment." };
+		case "external-connected":
+			return { label: "Connected (external)", token: "var(--positive)", icon: CheckCircle2, blurb: "Talking to an external Hindsight data plane." };
+		case "external-unreachable":
+			return { label: "Unreachable (external)", token: "var(--negative, var(--destructive))", icon: XCircle, blurb: "Configured for external mode but the API did not respond." };
+		case "managed-stopped":
+			return { label: "Stopped (managed)", token: "var(--muted-foreground)", icon: Square, blurb: "Managed runtime configured but not running — Start it to bring Docker up." };
+		case "managed-starting":
+			return { label: "Starting (managed)", token: "var(--info)", icon: RotateCw, blurb: "Managed Docker runtime is starting up." };
+		case "managed-running":
+			return { label: "Running (managed)", token: "var(--positive)", icon: CheckCircle2, blurb: "Managed Docker runtime is running and healthy." };
+		case "managed-unhealthy":
+			return { label: "Unhealthy (managed)", token: "var(--negative, var(--destructive))", icon: XCircle, blurb: "Managed runtime is up but failing health checks." };
+		default:
+			return { label: "Checking…", token: "var(--muted-foreground)", icon: RotateCw, blurb: "Reading the current Hindsight state." };
+	}
+}
+
+/** The managed runtime status row for the built-in Hindsight pack (if any). */
+function hindsightRuntime(): PackRuntimeStatus | undefined {
+	return hindsightRuntimes.find((r) => r.runtimeId === HINDSIGHT_RUNTIME && (r.packId === HINDSIGHT_PACK || r.packName === HINDSIGHT_PACK));
+}
+
+/** Whether the built-in Hindsight pack/runtime activation is on. */
+function hindsightEnabled(pack: InstalledPackWire): boolean {
+	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
+	if (!activation) return true; // assume enabled until the catalogue resolves
+	return activationEntityEnabledCount(activation) > 0;
+}
+
+/** The built-in Hindsight row's state badge + active-config summary + action bar. */
+function renderHindsightStatusStrip(pack: InstalledPackWire): TemplateResult {
+	const runtime = hindsightRuntime();
+	const state = deriveHindsightState({
+		enabled: hindsightEnabled(pack),
+		statusLoaded: hindsightStatusLoaded,
+		status: hindsightStatus,
+		runtime,
+	});
+	const meta = hindsightStateMeta(state);
+	const s = hindsightStatus;
+	const managed = state.startsWith("managed-");
+	const isManagedMode = s?.mode === "managed" || s?.mode === "managed-external-postgres";
+
+	return html`
+		<div class="market-hindsight-strip" data-testid="market-hindsight-strip" data-state=${state}>
+			<div class="flex items-center gap-1.5 flex-wrap">
+				<span
+					class="market-lozenge"
+					data-testid="market-hindsight-state"
+					data-state=${state}
+					style=${`border-color: color-mix(in oklch, ${meta.token} 35%, transparent); background: color-mix(in oklch, ${meta.token} 12%, transparent); color: ${meta.token};`}
+					title=${meta.blurb}
+				>${icon(meta.icon, "xs", state === "managed-starting" || state === "unknown" ? "animate-spin" : "")} ${meta.label}</span>
+				${hindsightActionResult
+					? html`<span
+							class="market-lozenge ${hindsightActionResult.ok ? "" : "market-lozenge--warning"}"
+							data-testid="market-hindsight-action-result"
+							style=${hindsightActionResult.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+						>${icon(hindsightActionResult.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightActionResult.message}</span>`
+					: ""}
+			</div>
+			<div class="text-[11px] text-muted-foreground mt-1" data-testid="market-hindsight-blurb">${meta.blurb}</div>
+			${renderHindsightConfigSummary()}
+			${renderHindsightActions(pack, state, managed, isManagedMode)}
+			${hindsightStartConsentOpen && state === "managed-stopped"
+				? html`<div class="mt-2" data-testid="market-hindsight-start-consent">
+						${renderRuntimeConsentCard(pack, HINDSIGHT_RUNTIME)}
+						<div class="flex items-center gap-2 mt-2">
+							<button class="market-btn market-btn--primary" data-testid="market-hindsight-start-confirm" ?disabled=${busy.has("hindsight:start")} @click=${() => handleHindsightStart(pack)}>${icon(Play, "xs")} Start (starts Docker)</button>
+							<button class="market-btn" data-testid="market-hindsight-start-cancel" @click=${() => { hindsightStartConsentOpen = false; renderApp(); }}>Cancel</button>
+						</div>
+					</div>`
+				: ""}
+			${hindsightLogs !== null
+				? html`<details class="market-hindsight-logs mt-2" data-testid="market-hindsight-logs" open>
+						<summary>Runtime logs</summary>
+						<pre class="market-hindsight-logs-pre">${hindsightLogs || "(no output)"}</pre>
+					</details>`
+				: ""}
+		</div>
+	`;
+}
+
+/** Active configured values surfaced prominently on the row (data-plane URL,
+ *  namespace, bank, recall/retain, timeout, queue depth). Read-only projection of the
+ *  `status` route; shown once status has loaded and the pack is configured. */
+function renderHindsightConfigSummary(): TemplateResult {
+	const s = hindsightStatus;
+	if (!s || !s.configured) return html``;
+	const rows: Array<[string, string]> = [];
+	if (s.mode) rows.push(["Mode", s.mode]);
+	if (s.externalUrl) rows.push(["API URL", s.externalUrl]);
+	if (s.bank) rows.push(["Bank", s.bank]);
+	if (s.namespace) rows.push(["Namespace", s.namespace]);
+	if (s.recallScope) rows.push(["Recall scope", s.recallScope]);
+	rows.push(["Auto recall", s.autoRecall ? "on" : "off"]);
+	rows.push(["Auto retain", s.autoRetain ? "on" : "off"]);
+	if (typeof s.timeoutMs === "number") rows.push(["Timeout", `${s.timeoutMs}ms`]);
+	if (typeof s.recallBudget === "number") rows.push(["Recall budget", String(s.recallBudget)]);
+	if (typeof s.queueDepth === "number") rows.push(["Queue depth", String(s.queueDepth)]);
+	if (rows.length === 0) return html``;
+	return html`
+		<dl class="market-hindsight-config" data-testid="market-hindsight-config">
+			${rows.map(([k, v]) => html`<div class="market-hindsight-config-row"><dt>${k}</dt><dd>${v}</dd></div>`)}
+		</dl>
+		${(() => {
+			const le = hindsightLastErrorText(s.lastError);
+			return le ? html`<div class="market-error mt-1" data-testid="market-hindsight-last-error">${le}</div>` : "";
+		})()}
+	`;
+}
+
+/** Normalise the `status.lastError` field, which the route persists as a
+ *  `{ message, ts }` diagnostic object, to a human string. Returns "" when there is
+ *  no usable message so the row renders nothing rather than `[object Object]`. */
+function hindsightLastErrorText(le: HindsightStatusWire["lastError"]): string {
+	if (le == null) return "";
+	if (typeof le === "string") return le.trim();
+	if (typeof le === "object") {
+		const msg = (le as { message?: unknown }).message;
+		if (typeof msg === "string" && msg.trim()) return msg.trim();
+	}
+	return "";
+}
+
+/** State-aware action bar. Every action is an explicit click; Start stays gated behind
+ *  the consent disclosure and is never auto-invoked. */
+function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState, managed: boolean, isManagedMode: boolean): TemplateResult {
+	const s = hindsightStatus;
+	const configured = !!s?.configured;
+	const testing = busy.has("hindsight:test");
+	const stopping = busy.has("hindsight:stop");
+	const loadingLogs = busy.has("hindsight:logs");
+	const canStop = state === "managed-running" || state === "managed-unhealthy" || state === "managed-starting";
+	return html`
+		<div class="market-hindsight-actions flex items-center gap-1.5 flex-wrap mt-2" data-testid="market-hindsight-actions">
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" @click=${() => openHindsightPanel()}>${icon(Settings, "xs")} Configure</button>
+			<button class="market-btn" data-testid="market-hindsight-test" ?disabled=${testing || !configured} @click=${() => handleHindsightTest()}>${icon(Plug, "xs", testing ? "animate-spin" : "")} Test connection</button>
+			${s?.uiUrl
+				? html`<a class="market-btn" data-testid="market-hindsight-open-ui" href=${s.uiUrl} target="_blank" rel="noopener noreferrer">${icon(ExternalLink, "xs")} Open Hindsight UI</a>`
+				: ""}
+			${isManagedMode && state === "managed-stopped"
+				? html`<button class="market-btn" data-testid="market-hindsight-start" @click=${() => { hindsightStartConsentOpen = true; ensureRuntimeCapabilities(pack, HINDSIGHT_RUNTIME); renderApp(); }}>${icon(Play, "xs")} Start runtime</button>`
+				: ""}
+			${managed && canStop
+				? html`<button class="market-btn" data-testid="market-hindsight-stop" ?disabled=${stopping} @click=${() => handleHindsightStop(pack)}>${icon(Square, "xs", stopping ? "animate-spin" : "")} Stop runtime</button>`
+				: ""}
+			${isManagedMode
+				? html`<button class="market-btn" data-testid="market-hindsight-logs-btn" ?disabled=${loadingLogs} @click=${() => handleHindsightLogs(pack)}>${icon(ScrollText, "xs", loadingLogs ? "animate-spin" : "")} View logs</button>`
+				: ""}
+		</div>
+	`;
+}
+
+/** Open the native Hindsight config/status panel — the primary setup path. */
+function openHindsightPanel(): void {
+	void import("./pack-panels.js").then((m) => m.openPackPanel({ panelId: HINDSIGHT_PANEL_ID }, HINDSIGHT_PACK));
+}
+
+/** Test connection == re-read the pack `status` route (pure, no Docker). Updates the
+ *  cached status + a transient ok/fail lozenge. */
+async function handleHindsightTest(): Promise<void> {
+	busy.add("hindsight:test");
+	hindsightActionResult = null;
+	renderApp();
+	let ok = false;
+	let message = "Connection failed";
+	const pack = installed.find((p) => p.builtin && p.packName === HINDSIGHT_PACK);
+	if (pack) {
+		// Re-read the pack `status` route over the SESSIONLESS built-in seam (pure read,
+		// no Docker) — the marketplace has no active chat session to mint a surface token.
+		const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+			packId: runtimeRestPackId(pack),
+			routeName: "status",
+			projectId: pack.scope === "project" ? currentProjectId() : undefined,
+		});
+		if (statusRes.ok) {
+			const status = statusRes.data;
+			hindsightStatus = status ?? null;
+			hindsightStatusLoaded = true;
+			ok = !!status?.healthy;
+			message = ok ? "Connected" : status?.configured ? "Not reachable" : "Not configured";
+		} else {
+			message = statusRes.error || "Connection failed";
+		}
+	}
+	busy.delete("hindsight:test");
+	hindsightActionResult = { kind: "test", ok, message };
+	renderApp();
+}
+
+/** Explicit managed-runtime start — the ONLY Docker-starting path from the marketplace.
+ *  Fired only from the consent-disclosure confirm button (a deliberate second click). */
+async function handleHindsightStart(pack: InstalledPackWire): Promise<void> {
+	busy.add("hindsight:start");
+	hindsightActionResult = null;
+	renderApp();
+	const res = await startPackRuntime({ packId: runtimeRestPackId(pack), runtimeId: HINDSIGHT_RUNTIME, projectId: pack.scope === "project" ? currentProjectId() : undefined });
+	busy.delete("hindsight:start");
+	hindsightStartConsentOpen = false;
+	if (res.ok) {
+		hindsightActionResult = { kind: "start", ok: true, message: "Runtime starting" };
+	} else {
+		hindsightActionResult = { kind: "start", ok: false, message: res.error };
+	}
+	renderApp();
+	await loadHindsightState();
+}
+
+/** Stop the managed runtime (brings Docker down; preserves data). */
+async function handleHindsightStop(pack: InstalledPackWire): Promise<void> {
+	busy.add("hindsight:stop");
+	hindsightActionResult = null;
+	renderApp();
+	const res = await stopPackRuntime({ packId: runtimeRestPackId(pack), runtimeId: HINDSIGHT_RUNTIME, projectId: pack.scope === "project" ? currentProjectId() : undefined });
+	busy.delete("hindsight:stop");
+	hindsightActionResult = res.ok ? { kind: "stop", ok: true, message: "Runtime stopped" } : { kind: "stop", ok: false, message: res.error };
+	renderApp();
+	await loadHindsightState();
+}
+
+/** View recent runtime logs inline (pure read). */
+async function handleHindsightLogs(pack: InstalledPackWire): Promise<void> {
+	if (hindsightLogs !== null) { hindsightLogs = null; renderApp(); return; }
+	busy.add("hindsight:logs");
+	renderApp();
+	const res = await getPackRuntimeLogs({ packId: runtimeRestPackId(pack), runtimeId: HINDSIGHT_RUNTIME, projectId: pack.scope === "project" ? currentProjectId() : undefined, tail: 200 });
+	busy.delete("hindsight:logs");
+	hindsightLogs = res.ok ? res.data.logs : `Failed to load logs: ${res.error}`;
+	renderApp();
 }
 
 function renderConflictDetails(packConflicts: ConflictWire[]): TemplateResult {

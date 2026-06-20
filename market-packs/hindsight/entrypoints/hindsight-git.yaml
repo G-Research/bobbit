@@ -1,0 +1,14 @@
+id: hindsight.git
+kind: git-widget-button
+label: Hindsight Memory
+# A git-widget-button LAUNCHER surfaced in the git status widget "Extensions" group
+# alongside PR Walkthrough. Unlike pr-walkthrough's spawn-on-click launcher, this is
+# a BARE PanelTarget (NO action:"spawn"): its click opens hindsight.panel in the
+# ACTIVE (owner) session via openPackPanel. Nothing is minted and nothing starts —
+# this is purely a secondary discoverability surface for the config/status panel
+# (the marketplace remains the primary setup path). "Show only when configured" is
+# intentionally NOT gated here: the entrypoint is registered while the pack is
+# active and the panel itself renders the dormant/configure state, keeping the
+# widget pack-agnostic (no per-render pack-route calls).
+target:
+  panelId: hindsight.panel
