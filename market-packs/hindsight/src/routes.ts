@@ -179,6 +179,8 @@ export const routes = {
 			autoRecall: cfg.autoRecall,
 			autoRetain: cfg.autoRetain,
 			retainEveryNTurns: cfg.retainEveryNTurns,
+			retainMaxDelayMs: cfg.retainMaxDelayMs,
+			retainOverlapTurns: cfg.retainOverlapTurns,
 			// Per-project override indicator for the panel/marketplace status row.
 			projectOverrideActive: !!projectOverride,
 			queueDepth: depth,

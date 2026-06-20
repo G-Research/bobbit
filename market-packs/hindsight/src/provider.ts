@@ -13,22 +13,26 @@
 
 import {
 	applyBankMission,
-	bumpRetainCounter,
+	buildAggregateContent,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
 	enqueueRetain,
 	isActive,
+	loadPending,
 	loadQueue,
 	makeClient,
+	nextOverlap,
 	overlayProjectConfig,
 	recallTagFilter,
 	recordError,
 	resolveConfig,
+	savePending,
 	saveQueue,
-	shouldRetainOnCount,
+	shouldFlushPending,
 	truncate,
 	type EffectiveConfig,
+	type PendingBuffer,
 	type RuntimeContext,
 	type StoreLike,
 	type Tags,
@@ -79,6 +83,11 @@ function getStore(ctx: ProviderCtx): StoreLike | null {
 
 function projectIdOf(ctx: ProviderCtx): string | undefined {
 	return ctx.projectId !== undefined ? String(ctx.projectId) : undefined;
+}
+
+function sessionIdOf(ctx: ProviderCtx): string | undefined {
+	const s = ctx.sessionId !== undefined ? String(ctx.sessionId).trim() : "";
+	return s.length > 0 ? s : undefined;
 }
 
 /** Resolve the effective config for a hook: the host-merged `ctx.config`
@@ -212,6 +221,33 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 	}
 }
 
+/** Flush the durable per-session pending buffer as ONE aggregate retain (overlap
+ *  context + every pending primary turn). On success the sticky error is cleared;
+ *  on failure the aggregate is durably queued for retry (never dropped). EITHER
+ *  way the buffer is advanced: the last `retainOverlapTurns` summaries are carried
+ *  forward as bounded overlap and the primary turns are cleared so the count
+ *  advances. No-op for an empty buffer. */
+async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: StoreLike, sessionId: string, sync: boolean): Promise<void> {
+	const buf = await loadPending(store, sessionId);
+	if (buf.turns.length === 0) return;
+	const content = buildAggregateContent(buf);
+	const tags = autoTags(ctx, "turn");
+	try {
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		await client.ensureBank(cfg.bank);
+		await applyBankMission(store, client, cfg);
+		await client.retain(cfg.bank, content, { tags, sync });
+		await clearError(store);
+	} catch (e) {
+		await enqueueRetain(store, { content, tags, ts: Date.now() });
+		await recordError(store, e);
+	}
+	// Advance the buffer regardless of success (failures are durably queued): carry
+	// bounded overlap forward, clear the primary turns so the count advances.
+	const overlap = nextOverlap(buf.turns, cfg.retainOverlapTurns);
+	await savePending(store, sessionId, { turns: [], overlap });
+}
+
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const base = resolveConfig(ctx.config);
@@ -234,16 +270,24 @@ const provider = {
 		const store = getStore(ctx);
 		if (store) await drainQueueHead(store, cfg, ctx.runtime);
 		const summary = buildTurnSummary(ctx);
-		if (!summary) return { blocks: [] };
-		// Cost lever: auto-retain runs an LLM extraction only on one in
-		// retainEveryNTurns turns. Without a store+session to track cadence we cannot
-		// count, so we retain (the safe capture-everything fallback).
-		let shouldRetain = true;
-		if (store && ctx.sessionId) {
-			const count = await bumpRetainCounter(store, String(ctx.sessionId));
-			shouldRetain = shouldRetainOnCount(count, cfg.retainEveryNTurns);
+		const sessionId = sessionIdOf(ctx);
+		// No durable buffer (no store or no session id) ⇒ capture-everything per-turn
+		// fallback (cannot batch without a place to hold pending turns).
+		if (!store || !sessionId) {
+			if (summary) await retainWithQueue(ctx, cfg, summary, "turn", false);
+			return { blocks: [] };
 		}
-		if (shouldRetain) await retainWithQueue(ctx, cfg, summary, "turn", false);
+		// Batch (never sample): append this turn's compact summary to the durable
+		// pending buffer, then flush ONE aggregate when the batch is full or the
+		// oldest pending turn has aged past retainMaxDelayMs (hook-observed timeout).
+		let buf: PendingBuffer = await loadPending(store, sessionId);
+		if (summary) {
+			buf = { turns: [...buf.turns, { summary, ts: Date.now() }], overlap: buf.overlap };
+			await savePending(store, sessionId, buf);
+		}
+		if (shouldFlushPending(buf, cfg.retainEveryNTurns, cfg.retainMaxDelayMs, Date.now())) {
+			await flushPending(ctx, cfg, store, sessionId, false);
+		}
 		return { blocks: [] };
 	},
 
@@ -251,9 +295,13 @@ const provider = {
 		const base = resolveConfig(ctx.config);
 		if (!isActive(base, ctx.runtime) || !base.autoRetain) return { blocks: [] };
 		const cfg = await effectiveConfig(ctx, base);
+		const store = getStore(ctx);
+		const sessionId = sessionIdOf(ctx);
+		// Synchronously flush any pending buffered turns BEFORE the about-to-be-lost
+		// span so no batched turn is dropped when context is compacted.
+		if (store && sessionId) await flushPending(ctx, cfg, store, sessionId, true);
 		const summary = buildCompactSummary(ctx);
-		// sync:true, cadence-EXEMPT — always land the about-to-be-lost span before
-		// context is dropped, regardless of retainEveryNTurns.
+		// sync:true, batch-EXEMPT — always land the about-to-be-lost span.
 		if (summary) await retainWithQueue(ctx, cfg, summary, "compaction", true);
 		return { blocks: [] };
 	},
@@ -263,7 +311,13 @@ const provider = {
 		if (!isActive(base, ctx.runtime)) return { blocks: [] };
 		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
-		if (store) await drainQueueAll(store, cfg, ctx.runtime);
+		const sessionId = sessionIdOf(ctx);
+		// Best-effort: flush any remaining buffered turns, then one-pass drain the
+		// durable retry queue.
+		if (store) {
+			if (base.autoRetain && sessionId) await flushPending(ctx, cfg, store, sessionId, false);
+			await drainQueueAll(store, cfg, ctx.runtime);
+		}
 		return { blocks: [] };
 	},
 };

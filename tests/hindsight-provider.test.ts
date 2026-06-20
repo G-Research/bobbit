@@ -133,8 +133,9 @@ function makeClient() {
 	return { client, calls, state };
 }
 
-// retainEveryNTurns:1 keeps these tests on the OLD per-turn auto-retain behavior;
-// the cadence (default 5) is exercised by dedicated tests below.
+// retainEveryNTurns:1 + retainOverlapTurns:0 keeps these tests on the OLD per-turn
+// behavior (each turn flushes a single-turn aggregate = the turn summary verbatim).
+// Batching (default 5), max-delay, and overlap are exercised by dedicated tests below.
 const ACTIVE = {
 	mode: "external",
 	externalUrl: "http://localhost:8888",
@@ -145,6 +146,8 @@ const ACTIVE = {
 	autoRecall: true,
 	autoRetain: true,
 	retainEveryNTurns: 1,
+	retainMaxDelayMs: 1_800_000,
+	retainOverlapTurns: 0,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -541,6 +544,8 @@ const MANAGED = {
 	autoRecall: true,
 	autoRetain: true,
 	retainEveryNTurns: 1,
+	retainMaxDelayMs: 1_800_000,
+	retainOverlapTurns: 0,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -814,7 +819,9 @@ test("routes recall: managed mode WITH a running runtime dials the injected runt
 test("config defaults: project scope + tags_match any + cadence 5 + observation-biased recall", () => {
 	assert.equal(CONFIG_DEFAULTS.recallScope, "project", "default recall is project (project + global)");
 	assert.equal(CONFIG_DEFAULTS.tagsMatch, "any", "any includes untagged/global memory");
-	assert.equal(CONFIG_DEFAULTS.retainEveryNTurns, 5, "cost-conscious auto-retain cadence");
+	assert.equal(CONFIG_DEFAULTS.retainEveryNTurns, 5, "cost-conscious auto-retain batch size");
+	assert.equal(CONFIG_DEFAULTS.retainMaxDelayMs, 1_800_000, "30m hook-observed max-delay flush");
+	assert.equal(CONFIG_DEFAULTS.retainOverlapTurns, 2, "bounded overlap carry-forward");
 	assert.deepEqual(CONFIG_DEFAULTS.recallTypes, ["observation", "world", "experience"]);
 	assert.ok(CONFIG_DEFAULTS.retainMission.length > 0);
 	assert.ok(CONFIG_DEFAULTS.observationsMission.length > 0);
@@ -840,6 +847,18 @@ test("validateConfigOverrides: tagsMatch, retainEveryNTurns, recallTypes, missio
 	assert.equal(validateConfigOverrides({ retainEveryNTurns: 0 }).ok, false);
 	assert.equal(validateConfigOverrides({ recallTypes: [] }).ok, false);
 	assert.equal(validateConfigOverrides({ recallTypes: ["bogus"] }).ok, false);
+});
+
+test("validateConfigOverrides: retainMaxDelayMs + retainOverlapTurns (batching cost levers)", () => {
+	const ok = validateConfigOverrides({ retainMaxDelayMs: 60000, retainOverlapTurns: 3 });
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value, { retainMaxDelayMs: 60000, retainOverlapTurns: 3 });
+	// 0 is valid for both (max-delay disabled / no overlap).
+	assert.deepEqual(validateConfigOverrides({ retainMaxDelayMs: 0, retainOverlapTurns: 0 }).value, { retainMaxDelayMs: 0, retainOverlapTurns: 0 });
+	// Negatives + non-numbers rejected.
+	assert.equal(validateConfigOverrides({ retainMaxDelayMs: -1 }).ok, false);
+	assert.equal(validateConfigOverrides({ retainOverlapTurns: -2 }).ok, false);
+	assert.equal(validateConfigOverrides({ retainOverlapTurns: "x" }).ok, false);
 });
 
 test("validateProjectOverride: safe keys only; cleared keys dropped; unsafe keys ignored", () => {
@@ -907,7 +926,7 @@ test("recall: tagsMatch any_strict (hard-isolation) flows through to the client"
 	}
 });
 
-test("auto-retain cadence: default retainEveryNTurns skips 4 turns, retains the 5th", async () => {
+test("auto-retain batching: default N buffers 4 turns then flushes ALL 5 in one aggregate", async () => {
 	const { client, calls } = makeClient();
 	__setClientFactory(() => client);
 	try {
@@ -916,16 +935,184 @@ test("auto-retain cadence: default retainEveryNTurns skips 4 turns, retains the 
 		for (let i = 1; i <= 4; i++) {
 			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
 		}
-		assert.equal(calls.retain.length, 0, "first four turns are skipped (no LLM extraction)");
+		assert.equal(calls.retain.length, 0, "first four turns are buffered (no LLM extraction yet)");
 		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "turn 5" });
-		assert.equal(calls.retain.length, 1, "the fifth turn retains");
-		assert.equal(calls.retain[0].content, "User: turn 5");
+		assert.equal(calls.retain.length, 1, "the fifth turn flushes ONE aggregate retain");
+		// ALL FIVE buffered turns appear in the single aggregate — batched, never sampled.
+		for (let i = 1; i <= 5; i++) {
+			assert.match(calls.retain[0].content, new RegExp(`User: turn ${i}\\b`), `turn ${i} is in the aggregate`);
+		}
+		assert.equal(calls.retain[0].opts.tags?.kind, "turn");
+		// The pending buffer's primary turns are cleared after the flush (count advances).
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "primary pending turns cleared after flush");
 	} finally {
 		__setClientFactory(null);
 	}
 });
 
-test("auto-retain cadence: retainEveryNTurns=1 preserves per-turn retain", async () => {
+test("auto-retain batching: N=10 buffers nine turns then flushes all ten in one aggregate", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 10 };
+		for (let i = 1; i <= 9; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 0, "nine turns buffered, nothing flushed yet");
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "turn 10" });
+		assert.equal(calls.retain.length, 1, "tenth turn flushes one aggregate");
+		for (let i = 1; i <= 10; i++) {
+			assert.match(calls.retain[0].content, new RegExp(`User: turn ${i}\\b`), `turn ${i} is in the N=10 aggregate`);
+		}
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: no buffered turn is silently dropped across consecutive batches", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// overlapTurns:0 ⇒ each turn appears EXACTLY once across the two aggregates.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 3, retainOverlapTurns: 0 };
+		for (let i = 1; i <= 6; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 2, "two full batches ⇒ two aggregate retains");
+		const all = `${calls.retain[0].content}\n${calls.retain[1].content}`;
+		for (let i = 1; i <= 6; i++) {
+			assert.match(all, new RegExp(`User: turn ${i}\\b`), `turn ${i} appears in some aggregate (never dropped)`);
+		}
+		// First aggregate is turns 1-3, second is 4-6 (no overlap ⇒ clean partition).
+		assert.match(calls.retain[0].content, /User: turn 1[\s\S]*User: turn 3/);
+		assert.match(calls.retain[1].content, /User: turn 4[\s\S]*User: turn 6/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: retainOverlapTurns carries the last summaries into the next aggregate", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 3, retainOverlapTurns: 2 };
+		// First batch: turns 1-3 ⇒ flush; overlap carries turns 2 & 3 forward.
+		for (let i = 1; i <= 3; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 1);
+		// Second batch: turns 4-6 ⇒ flush; aggregate INCLUDES overlap turns 2 & 3.
+		for (let i = 4; i <= 6; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 2);
+		const second = calls.retain[1].content;
+		assert.match(second, /Earlier context \(overlap\)/, "overlap context header present");
+		assert.match(second, /User: turn 2\b/, "overlap turn 2 carried forward");
+		assert.match(second, /User: turn 3\b/, "overlap turn 3 carried forward");
+		assert.match(second, /User: turn 4\b/);
+		assert.match(second, /User: turn 6\b/);
+		// Overlap is BOUNDED — only the last 2 of the prior batch, not turn 1.
+		assert.doesNotMatch(second, /User: turn 1\b/, "overlap is bounded (turn 1 not carried)");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: a later hook flushes a buffer older than retainMaxDelayMs", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// Big batch size so count never triggers; tiny max delay so age does.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 100, retainMaxDelayMs: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "stale turn" });
+		assert.equal(calls.retain.length, 0, "single turn below the batch size is buffered, not flushed");
+		// Backdate the pending turn so it is older than retainMaxDelayMs.
+		const buf = (await store.get("retain-pending:s")) as { turns: { summary: string; ts: number }[]; overlap: string[] };
+		buf.turns[0].ts = Date.now() - 10_000;
+		await store.put("retain-pending:s", buf);
+		// A LATER hook observes the stale buffer and flushes it (no provider timers).
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "later turn" });
+		assert.equal(calls.retain.length, 1, "stale buffer flushed by the later hook");
+		assert.match(calls.retain[0].content, /User: stale turn/);
+		assert.match(calls.retain[0].content, /User: later turn/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: beforeCompact synchronously flushes pending buffered turns first", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// High batch size ⇒ the two turns stay buffered until compaction flushes them.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "buffered 1" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "buffered 2" });
+		assert.equal(calls.retain.length, 0, "buffered, not yet flushed");
+		await provider.beforeCompact({ config: { ...cfg }, host: { store }, sessionId: "s", summary: "lost span" });
+		// Two retains: the flushed aggregate (sync) THEN the compact span (sync).
+		assert.equal(calls.retain.length, 2);
+		assert.match(calls.retain[0].content, /User: buffered 1[\s\S]*User: buffered 2/, "aggregate flushed first");
+		assert.equal(calls.retain[0].opts.sync, true, "pending flush on compaction is synchronous");
+		assert.equal(calls.retain[0].opts.tags?.kind, "turn");
+		assert.equal(calls.retain[1].content, "lost span");
+		assert.equal(calls.retain[1].opts.tags?.kind, "compaction");
+		// Buffer cleared after the synchronous flush.
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: sessionShutdown flushes the pending buffer (best-effort)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		const cfg = { ...ACTIVE, retainEveryNTurns: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "tail turn" });
+		assert.equal(calls.retain.length, 0, "buffered below the batch size");
+		await provider.sessionShutdown({ config: { ...cfg }, host: { store }, sessionId: "s" });
+		assert.equal(calls.retain.length, 1, "shutdown flushes the remaining buffered turns");
+		assert.match(calls.retain[0].content, /User: tail turn/);
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "buffer drained on shutdown");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: a failed flush is durably QUEUED, never dropped, and the buffer advances", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		state.failRetain = true;
+		const cfg = { ...ACTIVE, retainEveryNTurns: 2, retainOverlapTurns: 0 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t1" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t2" });
+		// Flush attempted (and failed) ⇒ the aggregate is preserved on the retry queue.
+		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		assert.equal(q.length, 1, "failed aggregate flush is durably queued");
+		assert.match(q[0].content, /User: t1[\s\S]*User: t2/);
+		// Buffer advanced so the count keeps moving (no unbounded growth on failure).
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "primary pending cleared even on a failed flush");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: retainEveryNTurns=1 preserves per-turn retain", async () => {
 	const { client, calls } = makeClient();
 	__setClientFactory(() => client);
 	try {
