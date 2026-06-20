@@ -345,3 +345,175 @@ test.describe("experiment-runner routes — autoresearch loop on a stub objectiv
 		}
 	});
 });
+
+test.describe("experiment-runner routes — autoresearch launches via iterate (not launch)", () => {
+	test("the FIRST iterate spawns the first candidate; launch refuses autoresearch", async ({ gateway }) => {
+		// Pins panel doLaunch fix #1: autoresearch must launch through `iterate`,
+		// because the A/B-only `launch` route returns LAUNCH_AB_ONLY for it. This
+		// test asserts the route-level contract the panel branches on.
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, () => ({
+				costUsd: 0.1,
+				gateVerdicts: { review: "passed" },
+				userMetrics: { objective: 1 },
+			}));
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ar-launch", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ar-launch-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ar launch e2e",
+				mode: "autoresearch",
+				runnable: { kind: "agent", spec: "optimize the thing" },
+				objective: { metricId: "objective.value", direction: "max" },
+				caps: { maxIterations: 6 },
+				stop: { plateauK: 3 },
+				perRunBudget: 1,
+			};
+			const defined = await routes.defineExperiment(ctx, { body: def });
+			expect(defined.error).toBeUndefined();
+
+			// launch refuses an autoresearch experiment — exactly why the panel must
+			// branch to `iterate` for this mode.
+			const launchAttempt = await routes.launch(ctx, { body: { experimentId } });
+			expect(launchAttempt.error).toBe("LAUNCH_AB_ONLY");
+			expect(spawned).toHaveLength(0);
+
+			// The first iterate spawns the first candidate (iteration 0).
+			const first = await routes.iterate(ctx, { body: { experimentId } });
+			expect(first.error).toBeUndefined();
+			expect(first.action).toBe("spawned");
+			expect(spawned).toHaveLength(1);
+			expect(first.candidateRun.iteration).toBe(0);
+			expect(first.candidateRun.status).toBe("spawned");
+			expect(first.candidateRun.childGoalId).toBeTruthy();
+			// The candidate carries its experiment identity + iteration in metadata.
+			expect(spawned[0].opts.metadata.experiment.experimentId).toBe(experimentId);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — live A/B poll → collect → aggregate yields non-empty metrics", () => {
+	test("collect writes per-run metrics; aggregate exposes them (the panel skipped collect)", async ({ gateway }) => {
+		// Pins panel loadDashboard fix #2: `poll` only settles + stores cost; metric
+		// extraction happens ONLY in `collect`. Without collect, aggregates are empty.
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, () => ({
+				costUsd: 0.1,
+				gateVerdicts: { build: "passed" },
+				taskCounts: { complete: 1, total: 1 },
+				userMetrics: { objective: 5 },
+			}));
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ab-collect", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ab-collect-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ab collect e2e",
+				mode: "ab",
+				runnable: { kind: "command", command: "echo metric" },
+				variants: [
+					{ armId: "baseline", label: "baseline", metadata: { temperature: 0.2 } },
+					{ armId: "hi", label: "hi", metadata: { temperature: 0.9 } },
+				],
+				repeats: 2,
+				metrics: [{ metricId: "cost.totalUsd" }, { metricId: "objective.value" }],
+				perRunBudget: 1,
+			};
+			await routes.defineExperiment(ctx, { body: def });
+			await routes.launch(ctx, { body: { experimentId } });
+			expect(spawned).toHaveLength(4);
+
+			// poll settles the runs but does NOT extract metrics.
+			const polled = await routes.poll(ctx, { body: { experimentId } });
+			expect(polled.allSettled).toBe(true);
+			expect(polled.runs.every((r: any) => !r.metrics || Object.keys(r.metrics).length === 0)).toBe(true);
+
+			// collect extracts metrics onto every settled run.
+			const collected = await routes.collect(ctx, { body: { experimentId } });
+			expect(collected.runs).toHaveLength(4);
+			expect(collected.runs.every((r: any) => r.metrics && Object.keys(r.metrics).length > 0)).toBe(true);
+			expect(collected.runs.every((r: any) => typeof r.metrics["cost.totalUsd"] === "number")).toBe(true);
+			expect(collected.runs.every((r: any) => r.metrics["objective.value"] === 5)).toBe(true);
+
+			// aggregate now exposes non-empty per-(arm × metric) aggregated values.
+			const agg = await routes.aggregate(ctx, { body: { experimentId } });
+			expect(agg.mode).toBe("ab");
+			expect(agg.aggregates.length).toBeGreaterThan(0);
+			// Every aggregate has runs behind it (n > 0) and a finite value — i.e. the
+			// metrics actually flowed from collect into aggregation (not empty).
+			const haveValues = agg.aggregates.some((a: any) => a.n > 0 && typeof a.value === "number" && Number.isFinite(a.value));
+			expect(haveValues).toBe(true);
+			const objAgg = agg.aggregates.find((a: any) => a.metricId === "objective.value");
+			expect(objAgg).toBeTruthy();
+			expect(objAgg.value).toBe(5);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — maxCostUsd is enforced PRE-SPAWN", () => {
+	test("the loop stops on budget when cumulative + perRunBudget would exceed the cap, with no extra spawn", async ({ gateway }) => {
+		// Pins fix #4: shouldStop passes def.perRunBudget as the projected next-run
+		// cost so the hard cap refuses to launch another (over-budget) candidate.
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			// Each run costs 0.1; perRunBudget=1; cap=1.05. After ONE settled run
+			// (cumulative 0.1) the next-spawn projection 0.1+1=1.1 > 1.05 → stop.
+			const reader = makeGoalReader(byGoalId, (opts) => {
+				const iter = opts?.metadata?.experiment?.iteration ?? 0;
+				return {
+					costUsd: 0.1,
+					gateVerdicts: { review: "passed" },
+					userMetrics: { objective: iter + 1 }, // always improving → no plateau stop
+				};
+			});
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ar-budget", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ar-budget-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ar budget e2e",
+				mode: "autoresearch",
+				runnable: { kind: "agent", spec: "optimize" },
+				objective: { metricId: "objective.value", direction: "max" },
+				caps: { maxIterations: 50, maxCostUsd: 1.05 },
+				stop: { plateauK: 50 }, // effectively disabled — budget must be the stop
+				perRunBudget: 1,
+			};
+			await routes.defineExperiment(ctx, { body: def });
+
+			let res: any = {};
+			let guard = 0;
+			do {
+				res = await routes.iterate(ctx, { body: { experimentId } });
+				expect(res.error).toBeUndefined();
+			} while (!res.stopped && guard++ < 20);
+
+			expect(res.stopped).toBeTruthy();
+			expect(String(res.stopped.reason)).toMatch(/budget/i);
+			// Only ONE candidate was ever spawned: the pre-spawn cap blocked the second.
+			expect(spawned).toHaveLength(1);
+
+			const store = await packStore();
+			const state = await store.get(PACK_ID, `exp/${experimentId}/state`);
+			expect(state.stopped.reason).toMatch(/budget/i);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});

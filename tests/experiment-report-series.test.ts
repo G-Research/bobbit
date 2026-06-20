@@ -123,6 +123,17 @@ describe("series: stop predicates", () => {
 		assert.equal(exceedsCaps({ caps: { maxIterations: 3 }, iterations: 2, cumulativeCostUsd: 0, elapsedMs: 0 }).exceeded, false);
 	});
 
+	it("exceedsCaps enforces maxCostUsd PRE-SPAWN via projectedNextCostUsd", () => {
+		// Cumulative is under the cap, but cumulative + projected next-run cost goes over → stop.
+		const over = exceedsCaps({ caps: { maxCostUsd: 5 }, iterations: 0, cumulativeCostUsd: 4, elapsedMs: 0, projectedNextCostUsd: 2 });
+		assert.equal(over.exceeded, true);
+		assert.match(over.reason as string, /budget/);
+		// Cumulative + projected exactly at the cap is NOT over (strict >).
+		assert.equal(exceedsCaps({ caps: { maxCostUsd: 5 }, iterations: 0, cumulativeCostUsd: 3, elapsedMs: 0, projectedNextCostUsd: 2 }).exceeded, false);
+		// No projection (default 0) ⇒ only the already-over check applies.
+		assert.equal(exceedsCaps({ caps: { maxCostUsd: 5 }, iterations: 0, cumulativeCostUsd: 4, elapsedMs: 0 }).exceeded, false);
+	});
+
 	it("isOverBudget compares per-run cost", () => {
 		assert.equal(isOverBudget(arRun(0, 1, { cost: { costUsd: 6 } }), 5), true);
 		assert.equal(isOverBudget(arRun(0, 1, { cost: { costUsd: 4 } }), 5), false);
@@ -156,5 +167,31 @@ describe("series: evaluateStop chooses the right reason at the right iteration",
 		const series = buildObjectiveSeries([arRun(0, 10), arRun(1, 20)], OBJ);
 		const stop = evaluateStop({ series, objective: OBJ, caps: { maxIterations: 10 }, stop: { plateauK: 5 }, cumulativeCostUsd: 0, elapsedMs: 0 });
 		assert.equal(stop.stopped, false);
+	});
+
+	it("stops PRE-SPAWN with a budget reason when cumulative+projected exceeds maxCostUsd", () => {
+		const series = buildObjectiveSeries([arRun(0, 10), arRun(1, 20)], OBJ);
+		// cumulative 4 is under the cap 5, but +perRunBudget(2) would overshoot → stop before spawning.
+		const stop = evaluateStop({
+			series,
+			objective: OBJ,
+			caps: { maxCostUsd: 5, maxIterations: 100 },
+			stop: { plateauK: 50 },
+			cumulativeCostUsd: 4,
+			elapsedMs: 0,
+			projectedNextCostUsd: 2,
+		});
+		assert.equal(stop.stopped, true);
+		assert.match(stop.reason, /budget/);
+		// Without the projection the same state keeps running (cumulative still under cap).
+		const keepGoing = evaluateStop({
+			series,
+			objective: OBJ,
+			caps: { maxCostUsd: 5, maxIterations: 100 },
+			stop: { plateauK: 50 },
+			cumulativeCostUsd: 4,
+			elapsedMs: 0,
+		});
+		assert.equal(keepGoing.stopped, false);
 	});
 });

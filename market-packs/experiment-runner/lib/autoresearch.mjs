@@ -90,6 +90,11 @@ export function shouldStop({ runs = [], def, cumulativeCostUsd = 0, elapsedMs = 
 	// No objective ⇒ no deterministic stop basis (autoresearch always has one).
 	if (!objective) return { stopped: false };
 	const series = objectiveSeries({ runs, objective });
+	// Pass the comparable per-run budget as the projected next-candidate cost so
+	// the shared `maxCostUsd` cap is enforced PRE-SPAWN (refuse to launch another
+	// candidate when cumulative + perRunBudget would exceed the cap). Math stays
+	// in the shared series lib — no fork here.
+	const projectedNextCostUsd = def && Number.isFinite(def.perRunBudget) ? def.perRunBudget : 0;
 	return evaluateStop({
 		series,
 		caps: (def && def.caps) || {},
@@ -97,5 +102,6 @@ export function shouldStop({ runs = [], def, cumulativeCostUsd = 0, elapsedMs = 
 		objective,
 		cumulativeCostUsd,
 		elapsedMs,
+		projectedNextCostUsd,
 	});
 }

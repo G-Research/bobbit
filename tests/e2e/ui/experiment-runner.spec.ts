@@ -221,6 +221,42 @@ test("autoresearch refuses to start uncapped; draft persists across reload", asy
 	await expect(page.locator(tid("experiment-runner-cap-max-iterations"))).toHaveValue("10");
 });
 
+test("autoresearch launches successfully via iterate (not the A/B-only launch route) and lands on the dashboard", async ({ page }) => {
+	// Regression for panel doLaunch fix #1: autoresearch used to call the A/B-only
+	// `launch` route, which returns LAUNCH_AB_ONLY, surfaced as a launch error and
+	// never navigated. The panel must branch to `iterate` and reach the dashboard.
+	await installPack();
+	await openWithPack(page);
+	await openPanelDeepLink(page);
+
+	await page.locator(tid("experiment-runner-mode-autoresearch")).click();
+	await expect(page.locator(tid("experiment-runner-autoresearch-banner"))).toBeVisible();
+
+	// Fill a fully-capped, stop-conditioned, acknowledged autoresearch definition.
+	await page.locator(tid("experiment-runner-name")).fill("optimize-launch");
+	await page.locator(tid("experiment-runner-body")).fill("echo '{\"metric\":\"objective.value\",\"value\":0.5}'");
+	await page.locator(tid("experiment-runner-per-iter-budget")).fill("2");
+	await page.locator(tid("experiment-runner-cap-max-iterations")).fill("3");
+	await page.locator(tid("experiment-runner-stop-plateau")).fill("2");
+	await page.locator(tid("experiment-runner-confirm-ack")).check();
+
+	const review = page.locator(tid("experiment-runner-review-launch"));
+	await expect(review).toBeEnabled();
+	await review.click();
+
+	// Confirm view → launch.
+	await expect(page.locator(tid("experiment-runner-view-confirm"))).toBeVisible();
+	const launch = page.locator(tid("experiment-runner-launch"));
+	await expect(launch).toContainText(/Launch loop/i);
+	await launch.click();
+
+	// The panel navigates to the dashboard (it did NOT stall on a launch error).
+	await expect(page.locator(tid("experiment-runner-view-dashboard"))).toBeVisible({ timeout: 20_000 });
+	// No A/B-only error surfaced — the autoresearch branch went through `iterate`.
+	const launchError = page.locator(tid("experiment-runner-launch-error"));
+	await expect(launchError).toHaveCount(0);
+});
+
 test("dashboard renders a seeded A/B experiment; editing the spec re-renders without a re-run; uninstall reconciles", async ({ page }) => {
 	await installPack();
 

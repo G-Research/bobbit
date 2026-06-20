@@ -277,9 +277,17 @@ function buildDefinition(d) {
 	const basics = d.basics || {};
 	// MetricSelection[]: { metricId, aggregation?, directionOverride? } (+ ui-only
 	// hints the backend ignores). The draft uses `metric` internally; emit metricId.
-	const metrics = arrayOf(d.metrics).filter((m) => m.collect).map((m) => ({
-		metricId: m.metric, aggregation: m.aggregation, direction: m.direction, primary: !!m.primary,
-	}));
+	// The canonical `directionOverride` is 'max'|'min' (aggregate.ts::metricDirection
+	// reads it for winner selection). The draft carries a display value
+	// (higher-better|lower-better|neutral); map it and only emit an override for a
+	// non-neutral choice so the user's direction reaches winner selection.
+	const DIR_TO_CANONICAL = { "higher-better": "max", "lower-better": "min" };
+	const metrics = arrayOf(d.metrics).filter((m) => m.collect).map((m) => {
+		const sel = { metricId: m.metric, aggregation: m.aggregation, primary: !!m.primary };
+		const directionOverride = DIR_TO_CANONICAL[m.direction];
+		if (directionOverride) sel.directionOverride = directionOverride;
+		return sel;
+	});
 	// RunnableSpec: a command unit → kind 'command' (body → command); otherwise the
 	// agent/goal-spec unit → kind 'agent' (body → spec). Never `body` / kind 'goal'.
 	const isCommand = basics.runnableUnit === "command";
@@ -494,9 +502,18 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		}
 
 		// Poll live runs if the experiment is still running (after a user gesture only).
+		// `poll` only moves runs to `settled` + stores cost; metric extraction,
+		// rawOutcome, completionBar, and verified are written ONLY by `collect`. So
+		// follow the poll with a `collect` (idempotent — it only touches `settled`
+		// runs, best-effort) BEFORE `report`, otherwise live A/B aggregates are empty.
+		const hasSettled = (rs) => arrayOf(rs).some((r) => r && r.status === "settled");
 		if (state && state.status === "running") {
 			const polled = await callRoute(host, "poll", { method: "POST", body: { experimentId } });
 			if (polled.ok && polled.data && Array.isArray(polled.data.runs)) runs = polled.data.runs;
+			if (hasSettled(runs)) {
+				const collected = await callRoute(host, "collect", { method: "POST", body: { experimentId } });
+				if (collected.ok && collected.data && Array.isArray(collected.data.runs)) runs = collected.data.runs;
+			}
 		}
 
 		// Render model from the shared reporting lib when the route is available.
@@ -538,7 +555,13 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		await storePut(host, K.metrics(experimentId), definition.metrics);
 		await appendIndex(host, instanceKey, { experimentId, title: definition.title, mode: definition.mode, status: "running" });
 
-		const launched = await callRoute(host, "launch", { method: "POST", body: { experimentId } });
+		// Branch on mode: the `launch` route is A/B-only (it returns LAUNCH_AB_ONLY
+		// for autoresearch). For autoresearch, skip `launch` and call `iterate` to
+		// spawn the FIRST candidate. Either backend `{error}` (other than the
+		// offline routes-unavailable fallback) sets launchError and does NOT
+		// navigate. Only one kick-off call fires per mode (no double iterate).
+		const launchRoute = definition.mode === "autoresearch" ? "iterate" : "launch";
+		const launched = await callRoute(host, launchRoute, { method: "POST", body: { experimentId } });
 		if (!launched.ok && launched.error !== "routes-unavailable") {
 			patch(host, instanceKey, { launching: false, launchError: launched.error });
 			return;
@@ -547,8 +570,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		patch(host, instanceKey, { launching: false });
 		navigate(host, { experimentId, view: "dashboard" });
 		await loadDashboard(host, instanceKey, experimentId);
-		// Kick the autoresearch loop forward once on launch.
-		if (definition.mode === "autoresearch") await callRoute(host, "iterate", { method: "POST", body: { experimentId } });
 	}
 
 	async function appendIndex(host, instanceKey, row) {

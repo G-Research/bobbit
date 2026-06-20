@@ -45,6 +45,7 @@ class Harness {
 	broadcasts: any[] = [];
 	prefs: SubgoalNestingPrefs = { subgoalsEnabled: true, maxNestingDepth: 3 };
 	owner: { goalId?: string; teamGoalId?: string } | undefined = { goalId: "exp-goal" };
+	startOutcome: "started" | "capacity-blocked" = "started";
 	private seq = 0;
 
 	constructor() {
@@ -107,7 +108,7 @@ class Harness {
 		return {
 			sessionManager: { getPersistedSession: () => this.owner } as unknown as Pick<SessionManager, "getPersistedSession">,
 			projectContextManager: { getContextForGoal: () => this.ctx } as unknown as Pick<ProjectContextManager, "getContextForGoal">,
-			verificationHarness: { requestChildStart: (id: string) => { this.startCalls.push(id); return "started" as const; } } as unknown as Pick<VerificationHarness, "requestChildStart">,
+			verificationHarness: { requestChildStart: (id: string) => { this.startCalls.push(id); return this.startOutcome; } } as unknown as Pick<VerificationHarness, "requestChildStart">,
 			getSubgoalNestingPrefs: () => this.prefs,
 			broadcastToAll: (ev: unknown) => { this.broadcasts.push(ev); },
 		};
@@ -264,5 +265,36 @@ describe("spawnExperimentChildGoal — guard refusals", () => {
 			(err: unknown) => err instanceof SpawnGoalError && err.code === "INVALID_INLINE_ROLES",
 		);
 		assert.equal(h.createGoalCalls.length, 0);
+	});
+});
+
+describe("spawnExperimentChildGoal — capacity-blocked scheduling", () => {
+	let h: Harness;
+	beforeEach(() => { h = new Harness(); });
+
+	it("parks the child state:'blocked' and broadcasts goal_state_changed when requestChildStart is capacity-blocked", async () => {
+		// Mirror the REST spawn-child handler (nested-goal-routes.ts ~693): a
+		// capacity-queued child must be stamped state='blocked' with a broadcast so
+		// it is visible + the scheduler can start it later when a permit frees.
+		h.startOutcome = "capacity-blocked";
+		const res = await spawnExperimentChildGoal(h.deps(), "owner-1", baseOpts({ runKey: "cap-1" }));
+		// The child goal is still created and returned.
+		assert.equal(h.createGoalCalls.length, 1);
+		assert.match(res.goalId, /^child-/);
+		// state:'blocked' was stamped via updateGoal (in addition to the runKey stamp).
+		const blockedUpdate = h.updateGoalCalls.find((u) => u.id === res.goalId && u.updates.state === "blocked");
+		assert.ok(blockedUpdate, "expected an updateGoal stamping state:'blocked'");
+		assert.equal(h.goals.get(res.goalId)!.state, "blocked");
+		// goal_state_changed was broadcast for the parked child.
+		const stateChanged = h.broadcasts.find((b) => b.type === "goal_state_changed" && b.goalId === res.goalId);
+		assert.ok(stateChanged, "expected a goal_state_changed broadcast for the capacity-blocked child");
+	});
+
+	it("does NOT stamp state:'blocked' or broadcast goal_state_changed when the start succeeds", async () => {
+		h.startOutcome = "started";
+		const res = await spawnExperimentChildGoal(h.deps(), "owner-1", baseOpts({ runKey: "ok-1" }));
+		assert.ok(!h.updateGoalCalls.some((u) => u.updates.state === "blocked"));
+		assert.ok(!h.broadcasts.some((b) => b.type === "goal_state_changed"));
+		assert.equal(h.goals.get(res.goalId)!.state, undefined);
 	});
 });

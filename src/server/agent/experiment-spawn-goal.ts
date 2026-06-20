@@ -238,7 +238,19 @@ export async function spawnExperimentChildGoal(
 		ctx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map((g) => g.id));
 	}
 	deps.broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId });
-	deps.verificationHarness.requestChildStart(child.id);
+	// Request a scheduled (cap-aware) start. A capacity-blocked child is parked
+	// `state='blocked'` and started later when a permit frees (mirrors the REST
+	// spawn-child handler in nested-goal-routes.ts). Without this stamp the child
+	// would sit in its default state while invisibly queued.
+	const outcome = deps.verificationHarness.requestChildStart(child.id);
+	if (outcome === "capacity-blocked") {
+		try {
+			await ctx.goalManager.updateGoal(child.id, { state: "blocked" });
+			deps.broadcastToAll({ type: "goal_state_changed", goalId: child.id });
+		} catch (err) {
+			console.warn(`[experiment-spawn-goal] failed to stamp capacity-blocked state for ${child.id} (non-fatal):`, err);
+		}
+	}
 
 	return { goalId: child.id };
 }

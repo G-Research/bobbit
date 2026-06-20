@@ -136,19 +136,40 @@ export function isOverBudget(run: RunRecord, perRunBudget: number | undefined): 
 	return c > perRunBudget;
 }
 
-/** Budget-cap predicate: any finite cap exceeded → true. */
+/**
+ * Budget-cap predicate: any finite cap exceeded → true.
+ *
+ * `projectedNextCostUsd` (default 0) is the cost the loop expects the NEXT
+ * candidate to incur (the comparable per-run budget). The `maxCostUsd` cap is a
+ * HARD PRE-SPAWN cap: the loop must refuse to launch another candidate when the
+ * already-spent cost plus that projection would exceed the cap. Without this,
+ * a loop with `cumulative < maxCostUsd` but `cumulative + perRunBudget >
+ * maxCostUsd` would still spawn one more (over-budget) child.
+ */
 export function exceedsCaps(args: {
 	caps?: AutoresearchCaps;
 	iterations: number;
 	cumulativeCostUsd: number;
 	elapsedMs: number;
+	projectedNextCostUsd?: number;
 }): { exceeded: boolean; reason?: string } {
 	const caps = args.caps ?? {};
 	if (typeof caps.maxIterations === "number" && args.iterations >= caps.maxIterations) {
 		return { exceeded: true, reason: `budget: iterations >= ${caps.maxIterations}` };
 	}
-	if (typeof caps.maxCostUsd === "number" && args.cumulativeCostUsd >= caps.maxCostUsd) {
-		return { exceeded: true, reason: `budget: cost >= ${caps.maxCostUsd}` };
+	if (typeof caps.maxCostUsd === "number") {
+		if (args.cumulativeCostUsd >= caps.maxCostUsd) {
+			return { exceeded: true, reason: `budget: cost >= ${caps.maxCostUsd}` };
+		}
+		const projected = typeof args.projectedNextCostUsd === "number" && Number.isFinite(args.projectedNextCostUsd)
+			? args.projectedNextCostUsd
+			: 0;
+		if (projected > 0 && args.cumulativeCostUsd + projected > caps.maxCostUsd) {
+			return {
+				exceeded: true,
+				reason: `budget: projected cost ${args.cumulativeCostUsd + projected} > ${caps.maxCostUsd}`,
+			};
+		}
 	}
 	if (typeof caps.maxWallClockMs === "number" && args.elapsedMs >= caps.maxWallClockMs) {
 		return { exceeded: true, reason: `budget: wallClock >= ${caps.maxWallClockMs}ms` };
@@ -168,6 +189,9 @@ export function evaluateStop(args: {
 	stop?: StopSpec;
 	cumulativeCostUsd: number;
 	elapsedMs: number;
+	/** Cost the next candidate is expected to incur (the comparable per-run
+	 *  budget). Enforces `maxCostUsd` as a hard PRE-SPAWN cap. */
+	projectedNextCostUsd?: number;
 }): StopAnnotation {
 	const { series, objective, caps, stop } = args;
 	const iterations = series.length;
@@ -177,6 +201,7 @@ export function evaluateStop(args: {
 		iterations,
 		cumulativeCostUsd: args.cumulativeCostUsd,
 		elapsedMs: args.elapsedMs,
+		projectedNextCostUsd: args.projectedNextCostUsd,
 	});
 	if (budget.exceeded) {
 		return { stopped: true, reason: budget.reason as string, iteration: iterations };
