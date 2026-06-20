@@ -21,6 +21,10 @@ config:
   #                                from externalDatabaseUrl (runtime mode external-postgres).
   mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }
   externalUrl: { type: string, optional: true }
+  # Optional human-facing Hindsight dashboard URL. Display/open-only ("Open Hindsight
+  # UI") — NEVER dialed by the client and NEVER gates activation (dormancy stays on
+  # externalUrl). Not a secret.
+  uiUrl: { type: string, optional: true }
   apiKey: { type: secret, optional: true }
   # External Postgres connection URL for managed-external-postgres mode. Maps onto
   # the runtime env HINDSIGHT_API_DATABASE_URL; unused in external/managed modes.

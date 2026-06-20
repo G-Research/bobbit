@@ -144,6 +144,13 @@ export const routes = {
 			autoRecall: cfg.autoRecall,
 			autoRetain: cfg.autoRetain,
 			queueDepth: depth,
+			// Additive (UX surfacing — existing keys unchanged): the active configured
+			// values both the panel and marketplace render without a second round-trip.
+			// Both URLs are NON-secret; secrets are never echoed here.
+			externalUrl: cfg.externalUrl ?? "", // data-plane API URL
+			uiUrl: cfg.uiUrl ?? "", // human dashboard URL (display/open-only)
+			timeoutMs: cfg.timeoutMs,
+			recallBudget: cfg.recallBudget,
 			...(err ? { lastError: err } : {}),
 		};
 		// Probe health ONLY when there is a reachable data plane (an external URL, or a
