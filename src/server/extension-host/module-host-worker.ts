@@ -119,7 +119,9 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// agents through these six poll-based verbs ONLY (no blocking `wait`); the live
 	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
 	// services the proxied calls over the same channel.
-	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
+	// `spawnGoal` (experiment-runner seam) is the 7th verb — launches a child GOAL
+	// carrying a per-arm treatment; rides the same `agents` capability.
+	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status", "spawnGoal"]),
 };
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
