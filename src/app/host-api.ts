@@ -96,8 +96,8 @@ setPanelHostFactory((sessionId, packId, panelId) =>
 	getHostApi(sessionId, undefined, { kind: "pack", packId, contributionKind: "panel", contributionId: panelId }),
 );
 
-// Pack schema V1 §8.4: give pack LAUNCHER entrypoints (git-widget / composer-slash /
-// command-palette) a host API bound to the ACTIVE (owner) session + the entrypoint's
+// Pack schema V1 §8.4: give pack LAUNCHER entrypoints (composer-slash /
+// session-menu) a host API bound to the ACTIVE (owner) session + the entrypoint's
 // PACK-BOUND surface, so a spawn launcher can `callRoute(run)` (resolving the owner
 // branch's PR) and `ui.openPanel({sessionId: childSessionId})` (selecting + switching
 // to the spawned child). A launcher originates no tool call, so `toolUseId` is

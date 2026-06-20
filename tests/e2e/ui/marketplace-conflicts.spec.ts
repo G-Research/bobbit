@@ -191,7 +191,6 @@ test.describe("Marketplace — install + registry surfacing of conflicts / orpha
 	// behaviour depends on this filtered set being correct.
 	test("built-in pr-walkthrough: disabling entrypoints drops them + the route deep-link from /api/ext/contributions", async () => {
 		const PACK = "pr-walkthrough";
-		const LIST_NAMES = ["pr-walkthrough-open", "pr-walkthrough-git-widget", "pr-walkthrough-palette", "pr-walkthrough-route"];
 
 		const before = (await listContributions()).find((p) => p.packId === PACK);
 		expect(before, "the built-in pr-walkthrough pack must resolve with NO install").toBeTruthy();
@@ -199,10 +198,15 @@ test.describe("Marketplace — install + registry surfacing of conflicts / orpha
 			(before?.entrypoints ?? []).some((e) => e.kind === "route" && e.routeId === PACK),
 			"the kind:route deep-link must be present before disable",
 		).toBe(true);
+		expect((before?.entrypoints ?? []).some((e) => e.kind === "session-menu"), "the session-menu launcher must be present before disable").toBe(true);
+		const listNames = (before?.entrypoints ?? [])
+			.map((e) => e.listName)
+			.filter((name): name is string => typeof name === "string" && name.length > 0);
+		expect(listNames).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
 
 		const put = await apiFetch("/api/marketplace/pack-activation", {
 			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK, disabled: { entrypoints: LIST_NAMES } }),
+			body: JSON.stringify({ scope: "server", packName: PACK, disabled: { entrypoints: listNames } }),
 		});
 		expect(put.status, "server-scope activation PUT for the built-in pack must succeed").toBe(200);
 

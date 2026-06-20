@@ -33,8 +33,8 @@
  * "no post on mount" gate is `navigator.userActivation` (read in
  * {@link consumeGesture}), NOT a flag set here — a pack cannot fabricate transient
  * activation, so wrapping is unnecessary for security. Retained so existing
- * handlers (entrypoint launchers, git-widget / command-palette clicks, composer
- * slash invocation) and tests keep compiling without churn.
+ * handlers (entrypoint launchers, session-menu clicks, composer slash invocation)
+ * and tests keep compiling without churn.
  */
 export function runWithUserGesture<T>(fn: () => T): T {
 	return fn();

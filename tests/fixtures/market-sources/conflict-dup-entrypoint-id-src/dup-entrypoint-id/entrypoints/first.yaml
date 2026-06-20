@@ -1,5 +1,5 @@
 id: dup.entry
-kind: command-palette
+kind: session-menu
 label: First
 target:
   route: dup-entry-route-a

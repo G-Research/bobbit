@@ -459,6 +459,7 @@ function closeSidebarActionsPopover(render = true): void {
 	if (!current) return;
 	_openSidebarActionsPopover = null;
 	current.element.open = false;
+	try { current.element.remove(); } catch { /* ignore */ }
 	if (render) renderApp();
 }
 
@@ -500,6 +501,7 @@ async function openSidebarActionsPopover(input: {
 		event.stopPropagation();
 		const current = _openSidebarActionsPopover;
 		const action = current?.actions.find((item) => item.id === event.detail.actionId);
+		closeSidebarActionsPopover(false);
 		void action?.run(event);
 	}) as EventListener);
 	element.addEventListener("close", () => removeSidebarActionsPopoverElement(element));

@@ -112,7 +112,7 @@ function writePack(repo: string, spec: PackSpec): void {
 		writeFileSync(
 			join(packDir, "entrypoints", `${e.listName}.yaml`),
 			`id: ${e.id ?? `${e.listName}-id`}\n` +
-				`kind: command-palette\n` +
+				`kind: session-menu\n` +
 				`label: ${e.label ?? e.listName}\n` +
 				(e.description ? `description: ${e.description}\n` : "") +
 				`target:\n  panelId: ${e.panelId ?? `${e.listName}-panel`}\n`,

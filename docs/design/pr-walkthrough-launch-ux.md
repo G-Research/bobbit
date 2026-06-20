@@ -4,6 +4,8 @@
 **Supersedes the launch/lifecycle model in:** [`pr-walkthrough-restore-ux.md`](pr-walkthrough-restore-ux.md) (PR #750, commit `4145abc`).
 **Builds on (unchanged foundation):** the `host.agents`-minted, role-granted, no-secret, binding-routed reviewer + the Host-API `PanelTarget.sessionId` (contract **v2**, already shipped) + the `setSessionSwitcher` full-switch path.
 
+> **Launcher-surface update:** `git-widget-button` and `command-palette` are removed and unsupported. This doc preserves the spawn-on-click child-reviewer semantics, but all launcher examples now use `composer-slash` or `session-menu`, plus the `kind:"route"` deep-link.
+
 This doc finalises the **mechanism** for the four locked requirements. The product decisions in the goal spec are requirements, not options — this document designs only the *how*. Every behaviour stated here is an acceptance criterion.
 
 ---
@@ -12,12 +14,12 @@ This doc finalises the **mechanism** for the four locked requirements. The produ
 
 PR #750 wired the launcher to *navigate the owner session* to `#/ext/pr-walkthrough?autorun=true`, which transiently mounts the panel **in the owner session**, autoruns `run` on mount, re-keys the pane to the child, and navigates to the child. On submit the reviewer is **server-dismissed**. That journey is wrong on four counts. The corrected journey:
 
-1. **Click "PR Walkthrough" in the GitStatusWidget** → spawns a fresh read-only reviewer sub-agent and **auto-switches** the view to it. **No panel/tab is ever mounted in the owner session.** Session title exactly `PR Walkthrough`; role `label: PR Walkthrough`; accessory `magnifier`.
+1. **Click "PR Walkthrough" in the sidebar or chat-header session actions menu** → spawns a fresh read-only reviewer sub-agent and **auto-switches** the view to it. **No panel/tab is ever mounted in the owner session.** Session title exactly `PR Walkthrough`; role `label: PR Walkthrough`; accessory `magnifier`.
 2. **In the sub-agent session the panel auto-opens** as the visible tab, showing exactly `PR Walkthrough: In Progress` + a spinner (no %), with **no manual Run/Load buttons anywhere**.
 3. **On submit** the child panel flips pending → rendered cards (the existing `publishing`→`rendered` seam). The reviewer is **NOT dismissed**: it posts a one-line "walkthrough ready" note, goes idle, stays read-only + selectable.
 4. **The user terminates** the session via the existing session dismiss/terminate control when done.
 
-No-PR / spawn-failure: an **inline error in the git-widget dropdown**; nothing spawned, no view switch. Always-fresh: every click is a NEW reviewer (no target dedup). Restart-survival: the post-submit reviewer survives a gateway restart, reaped only by the standard owner-gone rule.
+No-PR / spawn-failure: **visible launcher feedback from the session menu**; nothing spawned, no view switch, and the menu/popover is not left wedged open. Always-fresh: every click is a NEW reviewer (no target dedup). Restart-survival: the post-submit reviewer survives a gateway restart, reaped only by the standard owner-gone rule.
 
 ---
 
@@ -25,7 +27,7 @@ No-PR / spawn-failure: an **inline error in the git-widget dropdown**; nothing s
 
 | # | Current (PR #750) | Desired | Exact change site |
 |---|---|---|---|
-| G-1 | git-widget entrypoint navigates to a deep-link route with `autorun:true`; `_runPackLauncher` → `runLauncherEntrypoint` → `navigateToTarget` mounts the panel in the **owner** session. | Click invokes the pack `run` route, then opens the panel in the returned `childSessionId`; **no owner panel**. | `market-packs/pr-walkthrough/entrypoints/pr-walkthrough-git-widget.yaml` (target shape); `src/app/pack-entrypoints.ts::runLauncherEntrypoint` + new dispatch; `src/ui/components/GitStatusWidget.ts::_runPackLauncher`. |
+| G-1 | Legacy launcher target navigates to a deep-link route with `autorun:true`; `runLauncherEntrypoint` → `navigateToTarget` mounts the panel in the **owner** session. | Click invokes the pack `run` route, then opens the panel in the returned `childSessionId`; **no owner panel**. | `market-packs/pr-walkthrough/entrypoints/pr-walkthrough-session-menu.yaml` (target shape); `src/app/pack-entrypoints.ts::runLauncherEntrypoint` + spawn dispatch; shared session menu actions in `src/app/session-actions.ts`. |
 | G-2 | Role `label: PR Walkthrough Reviewer`, `accessory: review` (not a real sprite — `src/ui/bobbit-sprite-data.ts` only defines `magnifier`). Session title not set by spawn → `createSession` defaults `plan.title` to `"New session"` (`session-setup.ts`). | `label: PR Walkthrough`, `accessory: magnifier`; **session title `PR Walkthrough`** threaded through spawn. | `market-packs/pr-walkthrough/roles/pr-reviewer.yaml`; `src/server/extension-host/server-host-api.ts` spawn wrapper; `market-packs/pr-walkthrough/lib/routes.mjs::launchReviewer`. |
 | G-3 | Panel autoruns on mount via `autorun` param + `maybeAutorun` (`src/panel.js`); owner pane shows `Run PR walkthrough` / `Load walkthrough` buttons (`showActions`). Pending label `Reviewing the PR…`. | No autorun machinery; no manual buttons; the **child** pane self-drives the poll; pending label exactly `PR Walkthrough: In Progress`. | `market-packs/pr-walkthrough/src/panel.js` (rebuild `lib/panel.js`); `entrypoints/pr-walkthrough-route.yaml` (drop `autorun` paramKey). |
 | G-4 | Submit reaps the reviewer: `orchestrationCore.dismiss(...)` + `sessionManager.updateSessionMeta({childTerminal:true,terminalAt})` + `last/<owner>` pointer write (`src/server/pr-walkthrough/routes.ts`, submit-yaml handler). `status` route also `dismiss`es on both branches (`lib/routes.mjs::status`). `run` dedups by `reviewerKey` (`lib/routes.mjs::launchReviewer`, the `existing` block + index write + post-claim reconcile). | No submit-time dismiss / no `childTerminal` stamp / no `last/<owner>` write; no status-poll dismiss; **no `reviewerKey` dedup** (always fresh). | `src/server/pr-walkthrough/routes.ts`; `market-packs/pr-walkthrough/lib/routes.mjs`. |
@@ -64,11 +66,11 @@ function isSpawnLaunchTarget(t: unknown): t is SpawnLaunchTarget {
 
 `LauncherEntrypoint.target` becomes `PanelTarget | RouteTarget | SpawnLaunchTarget`. `entrypointInfosFromContributions` passes the target through unchanged for launcher kinds (it already does — it does not validate target internals for launchers), so a `{action,route,panelId}` target survives the contributions wire. `registerPackEntrypoints`'s launcher branch already accepts any non-panel/non-route target shape only if `isPanelTarget || target.route` — **extend that guard** to also accept `isSpawnLaunchTarget(target)`.
 
-**Entrypoint YAML (the git-widget launcher):**
+**Entrypoint YAML (the session-menu launcher):**
 
 ```yaml
-id: pr-walkthrough.git-widget
-kind: git-widget-button
+id: pr-walkthrough.session-menu
+kind: session-menu
 label: PR Walkthrough
 target:
   action: spawn
@@ -76,7 +78,7 @@ target:
   panelId: pr-walkthrough.panel
 ```
 
-The composer-slash (`pr-walkthrough-open.yaml`) and command-palette (`pr-walkthrough-palette.yaml`) launchers get the **same** `target` (Q3: all launch surfaces spawn). The `kind:"route"` deep-link entrypoint (`pr-walkthrough-route.yaml`) **stays** (it registers the panel so a child-session reload restores `#/ext/pr-walkthrough`), but drops `autorun` from `paramKeys` → `paramKeys: [jobId, baseSha, headSha]`.
+The composer-slash (`pr-walkthrough-open.yaml`) launcher gets the **same** `target` (Q3: all launch surfaces spawn). The `kind:"route"` deep-link entrypoint (`pr-walkthrough-route.yaml`) **stays** (it registers the panel so a child-session reload restores `#/ext/pr-walkthrough`), but drops `autorun` from `paramKeys` → `paramKeys: [jobId, baseSha, headSha]`.
 
 ### 3.2 The launcher-bound Host API
 
@@ -95,7 +97,7 @@ export function getLauncherHost(packId: string): HostApi | undefined {
 
 `src/app/host-api.ts` self-registers it at bootstrap (same place it registers `panelHostFactory`), binding the pack-scoped surface `{kind:"pack", packId, contributionKind:"entrypoint", contributionId}` to the active session. `callRoute` is authorized through the owner session's `allowedTools` guard exactly as a panel's `callRoute` is — the owner already has the pack installed, so `/api/ext/pr-walkthrough/run` is reachable. **Pack purity holds:** the pack provides declarative target + route + panel; the route call and navigation are versioned-Host-API only; the dispatch logic lives in platform `pack-entrypoints.ts`.
 
-### 3.3 Dispatch + inline-error contract to GitStatusWidget
+### 3.3 Dispatch + feedback contract for session menus
 
 `runLauncherEntrypoint` gains an optional result callback so the surface can render `NO_PR`/failure inline:
 
@@ -136,26 +138,11 @@ async function runSpawnLauncher(l: RegisteredLauncher, target: SpawnLaunchTarget
 
 **`run` already returns** `{ ok:true, childSessionId, jobId, … }` or `{ ok:false, code:"NO_PR" | …, error }` from the bare-body resolve-current-branch path (`lib/routes.mjs::run` → `resolveCurrentBranchTarget`). No `run` signature change is needed — its `ok:false` surfaces as the inline error; its `ok:true.childSessionId` drives the open.
 
-**GitStatusWidget** (`_runPackLauncher`): currently it `_closeDropdown()` then `runLauncherEntrypoint(id)`. New behaviour — keep the dropdown open until we know the result, and render the error inline on failure:
+The shared session action model adds one action per `listLauncherEntrypoints("session-menu")` result. Both the sidebar session-row menu and the chat-header menu consume that same model, so launcher availability and error handling cannot drift between surfaces.
 
-```ts
-@state private _launcherError: { id: string; message: string } | null = null;
+On click, the menu action calls `runLauncherEntrypoint(launcher.key, onResult, { sessionId })` inside the user gesture. Spawn launchers emit pending feedback such as `Starting PR Walkthrough…`; `{ ok:false }` results emit visible error feedback via `bobbit-launcher-feedback` and do not spawn, switch sessions, or leave the menu wedged open. `NO_PR` should surface as a user-readable message such as `No pull request found for this branch.`
 
-private _runPackLauncher(id: string): void {
-	this._launcherError = null;
-	try {
-		runLauncherEntrypoint(id, (r) => {
-			if (r.ok) { this._closeDropdown(); return; }            // view switches to the child
-			this._launcherError = { id, message: r.error || "Could not start the PR walkthrough." };
-			if (this._dropdownEl) render(this._renderDropdownContent(), this._dropdownEl);  // re-render portal inline
-		});
-	} catch { /* non-fatal */ }
-}
-```
-
-`_renderPackLaunchers` renders `this._launcherError?.id === b.id` as an inline `<div data-testid="git-widget-launcher-error" style="color:var(--negative)">${message}</div>` beneath the button. The dropdown stays open on error; nothing is spawned; no view switch (the `run` route returns before any spawn on `NO_PR`).
-
-Note: `runLauncherEntrypoint` is called from three surfaces — GitStatusWidget (`_runPackLauncher`), CommandPalette (`CommandPalette.ts`), MessageEditor slash (`MessageEditor.ts`). The `onResult` arg is optional; the palette/composer callers may pass it to toast the error, but at minimum must not regress (calling without a callback still spawns + switches on success).
+Note: `runLauncherEntrypoint` is also called by the composer slash launcher path. The `onResult` arg remains optional, but any user-facing launch surface should pass it so spawn failures are visible.
 
 ---
 
@@ -238,7 +225,7 @@ The reviewer is a normal selectable `host-agents` child session post-submit. **V
 ## 6. Removals checklist
 
 - `market-packs/pr-walkthrough/src/panel.js`: `maybeAutorun`, `markAutorunConsumed`, `autorunMarkerKey`, `wantsAutorun`, the `autorunConsumed` flag, the owner `onRun`/`onLoad` closures, the `showActions` Run/Load buttons, `readSubmittedToolCall` (owner transcript scan). Keep `publishAndLoad`, `renderBundle`/cards, the child-self poll (§4.2), recover-on-mount for the child pane.
-- `entrypoints/pr-walkthrough-git-widget.yaml` + `pr-walkthrough-open.yaml` + `pr-walkthrough-palette.yaml`: replace `target.route`/`autorun` with the `{action:spawn, route:run, panelId}` target.
+- `entrypoints/pr-walkthrough-session-menu.yaml` + `pr-walkthrough-open.yaml`: use the `{action:spawn, route:run, panelId}` target. Remove the legacy Git widget/palette launcher files rather than keeping aliases.
 - `entrypoints/pr-walkthrough-route.yaml`: `paramKeys: [jobId, baseSha, headSha]` (drop `autorun`).
 - `lib/routes.mjs`: `reviewerKey` dedup, `inFlightLaunches`, post-claim reconcile, `status` dismisses, `recover` owner branch.
 - `src/server/pr-walkthrough/routes.ts`: submit-time `dismiss`, `childTerminal` stamp, `last/<owner>` write (+ `prwLastKey` if unused).
@@ -251,14 +238,14 @@ The pack surface (`src/panel.js`, `lib/routes.mjs`, `entrypoints/*`, `roles/*`) 
 
 | Group | Files (disjoint) | Work |
 |---|---|---|
-| **G-A** (pack surface) | `market-packs/pr-walkthrough/src/panel.js` → rebuild `lib/panel.js` via `npm run build:packs`; `lib/routes.mjs`; `entrypoints/pr-walkthrough-{git-widget,open,palette,route}.yaml`; `roles/pr-reviewer.yaml` | §3.1 targets; §4 child pane (pending + self-poll + submitted→rendered + recover); §5.2 routes.mjs removals + `title:"PR Walkthrough"` spawn; §5.3 role label/accessory; §6 removals. |
-| **G-B** (platform client launcher) | `src/app/pack-entrypoints.ts`; `src/app/pack-panels.ts`; `src/app/host-api.ts`; `src/ui/components/GitStatusWidget.ts` | §3.1 `SpawnLaunchTarget` + register guard + dispatch; §3.2 `setLauncherHostFactory`/`getLauncherHost` + self-register; §3.3 `runLauncherEntrypoint(onResult)` + `runSpawnLauncher` + within-gesture guard + GitStatusWidget inline error. Optional: `CommandPalette.ts`/`MessageEditor.ts` pass-through `onResult`. |
+| **G-A** (pack surface) | `market-packs/pr-walkthrough/src/panel.js` → rebuild `lib/panel.js` via `npm run build:packs`; `lib/routes.mjs`; `entrypoints/pr-walkthrough-{session-menu,open,route}.yaml`; `roles/pr-reviewer.yaml` | §3.1 targets; §4 child pane (pending + self-poll + submitted→rendered + recover); §5.2 routes.mjs removals + `title:"PR Walkthrough"` spawn; §5.3 role label/accessory; §6 removals. |
+| **G-B** (platform client launcher) | `src/app/pack-entrypoints.ts`; `src/app/pack-panels.ts`; `src/app/host-api.ts`; `src/app/session-actions.ts`; `src/app/render.ts` | §3.1 `SpawnLaunchTarget` + register guard + dispatch; §3.2 `setLauncherHostFactory`/`getLauncherHost` + self-register; §3.3 `runLauncherEntrypoint(onResult)` + `runSpawnLauncher` + within-gesture guard + shared menu feedback. `MessageEditor.ts` may also pass through `onResult` for slash feedback. |
 | **G-C** (server lifecycle + title) | `src/server/pr-walkthrough/routes.ts`; `src/server/extension-host/server-host-api.ts`; `src/server/agent/session-setup.ts` (comment only) | §5.1 submit-handler removals; §5.3 `title` passthrough; comment fix. |
 | **G-D** (terminate) | the session terminate-control site (verify; minimal exposure only if missing) | §5.4. May be a no-op if the control already covers host-agents children. |
 | **G-E** (tests) | `tests/e2e/ui/pr-walkthrough-pack.spec.ts`; `tests/e2e/pr-walkthrough-host-agents.spec.ts`; `tests/pr-walkthrough-role-tools-policy.test.ts`; new unit for the launcher dispatch | §8. |
 | **G-F** (docs) | `docs/pr-walkthrough-panel.md`; `docs/extension-host-authoring.md`; `docs/design/pr-walkthrough-restore-ux.md` (mark superseded); this doc | launch model, auto-open carve-out, no-dismiss lifecycle, the new `SpawnLaunchTarget` entrypoint shape (docs gate). |
 
-**Conflict note:** G-A owns the entire pack; G-B owns only `src/app/*` + `GitStatusWidget.ts`; G-C owns only `src/server/*`. `src/app/host-api.ts` (client) and `src/server/extension-host/server-host-api.ts` (server) are **different files** — no overlap. `src/shared/extension-host/host-api.ts` is **not** edited (the `PanelTarget.sessionId` v2 field already shipped).
+**Conflict note:** G-A owns the entire pack; G-B owns only `src/app/*` session-menu launcher wiring; G-C owns only `src/server/*`. `src/app/host-api.ts` (client) and `src/server/extension-host/server-host-api.ts` (server) are **different files** — no overlap. `src/shared/extension-host/host-api.ts` is **not** edited (the `PanelTarget.sessionId` v2 field already shipped).
 
 **Build/commit constraints:** `lib/panel.js` is esbuild-bundled from `src/panel.js` via `npm run build:packs` — edit source, rebuild, **commit both**. `lib/routes.mjs` is hand-authored (no `src/routes.mjs`) — edit directly. Primary branch `master`; LF endings; co-author trailer on every commit.
 
@@ -271,7 +258,7 @@ The pack surface (`src/panel.js`, `lib/routes.mjs`, `entrypoints/*`, `roles/*`) 
 | # | Acceptance criterion (req / Q) | Test | Phase |
 |---|---|---|---|
 | T-1 | Click spawns a child; **no owner panel/tab is mounted**; UI auto-switches to the child. (req 1, Q1) | **Unit** (new, `pack-entrypoints`/`pack-panels` fixture): a mocked launcher host whose `callRoute("run")` returns `{ok:true, childSessionId:"c1"}` → assert `runSpawnLauncher` calls `host.ui.openPanel({panelId, sessionId:"c1"})` (which selects + switches), and that **no** `openPackPanel`/tab mount targets the owner session. | unit·node |
-| T-2 | No-PR / failure → inline git-widget error; **no session, no switch**. (Q2) | **Browser E2E** (`pr-walkthrough-pack.spec.ts`): click the git-widget launcher on a branch with no PR → `[data-testid="git-widget-launcher-error"]` shows "No open GitHub PR…", dropdown stays open, `getAllSessionsRaw` has **no** new `pr-reviewer` child, `selectedSessionId` unchanged. (Reuses the existing NO_PR harness.) | E2E·browser |
+| T-2 | No-PR / failure → visible session-menu feedback; **no session, no switch**. (Q2) | **Browser E2E** (`pr-walkthrough-pack.spec.ts`): click the session-menu launcher on a branch with no PR → a header toast/status or `[data-testid="session-menu-launcher-error"]` shows "No open GitHub PR…", the menu is not wedged open, `getAllSessionsRaw` has **no** new `pr-reviewer` child, `selectedSessionId` unchanged. (Reuses the existing NO_PR harness.) | E2E·browser |
 | T-3 | Child session auto-shows pending `PR Walkthrough: In Progress` + spinner; **no Run/Load buttons**. (req 2, Q3) | **Browser E2E**: render the panel in a bound-child fixture (seed `binding/<self>` in the in-process pack store, open `#/ext/pr-walkthrough` in that child session) → `[data-testid="prw-pending"]` contains exactly `PR Walkthrough: In Progress`; `[data-testid="prw-run"]`/`prw-load` have count 0. | E2E·browser |
 | T-4 | Submit → child pane flips to cards; reload re-renders via child-self `recover`. (req 3) | **Browser E2E**: with `binding/<self>` + then a `submitted/<jobId>` seeded, the pane polls `status` → `submitted` → renders `[data-testid="prw-navrail"]`/`prw-title`; reload → cards re-render via `recover` (no owner transcript). | E2E·browser |
 | T-5 | Always-fresh: two clicks for the SAME PR → TWO distinct reviewer sessions (no dedup). (Q4) | **API E2E**: call `run` with the same explicit github target twice → two distinct `childSessionId`s, both `created:true`, both live bindings. Regression-guards the removed `reviewerKey`. | E2E·api |
