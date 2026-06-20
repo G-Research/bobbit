@@ -4,7 +4,7 @@ Retained gate diagnostics preserve the evidence from automated gate verification
 
 ## Where this fits
 
-Gate verification stores a compact step result in the gate history so `gate_status`, notifications, and default `gate_inspect` calls stay small enough for agent context. Command steps can also emit much larger stdout/stderr streams and Playwright artifacts. Those larger diagnostics are retained in Bobbit state, outside the goal worktree, and are only read when a caller explicitly requests an inspection mode.
+Gate verification stores a compact step result in the gate history so `gate_status`, notifications, and default `gate_inspect` calls stay small enough for agent context. Command steps can also emit much larger stdout/stderr streams and Playwright artifacts. Those diagnostics are retained in Bobbit state, outside the goal worktree. Verification inspection reads logs with bounded selection and exposes artifacts as a compact index; artifact file content is fetched only when a caller explicitly targets one artifact.
 
 This split keeps routine status checks cheap while making failed E2E and browser-test gates diagnosable after worktree cleanup or a gateway restart.
 
@@ -44,9 +44,10 @@ Any explicit mode (`grep`, `tail`, `head`, `slice`, or `full`) allows verificati
 Typical flow:
 
 1. `gate_status` — find the failed step name from compact status.
-2. `gate_inspect(..., mode="grep")` — search retained logs for the failure marker or stack trace.
-3. `gate_inspect(..., mode="tail"|"slice")` — read surrounding context.
-4. Rerun the suite only if the retained diagnostics are insufficient or the fix needs fresh verification.
+2. `gate_inspect(..., section="verification", mode="grep")` — search retained logs for the failure marker or stack trace.
+3. `gate_inspect(..., section="verification", mode="tail"|"slice")` — read surrounding log context.
+4. If `diagnostics.artifacts.files[]` lists a relevant retained file, fetch that one file with `section="artifact"`.
+5. Rerun the suite only if the retained diagnostics are insufficient or the fix needs fresh verification.
 
 ## Compact surfaces stay compact
 
@@ -57,7 +58,7 @@ The following surfaces intentionally do not expose retained logs or artifact lis
 - `gate_inspect(section="verification")` when `mode` is omitted;
 - summary gate endpoints used by counters and dashboard cards.
 
-This prevents large Playwright logs, traces, screenshots, or report metadata from flooding an agent context during routine progress checks. Explicit inspection adds diagnostic metadata such as `diagnostics.outputSource`, `diagnostics.logs`, `diagnostics.artifacts`, and inspect hints.
+This prevents large Playwright logs, traces, screenshots, or report metadata from flooding an agent context during routine progress checks. Explicit verification inspection adds diagnostic metadata such as `diagnostics.outputSource`, `diagnostics.logs`, `diagnostics.artifacts`, and inspect hints. The artifact index is metadata-only: it does not include file `content`.
 
 ## Log caps and truncation metadata
 
@@ -86,7 +87,21 @@ When available, Bobbit copies Playwright-style artifacts from the command workin
 - selected files under Playwright `data/` and `trace/` folders;
 - `playwright-report/**`.
 
-Small `error-context.md` files are inlined in explicit inspection metadata as markdown content, so the failure locator context can be read without opening the original artifact directory. Larger or binary files are exposed as retained artifact metadata with path, relative path, source path, size, and kind.
+Explicit `gate_inspect(section="verification", mode=...)` returns a compact artifact index under `steps[].diagnostics.artifacts`. Each row is metadata only: `id`, `relativePath`, retained `path`, byte size, kind, optional `testName`, and optional retry metadata. Artifact rows never include file `content`, including for small `error-context.md` files.
+
+Use the index to fetch one artifact at a time:
+
+```text
+gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", mode="grep", pattern="Error|locator|failed", context=3)
+gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", retry=1, mode="tail", lines=120)
+gate_inspect(gate_id="implementation", section="artifact", artifact="test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md", mode="slice", from=40, to=120)
+```
+
+The `artifact` selector accepts either the stable artifact `id` from the index or an exact `relativePath`. Playwright retry directories are collapsed in the verification index under the base id with `retries: N`; pass `retry=N` to fetch a specific retry, or pass the exact `relativePath` for any retained file. If the same id exists in multiple verification steps, include `step` to disambiguate.
+
+Artifact fetches use the same bounded selection controls as verification output (`grep`, `head`, `tail`, `slice`, and `full`). When `mode` is omitted, `section="artifact"` defaults to a bounded tail rather than a full dump. Explicit `mode="full"` remains capped by normal line, byte, and tool-result budgets.
+
+The retained `path` remains in metadata so agents can still call `read(path)` as a fallback when direct file access is appropriate. Prefer `section="artifact"` for bounded, sandbox-checked inspection.
 
 Artifact capture is best effort. Missing reports do not change the verification result, but available reports are retained before worktree cleanup can remove them.
 
