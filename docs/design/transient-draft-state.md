@@ -1,36 +1,20 @@
-# Transient Draft State — Audit & Unified Persistence Design
+# Transient Draft State — Unified Persistence Architecture & Guidelines
 
-Status: design (proposal). Owner: goal *Unify transient drafts*.
+Status: implemented. Owner: goal *Unify transient drafts*.
 
-This document audits volatile in-progress UI state across the web client, pins
-down the exact `ask_user_choices` draft-loss failure mode, and proposes a small
-shared draft-state abstraction so new components stop reimplementing one-off
-`sessionStorage` / `localStorage` / IndexedDB / server-draft logic.
+This document outlines the architecture, design, and implementation of Bobbit's unified transient draft persistence pattern. This system preserves volatile, in-progress user input against accidental draft loss across the web client, while offering clear, standardized rules for choosing storage tiers.
 
-It builds directly on the composer fix described in
-[`composer-draft-persistence.md`](composer-draft-persistence.md) and the
-non-blocking ask model in [`../non-blocking-ask.md`](../non-blocking-ask.md).
-Read those first — this doc generalises their patterns rather than restating
-them.
+It builds on the patterns established in [`composer-draft-persistence.md`](composer-draft-persistence.md) and [`../non-blocking-ask.md`](../non-blocking-ask.md).
 
 ---
 
-## 1. The `ask_user_choices` failure mode
+## 1. The `ask_user_choices` Draft-Loss Solution
 
-### 1.1 What persists today and what does not
+### 1.1 The Original Problem
 
-The non-blocking `ask_user_choices` flow already makes **submitted** answers
-fully durable: the user's submission becomes a tagged user-message envelope
-(`[ask_user_choices_response tool_use_id=…]`) appended to the session `.jsonl`,
-broadcast to all tabs, and replayed on reload. The renderer
-(`AskUserChoicesRenderer`) flips the widget to read-only "answered" mode by
-scanning the transcript via `ctx.getAskResponseAnswers(toolUseId)`. This is
-correct and **must not change** (constraint: submitted answers stay
-transcript-backed and cross-client visible).
+The non-blocking `ask_user_choices` flow makes **submitted** answers fully durable by appending a tagged response envelope (`[ask_user_choices_response tool_use_id=…]`) to the session's `.jsonl` transcript. When reloaded, `AskUserChoicesRenderer` flips the widget to a read-only "answered" state by reading this transcript.
 
-The gap is entirely **pre-submit** state. The interactive widget
-(`<ask-user-choices-widget>`, `src/ui/components/AskUserChoicesWidget.ts`) keeps
-all in-progress input in component-local Lit reactive state:
+However, **pre-submit** state originally lived solely in the component-local Lit reactive state (`_draft`) of the `<ask-user-choices-widget>` component:
 
 ```ts
 @state() private _activeTab = 0;
@@ -39,128 +23,50 @@ all in-progress input in component-local Lit reactive state:
 @state() private _submitError = "";
 ```
 
-`_draft` is (re)initialised to empty in `_ensureDraft()`, called from
-`connectedCallback()` and from `willUpdate()` when the `questions` property
-changes. There is **no read-back from any persistent store** — so any event
-that destroys and recreates the widget DOM element resets every pending
-selection and any typed "Other" text to empty.
+Because this state was purely local, any event that unmounted or recreated the widget DOM element discarded the instance, resetting all pending selections and "Other" text fields to empty.
 
-### 1.2 When the element is recreated (and the draft is lost)
+### 1.2 Widget Recreation Triggers
 
-The widget lives inside the rendered transcript of `<agent-interface>`. The
-element instance — and therefore its `@state` — is discarded in all of these
-cases:
+The interactive widget lives in the transcript of `<agent-interface>`. The element instance is discarded and recreated in all of the following scenarios:
 
-1. **Page reload / hard refresh.** The transcript is rebuilt from scratch. The
-   pending `tool_use` re-renders as a *fresh, empty* interactive widget (no
-   envelope follows it yet, so the renderer correctly chooses interactive mode).
-   Every prior selection is gone.
-2. **Session switch beyond the LRU cache.** The client caches at most
-   `SESSION_CACHE_MAX = 10` session views (`sessionCache`). Switching away and
-   cycling through >10 other sessions evicts the origin session; switching back
-   recreates its `<agent-interface>` and all child tool cards from the
-   transcript — the widget comes back empty.
-3. **WebSocket reconnect / stream-driven re-render.** Reconnect and
-   `message_*` stream events can replace transcript message objects; if Lit
-   re-keys or recreates the widget element the draft is dropped. The existing
-   keyboard E2E already documents a related symptom — a streaming re-render
-   detaching the auto-advance `setTimeout`'s `this` because the element
-   instance was swapped.
-4. **Route / view changes** that unmount and remount the chat panel.
+1. **Page Reload / Hard Refresh**: The transcript is rebuilt from scratch. The pending `tool_use` is re-rendered as a fresh, empty interactive widget.
+2. **LRU Session Cache Eviction**: The client caches up to `SESSION_CACHE_MAX = 10` session views. Cycling through more than 10 sessions evicts the oldest session. Switching back recreates its DOM elements from the transcript.
+3. **WebSocket Reconnect & Stream-Driven Re-renders**: Reconnection and stream updates replace transcript messages, prompting Lit to swap or re-key DOM nodes.
+4. **Route / View Switches**: Navigating away from and back to the chat panel unmounts and remounts the widget.
 
-Submitted answers survive all four (transcript-backed); **pre-submit selections
-survive none of them**. This is the same *class* of bug the composer draft fix
-addressed (Bug 1: state trapped in a recreatable element), scoped to a different
-widget.
+### 1.3 The Persistence Fix
 
-### 1.3 Why the current E2E does not catch it
+To bridge these recreation events, pending selections and active tabs are persisted in the browser's `sessionStorage` tier using the unified `TransientDraftStore`.
 
-`tests/e2e/ui/ask-user-choices-ui.spec.ts` ("composite widget lifecycle")
-reloads mid-flow, but it reloads **before selecting anything** and only asserts
-that the pending widget re-renders *interactive* (Submit visible, Other input
-visible). It never selects an option / types Other text, reloads, and asserts
-those selections are still present. So the draft-loss path is unverified.
-
-### 1.4 Reproduction path (becomes the regression test)
-
-1. Trigger a multi-question ask (`ask_user_choices_composite`).
-2. On Q1 pick a concrete option; switch to Q2 and type text into the Other
-   field (auto-selecting Other). **Do not submit.**
-3. Either (a) reload the page, or (b) switch to another session, cycle through
-   >10 sessions to force LRU eviction, then switch back.
-4. **Observed today:** the widget re-renders interactive but empty — Q1 has no
-   selection, Q2's Other text is gone.
-   **Expected after fix:** Q1's selection and Q2's Other text are restored; the
-   widget stays interactive until submit/dismiss.
+- **Per-Tab Isolation**: By utilizing `sessionStorage`, drafts are safely isolated per browser tab. If a user opens the same pending session in two separate tabs, they can fill in their answers independently (avoiding state leakage), and whichever tab submits first writes to the transcript.
+- **Idempotency & Finality**: Submitted answers remain backed by the server-side transcript. Once submitted, the draft store is cleared, and any re-render safely locks the widget into read-only mode without risk of draft resurrection.
 
 ---
 
-## 2. Shared durable draft-state store
+## 2. Shared Durable Draft-State Store
 
-### 2.1 Goals
+To avoid scattered, ad-hoc, or non-standard uses of `sessionStorage`, `localStorage`, IndexedDB, or server endpoints, the project exposes a standardized, lightweight persistence pattern.
 
-- One small reusable abstraction instead of scattered ad-hoc storage calls
-  (constraint).
-- A clear decision rule for *which* storage tier a given draft uses, by payload
-  size and sensitivity.
-- Consistent keying, freshness/tombstone semantics, bounds, and cross-tab /
-  reload behaviour.
-- Cheap to adopt: a component should be able to seed synchronously on create and
-  write on change in two or three lines.
+### 2.1 Storage Tier Selection Rules
 
-### 2.2 Storage tiers and the selection rule
+Bobbit operates four distinct storage tiers. Developers must apply this decision table top-down when designing new user-input surfaces:
 
-We already operate four tiers. The shared store formalises *when* to use each.
+| Tier | Survives | Scope | Read Access | Capacity | Best For | Reference Implementation |
+|---|---|---|---|---|---|---|
+| **IndexedDB** | Reload, restart, tab close, browser restarts | Cross-tab / Global | Async | 10s–100s MB | Large or binary payloads (images, files, heavy extractions). | `PromptDraftAttachmentsStore` |
+| **Server Draft Table** | Reload, restart, device switch, server restarts | Cross-tab / Cross-device | Async | Small (< 10 KB) | Small drafts that must be authoritative server-side or synchronized cross-device. | `session-manager.createDraftManager`, `proposal-helpers.ts` |
+| **localStorage** | Reload, restart, tab close, browser restarts | Cross-tab / Global | Sync | ~5 MB | Small, non-sensitive drafts that intentionally persist globally. | `sidebar-filters` |
+| **sessionStorage** | Reload, HMR, element unmount/recreation | Same-tab / Local | Sync | ~5 MB | Small, client-local, tab-isolated scratch drafts. | `TransientDraftStore` ("session" backend) |
 
-| Tier | Survives | Cross-tab? | Sync read? | Capacity | Use for |
-|---|---|---|---|---|---|
-| **sessionStorage** | reload, element recreation, HMR (same tab) | No | Yes | ~5 MB | Small, client-local, low-sensitivity drafts whose value is "don't lose what I just typed in *this* tab": ask selections, ephemeral widget input. |
-| **localStorage** | reload, restart, across tabs | Yes | Yes | ~5 MB | Small drafts that should also survive tab close / appear in sibling tabs *and* whose persistence is intentional (rare for transient input; today used for dismissal fingerprints, sidebar filters). |
-| **IndexedDB** (`AppStorage` stores) | reload, restart, across tabs | Yes | No (async) | large (10s–100s MB) | Large or binary payloads: composer attachments (`PromptDraftAttachmentsStore`). |
-| **Server draft table** (`/api/sessions/:id/draft`, `sessions.json`) | reload, restart, across tabs, across devices | Yes (same session) | No (async, debounced) | small only | Drafts that must be authoritative server-side / cross-device: composer prompt text, proposal-form bodies. |
+### 2.2 The `TransientDraftStore` Abstraction
 
-**Selection rule (apply top-down, pick the first that matches):**
-
-1. Payload may exceed a few KB or is binary (images, extracted text) → **IndexedDB**.
-2. Draft must be visible on another device / is the server's source of truth
-   (prompt text, proposal bodies) → **server draft table** (with the existing
-   monotonic-gen guard).
-3. Draft should appear in *other tabs* of the same browser or survive tab close,
-   and is small + non-sensitive → **localStorage**.
-4. Otherwise (small, client-local, per-tab is acceptable) → **sessionStorage**.
-
-`ask_user_choices` pre-submit selections fall through to **(4) sessionStorage**:
-they are small, client-local, and the goal's constraints explicitly allow draft
-selections to be client-local unless server persistence is justified. Submitted
-answers already live in the transcript (tier "server", via the envelope), so
-cross-device / cross-tab convergence of the *final* answer is unaffected; only
-the in-progress scratch state needs to survive a same-tab reload / recreation.
-Per-tab isolation is in fact desirable: two tabs can independently fill the same
-question, and whichever submits first wins via the idempotent submit endpoint.
-
-> Why not the server draft table for ask selections? It would add a new
-> server-persisted draft type per `tool_use_id`, risk leaking partial answers
-> cross-device for what is throwaway scratch state, and buys nothing the
-> transcript envelope doesn't already provide once submitted. sessionStorage is
-> the minimal tier that fixes the reported bug.
-
-### 2.3 The `TransientDraftStore` abstraction
-
-A thin, synchronous, namespaced wrapper over `sessionStorage`/`localStorage`
-(the two synchronous web-storage tiers). It deliberately does **not** wrap
-IndexedDB or the server draft table — those already have purpose-built,
-gen-guarded modules (`PromptDraftAttachmentsStore`, `createDraftManager`,
-`proposal-helpers`); the shared store complements them rather than replacing
-them. The store's job is the long tail of *small client-local* drafts that today
-have no home and are lost on recreation.
-
-Proposed module: `src/ui/storage/transient-draft-store.ts`.
+`TransientDraftStore` is a thin, synchronous, namespaced wrapper over the browser's synchronous web-storage APIs (`sessionStorage` and `localStorage`). It is defined in `src/ui/storage/transient-draft-store.ts` and created via the factory function `createTransientDraftStore<T>(options)`.
 
 ```ts
-type DraftBackend = "session" | "local";
+export type DraftBackend = "session" | "local";
 
-interface TransientDraftStoreOptions {
-  /** Stable namespace, e.g. "ask". Prefixes every key. */
+export interface TransientDraftStoreOptions {
+  /** Stable namespace, e.g. "ask". Prefixes every storage key. */
   namespace: string;
   /** Web-storage tier. Default "session". */
   backend?: DraftBackend;
@@ -172,226 +78,155 @@ interface TransientDraftStoreOptions {
   tombstoneTtlMs?: number;
 }
 
-interface TransientDraftStore<T> {
-  /** Synchronous read; null when absent or tombstoned. */
+export interface TransientDraftStore<T> {
+  /** Synchronous read; null when absent, tombstoned, or unparseable. */
   load(key: string): T | null;
-  /** Synchronous write; bumps updatedAt, enforces bounds. No-op over maxEntryBytes. */
+  /** Synchronous write; bumps gen + updatedAt, enforces bounds. No-op over maxEntryBytes or while tombstoned. */
   save(key: string, value: T): void;
-  /** Delete + write a short-lived tombstone so a late save() can't resurrect. */
+  /** Delete the value + write a short-lived tombstone so a late save() can't resurrect. */
   clear(key: string): void;
   /** Drop a key entirely including any tombstone (hard delete). */
   forget(key: string): void;
 }
 ```
 
-#### Keying
+### 2.3 Store Semantic Guarantees
 
-`storageKey = "bobbit_draft/" + namespace + "/" + scopeKey`. Callers build
-`scopeKey` from the entity identity. For ask: `scopeKey = sessionId + "::" + toolUseId`.
-The `toolUseId` is an opaque exact-match value (may be a composite `call|fc`
-form per the ask-envelope contract) and **must not be split, trimmed, or
-normalised** — the store treats it as an opaque string.
+#### 1. Keying and Namespacing
+All keys are prefixed with a stable prefix: `bobbit_draft/<namespace>/<scopeKey>`.
+For pending asks, the `scopeKey` is built as `sessionId + "::" + toolUseId`. The `toolUseId` (which may contain special characters or composite IDs like `call|fc`) is treated as an opaque string, remaining un-split and un-trimmed to preserve exact round-trip matching.
 
-Each stored record is `{ v: T; updatedAt: number; gen: number }`:
+#### 2. Tombstone-Driven Clear
+Calling `clear(key)` deletes the draft value and writes a short-lived tombstone:
+```ts
+{ tombstone: true, until: now + tombstoneTtlMs, gen: lastSeenGen }
+```
+While a tombstone is active:
+- `load` synchronously returns `null`.
+- `save` operations are rejected.
+This is a robust defense against the **resurrection bug**, where a slow, in-flight, or debounced save operation scheduled *before* submission lands *after* submission and recreates the draft.
 
-- `updatedAt` (epoch ms) drives LRU eviction.
-- `gen` is a per-key monotonic counter (seeded from the loaded record) used only
-  to make `save` last-write-wins deterministic and to let a freshness check
-  detect a late async restore overwriting newer local input. Client-local
-  sessionStorage writes are synchronous so cross-write races are rare, but the
-  field keeps the model identical to the server prompt-draft guard and is needed
-  when a component does an async seed (see §2.4 freshness).
+#### 3. Last-Write-Wins Generation Guard (`gen`)
+Each stored record contains a monotonic `gen` counter:
+```ts
+interface ValueRecord<T> { v: T; updatedAt: number; gen: number; }
+```
+When a component calls `save`, the store ensures the new generation strictly exceeds any previously written generation for that key. Out-of-order stale writes are silently dropped.
 
-#### Freshness / generation / tombstone semantics
+#### 4. LRU Eviction & Size Caps
+- **Per-Namespace LRU**: `save` operations automatically enforce the `maxEntries` constraint by evicting the oldest entries (sorted by `updatedAt` first, with tombstones evicted ahead of live drafts). It never evicts the key currently being written.
+- **Oversize Byte Protection**: To prevent browser quota exhaustion and protect performance, writes exceeding `maxEntryBytes` (default 32 KB) are dropped. An alert is logged to the developer console once per namespace.
+- **Tombstone Sweeping**: Expired tombstones are swept lazily from the storage pool upon subsequent reads or writes in the namespace.
 
-- **Last-write-wins by gen.** `save` reads the current record, sets
-  `gen = max(loadedGen, lastWrittenGen) + 1`. A write whose computed `gen` is
-  not greater than the stored record's `gen` is ignored. This mirrors the
-  server staleness guard so a stale async path can never clobber fresher input.
-- **Tombstone on clear.** `clear(key)` deletes the value and writes a tombstone
-  record `{ tombstone: true, until: now + tombstoneTtlMs }`. While a tombstone
-  is live, `load` returns `null` and `save` is rejected. This prevents the
-  classic resurrection bug: a debounced/async write scheduled *before* submit
-  landing *after* submit would otherwise re-create a draft for an
-  already-answered question. (Directly analogous to the composer's
-  tombstone-on-send.) `forget` removes the tombstone too, for genuine teardown.
-- **Touched-since-seed guard (caller side).** When a component seeds
-  asynchronously (not needed for ask, which seeds synchronously), it tracks a
-  "user edited since seed" flag and skips applying the seed if set — same
-  pattern as `_draftTouchedSinceBind` in the composer.
-
-#### Cleanup and bounds
-
-- **Per-namespace LRU.** Every `save` enforces `maxEntries` by evicting the
-  oldest entries (by `updatedAt`) in the same namespace, never the key just
-  written.
-- **Per-entry byte cap.** A `save` whose JSON exceeds `maxEntryBytes` is dropped
-  (logged once) rather than risking a `QuotaExceededError`; oversize drafts are
-  out of scope for this tier and indicate the caller picked the wrong tier.
-- **Tombstone sweep.** Expired tombstones are removed lazily on the next
-  `load`/`save` touching that namespace.
-- **Submit/answered cleanup.** Callers call `clear(key)` when the draft is
-  committed (ask submit success, or when the widget first renders read-only
-  because an answer envelope already exists). Combined with LRU this bounds
-  storage even if some keys are never explicitly cleared (e.g. the session was
-  deleted server-side).
-- All storage access is wrapped in try/catch (private-mode / quota / disabled
-  storage degrade to in-memory no-op, never throw) — matching existing helpers.
-
-#### Cross-tab / reload behaviour
-
-- `backend: "session"` → per-tab; survives reload and element recreation within
-  the tab; not shared across tabs; cleared when the tab closes. This is the ask
-  default and the desired isolation.
-- `backend: "local"` → shared across tabs and survives restart. A `storage`
-  event listener can be exposed later if a surface needs live cross-tab mirroring
-  of an in-progress draft; no current surface requires it, so it is out of scope.
-
-### 2.4 How `ask_user_choices` uses it
-
-In `AskUserChoicesWidget`:
-
-- Construct one module-level store: `askDraftStore = new TransientDraftStore<DraftEntry[] & {activeTab:number}>({ namespace: "ask" })` (selections + active tab; `_focusedOption` and `_submitError` stay ephemeral — they carry no user content worth persisting).
-- **Seed synchronously** in `_ensureDraft()` (already called from
-  `connectedCallback` and on `questions` change): once `sessionId`, `toolUseId`,
-  and `questions` are all present and the widget is **not** read-only, compute
-  `scopeKey`, `load()` it, and use the stored `_draft`/`_activeTab` if shape
-  matches the current `questions` (length + multi flags); otherwise initialise
-  empty as today. Seeding is synchronous so there is no touched-since-seed race.
-- **Persist on change**: every mutator that edits `_draft`/`_activeTab`
-  (`_selectOption`, `_setOtherText`/`_onOtherInput`, `_clearActive`,
-  `_selectTab`, `_clickPrimary` advance) calls `askDraftStore.save(scopeKey, …)`.
-  Writes are tiny and synchronous; no debounce needed.
-- **Clear on commit**: in `_submit()` on success, and at seed time when the
-  widget is already read-only (`_isReadOnly()` true — an answer envelope exists),
-  call `askDraftStore.clear(scopeKey)`. The tombstone prevents any late
-  re-render from resurrecting the answered draft.
-- Read-only mode never reads/writes drafts (answers come from the transcript).
-
-This is additive to the widget's existing logic and changes none of its
-validation, causality, or submitted-answer model (constraint).
+#### 5. Fault Tolerance
+All localStorage and sessionStorage accesses are wrapped in `try/catch` scopes. If a browser blocks storage access (e.g., inside Safari private browsing, sandboxed iframes, or when storage quotas are exceeded), the store gracefully degrades to a memory-backed map. It **never** throws or disrupts the runtime.
 
 ---
 
-## 3. Migration plan
+## 3. How `ask_user_choices` Integrates the Pattern
 
-### Phase 1 — ship the store + fix ask (this goal, high value)
+The `<ask-user-choices-widget>` incorporates the `TransientDraftStore` synchronously:
 
-1. Add `src/ui/storage/transient-draft-store.ts` (§2.3). Pure browser module,
-   unit-testable via a `file://` `.spec.ts` fixture (no DOM beyond `window`).
-2. Wire `AskUserChoicesWidget` to it (§2.4).
-3. Add regression tests (§5).
-
-### Phase 2 — opportunistic adoption (follow-up, lower value)
-
-The composer (prompt text + attachments) and proposal forms already have robust,
-purpose-built durable drafts; **do not** re-route them through the new store —
-they correctly use the server-draft and IndexedDB tiers with gen guards, and
-churning them adds risk for no gain. They remain the reference implementations
-for tiers (2) and (1)/(IndexedDB).
-
-Candidate surfaces to migrate *if/when* they prove lossy in practice (each is
-currently a deliberate or low-impact exception — see §4):
-
-- Inline review-pane comment-in-progress (`AnnotationPopover` textarea) — keyed
-  by document id + anchor. Only worth it if users report losing long comments
-  when the popover is dismissed by an incidental click.
-- `GoalStatusWidget` bypass justification (`_bypassWhy` / `_bypassWho`).
-
-None of these are in scope for the initial fix; they are recorded so a future
-change has a documented home and a consistent tool to reach for.
+1. **Initialization**: Creates a module-level static store instance:
+   ```ts
+   const askDraftStore = createTransientDraftStore<AskDraftRecord>({
+     namespace: "ask",
+     backend: "session",
+   });
+   ```
+2. **Synchronous Restore & Shape Validation**: Seeding is triggered during `_ensureDraft()` (on mounting and question changes). Before applying a restored draft, `_sanitizeStored()` validates it against the current questions. It checks question counts, verifies the type matches (single-select vs. multi-select arrays), strips out options that are no longer valid, and clamps the active tab index. Mismatched or obsolete drafts are discarded.
+3. **Persist on Change**: Every input mutator (`_selectOption`, `_setOtherText`, `_selectTab`, etc.) synchronously calls `askDraftStore.save(key, { draft: this._draft, activeTab: this._activeTab })`.
+4. **Clean up on Submit**: When successfully submitted (or when the card mounts in a read-only state because an answer envelope is already in the transcript), `_clearDraftStore()` is invoked, executing `askDraftStore.clear(key)`. The tombstone prevents stale async saves from resurrecting the form.
 
 ---
 
-## 4. Intentional exceptions (audited, deliberately not migrated)
+## 4. Attachment Draft Resurrection Guard (Composer Follow-Up)
 
-Surfaces that hold component-local input but where loss-on-recreation is either
-already solved or an acceptable / intended behaviour:
+During the audit, a related async race was discovered and fixed in `<agent-interface>` (`AgentInterface.ts`), where composer attachment drafts could resurrect after being cleared.
 
-| Surface | State | Verdict |
+### 4.1 The Race Bug
+1. The user binds a session, and `_loadAttachmentDraft` schedules a slow, asynchronous IndexedDB read to get any saved attachments.
+2. While the load is in-flight, the user attaches a file, types a message, and clicks **Send**.
+3. Sending the message triggers `_clearAttachmentDraft()`, which clears the local attachment array (`this._attachments = []`) and deletes the draft from IndexedDB.
+4. Finally, the slow IndexedDB read resolves. It sees that the session ID is unchanged, and `this._attachments` is currently empty.
+5. It applies the loaded array, **resurrecting** the sent attachments inside the composer.
+
+### 4.2 The Monotonic Generation Guard Fix
+We introduced a monotonic generation token `_attachmentDraftGen` (type `number`) as a private field in `AgentInterface.ts`. 
+
+- Every load, set, or clear operation on the attachment draft increments this counter:
+  ```ts
+  private _attachmentDraftGen = 0;
+  ```
+- When `_loadAttachmentDraft(sessionId)` is initiated, it captures the current generation value locally:
+  ```ts
+  const gen = ++this._attachmentDraftGen;
+  ```
+- Upon the async resolve of the IndexedDB lookup, the guard checks both variables:
+  ```ts
+  if (this._attachmentDraftSessionId !== sessionId) return;
+  if (this._attachmentDraftGen !== gen) return;
+  ```
+- If a user sends a message or edits the attachment list while the load is in-flight, the generation is bumped. The guard intercepts this, and the slow in-flight read is safely discarded, preventing resurrection.
+
+---
+
+## 5. Completed Audit & Intentional Exceptions
+
+The following table summarizes the auditing of user-input surfaces across Bobbit. The guiding principle is to **persist only user-authored content that is costly to recreate**, while letting modal-scoped scratch values and pure UI affordances reset to default.
+
+| Surface | State | Verdict / Exception Rationale |
 |---|---|---|
-| **Message composer text** (`MessageEditor` / `session-manager`) | server draft + sessionStorage mirror + gen guard | Already durable. Reference impl for server tier. |
-| **Composer attachments** (`PromptDraftAttachmentsStore`) | IndexedDB, LRU + byte caps | Already durable. Reference impl for IndexedDB tier. |
-| **Proposal forms** (goal/role/project/staff/tool — `proposal-panels`, `createDraftManager`, `proposal-helpers`) | server draft table, debounced, + `state` mirror | Already durable across reload/switch/restart. No change. |
-| **`AnnotationPopover`** (review-pane inline comment input) | local `<textarea>` value; committed comments persist via `proposalBackend` | Exception. The *committed* comment is durable; the in-progress text is a transient floating popover whose dismissal is user-intended. Migrate only on demand (§3 Phase 2). |
-| **`GoalStatusWidget` bypass form** (`_bypassWhy`/`_bypassWho`) | component `@state` | Exception. Short modal-style confirmation inside an expandable widget; an audit justification is meant to be entered and submitted in one sitting. Low payoff. |
-| **`AddToInboxDialog`** (`_prompt`, title input), **`CustomProviderDialog`** (`manualModelsText`), **`SystemPromptDialog`** | dialog-local `@state` | Exception. Modal dialogs; closing intentionally discards. Persisting half-finished modal input would resurface stale data confusingly on reopen. |
-| **Search / picker query state** — `DirectoryPicker`, `ProjectPickerPopover`, `SidebarActionsPopover`, `SearchBox` | `_query` / `_highlightIndex` `@state` | Exception. Search queries are intentionally ephemeral; persisting them would be surprising. |
-| **Sidebar filters** (`sidebar-filters`) | already `localStorage`-backed | Already durable where intended. No change. |
-| **Pure UI affordance state** — expand/collapse, copied flags, diff view mode, loading/error transients (e.g. `ThinkingBlock.isExpanded`, `ConsoleBlock.copied`, `GitStatusWidget` action flags) | `@state` | Exception. No user-authored content; recreation-to-default is correct. |
-
-Principle for the exceptions: persist only **user-authored content** that is
-costly to recreate. Affordance state, search queries, and modal scratch input
-either carry no authored content or have intended discard-on-close semantics.
+| **Message Composer Text** | Server draft + sessionStorage mirror | Already durable. Serves as the reference implementation for the server draft tier. |
+| **Composer Attachments** | IndexedDB via `PromptDraftAttachmentsStore` | Already durable. Protected against async race resurrection via monotonic generation guards. |
+| **Proposal Forms** | Server draft table | Already durable. Forms automatically persist draft state under `/api/sessions/:id/draft` with debounced sync. |
+| **Sidebar Filters** | `localStorage` | Already durable. Persists lightweight filter options globally across tabs and browser restarts. |
+| **`AnnotationPopover`** (Review-pane comment textarea) | Transient component `@state` | **Intentional Exception**. The committed comment is durable; the comment-in-progress is a transient hover-popover whose closure implies discard. Discarding is standard behavior. |
+| **`GoalStatusWidget` Bypass Form** | Transient component `@state` | **Intentional Exception**. This is a short, modal-style justification that users complete in a single action. Low payoff for persistence. |
+| **Dialogs & Modals** (`AddToInboxDialog`, `CustomProviderDialog`, `SystemPromptDialog`) | Dialog-local `@state` | **Intentional Exception**. Closing a modal explicitly signals discard. Retaining stale, half-written modal fields on reopening would cause confusion. |
+| **Search / Picker Queries** (`DirectoryPicker`, `SearchBox`) | Transient query `@state` | **Intentional Exception**. Search queries are highly ephemeral and are expected to reset when the component is closed or unmounted. |
+| **UI Affordances** (Collapsibles, expanded sections, copy flags) | Component `@state` | **Intentional Exception**. Purely visual layout state. Resetting to default on recreation is desired. |
 
 ---
 
-## 5. Regression test plan
+## 6. Test Suite Architecture
 
-### 5.1 Store unit tests — `tests/transient-draft-store.spec.ts` (browser, file://)
+The implementation is protected from regressions by a comprehensive, multi-tiered test suite:
 
-Pinned invariants:
+### 6.1 Store Unit Invariants (`tests/transient-draft-store.spec.ts`)
+Pins the low-level behavior of `TransientDraftStore` inside a browser environment (`file://` browser unit test fixture):
+- **Round-Trip and Key Isolation**: Validates that saved objects retrieve identically and that namespaces/scope keys do not collide.
+- **Tombstone Behavior**: Assures `clear()` blocks write operations of equal/lesser generation, while `forget()` deletes the tombstone and lets fresh saves through.
+- **Last-Write-Wins (`gen`)**: Confirms that writes with stale generations are discarded.
+- **LRU and Size Protection**: Confirms oldest keys are evicted when limits are reached, and that oversize entries are discarded without throwing exceptions.
+- **Degradation**: Assures that when `Storage` is disabled, the store falls back to a memory-backed map.
 
-- **Round-trip + isolation**: `save`/`load` round-trips a value; distinct
-  `(namespace, scopeKey)` pairs never collide; opaque composite keys with `|`
-  are preserved verbatim.
-- **Tombstone**: after `clear`, `load` returns `null` and a subsequent `save`
-  (stale, lower/equal gen) is rejected until the tombstone expires; `forget`
-  removes the tombstone and allows fresh writes.
-- **Gen / last-write-wins**: an out-of-order `save` with a non-increasing gen
-  does not overwrite a newer value.
-- **Bounds**: exceeding `maxEntries` evicts the oldest by `updatedAt` and never
-  the just-written key; a write over `maxEntryBytes` is dropped without throwing.
-- **Backends**: `session` vs `local` write to the correct web-storage object;
-  disabled/throwing storage degrades to a no-op (no exception escapes).
+### 6.2 Widget Element Unit Tests (`tests/ask-user-choices-widget.spec.ts`)
+Validates `<ask-user-choices-widget>` lifecycle hooks, Lit rendering outputs, tab selections, and keyboard navigation.
 
-### 5.2 Ask widget E2E — extend `tests/e2e/ui/ask-user-choices-ui.spec.ts`
+### 6.3 Browser E2E Scenarios (`tests/e2e/ui/ask-user-choices-ui.spec.ts`)
+Executes browser automation tests on a live server instance:
+- `pre-submit selections survive reload`: Fills out an ask draft, reloads, and verifies radio options and typed "Other" strings are restored.
+- `pre-submit selections survive cache-evicted session switch`: Fills out a draft, switches through 11 different sessions to force the origin session out of the LRU `sessionCache` (destroying the DOM element), switches back, and verifies the selections are successfully restored.
+- `submit clears the draft — no resurrection after reload`: Submits the widget, reloads, and verifies the card remains read-only without resurrecting scratch states.
+- `pre-submit drafts are per-tab isolated`: Opens two separate tabs on the same session, verifies that unsaved draft state does not leak from tab 1 to tab 2, and that once tab 1 submits, tab 2 converges into a read-only state.
 
-New scenarios (the §1.4 reproduction made executable):
-
-- **`pre-submit selections survive reload`**: trigger composite ask, pick an
-  option on Q1, type Other text on Q2 (no submit), `page.reload()`, assert the
-  Q1 radio is still checked and the Q2 Other input still holds the text, and the
-  widget is still interactive (Submit present).
-- **`pre-submit selections survive cache-evicted session switch`**: same setup,
-  then create/switch through >10 sessions to evict the origin from
-  `sessionCache`, switch back, assert selections restored (slow-path
-  recreation). Mirrors the composer's `CT-02-f` attachment test.
-- **`per-tab isolation`**: open the same pending ask in a second tab; assert tab
-  2 does **not** show tab 1's unsaved selections (sessionStorage is per-tab),
-  and that after tab 1 submits, tab 2 flips read-only via the transcript
-  envelope (existing cross-client behaviour, re-asserted).
-- **`submit clears the draft (no resurrection)`**: fill + submit; reload; assert
-  read-only answered card with the submitted answers and that no interactive
-  scratch state reappears.
-
-### 5.3 Guard against regressions in unchanged behaviour
-
-- The existing ask E2E cases (Other cleanup via Escape, indicator shapes,
-  keyboard-only submission, error-chip-then-retry, legacy answers) must continue
-  to pass unchanged — they pin that validation, causality, and the
-  submitted-answer model are untouched (constraint).
-
-### 5.4 Verification commands
-
-- `npm run check`
-- `npm run test:unit` (includes the new `.spec.ts` store fixture)
-- Targeted ask E2E: the extended `tests/e2e/ui/ask-user-choices-ui.spec.ts`
-- Broader `npm run test:e2e` (or a justified subset) for the composer/proposal
-  durability tests if the shared store touches shared storage wiring.
+### 6.4 Attachment Race Unit Tests (`tests/agent-interface-attachment-draft-race.test.ts`)
+Uses a mock behavioral harness modeled on the `AgentInterface` component to simulate and verify async timing:
+- **Clear-After-Send**: Assures that an async IndexedDB lookup resolving after message clearance is safely ignored and doesn't resurrect files.
+- **Set-During-Load**: Assures that user-added attachments are not overwritten by a slow load resolving afterwards.
+- **Session-Switch-During-Load**: Assures that drafts resolving for session 1 are not applied to session 2 when a fast switch occurs.
 
 ---
 
-## 6. File map (proposed)
+## 7. Delivery File Map
 
-| File | Role |
+| File Path | Role |
 |---|---|
-| `src/ui/storage/transient-draft-store.ts` | New: synchronous namespaced sessionStorage/localStorage draft store with gen + tombstone + LRU/byte bounds. |
-| `src/ui/components/AskUserChoicesWidget.ts` | Modified: seed `_draft`/`_activeTab` from the store; persist on change; clear on submit / read-only. |
-| `tests/transient-draft-store.spec.ts` | New: store unit invariants (file:// browser fixture). |
-| `tests/e2e/ui/ask-user-choices-ui.spec.ts` | Extended: pre-submit draft survival across reload / cache-evicted switch; per-tab isolation; submit-clears-draft. |
-| `docs/design/transient-draft-state.md` | This document. |
-
-Existing modules referenced (unchanged): `composer-draft-persistence.md`
-patterns (`session-manager.createDraftManager`, `PromptDraftAttachmentsStore`),
-`proposal-helpers.ts`, `non-blocking-ask.md` / `src/shared/ask-envelope.ts`.
+| `src/ui/storage/transient-draft-store.ts` | The core factory function `createTransientDraftStore` and storage manager. |
+| `src/ui/components/AskUserChoicesWidget.ts` | The widget integrated with `TransientDraftStore` for pre-submit ask persistence. |
+| `src/ui/components/AgentInterface.ts` | The chat interface incorporating the `_attachmentDraftGen` resurrection guard. |
+| `tests/transient-draft-store.spec.ts` | Unit tests for standard `TransientDraftStore` behaviors. |
+| `tests/agent-interface-attachment-draft-race.test.ts` | Unit tests modeling the async resurrection race in `AgentInterface`. |
+| `tests/e2e/ui/ask-user-choices-ui.spec.ts` | End-to-end reload, eviction, and isolation tests for the ask widget. |
+| `docs/design/transient-draft-state.md` | This architectural reference and design guideline. |
