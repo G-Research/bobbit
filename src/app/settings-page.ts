@@ -1814,7 +1814,7 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean },
+	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean; onThinkingClear?: () => void },
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
 
@@ -1948,6 +1948,16 @@ export function renderModelRow(
 							fitContent: opts?.thinkingFitContent ?? true,
 						})}
 					</div>
+					<!-- Optional in-box thinking reset: keeps model + thinking resets in
+					     the SAME control (opt-in; Settings rows don't pass it). -->
+					${opts?.onThinkingClear && thinkingValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title="Reset thinking to default"
+							data-testid="model-thinking-clear-btn"
+							@click=${() => opts.onThinkingClear!()}
+						>${icon(X, "xs")}</button>
+					` : ""}
 				</div>
 			</div>
 			${testResult && !testing ? html`
