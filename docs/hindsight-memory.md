@@ -58,7 +58,7 @@ only opt-out (there is no uninstall for built-in packs). See
 
 The **primary** setup path is the **Marketplace** installed row for the built-in `hindsight` pack:
 it shows the current memory state, surfaces the active config, and its **Configure** button opens a
-[guided setup walkthrough](#guided-setup-walkthrough). The **command palette** entry (**Hindsight
+[guided setup walkthrough](#guided-setup-walkthrough). The **session menu** entry (**Hindsight
 Memory**) and the `#/ext/hindsight` deep link remain available as a **secondary**, discoverable way
 to open the same native panel directly. Both paths lead to the same surface; see
 [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup).
@@ -287,16 +287,15 @@ store-seeding path is now a test-only seam.
 
 ### Entrypoints
 
-Three entrypoints open the same **singleton** panel (one per session view), declared under
-`market-packs/hindsight/entrypoints/` and listed in `pack.yaml` `contents.entrypoints`. All three are
+Two entrypoints open the same **singleton** panel (one per session view), declared under
+`market-packs/hindsight/entrypoints/` and listed in `pack.yaml` `contents.entrypoints`. Both are
 the **secondary** discovery surface — the [Marketplace row](#setup-ux--marketplace-front-door-state-model--guided-setup)
 is the primary setup path:
 
 | Entrypoint | Kind | How to reach it |
 |---|---|---|
-| `hindsight-palette` | `command-palette` | A launcher labelled **Hindsight Memory**. Its target is a bare `PanelTarget` (no `action: spawn`), so it opens the panel in the **active/owner session** — there is no sub-agent, unlike the pr-walkthrough spawn launchers. |
+| `hindsight-session-menu` | `session-menu` | A launcher labelled **Hindsight Memory** in the session actions overflow menu, sitting next to **PR Walkthrough** so memory is reachable from the same place. Its target is a bare `PanelTarget` (no `action: spawn`), so it opens `hindsight.panel` in the **active/owner session** — there is no sub-agent, unlike the pr-walkthrough spawn launcher. Replaces the legacy `command-palette` + `git-widget-button` entrypoints removed in #829. Visibility is deliberately **not** gated on `status` (no per-render pack-route call): the entry is registered whenever the pack is active and the panel itself renders the dormant/configure state, keeping the widget pack-agnostic and never a dead affordance. |
 | `hindsight-route` | `route` (`routeId: hindsight`) | Deep link **`#/ext/hindsight`**. Carries no params (`paramKeys: []`); the panel rehydrates entirely from the `config`/`status` routes on mount, so a reload or shared link restores the same view. |
-| `hindsight-git` | `git-widget-button` | A launcher labelled **Hindsight Memory** in the git status widget's **Extensions** group, sitting next to **PR Walkthrough** so memory is reachable from the same place reviewers already look. Like the palette it is a bare `PanelTarget` (no `action: spawn`) — it opens `hindsight.panel` in the **active/owner session**. Visibility is deliberately **not** gated on `status` (no per-render pack-route call): the button is registered whenever the pack is active and the panel itself renders the dormant/configure state, keeping the widget pack-agnostic and never a dead affordance. |
 
 ### What the panel does
 
