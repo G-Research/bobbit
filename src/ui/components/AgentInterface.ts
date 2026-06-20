@@ -493,6 +493,11 @@ export class AgentInterface extends LitElement {
 	/** Session id the currently-loaded `_attachments` belong to — guards against
 	 *  applying a stale async load after the session prop changed. */
 	private _attachmentDraftSessionId?: string;
+	/** Monotonic token bumped on every load/set/clear of the attachment draft.
+	 *  An in-flight async load captures this and only applies its result if the
+	 *  token is unchanged — so a clear-after-send (same session id, empty
+	 *  `_attachments`) cannot let a stale read resurrect sent attachments. */
+	private _attachmentDraftGen = 0;
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
 	private _cachedMessagesRef?: AgentMessage[];
 
@@ -514,14 +519,19 @@ export class AgentInterface extends LitElement {
 	 *  Fire-and-forget; ignores the result if the session changed meanwhile. */
 	private _loadAttachmentDraft(sessionId: string | undefined): void {
 		this._attachmentDraftSessionId = sessionId;
+		const gen = ++this._attachmentDraftGen;
 		this._attachments = [];
 		if (!sessionId) return;
 		void (async () => {
 			try {
 				const files = await getAppStorage().promptDraftAttachments.getAttachments(sessionId);
-				// Only apply if still on the same session and the user hasn't already
-				// added attachments since this load was scheduled.
+				// Only apply if neither the session nor the draft generation changed
+				// since this load was scheduled. The generation guard catches a
+				// clear/set on the SAME session (e.g. send-then-clear) that the
+				// session-id check alone would miss, preventing a stale read from
+				// resurrecting cleared or replaced attachments.
 				if (this._attachmentDraftSessionId !== sessionId) return;
+				if (this._attachmentDraftGen !== gen) return;
 				if (files.length > 0 && this._attachments.length === 0) {
 					this._attachments = files;
 					this.requestUpdate();
@@ -536,6 +546,7 @@ export class AgentInterface extends LitElement {
 	 *  events are user-initiated and infrequent). */
 	private _setAttachmentDraft(files: Attachment[]): void {
 		this._attachments = files;
+		++this._attachmentDraftGen;
 		const sid = this.session?.sessionId;
 		if (!sid) return;
 		this._attachmentDraftSessionId = sid;
@@ -546,6 +557,7 @@ export class AgentInterface extends LitElement {
 	 *  Called on successful send / compact so a sent attachment never resurrects. */
 	private _clearAttachmentDraft(): void {
 		this._attachments = [];
+		++this._attachmentDraftGen;
 		const sid = this.session?.sessionId;
 		if (sid) void getAppStorage().promptDraftAttachments.deleteAttachments(sid).catch(() => {});
 	}
