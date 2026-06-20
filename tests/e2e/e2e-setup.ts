@@ -745,9 +745,7 @@ function pathContains(parent: string, child: string): boolean {
 	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
 }
 
-async function projectIdForRequestCwd(cwdValue: unknown): Promise<string | undefined> {
-	if (typeof cwdValue !== "string" || !cwdValue.trim()) return undefined;
-	const state = await readLiveProjectState();
+function findProjectIdForCwd(state: LiveProjectState, cwdValue: string): string | undefined {
 	if (!state.ok) return undefined;
 	const cwd = canonicalPathForMatch(cwdValue);
 	let best: { id: string; root: string } | undefined;
@@ -758,6 +756,23 @@ async function projectIdForRequestCwd(cwdValue: unknown): Promise<string | undef
 		if (!best || root.length > best.root.length) best = { id: project.id, root };
 	}
 	return best?.id;
+}
+
+async function projectIdForRequestCwd(cwdValue: unknown): Promise<string | undefined> {
+	if (typeof cwdValue !== "string" || !cwdValue.trim()) return undefined;
+	// Project registration and immediate session creation happen back-to-back in
+	// several E2E specs. Under broad-suite contention, the first list request can
+	// occasionally race the just-registered project becoming visible to this
+	// helper; retry briefly before falling back to the harness default project.
+	// Without this, worktree creation can incorrectly use default-project config
+	// such as a deliberately stale `base_ref` from another test.
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const state = await readLiveProjectState();
+		const match = findProjectIdForCwd(state, cwdValue);
+		if (match) return match;
+		if (attempt < 4) await new Promise(r => setTimeout(r, 25));
+	}
+	return undefined;
 }
 
 async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: string): Promise<void> {

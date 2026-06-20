@@ -251,13 +251,22 @@ test.describe("fork worktree choice", () => {
 			});
 			expect(poison.status, await poison.text()).toBe(200);
 		}
+		const repoBaseRef = await apiFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ base_ref: "master" }),
+		});
+		expect(repoBaseRef.status, await repoBaseRef.text()).toBe(200);
+
 		const sresp = await apiFetch("/api/sessions", {
 			method: "POST",
 			// Deliberately omit projectId: the E2E injector must select the project
 			// containing cwd, not leak the default project's stale base_ref into this repo.
+			// The repo project has a valid base_ref=master; the default project has a
+			// deliberately stale base_ref, so successful worktree setup proves the
+			// repo project's config was used.
 			body: JSON.stringify({ cwd: repoPath, worktree: true }),
 		});
-		expect(sresp.status).toBe(201);
+		expect(sresp.status, await sresp.clone().text()).toBe(201);
 		const sourceId = (await sresp.json()).id;
 		created.push(sourceId);
 		try {
