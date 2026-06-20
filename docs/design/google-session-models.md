@@ -1,9 +1,10 @@
 # Google account (Code Assist) models as agent session models
 
-Status: **design** (design-doc gate). This change edits **only** this file — no `src/`, tests,
-package files, or `AGENTS.md`. Every path/function/symbol named below is an exact target for the
-follow-up implementation task. This document is intended to be implementable without further
-architecture work.
+Status: **implemented** (was the design-doc gate artifact). The plan below shipped: account
+`google-gemini-cli` models are now session-selectable and run through the generated Code Assist
+provider extension. For current behavior and operator guidance see
+[`docs/google-oauth-models.md`](../google-oauth-models.md). This document is retained as the
+design record; every path/function/symbol named below was an exact target for the implementation.
 
 Goal: `Google Session Models` (`google-session-09851872`). Make `google-gemini-cli` (Google account
 OAuth / Gemini Code Assist) models selectable and runnable as normal Bobbit agent **session** models,

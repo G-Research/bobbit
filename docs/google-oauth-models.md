@@ -4,10 +4,10 @@ Bobbit can authenticate Google for Gemini in two distinct ways. They are intenti
 kept separate so an account login can never be confused with an API key, and so a
 Google credential can never accidentally "authenticate" the wrong provider.
 
-| Path | Provider id | Where | Credential | What it powers today |
+| Path | Provider id | Where | Credential | What it powers |
 |---|---|---|---|---|
-| **Google account OAuth** | `google-gemini-cli` | Settings → Account → Google OAuth | OAuth Bearer token (Code Assist) in `auth.json` | Account-backed Gemini model metadata + gateway-side helper completions. **Not yet selectable for agent sessions.** |
-| **Google AI Studio API key** | `google` | Settings → Models → Provider API Keys | API key in preferences (`providerKey.google`) | The always-working, session-usable Gemini path. |
+| **Google account OAuth** | `google-gemini-cli` | Settings → Account → Google OAuth | OAuth Bearer token (Code Assist) in `auth.json` | Account-backed Gemini models, usable as **full agent session models** (stream, tools, multi-turn) **and** gateway-side helper completions. |
+| **Google AI Studio API key** | `google` | Settings → Models → Provider API Keys | API key in preferences (`providerKey.google`) | The other, independent session-usable Gemini path. |
 
 This split is the single most important thing to understand about the feature: it is the
 reason there are two "Google" entries in Settings, two provider ids, and two different
@@ -111,58 +111,131 @@ sessions.
 
 ---
 
-## Current limitation: account-backed Gemini is account-only
+## Account-backed Gemini as agent session models
 
 When a Google account credential is present, the model registry emits account-backed Gemini
 models under provider `google-gemini-cli` with `api: "google-code-assist"` (see
-`src/server/agent/google-code-assist-models.ts`). These models show in the selector as
-**authenticated** but are emitted with **`sessionSelectable: false`** and a clear reason:
+`src/server/agent/google-code-assist-models.ts`). They appear in the model selector named
+`… (Google account)` and are **session-selectable**: you can bind one to any agent session
+exactly like an Anthropic, OpenAI, or API-key Gemini model.
 
-> Signed in, but Google account (Code Assist) models can't run in agent sessions yet — the
-> agent runtime has no Code Assist provider. For Gemini in sessions, add a Google AI Studio
-> API key (provider "google") under Settings → Models.
+A selected `google-gemini-cli/<model>` session can answer, stream output, call tools,
+receive tool results, and continue multi-turn context. The selection persists as a
+`provider/modelId` preference and is re-pinned on every spawn (including restart, restore,
+and respawn), so reloads do not silently fall back to another model.
 
-**Why:** the Code Assist adapter (`codeAssistComplete`) is wired only into **server-side**
-helper completions (`completeModelText` — used for title/name/connection-test). The
-pi-coding-agent runtime that powers agent **sessions** has no `google-gemini-cli` provider
-and no `google-code-assist` api, so binding such a model to a session would silently fall
-back or hard-fail. To prevent that, `google-gemini-cli` is server-side-gated as a
-non-session-selectable provider (`isSessionSelectableProvider` /
-`NON_SESSION_SELECTABLE_PROVIDERS` in `src/server/agent/google-code-assist.ts`): no path
-(browser picker, role override, `default.sessionModel` preference, API write, or a restored
-config) may bind it to a session. A pinning test cross-checks the per-model flag and the
-provider-level guard so they cannot drift.
+### How it runs (why there are two Gemini wire paths)
 
-Until agent-side Code Assist support exists, **session-usable Gemini requires a Google AI
-Studio API key** (provider `google`). The Account-tab note and the model-selector copy both
-say this explicitly, satisfying the goal constraint that an unusable subscription path must
-be surfaced clearly rather than implied to work.
+The Code Assist API (`cloudcode-pa.googleapis.com`) is not one of the providers that
+`@earendil-works/pi-ai` ships, so the spawned `pi-coding-agent` runtime that drives sessions
+has no built-in `google-code-assist` api. Bobbit closes that gap with a **generated provider
+extension** rather than by patching the upstream package:
+
+- A self-contained pi-coding-agent extension
+  (`src/server/agent/google-code-assist-provider-extension.ts`) registers
+  `api: "google-code-assist"` inside the agent runtime via `pi.registerProvider(...)`, with a
+  custom `streamSimple` handler that talks directly to
+  `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse`.
+- The extension is loaded via the existing `--extension` plumbing **only when a Google
+  account credential is present**, so non-Google users pay zero overhead. The same path works
+  for local and Docker-sandboxed sessions.
+- The conversion/streaming core lives in `src/server/agent/google-code-assist.ts`
+  (`convertContextToCodeAssist`, `codeAssistStream`, `parseCodeAssistStreamChunk`) and carries
+  **no `pi-ai` import**, so the gateway and the embedded extension share one tested wire
+  implementation. Gemini-native semantics (function calls, thinking, `thoughtSignature`
+  replay) are preserved end to end.
+
+This is why "log in with Google" and "paste a Gemini API key" remain genuinely different
+integrations: the account path streams through Code Assist with a per-request Bearer token,
+while the API-key `google` path uses the Gemini Developer API with `x-goog-api-key`. The full
+rationale and the options that were rejected (patching pi-ai, an OpenAI-compatible proxy, a
+CLI-backed runtime) are in [`docs/design/google-session-models.md`](design/google-session-models.md).
+
+### Per-request token & project endpoint
+
+The agent runtime does not hold a long-lived Google token. On each request the extension
+fetches fresh runtime material from an authenticated gateway endpoint:
+
+```
+GET /api/sessions/:id/google-code-assist/token  →  { accessToken, projectId }
+```
+
+- `accessToken` comes from `getGoogleAccessToken()` (refreshes the stored OAuth token when
+  needed); the OAuth **refresh** token is never returned.
+- `projectId` comes from an explicit `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` env
+  var when set (see below), otherwise from `ensureCodeAssistProject()` which resolves/onboards
+  the free-tier project and caches it.
+- A definitive auth failure returns `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` whose message
+  tells the user to re-authenticate via Settings → Account → Google (Gemini) — **not** to add
+  an API key. A token that is valid but whose project onboarding failed returns
+  `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }`, so a project problem is never misreported as a
+  re-auth requirement.
+
+Keeping refresh on the gateway and fetching per request means a token that expires mid-session
+is transparently renewed, and nothing Google-account-scoped has to be persisted inside the
+sandbox.
+
+### Project selection (free tier vs. paid Code Assist / GCA)
+
+`ensureCodeAssistProject()` resolves and caches a free-tier project on first use (persisted in
+`google-code-assist.json`). To route requests under a specific project — e.g. a paid Code
+Assist / Gemini Code Assist subscription billed to a GCP project — set **`GOOGLE_CLOUD_PROJECT`**
+or **`GOOGLE_CLOUD_PROJECT_ID`** in the gateway environment. An explicit value wins and skips
+the `loadCodeAssist`/`onboardUser` onboarding entirely, mirroring the Gemini CLI's precedence.
+
+### Provider isolation (unchanged)
 
 The `OAUTH_AUTHENTICATED_PROVIDERS` allow-list in `src/server/agent/model-registry.ts`
 (`anthropic`, `openai-codex`, `google-gemini-cli`) ensures only genuine OAuth providers are
 authenticated via `auth.json`, so a `google-gemini-cli` account token can never make the
-API-key-only `google` provider look usable.
+API-key-only `google` provider look usable. The two Gemini paths stay fully independent:
+removing the account login leaves an API key working, and vice versa.
+
+### Caveats: quota, tier, and account terms
+
+Google account Gemini runs through the **Gemini Code Assist** API using the official Gemini
+CLI installed-app OAuth client (see the OAuth client identity note above). Keep these caveats
+in mind, which the model-selector / Settings copy also surface:
+
+- This is **not** the AI Studio API path. Throughput is bound by your account's Code Assist
+  quota/tier; the free tier can rate-limit. Quota / rate-limit responses (HTTP 429) surface as
+  a clear provider error event in the session, not a silent stall.
+- It depends on Google's continued allowance of the Gemini CLI client for non-CLI apps. If
+  Google ever rejects that, the account row is disabled with a clear message while API-key
+  Gemini (provider `google`) stays available — the always-working in-session fallback.
+- A locked-down Docker sandbox that cannot reach `cloudcode-pa.googleapis.com` surfaces a
+  clear error event; use the API-key `google` provider in that case.
 
 ---
 
 ## Token & sandbox propagation (high level)
 
-Spawned/sandboxed agent sessions receive Google credentials through the same partitioned
-credential-propagation path as the other account providers, but **only when policy explicitly opts in**
-(least privilege; default is no Google credential in the sandbox). This Google rule is stricter than Codex: Codex keeps its legacy permissive fallback when `sandbox_tokens` is unset, but Google OAuth is never mounted by default.
+The **primary** runtime credential path for `google-gemini-cli` session models is the
+per-request gateway endpoint above — the provider extension fetches a fresh token + project id
+over `BOBBIT_GATEWAY_URL` on each request, so refresh stays gateway-side and works the same in
+local and Docker sessions.
+
+The env/`auth.json` propagation below is a **fallback** for egress-restricted sandboxes and is
+applied through the same partitioned path as the other account providers, but **only when
+policy explicitly opts in** (least privilege; default is no Google credential in the sandbox).
+This Google rule is stricter than Codex: Codex keeps its legacy permissive fallback when
+`sandbox_tokens` is unset, but Google OAuth is never mounted by default.
 
 - **Env var.** `src/server/agent/host-tokens.ts` maps provider `google-gemini-cli` to the
   sandbox env var `GOOGLE_CLOUD_ACCESS_TOKEN` (the var the Gemini CLI / google-auth honor for
-  a pre-acquired Bearer token, paired with `GOOGLE_GENAI_USE_GCA=1`). This is deliberately
-  distinct from the API-key `google` var (`GEMINI_API_KEY`) so the two never collide.
+  a pre-acquired Bearer token). This is deliberately distinct from the API-key `google` var
+  (`GEMINI_API_KEY`) so the two never collide. Note: `GOOGLE_GENAI_USE_GCA=1` only affects the
+  `@google/genai` SDK path; Bobbit's custom provider bypasses that SDK and streams Code Assist
+  directly, so it does not depend on that flag.
 - **Sanitized sandbox `auth.json`.** When the sandbox-token policy enables the Google entry
   (`sandboxTokenPolicyAllowsGoogleAuth`, key `GOOGLE_CLOUD_ACCESS_TOKEN`), the scoped
   read-only sandbox `auth.json` includes a sanitized `google-gemini-cli` credential
   containing only `{ type: "oauth", access, refresh?, expires? }`. `email`/profile/scope
   metadata is never copied into the sandbox. This mirrors the existing Codex sanitization
   pattern.
-- **Freshness.** Gateway-side token resolution refreshes the access token before use; the
-  sandbox carries the refresh token so it can re-mint an expired access token itself.
+- **Freshness.** Gateway-side token resolution refreshes the access token before use; when the
+  env/`auth.json` fallback is used, the sandbox carries the refresh token so it can re-mint an
+  expired access token itself.
 
 **Safety invariants** (unchanged from the rest of the auth pipeline): tokens are never
 logged (error bodies are truncated and redacted), `GET /api/oauth/status` and
@@ -176,26 +249,38 @@ account.
 
 Automated tests cover provider partitioning, sanitized status, refresh failure modes, the
 OAuth-capable allow-list, sandbox sanitization, the OAuth status/start/flow/complete/logout
-routes (mocked Google endpoints), and the Settings UI (Account row + reload persistence,
-the Models Provider API Keys section, and the stale-path regression). The following steps
-require a **real Google account** and are not part of CI:
+routes (mocked Google endpoints), the Code Assist streaming conversion (text/tool/usage/abort
+/re-auth), the token endpoint, the session-selectability of account models, and the Settings
+UI (Account row + reload persistence, the Models Provider API Keys section, and the stale-path
+regression). The following steps require a **real Google account** and are not part of CI; the
+session-running steps mirror the manual integration gated by
+`MANUAL_TEST_MODEL=google-gemini-cli/…`:
 
 1. **Login round-trip.** Settings → Account → Google OAuth → **Log in**. Complete Google
    consent in the opened tab (or paste the redirect URL/code in remote-gateway setups).
    Confirm the row flips to **Authenticated** with an **Expires** time.
 2. **Reload persistence.** Hard-reload Bobbit. The Google row must still show
    **Authenticated** (status is re-fetched from `auth.json`).
-3. **Account-only model state.** Open the model selector. Account-backed Gemini models
-   (`… (Google account)`) must appear **authenticated but not session-selectable**, with the
-   "can't run in agent sessions yet" reason. Confirm none can be bound to a session.
-4. **Server-side Code Assist completion (where supported).** Where a server-side helper
-   completion routes through `google-gemini-cli`, confirm it reaches
-   `cloudcode-pa.googleapis.com/v1internal` with a Bearer token, resolving/onboarding a free-
-   tier project on first use (cached in `google-code-assist.json`). On unsupported accounts,
-   confirm the limitation messaging is shown rather than a silent failure.
-5. **API-key fallback unchanged.** Add a Google AI Studio key under Settings → Models →
+3. **Selectable account models.** Open the model selector. Account-backed Gemini models
+   (`… (Google account)`) must appear **authenticated and session-selectable** (no disabled
+   "Account only" state). Bind one to a session.
+4. **Run a session turn.** With `google-gemini-cli/gemini-2.5-pro` (or another listed account
+   model) selected, confirm the agent answers, **streams** output, **calls a tool**, receives
+   the tool result, and **continues multi-turn** context. Under the hood this reaches
+   `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` with a per-request Bearer
+   token, resolving/onboarding a free-tier project on first use (cached in
+   `google-code-assist.json`).
+5. **Restart persistence.** Restart the session (or the gateway). The selected
+   `google-gemini-cli/<model>` must be re-pinned with **no fallback** to another provider.
+6. **Re-auth failure.** Let the access token expire (or revoke it) and trigger a turn. Confirm
+   the session surfaces a clear **re-authenticate via Settings → Account → Google** error
+   (`GOOGLE_CODE_ASSIST_REAUTH`) rather than a silent stall, and re-logging-in restores it.
+7. **Project selection.** Set `GOOGLE_CLOUD_PROJECT` (or `GOOGLE_CLOUD_PROJECT_ID`) and confirm
+   requests route under that project, skipping free-tier onboarding. Note expected quota /
+   rate-limit (HTTP 429) behavior on the free tier — it should appear as a provider error.
+8. **API-key fallback unchanged.** Add a Google AI Studio key under Settings → Models →
    Provider API Keys and confirm Gemini Developer API (`google`) models remain fully
    session-selectable and complete normally — independent of account login.
-6. **Logout isolation.** Log out of Google and confirm `anthropic`, `openai-codex`, and any
+9. **Logout isolation.** Log out of Google and confirm `anthropic`, `openai-codex`, and any
    API-key-only `google` credential are untouched, and that no token material appears in any
    response or log.
