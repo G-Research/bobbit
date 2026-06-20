@@ -49,12 +49,20 @@ import { getHostApi } from "../../src/app/host-api.js";
 			case "store.get": h.store.get("k"); break;
 			case "store.put": h.store.put("k", 1); break;
 			case "store.list": h.store.list(); break;
+			case "store.delete": h.store.delete("k"); break;
+			case "store.deletePrefix": h.store.deletePrefix("pre"); break;
+			case "store.stats": h.store.stats("pre"); break;
 			default: return "unknown-stub";
 		}
 		return null; // did not throw → failure
 	} catch (e) {
 		return e instanceof Error ? e.message : String(e);
 	}
+};
+
+(window as any).__storeMethods = () => {
+	const h: any = getHostApi("sess-1", "tu-1");
+	return ["get", "put", "list", "delete", "deletePrefix", "stats"].map((name) => `${name}:${typeof h.store[name]}`);
 };
 
 (window as any).__ready = true;

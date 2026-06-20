@@ -22,6 +22,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createServerHostApi } from "../src/server/extension-host/server-host-api.ts";
 
+const noopStore = { get: async () => null, put: async () => {}, list: async () => [], delete: async () => false, deletePrefix: async () => 0, stats: async () => ({ keys: 0, bytes: 0 }), getSync: () => null };
+
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the server-host caps (session + store) — callRoute/ui are client-only", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
@@ -64,22 +66,31 @@ describe("createServerHostApi — Fix B: NO server-side session.postMessage", ()
 
 describe("createServerHostApi — store delegates to the injected PackStore scoped to packId", () => {
 	it("binds every call to the SERVER-DERIVED packId (never caller-supplied)", async () => {
-		const calls: Array<{ op: string; packId: string; key?: string; value?: unknown; prefix?: string }> = [];
+		const calls: Array<{ op: string; packId: string; key?: string; value?: unknown; prefix?: string; opts?: unknown }> = [];
 		const fakeStore = {
 			get: async (packId: string, key: string) => { calls.push({ op: "get", packId, key }); return null; },
-			put: async (packId: string, key: string, value: unknown) => { calls.push({ op: "put", packId, key, value }); },
+			put: async (packId: string, key: string, value: unknown, opts?: unknown) => { calls.push({ op: "put", packId, key, value, opts }); },
 			list: async (packId: string, prefix?: string) => { calls.push({ op: "list", packId, prefix }); return ["a"]; },
+			delete: async (packId: string, key: string) => { calls.push({ op: "delete", packId, key }); return true; },
+			deletePrefix: async (packId: string, prefix: string) => { calls.push({ op: "deletePrefix", packId, prefix }); return 2; },
+			stats: async (packId: string, prefix?: string) => { calls.push({ op: "stats", packId, prefix }); return { keys: 1, bytes: 2 }; },
 			getSync: () => null,
 		};
 		const host = createServerHostApi({ sessionId: "s", packId: "my-pack", contributionId: "g/t", packStore: fakeStore });
 		assert.equal(host.capabilities.store, true);
 		await host.store.get("k1");
-		await host.store.put("k2", { n: 1 });
+		await host.store.put("k2", { n: 1 }, { quotaScope: { prefix: "k", profile: "review-final" } });
 		assert.deepEqual(await host.store.list("pre"), ["a"]);
+		assert.equal(await host.store.delete("k2"), true);
+		assert.equal(await host.store.deletePrefix("pre"), 2);
+		assert.deepEqual(await host.store.stats("pre"), { keys: 1, bytes: 2 });
 		assert.deepEqual(calls, [
 			{ op: "get", packId: "my-pack", key: "k1" },
-			{ op: "put", packId: "my-pack", key: "k2", value: { n: 1 } },
+			{ op: "put", packId: "my-pack", key: "k2", value: { n: 1 }, opts: { quotaScope: { prefix: "k", profile: "review-final" } } },
 			{ op: "list", packId: "my-pack", prefix: "pre" },
+			{ op: "delete", packId: "my-pack", key: "k2" },
+			{ op: "deletePrefix", packId: "my-pack", prefix: "pre" },
+			{ op: "stats", packId: "my-pack", prefix: "pre" },
 		]);
 	});
 
@@ -94,8 +105,6 @@ describe("createServerHostApi — onStoreWrite (host-owned activation-cache inva
 	// externalUrl) must let the host drop its activation-filtered provider cache so
 	// a dormant provider activates without a gateway restart. The host fires
 	// onStoreWrite AFTER a successful put, with the written key.
-	const noopStore = { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null };
-
 	it("fires onStoreWrite with the written key AFTER the put resolves", async () => {
 		const order: string[] = [];
 		const written: string[] = [];
@@ -135,7 +144,7 @@ describe("createServerHostApi — capabilityMask (least-privilege provider hosts
 	it("a store-only provider host reports store true, session/agents false", () => {
 		const host = createServerHostApi({
 			sessionId: "s", packId: "p", contributionId: "",
-			packStore: { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null },
+			packStore: noopStore,
 			capabilityMask: { store: true, session: false, agents: false },
 		});
 		assert.equal(host.capabilities.store, true);
@@ -150,7 +159,7 @@ describe("createServerHostApi — capabilityMask (least-privilege provider hosts
 		const calls: string[] = [];
 		const host = createServerHostApi({
 			sessionId: "s", packId: "p", contributionId: "",
-			packStore: { get: async (_p, k) => { calls.push(`get:${k}`); return null; }, put: async () => {}, list: async () => [], getSync: () => null },
+			packStore: { ...noopStore, get: async (_p, k) => { calls.push(`get:${k}`); return null; } },
 			capabilityMask: { store: true, session: false, agents: false },
 		});
 		await host.store.get("retain-queue");
@@ -160,7 +169,7 @@ describe("createServerHostApi — capabilityMask (least-privilege provider hosts
 	it("masked-off namespaces throw 'not available' on every method (defence-in-depth)", () => {
 		const host = createServerHostApi({
 			sessionId: "s", packId: "p", contributionId: "",
-			packStore: { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null },
+			packStore: noopStore,
 			capabilityMask: { store: true, session: false, agents: false },
 		});
 		assert.throws(() => host.session.readTranscript(), /host\.session capability is not available/);
