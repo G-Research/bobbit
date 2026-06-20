@@ -1,57 +1,58 @@
 /**
- * Browser E2E — Hindsight UX polish, MARKETPLACE surface (design
- * docs/design/hindsight-ux-polish.md + ...-implementation.md, Partition E).
+ * Browser E2E — Hindsight MARKETPLACE surface, redefined by the "Hindsight surfaces
+ * & embedded dashboard" goal. The Marketplace is the CONFIGURATION HOME (Configure
+ * form + guided wizard) and the row keeps a read-only derived state (Disabled ·
+ * Dormant · External connected/unreachable · Managed stopped/starting/running). The
+ * key change this goal lands: **Open Hindsight UI** no longer navigates the browser
+ * to the dashboard — it opens the EMBEDDED dashboard tab in-app, with a small
+ * secondary external-browser fallback link. This spec pins:
  *
- * The Marketplace is the PRIMARY Hindsight setup path (decision D2): the built-in
- * `hindsight` row must surface a CLEAR derived state (Disabled · Dormant · External
- * connected/unreachable · Managed stopped/starting/running/unhealthy) instead of a
- * flat "Enabled", with state-aware actions (Configure, Test connection, Open
- * Hindsight UI, Start/Stop runtime, View logs). This spec pins:
- *
- *   1. FIRST-RUN configure path — an unconfigured built-in row shows
- *      `market-hindsight-state` = Dormant; **Configure** opens the native panel.
- *   2. EXTERNAL CONNECTED — with a healthy external Hindsight configured, the row
- *      state = External connected; **Test connection** reports ok; **Open Hindsight
- *      UI** links to the configured (distinct) UI URL.
- *   3. MANAGED status rendering (MOCKED runtime events) — the row state tracks a
- *      mocked supervisor stopped→starting→running; loading the page / reading status
- *      NEVER fires `/start` (no-auto-start invariant); the explicit consent-gated
- *      **Start** is the only path that calls `/api/pack-runtimes/:id/start`.
+ *   1. FIRST-RUN — an unconfigured built-in row is Disabled and surfaces Configure.
+ *   2. EXTERNAL CONNECTED — a healthy external Hindsight derives External connected;
+ *      Test connection reports ok; the row exposes Open Hindsight UI.
+ *   3. OPEN HINDSIGHT UI — the primary `market-hindsight-open-ui` is a BUTTON that
+ *      opens the embedded dashboard tab (`hindsight-dashboard-frame` src=uiUrl) WITHOUT
+ *      opening a new browser window/page; a secondary `market-hindsight-open-ui-external`
+ *      anchor carries the uiUrl (target=_blank, rel=noopener) as the fallback.
+ *   4. INLINE CONFIGURE — the sessionless inline form saves config + persists across
+ *      reload (the config home).
+ *   5. MANAGED — the row tracks a mocked supervisor stopped→starting→running; loading
+ *      NEVER fires `/start`; explicit consent-gated Start is the only `/start` path.
+ *   6. lastError object rendering + per-project override (unchanged #820/quality
+ *      invariants preserved on the Marketplace surface).
  *
  * Runtime is MOCKED via `registerPackRuntimeSupervisorFactory` (no Docker); external
- * data is the in-process `hindsight-stub.mjs`. The gateway runs in-process in this
- * worker, so both the supervisor factory and the pack-store singleton are shared with
- * the page's REST calls (mirrors hindsight-pack.spec.ts).
+ * data is the in-process `hindsight-stub.mjs`.
  *
- * SKIP-GUARD: mirrors hindsight-pack.spec.ts — a static DEPS_READY plus a runtime
- * check that the built-in band actually serves the Hindsight pack contribution +
- * routes in this environment (dist not rebuilt / branches not merged ⇒ skip).
+ * SKIP-GUARD: a static STACK_READY (the embedded-dashboard panel bundle/descriptor of
+ * this goal — a reliable proxy that the marketplace changes also merged) gates the
+ * suite, plus a per-test runtime check that the contribution is served here. Keeps the
+ * suite green-by-skip until the parallel coder branches land.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { apiFetch, base, waitForSessionStatus } from "../e2e-setup.js";
+import { apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, navigateToHash } from "./ui-helpers.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 const PACK = "hindsight";
-const PANEL_ID = "hindsight.panel";
+const DASHBOARD_PANEL_ID = "hindsight.dashboard";
 const PACK_SRC = path.resolve(__dirname, "..", "..", "..", "market-packs", PACK);
 const STUB_PATH = path.resolve(__dirname, "..", "hindsight-stub.mjs");
 const CONFIG_KEY = "provider-config:memory";
-const EX_UI_URL = "http://localhost:19177/banks/hermes?view=data";
+const EX_UI_URL = "http://127.0.0.1:19177/banks/hermes?view=data";
 
-const DEPS_READY =
-	fs.existsSync(path.join(PACK_SRC, "lib", "HindsightPanel.js")) &&
-	fs.existsSync(path.join(PACK_SRC, "panels", "hindsight-memory.yaml")) &&
+const STACK_READY =
+	fs.existsSync(path.join(PACK_SRC, "lib", "HindsightDashboardPanel.js")) &&
+	fs.existsSync(path.join(PACK_SRC, "panels", "hindsight-dashboard.yaml")) &&
 	fs.existsSync(STUB_PATH);
 
-const describe = DEPS_READY ? test.describe : test.describe.skip;
+const describe = STACK_READY ? test.describe : test.describe.skip;
 
-// ── stub typing (the .mjs is untyped) ────────────────────────────────────────
 interface HindsightStub {
 	url: string;
 	setHealthy(ok: boolean): void;
@@ -76,33 +77,24 @@ async function listContributions(): Promise<PackContributionsMeta[]> {
 	return ((await res.json()).packs ?? []) as PackContributionsMeta[];
 }
 
-/** Runtime readiness: the built-in band must serve the panel + the config/status
- *  routes, and the panel module must be fetchable. Returns true when the Hindsight
- *  contribution is available in THIS environment, else false (→ skip). */
-async function hindsightContributionReady(): Promise<boolean> {
+/** Runtime readiness: the embedded-dashboard contribution (and config/status routes)
+ *  must be served here — a reliable proxy that the whole goal's stack has merged. */
+async function dashboardContributionReady(): Promise<boolean> {
 	const meta = (await listContributions()).find((p) => p.packId === PACK);
 	if (!meta) return false;
-	if (!meta.panels?.some((p) => p.id === PANEL_ID)) return false;
+	if (!meta.panels?.some((p) => p.id === DASHBOARD_PANEL_ID)) return false;
 	for (const r of ["config", "status"]) {
 		if (!meta.routeNames?.includes(r)) return false;
 	}
-	const panelRes = await apiFetch(`/api/ext/packs/${PACK}/panels/${encodeURIComponent(PANEL_ID)}`);
+	const panelRes = await apiFetch(`/api/ext/packs/${PACK}/panels/${encodeURIComponent(DASHBOARD_PANEL_ID)}`);
 	return panelRes.ok;
 }
 
-/** Seed / reset the persisted Hindsight config in the shared in-process pack store.
- *  Empty object ⇒ dormant. Non-empty ⇒ the route GET projects it as the live config. */
 async function putHindsightConfig(overrides: Record<string, unknown>): Promise<void> {
 	const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
 	await getPackStore().put(PACK, CONFIG_KEY, overrides);
 }
 
-/** Return the built-in DEFAULT-DISABLED Hindsight pack to its baseline (no stored
- *  activation record, no force-enable marker) so this spec is robust to a leaked
- *  enabled state from a sibling spec file (e.g. hindsight-pack) sharing the worker's
- *  in-process gateway + server-scope activation store. PUT every catalogue entity
- *  disabled WHILE UNCONFIGURED equals the pack's default ⇒ the server clears the
- *  record + drops the marker. Call AFTER clearing config so the pack is unconfigured. */
 async function resetHindsightActivation(): Promise<void> {
 	try {
 		const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
@@ -128,10 +120,7 @@ async function reconcile(page: Page): Promise<void> {
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => { /* race */ });
 }
 
-/** Does the `config` route expose the per-project override contract (globalConfig /
- *  projectOverride) in THIS environment? The route partition that adds it (design
- *  hindsight-memory-quality) may not have merged when this spec file runs alone, so
- *  the override UI test guards on this probe rather than failing. */
+/** Does the `config` route expose the per-project override contract here? */
 async function overrideContractReady(): Promise<boolean> {
 	const res = await apiFetch(`/api/ext/pack-route/${PACK}/config?projectId=__probe__`);
 	if (!res.ok) return false;
@@ -139,8 +128,6 @@ async function overrideContractReady(): Promise<boolean> {
 	return Object.prototype.hasOwnProperty.call(data, "globalConfig") || Object.prototype.hasOwnProperty.call(data, "projectOverride");
 }
 
-/** Open the app, create + select a session (so the marketplace can mint the pack
- *  route surface token for the Hindsight `status` read), and reconcile renderers. */
 async function openWithSession(page: Page): Promise<void> {
 	await openApp(page);
 	const sid = await createSessionViaUI(page);
@@ -149,11 +136,7 @@ async function openWithSession(page: Page): Promise<void> {
 	await reconcile(page);
 }
 
-/** Navigate to the Marketplace, land on the Installed tab, and return the built-in
- *  Hindsight row locator. Re-callable to re-trigger the background status/runtime
- *  loads (loadMarketplaceData runs on each #/market entry). */
 async function openMarketRow(page: Page): Promise<ReturnType<Page["locator"]>> {
-	// Land on a non-market route first so the #/market entry is a genuine hashchange.
 	await navigateToHash(page, "#/roles");
 	await navigateToHash(page, "#/market");
 	await expect(page.locator('[data-testid="market-installed-panel"]')).toBeVisible({ timeout: 15_000 });
@@ -164,12 +147,9 @@ async function openMarketRow(page: Page): Promise<ReturnType<Page["locator"]>> {
 }
 
 const stateBadge = (row: ReturnType<Page["locator"]>) => row.locator('[data-testid="market-hindsight-state"]');
+const dashboardFrame = (page: Page) => page.locator('[data-testid="hindsight-dashboard-frame"]').first();
 
-// ── Mocked managed runtime supervisor (NO Docker). Mutable status so a test can
-//    drive stopped→starting→running; records control calls so we can assert the
-//    no-auto-start invariant. `capabilitySummary.ports` points the route's runtime
-//    base URL at the in-process stub, so a "running" runtime probes HEALTHY (→ the
-//    Managed-running state) without any real Docker. ──
+// ── Mocked managed runtime supervisor (NO Docker). ──
 interface SupCall { op: "start" | "stop" | "restart" | "down"; }
 const supCalls: SupCall[] = [];
 let managedRuntimeStatus: "stopped" | "starting" | "running" | "unhealthy" | "docker-unavailable" = "stopped";
@@ -191,7 +171,6 @@ const fakeSupervisor = {
 			startPolicy: "on-enable",
 			services: ["api", "db"],
 			images: ["hindsight/api", "postgres"],
-			// Point the route's runtime base URL at the stub so a running runtime is HEALTHY.
 			ports: [{ key: "API_PORT", host: stubPort, container: 8000 }],
 			volumePath: "~/.hindsight",
 			trust: "local",
@@ -199,9 +178,9 @@ const fakeSupervisor = {
 	},
 };
 
-describe.configure({ mode: "serial" });
+test.describe.configure({ mode: "serial" });
 
-describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
+describe("Hindsight pack — Marketplace state + actions (config home + embedded Open UI)", () => {
 	let stub: HindsightStub;
 	let ready = false;
 
@@ -210,7 +189,7 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor as never);
 		stub = await startStub();
 		stubPort = Number(new URL(stub.url).port);
-		ready = await hindsightContributionReady();
+		ready = await dashboardContributionReady();
 	});
 
 	test.afterAll(async () => {
@@ -222,12 +201,6 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 	});
 
 	test.beforeEach(async () => {
-		// Clean slate, ORDER-INDEPENDENT of sibling spec files sharing this worker's
-		// gateway: clear config, then reset the built-in pack to its DEFAULT-DISABLED
-		// baseline (drops any leaked force-enable marker / stored record). The first
-		// test then sees the true "disabled" state; connected/managed tests re-enable
-		// the pack via putHindsightConfig (the configured-rule). Reset BEFORE clearing
-		// supCalls so a runtime stop fired by the reset PUT does not pollute assertions.
 		await putHindsightConfig({});
 		await resetHindsightActivation();
 		supCalls.length = 0;
@@ -236,82 +209,91 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 	});
 
 	test("first-run: the built-in row shows Disabled and surfaces Configure as the primary setup path", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		await openWithSession(page);
 		const row = await openMarketRow(page);
 
-		// The built-in Hindsight pack ships DEFAULT-DISABLED (manifest `defaultDisabled:
-		// true`): a fresh, unconfigured, untouched server resolves it with every entity
-		// de-activated, so the row's headline state is "disabled" (NOT a flat "Enabled",
-		// and NOT "dormant" — dormant is the enabled-but-unconfigured state). Enabling or
-		// configuring it flips this. Also proves the sessionless built-in pack-route
-		// status read still works after #/market cleared the active chat session.
 		await expect(stateBadge(row), "an unconfigured built-in Hindsight row is Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
 
-		// Configure is surfaced as the primary setup affordance on the row.
-		// (Opening the native panel itself requires an active session to bind to — a
-		// separate session-context concern exercised by hindsight-pack.spec.ts, which
-		// opens the panel via the command-palette launcher inside a live session. The
-		// Market route deliberately disconnects the chat session, so we assert the
-		// action is surfaced + actionable here rather than re-testing panel mount.)
 		const configure = row.locator('[data-testid="market-hindsight-configure"]');
 		await expect(configure, "Configure is offered as the primary setup path").toBeVisible();
 		await expect(configure).toBeEnabled();
 	});
 
-	test("external connected: row state, Test connection, and Open Hindsight UI", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
-		// Configure a healthy EXTERNAL Hindsight out-of-band, with a DISTINCT UI URL.
+	test("external connected: row state and Test connection", async ({ page }) => {
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		await putHindsightConfig({ externalUrl: stub.url, bank: "hermes", uiUrl: EX_UI_URL });
 
 		await openWithSession(page);
 		const row = await openMarketRow(page);
 
-		// The row derives External connected (healthy external data plane).
 		await expect(stateBadge(row), "a healthy external Hindsight is External connected").toHaveAttribute("data-state", "external-connected", { timeout: 20_000 });
 
-		// The active config summary surfaces the data-plane URL + bank prominently.
 		const summary = row.locator('[data-testid="market-hindsight-config"]');
 		await expect(summary).toBeVisible({ timeout: 15_000 });
 		await expect(summary).toContainText("hermes");
 
-		// Open Hindsight UI links to the configured UI URL verbatim (distinct from the API URL).
-		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
-		await expect(openUi, "Open Hindsight UI surfaces with a configured UI URL").toBeVisible();
-		await expect(openUi).toHaveAttribute("href", EX_UI_URL);
-		expect(EX_UI_URL).not.toBe(stub.url);
-
-		// Test connection re-reads the status route and reports a transient ok lozenge.
 		await row.locator('[data-testid="market-hindsight-test"]').click();
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]'), "Test connection reports a result lozenge").toBeVisible({ timeout: 20_000 });
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toContainText("Connected");
 	});
 
-	test("inline Configure form saves config sessionlessly and persists across reload", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
-		// Start disabled (default-disabled built-in, no config). The inline form is the
-		// #/market setup path — there is no active chat session to mount the native panel
-		// against, so Configure must write config over the SESSIONLESS built-in pack-route
-		// config-write seam. Saving an externalUrl configures the pack, which (per the
-		// live-setup-preservation rule) also flips it out of the default-disabled state.
+	test("Open Hindsight UI opens the EMBEDDED dashboard tab (no new window); the external link is the fallback", async ({ page }) => {
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
+		// Distinct data-plane URL + human dashboard UI URL.
+		await putHindsightConfig({ externalUrl: stub.url, bank: "hermes", uiUrl: EX_UI_URL });
+		expect(EX_UI_URL).not.toBe(stub.url);
+
+		// Keep the embed warning out of the way: a generous iframe load-timeout.
+		await page.addInitScript(() => { (window as any).__bobbitHindsightIframeTimeoutMs = 60_000; });
+
+		await openWithSession(page);
+		const row = await openMarketRow(page);
+		await expect(stateBadge(row)).toHaveAttribute("data-state", "external-connected", { timeout: 20_000 });
+
+		// The primary Open Hindsight UI is an in-app route link (not an external
+		// target=_blank/window.open escape hatch).
+		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
+		await expect(openUi, "Open Hindsight UI is surfaced with a configured UI URL").toBeVisible({ timeout: 15_000 });
+		await expect(openUi).toHaveAttribute("href", /#\/ext\/hindsight$/);
+		await expect(openUi).not.toHaveAttribute("target", "_blank");
+
+		// The secondary external-browser fallback carries the uiUrl verbatim.
+		const external = row.locator('[data-testid="market-hindsight-open-ui-external"]');
+		await expect(external, "a secondary external-browser fallback link exists").toBeVisible({ timeout: 15_000 });
+		await expect(external).toHaveAttribute("href", EX_UI_URL);
+		await expect(external).toHaveAttribute("target", "_blank");
+		await expect(external).toHaveAttribute("rel", /noopener/);
+
+		// Clicking the primary opens the embedded dashboard tab IN-APP — no new window/page.
+		const popups: unknown[] = [];
+		page.on("popup", (p) => popups.push(p));
+		const pagesBefore = page.context().pages().length;
+		await openUi.click();
+
+		const fr = dashboardFrame(page);
+		await expect(fr, "Open Hindsight UI opens the embedded dashboard tab").toBeVisible({ timeout: 20_000 });
+		await expect(fr, "the embedded iframe loads the configured UI URL verbatim").toHaveAttribute("src", EX_UI_URL, { timeout: 15_000 });
+		expect(popups, "Open Hindsight UI must NOT open a new browser window").toHaveLength(0);
+		expect(page.context().pages().length, "no extra browser page is created").toBe(pagesBefore);
+	});
+
+	test("inline Configure form saves config sessionlessly and persists across reload (the config home)", async ({ page }) => {
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		await openWithSession(page);
 		let row = await openMarketRow(page);
 		await expect(stateBadge(row), "an unconfigured default-disabled row starts Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
 
-		// Configure toggles the inline form (NOT the native panel) on #/market.
 		await row.locator('[data-testid="market-hindsight-configure"]').click();
 		const form = row.locator('[data-testid="market-hindsight-config-form"]');
 		await expect(form, "Configure opens the inline config form").toBeVisible({ timeout: 15_000 });
-		// The form hydrates from the config route; the mode select appears once loaded.
 		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
 
-		// Set the API/data-plane URL (dialed), bank, and the DISTINCT Dashboard UI URL.
 		await form.locator('[data-testid="market-hindsight-form-externalurl"]').fill(stub.url);
 		await form.locator('[data-testid="market-hindsight-form-bank"]').fill("hermes");
 		await form.locator('[data-testid="market-hindsight-form-uiurl"]').fill(EX_UI_URL);
 		expect(EX_UI_URL).not.toBe(stub.url);
 
-		// Save writes via the sessionless config-write seam and reports a result lozenge.
 		await form.locator('[data-testid="market-hindsight-config-save"]').click();
 		await expect(form.locator('[data-testid="market-hindsight-config-result"]'), "save reports a result").toContainText("Saved", { timeout: 20_000 });
 
@@ -319,24 +301,21 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await page.reload();
 		row = await openMarketRow(page);
 
-		// The row reflects the saved deployment after reload (persistence).
 		const summary = row.locator('[data-testid="market-hindsight-config"]');
 		await expect(summary, "the saved config surfaces after reload").toBeVisible({ timeout: 20_000 });
 		await expect(summary).toContainText("hermes");
 
-		// Open Hindsight UI links to the saved (distinct) UI URL verbatim.
-		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
-		await expect(openUi, "Open Hindsight UI surfaces the saved UI URL").toBeVisible({ timeout: 15_000 });
-		await expect(openUi).toHaveAttribute("href", EX_UI_URL);
+		// The external fallback link reflects the saved (distinct) UI URL verbatim.
+		const external = row.locator('[data-testid="market-hindsight-open-ui-external"]');
+		await expect(external, "the external fallback link surfaces the saved UI URL").toBeVisible({ timeout: 15_000 });
+		await expect(external).toHaveAttribute("href", EX_UI_URL);
 	});
 
 	test("managed: the row tracks mocked runtime status (stopped→starting→running) and loading never starts Docker", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
-		// Configure a MANAGED deployment out-of-band; the runtime starts STOPPED.
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		await putHindsightConfig({ mode: "managed", llmApiKey: "sk-managed-test" });
 		managedRuntimeStatus = "stopped";
 
-		// Track every runtime /start request the page issues (no-auto-start probe).
 		const startRequests: string[] = [];
 		page.on("request", (r) => {
 			if (/\/api\/pack-runtimes\/[^/]+\/start(\?|$)/.test(r.url())) startRequests.push(r.url());
@@ -345,27 +324,16 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await openWithSession(page);
 		let row = await openMarketRow(page);
 
-		// Stopped: the row shows Managed stopped with an explicit Start action.
 		await expect(stateBadge(row), "a configured-but-stopped managed runtime is Managed stopped").toHaveAttribute("data-state", "managed-stopped", { timeout: 20_000 });
 		await expect(row.locator('[data-testid="market-hindsight-start"]'), "Managed stopped shows a Start action").toBeVisible();
 		expect(startRequests, "loading the marketplace must NOT start Docker (status reads are pure)").toHaveLength(0);
 		expect(supCalls.filter((c) => c.op === "start"), "no supervisor.start on load").toHaveLength(0);
 
-		// Mocked runtime event: starting → the row tracks Managed starting.
 		managedRuntimeStatus = "starting";
 		row = await openMarketRow(page);
 		await expect(stateBadge(row), "row tracks the mocked starting status").toHaveAttribute("data-state", "managed-starting", { timeout: 20_000 });
-		// While transitioning up, a Stop action is offered (and Start is not).
 		await expect(row.locator('[data-testid="market-hindsight-stop"]'), "a starting runtime offers Stop").toBeVisible();
 
-		// Mocked runtime event: running → the row tracks the running supervisor status.
-		// The row derives a managed "up" state from the running runtime. Whether it lands
-		// on managed-running vs managed-unhealthy depends on a live data-plane HEALTH
-		// probe (the route resolves ctx.runtime from the static provider-contribution
-		// config, so a store-only managed config reports healthy:false in this mocked
-		// environment) — real health is asserted in manual-integration (real Docker).
-		// Here we pin that the row CONSUMED the running supervisor status: it leaves
-		// stopped/starting, no longer offers Start, and offers Stop.
 		managedRuntimeStatus = "running";
 		row = await openMarketRow(page);
 		await expect
@@ -374,13 +342,12 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await expect(row.locator('[data-testid="market-hindsight-start"]'), "a running runtime no longer offers Start").toHaveCount(0);
 		await expect(row.locator('[data-testid="market-hindsight-stop"]'), "a running runtime offers Stop").toBeVisible();
 
-		// Across all three reads NOTHING ever auto-started Docker.
 		expect(startRequests, "status polling/rendering never starts Docker").toHaveLength(0);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start was never called by reads").toHaveLength(0);
 	});
 
 	test("managed: explicit consent-gated Start is the only path that calls /start (exactly once)", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		await putHindsightConfig({ mode: "managed", llmApiKey: "sk-managed-test" });
 		managedRuntimeStatus = "stopped";
 
@@ -393,12 +360,10 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		const row = await openMarketRow(page);
 		await expect(stateBadge(row)).toHaveAttribute("data-state", "managed-stopped", { timeout: 20_000 });
 
-		// Clicking Start opens the consent disclosure — it does NOT start Docker yet.
 		await row.locator('[data-testid="market-hindsight-start"]').click();
 		await expect(row.locator('[data-testid="market-hindsight-start-consent"]'), "Start opens the consent disclosure first").toBeVisible({ timeout: 15_000 });
 		expect(startRequests, "opening the consent card must not start Docker").toHaveLength(0);
 
-		// Confirming the consent is the explicit start gesture → exactly one /start.
 		const confirm = row.locator('[data-testid="market-hindsight-start-confirm"]');
 		await expect(confirm).toBeVisible();
 		const [startReq] = await Promise.all([
@@ -406,50 +371,32 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 			confirm.click(),
 		]);
 		expect(startReq.url()).toMatch(/\/api\/pack-runtimes\/[^/]+\/start/);
-		// The action result reflects the start; exactly one start request + one supervisor call.
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toBeVisible({ timeout: 20_000 });
 		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
 	});
 
-	// ── Per-project memory override (design hindsight-memory-quality): the inline
-	//    Configure form surfaces a compact override section for the CURRENT project;
-	//    saving a project recall-scope override persists across a full reload and the
-	//    summary shows a "project override active" badge. Guarded on the route exposing
-	//    the override contract so the spec stays green where that partition hasn't
-	//    merged. ──
 	test("per-project override: recall scope override saves and persists across reload", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		test.skip(!(await overrideContractReady()), "config route does not expose the per-project override contract here");
-		// Configure a healthy external deployment so the pack is configured + the row enabled.
 		await putHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
 
 		await openWithSession(page);
 		let row = await openMarketRow(page);
 
-		// Open Configure → the per-project override section appears for the current project.
 		await row.locator('[data-testid="market-hindsight-configure"]').click();
 		const form = row.locator('[data-testid="market-hindsight-config-form"]');
 		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
 		const override = row.locator('[data-testid="market-hindsight-override"]');
 		await expect(override, "the per-project override section is shown").toBeVisible({ timeout: 15_000 });
 
-		// Pin THIS project's recall scope to `all` (override the global default), and save.
 		await override.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("all");
 		await override.locator('[data-testid="market-hindsight-override-save"]').click();
 		await expect(override.locator('[data-testid="market-hindsight-override-result"]'), "the override save reports a result").toContainText("Saved", { timeout: 20_000 });
 
-		// The read-only summary now flags the active project override.
 		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge appears").toBeVisible({ timeout: 20_000 });
-
-		// The GLOBAL inline Configure field must keep showing the GLOBAL value (`project`,
-		// the default — global config seeded no recallScope), NOT the project override
-		// (`all`). The global form hydrates from `globalConfig`, never the overlay-resolved
-		// effective `config`; otherwise the override would masquerade as a global setting
-		// and risk being written back as global.
 		await expect(form.locator('[data-testid="market-hindsight-form-recallscope"]'), "the global recall-scope field shows the global value, not the project override").toHaveValue("project", { timeout: 15_000 });
 
-		// Reload the whole page — the project override must survive (sessionless read).
 		await page.reload();
 		row = await openMarketRow(page);
 		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge persists across reload").toBeVisible({ timeout: 20_000 });
@@ -457,19 +404,15 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		const override2 = row.locator('[data-testid="market-hindsight-override"]');
 		await expect(override2.locator('[data-testid="market-hindsight-override-recallscope"]'), "the saved override value persists").toHaveValue("all", { timeout: 15_000 });
 
-		// Hygiene: clear the override back to inherit so the project overlay does not leak.
 		await override2.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("");
 		await override2.locator('[data-testid="market-hindsight-override-save"]').click();
 		await expect(override2.locator('[data-testid="market-hindsight-override-result"]')).toContainText("Saved", { timeout: 20_000 });
 	});
 
-	// ── The route persists `lastError` as an OBJECT ({ message, ts }); the row must
-	//    render its `message`, never `[object Object]`. ──
 	test("a stored object lastError renders its message (never [object Object])", async ({ page }) => {
-		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!ready, "Hindsight embedded-dashboard/marketplace stack not served in this environment");
 		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
 		try {
-			// Configure an external Hindsight + seed the route's object-shaped diagnostic.
 			await putHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
 			await getPackStore().put(PACK, "last-error", { message: "Hindsight HTTP 503 for POST /recall", ts: Date.now() });
 
@@ -481,7 +424,6 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 			await expect(lastErr).toContainText("Hindsight HTTP 503 for POST /recall");
 			await expect(lastErr, "an object lastError must never stringify to [object Object]").not.toContainText("[object Object]");
 		} finally {
-			// Clear the seeded diagnostic so it cannot leak into later (serial) tests.
 			await getPackStore().put(PACK, "last-error", null);
 		}
 	});

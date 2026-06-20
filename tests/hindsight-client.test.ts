@@ -347,6 +347,29 @@ describe("hindsight-client — transport errors", () => {
 		}
 	});
 
+	it("surfaces the upstream `detail` body in the HTTP error message (e.g. 400 'Query too long')", async () => {
+		// The provider/route soft-skip keys on the message carrying the upstream detail,
+		// so the client MUST append it to the HindsightError message for 4xx/5xx.
+		const server = http.createServer((_req, res) => {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ detail: "Query too long: 620 tokens exceeds maximum of 500 tokens" }));
+		});
+		await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+		const port = (server.address() as AddressInfo).port;
+		const client = createClient({ baseUrl: `http://127.0.0.1:${port}` });
+		try {
+			await assert.rejects(client.recall("bobbit", "q"), (err: unknown) => {
+				assert.ok(err instanceof HindsightError);
+				assert.equal(err.kind, "http");
+				assert.equal(err.status, 400);
+				assert.match(err.message, /Query too long: 620 tokens exceeds maximum of 500/);
+				return true;
+			});
+		} finally {
+			await new Promise<void>((r) => server.close(() => r()));
+		}
+	});
+
 	it("throws HindsightError{kind:timeout} within budget on a slow server", async () => {
 		const server = http.createServer((_req, _res) => {
 			// Never respond — let the client's AbortController fire.

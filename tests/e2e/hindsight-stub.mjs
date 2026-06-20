@@ -14,6 +14,7 @@
  *     url,                       // base url, e.g. http://127.0.0.1:54321
  *     calls,                     // RecordedCall[] (method, path, bank, namespace, body, headers)
  *     setHealthy(ok),            // false ⇒ /health 503 and recall/retain 503
+ *     setRecallError(err|null),  // err = { status, detail } ⇒ recall returns that HTTP error (e.g. 400 "Query too long")
  *     seedMemories(bank, mem[]), // seed recall results (filtered by tags + tags_match)
  *     retained(bank?),           // recorded retained items { content, tags, async }
  *     recalledTypes(bank?),      // recorded recall `types` filters (last-first)
@@ -75,6 +76,9 @@ export function startHindsightStub({ port = 0 } = {}) {
 	/** @type {RecordedCall[]} */
 	const calls = [];
 	let healthy = true;
+	/** When set, recall responds with this HTTP error: { status, detail }. Models the
+	 *  data plane's 500-token "Query too long" 400 so the soft-skip can be exercised. */
+	let recallError = null;
 	/** bank → seeded memory records */
 	const seeded = new Map();
 	/** bank → retained item records */
@@ -128,6 +132,7 @@ export function startHindsightStub({ port = 0 } = {}) {
 		// POST /v1/{ns}/banks/{bank}/memories/recall  — recall_memories
 		if (method === "POST" && bank && segs[4] === "memories" && segs[5] === "recall") {
 			if (!healthy) return send(res, 503, { detail: "unhealthy" });
+			if (recallError) return send(res, recallError.status, { detail: recallError.detail });
 			const reqTags = body?.tags;
 			const mode = body?.tags_match;
 			const mem = seeded.get(bank) ?? [];
@@ -179,6 +184,9 @@ export function startHindsightStub({ port = 0 } = {}) {
 				calls,
 				setHealthy(ok) {
 					healthy = ok;
+				},
+				setRecallError(err) {
+					recallError = err ?? null;
 				},
 				seedMemories(bank, mem) {
 					banks.add(bank);

@@ -18,7 +18,11 @@ import {
 	LAST_ERROR_KEY,
 	PROJECT_RECALL_TAGS_MATCH,
 	QUEUE_KEY,
+	RECALL_QUERY_CHARS_PER_TOKEN,
+	RECALL_QUERY_SAFE_CHAR_CEILING,
+	RECALL_QUERY_TOKEN_CAP,
 	clampRecallQuery,
+	isQueryTooLongError,
 	loadEffectiveConfig,
 	projectConfigKey,
 	recallTagFilter,
@@ -50,20 +54,30 @@ test("recallTagFilter: 'all' scope, or project scope with no id ⇒ no tag filte
 });
 
 // ── clampRecallQuery — pure helper (core fix for the 500-token "Query too long") ─
-test("clampRecallQuery: short unchanged, long truncated, maxChars<=0 returns trimmed full", () => {
+test("clampRecallQuery: short unchanged, long truncated to min(maxChars, token-safe ceiling)", () => {
 	// Short query (and whitespace-trimmed) passes through unchanged.
 	assert.equal(clampRecallQuery("hello", 1200), "hello");
 	assert.equal(clampRecallQuery("  hello  ", 1200), "hello");
-	// Long query is sliced to at most maxChars characters.
+	// Long query is sliced to at most maxChars characters (below the ceiling).
 	const long = "x".repeat(5000);
 	assert.equal(clampRecallQuery(long, 1200).length, 1200);
 	assert.equal(clampRecallQuery(long, 50).length, 50);
-	// maxChars <= 0 (and non-finite) disables clamping ⇒ returns the trimmed full string.
-	assert.equal(clampRecallQuery(`  ${long}  `, 0), long);
-	assert.equal(clampRecallQuery(long, -10), long);
-	assert.equal(clampRecallQuery(long, Number.NaN), long);
 	// Never throws on nullish input.
 	assert.equal(clampRecallQuery(undefined as unknown as string, 100), "");
+});
+
+test("clampRecallQuery: ALWAYS enforces the token-safe ceiling, even with a high/disabled maxChars", () => {
+	const long = "x".repeat(5000);
+	// A configured maxChars far above the ceiling (e.g. the 3000 default) is capped
+	// at the token-safe ceiling so a dense query can never exceed the 500-token cap.
+	assert.equal(clampRecallQuery(long, 3000).length, RECALL_QUERY_SAFE_CHAR_CEILING);
+	assert.equal(clampRecallQuery(long, 100000).length, RECALL_QUERY_SAFE_CHAR_CEILING);
+	// Disabled char-clamping (<= 0 / non-finite) STILL enforces the token-safe ceiling.
+	assert.equal(clampRecallQuery(long, 0).length, RECALL_QUERY_SAFE_CHAR_CEILING);
+	assert.equal(clampRecallQuery(long, -10).length, RECALL_QUERY_SAFE_CHAR_CEILING);
+	assert.equal(clampRecallQuery(long, Number.NaN).length, RECALL_QUERY_SAFE_CHAR_CEILING);
+	// The ceiling sits comfortably under the 500-token cap at the conservative ratio.
+	assert.ok(RECALL_QUERY_SAFE_CHAR_CEILING / RECALL_QUERY_CHARS_PER_TOKEN < RECALL_QUERY_TOKEN_CAP);
 });
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -83,13 +97,15 @@ interface FakeState {
 	healthy: boolean;
 	memories: { text: string; id?: string; score?: number }[];
 	failRecall: boolean;
+	/** When set, recall throws THIS value (e.g. a HindsightError-shaped 400). */
+	recallError: unknown;
 	failRetain: boolean;
 	failEnsureBank: boolean;
 	failUpdateBankConfig: boolean;
 }
 
 function makeClient() {
-	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
+	const state: FakeState = { healthy: true, memories: [], failRecall: false, recallError: undefined, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
 	const calls = {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
 		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
@@ -110,6 +126,7 @@ function makeClient() {
 		},
 		recall: async (bank: string, query: string, opts: unknown) => {
 			calls.recall.push({ bank, query, opts });
+			if (state.recallError !== undefined) throw state.recallError;
 			if (state.failRecall) throw new Error("recall failed");
 			return { memories: state.memories };
 		},
@@ -251,6 +268,76 @@ test("lastError is NOT cleared when recall fails", async () => {
 		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store }, prompt: "q" });
 		const err = (await store.get(LAST_ERROR_KEY)) as { message: string } | null;
 		assert.ok(err && /recall failed/.test(err.message), "failure records (does not clear) lastError");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── Soft-skip the data plane's 500-token "Query too long" 400 (defence in depth) ─
+test("isQueryTooLongError: only a kind:http status:400 'too long'/query error matches", () => {
+	// The exact shape the client throws (status + detail surfaced in the message).
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "Hindsight HTTP 400 for POST .../recall: Query too long: 620 tokens exceeds maximum of 500" }), true);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "...query exceeds limit" }), true);
+	// Genuine errors are NOT soft-skipped: other statuses, kinds, and unrelated 400s.
+	assert.equal(isQueryTooLongError({ kind: "http", status: 500, message: "Query too long" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 401, message: "unauthorized" }), false);
+	assert.equal(isQueryTooLongError({ kind: "timeout", message: "Query too long" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "bad request" }), false);
+	assert.equal(isQueryTooLongError(new Error("Query too long")), false);
+	assert.equal(isQueryTooLongError(null), false);
+	assert.equal(isQueryTooLongError("Query too long"), false);
+});
+
+test("doRecall SOFT-skips a 400 'Query too long' (empty recall, no sticky lastError, prior cleared)", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		// HindsightError-shaped 400 carrying the upstream "Query too long" detail.
+		state.recallError = { kind: "http", status: 400, message: "Hindsight HTTP 400 for POST .../recall: Query too long: 620 tokens exceeds maximum of 500" };
+		const store = makeStore();
+		// A prior sticky error is CLEARED by the soft-skip so the banner can't persist.
+		await store.put(LAST_ERROR_KEY, { message: "stale Query too long", ts: 1 });
+		const out = await provider.beforePrompt({ config: { ...ACTIVE }, host: { store }, prompt: "q" });
+		assert.deepEqual(out.blocks, [], "query-too-long ⇒ empty recall (non-fatal)");
+		assert.equal(await store.get(LAST_ERROR_KEY), null, "no sticky lastError recorded; prior one cleared");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall SOFT-skips a 400 'Query too long' (clean empty, no error field, prior cleared)", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.recallError = { kind: "http", status: 400, message: "Query too long: 700 tokens exceeds maximum of 500" };
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		await store.put(LAST_ERROR_KEY, { message: "stale", ts: 1 });
+		const res = (await routes.recall({ host: { store } } as never, { body: { query: "q" } } as never)) as {
+			configured: boolean; memories: unknown[]; error?: string;
+		};
+		assert.deepEqual(res, { configured: true, memories: [] }, "soft-skip ⇒ clean empty result with NO error field");
+		assert.equal(await store.get(LAST_ERROR_KEY), null, "prior sticky error cleared by the soft-skip");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall still surfaces GENUINE errors (a non-query 5xx is recorded / returned)", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.recallError = { kind: "http", status: 500, message: "Hindsight HTTP 500 for POST .../recall: boom" };
+		// Provider: a genuine error is recorded as lastError (not soft-skipped).
+		const pStore = makeStore();
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: pStore }, prompt: "q" });
+		const err = (await pStore.get(LAST_ERROR_KEY)) as { message: string } | null;
+		assert.ok(err && /HTTP 500/.test(err.message), "genuine 5xx records lastError");
+		// Route: a genuine error is returned in the `error` field.
+		const rStore = makeStore();
+		await rStore.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		const res = (await routes.recall({ host: { store: rStore } } as never, { body: { query: "q" } } as never)) as { error?: string };
+		assert.ok(res.error && /HTTP 500/.test(res.error), "genuine 5xx returned in the route error field");
 	} finally {
 		__setClientFactory(null);
 	}

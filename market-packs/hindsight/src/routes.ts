@@ -34,6 +34,7 @@ import {
 	clientConfig,
 	isActive,
 	isConfigured,
+	isQueryTooLongError,
 	loadEffectiveConfig,
 	loadProjectOverride,
 	loadQueue,
@@ -238,6 +239,14 @@ export const routes = {
 			await clearError(store);
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
+			// The data plane's 500-token "Query too long" 400 is a SOFT skip: return a
+			// clean empty result with NO `error` field and clear any prior sticky error,
+			// so the panel/marketplace banner can never reappear from this cause (the
+			// token-safe clamp should already prevent it). Genuine errors still surface.
+			if (isQueryTooLongError(e)) {
+				await clearError(store);
+				return { configured: true, memories: [] };
+			}
 			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
 		}
 	},
