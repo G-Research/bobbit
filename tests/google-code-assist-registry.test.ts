@@ -89,6 +89,35 @@ describe("Google account model emission + auth isolation", () => {
 		}
 	});
 
+	it("does not emit Developer-API-only Gemini models that Code Assist 404s on", async () => {
+		// Live Code Assist probes return HTTP 404 "Requested entity not found" for
+		// gemini-2.0-*, gemini-3.5-flash, and the *-latest aliases even though pi-ai's
+		// `google` catalog carries them. They must be excluded from the account list.
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		const models = await getAvailableModels(prefs);
+		const accountIds = new Set(models.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
+		assert.ok(accountIds.size > 0, "expected at least one google-gemini-cli model");
+		for (const unsupported of [
+			"gemini-2.0-flash",
+			"gemini-2.0-flash-lite",
+			"gemini-3.5-flash",
+			"gemini-flash-latest",
+			"gemini-flash-lite-latest",
+		]) {
+			assert.equal(accountIds.has(unsupported), false, `${unsupported} must not be emitted (Code Assist 404)`);
+		}
+	});
+
+	it("emits the supported Code Assist Gemini models", async () => {
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		const models = await getAvailableModels(prefs);
+		const accountIds = new Set(models.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
+		// These are confirmed-serving ids that are also present in pi-ai's catalog.
+		for (const supported of ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"]) {
+			assert.equal(accountIds.has(supported), true, `${supported} must be emitted (Code Assist supported)`);
+		}
+	});
+
 	it("keeps API-key google (Gemini Developer API) models selectable for sessions", async () => {
 		// The always-working API-key fallback must never be gated. Authenticate it via env.
 		process.env.GOOGLE_API_KEY = "test-key";

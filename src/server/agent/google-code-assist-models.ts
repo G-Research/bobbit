@@ -32,13 +32,31 @@ import {
 } from "./google-code-assist.js";
 
 /**
- * Gemini ids the Code Assist API serves. Restricted to first-party `gemini-*`
- * models (Gemma and Vertex-only variants are excluded). A model is included only
- * when pi-ai's `google` catalog also carries it, so we never emit a stale id.
+ * Curated allowlist of Gemini ids the Code Assist (cloudcode-pa) endpoint actually
+ * serves over the OAuth/account path. This is intentionally an explicit allowlist
+ * rather than a `gemini-*` heuristic: pi-ai's `google` catalog carries Developer
+ * API (AI Studio) models that Code Assist 404s on ("Requested entity not found"),
+ * e.g. `gemini-2.0-*`, `gemini-3.5-flash`, and the `*-latest` aliases. Emitting
+ * those made them selectable and produced live HTTP 404 session failures.
+ *
+ * Membership was confirmed against live Code Assist probes (see
+ * docs/google-oauth-models.md). Only emit an id when it is BOTH on this allowlist
+ * AND present in pi-ai's `google` catalog, so we never emit a stale id and metadata
+ * (context window / cost) stays in sync.
  */
+const CODE_ASSIST_ALLOWLIST: ReadonlySet<string> = new Set([
+	"gemini-2.5-flash",
+	"gemini-2.5-flash-lite",
+	"gemini-2.5-pro",
+	"gemini-3-pro-preview",
+	"gemini-3.1-pro-preview",
+	"gemini-3-flash-preview",
+	"gemini-3.1-flash-lite",
+	"gemini-3.1-flash-lite-preview",
+]);
+
 function isCodeAssistEligible(id: string): boolean {
-	const s = id.toLowerCase();
-	return s.startsWith("gemini-") && !s.includes("customtools");
+	return CODE_ASSIST_ALLOWLIST.has(id.toLowerCase());
 }
 
 export function getGoogleCodeAssistModels(): ApiModel[] {
