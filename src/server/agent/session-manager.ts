@@ -1990,9 +1990,13 @@ export class SessionManager {
 		projectConfigStore?: { get(key: string): string | undefined },
 		projectId?: string,
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
-		// allowedTools=undefined or empty => no restrictions; include catalog.
-		// allowedTools restricted => require activate_skill in the list.
-		if (allowedTools && allowedTools.length > 0) {
+		// allowedTools=undefined => unrestricted; include the catalog.
+		// allowedTools=[] (EXPLICIT no tools, e.g. a recursion-stripped delegate or
+		// a session emptied by bobbit.disabledTools) => no activate_skill, so emit
+		// NO Available Skills affordance. A non-empty allowlist must contain
+		// activate_skill for the catalog to appear. `[].some(...)` is false, so an
+		// empty allowlist correctly returns undefined here.
+		if (allowedTools) {
 			const hasActivate = allowedTools.some(t => t.toLowerCase() === "activate_skill");
 			if (!hasActivate) return undefined;
 		}
