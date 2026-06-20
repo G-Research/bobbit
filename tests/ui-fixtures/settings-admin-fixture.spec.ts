@@ -534,6 +534,55 @@ test.describe("Settings/admin UI fixture", () => {
 		expect([after?.model ?? "", after?.thinkingLevel ?? ""]).toEqual([TEST_MODEL, TEST_THINKING]);
 	});
 
+	test("list view rapid model-then-thinking edit does not clobber the just-picked model (save race, finding #2)", async ({ page }) => {
+		// Repro for the inline save race: a user picks a model and then changes
+		// thinking BEFORE the model save round-trips (customize + PUT + refetch). The
+		// old fire-and-forget handler built the second PUT from the stale row object
+		// (model still empty), clearing the model just selected. The pending-draft
+		// merge + serialized save loop must preserve the model.
+		await resetFixture(page, { prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL } });
+		await loadRoles(page, "#/roles");
+
+		// Slow the role PUTs so the thinking change is dispatched while the model
+		// save is still in flight (the refetch that refreshes the row has NOT run).
+		// Wrapping window.fetch keeps the fixture's mock intact and avoids the
+		// network layer (the app calls window.fetch directly, not page.route).
+		await page.evaluate(() => {
+			const orig = window.fetch;
+			window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+				const method = (init?.method || "GET").toUpperCase();
+				const url = typeof input === "string" ? input : (input as any).url ?? String(input);
+				if (method === "PUT" && /\/api\/roles\//.test(url)) {
+					await new Promise((r) => setTimeout(r, 400));
+				}
+				return orig(input, init);
+			}) as typeof window.fetch;
+		});
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+
+		// Pick a model inline — this kicks off the (now slow) save.
+		await control.locator("[data-testid='model-row'] button[title='Choose model']").click();
+		await page.locator(`agent-model-selector [data-model-id="claude-opus-4-1"]`).dispatchEvent("click");
+
+		// Immediately change thinking, WITHOUT waiting for the model save to settle.
+		await control.locator("[data-testid='model-row'] button[role='combobox']").click();
+		await page.getByRole("option", { name: "High", exact: true }).click();
+
+		// Both edits must land: the model is preserved (not clobbered with "") and
+		// the thinking override is applied. On the pre-fix code the model ends "".
+		await expect.poll(async () => {
+			const c = await storedRole(page, "coder");
+			return [c?.model ?? "", c?.thinkingLevel ?? ""];
+		}).toEqual([TEST_MODEL, TEST_THINKING]);
+
+		// And the row reflects the override end-state.
+		await expect(control).toHaveAttribute("data-model-state", "override");
+		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(SRC_ROLE_OVERRIDE);
+		await expect(control.locator(LIST_THINKING_SOURCE)).toHaveText(SRC_ROLE_OVERRIDE);
+	});
+
 	test("list view clearing the model preserves an existing thinking override (finding #1)", async ({ page }) => {
 		await resetFixture(page, {
 			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },

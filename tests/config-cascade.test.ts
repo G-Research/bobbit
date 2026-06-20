@@ -242,6 +242,176 @@ describe("ConfigCascade — Role.model and Role.thinkingLevel three-layer resolu
 		assert.equal(meta.thinkingLevel.value, "medium");
 	});
 
+	it("metadata reports a server-market winner over a shadowed builtin field at system scope (finding #1)", () => {
+		// builtin defines `coder` with a model + thinkingLevel; the server store has
+		// NO coder, so a server-market pack role is the whole-role winner. The
+		// server-market band (rank 1) sits BELOW the system-scope editable server
+		// band (rank 2) but ABOVE builtin (rank 0). The previous guard only trusted
+		// the winner when winnerRank >= editableRank, so it fell through and reported
+		// the lower builtin model. The winner's model must be reported instead.
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", { model: "anthropic/claude-haiku", thinkingLevel: "low" });
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const serverStores = {
+			getRoles: () => [], // server store does NOT define coder
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = { getOrCreate: () => undefined } as any;
+
+		const marketRole = {
+			name: "coder", label: "Coder", promptTemplate: "p", accessory: "none",
+			model: "anthropic/claude-opus-4", createdAt: 0, updatedAt: 0,
+		};
+		const marketProvider = {
+			marketEntries: (scope: string) => scope === "server"
+				? [{
+					id: "market:server:mk", kind: "market", scope: "server", path: "/virtual/mk",
+					readOnly: true, layout: "defaults-tree",
+					manifest: { name: "mk", description: "", version: "1", contents: { roles: ["coder"], tools: [], skills: [], entrypoints: [] } },
+					preloaded: { roles: [{ name: "coder", item: marketRole }] },
+				}]
+				: [],
+		} as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm, undefined, marketProvider);
+
+		// Sanity: the server-market pack is the whole-role winner.
+		const winner = cascade.resolveRoles().find(r => r.item.name === "coder");
+		assert.ok(winner);
+		assert.equal(winner!.origin, "server");
+		assert.equal(winner!.originPackName, "mk");
+		assert.equal(winner!.item.model, "anthropic/claude-opus-4");
+
+		const meta = cascade.resolveRoleModelResolution("coder");
+		// Model: the winning server-market value, NOT the shadowed builtin haiku.
+		assert.equal(meta.model.source, "inherited-role");
+		assert.equal(meta.model.origin, "server");
+		assert.equal(meta.model.value, "anthropic/claude-opus-4");
+		assert.equal(meta.model.originPackName, "mk");
+		assert.equal(meta.model.sourceLabel, "mk");
+		// Pack-managed → read-only inline.
+		assert.equal(meta.model.editable, false);
+		// thinkingLevel: market role omits it → falls through to the builtin field.
+		assert.equal(meta.thinkingLevel.source, "inherited-role");
+		assert.equal(meta.thinkingLevel.origin, "builtin");
+		assert.equal(meta.thinkingLevel.value, "low");
+		assert.equal(meta.thinkingLevel.editable, false);
+	});
+
+	it("metadata reports a global-user winner over a shadowed server field at PROJECT scope (finding #1)", () => {
+		// builtin + server both define `coder` model; a global-user user-pack role
+		// also defines a DIFFERENT model. At PROJECT scope the project layer has no
+		// coder override, so the global-user role (rank 4) is the whole-role winner —
+		// BELOW the project editable band (rank 6) but ABOVE the server band (rank 2).
+		// The previous guard fell through and reported the shadowed server model; the
+		// global-user model must be reported instead, and it stays editable (user
+		// pack, not a market pack).
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", { model: "anthropic/claude-haiku", thinkingLevel: "low" });
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const serverDir = mkTemp();
+		const serverRoleStore = new RoleStore(serverDir);
+		serverRoleStore.put({
+			name: "coder", label: "Coder", promptTemplate: "p", accessory: "none",
+			model: "anthropic/claude-sonnet", thinkingLevel: "medium",
+			createdAt: 0, updatedAt: 0,
+		});
+
+		const homeDir = mkTemp();
+		writeRoleYaml(path.join(homeDir, ".bobbit", "config"), "coder", { model: "anthropic/claude-opus-4" });
+
+		const projectDir = mkTemp();
+		const projectRoleStore = new RoleStore(projectDir); // empty: no coder override
+
+		const serverStores = {
+			getRoles: () => serverRoleStore.getAllLocal(),
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = {
+			getOrCreate: (id: string) => id === "proj1" ? { roleStore: projectRoleStore } : undefined,
+		} as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+		cascade.setGlobalUserBase(homeDir);
+
+		// Sanity: at project scope the global-user role is the winner.
+		const winner = cascade.resolveRoles("proj1").find(r => r.item.name === "coder");
+		assert.ok(winner);
+		assert.equal(winner!.origin, "user");
+		assert.equal(winner!.item.model, "anthropic/claude-opus-4");
+
+		const meta = cascade.resolveRoleModelResolution("coder", "proj1");
+		// Model: the winning global-user value, NOT the shadowed server sonnet.
+		assert.equal(meta.model.source, "inherited-role");
+		assert.equal(meta.model.origin, "user");
+		assert.equal(meta.model.value, "anthropic/claude-opus-4");
+		assert.equal(meta.model.editable, true);
+		// thinkingLevel: global-user role omits it → server supplies the value.
+		assert.equal(meta.thinkingLevel.source, "inherited-role");
+		assert.equal(meta.thinkingLevel.origin, "server");
+		assert.equal(meta.thinkingLevel.value, "medium");
+		assert.equal(meta.thinkingLevel.editable, true);
+	});
+
+	it("metadata reports a project-scoped winner over a shadowed server field as an editable role override (finding #1)", () => {
+		// The project layer defines `coder` model; server defines a different model.
+		// At project scope the project role is the winner AND the editable layer, so
+		// the field reads as a direct `role` override (editable), never the shadowed
+		// server value.
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", { model: "anthropic/claude-haiku", thinkingLevel: "low" });
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const serverDir = mkTemp();
+		const serverRoleStore = new RoleStore(serverDir);
+		serverRoleStore.put({
+			name: "coder", label: "Coder", promptTemplate: "p", accessory: "none",
+			model: "anthropic/claude-sonnet", thinkingLevel: "medium",
+			createdAt: 0, updatedAt: 0,
+		});
+
+		const projectDir = mkTemp();
+		const projectRoleStore = new RoleStore(projectDir);
+		projectRoleStore.put({
+			name: "coder", label: "Coder", promptTemplate: "p", accessory: "none",
+			model: "anthropic/claude-opus-4",
+			createdAt: 0, updatedAt: 0,
+		});
+
+		const serverStores = {
+			getRoles: () => serverRoleStore.getAllLocal(),
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = {
+			getOrCreate: (id: string) => id === "proj1" ? { roleStore: projectRoleStore } : undefined,
+		} as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+
+		const meta = cascade.resolveRoleModelResolution("coder", "proj1");
+		// Model: project override wins, reported as an editable role override.
+		assert.equal(meta.model.source, "role");
+		assert.equal(meta.model.origin, "project");
+		assert.equal(meta.model.value, "anthropic/claude-opus-4");
+		assert.equal(meta.model.editable, true);
+		assert.equal(meta.model.sourceLabel, "Project");
+		// thinkingLevel: project role omits it → falls through to the server field.
+		assert.equal(meta.thinkingLevel.source, "inherited-role");
+		assert.equal(meta.thinkingLevel.origin, "server");
+		assert.equal(meta.thinkingLevel.value, "medium");
+	});
+
 	it("falls through to builtin when neither server nor project define the role", () => {
 		const builtinsDir = mkTemp();
 		writeRoleYaml(builtinsDir, "tester", {

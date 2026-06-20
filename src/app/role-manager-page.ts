@@ -73,6 +73,18 @@ let deleting = false;
 let savedModelFlashRole: string | null = null;
 let savedModelFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Inline list-row save race guard. Inline model/thinking edits are auto-saved
+// asynchronously, but a save round-trips through customize + PUT + a full
+// refetch before the row objects refresh. If a user picks a model and then
+// quickly changes thinking, the second handler would otherwise read the model
+// off the STALE row object (still showing no override) and clobber the
+// just-selected model with "". To prevent that we keep a per-role pending draft
+// (the latest desired { model, thinkingLevel } for that scope) and a per-role
+// serialized save loop that coalesces rapid edits into ordered PUTs built from
+// the merged draft rather than from any stale row snapshot.
+const pendingInlineEdits = new Map<string, { model: string; thinkingLevel: string }>();
+const inlineSaveActive = new Set<string>();
+
 // Group policies loaded from server
 let groupPolicies: Record<string, string> = {};
 
@@ -314,6 +326,57 @@ async function persistInlineModel(role: RoleData, model: string, thinkingLevel: 
 		savedModelFlashTimer = null;
 		if (currentView === "list") renderApp();
 	}, 1800);
+}
+
+/**
+ * Merge a single inline field change into the role's pending draft and kick off
+ * (or coalesce into) its serialized save loop. The draft base is the role's
+ * existing pending draft when one is in flight, else the current-scope
+ * overrides off the freshly-rendered row — so the "model picked, then thinking
+ * changed before refetch" race never reads a stale model/thinking off the row.
+ */
+function queueInlineEdit(role: RoleData, patch: { model?: string; thinkingLevel?: string }): void {
+	const base = pendingInlineEdits.get(role.name) ?? currentScopeRoleOverrides(role);
+	pendingInlineEdits.set(role.name, {
+		model: patch.model ?? base.model,
+		thinkingLevel: patch.thinkingLevel ?? base.thinkingLevel,
+	});
+	scheduleInlineSave(role.name);
+}
+
+/**
+ * Per-role serialized save loop. Drains the pending draft for `name` one PUT at
+ * a time; a newer edit that arrives mid-save is picked up on the next loop turn
+ * rather than racing the in-flight save. Always builds the PUT from the latest
+ * fetched row object (so origin/customize state is fresh) merged with the
+ * pending model/thinking draft.
+ */
+function scheduleInlineSave(name: string): void {
+	if (inlineSaveActive.has(name)) return; // a loop is already draining this role
+	inlineSaveActive.add(name);
+	void (async () => {
+		try {
+			let desired = pendingInlineEdits.get(name);
+			while (desired) {
+				// Use the freshest row object so a save that already promoted the
+				// role into the project layer is not re-customized, and label/prompt/
+				// accessory/tools reflect the latest fetch.
+				const current = roles.find(r => r.name === name);
+				if (!current) { pendingInlineEdits.delete(name); break; }
+				await persistInlineModel(current, desired.model, desired.thinkingLevel);
+				const after = pendingInlineEdits.get(name);
+				if (after && after.model === desired.model && after.thinkingLevel === desired.thinkingLevel) {
+					// No newer edit arrived during the save — drain complete.
+					pendingInlineEdits.delete(name);
+					desired = undefined;
+				} else {
+					desired = after; // a newer edit landed mid-save; persist it next.
+				}
+			}
+		} finally {
+			inlineSaveActive.delete(name);
+		}
+	})();
 }
 
 async function handleDelete(): Promise<void> {
@@ -876,15 +939,18 @@ function renderListView(): TemplateResult {
 				// Model and thinking are independent. Setting OR clearing the model
 				// preserves any existing thinking override — clearing the model must
 				// never write thinkingLevel:"" (thinking is reset only by its own
-				// dedicated clear control, role-row-thinking-clear-btn).
-				void persistInlineModel(role, model, currentScopeRoleOverrides(role).thinkingLevel);
+				// dedicated clear control, role-row-thinking-clear-btn). The pending
+				// draft (not the stale row) supplies the preserved thinking value so a
+				// rapid follow-up thinking edit cannot clobber this model choice.
+				queueInlineEdit(role, { model });
 			},
 			onThinkingChange: (role, thinking) => {
-				// Thinking is editable/clearable independently of the model. Persist
-				// only the current-scope model OVERRIDE (empty when inherited) so a
+				// Thinking is editable/clearable independently of the model. The pending
+				// draft supplies the preserved current-scope model OVERRIDE so a
 				// thinking-only change never promotes an inherited model into a fresh
-				// current-scope model override.
-				void persistInlineModel(role, currentScopeRoleOverrides(role).model, thinking);
+				// current-scope model override — and a model picked moments earlier
+				// (still mid-save) is preserved instead of being overwritten with "".
+				queueInlineEdit(role, { thinkingLevel: thinking });
 			},
 		},
 	});
