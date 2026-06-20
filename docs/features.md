@@ -115,7 +115,7 @@ happens (no network, no prompt drift) until a Hindsight URL is configured, so op
 no cost.
 
 Configuration is done from a **native config/status panel** (Extension Platform P4), opened from
-the command palette (**Hindsight Memory**) or the deep link `#/ext/hindsight`. The panel picks the
+the Marketplace or the session actions overflow menu (**Hindsight Memory**), or via the deep link `#/ext/hindsight`. The panel picks the
 deployment mode (external / managed / managed-external-postgres), writes config through the pack's
 `config` route (with server-side validation and write-only secret redaction), shows a runtime
 status card (connected/unreachable/starting, retry-queue depth, last error), and searches memory
