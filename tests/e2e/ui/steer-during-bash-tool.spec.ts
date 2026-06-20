@@ -83,11 +83,16 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 		// abort handler emits a `message_end` with `stopReason:"error"` before
 		// `agent_end`, mirroring what the real Claude bridge does.
 		process.env.MOCK_ABORT_AS_ERROR = "1";
+		// Make steer delivery deterministic for this abort-reconcile spec: the
+		// steer RPC is accepted, but the mock does not also enqueue its own
+		// follow-up prompt. The server's in-flight steer ledger must recover it.
+		process.env.MOCK_STEER_QUEUE_DROP = "always";
 		await waitForHealth();
 	});
 
 	test.afterAll(() => {
 		delete process.env.MOCK_ABORT_AS_ERROR;
+		delete process.env.MOCK_STEER_QUEUE_DROP;
 	});
 
 	test("queued+steered messages must drain after Stop without requiring a fresh user prompt", async ({ page, rec }) => {
