@@ -121,14 +121,17 @@ Both are byte-identical logic because the bundle is generated from the source.
 ### 4.1 The results registry (pack store)
 
 Orchestration (A/B fan-out and autoresearch loop) writes a **results registry**
-into the pack-scoped `host.store`. Reporting only ever **reads** it. Proposed key
-layout (mirrors PR-walkthrough's `job/…`, `binding/…` namespacing):
+into the pack-scoped `host.store`. Reporting only ever **reads** it. Every key is
+built from `lib/store-keys.mjs` (the single source of keys — see
+[experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §3 for the
+full schema); the keys reporting reads are:
 
 ```
 exp/<experimentId>                 → ExperimentDef
 exp/<experimentId>/run/<runId>     → RunRecord       (one per variant×repeat or per iteration)
 exp/<experimentId>/ledger          → LedgerEntry[]   (autoresearch only; best-so-far feed-forward)
 exp/<experimentId>/dashboard       → DashboardSpec   (editable view-spec; §7)
+exp/<experimentId>/metrics         → MetricSelection[] (editable metric selection; §5)
 ```
 
 `ExperimentDef` (the parts reporting reads):
@@ -160,17 +163,22 @@ interface RunRecord {
   verified: boolean;       // correctness gate result (autoresearch reject if false)
   completionBar: string;   // a tag for same-completion-bar filtering (e.g. "all-gates-passed")
   metrics: Record<string, number | null>;   // extracted metric values, keyed by metricId
-  raw?: RawOutcomeRefs;    // pointers/snapshots of underlying outcome data (§4.2)
+  rawOutcome?: RawOutcome; // underlying outcome data, retained for re-extraction (§4.2)
   startedAt?: number;
   completedAt?: number;
 }
 ```
 
-**Key invariant:** `RunRecord.metrics` is the *already-extracted* numeric outcome.
-Metric extraction (running the metric-extractor contract over outcome data) happens
-in the **orchestration / extractor** sub-stream, not in reporting. Reporting
-consumes `RunRecord.metrics` and aggregates. This keeps the reporting lib pure and
-deterministic (no I/O, no extractor execution) — essential for the pinning tests.
+**Key invariant:** `RunRecord.metrics` is the *already-extracted* numeric outcome,
+and it lives on the `RunRecord` **alongside** `rawOutcome` (one record, both fields
+— there is no separate `outcome/*` blob). Metric extraction (running the
+metric-extractor contract over outcome data) happens in the **orchestration /
+extractor** sub-stream at collect time, not in reporting; when the user edits the
+metric selection or dashboard spec, that sub-stream re-extracts from the stored
+`rawOutcome` without re-running. Reporting consumes `RunRecord.metrics` (and
+`MetricSelection`) and aggregates — it never executes extractors. This keeps the
+reporting lib pure and deterministic (no I/O, no extractor execution) — essential
+for the pinning tests.
 
 ### 4.2 Raw outcome data
 
@@ -185,10 +193,13 @@ in a "raw" drill-down widget) comes from the standard goal-tree artefacts:
   `RunRecord.verified` and of a "verification outcome" built-in metric.
 - **`tasks.json`** — task counts / states; source of throughput-style metrics.
 
-Reporting treats these as **inputs already reduced into `RunRecord.metrics`** by
-the extractor stream. The `raw` refs on a `RunRecord` are optional and used only by
-drill-down widgets that want to show the underlying numbers; the report model never
-recomputes a metric from raw data (that would be a second source of truth).
+The extractor stream reads these **by the child `goalId` via REST** (`GET
+/api/goals/:id/cost|gates|tasks`), never by parsing sibling-goal state files through
+ambient fs paths. Reporting treats them as **inputs already reduced into
+`RunRecord.metrics`** by the extractor stream. The `rawOutcome` on a `RunRecord` is
+optional and used only by drill-down widgets that want to show the underlying
+numbers; the report model never recomputes a metric from raw data (that would be a
+second source of truth).
 
 ### 4.3 The pure entry point
 
@@ -286,7 +297,7 @@ Per the goal's "ship a useful core set; the point is the seams":
 - `ledger-table` — iteration / candidate / objective / accepted (autoresearch).
 - `summary-cards` — headline numbers (best arm, total runs, projected vs actual
   cost) for either mode.
-- `raw-drilldown` — optional table of a run's underlying `raw` outcome refs.
+- `raw-drilldown` — optional table of a run's underlying `rawOutcome` data.
 
 A pack (or a quant team) contributes a custom visualization by shipping a module
 that calls `registerWidget(...)`; the spec references it by `type`. The renderer
@@ -340,9 +351,12 @@ report: async (ctx, req) => {
   runs re-renders with **no re-run** (the goal's "re-render from stored raw
   outcomes — no re-run, no redeploy").
 
-### 7.2 Panel dashboard (`panels/experiment-dashboard.yaml`)
+### 7.2 Panel dashboard (the four-view `panels/experiment-runner-panel.yaml`)
 
-The panel (`lib/panel.js`) calls `host.callRoute("report", { experimentId })`,
+The pack ships **one** panel — `panels/experiment-runner-panel.yaml`, a four-view
+state machine (mode-select → define → confirm → dashboard); there is no separate
+`experiment-dashboard.yaml`. Its dashboard view (`lib/panel.js`) calls
+`host.callRoute("report", { experimentId })`,
 receives `{ model }`, and renders it client-side **through the same widget
 registry** (the bundled `experiment-report.mjs`). Rendering the `model` (not the
 server `html`) on the client lets the panel stay interactive (widget hover, edit
@@ -464,8 +478,8 @@ src/shared/experiment-report/
 
 market-packs/experiment-runner/
   lib/experiment-report.mjs   # build:packs bundle of src/shared/experiment-report (committed)
-  lib/routes.mjs              # adds: report, saveDashboard (+ orchestration routes elsewhere)
-  panels/experiment-dashboard.yaml → ../lib/panel.js
+  lib/routes.mjs              # adds: report, saveDashboard (+ orchestration routes — see pack-backend §4)
+  panels/experiment-runner-panel.yaml → ../lib/panel.js   # the one four-view panel
 
 tests/
   experiment-report-aggregate.test.ts

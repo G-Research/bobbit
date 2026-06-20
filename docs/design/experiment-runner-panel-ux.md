@@ -12,10 +12,13 @@ browser-E2E scenarios that pin all of it.
   `goalManager.getEffectiveGoalMetadata` (deep-merge ancestors→self), the `goalProvisioned`
   lifecycle hook, and `goalManager.createGoal({ spec, metadata, inlineRoles, parentGoalId,
   workflowId, … })`.
-- The one new core/host capability this goal adds — **`host.agents.spawnGoal({ spec, metadata,
-  inlineRoles, workflow, parentGoalId }) → { goalId }`**. The panel UX treats it as a black box:
-  "launch one arm/candidate as a child goal of the experiment goal, carrying its arm treatment".
-  *Designing that capability is a different task; this doc only consumes it through a pack route.*
+- The one new core/host capability this goal adds — **`host.agents.spawnGoal({ title, spec,
+  runKey, parentGoalId?, metadata, inlineRoles, workflowId?, workflow? }) → { goalId }`**
+  (`runKey` is the required idempotency key; `parentGoalId` is an optional caller assertion only
+  — the server derives the real parent and rejects a mismatch). The panel UX treats it as a
+  black box: "launch one arm/candidate as a child goal of the experiment goal, carrying its arm
+  treatment". *Designing that capability is a different task; this doc only consumes it through a
+  pack route — the panel never calls `spawnGoal` directly.*
 
 **Pack-surface foundation (verified against the codebase):**
 - Pack schema V1 — [`docs/extension-host-authoring.md`](../extension-host-authoring.md),
@@ -115,8 +118,8 @@ plumbing maps cleanly onto the proven pr-walkthrough pattern:
 | pr-walkthrough mechanic | experiment-runner adaptation |
 |---|---|
 | Spawn launcher `{action:"spawn", route, panelId}` opens a child reviewer session | **No.** Experiment launchers are **panel launchers** — clicking opens the experiment panel **in the current session** at View 1. The child-goal spawning happens later, server-side, when the user hits Launch (the `launch` route calls `host.agents.spawnGoal` per arm). The experiment panel is the *owner-session control surface*, unlike the pr-walkthrough panel which lives only in the child. |
-| `host.callRoute("bundle"/"publish"/"status")` for all dynamic data | `host.callRoute("project"/"launch"/"poll"/"report"/"saveSpec")` — the pack's own routes (§9). Never a raw fetch. |
-| Pack store holds `binding/<child>` + `submitted/<jobId>` | Pack store holds the **results registry**: `exp/<id>` (definition + metrics + dashboard spec), `exp/<id>/runs/<runId>` (per-run config + raw outcome), `exp/<id>/best` (best-so-far + ledger). §8. |
+| `host.callRoute("bundle"/"publish"/"status")` for all dynamic data | `host.callRoute("projectCost"/"launch"/"poll"/"report"/"saveDashboard")` — the pack's own routes (§9). Never a raw fetch. |
+| Pack store holds `binding/<child>` + `submitted/<jobId>` | Pack store holds the **results registry**: `exp/<id>` (definition), `exp/<id>/run/<runId>` (`RunRecord` — per-run config + raw outcome + extracted metrics), `exp/<id>/ledger` (autoresearch ledger), `exp/<id>/dashboard`, `exp/<id>/metrics`. §8. |
 | `kind:"route"` deep-link `routeId:"pr-walkthrough"` restores the child pane on reload | `kind:"route"` deep-link `routeId:"experiment-runner"`, `paramKeys:[experimentId, view]` restores the dashboard (or define draft) on reload. |
 | Child pane auto-polls its own job (read-only carve-out) | The **owner** experiment panel polls `poll` for live status. This is **not** the auto-invoke carve-out (that is child-session-only) — the owner panel polls only **after a user gesture** (Launch, or opening a still-running experiment whose `status==="running"` the user themselves started). Polling a known-running experiment the user navigated to is a read; it never spawns. |
 
@@ -124,8 +127,8 @@ Why launch goes through a server route, not a launcher `action:"spawn"`: the spa
 opens **one** child session and switches to it. An A/B experiment fans out `variant × repeat`
 **child goals** (not sessions to switch to) and the user must stay on the dashboard to watch the
 matrix. So the launcher just opens the panel; the `launch` route does the fan-out via
-`host.agents.spawnGoal` and returns `{ experimentId, spawned: [...goalIds] }`; the panel flips to
-the dashboard and begins polling.
+`host.agents.spawnGoal` (one call per arm, each with its own `runKey`) and returns
+`{ experimentId, spawned: [...goalIds] }`; the panel flips to the dashboard and begins polling.
 
 ---
 
@@ -267,7 +270,8 @@ range.
 
 Per the goal's extensibility requirement, *what* is measured is editable per-experiment without
 code. The Metrics block is a table bound to the **metric-extractor registry** exposed by the
-`metrics` route (`host.callRoute("metrics")` → `{ builtins: [...], custom: [...] }`).
+`listMetrics` route (`host.callRoute("listMetrics")` → `{ builtins: [...], custom: [...] }`);
+edits are persisted via the `saveMetrics` route.
 
 Each selectable metric row:
 
@@ -287,13 +291,13 @@ the table flagged `user-channel` once a first run reports them, so an agent/user
 novel metric with no code.
 
 A code-contributed extractor registers through the documented **metric-extractor contract**
-(a `lib/metrics/<name>.mjs` exporting `{ id, extract(ctx) }`) and then appears in this table
-flagged `custom` — proving "code-contributed extractor registers through the documented
-contract" without a UI change.
+(`registerMetric(...)` in `lib/metrics.mjs`) and then appears in this table flagged `custom` —
+proving "code-contributed extractor registers through the documented contract" without a UI
+change.
 
-Editing the metrics of an **already-run** experiment is allowed and re-renders the dashboard from
-stored raw outcomes (no re-run) — the metric values are extracted at view time from the persisted
-per-run outcome blobs.
+Editing the metrics of an **already-run** experiment is allowed (via `saveMetrics`) and re-renders
+the dashboard from stored raw outcomes (no re-run) — the metric values are re-extracted from each
+`RunRecord`'s persisted `rawOutcome`.
 
 ---
 
@@ -335,9 +339,9 @@ so far vs. the cap, and a kebab menu (Edit definition · Duplicate · Export rep
 
 ### 7.2 Editable dashboard spec
 
-The dashboard is rendered from a stored **view-spec** (`exp/<id>.dashboard`): an ordered list of
+The dashboard is rendered from a stored **view-spec** (`exp/<id>/dashboard`): an ordered list of
 widget descriptors, each `{ type, title, metric(s), options }`, bound to collected metrics.
-Widget types come from the **widget-renderer registry** (`host.callRoute("widgets")` →
+Widget types come from the **widget-renderer registry** (`host.callRoute("listWidgets")` →
 built-in types + pack-contributed types). Built-in widget types (small core set):
 `bar-compare`, `line-progress`, `small-multiples`, `runs-table`, `ledger`, `stat`.
 
@@ -347,8 +351,9 @@ built-in types + pack-contributed types). Built-in widget types (small core set)
 - Remove a widget.
 - Edit a widget title + options (e.g. bar vs. boxplot for a metric).
 
-Saving calls `host.callRoute("saveSpec", { experimentId, dashboard })`, persists to the store,
-and re-renders **from the same stored raw outcomes** — no re-run, no redeploy. A newly-registered
+Saving calls `host.callRoute("saveDashboard", { experimentId, dashboard })`, persists to the
+store, and re-renders **from the same stored raw outcomes** — no re-run, no redeploy. A
+newly-registered
 widget type (built-in OR pack-contributed) appears in the "Add widget" type list immediately
 (proving "newly-registered widget type is used"). Because the renderer is spec-driven, adding a
 metric or chart is a *registration, not a refactor*.
@@ -363,16 +368,18 @@ localStorage mirror for instant cold paint, mirroring the pr-walkthrough panel's
 
 | Key | Holds | Written by |
 |---|---|---|
-| `exp/<id>` | definition (basics, variants/seed, metrics selection, caps/stops, dashboard spec, mode) | `saveSpec` route on draft-change + launch |
-| `exp/<id>/runs/<runId>` | per-run config (arm metadata + inlineRoles) + raw outcome blob (session-costs, gates/verification, tasks) | `poll`/`report` route as child goals complete |
-| `exp/<id>/best` | autoresearch best-so-far + the full ledger | `poll` route after each accept/reject |
+| `exp/<id>` | definition (basics, variants/seed, caps/stops, mode) | `defineExperiment` route on save + launch |
+| `exp/<id>/run/<runId>` | `RunRecord` — per-run config (arm metadata + inlineRoles) + raw outcome + extracted metrics | `launch`/`poll`/`collect` route as child goals complete |
+| `exp/<id>/ledger` | autoresearch ledger (best-so-far is recomputed from runs + ledger, not stored separately) | `iterate` route after each accept/reject |
+| `exp/<id>/dashboard` | editable dashboard view-spec | `saveDashboard` route |
+| `exp/<id>/metrics` | editable metric selection | `saveMetrics` route |
 | `drafts/<instanceKey>` | unsaved define-form draft (so an in-progress definition survives reload before first launch) | panel on every field edit (debounced), localStorage + store |
-| `index` | list of experiment ids + name + mode + status (for any future list view) | `launch` / `saveSpec` |
+| `index/experiments` | experiment index (ids + name + mode + status) | `launch` / `defineExperiment` |
 
 **Reload / deep-link behaviour:**
 - The `kind:"route"` deep-link `#/ext/experiment-runner?experimentId=<id>&view=dashboard`
   re-opens the panel, `host.store.get("exp/<id>")` rehydrates the definition, and the dashboard
-  re-renders from `exp/<id>/runs/*`. A running experiment resumes polling on rehydrate.
+  re-renders from `exp/<id>/run/*`. A running experiment resumes polling on rehydrate.
 - An unsaved draft (no `experimentId` yet) rehydrates from `drafts/<instanceKey>` so a reload
   mid-definition loses nothing.
 - The panel is **parameterized** on `experimentId` (`instanceMode: parameterized`,
@@ -394,22 +401,25 @@ experiment-runner/
     experiment-runner-route.yaml         # kind:"route", routeId:"experiment-runner" (deep-link/reload)
   lib/
     panel.js                             # BUILT panel bundle (from src/panel.js)
-    routes.mjs                           # pack routes (project, metrics, widgets, launch, poll, report, saveSpec)
+    routes.mjs                           # pack routes (the canonical 15 — see 9.1 / 9.4)
+    engine.mjs                           # mode-agnostic run-config mapping, fan-out, outcome collection (REST goal-id reads)
+    store-keys.mjs                       # registry key schema (pure; SINGLE source of store keys)
     aggregate.mjs                        # median/spread + same-completion-bar filtering (node-safe, unit-tested)
-    optimizer.mjs                        # deterministic accept/reject + plateau/budget/target stop (node-safe)
-    outcome.mjs                          # parse session-costs.json / gates.json / tasks.json → raw outcome blob
-    report-lib.mjs                       # SHARED reporting lib (single source of truth; ports ab-report.mjs)
-    metrics/                             # metric-extractor registry (built-ins + the user-channel)
-      index.mjs
-      cost.mjs  wall.mjs  tokens.mjs  verification.mjs  tasks.mjs  user-channel.mjs
-    widgets/                             # widget-renderer registry (spec-driven)
-      index.mjs
-      bar-compare.js  line-progress.js  small-multiples.js  runs-table.js  ledger.js  stat.js
+    autoresearch.mjs                     # deterministic accept/reject + plateau/budget/target stop (node-safe)
+    metrics.mjs                          # metric-extractor contract + registry + built-ins + user-channel
+    widgets.mjs                          # widget-renderer contract + registry (spec-driven)
+    experiment-report.mjs                # SHARED reporting lib (build:packs bundle of src/shared/experiment-report/)
   src/
     panel.js                             # SOURCE (esbuild → lib/panel.js); never bare-imports lit
     forms/                               # mode-select, ab-form, autoresearch-form, metrics-editor, confirm
     dashboard/                           # dashboard view + dashboard-spec editor
 ```
+
+> There is **no** `optimizer.mjs` (the deterministic loop lives in `autoresearch.mjs`), no
+> `outcome.mjs` and no ambient fs parsing (outcome reads are REST/goal-id-keyed helpers inside
+> `engine.mjs`/`routes.mjs`), and no `report-lib.mjs`/`lib/report.mjs` (the shared reporting lib
+> is the build:packs bundle `experiment-report.mjs`, sourced from `src/shared/experiment-report/`).
+> The widget/metric registries are single `widgets.mjs` / `metrics.mjs` files, not directories.
 
 ### 9.1 `pack.yaml`
 
@@ -430,7 +440,9 @@ contents:
     - experiment-runner-route
 routes:
   module: lib/routes.mjs
-  names: [project, metrics, widgets, launch, poll, report, saveSpec]
+  names: [defineExperiment, projectCost, launch, poll, collect, aggregate,
+          iterate, listExperiments, getExperiment, saveMetrics, saveDashboard,
+          report, listMetrics, listWidgets, cancel]
 ```
 
 ### 9.2 `panels/experiment-runner-panel.yaml`
@@ -478,30 +490,41 @@ paramKeys: [experimentId, view]
 
 ### 9.4 Routes (`lib/routes.mjs`) — the panel's data contract
 
+This panel consumes a subset of the canonical 15 routes (full catalogue + contracts in
+[experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §4):
+
 | Route | Method | Request → Response | Used by |
 |---|---|---|---|
-| `project` | GET | `{}` → `{ defaultPerRunBudget, concurrencyMax, workflows: [...] }` | define form (defaults + workflow select) |
-| `metrics` | GET | `{}` → `{ builtins, custom, userChannel }` | metrics editor |
-| `widgets` | GET | `{}` → `{ types: [{id,label,bindsMetrics}] }` | dashboard-spec editor |
-| `saveSpec` | POST | `{ experimentId?, definition }` → `{ experimentId }` | draft autosave + dashboard edits |
-| `launch` | POST | `{ experimentId }` → `{ experimentId, spawned: [goalId...] }` | View 3 confirm → calls `host.agents.spawnGoal` per arm |
-| `poll` | GET | `{ experimentId }` → `{ status, runs:[{runId,goalId,armLabel,status,outcome?}], best?, ledger? }` | dashboard live updates |
-| `report` | GET | `{ experimentId }` → `{ aggregated, dashboard }` (via `report-lib.mjs`) | dashboard render + Export |
+| `projectCost` | POST | `{ expId }` or inline def → `CostProjection` | define form projection strip + confirm |
+| `listMetrics` | GET | `{}` → `{ builtins, custom, userChannel }` | metrics editor |
+| `listWidgets` | GET | `{}` → `{ types: [{id,label,bindsMetrics}] }` | dashboard-spec editor |
+| `defineExperiment` | POST | `{ definition }` → `{ expId, projection }` | save definition + draft autosave |
+| `saveMetrics` | POST | `{ expId, metrics }` → `{ ok }` | metrics edits (re-extract, no re-run) |
+| `saveDashboard` | POST | `{ expId, dashboard }` → `{ ok }` | dashboard-spec edits (re-render, no re-run) |
+| `launch` | POST | `{ expId }` → `{ experimentId, spawned: [goalId...] }` | View 3 confirm → fan-out via `spawnGoal` |
+| `iterate` | POST | `{ expId }` → `{ iteration, decision?, stopped? }` | autoresearch loop step |
+| `poll` | POST | `{ expId }` → `{ runs: RunRecord[], allSettled }` | dashboard live updates |
+| `collect` | POST | `{ expId, runId? }` → `{ runs: RunRecord[] }` | finalize settled runs |
+| `getExperiment` | GET | `{ expId }` → `{ def, state, runs, ledger }` | dashboard hydration |
+| `report` | POST | `{ expId }` → `{ model, html }` (via `experiment-report.mjs`) | dashboard render + Export |
+| `cancel` | POST | `{ expId }` → `{ cancelled }` | Stop experiment |
 
-`launch` is where the **server-side** fan-out lives: for each `variant × repeat` (A/B) or the
-seed (Autoresearch iteration 0), it deep-merges the experiment goal's effective metadata with the
-arm's treatment and calls `host.agents.spawnGoal({ spec, metadata, inlineRoles, workflow,
-parentGoalId: experimentGoalId })`. For Autoresearch, the loop (propose → spawn → poll-eval →
-deterministic accept/reject via `optimizer.mjs` → deterministic stop) is driven across successive
-`poll` calls (routes run in a fresh worker per call, so all loop state is in the store —
-`exp/<id>/best` + ledger — never a module singleton; this is the documented route-worker caveat).
+`launch` is where the **server-side** fan-out lives: for each `variant × repeat` (A/B), it
+deep-merges the experiment goal's effective metadata with the arm's treatment and calls
+`host.agents.spawnGoal({ title, spec, runKey, metadata, inlineRoles, workflowId, parentGoalId })`
+(one per arm, `runKey` for idempotency; `parentGoalId` is an assertion only). For Autoresearch,
+the loop (propose → spawn → eval → deterministic accept/reject via `autoresearch.mjs` →
+deterministic stop) is driven across successive `iterate`/`poll` calls (routes run in a fresh
+worker per call, so all loop state is in the store — the `RunRecord`s + `exp/<id>/ledger`, with
+best-so-far **recomputed** on read — never a module singleton; this is the documented
+route-worker caveat).
 
-The deterministic **accept/reject + stop** decisions live in `optimizer.mjs` and the
+The deterministic **accept/reject + stop** decisions live in `autoresearch.mjs` and the
 **aggregation** (median/spread, same-completion-bar filtering) in `aggregate.mjs` — both
-node-safe, both unit-tested (the framework decides keep/stop; the LLM only proposes). The
-`report-lib.mjs` is the single source of truth ported from
-`.claude/skills/graphify-ab/scripts/ab-report.mjs`; that skill is consolidated onto it (thin
-wrapper).
+node-safe, both unit-tested (the framework decides keep/stop; the LLM only proposes). The shared
+reporting lib `experiment-report.mjs` is the single source of truth. **Note:** `graphify-ab` /
+`ab-report.mjs` is **absent in this branch**; the shared lib is authored fresh as the canonical
+engine, and any future `graphify-ab` must become a thin wrapper over it.
 
 ---
 
@@ -514,7 +537,7 @@ pr-walkthrough `byJob` pattern — survives panel re-creation within a page sess
 interface ExperimentPanelEntry {
   view: "mode-select" | "define" | "confirm" | "dashboard";
   mode: "ab" | "autoresearch" | null;
-  experimentId?: string;        // undefined until first saveSpec/launch
+  experimentId?: string;        // undefined until first defineExperiment/launch
 
   // ── definition draft (View 2) ──
   basics: { name; runnableUnit: "goal" | "command"; body; workflowId? };
@@ -533,7 +556,7 @@ interface ExperimentPanelEntry {
 
   // ── dashboard (View 4) ──
   status?: "running" | "complete" | "stopped";
-  runs?: RunOutcome[]; best?; ledger?;
+  runs?: RunRecord[]; best?; ledger?;   // best-so-far recomputed from runs + ledger
   dashboard?: WidgetSpec[];     // editable view-spec
   dashboardEditing?: boolean;
   polling?: boolean;            // set only after Launch or opening a known-running exp
@@ -552,9 +575,13 @@ interface ExperimentPanelEntry {
 - No `host.invokeAction` (no tool), no `host.session.postMessage` (the panel never drives the
   user's agent — the `launch` route spawns child goals server-side).
 
-**External data the routes read (server-side, ambient):** per child goal —
-`session-costs.json`, `gates.json` + verification records, `tasks.json` — parsed by
-`outcome.mjs` into the raw outcome blob the store persists and the dashboard renders from.
+**External data the routes read (server-side):** per child goal — cost, gates +
+verification records, and tasks — via **REST endpoints keyed by the child `goalId`**
+(`GET /api/goals/:id/cost|gates|tasks`), never by parsing sibling-goal `session-costs.json` /
+`gates.json` / `tasks.json` through ambient fs paths. The reads land on each `RunRecord`
+(`rawOutcome` + extracted `metrics`) that the store persists and the dashboard renders from. See
+[experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §5.2 for the exact
+mechanism.
 
 **No new client UI state outside the pack.** The pack reconciles into the existing pack-panel /
 pack-entrypoint registries (`reconcilePackPanelsForProject`,
@@ -608,7 +635,8 @@ Fill name, runnable unit = Command, body, two variants with distinct metadata, r
 the projection strip shows `2 variants × 2 repeats = 4 runs` and a `≤ $…` estimate →
 `Review & launch` enabled → confirm → the dashboard appears, `poll` is called, runs spawn (assert
 the `launch` route was hit and the mocked `host.agents.spawnGoal` was called 4× with **distinct
-per-arm metadata**), and the comparison widget renders with both variant series.
+per-arm metadata** and distinct `runKey`s), and the comparison widget renders with both variant
+series.
 
 **E2E-3 — A/B validation blocks bad definitions.**
 With only one variant, `Review & launch` is disabled with a tooltip; adding an identical second
@@ -652,19 +680,20 @@ A running A/B experiment's "Stop experiment" cancels pending child goals and the
 no-ops (uninstall-style drop), pinning clean teardown.
 
 Companion **unit** specs (node, `lib/`): `aggregate.mjs` (median/spread + same-completion-bar
-filtering), `optimizer.mjs` (accept/reject + plateau/budget/target on synthetic series),
-`outcome.mjs` (parsing fixtures), guardrail enforcement (a definition with no cap is rejected by
-`launch`), and the extensibility seams (a custom metric extractor + a custom widget spec render).
+filtering), `autoresearch.mjs` (accept/reject + plateau/budget/target on synthetic series),
+`engine.mjs` (outcome parsing from mocked REST payloads), guardrail enforcement (a definition
+with no cap is rejected by `defineExperiment`), and the extensibility seams (a custom metric
+extractor + a custom widget spec render).
 
 ---
 
 ## 13. Open questions for the implementing engineer
 
-1. **`spawnGoal` return shape** — this UX assumes `{ goalId }` per arm and that the experiment
-   panel's owning session can poll those child goals' outcome files. Confirm the route can read
-   each child goal's worktree `session-costs.json` / `gates.json` / `tasks.json` (ambient `fs` in
-   the confined worker, `process.cwd()` = session worktree — but child goals are sibling
-   worktrees; the route may need the child goal's path from `host.agents`/goal manager).
+1. **`spawnGoal` return shape — RESOLVED.** It is exactly `{ goalId }` per arm (no
+   `branch`/`blocked`/`capacity` fields). Outcome reads are **REST/goal-id-keyed**
+   (`GET /api/goals/:id/cost|gates|tasks`) from the pack route — the route never parses a sibling
+   goal's worktree `session-costs.json` / `gates.json` / `tasks.json` via ambient `fs`. See
+   [experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §5.2.
 2. **Live poll cadence** — the dashboard polls `poll`; align the interval with the
    reduce-server-cpu work (see `docs/design/reduce-server-cpu-experiment-dashboard-polling.md`)
    so a long overnight Autoresearch run doesn't hammer the gateway. Suggest a backoff (1.5s while

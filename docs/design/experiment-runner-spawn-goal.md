@@ -54,9 +54,10 @@ unreachable from a pack today.
 that maps to `GoalManager.createGoal` (+ worktree setup + scheduled team start),
 launching each variant/candidate as a **child goal of the experiment goal**
 whose metadata = experiment metadata deep-merged with the arm's treatment. This
-is the only expected core/host change. A read-only companion verb
-(`goalStatus`, §11) is recommended so the pack can poll completion in-process
-without coupling to on-disk store formats.
+is the **only** expected core/host change — there is **no** companion `goalStatus`
+verb in v1. The pack reads each arm's outcome **by the returned `goalId`** through
+sanctioned goal REST/internal reads (§11), never by parsing sibling goal state
+files.
 
 ---
 
@@ -76,13 +77,19 @@ as "orchestration VERBS, not transport"):
  *  bound session has no effective goal, when the spawn backend is unavailable,
  *  or when the goal-level nesting/subgoal policy rejects the spawn. */
 spawnGoal(opts: {
-	/** Goal spec (markdown). Required; non-empty after trim. */
-	spec: string;
 	/** Visible goal title. Required; non-empty after trim. */
 	title: string;
+	/** Goal spec (markdown). Required; non-empty after trim. */
+	spec: string;
 	/** Idempotency key unique within the parent goal (mirrors spawn-child's
 	 *  `planId`). A re-call with the same key returns the existing child id. */
 	runKey: string;
+	/** Optional caller assertion only. The server ALWAYS derives the real parent
+	 *  from the bound owner session's effective goal; if `parentGoalId` is
+	 *  supplied and does not match the derived parent the call is rejected. It is
+	 *  never authoritative — accepted solely to satisfy/verify caller intent (and
+	 *  the goal spec example). */
+	parentGoalId?: string;
 	/** Per-arm namespaced metadata (the treatment). Deep-merged on top of the
 	 *  experiment goal's effective metadata by #822's resolver across the whole
 	 *  child sub-tree. Plain object; arrays/scalars replace wholesale. */
@@ -99,16 +106,21 @@ spawnGoal(opts: {
 }): Promise<{ goalId: string }>;
 ```
 
+The return shape is exactly `Promise<{ goalId: string }>` for v1 — no
+`branch`/`blocked`/`capacity` fields, and no `dependsOnPlanIds` opt.
+
 Design choices:
 
 - **It is the 7th `host.agents` verb, not a new namespace.** It is orchestration
   ("launch a properly-scoped principal"), so it belongs beside `spawn`. The
   capability flag stays `capabilities.agents`. (A pinning test asserts the new
   surface key set — §12.)
-- **No `parentGoalId` parameter.** The parent is *always* the bound session's
-  effective goal (server-derived, §8). A pack must not be able to target an
-  arbitrary goal — that is the same own-session-only stance the other verbs take
-  ("there is NO parameter for a foreign/user session").
+- **`parentGoalId` is a caller assertion only.** The parent is *always*
+  server-derived from the bound session's effective goal (§8). `parentGoalId` is
+  accepted solely so a caller can assert/verify intent (and to match the goal
+  spec example); the server compares it against the derived parent and **rejects a
+  mismatch**. It is never authoritative — a pack still cannot target an arbitrary
+  goal.
 - **No `projectId`, `sandboxed`, `cwd` parameters.** All inherited from the
   parent goal (§9) — a pack cannot widen scope.
 - **`runKey` (idempotency).** A/B fan-out and autoresearch retries both re-call;
@@ -116,7 +128,10 @@ Design choices:
 
 ### 2.2 Capability map / mask
 
-No new flag. `spawnGoal` rides `capabilities.agents`. The provider
+No new `ServerHostCapabilities.spawnGoal` flag. `spawnGoal` rides
+`capabilities.agents`; feature detection can check
+`typeof ctx.host.agents.spawnGoal === "function"` if a pack needs to degrade on an
+older host. The provider
 least-privilege host (`server.ts:1263`, `capabilityMask: { store: true }`)
 already denies `agents`, so a provider hook cannot spawn goals — unchanged.
 `denyNamespace("agents", …)` already replaces every method with a throwing stub
@@ -180,6 +195,9 @@ export interface SpawnChildGoalOpts {
 	spec: string;
 	title: string;
 	runKey: string;
+	/** Optional caller assertion only; server derives the real parent and rejects
+	 *  a mismatch. Never authoritative. */
+	parentGoalId?: string;
 	metadata?: Record<string, unknown>;
 	inlineRoles?: Record<string, import("../agent/role-store.js").Role>;
 	workflowId?: string;
@@ -217,6 +235,7 @@ spawnGoal: async (goalOpts) => {
 	if (!runKey) throw new Error("host.agents.spawnGoal: runKey is required");
 	return spawnChildGoal(ownerSessionId, {
 		spec, title, runKey,
+		parentGoalId: goalOpts.parentGoalId, // assertion only; closure verifies vs derived
 		metadata: goalOpts.metadata,
 		inlineRoles: goalOpts.inlineRoles,
 		workflowId: goalOpts.workflowId,
@@ -258,6 +277,10 @@ export async function spawnExperimentChildGoal(deps: {
 	const parentGoalId = owner?.goalId ?? owner?.teamGoalId;
 	if (!parentGoalId) throw new SpawnGoalError("NO_EFFECTIVE_GOAL",
 		"calling session has no goal to parent the run under");
+	// Caller's parentGoalId is an assertion only — reject a mismatch, never trust it.
+	if (opts.parentGoalId && opts.parentGoalId !== parentGoalId)
+		throw new SpawnGoalError("PARENT_MISMATCH",
+			`asserted parentGoalId ${opts.parentGoalId} ≠ derived parent ${parentGoalId}`);
 	const ctx = deps.projectContextManager.getContextForGoal(parentGoalId);
 	if (!ctx) throw new SpawnGoalError("PARENT_GOAL_NOT_FOUND", "parent goal project context not found");
 	const parent = ctx.goalStore.get(parentGoalId)!;
@@ -339,7 +362,8 @@ const spawnChildGoal = (ownerSessionId: string, o: SpawnChildGoalOpts) =>
 | `metadata` | `opts.metadata` | persisted iff non-empty plain object (`structuredClone`); the **arm treatment** |
 | `inlineRoles` (merged with parent) | `opts.inlineRoles` | frozen via `structuredClone` |
 | `workflowId` / `workflow` (cascade) | `opts.workflowId` + `opts.resolvedWorkflow` | see §10 |
-| — (server-derived) | `opts.parentGoalId` | owner's effective goal id |
+| `parentGoalId` (assertion only) | — | verified against the server-derived parent; rejected on mismatch, never used as the parent |
+| — (server-derived) | `opts.parentGoalId` | owner's effective goal id (the authoritative parent) |
 | inherited | `opts.projectId` | `parent.projectId` |
 | inherited | `opts.sandboxed` | `parent.sandboxed` |
 | inherited ceiling | `opts.subgoalsAllowed` / `opts.maxNestingDepth` | `inheritedChildOverrides(parent, prefs)` |
@@ -373,10 +397,13 @@ branches, or team start; it only calls `spawnGoal` and polls.
 
 ## 8. Parent/child scoping & security
 
-- **Parent is server-derived, never caller-supplied.** `parentGoalId =
-  owner.goalId ?? owner.teamGoalId` (the same `stampGoalId`/effective-goal
-  pattern #822 uses at every edge). A pack cannot pass a goal id, so it cannot
-  parent a run under a foreign goal or create a root goal.
+- **Parent is server-derived; the caller's `parentGoalId` is an assertion only.**
+  The authoritative parent is `owner.goalId ?? owner.teamGoalId` (the same
+  `stampGoalId`/effective-goal pattern #822 uses at every edge). A pack *may*
+  supply `parentGoalId` to assert/verify intent, but the server compares it to the
+  derived parent and **rejects a mismatch** (`PARENT_MISMATCH`) — it is never used
+  as the parent. So a pack still cannot parent a run under a foreign goal or create
+  a root goal.
 - **Project / sandbox inheritance.** `projectId` and `sandboxed` come from the
   parent goal, never from the pack. The child can never run outside the
   experiment goal's project or escape its sandbox — the same hard invariant
@@ -441,38 +468,21 @@ either an id or an inline snapshot.
 
 ---
 
-## 11. Polling completion — recommended read companion `goalStatus`
+## 11. Reading arm outcomes & completion (REST, goal-id-keyed)
 
-`spawnGoal` returns a `goalId`, but the pack still needs to know when an arm
-finishes (to aggregate) and whether it passed verification (the autoresearch
-correctness gate). The pack must **not** read `gates.json` / goal-store files
-directly (couples it to internal formats and to a sandboxed arm's container
-path). Two options:
+`spawnGoal` returns a `goalId`; the pack reads each arm's progress, completion,
+and verification outcome **by that goal id** through sanctioned goal REST/internal
+reads. **There is no `goalStatus` companion host verb in v1** — the core/host
+change is `spawnGoal` *only*.
 
-- **(Recommended) add a read-only companion verb** `goalStatus(goalId)`:
-  ```ts
-  goalStatus(goalId: string): Promise<{
-  	state: string;        // todo | in-progress | blocked | complete | …
-  	archived: boolean;
-  	gates: Array<{ id: string; status: string }>; // incl. ready-to-merge
-  } | null>;
-  ```
-  Scoped exactly like the other verbs: it resolves only goals whose
-  `parentGoalId === ownerSession.effectiveGoalId` (own spawned children) and
-  returns `null` otherwise — never a foreign goal. Implemented by a second
-  injected closure `readChildGoalStatus(ownerSessionId, goalId)` that reads the
-  per-project `goalStore` + `gateStore`. This is still "minimal" — read-only, no
-  new persistence, scoped, and it makes the pack's poll loop format-stable.
-- **(Fallback) reuse `host.agents.status`/`read`** on the arm's *team-lead
-  session*. This is awkward (the pack would have to discover the team-lead
-  session id for a goal) and exposes session-level, not goal-level, state — not
-  recommended.
-
-This note treats `spawnGoal` as the load-bearing change and `goalStatus` as the
-recommended companion. If the team wants the strict "one capability only" stance,
-`goalStatus` can be deferred and the pack polls via a thin REST GET from the
-pack's *route* (routes can call the gateway) — but the cleaner contract is the
-scoped host read verb. **Decision needed** (see §15).
+The pack's poll/collect routes read arm state via the existing goal REST endpoints
+keyed by the child `goalId` (a pack route is trusted with ambient `fetch` +
+on-disk creds; see the pack-backend design for the exact endpoints). The pack must
+**never** parse a sibling goal's `session-costs.json`, `gates.json`, or
+`tasks.json` through ambient fs/worktree paths: those state files live under the
+centralized `.bobbit/state` (not the arm worktree), and a sandboxed arm's files
+may be on a container path the pack cannot reach. Goal-id-keyed REST reads are
+version-stable and already authorized.
 
 ---
 
@@ -487,6 +497,7 @@ promise rejection the pack awaits (`host-reply` `{ ok: false, error }`):
 | backend not injected (non-gateway) | `host.agents.spawnGoal backend unavailable` |
 | missing/blank `spec`/`title`/`runKey` | `host.agents.spawnGoal: <field> is required` |
 | owner has no effective goal | `NO_EFFECTIVE_GOAL` |
+| asserted `parentGoalId` ≠ derived parent | `PARENT_MISMATCH` |
 | parent goal context missing | `PARENT_GOAL_NOT_FOUND` |
 | parent goal paused | `GOAL_PAUSED` |
 | subgoals disabled for tree | `SUBGOALS_DISABLED` (from `checkCanSpawnChild`) |
@@ -506,24 +517,23 @@ throw plain `Error`s, consistent with the existing `agents` verbs).
 Production (all on the goal branch, post-#822):
 
 1. **`src/server/extension-host/server-host-api.ts`**
-   - `ServerHostAgentsApi`: add `spawnGoal` (and, if adopted, `goalStatus`).
-   - `CreateServerHostApiOptions`: add `spawnChildGoal?` (and `readChildGoalStatus?`).
+   - `ServerHostAgentsApi`: add `spawnGoal` (the only new verb; no `goalStatus`).
+   - `CreateServerHostApiOptions`: add `spawnChildGoal?`.
    - `createServerHostApi`: implement `spawnGoal` in the `agents` object using
      `requireCore().assertCanSpawn` + the injected closure; validate args.
    - Export `SpawnChildGoalOpts` (or import from the new module).
 2. **`src/server/extension-host/module-host-bootstrap.ts`**
-   - `buildHostProxy`: add `spawnGoal` (and `goalStatus`) to the `agents` proxy.
+   - `buildHostProxy`: add `spawnGoal` to the `agents` proxy.
 3. **`src/server/extension-host/module-host-worker.ts`**
-   - `PROXYABLE.agents`: add `"spawnGoal"` (and `"goalStatus"`).
+   - `PROXYABLE.agents`: add `"spawnGoal"`.
 4. **`src/server/agent/experiment-spawn-goal.ts`** (new)
    - `spawnExperimentChildGoal(deps, ownerSessionId, opts)` — the gateway closure
      body (§5); `SpawnChildGoalOpts`, `SpawnGoalError`, and small helpers
      (`deriveChildRepoCwd`, `mergeInlineRoles`, `resolveChildWorkflowOrFallback`)
      shared with / extracted from `nested-goal-routes.ts`.
-   - Optional: `readChildGoalStatus(deps, ownerSessionId, goalId)` for §11.
 5. **`src/server/server.ts`**
-   - Build the `spawnChildGoal` (and `readChildGoalStatus`) closures once; pass
-     them into the **two** action/route `createServerHostApi(...)` calls
+   - Build the `spawnChildGoal` closure once; pass
+     it into the **two** action/route `createServerHostApi(...)` calls
      (`~6024`, `~6401`). Do **not** pass them to the provider host (`~1263`).
 6. *(Optional refactor)* **`src/server/agent/nested-goal-routes.ts`** — route the
    spawn-child handler through `experiment-spawn-goal.ts`'s shared core so both
@@ -541,8 +551,9 @@ the `goalProvisioned` plumbing — they already do exactly what is needed.
 `OrchestrationCore` view + a fake `spawnChildGoal` closure):
 
 - `surface exposes spawnGoal alongside the six poll verbs` — `Object.keys(
-  host.agents).sort()` equals `["dismiss","goalStatus"?,"list","prompt","read",
-  "spawn","spawnGoal","status"]` (assert the exact set; pins §2/§3).
+  host.agents).sort()` equals `["dismiss","list","prompt","read","spawn",
+  "spawnGoal","status"]` (assert the exact set, with **no** `goalStatus`; pins
+  §2/§3).
 - `spawnGoal forwards spec/title/runKey/metadata/inlineRoles/workflow to the
   injected closure verbatim` and returns `{ goalId }`.
 - `spawnGoal validates required fields` — blank `spec`/`title`/`runKey` reject.
@@ -558,8 +569,8 @@ the `goalProvisioned` plumbing — they already do exactly what is needed.
 project context / GoalManager / scheduler):
 
 - `maps arm metadata + merged inlineRoles + workflow cascade onto createGoal`.
-- `parents the run under the owner's effective goal (goalId ?? teamGoalId); never
-  caller-supplied`.
+- `parents the run under the owner's effective goal (goalId ?? teamGoalId); the
+  caller's parentGoalId is only an assertion and a mismatch is rejected`.
 - `inherits projectId + sandboxed from the parent goal`.
 - `is idempotent on runKey` — second call returns the first child id, no second
   createGoal.
@@ -597,11 +608,10 @@ change touches goal spawn + worktree provisioning, also run `test:manual` once
 
 ## 15. Open questions / decisions for the team lead
 
-1. **`goalStatus` companion verb (§11): in or out?** Recommended in (read-only,
-   scoped) so the pack's poll loop is format-stable and works for sandboxed arms.
-   If "strictly one capability", defer it and poll from the pack's route via
-   REST. *Lean: include it — it is small and removes a fragile fs/format
-   coupling.*
+1. **`goalStatus` companion verb (§11): DECIDED OUT for v1.** The core/host change
+   is `spawnGoal` only; the pack polls arm outcomes from its route via
+   goal-id-keyed REST reads (§11). A scoped `goalStatus` read verb may be revisited
+   later, but it is explicitly not part of this goal.
 2. **Refactor spawn-child onto the shared core (§5/§13.6)?** Strongly preferred
    to prevent drift, but it edits an authz-sensitive handler. Could be a
    follow-up if the lead wants this goal's diff minimal. *Lean: extract the
