@@ -45,6 +45,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { parse as parseYamlDocument } from "yaml";
 
 // PRODUCTION-FAITHFUL SYNTHESIS (design built-in-first-party-packs §8.4): the pack
 // runs the SAME YAML→cards synthesis as the deleted built-in via the pure shared
@@ -94,6 +95,8 @@ const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
 
 const DRAFT_QUOTA = (jobId) => ({ quotaScope: { prefix: draftPrefix(jobId), profile: "review-draft" } });
 const FINAL_QUOTA = (jobId) => ({ quotaScope: { prefix: finalPrefix(jobId), profile: "review-final" } });
+const REVIEW_BINDING_QUOTA = (jobId) => ({ quotaScope: { prefix: reviewPrefix(jobId), profile: "default" } });
+const REVIEWER_INDEX_QUOTA = (sessionId) => ({ quotaScope: { prefix: reviewerIndexKey(sessionId), profile: "default" } });
 const CHUNK_ID_PATTERN = /^(?:metadata|context|merge_assessment|omissions_and_followups|audit|display|document|decision:[A-Za-z0-9_.-]+|chunk:[A-Za-z0-9_.-]+)$/;
 const DEFAULT_PHASE_ORDER = ["orientation", "design", "significant", "other", "audit"];
 
@@ -311,7 +314,7 @@ export const routes = {
 		}
 		const legacySubmitted = await store.get(submittedKey(binding.jobId));
 		if (legacySubmitted && typeof legacySubmitted === "object" && strOf(legacySubmitted.yaml)) {
-			return { phase: "submitted", yaml: legacySubmitted.yaml, baseSha: legacySubmitted.baseSha ?? binding.baseSha, headSha: legacySubmitted.headSha ?? binding.headSha };
+			return { phase: "submitted", yaml: legacySubmitted.yaml, baseSha: legacySubmitted.baseSha ?? binding.baseSha, headSha: legacySubmitted.headSha ?? binding.headSha, jobId: binding.jobId };
 		}
 
 		const chunkSummary = await summarizeChunks(store, binding.jobId);
@@ -325,7 +328,7 @@ export const routes = {
 		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
 		catch { agentStatus = "terminated"; }
 		if (agentStatus === "terminated") {
-			await store.put(bindingKey(childSessionId), { ...binding, status: "error" });
+			try { await store.put(reviewBindingKey(binding.jobId, childSessionId), { ...binding, status: "error" }, REVIEW_BINDING_QUOTA(binding.jobId)); } catch { /* status reporting must not fail on store quota */ }
 			return { phase: "error", agentStatus, error: "The reviewer terminated without producing a walkthrough.", code: "PRW_REVIEWER_TERMINATED" };
 		}
 		return { phase: "running", agentStatus };
@@ -351,7 +354,10 @@ export const routes = {
 		if (isFinalPayload(finalPayload)) {
 			return {
 				found: true,
+				finalized: true,
 				jobId: selfBinding.jobId,
+				changesetId: finalPayload.changesetId,
+				finalizedAt: finalPayload.finalizedAt,
 				yaml: finalPayload.yaml,
 				baseSha: finalPayload.baseSha ?? selfBinding.baseSha,
 				headSha: finalPayload.headSha ?? selfBinding.headSha,
@@ -371,7 +377,7 @@ export const routes = {
 		if (chunkSummary.chunks.length > 0) {
 			return { found: false, phase: "draft", jobId: selfBinding.jobId, chunkSummary, code: "PRW_REVIEW_DRAFT", error: "Walkthrough analysis is saved but not finalized yet." };
 		}
-		return { found: false, code: "PRW_REVIEW_MISSING", error: "Walkthrough data expired or was cleaned up. Start a new walkthrough." };
+		return { found: false, phase: "running", jobId: selfBinding.jobId, baseSha: selfBinding.baseSha, headSha: selfBinding.headSha, code: "PRW_REVIEW_RUNNING" };
 	},
 };
 
@@ -395,21 +401,15 @@ function isObject(value) {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function parseYamlValue(yamlText, _label = "YAML") {
+function parseYamlValue(yamlText, label = "YAML") {
 	const text = String(yamlText ?? "").trim();
 	if (!text) return null;
-	if (/^-\s+/m.test(text)) return [];
-	if (/^[A-Za-z0-9_.-]+\s*:/m.test(text)) return topLevelYamlMap(text);
-	return text.replace(/^['\"]|['\"]$/g, "");
-}
-
-function topLevelYamlMap(text) {
-	const out = {};
-	for (const line of String(text).split(/\r?\n/)) {
-		const match = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
-		if (match) out[match[1]] = match[2].replace(/^['\"]|['\"]$/g, "");
+	try {
+		const value = parseYamlDocument(text);
+		return value === undefined ? null : value;
+	} catch (err) {
+		throw prwError("PRW_CHUNK_INVALID", `${label} must be valid YAML.`, { message: messageOf(err) });
 	}
-	return out;
 }
 
 function validateChunkId(sectionId) {
@@ -488,8 +488,18 @@ async function readPrWalkthroughSubmissionStatus(ctx, body = {}) {
 }
 
 async function submitPrWalkthroughYamlCompat(ctx, body) {
-	const saved = await submitPrWalkthroughChunk(ctx, { ...body, section_id: "document" });
-	const finalized = await finalizePrWalkthroughSubmission(ctx, body);
+	const { binding } = await resolveReviewerBinding(ctx, body);
+	const existing = await readChunkRecords(ctx.host.store, binding.jobId);
+	const sectionChunks = existing.filter((record) => record.id !== "document");
+	if (sectionChunks.length > 0) {
+		throw prwError(
+			"PRW_CHUNK_CONFLICT",
+			"submit_pr_walkthrough_yaml cannot be used after incremental chunks have been saved; continue with finalize_pr_walkthrough_submission or start a new review.",
+			{ savedChunks: sectionChunks.map((record) => record.id) },
+		);
+	}
+	const saved = await submitPrWalkthroughChunk(ctx, { ...body, section_id: "document", jobId: binding.jobId });
+	const finalized = await finalizePrWalkthroughSubmission(ctx, { ...body, jobId: binding.jobId });
 	return { ...finalized, savedChunk: saved.chunk };
 }
 
@@ -545,8 +555,19 @@ async function summarizeChunks(store, jobId) {
 	const ids = chunks.map((c) => c.id);
 	const missing = [];
 	for (const required of ["metadata", "context", "merge_assessment", "audit"]) if (!ids.includes(required) && !ids.includes("document")) missing.push(required);
-	if (!ids.includes("document") && !ids.some((id) => id.startsWith("chunk:"))) missing.push("chunk:<id> or audit.reviewer_checklist");
+	const audit = records.find((record) => record.id === "audit");
+	const auditChecklist = audit ? auditChecklistItems(audit.yaml) : [];
+	if (!ids.includes("document") && !ids.some((id) => id.startsWith("chunk:")) && auditChecklist.length === 0) missing.push("chunk:<id> or audit.reviewer_checklist");
 	return { chunks, missing, nextRequired: missing[0], hasDocument: ids.includes("document"), finalized: false };
+}
+
+function auditChecklistItems(yamlText) {
+	try {
+		const auditValue = parseYamlValue(yamlText, "audit");
+		return Array.isArray(auditValue?.reviewer_checklist) ? auditValue.reviewer_checklist : [];
+	} catch {
+		return [];
+	}
 }
 
 function summarizeChunkRecord(record) {
@@ -565,8 +586,7 @@ async function assembleSubmission(store, binding) {
 	const required = ["metadata", "context", "merge_assessment", "audit"];
 	const missing = required.filter((id) => !byId.has(id));
 	const reviewChunks = records.filter((r) => r.id.startsWith("chunk:"));
-	const auditValue = byId.has("audit") ? parseYamlValue(byId.get("audit").yaml, "audit") : undefined;
-	const auditChecklist = Array.isArray(auditValue?.reviewer_checklist) ? auditValue.reviewer_checklist : [];
+	const auditChecklist = byId.has("audit") ? auditChecklistItems(byId.get("audit").yaml) : [];
 	if (reviewChunks.length === 0 && auditChecklist.length === 0) missing.push("chunk:<id> or audit.reviewer_checklist");
 	if (missing.length > 0) throw prwError("PRW_FINALIZE_INCOMPLETE", "Saved chunks are incomplete for finalization.", { missing });
 
@@ -691,7 +711,7 @@ function finalBundleResult(payload, jobId) {
 }
 
 function finalSubmittedStatus(payload, binding) {
-	return { phase: "submitted", yaml: payload.yaml, baseSha: payload.baseSha ?? binding.baseSha, headSha: payload.headSha ?? binding.headSha, jobId: payload.jobId, changesetId: payload.changesetId, finalizedAt: payload.finalizedAt };
+	return { phase: "submitted", finalized: true, yaml: payload.yaml, baseSha: payload.baseSha ?? binding.baseSha, headSha: payload.headSha ?? binding.headSha, jobId: payload.jobId, changesetId: payload.changesetId, finalizedAt: payload.finalizedAt };
 }
 
 async function bestEffortDeletePrefix(store, prefix) {
@@ -1007,14 +1027,10 @@ async function launchReviewer(ctx, parent, target, canonicalKey) {
 			headSha: target.headSha,
 			createdAt: Date.now(),
 		};
-		await store.put(reviewerIndexKey(childSessionId), reviewerIndex);
-		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: false });
-		// Legacy binding retained during the panel/tool migration so current child panes
-		// can still recover; new durable payloads live only under reviews/<jobId>/....
-		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: false });
+		await store.put(reviewerIndexKey(childSessionId), reviewerIndex, REVIEWER_INDEX_QUOTA(childSessionId));
+		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: false }, REVIEW_BINDING_QUOTA(jobId));
 		await ctx.host.agents.prompt(childSessionId, kickoff);
-		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: true });
-		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: true });
+		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: true }, REVIEW_BINDING_QUOTA(jobId));
 	} catch (e) {
 		try { await ctx.host.agents.dismiss(childSessionId); } catch { /* no orphaned visible child */ }
 		await bestEffortDelete(store, reviewerIndexKey(childSessionId));

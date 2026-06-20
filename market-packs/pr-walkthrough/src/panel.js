@@ -12,8 +12,8 @@
 //     persists the result (the read→publish parity seam).
 //   - host.callRoute("status", { childSessionId, jobId }) → poll the reviewer until
 //     it submits the production YAML ({ phase:"submitted", yaml, … }).
-//   - host.callRoute("recover", …) → resolve THIS reviewer child's submitted YAML
-//     from its own binding/<self> on a reload (idempotent re-publish).
+//   - host.callRoute("recover", …) → resolve THIS reviewer child's review-scoped
+//     binding/final payload on reload (legacy binding fallback stays server-side).
 //
 // LAUNCH UX (pr-walkthrough-launch-ux.md): the panel is mounted ONLY inside a
 // reviewer SUB-AGENT session — there is NO owner-session pane and NO manual
@@ -23,7 +23,7 @@
 //
 // CHILD-PANE SELF-POLL — the documented carve-out from "no auto-invoke on mount"
 // (pack-panels.ts::PackPanel), scoped to THIS child-session reviewer pane: on mount
-// the pane reads its own binding/<__sessionId>; with no submitted YAML it shows a
+// the pane calls recover to resolve its review-scoped binding; with no submitted YAML it shows a
 // pending "PR Walkthrough: In Progress" spinner and self-drives the read-only
 // `status` poll; on submit it flips to the rendered cards. This is READ-ONLY — it
 // ONLY polls/recovers its OWN job (never spawns or mutates anything). On reload it
@@ -166,7 +166,7 @@ function deriveJobRef(yamlText, fallback) {
 //   running    → pending: a reviewer child is producing the walkthrough; the pane
 //                self-polls `status` (the spinner + "PR Walkthrough: In Progress").
 //   publishing → transient: the reviewer submitted; running publish → bundle.
-//   empty      → resolved NOT a reviewer child (no binding/<self>) → neutral state.
+//   empty      → resolved NOT a reviewer child → neutral state.
 // Module-level so it survives panel instance re-creation within a page session.
 // Keyed by the BOUND session id (`__sessionId`) so each reviewer child gets its OWN entry.
 const byJob = globalThis.__bobbitPrWalkthroughPanelState || (globalThis.__bobbitPrWalkthroughPanelState = new Map());
@@ -1149,7 +1149,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const paramJobId = params && params.jobId;
 			// PER-SESSION state key. The render layer injects the BOUND session id
 			// (`__sessionId`) — in a reviewer child that is the child's own id, which
-			// has a binding/<self> in the pack store. Falls back to the deep-link jobId,
+			// recover resolves through review-scoped store keys. Falls back to the deep-link jobId,
 			// then a neutral constant (non-DOM/unit fixtures with no bound session).
 			const boundSessionId = params && params.__sessionId;
 			const paramKey = boundSessionId || paramJobId || "__session__";
@@ -1159,33 +1159,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const status = entry.status || "idle";
 			const displayJob = entry.jobId || paramJobId || "current session";
 
-			// `publishAndLoad` is the read→publish→render seam. It accepts the RAW
-			// submitted YAML wrapped as a toolCall-like `{ input: { yaml } }` (arriving
-			// from the `status`/`recover` route), runs the production `publish` synthesis,
-			// then reads the live `bundle`. The optional baseSha/headSha overrides pass the
-			// binding's SHAs; `targetKey` is the byJob key to write the rendered entry under.
-			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride, targetKey = paramKey) => {
-				const yamlText = rawYamlOf(toolCall);
-				const ref = deriveJobRef(yamlText, paramJobId);
-				const jobId = ref.jobId;
-				// SHAs for the LIVE recompute: PREFER the submitted YAML's pr.base_sha/
-				// head_sha; then the explicit override (the route's binding SHAs); then the
-				// deep-link params. Without these, `publish` stores a pointer with undefined
-				// SHAs and `bundle` returns the empty state.
-				const effBaseSha = ref.baseSha || baseShaOverride || baseSha;
-				const effHeadSha = ref.headSha || headShaOverride || headSha;
-				// Persist via the pack's OWN `publish` route BEFORE reading `bundle`, so the
-				// bundle serves the synthesized production cards over the structural fallback.
-				if (yamlText && host.callRoute) {
-					const publishBody = { jobId, yaml: yamlText };
-					if (effBaseSha) publishBody.baseSha = effBaseSha;
-					if (effHeadSha) publishBody.headSha = effHeadSha;
-					const result = await host.callRoute("publish", { method: "POST", body: publishBody });
-					if (result && result.ok === false) {
-						storeEntry(targetKey, { status: "error", error: structuredRouteMessage(result, "PR walkthrough publish failed."), code: result.code, jobId, mountKicked: true });
-						return;
-					}
-				}
+			// Existing finalized reviews are already committed under the review-scoped
+			// job id returned by status/recover. Load that bundle directly; only legacy
+			// YAML submissions go through the compatibility publish path.
+			const loadBundle = async ({ jobId, baseSha: baseShaOverride, headSha: headShaOverride, targetKey = paramKey, toolCall }) => {
+				const effBaseSha = baseShaOverride || baseSha;
+				const effHeadSha = headShaOverride || headSha;
 				const query = { jobId };
 				if (effBaseSha) query.baseSha = effBaseSha;
 				if (effHeadSha) query.headSha = effHeadSha;
@@ -1200,6 +1179,25 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				const diffMode = cur.userSetMode && cur.diffMode ? cur.diffMode : (persisted && persisted.userSetMode && persisted.diffMode ? persisted.diffMode : defaultDiffMode());
 				const rendered = mergePersistedReviewerState({ ...cur, status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode, mountKicked: true }, persisted);
 				storeEntry(targetKey, rendered);
+			};
+
+			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride, targetKey = paramKey) => {
+				const yamlText = rawYamlOf(toolCall);
+				const ref = deriveJobRef(yamlText, paramJobId);
+				const jobId = ref.jobId;
+				const effBaseSha = ref.baseSha || baseShaOverride || baseSha;
+				const effHeadSha = ref.headSha || headShaOverride || headSha;
+				if (yamlText && host.callRoute) {
+					const publishBody = { jobId, yaml: yamlText };
+					if (effBaseSha) publishBody.baseSha = effBaseSha;
+					if (effHeadSha) publishBody.headSha = effHeadSha;
+					const result = await host.callRoute("publish", { method: "POST", body: publishBody });
+					if (result && result.ok === false) {
+						storeEntry(targetKey, { status: "error", error: structuredRouteMessage(result, "PR walkthrough publish failed."), code: result.code, jobId, mountKicked: true });
+						return;
+					}
+				}
+				await loadBundle({ jobId, baseSha: effBaseSha, headSha: effHeadSha, targetKey, toolCall });
 			};
 
 			// ── CHILD-PANE self-poll loop (read-only carve-out) ─────────────────────
@@ -1219,12 +1217,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						st = await host.callRoute("status", { method: "POST", body: { childSessionId, jobId } });
 					} catch { st = undefined; }
 					if (st && st.phase === "submitted") {
-						storeEntry(key, { status: "publishing", jobId, mountKicked: true });
+						const submittedJobId = st.jobId || jobId;
+						storeEntry(key, { status: "publishing", jobId: submittedJobId, mountKicked: true });
 						if (host.requestRender) host.requestRender();
 						try {
-							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha, st.headSha, key);
+							const toolCall = { input: { yaml: st.yaml } };
+							if (st.finalized || st.finalizedAt) await loadBundle({ jobId: submittedJobId, baseSha: st.baseSha, headSha: st.headSha, targetKey: key, toolCall });
+							else await publishAndLoad(toolCall, st.baseSha, st.headSha, key);
 						} catch (e) {
-							storeEntry(key, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId, mountKicked: true });
+							storeEntry(key, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId: submittedJobId, mountKicked: true });
 						}
 						if (host.requestRender) host.requestRender();
 						return;
@@ -1251,40 +1252,25 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			};
 
 			// ── Mount kickoff (the carve-out) ───────────────────────────────────────
-			// Runs ONCE per bound session pane. Resolves binding/<self>:
-			//   • not a reviewer child → neutral "empty" state (no Run/Load).
-			//   • already rendered → nothing.
-			//   • submitted (e.g. after a reload) → `recover` → re-publish → cards.
-			//   • not yet submitted → pending spinner + start the self-poll.
-			// READ-ONLY: it only reads the store and calls the read-only `recover`/
-			// `status`/`bundle`/`publish` (idempotent) routes for its OWN job.
+			// Runs ONCE per bound session pane. The recover route resolves the current
+			// review-scoped binding via reviewers/<sessionId>; legacy binding/<sessionId>
+			// is only a server-side fallback for old reviews.
 			const resolveChildMount = async () => {
-				let binding;
-				try { binding = boundSessionId && host.store ? await host.store.get(`binding/${boundSessionId}`) : undefined; }
-				catch { binding = undefined; }
 				const cur = byJob.get(paramKey) || {};
 				if (cur.bundle || cur.status === "rendered") return; // already rendered
-				if (!binding || typeof binding !== "object") {
-					// Not a reviewer child, unless a job-scoped deep link points at data that has been cleaned up.
-					storeEntry(paramKey, paramJobId
-						? { ...cur, status: "missing", jobId: paramJobId, error: "Walkthrough data expired or was cleaned up. Start a new walkthrough.", code: "PRW_REVIEW_MISSING" }
-						: { ...cur, status: "empty" });
-					if (host.requestRender) host.requestRender();
-					return;
-				}
-				const jobId = binding.jobId;
-				// Reload-after-submit: `recover` self-resolves the submitted YAML from
-				// binding/<self> and we re-publish idempotently.
 				let recovered;
 				if (host.callRoute) {
 					try { recovered = await host.callRoute("recover", { method: "POST", body: {} }); }
 					catch { recovered = undefined; }
 				}
 				if (recovered && recovered.found && recovered.yaml) {
+					const jobId = recovered.jobId || paramJobId || "pr-walkthrough";
 					storeEntry(paramKey, { status: "publishing", jobId, mountKicked: true });
 					if (host.requestRender) host.requestRender();
 					try {
-						await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha, paramKey);
+						const toolCall = { input: { yaml: recovered.yaml } };
+						if (recovered.finalized || recovered.finalizedAt) await loadBundle({ jobId, baseSha: recovered.baseSha, headSha: recovered.headSha, targetKey: paramKey, toolCall });
+						else await publishAndLoad(toolCall, recovered.baseSha, recovered.headSha, paramKey);
 					} catch (e) {
 						storeEntry(paramKey, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId, mountKicked: true });
 					}
@@ -1292,22 +1278,29 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					return;
 				}
 				if (recovered && recovered.phase === "draft") {
-					storeEntry(paramKey, { status: "draft", jobId: recovered.jobId || jobId, chunkSummary: recovered.chunkSummary, polling: true, mountKicked: true });
+					const jobId = recovered.jobId || paramJobId || "pr-walkthrough";
+					storeEntry(paramKey, { status: "draft", jobId, chunkSummary: recovered.chunkSummary, polling: true, mountKicked: true });
 					if (host.requestRender) host.requestRender();
-					queueMicrotask(() => { void pollChild(paramKey, boundSessionId, recovered.jobId || jobId); });
+					queueMicrotask(() => { void pollChild(paramKey, boundSessionId, jobId); });
 					return;
 				}
-				if (recovered && recovered.code === "PRW_REVIEW_MISSING" && recovered.error && binding.status === "submitted") {
-					storeEntry(paramKey, { status: "missing", error: structuredRouteMessage(recovered), code: recovered.code, jobId, mountKicked: true });
+				if (recovered && recovered.phase === "running" && recovered.jobId) {
+					const c2 = byJob.get(paramKey) || {};
+					if (c2.polling || c2.status === "rendered" || c2.bundle) return;
+					storeEntry(paramKey, { ...c2, status: "running", polling: true, jobId: recovered.jobId, mountKicked: true });
+					if (host.requestRender) host.requestRender();
+					queueMicrotask(() => { void pollChild(paramKey, boundSessionId, recovered.jobId); });
+					return;
+				}
+				if (recovered && recovered.code === "PRW_REVIEW_MISSING" && recovered.error) {
+					storeEntry(paramKey, { status: "missing", error: structuredRouteMessage(recovered), code: recovered.code, jobId: paramJobId, mountKicked: true });
 					if (host.requestRender) host.requestRender();
 					return;
 				}
-				// No submitted YAML yet → pending + self-drive the poll (single-flight).
-				const c2 = byJob.get(paramKey) || {};
-				if (c2.polling || c2.status === "rendered" || c2.bundle) return;
-				storeEntry(paramKey, { ...c2, status: "running", polling: true, jobId, mountKicked: true });
+				storeEntry(paramKey, paramJobId
+					? { ...cur, status: "missing", jobId: paramJobId, error: "Walkthrough data expired or was cleaned up. Start a new walkthrough.", code: "PRW_REVIEW_MISSING" }
+					: { ...cur, status: "empty" });
 				if (host.requestRender) host.requestRender();
-				queueMicrotask(() => { void pollChild(paramKey, boundSessionId, jobId); });
 			};
 
 			// Kick the mount resolver ONCE per pane. The synchronous `mountKicked` flag

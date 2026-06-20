@@ -5,8 +5,14 @@ import { routes } from "../market-packs/pr-walkthrough/lib/routes.mjs";
 
 class MemoryStore {
 	data = new Map<string, unknown>();
+	puts: Array<{ key: string; value: unknown; opts?: unknown }> = [];
+	rejectUnscopedPuts = false;
 	async get(key: string): Promise<unknown | null> { return this.data.get(key) ?? null; }
-	async put(key: string, value: unknown): Promise<void> { this.data.set(key, value); }
+	async put(key: string, value: unknown, opts?: unknown): Promise<void> {
+		this.puts.push({ key, value, opts });
+		if (this.rejectUnscopedPuts && !opts) throw new Error(`unscoped put rejected for ${key}`);
+		this.data.set(key, value);
+	}
 	async list(prefix = ""): Promise<string[]> { return [...this.data.keys()].filter((key) => key.startsWith(prefix)).sort(); }
 	async delete(key: string): Promise<boolean> { return this.data.delete(key); }
 	async deletePrefix(prefix: string): Promise<number> {
@@ -44,13 +50,43 @@ async function saveChunk(ctx: any, section_id: string, yaml: string) {
 	return result;
 }
 
-async function saveMinimumChunks(ctx: any) {
+async function saveRequiredChunks(ctx: any) {
 	await saveChunk(ctx, "metadata", `title: Durable chunks\noriginal_description:\n  body: test\n  source: gh_api\n  fetched_at: "2026-05-30T00:00:00.000Z"\nstats:\n  files_changed: 1\n  additions: 1\n  deletions: 0`);
 	await saveChunk(ctx, "context", "why_created: A\nproblem_solved: B\nwhy_worth_merging: C\nmerge_concerns: D\nauthor_intent: E\nreviewer_map: F");
 	await saveChunk(ctx, "merge_assessment", "recommendation: comment\nconfidence: medium\nsummary: S\nblocking_concerns: []\nnon_blocking_concerns: []");
-	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
 	await saveChunk(ctx, "audit", "remaining_changed_areas: []\nlow_signal_or_mechanical_changes: []\ngenerated_or_binary_files: []\nreviewer_checklist:\n  - ok");
 }
+
+async function saveMinimumChunks(ctx: any) {
+	await saveRequiredChunks(ctx);
+	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
+}
+
+test("PR walkthrough run uses scoped review writes and skips legacy binding writes", async () => {
+	const store = new MemoryStore();
+	store.rejectUnscopedPuts = true;
+	const prompted: string[] = [];
+	const ctx = {
+		sessionId: "owner-1",
+		host: {
+			store,
+			agents: {
+				async spawn() { return { childSessionId: "child-1" }; },
+				async prompt(childSessionId: string) { prompted.push(childSessionId); },
+				async dismiss() { throw new Error("should not dismiss"); },
+			},
+		},
+	};
+	const result = await routes.run(ctx, { body: { prUrl: "https://github.com/SuuBro/bobbit/pull/42", baseSha, headSha } });
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(prompted[0], "child-1");
+	assert.equal(await store.get("binding/child-1"), null);
+	const keys = store.puts.map((put) => put.key);
+	assert.ok(keys.includes("reviewers/child-1"));
+	assert.ok(keys.includes(`reviews/${result.jobId}/binding/child-1`));
+	assert.ok(!keys.includes("binding/child-1"));
+	for (const put of store.puts) assert.ok(put.opts, `${put.key} should be quota scoped`);
+});
 
 test("PR walkthrough chunks are idempotent and finalized into review-scoped payload", async () => {
 	const { ctx, store } = seedCtx();
@@ -72,4 +108,29 @@ test("PR walkthrough chunks are idempotent and finalized into review-scoped payl
 	assert.equal(bundle.cardsSource, "stored-final");
 	assert.equal(bundle.cardCount, undefined);
 	assert.equal(bundle.cards.length, 3);
+});
+
+test("submit_pr_walkthrough_yaml rejects before writing document over incremental chunks", async () => {
+	const { ctx, store } = seedCtx();
+	await saveChunk(ctx, "metadata", "title: Partial\nstats:\n  files_changed: 1\n  additions: 1\n  deletions: 0\noriginal_description:\n  body: test\n  source: gh_api\n  fetched_at: \"2026-05-30T00:00:00.000Z\"");
+	const result = await routes.publish(ctx, { body: { op: "submitYaml", yaml: "not: used" } });
+	assert.equal(result.ok, false);
+	assert.equal(result.code, "PRW_CHUNK_CONFLICT");
+	assert.equal(await store.get(`reviews/${jobId}/draft/chunks/document`), null);
+
+	await saveChunk(ctx, "context", "why_created: A\nproblem_solved: B\nwhy_worth_merging: C\nmerge_concerns: D\nauthor_intent: E\nreviewer_map: F");
+	await saveChunk(ctx, "merge_assessment", "recommendation: comment\nconfidence: medium\nsummary: S\nblocking_concerns: []\nnon_blocking_concerns: []");
+	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
+	await saveChunk(ctx, "audit", "remaining_changed_areas: []\nlow_signal_or_mechanical_changes: []\ngenerated_or_binary_files: []\nreviewer_checklist:\n  - ok");
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+});
+
+test("audit reviewer_checklist nested array satisfies chunk-or-audit minimum", async () => {
+	const { ctx } = seedCtx();
+	await saveRequiredChunks(ctx);
+	const status = await routes.publish(ctx, { body: { op: "submissionStatus" } });
+	assert.ok(!status.chunkSummary.missing.includes("chunk:<id> or audit.reviewer_checklist"), JSON.stringify(status.chunkSummary));
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
 });
