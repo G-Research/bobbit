@@ -18,14 +18,13 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > `managed` and `managed-external-postgres`, explicit-consent start, disable/uninstall/purge, and
 > `ctx.runtime` injection) now ships as **P3** and is documented in
 > [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
-> **native config/status panel** and its launch entrypoints now ship as **P4** — see
-> [Native config & status panel](#native-config--status-panel). The explicit
-> `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
-> [Agent tools](#agent-tools). The **setup UX** (Marketplace front door, the eight-state badge
-> model, guided setup walkthrough, the stale-form fix, and `uiUrl`) ships as the **UX polish**
-> pass — see [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup) and the
-> design spec [docs/design/hindsight-ux-polish.md](design/hindsight-ux-polish.md). The reflect UI
-> and cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
+> explicit `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
+> [Agent tools](#agent-tools). The current **setup and dashboard UX** (Marketplace configuration,
+> guided setup walkthrough, the stale-form fix, `uiUrl`, and embedded dashboard entrypoints) ships
+> as the **UX polish** pass — see [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup),
+> [Embedded Dashboard Tab](#embedded-dashboard-tab), and the design spec
+> [docs/design/hindsight-ux-polish.md](design/hindsight-ux-polish.md). The reflect UI and
+> cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
 
 ## Installed but dormant by default
 
@@ -345,8 +344,9 @@ The panel uses only Bobbit theme tokens (`--background`, `--foreground`, `--card
 `--primary`, `--muted-foreground`, the `--chart-*` palette, and the `--positive`/`--negative`/
 `--warning` semantic slots via `color-mix`) — no hardcoded palette. Browser coverage lives in
 `tests/e2e/ui/hindsight-pack.spec.ts` (reusing the shared `tests/e2e/hindsight-stub.mjs`): open
-from the palette, Save external URL + bank, stub status flips to connected, search renders seeded
-memories, and persistence across reload via the `#/ext/hindsight` deep link.
+from the session menu or `#/ext/hindsight`, verify the iframe uses the configured `uiUrl`, assert
+that the entry is not a configuration form, cover unset/blocked iframe fallback states, and verify
+persistence across reload via the `#/ext/hindsight` deep link.
 
 ## Setup UX — Marketplace front door, state model & guided setup
 
@@ -586,8 +586,8 @@ Tracked in later Extension Platform goals, **not** in this release:
 >   [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup).
 > - The explicit **agent tools** `hindsight_recall/retain/reflect` landed in **P5** — see
 >   [Agent tools](#agent-tools).
-> - The **native config/status panel** + command-palette and `#/ext/hindsight` deep-link
->   entrypoints landed in **P4** — see [Native config & status panel](#native-config--status-panel).
+> - The original native config/status panel landed in **P4**, but the current entrypoint model is
+>   Marketplace for configuration and `#/ext/hindsight` / session-menu for the embedded dashboard.
 >   Store-seeding is no longer the user-facing configuration path (test-only now).
 > - The managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
 >   (`mode: managed` / `managed-external-postgres`) landed in **P3** — see
