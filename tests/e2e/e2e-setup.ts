@@ -11,7 +11,7 @@
 
 import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
 
@@ -228,7 +228,7 @@ export async function injectDefaultProjectId(body: unknown): Promise<unknown> {
 	if (typeof parsed.projectId === "string" && parsed.projectId) {
 		return typeof body === "string" ? body : JSON.stringify(parsed);
 	}
-	const pid = await defaultProjectId();
+	const pid = (await projectIdForRequestCwd(parsed.cwd)) ?? (await defaultProjectId());
 	if (!pid) return typeof body === "string" ? body : JSON.stringify(parsed);
 	return JSON.stringify({ ...parsed, projectId: pid });
 }
@@ -729,6 +729,30 @@ function formatLiveProjectState(state: LiveProjectState): string {
 		return safeJson({ ok: false, status: state.status, body: state.body, error: state.error });
 	}
 	return safeJson({ ok: true, status: state.status, rawKind: state.rawKind, projects: state.projects });
+}
+
+function canonicalPathForMatch(p: string): string {
+	try { return realpathSync(p); } catch { return resolve(p); }
+}
+
+function pathContains(parent: string, child: string): boolean {
+	const rel = relative(parent, child);
+	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+async function projectIdForRequestCwd(cwdValue: unknown): Promise<string | undefined> {
+	if (typeof cwdValue !== "string" || !cwdValue.trim()) return undefined;
+	const state = await readLiveProjectState();
+	if (!state.ok) return undefined;
+	const cwd = canonicalPathForMatch(cwdValue);
+	let best: { id: string; root: string } | undefined;
+	for (const project of state.projects) {
+		if (project.hidden || !project.id || !project.rootPath) continue;
+		const root = canonicalPathForMatch(project.rootPath);
+		if (!pathContains(root, cwd)) continue;
+		if (!best || root.length > best.root.length) best = { id: project.id, root };
+	}
+	return best?.id;
 }
 
 async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: string): Promise<void> {

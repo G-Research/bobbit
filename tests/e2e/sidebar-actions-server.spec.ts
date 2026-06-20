@@ -242,15 +242,27 @@ test.describe("fork worktree choice", () => {
 
 	test("newWorktree=true allocates a distinct worktree/branch; newWorktree=false reuses the source worktree", async ({ gateway }) => {
 		const created: string[] = [];
+		const defaultId = await defaultProjectId();
+		const staleBaseRef = `stale-continue-base-cross-project-${Date.now()}`;
+		if (defaultId) {
+			const poison = await apiFetch(`/api/projects/${defaultId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: staleBaseRef }),
+			});
+			expect(poison.status, await poison.text()).toBe(200);
+		}
 		const sresp = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
+			// Deliberately omit projectId: the E2E injector must select the project
+			// containing cwd, not leak the default project's stale base_ref into this repo.
+			body: JSON.stringify({ cwd: repoPath, worktree: true }),
 		});
 		expect(sresp.status).toBe(201);
 		const sourceId = (await sresp.json()).id;
 		created.push(sourceId);
 		try {
 			const srcRec = await waitUntilReady(sourceId);
+			expect(srcRec.projectId).toBe(projectId);
 			expect(srcRec.worktreePath).toBeTruthy();
 			expect(srcRec.cwd).toBe(srcRec.worktreePath);
 			await sendPromptAndWait(sourceId, "FORK_WT_MARKER hello from worktree");
@@ -295,6 +307,12 @@ test.describe("fork worktree choice", () => {
 			expect(existsSync(reusePs!.agentSessionFile!)).toBe(true);
 		} finally {
 			for (const id of created) await deleteSession(id);
+			if (defaultId) {
+				await apiFetch(`/api/projects/${defaultId}/config`, {
+					method: "PUT",
+					body: JSON.stringify({ base_ref: "" }),
+				}).catch(() => {});
+			}
 		}
 	});
 });
