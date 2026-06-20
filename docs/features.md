@@ -114,15 +114,7 @@ prompt and retains a compact summary of each turn. It ships **active but dormant
 happens (no network, no prompt drift) until a Hindsight URL is configured, so opted-out users pay
 no cost.
 
-Configuration is done from a **native config/status panel** (Extension Platform P4), opened from
-the Marketplace or the session actions overflow menu (**Hindsight Memory**), or via the deep link `#/ext/hindsight`. The panel picks the
-deployment mode (external / managed / managed-external-postgres), writes config through the pack's
-`config` route (with server-side validation and write-only secret redaction), shows a runtime
-status card (connected/unreachable/starting, retry-queue depth, last error), and searches memory
-via the `recall` route. It replaces the earlier store-seeding path, which is now a test-only seam.
-See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and
-[managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed
-Docker/Postgres runtime.
+All configuration, setup, and re-configuration are performed directly inside the **Marketplace** (via the inline Configure form/wizard on the Marketplace page). The session actions overflow menu entry (**Hindsight Memory**) and deep link `#/ext/hindsight` now open the **live Hindsight dashboard embedded as a sandboxed iframe** (utilizing `uiUrl`) in a first-class in-app Bobbit tab/panel. This lets the user seamlessly use, view, and query the memory bank without leaving the application. When `uiUrl` is unset, the in-app tab directs the user to the Marketplace for configuration with a helpful Call-to-Action (CTA) and displays any available API/external status context. See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and [managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed Docker/Postgres runtime details.
 
 ## Assistant Registry
 

@@ -15,7 +15,7 @@ contents:
   roles: []
   tools: [hindsight] # explicit hindsight_recall/retain/reflect agent tools (P5)
   skills: []
-  entrypoints: [hindsight-session-menu, hindsight-route] # session-menu launcher + deep-link route for the native config/status panel
+  entrypoints: [hindsight-session-menu, hindsight-route] # session-menu launcher + deep-link route for the embedded dashboard (use/view/query) panel
   providers: [memory] # → providers/memory.yaml
   hooks: []
   mcp: []

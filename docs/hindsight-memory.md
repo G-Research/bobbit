@@ -18,14 +18,13 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > `managed` and `managed-external-postgres`, explicit-consent start, disable/uninstall/purge, and
 > `ctx.runtime` injection) now ships as **P3** and is documented in
 > [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
-> **native config/status panel** and its launch entrypoints now ship as **P4** — see
-> [Native config & status panel](#native-config--status-panel). The explicit
-> `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
-> [Agent tools](#agent-tools). The **setup UX** (Marketplace front door, the eight-state badge
-> model, guided setup walkthrough, the stale-form fix, and `uiUrl`) ships as the **UX polish**
-> pass — see [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup) and the
-> design spec [docs/design/hindsight-ux-polish.md](design/hindsight-ux-polish.md). The reflect UI
-> and cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
+> explicit `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
+> [Agent tools](#agent-tools). The current **setup and dashboard UX** (Marketplace configuration,
+> guided setup walkthrough, the stale-form fix, `uiUrl`, and embedded dashboard entrypoints) ships
+> as the **UX polish** pass — see [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup),
+> [Embedded Dashboard Tab](#embedded-dashboard-tab), and the design spec
+> [docs/design/hindsight-ux-polish.md](design/hindsight-ux-polish.md). The reflect UI and
+> cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
 
 ## Installed but dormant by default
 
@@ -56,19 +55,11 @@ only opt-out (there is no uninstall for built-in packs). See
 
 ## Turning it on
 
-The **primary** setup path is the **Marketplace** installed row for the built-in `hindsight` pack:
-it shows the current memory state, surfaces the active config, and its **Configure** button opens a
-[guided setup walkthrough](#guided-setup-walkthrough). The **session menu** entry (**Hindsight
-Memory**) and the `#/ext/hindsight` deep link remain available as a **secondary**, discoverable way
-to open the same native panel directly. Both paths lead to the same surface; see
-[Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup).
+The **Marketplace** is the single, authoritative home for configuring Hindsight. Setting up or reconfiguring the memory pack (deployment mode, URLs, bank, scope, and toggles) happens strictly through the inline **Configure** form or the guided wizard in the Marketplace's `hindsight` pack row.
 
-Whichever path you use, configuration is one screen: set at least `externalUrl` (external mode) and
-Save. Under the hood every surface writes through the `config` pack route (see
-[Pack routes](#pack-routes)), so you can also drive it programmatically: set at least `externalUrl`
-pointing at your Hindsight base URL (default Hindsight port is `8888`). Once the effective config
-has a non-empty URL, the provider activates on the next session spawn and starts recalling and
-retaining.
+The configuration form is simple: set the deployment mode and the required URLs (such as `externalUrl` for external mode) and Save. Under the hood, the Marketplace configuration writes through the `config` pack route (see [Pack routes](#pack-routes)), so it can also be driven programmatically. Once the effective configuration is valid, the provider activates on the next session spawn to start automatically recalling and retaining.
+
+In contrast, the session-menu entry (**Hindsight Memory**) and the `#/ext/hindsight` deep link (route) are used for **using, viewing, and querying** memory within the app (see [Embedded Dashboard Tab](#embedded-dashboard-tab)), not for configuration.
 
 > Earlier the only non-test way to configure the pack was seeding the pack store directly. With P4
 > the panel + `config` route are the user-facing path; **store-seeding is now a test-only seam**
@@ -85,7 +76,7 @@ provider reads.
 |---|---|---|---|
 | `mode` | enum `external` \| `managed` \| `managed-external-postgres` | `external` | Deployment mode. `external` is documented here; the two managed modes start a Docker runtime — see [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). Only `external` activates via `externalUrl`; managed modes activate via `activeWhenConfig`. |
 | `externalUrl` | string (optional) | — | Base URL of your running Hindsight **data-plane API** (external mode) — where Bobbit reads and writes memory. **Empty ⇒ dormant** in external mode. This is the single field that switches the external pack on. AJ's local example: `http://localhost:9177`. See [API URL vs UI/dashboard URL](#api-url-vs-uidashboard-url). |
-| `uiUrl` | string (optional) | — | Optional, **non-secret** human-facing Hindsight **dashboard** URL. Display/open-only — it backs the **Open Hindsight UI** action and is **never dialed by the client** and **never** influences activation/dormancy (those stay keyed on `externalUrl`). Never fabricated from `externalUrl` (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data`. Validated as an http(s) URL; `""` clears it. |
+| `uiUrl` | string (optional) | — | Optional, **non-secret** human-facing Hindsight **dashboard** URL. Display-only — it is used for the in-app embedded dashboard and is **never dialed by the client** and **never** influences activation/dormancy (those stay keyed on `externalUrl`). Never fabricated from `externalUrl` (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data`. Validated as an http(s) URL; `""` clears it. |
 | `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). Also forms `ctx.runtime.headers` for the managed API. |
 | `llmApiKey` / `externalDatabaseUrl` / `dataDir` | secret / secret / string | — / — / `~/.hindsight` | **Managed-mode only.** `llmApiKey` → `HINDSIGHT_API_LLM_API_KEY`, `externalDatabaseUrl` → `HINDSIGHT_API_DATABASE_URL` (redacted to `*Set` booleans on the GET surface), `dataDir` is the managed-Postgres bind path. See [managed-runtimes.md — P3](managed-runtimes.md#secrets--config-mapping). |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
@@ -321,80 +312,41 @@ asserts the scope→tag mapping and default/custom bank routing on the stub, con
 resolve for a project session, and that disabling the pack tools removes them from a newly-created
 session's tool list (and closes the surface-token mint with a 403).
 
-## Native config & status panel
+## Embedded Dashboard Tab
 
-The pack ships a **native, theme-compatible panel** (Extension Platform **P4**) that is the
-user-facing configuration surface and a live status/search view. It is a pure client of the
-existing P2 [pack routes](#pack-routes) through the versioned Host API — it adds **no new server
-routes**, never makes a raw `fetch`, and never writes pack-store config keys directly (so the
-`config` route's validation + secret redaction always apply). Source is
-`market-packs/hindsight/src/panel.js`, built to `lib/HindsightPanel.js`; the panel descriptor is
-`panels/hindsight-memory.yaml` (`id: hindsight.panel`). Full implementation contract:
-[docs/design/hindsight-panel-p4-implementation.md](design/hindsight-panel-p4-implementation.md).
+The **Hindsight** extension entrypoints are designed for **using, viewing, and querying** memory within the app. Clicking the session-menu entry (**Hindsight Memory**) or navigating to the `#/ext/hindsight` route opens the **live Hindsight dashboard embedded directly as an in-app Bobbit tab/panel** so the user can inspect and search the memory bank without leaving Bobbit.
 
-**Why a native panel?** Before P4 the only non-test way to configure the pack was seeding the
-pack store directly. The panel makes configuration a one-screen task, surfaces runtime health
-and the retry-queue depth where the operator can act on them, and keeps secrets write-only — the
-store-seeding path is now a test-only seam.
+This is implemented by rendering the configured `uiUrl` in a **sandboxed iframe** inside a first-class side-panel/tab, reusing Bobbit's pack-panel or iframe infrastructure. Because the local Hindsight dashboard runs without frame-protection headers (no local `X-Frame-Options` or Content Security Policy blocking), it embeds cleanly and securely.
 
-### Entrypoints
+### Entrypoints & Navigation
 
-Two entrypoints open the same **singleton** panel (one per session view), declared under
-`market-packs/hindsight/entrypoints/` and listed in `pack.yaml` `contents.entrypoints`. Both are
-the **secondary** discovery surface — the [Marketplace row](#setup-ux--marketplace-front-door-state-model--guided-setup)
-is the primary setup path:
+Two entrypoints open this **embedded dashboard tab**, declared under `market-packs/hindsight/entrypoints/` and listed in `pack.yaml` under `contents.entrypoints`:
 
 | Entrypoint | Kind | How to reach it |
 |---|---|---|
-| `hindsight-session-menu` | `session-menu` | A launcher labelled **Hindsight Memory** in the session actions overflow menu, sitting next to **PR Walkthrough** so memory is reachable from the same place. Its target is a bare `PanelTarget` (no `action: spawn`), so it opens `hindsight.panel` in the **active/owner session** — there is no sub-agent, unlike the pr-walkthrough spawn launcher. Replaces the legacy `command-palette` + `git-widget-button` entrypoints removed in #829. Visibility is deliberately **not** gated on `status` (no per-render pack-route call): the entry is registered whenever the pack is active and the panel itself renders the dormant/configure state, keeping the widget pack-agnostic and never a dead affordance. |
-| `hindsight-route` | `route` (`routeId: hindsight`) | Deep link **`#/ext/hindsight`**. Carries no params (`paramKeys: []`); the panel rehydrates entirely from the `config`/`status` routes on mount, so a reload or shared link restores the same view. |
+| `hindsight-session-menu` | `session-menu` | A launcher labelled **Hindsight Memory** in the session actions overflow menu, sitting next to **PR Walkthrough**. Its target is a `PanelTarget` (no `action: spawn`), which loads the embedded dashboard iframe for the configured `uiUrl` within the active/owner session. |
+| `hindsight-route` | `route` (`routeId: hindsight`) | Deep link **`#/ext/hindsight`**. Opens the embedded dashboard tab directly, rehydrating the view from the routes. |
 
-### What the panel does
+### Failure Paths & Safe Fallbacks
 
-The panel reads and writes only through `host.callRoute` and feature-detects
-`host.capabilities.callRoute` (degrading to an "unavailable on this host" message on a host that
-predates the capability). Its state is cached per `params.__sessionId` so reopening or reloading
-rehydrates cleanly. It never mutates config on mount — mount kicks read-only `config` GET +
-`status` GET; only **Save** and **Search** write.
+The embedded dashboard tab is robust against misconfiguration or environment failures:
+- **Unset `uiUrl`**: If the `uiUrl` setting is empty, the tab does not dead-end. It displays a helpful Call-to-Action (CTA) pointing the user to configure Hindsight in the Marketplace, alongside any available API-only or external status context.
+- **Blocked or Unreachable iframe**: If a remote or secured Hindsight deployment serves frame protection headers (blocking the iframe) or is network-unreachable, the tab detects this and renders a clear warning.
+- **Secondary Fallback**: The primary **"Open Hindsight UI"** action opens the embedded in-app dashboard; an external-browser fallback link is provided as a secondary option when `uiUrl` is configured, while an unset `uiUrl` displays helpful Marketplace guidance.
 
-- **Configuration card.** Picks the deployment `mode` (`external` / `managed` /
-  `managed-external-postgres`) and progressively discloses the fields relevant to that mode:
-  `externalUrl` (external), `dataDir` (managed), `externalDatabaseUrl` (managed-external-postgres),
-  `llmApiKey` (managed modes), plus the optional `uiUrl` ([dashboard URL](#api-url-vs-uidashboard-url)),
-  `apiKey`, `bank`, `namespace`, `recallScope`, the `autoRecall`/`autoRetain` toggles, and
-  `recallBudget`/`timeoutMs`. Save POSTs **only touched** keys to the `config` route (not a diff of
-  the whole draft) — an untouched-but-stale field can never clobber a config that changed on the
-  server, and an empty optional string clears that value. Validation is the route's job —
-  `{ ok: false, errors }` renders inline next to Save without mutating the panel snapshot. See
-  [Stale-form & Save safety](#stale-form--save-safety) for the dirty-aware hydration contract.
-- **Secrets are write-only.** The `config` GET surface returns only `*Set` booleans
-  (`apiKeySet`/`externalDatabaseUrlSet`/`llmApiKeySet`), so the panel shows a "set" placeholder and
-  never echoes a stored secret. An untouched secret field is omitted from the Save body (preserving
-  it); an explicit clear sends `""`.
-- **Runtime status card.** Driven by the `status` route. A state badge derives from
-  `{ configured, healthy, mode }` (and, for managed modes, the supervisor runtime status) through
-  the shared [eight-state model](#state-model--one-source-two-surfaces) so the panel and the
-  Marketplace row can never disagree. It shows mode/bank/namespace/recallScope/auto-toggles, the
-  [active configured values](#active-configured-values-surfaced), the **retry-queue counter**
-  (`queueDepth`), `lastError` as a muted diagnostic when present, and a **real inline logs view**
-  (managed modes only). The logs affordance toggles an inline panel that fetches `GET
-  /api/pack-runtimes/:id/logs?tail=` — the **server admin runtime-logs route**, not a pack route
-  (the same surface the built-in background-process pill reads). It is strictly **read-only** (only
-  ever a GET); the panel never starts/stops Docker — all config/status/recall data still flows
-  through the pack routes. A **Refresh** button re-polls `status`; while a managed mode is configured-but-not-yet
-  healthy the panel runs a bounded health poll so the badge flips to Connected when the runtime
-  comes up. Recent-retains data is **not** invented — P2 `status` exposes only `queueDepth` +
-  `lastError`, so that is what the card shows.
-- **Memory search.** A query input + scope (`all`/`project`) toggle POSTs to the `recall` route
-  and renders the returned memory cards (text plus optional `score`/`id`), with loading / empty /
-  dormant / error states. It never calls `retain` or `reflect`.
+### Move configuration out of the entry, into the Marketplace
+
+To streamline the user experience, configuration has been completely moved out of the session entry point and consolidated inside the **Marketplace**. The standalone config/status form that the entry used to open is no longer the entry's job, leaving the entry focused entirely on utilizing the embedded dashboard.
+- **Marketplace inline form/wizard**: All settings (deployment mode, URLs, bank, scope, and auto-toggles) and write-only secrets management are performed strictly within the Marketplace row's inline form.
+- **Read-only status card**: Genuine runtime status metrics (such as mode, health, and retry-queue depth) are visible in the Marketplace row itself.
 
 The panel uses only Bobbit theme tokens (`--background`, `--foreground`, `--card`, `--border`,
 `--primary`, `--muted-foreground`, the `--chart-*` palette, and the `--positive`/`--negative`/
 `--warning` semantic slots via `color-mix`) — no hardcoded palette. Browser coverage lives in
 `tests/e2e/ui/hindsight-pack.spec.ts` (reusing the shared `tests/e2e/hindsight-stub.mjs`): open
-from the palette, Save external URL + bank, stub status flips to connected, search renders seeded
-memories, and persistence across reload via the `#/ext/hindsight` deep link.
+from the session menu or `#/ext/hindsight`, verify the iframe uses the configured `uiUrl`, assert
+that the entry is not a configuration form, cover unset/blocked iframe fallback states, and verify
+persistence across reload via the `#/ext/hindsight` deep link.
 
 ## Setup UX — Marketplace front door, state model & guided setup
 
@@ -453,11 +405,7 @@ Users conflate the two URLs, so the UI distinguishes them everywhere:
 - **API URL** (`externalUrl`) — the Hindsight **data-plane API**, where Bobbit reads and writes
   memory. This is the only URL the client ever dials, and the field that switches external mode on.
   AJ's local example: `http://localhost:9177`.
-- **UI / dashboard URL** (`uiUrl`) — the human **web dashboard** for browsing memory. Bobbit
-  **never** reads through it; it only backs the **Open Hindsight UI** link (opened in a new tab).
-  Optional, non-secret, and **never fabricated** from the API URL (different port/path). AJ's local
-  example: `http://localhost:19177/banks/hermes?view=data` (Tailscale equivalent:
-  `http://<tailscale-host>:19177/banks/hermes?view=data`). When unset, the action is hidden.
+- **UI / dashboard URL** (`uiUrl`) — the human **web dashboard** for browsing memory. Bobbit **never** reads through it. The primary **Open Hindsight UI** action opens the embedded in-app dashboard route (`#/ext/hindsight`). A secondary link to open in an external browser is provided when `uiUrl` is configured. If `uiUrl` is unset, the interface directs the user with helpful Marketplace configuration guidance. It is optional, non-secret, and **never fabricated** from the API URL (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data` (Tailscale equivalent: `http://<tailscale-host>:19177/banks/hermes?view=data`).
 
 ### Actions (state-aware)
 
@@ -466,9 +414,9 @@ read seam above). At most a few buttons render inline.
 
 | Action | Where shown | Effect | Backing call |
 |---|---|---|---|
-| **Configure** | always (primary) | Opens the native panel / guided setup seeded with current config | `openPackPanel` → `config` POST |
+| **Configure** | always (primary) | Opens the guided setup wizard / inline configuration form inside the Marketplace | opens Marketplace inline configure form / wizard |
 | **Test connection** | when configured | Re-reads the `status` route (pure health probe, no Docker) and shows an inline ok/fail lozenge | sessionless `status` read |
-| **Open Hindsight UI** | when a `uiUrl` is known | Opens the dashboard in a new tab | anchor to `uiUrl` |
+| **Open Hindsight UI** | always | Opens the embedded dashboard tab inside Bobbit (displays helpful Marketplace guidance if uiUrl is unset; includes a secondary link to open externally if uiUrl is configured) | in-app navigation (iframe target) |
 | **Start runtime** | managed + stopped | **Explicit** consented Docker start (gated by the consent disclosure) | `POST /api/pack-runtimes/:id/start` |
 | **Stop runtime** | managed + running/starting/unhealthy | Stops containers, keeps data | `POST /api/pack-runtimes/:id/stop` |
 | **View logs** | managed modes | Inline read-only log tail | `GET /api/pack-runtimes/:id/logs?tail=` |
@@ -478,11 +426,9 @@ connection** never starts Docker — it is a pure read.
 
 ### Guided setup walkthrough
 
-**Configure** opens a guided walkthrough (the native panel's setup flow) that explains the choices,
-recommends safe defaults, validates each step, and shows live progress for runtime actions. It
-writes through the **same** `config` + `pack-runtimes` routes — it is a guided wrapper, not a new
-config store. Step 0 is a four-card deployment chooser that maps exactly what Bobbit manages vs
-what you manage:
+**Configure** opens the guided setup wizard inside the Marketplace. This walkthrough explains the configuration choices, recommends safe defaults, validates settings, and guides you through the setup process. It is a user-friendly wrapper over the underlying `config` + `pack-runtimes` routes. 
+
+Step 0 is a four-card deployment chooser that specifies exactly what Bobbit manages vs what you manage. All cards are fully selectable, and selecting any mode cleanly advances the wizard to the appropriate next step:
 
 | Choice | `mode` | Bobbit manages | You manage |
 |---|---|---|---|
@@ -491,14 +437,12 @@ what you manage:
 | **Connect existing Hindsight** | `external` | Nothing (client only) | The whole Hindsight deployment |
 | **Hermes-local / embedded** | `external` (preset) | Nothing | Hermes runs Hindsight for you |
 
-The **Hermes-local** card is a preset that bakes AJ's values (API `http://localhost:9177`, bank
-`hermes`, UI `http://localhost:19177/banks/hermes?view=data`). Selecting a preset only edits the
-local draft — **it never starts Docker**. The external branch collects API URL → optional dashboard
-URL → bank/namespace → API key → recall/retain & limits, then runs a non-blocking connection +
-recall **smoke test** (retain is never auto-fired) rendered as a per-step progress list. The
-managed branch shows the consent disclosure, required secrets, data dir / Postgres URL, then an
-explicit **Start** with a progress timeline (pull → create → start → health check → smoke test) —
-in normal E2E these runtime events are **mocked/stubbed** (real Docker only in manual integration).
+The **Hermes-local** card is a preset that bakes AJ's local development values. Selecting any preset or mode only edits your local setup draft — **it never starts Docker**. 
+
+#### Per-Mode Actionable Steps & Guidance
+To ensure the setup experience matches what is actually happening under the hood, the steps and actions in the wizard dynamically adjust based on the selected mode:
+- **Managed Modes (`managed` and `managed-external-postgres`)**: Because Bobbit manages the Docker containers, the wizard displays the consent disclosure and requires you to input necessary secrets (like the LLM API key). It culminates in an explicit, consent-gated **Start Runtime** step and button. This triggers the Docker compose workflow (pull → create → start → health check → smoke test) and is the only path that launches the managed Docker process.
+- **External Mode (`external`)**: In this mode, Hindsight is managed entirely by you externally. Because there is no Bobbit-managed runtime to boot, the wizard **does not promise or show a Start Runtime button**. Instead, the final step presents a **Test Connection** button, which performs a non-blocking reachability and recall smoke test (retaining is never auto-fired during smoke tests) to verify Bobbit can successfully communicate with your external Hindsight data-plane API.
 
 ### Recommended defaults
 
@@ -642,8 +586,8 @@ Tracked in later Extension Platform goals, **not** in this release:
 >   [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup).
 > - The explicit **agent tools** `hindsight_recall/retain/reflect` landed in **P5** — see
 >   [Agent tools](#agent-tools).
-> - The **native config/status panel** + command-palette and `#/ext/hindsight` deep-link
->   entrypoints landed in **P4** — see [Native config & status panel](#native-config--status-panel).
+> - The original native config/status panel landed in **P4**, but the current entrypoint model is
+>   Marketplace for configuration and `#/ext/hindsight` / session-menu for the embedded dashboard.
 >   Store-seeding is no longer the user-facing configuration path (test-only now).
 > - The managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
 >   (`mode: managed` / `managed-external-postgres`) landed in **P3** — see

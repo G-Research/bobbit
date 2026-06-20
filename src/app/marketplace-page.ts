@@ -120,6 +120,7 @@ const runtimeCapabilitiesInFlight = new Set<string>();
 const HINDSIGHT_PACK = "hindsight";
 const HINDSIGHT_RUNTIME = "hindsight";
 const HINDSIGHT_PANEL_ID = "hindsight.panel";
+const HINDSIGHT_DASHBOARD_ROUTE = "#/ext/hindsight";
 
 /** Subset of the Hindsight `status` route response the marketplace needs. The
  *  `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are additive (Partition C)
@@ -1964,8 +1965,9 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 		<div class="market-hindsight-actions flex items-center gap-1.5 flex-wrap mt-2" data-testid="market-hindsight-actions">
 			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" aria-expanded=${hindsightConfigFormOpen ? "true" : "false"} @click=${() => toggleHindsightConfigForm(pack)}>${icon(Settings, "xs")} Configure</button>
 			<button class="market-btn" data-testid="market-hindsight-test" ?disabled=${testing || !configured} @click=${() => handleHindsightTest()}>${icon(Plug, "xs", testing ? "animate-spin" : "")} Test connection</button>
+			<a class="market-btn" data-testid="market-hindsight-open-ui" href=${HINDSIGHT_DASHBOARD_ROUTE}>${icon(ExternalLink, "xs")} Open Hindsight UI</a>
 			${s?.uiUrl
-				? html`<a class="market-btn" data-testid="market-hindsight-open-ui" href=${s.uiUrl} target="_blank" rel="noopener noreferrer">${icon(ExternalLink, "xs")} Open Hindsight UI</a>`
+				? html`<a class="market-btn" data-testid="market-hindsight-open-ui-external" href=${s.uiUrl} target="_blank" rel="noopener noreferrer" title="Open the dashboard in an external browser tab">${icon(ExternalLink, "xs")} Open externally</a>`
 				: ""}
 			${isManagedMode && state === "managed-stopped"
 				? html`<button class="market-btn" data-testid="market-hindsight-start" @click=${() => { hindsightStartConsentOpen = true; ensureRuntimeCapabilities(pack, HINDSIGHT_RUNTIME); renderApp(); }}>${icon(Play, "xs")} Start runtime</button>`
@@ -1988,6 +1990,7 @@ function openHindsightPanel(): void {
 	void import("./pack-panels.js").then((m) => m.openPackPanel({ panelId: HINDSIGHT_PANEL_ID }, HINDSIGHT_PACK));
 }
 void openHindsightPanel; // retained: the in-session panel path is unchanged.
+
 
 /** Default the inline form values (used when the config read hasn't populated a field). */
 function defaultHindsightForm(): HindsightConfigFormValues {
@@ -2797,7 +2800,7 @@ function renderWizardConnectStep(pack: InstalledPackWire, f: HindsightWizardForm
 
 	if (f.mode === "external") {
 		return html`
-			<p class="market-wizard-help">Test that Bobbit can reach your Hindsight data plane.</p>
+			<p class="market-wizard-help">Test the existing Hindsight data-plane URL. Bobbit will not start a runtime in external mode.</p>
 			<div class="flex items-center gap-2 flex-wrap">
 				<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-test" ?disabled=${busyWizard} @click=${() => handleWizardTest(pack)}>${icon(Plug, "xs", busyWizard ? "animate-spin" : "")} Test connection</button>
 				${resultLozenge}
@@ -2817,14 +2820,14 @@ function renderWizardConnectStep(pack: InstalledPackWire, f: HindsightWizardForm
 	ensureWizardCapabilities(pack, HINDSIGHT_RUNTIME, f.mode);
 	const cap = wizardRuntimeCap.get(wizardCapKey(pack, HINDSIGHT_RUNTIME, f.mode));
 	return html`
-		<p class="market-wizard-help">Starting brings up local Docker containers. Review what runs, then start it explicitly.</p>
+		<p class="market-wizard-help">Start the managed Hindsight runtime. This starts Docker only after you review the disclosure and press Start Runtime.</p>
 		${renderRuntimeConsentCardView(HINDSIGHT_RUNTIME, cap)}
 		<label class="market-wizard-consent" data-testid="market-hindsight-wizard-consent-label">
 			<input type="checkbox" data-testid="market-hindsight-wizard-consent" .checked=${hindsightWizardConsent} @change=${(e: Event) => { hindsightWizardConsent = (e.target as HTMLInputElement).checked; renderApp(); }} />
 			<span>I understand this starts local Docker containers that store memory.</span>
 		</label>
 		<div class="flex items-center gap-2 flex-wrap">
-			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-start" ?disabled=${busyWizard || !hindsightWizardConsent} @click=${() => handleWizardStart(pack)}>${icon(Play, "xs", busyWizard ? "animate-spin" : "")} Start (starts Docker)</button>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-start" ?disabled=${busyWizard || !hindsightWizardConsent} @click=${() => handleWizardStart(pack)}>${icon(Play, "xs", busyWizard ? "animate-spin" : "")} Start Runtime (Docker)</button>
 			${resultLozenge}
 			${rt ? html`<span class="market-lozenge" data-testid="market-hindsight-wizard-runtime-status">${rt.status}</span>` : ""}
 		</div>
