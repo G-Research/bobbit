@@ -10,8 +10,15 @@ const MAX_FILES_PER_SESSION = 10;
 /** Best-effort cap on how many sessions retain attachment drafts. Oldest
  *  (by updatedAt) are evicted first so the store can't grow unbounded. */
 const MAX_SESSIONS = 20;
-/** Best-effort cap on total base64 bytes across all retained sessions. Pasted
- *  screenshots are large, so this keeps IndexedDB usage bounded. */
+/** Hard cap on the serialized bytes a SINGLE session's draft may persist.
+ *  Enforced on write by trimming attachments, so the total-store cap stays
+ *  honest even for the active session (which `_evict` never evicts). Set well
+ *  below MAX_TOTAL_BYTES so one session can never exhaust the whole budget. */
+const MAX_BYTES_PER_SESSION = 16 * 1024 * 1024; // 16 MB
+/** Hard cap on total base64 bytes across all retained sessions. Pasted
+ *  screenshots are large, so this keeps IndexedDB usage bounded. Because the
+ *  active session is capped per-record (MAX_BYTES_PER_SESSION) it can never by
+ *  itself exceed this total, so eviction of other sessions always restores it. */
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024; // 64 MB
 
 interface PromptDraftAttachmentsRecord {
@@ -23,13 +30,34 @@ interface PromptDraftAttachmentsRecord {
 	updatedAt: number;
 }
 
+/** Rough serialized size of a single attachment (base64 dominates). */
+function attachmentBytes(a: Attachment): number {
+	return (a.content?.length ?? 0) + (a.preview?.length ?? 0) + (a.extractedText?.length ?? 0);
+}
+
 /** Rough serialized size of a record's attachments (base64 dominates). */
 function recordBytes(rec: PromptDraftAttachmentsRecord): number {
 	let bytes = 0;
-	for (const a of rec.attachments) {
-		bytes += (a.content?.length ?? 0) + (a.preview?.length ?? 0) + (a.extractedText?.length ?? 0);
-	}
+	for (const a of rec.attachments) bytes += attachmentBytes(a);
 	return bytes;
+}
+
+/** Trim a list to at most MAX_FILES_PER_SESSION entries AND at most
+ *  MAX_BYTES_PER_SESSION bytes. Attachments are kept in order until the byte
+ *  budget is exhausted; the remainder are dropped from persistence (they stay
+ *  in the live editor, they just won't survive a reload). This guarantees a
+ *  single session's persisted record can never exceed the documented cap. */
+function trimToCaps(attachments: Attachment[]): Attachment[] {
+	const capped = attachments.slice(0, MAX_FILES_PER_SESSION);
+	const kept: Attachment[] = [];
+	let bytes = 0;
+	for (const a of capped) {
+		const size = attachmentBytes(a);
+		if (bytes + size > MAX_BYTES_PER_SESSION) break;
+		bytes += size;
+		kept.push(a);
+	}
+	return kept;
 }
 
 /**
@@ -62,10 +90,12 @@ export class PromptDraftAttachmentsStore extends Store {
 	}
 
 	/** Persist the composer attachments for a session. An empty list deletes the
-	 *  record. Applies per-session, per-session-count and total-byte caps. */
+	 *  record. Applies a per-session file cap, a per-session byte cap (so the
+	 *  active never-evicted record can't exceed the total budget) and, via
+	 *  `_evict`, per-session-count and total-byte caps across all sessions. */
 	async setAttachments(sessionId: string, attachments: Attachment[]): Promise<void> {
 		if (!sessionId) return;
-		const list = Array.isArray(attachments) ? attachments.slice(0, MAX_FILES_PER_SESSION) : [];
+		const list = Array.isArray(attachments) ? trimToCaps(attachments) : [];
 		if (list.length === 0) {
 			await this.deleteAttachments(sessionId);
 			return;

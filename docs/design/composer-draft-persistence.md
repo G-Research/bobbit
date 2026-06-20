@@ -72,9 +72,10 @@ The `PromptDraftAttachmentsStore` manages file persistence in IndexedDB.
 To prevent IndexedDB from growing unbounded due to stale session drafts, the store enforces strict budget caps during every write operation:
 
 1. **Per-Session File Cap** (`MAX_FILES_PER_SESSION = 10`): Slices incoming arrays to retain at most 10 attachments, matching the UI's `MessageEditor.maxFiles` rule.
-2. **Session Count Cap** (`MAX_SESSIONS = 20`): A best-effort limit on how many historical sessions can retain file drafts. When exceeded, the oldest records (by `updatedAt`) are evicted.
-3. **Total Byte Cap** (`MAX_TOTAL_BYTES = 64 * 1024 * 1024` / 64 MB): Measures base64 character counts in attachment properties (`content`, `preview`, `extractedText`). If the store exceeds 64 MB across all drafts, it evicts the oldest sessions first.
-4. **Safety Filter**: The session currently being written (`keepSessionId`) is explicitly excluded from the candidate eviction list, guaranteeing the active draft is never self-evicted during its write.
+2. **Per-Session Byte Cap** (`MAX_BYTES_PER_SESSION = 16 * 1024 * 1024` / 16 MB): Enforced on write by `trimToCaps` — attachments are kept in arrival order until the per-session byte budget is exhausted; the remainder are dropped from persistence (they remain in the live composer, they just won't survive a reload). Because this cap is well below the total cap and the active session is **never** evicted by `_evict`, a single active draft can never by itself exceed the documented total budget. This closes the honesty gap where an oversized active record could otherwise sit above the total cap indefinitely.
+3. **Session Count Cap** (`MAX_SESSIONS = 20`): A best-effort limit on how many historical sessions can retain file drafts. When exceeded, the oldest records (by `updatedAt`) are evicted.
+4. **Total Byte Cap** (`MAX_TOTAL_BYTES = 64 * 1024 * 1024` / 64 MB): Measures base64 character counts in attachment properties (`content`, `preview`, `extractedText`). If the store exceeds 64 MB across all drafts, it evicts the oldest sessions first. Since the active (kept) record is bounded by the per-session cap, evicting other sessions always restores the total below this limit.
+5. **Safety Filter**: The session currently being written (`keepSessionId`) is explicitly excluded from the candidate eviction list, guaranteeing the active draft is never self-evicted during its write. The per-session byte cap (item 2) is what keeps the total cap honest despite this exclusion.
 
 ---
 
@@ -99,7 +100,7 @@ To survive Lit component recreation, the file state is lifted out of the transie
 ```
 
 1. **Binding**: `AgentInterface` holds the reactive `_attachments` array. It binds this array into `<message-editor>` via the `.attachments` property and listens for updates via the editor's `onFilesChange` callback.
-2. **Loading (`_loadAttachmentDraft`)**: Whenever the active session changes (including slow-path cache-evicted loads and page refreshes), `AgentInterface` fires an asynchronous read from `PromptDraftAttachmentsStore`. It guards this with `_attachmentDraftSessionId` to ignore late async loads if the user switched sessions in the meantime.
+2. **Loading (`_loadAttachmentDraft`)**: Whenever the active session changes (including slow-path cache-evicted loads and page refreshes), `AgentInterface` fires an asynchronous read from `PromptDraftAttachmentsStore`. It guards this with **both** `_attachmentDraftSessionId` (ignore late loads after a session switch) and an in-memory monotonic `_attachmentDraftGen` token captured at schedule time. The gen token is bumped on every load/set/clear, so a clear-after-send or a user edit on the *same* session (which the session-id check alone would miss) invalidates the in-flight read and prevents stale attachments from being resurrected. This is an **in-flight async-load guard only** — it is not persisted; IndexedDB records carry no generation field.
 3. **Saving (`_setAttachmentDraft`)**: When the user adds or removes files, `AgentInterface` updates its local state and writes to IndexedDB immediately. This is debounce-free because file modifications are infrequent, user-initiated events.
 4. **Clearing (`_clearAttachmentDraft`)**: On successful message transmission or when running a `/compact` command, the draft attachments are deleted from IndexedDB to prevent resurrection.
 
@@ -148,16 +149,27 @@ The combined design guarantees the following behaviors:
 
 Automated coverage enforces all invariants described in this document.
 
-### Focused Unit Tests (`tests/session-store.test.ts`)
-- `draft gen staleness guard`:
+### Text Draft Unit Tests (`tests/session-store.test.ts`)
+- `draft gen staleness guard` (text `prompt` draft only):
   - *accepts a strictly increasing gen*: Newer writes overwrite older ones.
   - *silently discards a stale (lower-gen) write*: Stale writes return `true` but do not mutate.
   - *accepts an equal-gen write*: Allows idempotent overwrites at the same generation.
   - *does not resurrect a tombstone*: Prevents a stale text save after an empty-text send from resurrecting.
   - *isolation and persistence*: Ensures guards operate per draft type independently and survive store reload.
-- `attachment draft storage contract`:
-  - *round-trips and isolates*: Verifies attachment drafts stay isolated from prompt text and survive store reloads.
-  - *applies gen guard*: Ensures attachment-type drafts are subject to the same monotonic sequence checks.
+
+> **Attachment drafts are not server-side.** Unlike text, composer attachments are NOT stored in the server `SessionStore` and carry **no persistent gen guard** — they live client-side in IndexedDB (`PromptDraftAttachmentsStore`). The only resurrection guard is the in-flight async-load generation token (`_attachmentDraftGen`) in `AgentInterface`. See the dedicated tests below.
+
+### Attachment Store Unit Tests (`tests/prompt-draft-attachments-store.test.ts`)
+- *round-trips and isolates per session*: Attachments persist and stay keyed by session id.
+- *per-session file cap*: Lists are trimmed to `MAX_FILES_PER_SESSION`.
+- *per-session byte cap*: A single session's record can never exceed `MAX_BYTES_PER_SESSION`, keeping the total cap honest even though the active session is never evicted.
+- *LRU + count/byte eviction*: Oldest sessions are evicted past `MAX_SESSIONS` / `MAX_TOTAL_BYTES`, and the just-written session is never self-evicted.
+- *empty list deletes the record*.
+
+### Attachment In-Flight Guard Unit Tests (`tests/agent-interface-attachment-draft-race.test.ts`)
+- *clear-after-send*: A slow IndexedDB read resolving after send does not resurrect sent attachments.
+- *set-during-load*: A stale load does not clobber freshly user-added attachments.
+- *session-switch-during-load*: A draft loading for session A is never applied to session B.
 
 ### Browser E2E Tests (`tests/e2e/ui/stories-drafts.spec.ts`)
 - `CT-02-b` (*Pasted image draft survives fast switch and reload*): Asserts attachment survival through fast session transitions and browser reloads.
