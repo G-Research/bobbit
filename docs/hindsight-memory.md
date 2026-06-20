@@ -127,6 +127,8 @@ Only safe, **memory-quality** keys are overrideable per-project:
 
 **Inherit & Clear Behavior:** Any overridden key set to an empty value (`null` or `""`) is omitted from the project overlay, causing it to transparently inherit from the server-global config.
 
+**Marketplace Config Hydration:** The Marketplace global config form hydrates strictly from `globalConfig` (the un-overlaid, server-global settings). This ensures that any active per-project override does not masquerade as a global setting, preventing it from being accidentally written back globally during save. The effective, overlaid configuration is reserved exclusively for the runtime status/summary rendering and session execution.
+
 ## Bank & tag taxonomy
 
 **One shared, tag-scoped bank.** All Bobbit memory lives in a single Hindsight bank, id from
@@ -153,15 +155,19 @@ context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>
 
 **Recall scope.**
 
-- `project` (default) — add a `project:<projectId>` tag filter with `tags_match` mapped from `config.tagsMatch` (default `"any"`).
+- `project` (default) — add a `project:<projectId>` tag filter. Under default project scope with no extra tags, the query continues to use the configured `tagsMatch` (which defaults to `"any"`).
   - Under `"any"`, the query fetches project-tagged **plus** untagged/global memories, excluding only memories tagged for other projects.
   - Under `"any_strict"`, untagged/global memories are excluded, enforcing hard project isolation.
   The filter is applied only when the session is associated with a real project ID; a global/server-scope session continues to recall globally.
 - `all` — recall across the entire bank with no project filter. This allows cross-project semantic queries like "how did we set up the database in project X?" to surface knowledge across the entire installation.
 
 Recall, `reflect`, and the agent tools all route this scope→tag decision through one shared
-`recallTagFilter(scope, projectId, tagsMatch)` helper (`market-packs/hindsight/src/shared.ts`),
+`recallTagFilter(scope, projectId, tagsMatch, extraTags)` helper (`market-packs/hindsight/src/shared.ts`),
 so every read path resolves project scope identically.
+
+**Extra tags and narrowing semantics:**
+When optional flat `extraTags` are supplied to the helper (e.g., via the agent tools under project scope), they **narrow** results rather than broadening them. The helper overrides `tagsMatch` to `"all_strict"` (requiring all specified tags). Thus, the query matches the current project tag **plus** every extra tag, while strictly excluding untagged/global memories and other-project memories that happen to share that extra tag.
+Furthermore, the route-derived project ID is authoritative: any caller-supplied `project` key inside the `extraTags` is completely ignored and dropped under project scope to prevent callers from overriding the active project scope.
 
 The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
 correctness never depends on once-per-session in-memory state (provider workers are per-hook and
@@ -220,9 +226,10 @@ empty recall produces no block.
 ### Retry queue & diagnostics
 
 A retain that fails (network/timeout/HTTP) is **not lost**. The provider appends
-`{ content, tags, ts }` to a durable queue in the pack store (key `retain-queue`):
+`{ content, tags, ts, bank, namespace }` to a durable queue in the pack store (key `retain-queue`):
 
 - **Cap 100** — appending past 100 entries drops the oldest (FIFO eviction).
+- **Target Routing** — queue entries include the original target `bank` and `namespace` at the time of the failure, ensuring that retry attempts are routed back to their correct destination even if the current session config has since changed. Legacy queue entries that lack these fields transparently fall back to using the active, currently-configured bank and namespace.
 - **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
   turn's own retain; success removes it, failure leaves it.
 - **Drain on `sessionShutdown`** — one best-effort full pass.
@@ -246,9 +253,9 @@ list) rather than erroring.
 |---|---|
 | `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides to the pack store, return the new effective config. |
 | `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, externalUrl, uiUrl, timeoutMs, recallBudget, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueDepth` is the retry-queue length. The trailing `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are **additive** (UX-polish) so the panel and Marketplace can render the [active configured values](#active-configured-values-surfaced) without a second round-trip; both URLs are **non-secret** and secrets are still never echoed. `lastError` is persisted as a `{ message, ts }` object, so consumers must read `.message` (rendering the object raw yields `[object Object]`). |
-| `recall` | `{ query, scope? }` → resolves bank + tags (via `recallTagFilter`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
+| `recall` | `{ query, scope?, tags? }` → resolves bank + tags (via `recallTagFilter(scope, projectId, tagsMatch, tags)`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
 | `retain` | `{ content, tags?, sync?, scope? }` → `ensureBank` + `client.retain` with merged auto-tags; `scope: project` (with a real project id) adds a `project:<id>` tag. The `kind:manual` marker is spread **last** so user/scope tags can't override it. Returns `{ ok }`. |
-| `reflect` | `{ prompt, scope? }` → `client.reflect` with the same `recallTagFilter` scope mapping as `recall`; returns `{ text }`. |
+| `reflect` | `{ prompt, scope?, tags? }` → `client.reflect` with the same `recallTagFilter(scope, projectId, tagsMatch, tags)` scope mapping as `recall`; returns `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
 ## Agent tools
@@ -299,9 +306,8 @@ All three tools accept `scope: project | all` (defaulting to the configured `rec
 
 **Scope is a tag filter on the single shared bank (`config.bank`, default `bobbit`) — never a different bank.**
 
-- `recall` — `project` adds a `project:<id>` tag filter with `tagsMatch` (project-tagged **plus** untagged/global, excluding other projects — see [Recall scope](#bank--tag-taxonomy)); `all` adds no project filter. The project tag is only added when the session has a **real project id** — a global/server-scope session fabricates no placeholder tag.
+- `recall` / `reflect` — under `project` scope with no extra tags, this adds a `project:<id>` tag filter and resolves using the configured `tagsMatch` (default `"any"`, fetching project-tagged **plus** untagged/global memories, excluding other projects — see [Recall scope](#bank--tag-taxonomy)). When optional extra `tags` are supplied under `project` scope, they **narrow** results with strict `all_strict` semantics (matching the current project tag AND every extra tag, while excluding untagged/global and other-project memories sharing that extra tag). Any caller-supplied `tags.project` value is completely ignored and dropped; the route-derived current project ID is authoritative and cannot be overridden. Under `all` scope, no project tag filter is added, but optional extra `tags` are still applied additively (matching via `"any"`).
 - `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags` are additive and never change the bank. The `kind:manual` provenance marker is spread **last**, so a user-supplied `tags: { kind: "..." }` can never override it.
-- `reflect` — `scope` maps to the **same** `recallTagFilter` as `recall`: `project` (with a real project id) reflects over project-tagged plus untagged/global memories; `all` (or no project id) reflects over the whole shared bank. It still creates no extra banks.
 
 A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's [bank & tag taxonomy](#bank--tag-taxonomy): scope is *always* expressed as tags on one bank, never as bank fan-out.
 
