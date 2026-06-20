@@ -22,10 +22,26 @@ async function expectSessionComposer(page: import("@playwright/test").Page, sess
 		page.locator("textarea").first(),
 		`${label}: ROUTE_VIEW_SESSION_MISMATCH expected /session/${sessionId} to open the session composer`,
 	).toBeVisible({ timeout: 15_000 });
+	await expectCopyActionReachable(page, `${label}: expected session copy action for ${sessionId}`);
+}
+
+async function expectCopyActionReachable(page: import("@playwright/test").Page, message = "expected session copy action"): Promise<void> {
 	await expect(
-		page.locator('[data-testid="copy-session-link"] button').first(),
-		`${label}: ROUTE_VIEW_SESSION_MISMATCH expected session header actions for ${sessionId}`,
+		page.locator('[data-session-action-surface="header"][data-session-action-id="copy-link"], [data-testid="session-actions-trigger"]').first(),
+		message,
 	).toBeVisible({ timeout: 10_000 });
+}
+
+async function clickCopySessionAction(page: import("@playwright/test").Page): Promise<void> {
+	const direct = page.locator('[data-session-action-surface="header"][data-session-action-id="copy-link"]').first();
+	if (await direct.isVisible().catch(() => false)) {
+		await direct.click();
+		return;
+	}
+	await page.locator('[data-testid="session-actions-trigger"]').first().click();
+	const item = page.locator('sidebar-actions-popover [role="menuitem"][data-session-action-id="copy-link"]').first();
+	await expect(item).toBeVisible({ timeout: 5_000 });
+	await item.click();
 }
 
 async function expectCanonicalSessionHashUrl(page: import("@playwright/test").Page, sessionId: string, label: string): Promise<void> {
@@ -54,12 +70,10 @@ test.describe("Copy session link button (UI)", () => {
 			// Navigate to the session.
 			await openSessionByHash(page, sessionId);
 
-			// Button is present.
-			const btn = page.locator('[data-testid="copy-session-link"] button').first();
-			await expect(btn).toBeVisible({ timeout: 10_000 });
+			await expectCopyActionReachable(page);
 
 			// Click and verify clipboard.
-			await btn.click();
+			await clickCopySessionAction(page);
 			const expectedUrl = await page.evaluate(
 				(id) => `${location.origin}/session/${id}`,
 				sessionId,
@@ -77,11 +91,10 @@ test.describe("Copy session link button (UI)", () => {
 			// Persists across reload.
 			await page.reload();
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-			const btn2 = page.locator('[data-testid="copy-session-link"] button').first();
-			await expect(btn2).toBeVisible({ timeout: 10_000 });
+			await expectCopyActionReachable(page);
 			// Clear the clipboard, click again, verify another copy.
 			await page.evaluate(() => navigator.clipboard.writeText(""));
-			await btn2.click();
+			await clickCopySessionAction(page);
 			await expect(async () => {
 				const clip = await page.evaluate(() => navigator.clipboard.readText());
 				expect(clip).toBe(expectedUrl);
@@ -119,9 +132,8 @@ test.describe("Copy session link button (UI)", () => {
 			await openApp(page);
 			await openSessionByHash(page, sessionId);
 
-			const btn = page.locator('[data-testid="copy-session-link"] button').first();
-			await expect(btn).toBeVisible({ timeout: 10_000 });
-			await btn.click();
+			await expectCopyActionReachable(page);
+			await clickCopySessionAction(page);
 			const copiedUrl = await page.evaluate(() => navigator.clipboard.readText());
 			expect(copiedUrl, "copy action should produce the path-style session URL being fixed").toBe(`${base()}/session/${sessionId}`);
 
@@ -159,8 +171,7 @@ test.describe("Copy session link button (UI)", () => {
 				`hash precedence load: HASH_PRECEDENCE_SESSION_URL must not canonicalize conflicting path session ${oldSessionId}`,
 			).not.toBe(`${base()}/#/session/${oldSessionId}`);
 
-			const btn = page.locator('[data-testid="copy-session-link"] button').first();
-			await btn.click();
+			await clickCopySessionAction(page);
 			await expect(async () => {
 				const clip = await page.evaluate(() => navigator.clipboard.readText());
 				expect(clip).toBe(`${base()}/session/${newSessionId}`);

@@ -41,11 +41,25 @@ import {
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
-	let remaining = await page.locator(".queue-pill .steer-btn").count();
+	const buttons = page.locator(".queue-pill .steer-btn");
+	let remaining = await buttons.count();
 	while (remaining > 0) {
-		await page.locator(".queue-pill .steer-btn").first().evaluate((el: HTMLElement) => el.click());
-		await expect.poll(async () => page.locator(".queue-pill .steer-btn").count(), { timeout: 5_000 }).toBeLessThan(remaining);
-		remaining = await page.locator(".queue-pill .steer-btn").count();
+		// The queued steer row can drain between the count above and the click
+		// under full-suite load. Query synchronously in the page so a vanished
+		// button is treated as already drained instead of waiting for a selector
+		// that should not reappear.
+		const clicked = await page.evaluate(() => {
+			const button = document.querySelector<HTMLButtonElement>(".queue-pill .steer-btn");
+			if (!button) return false;
+			button.click();
+			return true;
+		});
+
+		if (clicked) {
+			await expect.poll(async () => buttons.count(), { timeout: 5_000 }).toBeLessThan(remaining);
+		}
+
+		remaining = await buttons.count();
 	}
 }
 

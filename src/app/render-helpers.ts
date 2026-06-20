@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, ExternalLink, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import { bucketTeamChildren } from "./team-archived-bucket.js";
@@ -24,11 +24,10 @@ import {
 	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
-import { shortcutHint } from "./shortcut-registry.js";
-import { connectToSession, terminateSession, createAndConnectSession, startReattempt, forkSession } from "./session-manager.js";
-import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
+import { connectToSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, refreshAgentSession, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
+import { buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -413,13 +412,7 @@ export const HEADER_CHEVRON_W = 20;
 
 export type SidebarActionEntityKind = "session" | "goal";
 
-export interface SidebarActionTrailingToggle {
-	id: string;
-	checked: boolean;
-	ariaLabel: string;
-	label?: string;
-	onToggle: () => void;
-}
+export type SidebarActionTrailingToggle = SessionActionTrailingToggle;
 
 export interface SidebarActionItem {
 	id: string;
@@ -431,14 +424,6 @@ export interface SidebarActionItem {
 	run: (event: Event) => void | Promise<void>;
 	trailingToggle?: SidebarActionTrailingToggle;
 }
-
-// Fork's "New worktree" choice. Module-level so the popover checkbox toggle and
-// the Fork run handler share one source of truth; reset to the default (checked)
-// each time a session actions menu opens.
-let _forkNewWorktree = true;
-
-/** Session ids with an in-flight sidebar Refresh agent request. */
-const _refreshingAgentSessionIds = new Set<string>();
 
 interface OpenSidebarActionsPopover {
 	kind: SidebarActionEntityKind;
@@ -457,14 +442,15 @@ function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: st
 		&& _openSidebarActionsPopover.element.open;
 }
 
-function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
-	// Quick actions render left→right in the hover strip, so the right-most quick
-	// action is the LAST quick item. In the popover we surface quick actions in
-	// reverse strip order (right-most first/top), followed by menu-only actions in
-	// their existing order. FLIP stays keyed by action id, so reordering is safe.
-	const quick = actions.filter((a) => a.quick).reverse();
-	const menuOnly = actions.filter((a) => !a.quick);
-	return [...quick, ...menuOnly].map(({ id, label, title, icon, tone, quick, trailingToggle }) => ({ id, label, title, icon, tone, quick, trailingToggle }));
+function toSidebarActionsPopoverItem({ id, label, title, icon, tone, quick, trailingToggle }: SidebarActionItem): SidebarActionsPopoverItem {
+	return { id, label, title, icon, tone, quick, trailingToggle };
+}
+
+function sidebarActionPopoverItems(kind: SidebarActionEntityKind, actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
+	if (kind === "session") return actions.map(toSidebarActionsPopoverItem);
+	const quickActions = actions.filter((action) => action.quick).reverse();
+	const menuOnlyActions = actions.filter((action) => !action.quick);
+	return [...quickActions, ...menuOnlyActions].map(toSidebarActionsPopoverItem);
 }
 
 function closeSidebarActionsPopover(render = true): void {
@@ -486,7 +472,7 @@ function refreshOpenSidebarActionsPopover(): void {
 	const current = _openSidebarActionsPopover;
 	if (!current) return;
 	current.actions = current.refresh();
-	current.element.items = sidebarActionPopoverItems(current.actions);
+	current.element.items = sidebarActionPopoverItems(current.kind, current.actions);
 }
 
 async function openSidebarActionsPopover(input: {
@@ -507,7 +493,7 @@ async function openSidebarActionsPopover(input: {
 	if (requestId !== _sidebarActionsPopoverRequestId || !input.trigger.isConnected) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
-	element.items = sidebarActionPopoverItems(input.actions);
+	element.items = sidebarActionPopoverItems(input.kind, input.actions);
 	element.sourceRects = input.sourceRects;
 	element.open = true;
 	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
@@ -528,7 +514,7 @@ async function openSidebarActionsPopover(input: {
 	renderApp();
 }
 
-function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { mobile: boolean; btnPad: string }): TemplateResult {
+function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; mobile: boolean; btnPad: string }): TemplateResult {
 	return html`${actions.filter((action) => action.quick).map((action) => {
 		const danger = action.tone === "danger";
 		const colorClass = opts.mobile
@@ -540,6 +526,7 @@ function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { mobile:
 			<button
 				class="${opts.btnPad} rounded ${colorClass}"
 				data-sidebar-action-id=${action.id}
+				data-session-action-id=${opts.kind === "session" ? action.id : nothing}
 				data-sidebar-action-quick="true"
 				@click=${action.run}
 				title=${action.title || action.label}
@@ -596,106 +583,40 @@ function renderSidebarActionsTrigger(input: {
 	`;
 }
 
+function toSidebarActionItem(action: SessionActionDescriptor): SidebarActionItem {
+	return {
+		id: action.id,
+		label: action.label,
+		title: action.title,
+		icon: action.icon,
+		tone: action.tone,
+		quick: action.quick === true,
+		run: action.run,
+		trailingToggle: action.trailingToggle,
+	};
+}
+
+function notifySidebarSessionActionsChanged(): void {
+	refreshOpenSidebarActionsPopover();
+	renderApp();
+}
+
 function buildSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
-	const staffId = session.staffId;
-	const modifyLabel = staffId ? "Edit staff" : "Modify";
-	const isTeamLead = session.role === "team-lead";
-	const actions: SidebarActionItem[] = [
-		{
-			id: "modify",
-			label: modifyLabel,
-			title: staffId ? "Open this staff agent's settings" : "Rename this session",
-			icon: icon(Pencil, "xs"),
-			quick: true,
-			run: staffId
-				? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
-				: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
-		},
-		{
-			id: "terminate",
-			label: isTeamLead ? "End team" : "Terminate",
-			title: `${isTeamLead ? "Stop this team and its agents" : "Terminate this session"}${shortcutHint("terminate-session")}`,
-			icon: icon(Trash2, "xs"),
-			tone: "danger",
-			quick: true,
-			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id); },
-		},
-		{
-			id: "copy-link",
-			label: "Copy link",
-			title: "Copy a link to this session",
-			icon: icon(Link, "xs"),
-			quick: false,
-			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
-		},
-		{
-			id: "open-new-window",
-			label: "Open in new window",
-			title: "Open this session in a new browser window",
-			icon: icon(ExternalLink, "xs"),
-			quick: false,
-			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
-		},
-	];
-	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
-	if (canForkSidebarSession(session)) {
-		actions.push({
-			id: "fork",
-			label: "Fork",
-			title: "Create a new session from this session's history",
-			icon: icon(GitFork, "xs"),
-			quick: false,
-			run: (e: Event) => { e.stopPropagation(); void forkSession(session, { newWorktree: _forkNewWorktree }); },
-			trailingToggle: {
-				id: "fork-new-worktree",
-				checked: _forkNewWorktree,
-				ariaLabel: _forkNewWorktree ? "New worktree (on) — fork into a fresh worktree" : "New worktree (off) — reuse the source worktree",
-				label: "New worktree",
-				onToggle: () => { _forkNewWorktree = !_forkNewWorktree; refreshOpenSidebarActionsPopover(); },
-			},
-		});
-	}
-	return actions;
+	return buildSessionActions({
+		session,
+		displayTitle,
+		staffId: session.staffId,
+		onRefreshStateChanged: notifySidebarSessionActionsChanged,
+	}).map(toSidebarActionItem);
 }
 
 function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
-	const actions: SidebarActionItem[] = [
-		{
-			id: "modify",
-			label: "Modify",
-			title: "Rename this team lead session",
-			icon: icon(Pencil, "xs"),
-			quick: true,
-			run: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
-		},
-		{
-			id: "terminate",
-			label: "End team",
-			title: `Stop this team and its agents${shortcutHint("terminate-session")}`,
-			icon: icon(Trash2, "xs"),
-			tone: "danger",
-			quick: true,
-			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); },
-		},
-		{
-			id: "copy-link",
-			label: "Copy link",
-			title: "Copy a link to this team lead session",
-			icon: icon(Link, "xs"),
-			quick: false,
-			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
-		},
-		{
-			id: "open-new-window",
-			label: "Open in new window",
-			title: "Open this team lead session in a new browser window",
-			icon: icon(ExternalLink, "xs"),
-			quick: false,
-			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
-		},
-	];
-	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
-	return actions;
+	return buildSessionActions({
+		session,
+		displayTitle,
+		goalId,
+		onRefreshStateChanged: notifySidebarSessionActionsChanged,
+	}).map(toSidebarActionItem);
 }
 
 function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean; showArchive: boolean }): SidebarActionItem[] {
@@ -758,75 +679,9 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 	return actions;
 }
 
-function buildRefreshAgentSidebarAction(session: GatewaySession): SidebarActionItem {
-	const refreshing = _refreshingAgentSessionIds.has(session.id);
-	return {
-		id: "refresh-agent",
-		label: refreshing ? "Refreshing agent…" : "Refresh agent",
-		title: refreshing ? "Agent refresh is already running" : "Restart this agent with the latest prompt, tools, and auth state",
-		icon: icon(RotateCcw, "xs"),
-		quick: false,
-		run: (e: Event) => { e.stopPropagation(); void runRefreshAgentSession(session); },
-	};
-}
-
-function canRefreshAgentSession(session: GatewaySession): boolean {
-	return !session.archived
-		&& !session.readOnly
-		&& !session.nonInteractive
-		&& session.status !== "terminated"
-		&& session.status !== "archived";
-}
-
-function refreshAgentNeedsConfirmation(session: GatewaySession): boolean {
-	return session.status === "streaming" || session.status === "busy" || session.isCompacting === true;
-}
-
-async function runRefreshAgentSession(session: GatewaySession): Promise<void> {
-	if (_refreshingAgentSessionIds.has(session.id)) return;
-	const force = refreshAgentNeedsConfirmation(session);
-	if (force) {
-		const confirmed = await confirmAction(
-			"Refresh agent",
-			"This will interrupt the current agent process and restart it with the latest prompt, tools, MCP configuration, and auth state. Transcript and history remain intact.",
-			"Refresh agent",
-			false,
-		);
-		if (!confirmed) return;
-	}
-	_refreshingAgentSessionIds.add(session.id);
-	refreshOpenSidebarActionsPopover();
-	renderApp();
-	try {
-		await refreshAgentSession(session.id, { force });
-	} finally {
-		_refreshingAgentSessionIds.delete(session.id);
-		refreshOpenSidebarActionsPopover();
-		renderApp();
-	}
-}
-
-function canForkSidebarSession(session: GatewaySession): boolean {
-	return session.status !== "terminated"
-		&& !session.archived
-		&& !session.readOnly
-		&& !session.nonInteractive
-		&& !isChildSession(session)
-		// Mirror the server guard isUnsupportedForkSource() in src/server/server.ts:
-		// among role-based sessions, only "team-lead" is non-forkable; "general" and
-		// "assistant" are forkable. Keep client and server consistent.
-		&& session.role !== "team-lead"
-		&& !session.teamGoalId
-		&& !session.teamLeadSessionId;
-}
-
 function openExternalUrl(url: string): void {
 	const opened = window.open(url, "_blank", "noopener");
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
-}
-
-function openSessionInNewWindow(sessionId: string): void {
-	openExternalUrl(sessionDeepLink(sessionId));
 }
 
 function prefetchGoalGithubLink(goalId: string): void {
@@ -1049,7 +904,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
-	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: () => { _forkNewWorktree = true; } })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const navId = `session:${session.id}`;
 	// Keyboard nav can have moved the active row away from this session even
@@ -1207,7 +1062,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
 	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
-	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -1494,7 +1349,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
 	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
 	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
-	const goalButtons = html`${renderSidebarQuickActions(goalActions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
+	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">

@@ -5,8 +5,8 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { agentEndPredicate, apiFetch, connectWs, registerProject } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join, normalize } from "node:path";
@@ -223,7 +223,17 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
 			if (srcId) await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-			rmSync(baseDir, { recursive: true, force: true });
+			// Windows can keep git/worktree files open briefly after session and project
+			// deletion. Use bounded retries so cleanup does not replace the real test
+			// failure with a transient EPERM/ENOTEMPTY from the temp directory removal.
+			await awaitableRm(baseDir, {
+				maxAttempts: 8,
+				backoffMs: 250,
+				onFinalFailure: (err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					console.warn(`[continue-archived-multi-repo] cleanup deferred for ${baseDir}: ${msg}`);
+				},
+			});
 		}
 	});
 });
