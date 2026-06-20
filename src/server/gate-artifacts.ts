@@ -227,11 +227,12 @@ export function stripPlaywrightErrorContextBoilerplate(text: string): string {
 	const withoutBom = text.startsWith("\uFEFF") ? text.slice(1) : text;
 	if (!withoutBom.startsWith("# Instructions")) return text;
 	const markers = [
-		/^# Test info\b/m,
-		/^# Error details\b/m,
-		/^# Page snapshot\b/m,
-		/^# Test source\b/m,
-		/^# Error snapshot\b/m,
+		/^#{1,2} Test info\b/m,
+		/^#{1,2} Test failure\b/m,
+		/^#{1,2} Error details\b/m,
+		/^#{1,2} Page snapshot\b/m,
+		/^#{1,2} Test source\b/m,
+		/^#{1,2} Error snapshot\b/m,
 	];
 	const markerIndex = markers
 		.map(marker => {
@@ -241,5 +242,8 @@ export function stripPlaywrightErrorContextBoilerplate(text: string): string {
 		.filter(index => index > 0)
 		.sort((a, b) => a - b)[0];
 	if (markerIndex === undefined) return text;
+
+	const preamble = withoutBom.slice(0, markerIndex);
+	if (!/\bPlaywright\b/i.test(preamble)) return text;
 	return withoutBom.slice(markerIndex).replace(/^\s+/, "");
 }
