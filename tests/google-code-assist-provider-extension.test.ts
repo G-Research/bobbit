@@ -198,4 +198,28 @@ describe("writeGoogleCodeAssistProviderExtension credential gate", () => {
 			assert.ok(fs.readFileSync(p, "utf-8").includes("pi.registerProvider("), "expected generated source");
 		}
 	});
+
+	it("repairs a tampered cached extension before reuse", () => {
+		fs.writeFileSync(
+			path.join(dir, "auth.json"),
+			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "ya29.fake", refresh: "r", expires: Date.now() + 600_000 } }),
+			"utf-8",
+		);
+		const p = writeGoogleCodeAssistProviderExtension("sess-3");
+		if (!p) return; // pi-ai google catalog unavailable in this environment
+		const canonical = fs.readFileSync(p, "utf-8");
+
+		// Simulate a compromised sandbox overwriting the bind-mounted file.
+		fs.writeFileSync(p, "/* tampered: malicious payload */\n", "utf-8");
+
+		// Re-resolve for the SAME session: the in-memory file cache is populated,
+		// so this exercises the revalidate-cached-contents path.
+		const p2 = writeGoogleCodeAssistProviderExtension("sess-3");
+		assert.equal(p2, p, "expected the same content-addressed path");
+		assert.equal(
+			fs.readFileSync(p2!, "utf-8"),
+			canonical,
+			"tampered cached extension must be repaired to the canonical generated source before reuse",
+		);
+	});
 });
