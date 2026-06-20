@@ -28,6 +28,7 @@ import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
+import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
@@ -6074,6 +6075,15 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
+			// nested-goal creation closure (parent-derived, cap-aware team start).
+			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
+				sessionManager,
+				projectContextManager,
+				verificationHarness,
+				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+				broadcastToAll,
+			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
@@ -6451,6 +6461,15 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
+			// nested-goal creation closure (parent-derived, cap-aware team start).
+			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
+				sessionManager,
+				projectContextManager,
+				verificationHarness,
+				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+				broadcastToAll,
+			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
