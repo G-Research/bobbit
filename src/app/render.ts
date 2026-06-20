@@ -8,7 +8,7 @@ import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderOpen, FolderPlus, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,6 +20,7 @@ import {
 
 	getSidebarData,
 	setRenderSuppressed,
+	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, retryLoadSessions } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
@@ -30,7 +31,10 @@ import {
 	reviewDocumentFromDecisionDetail,
 	submitReviewDecision,
 } from "./review-sources.js";
-import { backToSessions, createAndConnectSession, terminateSession } from "./session-manager.js";
+import { backToSessions, createAndConnectSession } from "./session-manager.js";
+import { buildSessionActions, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
+import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
+import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 // Lazy wrapper for the proposal-panels chunk. Static import here keeps
 // the wrapper itself in the entry bundle while the ~80 kB body of
 // goal/role/tool/staff/project preview panels lands on first view.
@@ -44,7 +48,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
 // fires the same shared `import("./dialogs.js")` on first use; the
 // chunk is shared across all UI surfaces that open dialogs.
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
+import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls } from "./sidebar.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
@@ -649,6 +653,213 @@ export function showHeaderToast(text: string): void {
 function headerToast() {
 	if (!_headerToastText) return "";
 	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
+}
+
+interface OpenHeaderSessionActionsPopover {
+	sessionId: string;
+	element: SidebarActionsPopover;
+	actions: SessionActionDescriptor[];
+	refresh: () => SessionActionDescriptor[];
+	cleanup?: () => void;
+}
+
+let _openHeaderSessionActionsPopover: OpenHeaderSessionActionsPopover | null = null;
+let _headerSessionActionsPopoverRequestId = 0;
+
+function headerDirectSessionActionLimit(): number {
+	const width = window.innerWidth || document.documentElement.clientWidth || 1024;
+	if (width < 760) return 1;
+	if (width < 980) return 2;
+	if (width < 1180) return 3;
+	return 4;
+}
+
+function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobile: boolean): {
+	directActions: SessionActionDescriptor[];
+	overflowActions: SessionActionDescriptor[];
+} {
+	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
+	const directLimit = firstTrailingActionIndex >= 0
+		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
+		: headerDirectSessionActionLimit();
+	if (mobile) {
+		return {
+			directActions: actions.filter((action) => action.quick),
+			overflowActions: actions,
+		};
+	}
+	const directCount = Math.min(actions.length, directLimit);
+	return {
+		directActions: actions.slice(0, directCount),
+		overflowActions: actions.slice(directCount),
+	};
+}
+
+function toHeaderPopoverItems(actions: SessionActionDescriptor[]): SidebarActionsPopoverItem[] {
+	return actions.map(({ id, label, title, icon: actionIcon, tone, quick, trailingToggle }) => ({
+		id: String(id),
+		label,
+		title,
+		icon: actionIcon,
+		tone,
+		quick: quick === true,
+		trailingToggle,
+	}));
+}
+
+function isHeaderSessionActionsPopoverOpen(sessionId: string): boolean {
+	return _openHeaderSessionActionsPopover?.sessionId === sessionId
+		&& _openHeaderSessionActionsPopover.element.open;
+}
+
+function closeHeaderSessionActionsPopover(renderAfterClose = true): void {
+	_headerSessionActionsPopoverRequestId++;
+	const current = _openHeaderSessionActionsPopover;
+	if (!current) return;
+	_openHeaderSessionActionsPopover = null;
+	current.cleanup?.();
+	current.element.open = false;
+	try { current.element.remove(); } catch { /* ignore */ }
+	if (renderAfterClose) renderApp();
+}
+
+function refreshOpenHeaderSessionActionsPopover(): void {
+	const current = _openHeaderSessionActionsPopover;
+	if (current) {
+		current.actions = current.refresh();
+		current.element.items = toHeaderPopoverItems(current.actions);
+		return;
+	}
+	renderApp();
+}
+
+async function openHeaderSessionActionsPopover(input: {
+	sessionId: string;
+	trigger: HTMLElement;
+	actions: SessionActionDescriptor[];
+	refresh: () => SessionActionDescriptor[];
+	sourceRects: SidebarActionsFlipRect[];
+}): Promise<void> {
+	if (isHeaderSessionActionsPopoverOpen(input.sessionId)) {
+		closeHeaderSessionActionsPopover();
+		return;
+	}
+	closeHeaderSessionActionsPopover(false);
+	const requestId = ++_headerSessionActionsPopoverRequestId;
+	await import("../ui/components/SidebarActionsPopover.js");
+	if (requestId !== _headerSessionActionsPopoverRequestId || !input.trigger.isConnected) return;
+	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
+	element.anchorEl = input.trigger;
+	element.items = toHeaderPopoverItems(input.actions);
+	element.sourceRects = input.sourceRects;
+	element.open = true;
+	const handleResize = () => refreshOpenHeaderSessionActionsPopover();
+	window.addEventListener("resize", handleResize);
+	const cleanup = () => window.removeEventListener("resize", handleResize);
+	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
+		event.stopPropagation();
+		const current = _openHeaderSessionActionsPopover;
+		const action = current?.actions.find((item) => String(item.id) === event.detail.actionId);
+		void action?.run(event);
+	}) as EventListener);
+	element.addEventListener("close", () => {
+		if (_openHeaderSessionActionsPopover?.element === element) {
+			_openHeaderSessionActionsPopover.cleanup?.();
+			_openHeaderSessionActionsPopover = null;
+		} else {
+			cleanup();
+		}
+		try { element.remove(); } catch { /* ignore */ }
+		renderApp();
+	});
+	document.body.appendChild(element);
+	_openHeaderSessionActionsPopover = {
+		sessionId: input.sessionId,
+		element,
+		actions: input.actions,
+		refresh: input.refresh,
+		cleanup,
+	};
+	renderApp();
+}
+
+function renderHeaderSessionActionButton(action: SessionActionDescriptor, mobile = false) {
+	const danger = action.tone === "danger";
+	return html`
+		<button
+			type="button"
+			class="${mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground ${danger ? "hover:text-destructive" : ""}"
+			data-session-action-surface="header"
+			data-session-action-id=${String(action.id)}
+			data-sidebar-action-id=${String(action.id)}
+			data-sidebar-action-quick=${action.quick ? "true" : "false"}
+			@click=${(event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				closeHeaderSessionActionsPopover(false);
+				void action.run(event);
+			}}
+			title=${action.title || action.label}
+			aria-label=${action.label}
+		>
+			<span class="inline-flex items-center gap-1">${action.icon}${mobile ? html`` : html`<span class="text-xs hidden md:inline">${action.label}</span>`}</span>
+		</button>
+	`;
+}
+
+function renderHeaderSessionActions(input: {
+	session: GatewaySession;
+	displayTitle: string;
+	staffId?: string;
+	staffName?: string;
+	mobile: boolean;
+}) {
+	const buildActions = () => buildSessionActions({
+		session: input.session,
+		displayTitle: input.displayTitle,
+		staffId: input.staffId,
+		staffName: input.staffName,
+		goalId: input.session.goalId || input.session.teamGoalId,
+		onRefreshStateChanged: refreshOpenHeaderSessionActionsPopover,
+	}).slice().sort((a, b) => a.priority - b.priority);
+	const actions = buildActions();
+	if (!actions.length) return html``;
+	const { directActions, overflowActions } = partitionHeaderSessionActions(actions, input.mobile);
+	const showOverflow = input.mobile || overflowActions.length > 0;
+	const openFromTrigger = (event: Event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const trigger = event.currentTarget as HTMLElement;
+		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
+		resetSessionForkNewWorktree();
+		const currentOverflowActions = () => partitionHeaderSessionActions(buildActions(), input.mobile).overflowActions;
+		void openHeaderSessionActionsPopover({
+			sessionId: input.session.id,
+			trigger,
+			actions: currentOverflowActions(),
+			refresh: currentOverflowActions,
+			sourceRects: row ? captureSidebarActionSourceRects(row) : [],
+		});
+	};
+	return html`
+		<div class="flex items-center gap-1 shrink-0 relative" data-session-action-surface="header" data-sidebar-actions-row-root>
+			<div class="sidebar-actions flex items-center gap-1">
+				${directActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
+				${showOverflow ? html`
+					<button
+						type="button"
+						class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
+						data-testid="session-actions-trigger"
+						aria-label="Session actions"
+						aria-haspopup="menu"
+						aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}
+						title="Session actions"
+						@click=${openFromTrigger}
+					>${icon(Menu, "xs")}</button>
+				` : html``}
+			</div>
+		</div>
+	`;
 }
 
 // ── Disabled `#/ext/<routeId>` deep-link empty state (built-in-first-party-packs
@@ -1742,62 +1953,15 @@ export function doRenderApp(): void {
 	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
 	const headerTitle = activeStaffAgent?.name ?? sessionTitle;
-	const editLabel = activeStaffAgent ? "Edit" : "Modify";
 	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
-	const isTeamLead = activeSession?.role === "team-lead";
-	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
-		<div class="flex items-center gap-1 shrink-0 relative">
-			${Button({
-				variant: "ghost",
-				size: "sm",
-				onClick: () => {
-					import("../ui/dialogs/SystemPromptDialog.js").then(m => m.SystemPromptDialog.show(activeSid!));
-				},
-				children: html`<span class="inline-flex items-center gap-1">${icon(FileText, "xs")}<span class="text-xs hidden sm:inline">Prompt</span></span>`,
-				className: "h-7 px-2 text-muted-foreground",
-				title: "View System Prompt",
-			})}
-			<span data-testid="copy-session-link">${Button({
-				variant: "ghost",
-				size: "sm",
-				onClick: async () => {
-					const url = `${location.origin}/session/${activeSid}`;
-					try {
-						await navigator.clipboard.writeText(url);
-						showHeaderToast("Link copied");
-					} catch {
-						const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
-						m.CopyLinkFallbackDialog.show(url);
-					}
-				},
-				children: html`<span class="inline-flex items-center gap-1">${icon(Link, "xs")}<span class="text-xs hidden sm:inline">Link</span></span>`,
-				className: "h-7 px-2 text-muted-foreground",
-				title: "Copy session link",
-			})}</span>
-			${Button({
-				variant: "ghost",
-				size: "sm",
-				onClick: () => {
-					if (activeStaffAgent) {
-						setHashRoute("staff-edit", activeStaffAgent.id);
-					} else {
-						showRenameDialog(activeSid, sessionTitle);
-					}
-				},
-				children: html`<span class="inline-flex items-center gap-1">${icon(Pencil, "xs")}<span class="text-xs hidden sm:inline">${editLabel}</span></span>`,
-				className: "h-7 px-2 text-muted-foreground",
-				title: activeStaffAgent ? "Edit staff agent" : "Modify session",
-			})}
-			${Button({
-				variant: "ghost",
-				size: "sm",
-				onClick: () => terminateSession(activeSid),
-				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">${isTeamLead ? "End Team" : "Terminate"}</span></span>`,
-				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
-				title: (isTeamLead ? "End team" : "Terminate session") + shortcutHint("terminate-session"),
-			})}
-		</div>
-	` : "";
+	const hasHeaderSessionActions = Boolean(connected && state.remoteAgent && activeSession);
+	const headerSessionActions = hasHeaderSessionActions && activeSession ? renderHeaderSessionActions({
+		session: activeSession,
+		displayTitle: sessionTitle,
+		staffId: activeStaffAgent?.id ?? activeSession.staffId,
+		staffName: activeStaffAgent?.name,
+		mobile: !desktop,
+	}) : html``;
 
 	const headerLeft = () => {
 		if (connected && state.remoteAgent) {
@@ -1828,7 +1992,7 @@ export function doRenderApp(): void {
 							<span class="mobile-header-title font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}${(activeSession?.status === "preparing" || activeSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.75em;">preparing…</span>` : ""}</span>
 							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${goalTitle}</span>` : ""}
 						</div>
-						<div class="shrink-0">${editDeleteBtns}</div>
+						<div class="shrink-0">${headerSessionActions}</div>
 					</div>
 				`;
 			}
@@ -1856,7 +2020,7 @@ export function doRenderApp(): void {
 
 	const headerRight = () => {
 		if (desktop) {
-			return editDeleteBtns ? html`<div class="flex items-center gap-1 px-2">${editDeleteBtns}</div>` : html``;
+			return hasHeaderSessionActions ? html`<div class="flex items-center gap-1 px-2">${headerSessionActions}</div>` : html``;
 		}
 		const settingsBtn = Button({
 			variant: "ghost",

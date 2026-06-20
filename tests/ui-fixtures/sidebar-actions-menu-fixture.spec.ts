@@ -76,6 +76,17 @@ function checkbox(page: Page): Locator {
 	return page.locator('sidebar-actions-popover [role="menuitemcheckbox"][data-sidebar-action-id="fork"]').first();
 }
 
+async function focusMenuStop(page: Page, actionId: string, role: "menuitem" | "menuitemcheckbox"): Promise<void> {
+	await page.keyboard.press("Home");
+	const stopIndex = await page.locator("sidebar-actions-popover [role='menuitem'], sidebar-actions-popover [role='menuitemcheckbox']").evaluateAll(
+		(els, target) => els.findIndex((el) => el.getAttribute("role") === target.role
+			&& (el as HTMLElement).dataset.sidebarActionId === target.actionId),
+		{ actionId, role },
+	);
+	expect(stopIndex, `${MARK}: expected ${role} roving-focus stop for ${actionId}`).toBeGreaterThanOrEqual(0);
+	for (let i = 0; i < stopIndex; i += 1) await page.keyboard.press("ArrowDown");
+}
+
 async function openMenu(page: Page, kind: "session" | "goal", id: string): Promise<void> {
 	await expect(row(page, kind, id), `${MARK}: row ${kind}:${id} should render`).toBeVisible({ timeout: 10_000 });
 	await trigger(page, kind, id).click();
@@ -116,13 +127,14 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	const ids = await loadFixture(page);
 
 	await openMenu(page, "session", ids.session);
-	await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Open in new window", "Refresh agent", "Fork"]);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
 	await expect.poll(() => menuTitleMap(page)).toMatchObject({
 		modify: "Rename this session",
-		"copy-link": "Copy a link to this session",
-		"open-new-window": "Open this session in a new browser window",
 		"refresh-agent": "Restart this agent with the latest prompt, tools, and auth state",
 		fork: "Create a new session from this session's history",
+		"copy-link": "Copy a link to this session",
+		"view-system-prompt": "View System Prompt",
+		"open-new-window": "Open this session in a new browser window",
 	});
 	expect((await menuTitleMap(page)).terminate).toContain("Terminate this session");
 	await page.keyboard.press("Escape");
@@ -175,7 +187,7 @@ test("copy link fallback uses legacy execCommand without surfacing a modal", asy
 	await expectNoPopover(page);
 	await expect(page.locator("copy-link-fallback-dialog")).toHaveCount(0);
 	await expect.poll(() => page.evaluate(() => (window as any).__sidebarActionsExecCopies)).toContain(
-		await page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, ids.session),
+		await page.evaluate((id) => `${location.protocol}//${location.host}/session/${id}`, ids.session),
 	);
 
 	await openMenu(page, "goal", ids.goal);
@@ -209,7 +221,7 @@ test("fork checkbox is a roving-focus stop and Space toggles without dismissing"
 
 	await openMenu(page, "session", ids.session);
 	await expect(checkbox(page)).toHaveAttribute("aria-checked", "true");
-	for (let i = 0; i < 5; i += 1) await page.keyboard.press("ArrowDown");
+	await focusMenuStop(page, "fork", "menuitem");
 	await expect(item(page, "fork")).toBeFocused();
 
 	await page.keyboard.press("ArrowDown");
@@ -218,10 +230,12 @@ test("fork checkbox is a roving-focus stop and Space toggles without dismissing"
 	await expect(checkbox(page)).toHaveAttribute("aria-checked", "false");
 	await expect(menu(page)).toBeVisible();
 	await expect(checkbox(page)).toBeFocused();
+	expect(await page.evaluate(() => (window as any).__sidebarActionsForkBodies)).toEqual([]);
 
 	await page.keyboard.press(" ");
 	await expect(checkbox(page)).toHaveAttribute("aria-checked", "true");
 	await expect(menu(page)).toBeVisible();
+	expect(await page.evaluate(() => (window as any).__sidebarActionsForkBodies)).toEqual([]);
 });
 
 test("role-based fork visibility mirrors the server-supported session model", async ({ page }) => {
@@ -257,18 +271,45 @@ test("reduced-motion opens and closes without component animations", async ({ pa
 	await expect.poll(() => page.evaluate(() => (window as any).__sidebarActionsAnimateCalls)).toBe(0);
 });
 
-test("mobile v1 hides the hamburger and keeps existing inline quick actions visible", async ({ page }) => {
+test("mobile rows expose quick actions plus hamburger menus without row navigation", async ({ page }) => {
 	const ids = await loadFixture(page, { width: 390, height: 820 });
 	const sRow = row(page, "session", ids.session);
-	await expect(trigger(page, "session", ids.session)).toHaveCount(0);
 	await expect(sRow.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]')).toBeVisible();
 	await expect(sRow.locator('[data-sidebar-action-id="terminate"][data-sidebar-action-quick="true"]')).toBeVisible();
 	await expect(sRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
 
+	const startingHash = await page.evaluate(() => window.location.hash);
+	const startingActive = await sRow.getAttribute("data-nav-active");
+	await expect(trigger(page, "session", ids.session), "mobile session rows must expose a hamburger actions trigger").toBeVisible();
+	await openMenu(page, "session", ids.session);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
+	await expect(item(page, "refresh-agent")).toBeVisible();
+	await expect(item(page, "fork")).toBeVisible();
+	await expect(item(page, "copy-link")).toBeVisible();
+	await expect(item(page, "view-system-prompt")).toBeVisible();
+	await expect(item(page, "open-new-window")).toBeVisible();
+	await expect.poll(() => page.evaluate(() => window.location.hash), { message: `${MARK}: session hamburger must not select/navigate the row` }).toBe(startingHash);
+	await expect(sRow).toHaveAttribute("data-nav-active", startingActive ?? "false");
+	await page.keyboard.press("Escape");
+	await expectNoPopover(page);
+
+	await sRow.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]').click();
+	await expect.poll(() => page.evaluate(() => window.location.hash), { message: `${MARK}: quick modify must not select/navigate the row` }).toBe(startingHash);
+	await expect(sRow).toHaveAttribute("data-nav-active", startingActive ?? "false");
+	await page.keyboard.press("Escape").catch(() => {});
+
 	const gRow = row(page, "goal", ids.goal);
-	await expect(trigger(page, "goal", ids.goal)).toHaveCount(0);
-	await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt is popover-only and not an inline quick action").toHaveCount(0);
 	await expect(gRow.locator('[data-sidebar-action-id="archive"][data-sidebar-action-quick="true"]')).toBeVisible();
 	await expect(gRow.locator('[data-sidebar-action-id="dashboard"][data-sidebar-action-quick="true"]')).toBeVisible();
+	await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt remains popover-only, not an inline quick action").toHaveCount(0);
 	await expect(gRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
+	const emptyState = page.getByText("No sessions").first();
+	const emptyStateWasVisible = await emptyState.isVisible();
+	await expect(trigger(page, "goal", ids.goal), "mobile goal rows must expose a hamburger actions trigger").toBeVisible();
+	await openMenu(page, "goal", ids.goal);
+	await expect.poll(() => menuLabels(page)).toEqual(["Goal dashboard", "Archive", "Re-attempt", "Copy link"]);
+	await expect(item(page, "reattempt")).toBeVisible();
+	await expect(item(page, "copy-link")).toBeVisible();
+	await expect.poll(() => page.evaluate(() => window.location.hash), { message: `${MARK}: goal hamburger must not navigate the row` }).toBe(startingHash);
+	if (emptyStateWasVisible) await expect(emptyState, `${MARK}: goal hamburger must not toggle expansion`).toBeVisible();
 });

@@ -68,6 +68,12 @@ export function sessionDeepLink(sessionId: string): string {
 	return absoluteHashUrl(`/session/${encodeURIComponent(sessionId)}`);
 }
 
+export function sessionPathDeepLink(sessionId: string): string {
+	const path = `/session/${encodeURIComponent(sessionId)}`;
+	if (typeof location === "undefined") return path;
+	return `${location.origin}${path}`;
+}
+
 export function goalDeepLink(goalId: string): string {
 	return absoluteHashUrl(`/goal/${encodeURIComponent(goalId)}`);
 }

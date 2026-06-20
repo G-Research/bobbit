@@ -295,7 +295,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -2242,14 +2242,21 @@ export function createGateway(config: GatewayConfig) {
 				// Auto-build or rebuild image if missing or stale. Images are
 				// shared across projects (Docker image tags) so the first project
 				// to request a sandbox pays the build cost.
-				const imageStatus = await checkDockerAvailability(imageName);
-				if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
-					const buildResult = await buildSandboxImage(imageName, projectDir);
+				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined);
+				if (imageStatus.imageExists === false) {
+					if (!dockerContextRoot) {
+						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
+					}
+					const buildResult = await buildSandboxImage(imageName, dockerContextRoot);
 					if (!buildResult.success) {
-						console.error(`[sandbox] Auto-build failed for project ${projectId}; proceeding will likely error`);
+						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
 					}
 				} else if (imageStatus.imageExists === true) {
-					await ensureImageAgentVersion(imageName, projectDir);
+					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined);
+					if (!imageReady) {
+						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
+					}
 				}
 
 				const isRepo = await isGitRepo(projectDir);
@@ -3265,7 +3272,8 @@ async function handleApiRoute(
 		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
 		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
-		const status = await checkDockerAvailability(configured ? imageName : undefined);
+		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
 		json({ ...status, configured });
 		return;
 	}
@@ -3273,7 +3281,8 @@ async function handleApiRoute(
 	// POST /api/sandbox-image/build
 	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
 		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		if (!fs.existsSync(path.join(config.defaultCwd, "docker", "Dockerfile"))) {
+		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
 			return;
 		}
@@ -3281,7 +3290,7 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, config.defaultCwd);
+		const result = await buildSandboxImage(imageName, dockerContextRoot);
 		if (result.success) {
 			json({ success: true });
 		} else {
