@@ -67,10 +67,14 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_NUMBER/);
 		assert.match(source, /if \(!sessionId\) return/);
 		assert.match(source, /name:\s*"readonly_bash"/);
+		assert.match(source, /name:\s*"submit_pr_walkthrough_chunk"/);
+		assert.match(source, /name:\s*"read_pr_walkthrough_submission_status"/);
+		assert.match(source, /name:\s*"finalize_pr_walkthrough_submission"/);
 		assert.match(source, /name:\s*"submit_pr_walkthrough_yaml"/);
-		assert.match(source, /\/api\/internal\/pr-walkthrough\/submit-yaml/);
+		assert.match(source, /\/api\/ext\/surface-token/);
+		assert.match(source, /\/api\/ext\/route\/publish/);
 		assert.match(source, /"X-Bobbit-Session-Secret": sessionSecret/);
-		assert.match(source, /JSON\.stringify\(\{ yaml \}\)/);
+		assert.match(source, /JSON\.stringify\(\{ sessionId, surfaceToken: surface\.token, init: \{ method: "POST", body: routeBody \} \}\)/);
 		// The submit-proof secret must be entirely gone from the tool.
 		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_JOB_ID/);
 		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
