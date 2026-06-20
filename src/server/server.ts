@@ -292,7 +292,8 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
+import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
@@ -427,6 +428,84 @@ export function readConcretePackToolsFromGroups(
 		}
 	}
 	return { tools, descriptions };
+}
+
+// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────────
+// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+// provider, entrypoints, runtime all absent) on a fresh server until the user
+// enables it OR it is "already configured" (live-setup preservation). The
+// overlay is injected into the SERVER-scope ProjectConfigStore so the single
+// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+// Marketplace endpoints) all observe the same effective state; it is never
+// persisted, so the dormancy invariant holds and an explicit user toggle (a
+// persisted record, or the force-enabled marker) always wins.
+//
+// These helpers are MODULE-scoped (not closed over createGateway) so the
+// activation PUT inside the top-level handleApiRoute shares them. The static
+// per-pack info is memoized and cleared on any pack-list mutation via
+// clearDefaultDisabledInfoCache(); the live gates (force-enabled marker +
+// persisted provider config) are read each call.
+interface DefaultDisabledInfo { allDisabled: DisabledRefs; packId: string; providerIds: string[] }
+const defaultDisabledInfoCache = new Map<string, DefaultDisabledInfo | null>();
+function clearDefaultDisabledInfoCache(): void { defaultDisabledInfoCache.clear(); }
+/** Resolve + memoize the default-disabled info for a SERVER-scope pack name, or
+ *  `null` when the pack is not default-disabled. An installed server market pack
+ *  wins over the built-in band (mirrors buildActivationCatalogue's resolution). */
+function getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStore): DefaultDisabledInfo | null {
+	const cached = defaultDisabledInfoCache.get(packName);
+	if (cached !== undefined) return cached;
+	let info: DefaultDisabledInfo | null = null;
+	const base = getProjectRoot();
+	let entry = scopeMarketPackEntries("server" as PackScope, base, serverStore.getPackOrder("server"))
+		.find((e) => e.manifest?.name === packName);
+	if (!entry || !entry.manifest) {
+		entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+	}
+	if (entry?.manifest?.defaultDisabled === true) {
+		const concrete = readConcretePackToolsFromGroups(entry.path, entry.manifest.contents.tools).tools;
+		let providerIds: string[] = [];
+		try { providerIds = loadPackContributions(entry.path, entry.manifest).providers.map((p) => p.id); }
+		catch { /* contributions optional; configured-check just sees no providers */ }
+		info = {
+			allDisabled: buildAllDisabledRefs(entry.manifest, concrete),
+			packId: packIdFromRoot(entry.path),
+			providerIds,
+		};
+	}
+	defaultDisabledInfoCache.set(packName, info);
+	return info;
+}
+/** Persisted marker key: pack names the user EXPLICITLY enabled. An explicit
+ *  enable clears all disabled refs (an empty record, indistinguishable from
+ *  "never touched"), so the marker disambiguates it from the default-disabled
+ *  baseline and makes the enable survive reboots. */
+const PACK_FORCE_ENABLED_KEY = "pack_force_enabled";
+/** Order-insensitive equality for two DisabledRefs (kinds present with non-empty
+ *  arrays must match as SETS). Used to detect when an activation PUT matches the
+ *  pack's current default so we persist a deviation only. */
+function disabledRefsEqual(a: DisabledRefs, b: DisabledRefs): boolean {
+	const kindsOf = (r: DisabledRefs): string[] =>
+		Object.keys(r).filter((k) => Array.isArray((r as Record<string, string[]>)[k]) && (r as Record<string, string[]>)[k].length > 0).sort();
+	const ka = kindsOf(a); const kb = kindsOf(b);
+	if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+	for (const k of ka) {
+		const sa = [...(a as Record<string, string[]>)[k]].sort();
+		const sb = [...(b as Record<string, string[]>)[k]].sort();
+		if (sa.length !== sb.length || sa.some((v, i) => v !== sb[i])) return false;
+	}
+	return true;
+}
+function readForceEnabledPacks(store: ProjectConfigStore): Set<string> {
+	try {
+		const raw = store.get(PACK_FORCE_ENABLED_KEY);
+		const arr = raw ? (JSON.parse(raw) as unknown) : [];
+		return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
+	} catch { return new Set(); }
+}
+function writeForceEnabledPacks(store: ProjectConfigStore, set: Set<string>): void {
+	if (set.size === 0) store.remove(PACK_FORCE_ENABLED_KEY);
+	else store.set(PACK_FORCE_ENABLED_KEY, JSON.stringify([...set].sort()));
 }
 
 export function buildMarketToolRootsForProject(options: {
@@ -1517,6 +1596,44 @@ export function createGateway(config: GatewayConfig) {
 		disabled(scope, projectId, packName) {
 			return packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 		},
+	});
+
+	// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────
+	// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+	// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+	// provider, entrypoints, runtime all absent) on a fresh server until the user
+	// enables it OR it is "already configured" (live-setup preservation). We inject
+	// a READ-TIME overlay into the SERVER-scope activation store so the single
+	// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+	// Marketplace endpoints) all observe the same effective state. The overlay is
+	// never persisted, so the dormancy invariant holds and an explicit user toggle
+	// (a persisted record, or the force-enabled marker) always wins.
+	//
+	// The static per-pack info + force-enabled marker live in module-scope helpers
+	// (getDefaultDisabledInfo / readForceEnabledPacks / writeForceEnabledPacks) so
+	// the activation PUT in handleApiRoute (a top-level function) shares them. Here
+	// we only INJECT the overlay resolver into the SERVER-scope store: it consults
+	// the memoized static info plus the live gates (force-enabled marker + persisted
+	// provider config) on each call (cheap, and only for default-disabled packs).
+	projectConfigStore.setDefaultActivationResolver((scope, packName, stored): DisabledRefs | undefined => {
+		if (scope !== "server") return undefined;
+		const info = getDefaultDisabledInfo(packName, projectConfigStore);
+		if (!info) return undefined;
+		const isForceEnabled = readForceEnabledPacks(projectConfigStore).has(packName);
+		let isConfigured = false;
+		if (!isForceEnabled && Object.keys(stored).length === 0) {
+			for (const pid of info.providerIds) {
+				const cfg = getPackStore().getSync<Record<string, unknown>>(info.packId, providerConfigStoreKey(pid));
+				if (isProviderConfigConfigured(cfg)) { isConfigured = true; break; }
+			}
+		}
+		return resolveDefaultActivationOverlay({
+			scope, packName, stored,
+			isDefaultDisabled: true,
+			isForceEnabled,
+			isConfigured,
+			allDisabledRefs: info.allDisabled,
+		});
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -2879,7 +2996,7 @@ async function handleApiRoute(
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); clearDefaultDisabledInfoCache(); };
 	// Host-owned activation-cache invalidation: a pack persisting provider config
 	// (key `provider-config:*`) must drop the activation-filtered provider index so
 	// a dormant provider (e.g. Hindsight gaining an externalUrl) activates WITHOUT a
@@ -7027,25 +7144,56 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin read of a
-	// BUILT-IN pack's read-only route (Hindsight UX polish). The Marketplace must
-	// read built-in Hindsight config/status as a PURE read, but after `#/market`
-	// navigation there is no active chat session, so the surface-token path
+	// GET/POST /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin access to a
+	// BUILT-IN pack's route (Hindsight UX polish). The Marketplace must read built-in
+	// Hindsight config/status, AND write Hindsight config, after `#/market` navigation
+	// when there is no active chat session, so the surface-token path
 	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
 	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
 	// so it cannot widen the extension threat model:
 	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
-	//   • GET only — the route's own mutation paths (e.g. `config` write) need a
-	//     POST + body, so this can never persist; it is a pure read.
 	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
-	//     this sessionless seam to read another pack's route output.
-	// `ctx.runtime` is resolved WITHOUT starting Docker (mirrors `/api/ext/route`),
-	// preserving the no-Docker-auto-start invariant.
+	//     this sessionless seam to read or write another pack's route output.
+	//   • GET → any route (pure read). POST → ALLOWLISTED to the `config` route name
+	//     ONLY (the built-in config write); any other routeName under POST is rejected
+	//     403, so this is NOT a general write seam — it is purely the GET seam's
+	//     config-write sibling. The `config` route validates + persists to the pack
+	//     store (CONFIG_INVALID for bad input) and returns the redacted effective
+	//     config.
+	// CRITICAL: this path NEVER starts Docker and works with NO session — POST only
+	// persists config to the pack store. `ctx.runtime` is resolved WITHOUT starting
+	// Docker (mirrors `/api/ext/route`), preserving the no-Docker-auto-start invariant.
 	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
-	if (packRouteMatch && req.method === "GET") {
+	if (packRouteMatch && (req.method === "GET" || req.method === "POST")) {
 		const reqPackId = decodeURIComponent(packRouteMatch[1]);
 		const routeName = decodeURIComponent(packRouteMatch[2]);
+		const isWrite = req.method === "POST";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		// POST is allowlisted to the `config` route ONLY — never a general write seam.
+		if (isWrite && routeName !== "config") {
+			json({ error: "sessionless pack-route writes are available only for the 'config' route" }, 403);
+			return;
+		}
+		// Parse the JSON body for the config write. An empty body is rejected for POST
+		// (a config write must carry overrides); malformed JSON is a 400 client error.
+		let writeBody: Record<string, unknown> = {};
+		if (isWrite) {
+			const bodyText = await readBodyText(req);
+			if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+			const trimmed = bodyText.trim();
+			if (trimmed.length === 0) { json({ error: "config write requires a JSON body" }, 400); return; }
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					json({ error: "config write body must be a JSON object" }, 400);
+					return;
+				}
+				writeBody = parsed as Record<string, unknown>;
+			} catch {
+				json({ error: "config write body must be valid JSON" }, 400);
+				return;
+			}
+		}
 		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
 		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
 		const builtinPackIds = new Set(
@@ -7054,7 +7202,7 @@ async function handleApiRoute(
 				.map((e) => packIdFromRoot(e.path)),
 		);
 		if (!builtinPackIds.has(reqPackId)) {
-			json({ error: "sessionless pack-route reads are available only to built-in packs" }, 403);
+			json({ error: "sessionless pack-route access is available only to built-in packs" }, 403);
 			return;
 		}
 		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
@@ -7095,9 +7243,9 @@ async function handleApiRoute(
 				resolved.packRoot,
 				routeName,
 				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
-				{ method: "GET" },
+				isWrite ? { method: "POST", body: writeBody } : { method: "GET" },
 			);
-			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=ok durationMs=${Date.now() - start}`);
+			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} method=${isWrite ? "POST" : "GET"} sessionless outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;
@@ -7680,6 +7828,12 @@ async function handleApiRoute(
 					// "update available" (they update with the app upgrade, §4.2).
 					updateAvailable: false,
 					sourceStatus: "ok" as const,
+					// Default-disabled built-in packs (manifest `defaultDisabled: true`, e.g.
+					// Hindsight) ship dormant. Surface BOTH a stable structural flag
+					// (`defaultDisabled`) and the UI intent alias (`requiresGuidedSetup`) so the
+					// Marketplace can launch the guided setup wizard when the user enables it.
+					defaultDisabled: e.manifest!.defaultDisabled === true,
+					requiresGuidedSetup: e.manifest!.defaultDisabled === true,
 				}));
 				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
 			} catch (err) { jsonError(500, err); }
@@ -7932,7 +8086,42 @@ async function handleApiRoute(
 				return;
 			}
 
-			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			// Default-disabled built-in packs (e.g. Hindsight) persist only DEVIATIONS
+			// from the pack's current default, keeping the dormancy invariant byte-clean
+			// and giving a deterministic way to return to the default (no stored record,
+			// no marker). The default itself depends on whether the pack is "already
+			// configured" (live-setup rule): configured ⇒ enabled ({}), else ⇒ all-disabled.
+			//   • request == default              → clear the stored record + drop the marker
+			//   • request all-enabled, NOT default → explicit ENABLE: drop the record, SET the
+			//                                         force-enable marker (an empty record is
+			//                                         indistinguishable from "never touched", so
+			//                                         the marker is what makes the enable stick)
+			//   • anything else                    → persist the record verbatim (explicit
+			//                                         per-entity / disable choice wins), drop marker
+			const ddInfo = scope === "server" ? getDefaultDisabledInfo(packName, cfgStore) : null;
+			if (ddInfo) {
+				let configured = false;
+				for (const pid of ddInfo.providerIds) {
+					if (isProviderConfigConfigured(getPackStore().getSync<Record<string, unknown>>(ddInfo.packId, providerConfigStoreKey(pid)))) { configured = true; break; }
+				}
+				const defaultDisabled: DisabledRefs = configured ? {} : ddInfo.allDisabled;
+				const nowAllEnabled = Object.keys(normalized).every((k) => (normalized as Record<string, string[]>)[k].length === 0);
+				const marker = readForceEnabledPacks(cfgStore);
+				if (disabledRefsEqual(normalized, defaultDisabled)) {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.delete(packName);
+				} else if (nowAllEnabled) {
+					// all-enabled but the default is disabled (pack not configured) → explicit enable.
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.add(packName);
+				} else {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+					marker.delete(packName);
+				}
+				writeForceEnabledPacks(cfgStore, marker);
+			} else {
+				cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			}
 			invalidateResolverCaches();
 
 			const activationResponse: Record<string, unknown> = { scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) };

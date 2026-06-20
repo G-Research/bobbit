@@ -1,21 +1,25 @@
 name: hindsight_reflect
 description: "Reflect over the Hindsight bank to synthesize an answer to a prompt."
 summary: "Synthesize an answer from long-term memory"
-params: [prompt, scope?]
+params: [prompt, scope?, tags?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Hindsight
 docs: |-
-  Required: `prompt`. Optional: `scope` (`project` | `all`).
+  Required: `prompt`. Optional: `scope` (`project` | `all`), `tags` (simple
+  key→value map).
 
   Asks Hindsight to synthesize an answer over the shared bank rather than
-  returning a raw recall list. `scope: project` restricts reflection to this
-  project's memories (the route adds a `project:<id>` tag filter when a real
-  project id is present); `scope: all` reflects over the whole bank. When `scope`
-  is omitted the pack's configured `recallScope` applies. Scope maps to a tag
-  filter on the SAME shared bank — never a different bank. Returns the synthesized
-  text. Dormant (unconfigured) Hindsight returns empty text, not an error.
+  returning a raw recall list. Omit `scope` for the configured default
+  (`project` = this project + shared/global memories); `scope: all` reflects over
+  every project. `scope: project` filters to this project's memories (the route
+  adds a `project:<id>` tag filter when a real project id is present) while still
+  including untagged/global. Use `tags` only for a simple targeted filter (e.g.
+  `{ goal: "..." }`) — compound `tag_groups` queries are a direct Hindsight API
+  escape hatch documented in docs/hindsight-memory.md. Scope maps to a tag filter
+  on the SAME shared bank — never a different bank. Returns the synthesized text.
+  Dormant (unconfigured) Hindsight returns empty text, not an error.
 detail_docs: >-
   ## Purpose
 
@@ -40,9 +44,12 @@ detail_docs: >-
   | `prompt` | string | **Yes** | The question to reflect on. |
 
   | `scope` | `project` \| `all` | No | `project` filters reflection to this
-  project's memories via a `project:<id>` tag; `all` reflects over the whole
-  bank. Defaults to the pack's configured `recallScope`. Maps to a tag filter on
-  the SAME shared bank — never a different bank. |
+  project's memories (plus shared/global) via a `project:<id>` tag; `all` reflects
+  over the whole bank. Defaults to the pack's configured `recallScope` (`project`).
+  Maps to a tag filter on the SAME shared bank — never a different bank. |
+
+  | `tags` | map | No | Simple key→value filter for a targeted reflection (e.g. `{
+  goal: "..." }`). Merged additively with the scope filter. |
 
 
   ## Notes
@@ -51,7 +58,11 @@ detail_docs: >-
   - Scope maps to a tag filter on the single resolved bank — no extra banks, no
   direct Hindsight calls.
 
-  - A `project` reflect only adds a `project:<id>` filter when the session has a
-  real project id; otherwise no project tag is fabricated.
+  - `project` scope reflects over this project's memories AND untagged/global ones
+  (`tags_match: any`); it adds a `project:<id>` filter only when the session has a
+  real project id.
+
+  - `tags` is a flat map; compound `tag_groups` queries are a direct data-plane API
+  escape hatch (see docs/hindsight-memory.md), not exposed to the agent.
 
   - Unconfigured Hindsight returns empty text (dormant), not an error.

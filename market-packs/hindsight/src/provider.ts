@@ -12,17 +12,28 @@
 // unconfigured pack contributes no active provider at all.
 
 import {
+	applyBankMission,
+	buildAggregateContent,
+	clampRecallQuery,
+	clearError,
 	clientConfig,
 	enqueueRetain,
 	isActive,
+	loadPending,
 	loadQueue,
 	makeClient,
+	nextOverlap,
+	overlayProjectConfig,
 	recallTagFilter,
 	recordError,
 	resolveConfig,
+	savePending,
 	saveQueue,
+	shouldFlushPending,
 	truncate,
 	type EffectiveConfig,
+	type PendingBuffer,
+	type QueueEntry,
 	type RuntimeContext,
 	type StoreLike,
 	type Tags,
@@ -71,6 +82,23 @@ function getStore(ctx: ProviderCtx): StoreLike | null {
 	return ctx?.host?.store ?? null;
 }
 
+function projectIdOf(ctx: ProviderCtx): string | undefined {
+	return ctx.projectId !== undefined ? String(ctx.projectId) : undefined;
+}
+
+function sessionIdOf(ctx: ProviderCtx): string | undefined {
+	const s = ctx.sessionId !== undefined ? String(ctx.sessionId).trim() : "";
+	return s.length > 0 ? s : undefined;
+}
+
+/** Resolve the effective config for a hook: the host-merged `ctx.config`
+ *  (server/global base) with the per-project overlay (safe memory-quality keys)
+ *  layered on top. Activation/dormancy is gated on the BASE elsewhere; the overlay
+ *  never changes mode/externalUrl. */
+async function effectiveConfig(ctx: ProviderCtx, base: EffectiveConfig): Promise<EffectiveConfig> {
+	return overlayProjectConfig(base, getStore(ctx), projectIdOf(ctx));
+}
+
 function textOf(v: unknown): string | undefined {
 	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
@@ -105,16 +133,20 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	const q = (query ?? "").trim();
 	if (!q) return [];
 
-	// Project scope maps to a project-tagged + untagged/global filter on the shared
-	// bank (recallTagFilter / PROJECT_RECALL_TAGS_MATCH); `all` scope sends no filter.
-	const filter = recallTagFilter(cfg.recallScope, ctx.projectId !== undefined ? String(ctx.projectId) : undefined);
+	// Project scope maps to a project-tagged + (with tagsMatch `any`) untagged/global
+	// filter on the shared bank; `any_strict` excludes global; `all` scope sends none.
+	const filter = recallTagFilter(cfg.recallScope, projectIdOf(ctx), cfg.tagsMatch);
 	const store = getStore(ctx);
+	// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
+	const clampedQuery = clampRecallQuery(q, cfg.recallMaxInputChars);
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
-		const res = await client.recall(cfg.bank, q, {
+		const res = await client.recall(cfg.bank, clampedQuery, {
 			maxTokens: cfg.recallBudget,
+			types: cfg.recallTypes,
 			...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 		});
+		if (store) await clearError(store);
 		const memories = res?.memories ?? [];
 		if (memories.length === 0) return [];
 		return [
@@ -133,15 +165,32 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	}
 }
 
+/** Replay ONE queued entry into the bank/namespace it was ORIGINALLY routed to
+ *  (captured at enqueue) — never the current hook's (possibly per-project-
+ *  overridden) `cfg.bank`, so a failed retain can never cross banks/projects.
+ *  Entries queued before the `bank`/`namespace` fields existed fall back to the
+ *  current cfg. Throws on failure so callers can decide whether to requeue. */
+async function retainQueueEntry(store: StoreLike, cfg: EffectiveConfig, runtime: RuntimeContext | undefined, entry: QueueEntry): Promise<void> {
+	const bank = entry.bank ?? cfg.bank;
+	const namespace = entry.namespace ?? cfg.namespace;
+	// Effective cfg pinned to the entry's target so ensureBank + mission + retain all
+	// agree on the ORIGINAL bank/namespace (deployment fields are server-global and
+	// unchanged by the per-project overlay, so reusing cfg's baseUrl/auth is correct).
+	const targetCfg: EffectiveConfig = { ...cfg, bank, namespace };
+	const cc = clientConfig(cfg, runtime);
+	const client = await makeClient(cc.namespace === namespace ? cc : { ...cc, namespace });
+	await client.ensureBank(bank);
+	await applyBankMission(store, client, targetCfg);
+	await client.retain(bank, entry.content, { tags: entry.tags, sync: false });
+}
+
 /** Retry the queue HEAD (one entry) before the turn's own retain. */
 async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
 	const head = q[0];
 	try {
-		const client = await makeClient(clientConfig(cfg, runtime));
-		await client.ensureBank(cfg.bank);
-		await client.retain(cfg.bank, head.content, { tags: head.tags, sync: false });
+		await retainQueueEntry(store, cfg, runtime, head);
 		q.shift();
 		await saveQueue(store, q);
 	} catch (e) {
@@ -149,21 +198,16 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: 
 	}
 }
 
-/** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). */
+/** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). Each entry is
+ *  replayed into its OWN captured bank/namespace (a queue may mix banks across
+ *  per-project overrides), so a failed entry never lands in another project's bank. */
 async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
-	let client;
-	try {
-		client = await makeClient(clientConfig(cfg, runtime));
-	} catch {
-		return;
-	}
-	const remaining = [];
+	const remaining: QueueEntry[] = [];
 	for (const entry of q) {
 		try {
-			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, entry.content, { tags: entry.tags, sync: false });
+			await retainQueueEntry(store, cfg, runtime, entry);
 		} catch {
 			remaining.push(entry);
 		}
@@ -177,52 +221,114 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
+		await applyBankMission(store, client, cfg);
 		await client.retain(cfg.bank, summary, { tags, sync });
+		if (store) await clearError(store);
 	} catch (e) {
 		if (store) {
-			await enqueueRetain(store, { content: summary, tags, ts: Date.now() });
+			await enqueueRetain(store, { content: summary, tags, ts: Date.now(), bank: cfg.bank, namespace: cfg.namespace });
 			await recordError(store, e);
 		}
 	}
 }
 
+/** Flush the durable per-session pending buffer as ONE aggregate retain (overlap
+ *  context + every pending primary turn). On success the sticky error is cleared;
+ *  on failure the aggregate is durably queued for retry (never dropped). EITHER
+ *  way the buffer is advanced: the last `retainOverlapTurns` summaries are carried
+ *  forward as bounded overlap and the primary turns are cleared so the count
+ *  advances. No-op for an empty buffer. */
+async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: StoreLike, sessionId: string, sync: boolean): Promise<void> {
+	const buf = await loadPending(store, sessionId);
+	if (buf.turns.length === 0) return;
+	const content = buildAggregateContent(buf);
+	const tags = autoTags(ctx, "turn");
+	try {
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		await client.ensureBank(cfg.bank);
+		await applyBankMission(store, client, cfg);
+		await client.retain(cfg.bank, content, { tags, sync });
+		await clearError(store);
+	} catch (e) {
+		await enqueueRetain(store, { content, tags, ts: Date.now(), bank: cfg.bank, namespace: cfg.namespace });
+		await recordError(store, e);
+	}
+	// Advance the buffer regardless of success (failures are durably queued): carry
+	// bounded overlap forward, clear the primary turns so the count advances.
+	const overlap = nextOverlap(buf.turns, cfg.retainOverlapTurns);
+	await savePending(store, sessionId, { turns: [], overlap });
+}
+
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async beforePrompt(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async afterTurn(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime) || !base.autoRetain) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
 		if (store) await drainQueueHead(store, cfg, ctx.runtime);
 		const summary = buildTurnSummary(ctx);
-		if (summary) await retainWithQueue(ctx, cfg, summary, "turn", false);
+		const sessionId = sessionIdOf(ctx);
+		// No durable buffer (no store or no session id) ⇒ capture-everything per-turn
+		// fallback (cannot batch without a place to hold pending turns).
+		if (!store || !sessionId) {
+			if (summary) await retainWithQueue(ctx, cfg, summary, "turn", false);
+			return { blocks: [] };
+		}
+		// Batch (never sample): append this turn's compact summary to the durable
+		// pending buffer, then flush ONE aggregate when the batch is full or the
+		// oldest pending turn has aged past retainMaxDelayMs (hook-observed timeout).
+		let buf: PendingBuffer = await loadPending(store, sessionId);
+		if (summary) {
+			buf = { turns: [...buf.turns, { summary, ts: Date.now() }], overlap: buf.overlap };
+			await savePending(store, sessionId, buf);
+		}
+		if (shouldFlushPending(buf, cfg.retainEveryNTurns, cfg.retainMaxDelayMs, Date.now())) {
+			await flushPending(ctx, cfg, store, sessionId, false);
+		}
 		return { blocks: [] };
 	},
 
 	async beforeCompact(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime) || !base.autoRetain) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
+		const store = getStore(ctx);
+		const sessionId = sessionIdOf(ctx);
+		// Synchronously flush any pending buffered turns BEFORE the about-to-be-lost
+		// span so no batched turn is dropped when context is compacted.
+		if (store && sessionId) await flushPending(ctx, cfg, store, sessionId, true);
 		const summary = buildCompactSummary(ctx);
-		// sync:true — land the about-to-be-lost span before context is dropped.
+		// sync:true, batch-EXEMPT — always land the about-to-be-lost span.
 		if (summary) await retainWithQueue(ctx, cfg, summary, "compaction", true);
 		return { blocks: [] };
 	},
 
 	async sessionShutdown(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
-		if (store) await drainQueueAll(store, cfg, ctx.runtime);
+		const sessionId = sessionIdOf(ctx);
+		// Best-effort: flush any remaining buffered turns, then one-pass drain the
+		// durable retry queue.
+		if (store) {
+			if (base.autoRetain && sessionId) await flushPending(ctx, cfg, store, sessionId, false);
+			await drainQueueAll(store, cfg, ctx.runtime);
+		}
 		return { blocks: [] };
 	},
 };

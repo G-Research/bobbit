@@ -144,7 +144,7 @@ function draftFromConfig(cfg) {
 		bank: asText(c.bank, "bobbit"),
 		namespace: asText(c.namespace, "default"),
 		dataDir: asText(c.dataDir, "~/.hindsight"),
-		recallScope: c.recallScope === "project" ? "project" : "all",
+		recallScope: c.recallScope === "all" ? "all" : "project",
 		autoRecall: c.autoRecall !== false,
 		autoRetain: c.autoRetain !== false,
 		recallBudget: asText(c.recallBudget, "1200"),
@@ -300,7 +300,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const orig = asText(cfg[f], "");
 			if (cur !== orig) body[f] = cur;
 		}
-		if (t.recallScope && d.recallScope !== (cfg.recallScope === "project" ? "project" : "all")) body.recallScope = d.recallScope;
+		if (t.recallScope && d.recallScope !== (cfg.recallScope === "all" ? "all" : "project")) body.recallScope = d.recallScope;
 		for (const f of ["autoRecall", "autoRetain"]) {
 			if (t[f] && Boolean(d[f]) !== (cfg[f] !== false)) body[f] = Boolean(d[f]);
 		}
@@ -469,7 +469,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		entry.searchState = "searching";
 		entry.searchError = null;
 		repaint(host);
-		const scope = entry.searchScope || (entry.config && entry.config.recallScope) || "all";
+		const scope = entry.searchScope || (entry.config && entry.config.recallScope) || "project";
 		try {
 			const res = await host.callRoute("recall", { method: "POST", body: { query, scope } });
 			const e2 = get(key);
@@ -718,7 +718,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 								: nothing}
 							<div class="hs-row"><dt>Bank</dt><dd>${asText(s.bank || (entry.config && entry.config.bank), "bobbit")}</dd></div>
 							<div class="hs-row"><dt>Namespace</dt><dd>${asText(s.namespace || (entry.config && entry.config.namespace), "default")}</dd></div>
-							<div class="hs-row"><dt>Recall scope</dt><dd>${asText(s.recallScope || (entry.config && entry.config.recallScope), "all")}</dd></div>
+							<div class="hs-row"><dt>Recall scope</dt><dd>${(() => { const sc = asText(s.recallScope || (entry.config && entry.config.recallScope), "project"); return sc === "all" ? "all (every project)" : "project (this project + shared/global)"; })()}</dd></div>
 							<div class="hs-row"><dt>Auto recall / retain</dt><dd>${s.autoRecall === false ? "off" : "on"} / ${s.autoRetain === false ? "off" : "on"}</dd></div>
 							${timeoutMs ? html`<div class="hs-row"><dt>Timeout</dt><dd data-testid="hindsight-status-timeout">${timeoutMs} ms</dd></div>` : nothing}
 							${recallBudget ? html`<div class="hs-row"><dt>Recall budget</dt><dd>${recallBudget} tokens</dd></div>` : nothing}
@@ -779,7 +779,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="hs-row"><dt>Namespace</dt><dd><code>default</code> unless your Hindsight uses namespaces.</dd></div>
 				<div class="hs-row"><dt>Auto-retain</dt><dd>On (async) — memories are saved in the background after each turn; no latency cost.</dd></div>
 				<div class="hs-row"><dt>Auto-recall</dt><dd>On — relevant memories are pulled in automatically.</dd></div>
-				<div class="hs-row"><dt>Recall scope</dt><dd><code>all</code> — search across everything you've done.</dd></div>
+				<div class="hs-row"><dt>Recall scope</dt><dd><code>project</code> — this project + shared/global memories (<code>all</code> = every project in the shared bank).</dd></div>
 				<div class="hs-row"><dt>Timeout</dt><dd><code>1500 ms</code> — conservative; Hindsight calls never stall a turn.</dd></div>
 				<div class="hs-row"><dt>LLM key (managed)</dt><dd>You supply it — Bobbit forwards it to the local runtime only; never hardcodes a provider secret.</dd></div>
 			</dl>
@@ -967,9 +967,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<label class="hs-field">
 					<span class="hs-label">Recall scope</span>
 					<select class="hs-input" data-testid="hindsight-recall-scope" .value=${d.recallScope} @change=${(e) => setField(host, key, "recallScope", e.currentTarget.value)}>
-						<option value="all" ?selected=${d.recallScope === "all"}>All</option>
 						<option value="project" ?selected=${d.recallScope === "project"}>This project</option>
+						<option value="all" ?selected=${d.recallScope === "all"}>All</option>
 					</select>
+					<span class="hs-hint">project = this project + shared/global memories; all = every project in the shared bank.</span>
 				</label>
 
 				<div class="hs-toggles">
@@ -1005,7 +1006,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 	const renderSearchCard = (entry, host, key) => {
 		const onSubmit = (e) => { if (e) e.preventDefault(); runSearch(host, key); };
-		const scope = entry.searchScope || (entry.config && entry.config.recallScope) || "all";
+		const scope = entry.searchScope || (entry.config && entry.config.recallScope) || "project";
 		return html`
 			<section class="hs-card" data-testid="hindsight-search-card">
 				<h2 class="hs-card-title">Search memory</h2>
@@ -1019,8 +1020,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						@input=${(e) => { const en = get(key); if (en) en.searchQuery = e.currentTarget.value; }}
 					/>
 					<select class="hs-input hs-scope" data-testid="hindsight-search-scope" .value=${scope} @change=${(e) => { const en = get(key); if (en) { en.searchScope = e.currentTarget.value; repaint(host); } }}>
-						<option value="all" ?selected=${scope === "all"}>All</option>
 						<option value="project" ?selected=${scope === "project"}>This project</option>
+						<option value="all" ?selected=${scope === "all"}>All</option>
 					</select>
 					<button class="hs-btn hs-btn-primary" data-testid="hindsight-search-submit" type="submit" ?disabled=${entry.searchState === "searching"}>${entry.searchState === "searching" ? "Searching…" : "Search"}</button>
 				</form>
@@ -1148,12 +1149,25 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			return html`
 				${STYLE}
 				<div class="hs-root" data-testid="hindsight-panel" data-config-state=${entry.configState} data-status-state=${entry.statusState}>
-					<div class="hs-head">
-						<h1>Hindsight Memory</h1>
-						${entry.configured && !entry.setupOpen
-							? html`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${() => { const e = get(key); if (e) { e.setupOpen = true; repaint(host); } }}>Setup guide</button>`
-							: nothing}
-					</div>
+					${(() => {
+						// Prominent header link to the human-facing Hindsight dashboard when a
+						// uiUrl is configured (status echoes it; config carries it before status
+						// loads). This is the "reach the actual Hindsight UI" affordance — it
+						// opens uiUrl in a new tab and is NEVER dialed by Bobbit.
+						const headerUiUrl = asText((entry.status && entry.status.uiUrl) || (entry.config && entry.config.uiUrl), "");
+						return html`
+							<div class="hs-head">
+								<h1>Hindsight Memory</h1>
+								<div class="hs-card-actions">
+									${headerUiUrl
+										? html`<a class="hs-btn hs-open-ui" data-testid="hindsight-header-open-ui" href=${headerUiUrl} target="_blank" rel="noopener noreferrer">Open Hindsight UI ↗</a>`
+										: nothing}
+									${entry.configured && !entry.setupOpen
+										? html`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${() => { const e = get(key); if (e) { e.setupOpen = true; repaint(host); } }}>Setup guide</button>`
+										: nothing}
+								</div>
+							</div>`;
+					})()}
 					${renderStatusCard(entry, host, key)}
 					${entry.configState === "error"
 						? html`<section class="hs-card"><p class="hs-error" data-testid="hindsight-config-load-error">${asText(entry.configError, "Config unavailable")}</p></section>`

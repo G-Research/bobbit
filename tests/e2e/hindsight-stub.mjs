@@ -16,6 +16,8 @@
  *     setHealthy(ok),            // false ⇒ /health 503 and recall/retain 503
  *     seedMemories(bank, mem[]), // seed recall results (filtered by tags + tags_match)
  *     retained(bank?),           // recorded retained items { content, tags, async }
+ *     recalledTypes(bank?),      // recorded recall `types` filters (last-first)
+ *     bankConfig(bank),          // last-applied bank-config `updates` (mission PATCH)
  *     close(),                   // shut the server down
  *   }
  */
@@ -77,6 +79,8 @@ export function startHindsightStub({ port = 0 } = {}) {
 	const seeded = new Map();
 	/** bank → retained item records */
 	const retainedByBank = new Map();
+	/** bank → last-applied bank-config `updates` (mission PATCH) */
+	const bankConfigByBank = new Map();
 	/** known bank ids (ensured / seeded / retained) */
 	const banks = new Set();
 
@@ -111,6 +115,14 @@ export function startHindsightStub({ port = 0 } = {}) {
 		if (method === "PUT" && bank && segs.length === 4) {
 			banks.add(bank);
 			return send(res, 200, { bank_id: bank, name: bank });
+		}
+
+		// PATCH /v1/{ns}/banks/{bank}/config  — update_bank_config (mission steering)
+		if (method === "PATCH" && bank && segs[4] === "config" && segs.length === 5) {
+			banks.add(bank);
+			const updates = (body && typeof body === "object" && body.updates) || {};
+			bankConfigByBank.set(bank, { ...(bankConfigByBank.get(bank) ?? {}), ...updates });
+			return send(res, 200, { bank_id: bank, config: bankConfigByBank.get(bank) });
 		}
 
 		// POST /v1/{ns}/banks/{bank}/memories/recall  — recall_memories
@@ -175,6 +187,9 @@ export function startHindsightStub({ port = 0 } = {}) {
 				retained(bank) {
 					if (bank) return [...(retainedByBank.get(bank) ?? [])];
 					return [...retainedByBank.values()].flat();
+				},
+				bankConfig(bank) {
+					return bankConfigByBank.get(bank) ?? null;
 				},
 				close() {
 					return new Promise((res) => server.close(() => res()));

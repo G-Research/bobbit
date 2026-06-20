@@ -185,6 +185,9 @@ export function validateManifest(
 	if (d.schema !== undefined) manifest.schema = schema;
 	if (provides !== undefined) manifest.provides = provides;
 	if (requires !== undefined) manifest.requires = requires;
+	// Default-disabled flag (built-in dormant packs, e.g. hindsight). Only the
+	// literal boolean `true` opts in; any other value is ignored (default-enabled).
+	if (d.defaultDisabled === true) manifest.defaultDisabled = true;
 	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.
 	// Tolerant — a malformed routes block is dropped (no routes), never fatal.
 	const routes = parseRoutesRef(d.routes);

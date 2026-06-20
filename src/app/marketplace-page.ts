@@ -13,6 +13,7 @@ import {
 	ArrowLeft,
 	CheckCircle2,
 	ChevronDown,
+	ChevronRight,
 	Circle,
 	Database,
 	Download,
@@ -54,6 +55,7 @@ import {
 	getPackRuntimeLogs,
 	listPackRuntimes,
 	readBuiltinPackRoute,
+	writeBuiltinPackRoute,
 	startPackRuntime,
 	stopPackRuntime,
 	type BrowsePackWire,
@@ -143,6 +145,62 @@ interface HindsightStatusWire {
 	recallBudget?: number;
 }
 
+/** The redacted `config` route GET response shape the inline form hydrates from.
+ *  Secrets are surfaced as `<field>Set` booleans, never raw values. `externalUrl`/
+ *  `uiUrl` are present only when set (resolveConfig omits empty strings). */
+interface HindsightConfigWire {
+	mode?: string;
+	externalUrl?: string;
+	uiUrl?: string;
+	bank?: string;
+	namespace?: string;
+	recallScope?: string;
+	autoRecall?: boolean;
+	autoRetain?: boolean;
+	timeoutMs?: number;
+	recallBudget?: number;
+	dataDir?: string;
+	apiKeySet?: boolean;
+}
+
+/** The per-project override metadata the `config` GET route exposes when a
+ *  `projectId` is supplied (design hindsight-memory-quality §"Per-project override").
+ *  Only the safe memory-quality keys are surfaced; absent fields inherit the global
+ *  config. Optional everywhere — when the route partition that adds this hasn't
+ *  merged, the response simply omits these and the override UI stays dormant. */
+interface HindsightProjectOverrideWire {
+	recallScope?: string;
+	bank?: string;
+	tagsMatch?: string;
+	recallBudget?: number;
+	recallTypes?: string[];
+}
+
+/** The full `config` GET response. `config` is the EFFECTIVE (overlay-resolved)
+ *  config; `globalConfig`/`projectOverride` are present only when the route was
+ *  asked for a specific project AND supports per-project overlays. */
+interface HindsightConfigGetWire {
+	config?: HindsightConfigWire;
+	globalConfig?: HindsightConfigWire;
+	projectOverride?: HindsightProjectOverrideWire | null;
+	projectId?: string;
+}
+
+/** Editable values for the inline Configure form (strings for input binding). */
+interface HindsightConfigFormValues {
+	mode: string;
+	externalUrl: string;
+	uiUrl: string;
+	bank: string;
+	namespace: string;
+	recallScope: string;
+	autoRecall: boolean;
+	autoRetain: boolean;
+	timeoutMs: string;
+	recallBudget: string;
+	apiKey: string;
+}
+
 let hindsightStatus: HindsightStatusWire | null = null;
 let hindsightStatusLoaded = false;
 let hindsightRuntimes: PackRuntimeStatus[] = [];
@@ -153,6 +211,86 @@ let hindsightActionResult: { kind: "test" | "start" | "stop"; ok: boolean; messa
 let hindsightStartConsentOpen = false;
 /** Inline runtime logs (View logs), fetched best-effort; null = not loaded. */
 let hindsightLogs: string | null = null;
+
+/** Whether the inline Configure form is expanded (Configure click toggles it). */
+let hindsightConfigFormOpen = false;
+/** The editable form values, hydrated from the `config` route on open. */
+let hindsightConfigForm: HindsightConfigFormValues | null = null;
+/** The values as loaded from the route (apiKey loaded blank) — the touched-field
+ *  baseline so the save only POSTs fields the user actually changed (an untouched
+ *  blank secret input never clobbers a stored secret). */
+let hindsightConfigLoaded: HindsightConfigFormValues | null = null;
+/** Whether a stored apiKey exists (drives the "set/blank" hint on the secret field). */
+let hindsightConfigApiKeySet = false;
+/** Transient save-result lozenge for the inline config form. */
+let hindsightConfigResult: { ok: boolean; message: string } | null = null;
+
+// ── Per-project memory override (design hindsight-memory-quality §"Per-project
+// override"). The built-in Hindsight pack is server-scoped, but its memory config
+// supports a small project overlay (recallScope + optional bank) layered over the
+// global config. The marketplace passes the CURRENT projectId for the built-in row
+// so the config route can surface + persist that overlay. All state degrades to a
+// dormant section when the route partition exposing it hasn't merged. ──
+/** The projectId the override section addresses (current project), if any. */
+let hindsightOverrideProjectId: string | undefined;
+/** Whether the config route exposed the per-project overlay contract (globalConfig /
+ *  projectOverride present). False ⇒ the override section is hidden entirely. */
+let hindsightOverrideSupported = false;
+/** The server/global base config (used to label "inherit (<global>)" affordances). */
+let hindsightGlobalConfig: HindsightConfigWire | null = null;
+/** The stored project overlay (null/empty ⇒ no override; inherits global). */
+let hindsightProjectOverride: HindsightProjectOverrideWire | null = null;
+/** Editable override form values. "" recallScope ⇒ inherit; "" bank ⇒ inherit. */
+let hindsightOverrideForm: { recallScope: string; bank: string } | null = null;
+/** Transient save-result lozenge for the per-project override save. */
+let hindsightOverrideResult: { ok: boolean; message: string } | null = null;
+
+// ── Hindsight guided setup WIZARD (design extension-platform §11 + G3.3) ──────
+// Clicking Enable on a DISABLED built-in Hindsight row launches a guided wizard
+// (mode → defaults+rationale → test/start with progress → smoke test → finish)
+// INSTEAD of flipping the pack enabled immediately. Finish saves config via the
+// sessionless config-write seam, THEN enables the pack. Cancel before the
+// connect/start action persists nothing and leaves the pack disabled. The wizard
+// reuses the existing config-write, status-read, runtime-start and consent
+// disclosure paths — it is a guided SEQUENCING on top of them, not a rewrite.
+export type HindsightWizardStep = "mode" | "configure" | "connect" | "smoke";
+export type HindsightWizardMode = "external" | "managed" | "managed-external-postgres";
+
+/** Editable wizard form. Distinct from the inline-Configure form values so the
+ *  wizard can surface the managed-mode fields (llmApiKey/dataDir/externalDatabaseUrl)
+ *  and the recall-query clamp (recallMaxInputChars) with their own rationale copy. */
+interface HindsightWizardForm {
+	mode: HindsightWizardMode;
+	externalUrl: string;
+	uiUrl: string;
+	apiKey: string;
+	llmApiKey: string;
+	externalDatabaseUrl: string;
+	dataDir: string;
+	bank: string;
+	namespace: string;
+	recallScope: string;
+	autoRecall: boolean;
+	autoRetain: boolean;
+	timeoutMs: string;
+	recallMaxInputChars: string;
+}
+
+let hindsightWizardOpen = false;
+/** `${scope}:${packName}` of the pack the wizard targets (so only that row renders it). */
+let hindsightWizardPackKey: string | null = null;
+let hindsightWizardStep: HindsightWizardStep = "mode";
+let hindsightWizardForm: HindsightWizardForm | null = null;
+/** Managed-mode consent (must be ticked before the explicit Start). */
+let hindsightWizardConsent = false;
+/** Whether config has been persisted yet (set by the connect/start action + Finish). */
+let hindsightWizardConfigSaved = false;
+/** Result of the connect/start action (External: Test; Managed: Start). */
+let hindsightWizardConnect: { ok: boolean; message: string } | null = null;
+/** Best-effort smoke-test result (non-fatal). */
+let hindsightWizardSmoke: { ok: boolean; message: string } | null = null;
+/** Surfaced wizard error (config validation / save failure). */
+let hindsightWizardError = "";
 
 let newSourceUrl = "";
 let newSourceRef = "";
@@ -202,6 +340,26 @@ export function clearMarketplaceState(): void {
 	hindsightActionResult = null;
 	hindsightStartConsentOpen = false;
 	hindsightLogs = null;
+	hindsightConfigFormOpen = false;
+	hindsightConfigForm = null;
+	hindsightConfigLoaded = null;
+	hindsightConfigApiKeySet = false;
+	hindsightConfigResult = null;
+	hindsightOverrideProjectId = undefined;
+	hindsightOverrideSupported = false;
+	hindsightGlobalConfig = null;
+	hindsightProjectOverride = null;
+	hindsightOverrideForm = null;
+	hindsightOverrideResult = null;
+	hindsightWizardOpen = false;
+	hindsightWizardPackKey = null;
+	hindsightWizardStep = "mode";
+	hindsightWizardForm = null;
+	hindsightWizardConsent = false;
+	hindsightWizardConfigSaved = false;
+	hindsightWizardConnect = null;
+	hindsightWizardSmoke = null;
+	hindsightWizardError = "";
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
@@ -352,16 +510,55 @@ async function loadHindsightState(): Promise<void> {
 	const projectId = currentProjectId();
 	const runtimesRes = await listPackRuntimes(projectId);
 	if (runtimesRes.ok) hindsightRuntimes = runtimesRes.data.runtimes || [];
+	// Pass the CURRENT projectId for the built-in row too (not just project-scope
+	// packs): the config route overlays the per-project memory override + reports the
+	// EFFECTIVE recall scope for it. A route partition that ignores projectId simply
+	// returns the global view (override section stays dormant).
 	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
 		packId: runtimeRestPackId(pack),
 		routeName: "status",
-		projectId: pack.scope === "project" ? projectId : undefined,
+		projectId,
 	});
 	if (statusRes.ok) {
 		hindsightStatus = statusRes.data ?? null;
 		hindsightStatusLoaded = true;
 	}
+	// Read config (project-scoped) to surface the per-project override badge on the
+	// summary WITHOUT opening Configure. Pure read; populates META only (never the
+	// editable override form, which Configure seeds on open).
+	const cfgRes = await readBuiltinPackRoute<HindsightConfigGetWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		projectId,
+	});
+	if (cfgRes.ok && cfgRes.data) applyHindsightOverrideMeta(cfgRes.data, projectId);
 	renderApp();
+}
+
+/** Populate the per-project override METADATA (support flag, global base, stored
+ *  overlay) from a `config` GET response. Does NOT touch the editable override form.
+ *  The route exposes the overlay contract only when it returns `globalConfig` or a
+ *  `projectOverride` field; absent ⇒ the section stays hidden. */
+function applyHindsightOverrideMeta(data: HindsightConfigGetWire, projectId: string | undefined): void {
+	hindsightOverrideProjectId = projectId;
+	const supported = !!projectId && (Object.prototype.hasOwnProperty.call(data, "globalConfig") || Object.prototype.hasOwnProperty.call(data, "projectOverride"));
+	hindsightOverrideSupported = supported;
+	hindsightGlobalConfig = data.globalConfig ?? null;
+	hindsightProjectOverride = data.projectOverride ?? null;
+}
+
+/** True when a non-empty per-project overlay is stored (drives the summary badge). */
+function hasHindsightProjectOverride(): boolean {
+	const o = hindsightProjectOverride;
+	if (!o) return false;
+	return !!(o.recallScope || (o.bank && o.bank.trim()) || o.tagsMatch || o.recallBudget != null || (o.recallTypes && o.recallTypes.length));
+}
+
+/** Resolve the current project's display name for override copy. */
+function hindsightProjectName(): string {
+	const pid = hindsightOverrideProjectId;
+	if (!pid) return "this project";
+	return state.projects.find((p) => p.id === pid)?.name || "this project";
 }
 
 /** Fetch the UNFILTERED activation catalogue + disabled overrides for every
@@ -1205,7 +1402,9 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: html`${pack.packName === HINDSIGHT_PACK ? renderHindsightStatusStrip(pack) : ""}${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
+				: isHindsightWizardOpenFor(pack)
+					? renderHindsightWizard(pack)
+					: html`${pack.packName === HINDSIGHT_PACK ? renderHindsightStatusStrip(pack) : ""}${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1315,12 +1514,42 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 					data-testid="market-toggle-pack-${pack.packName}"
 					.checked=${enabled > 0}
 					?disabled=${busy.has(busyKey)}
-					@change=${(e: Event) => handleToggleAllActivation(pack, (e.target as HTMLInputElement).checked)}
+					@change=${(e: Event) => handleMasterToggle(pack, e.target as HTMLInputElement)}
 				/>
 				<span class="market-toggle-slider"></span>
 			</span>
 		</label>
 	`;
+}
+
+/** Master enable/disable toggle handler. For a DISABLED built-in Hindsight row,
+ *  turning the pack ON launches the guided setup wizard INSTEAD of flipping the
+ *  activation — the pack only becomes enabled when the wizard reaches Finish. All
+ *  other packs (and disabling Hindsight) toggle activation directly. */
+function handleMasterToggle(pack: InstalledPackWire, el: HTMLInputElement): void {
+	const checked = el.checked;
+	if (checked && shouldLaunchHindsightWizard(pack)) {
+		// Intercept: the pack stays disabled (the bound `.checked` value is unchanged),
+		// so lit will NOT reset the user-toggled checkbox — reset the DOM element directly
+		// so the toggle does not appear "on" while the wizard (and after Cancel) is shown.
+		el.checked = false;
+		openHindsightWizard(pack);
+		return;
+	}
+	void handleToggleAllActivation(pack, checked);
+}
+
+/** Whether clicking Enable on this row should launch the guided wizard rather than
+ *  enabling immediately: a built-in `hindsight` row that is currently disabled.
+ *  Consumes the sibling server `requiresGuidedSetup` field ADDITIVELY — only an
+ *  explicit `false` opts out (absent/true ⇒ launch), so it works whether or not the
+ *  default-disabled server change has merged. */
+export function shouldLaunchHindsightWizard(pack: InstalledPackWire): boolean {
+	if (!(pack.builtin && pack.packName === HINDSIGHT_PACK)) return false;
+	if (hindsightEnabled(pack)) return false;
+	const requiresGuided = (pack as { requiresGuidedSetup?: boolean }).requiresGuidedSetup;
+	if (requiresGuided === false) return false;
+	return true;
 }
 
 /** Every keyof DisabledRefs that the catalogue counts as a toggleable entity.
@@ -1657,6 +1886,7 @@ function renderHindsightStatusStrip(pack: InstalledPackWire): TemplateResult {
 			<div class="text-[11px] text-muted-foreground mt-1" data-testid="market-hindsight-blurb">${meta.blurb}</div>
 			${renderHindsightConfigSummary()}
 			${renderHindsightActions(pack, state, managed, isManagedMode)}
+			${hindsightConfigFormOpen ? renderHindsightConfigForm(pack) : ""}
 			${hindsightStartConsentOpen && state === "managed-stopped"
 				? html`<div class="mt-2" data-testid="market-hindsight-start-consent">
 						${renderRuntimeConsentCard(pack, HINDSIGHT_RUNTIME)}
@@ -1687,7 +1917,7 @@ function renderHindsightConfigSummary(): TemplateResult {
 	if (s.externalUrl) rows.push(["API URL", s.externalUrl]);
 	if (s.bank) rows.push(["Bank", s.bank]);
 	if (s.namespace) rows.push(["Namespace", s.namespace]);
-	if (s.recallScope) rows.push(["Recall scope", s.recallScope]);
+	if (s.recallScope) rows.push(["Recall scope", s.recallScope === "project" ? "project (this project + shared/global)" : "all (every project)"]);
 	rows.push(["Auto recall", s.autoRecall ? "on" : "off"]);
 	rows.push(["Auto retain", s.autoRetain ? "on" : "off"]);
 	if (typeof s.timeoutMs === "number") rows.push(["Timeout", `${s.timeoutMs}ms`]);
@@ -1698,6 +1928,9 @@ function renderHindsightConfigSummary(): TemplateResult {
 		<dl class="market-hindsight-config" data-testid="market-hindsight-config">
 			${rows.map(([k, v]) => html`<div class="market-hindsight-config-row"><dt>${k}</dt><dd>${v}</dd></div>`)}
 		</dl>
+		${hasHindsightProjectOverride()
+			? html`<span class="market-lozenge market-hindsight-override-badge mt-1" data-testid="market-hindsight-override-active" title=${`Per-project memory override active for ${hindsightProjectName()}`}>${icon(Settings, "xs")} Project override active</span>`
+			: ""}
 		${(() => {
 			const le = hindsightLastErrorText(s.lastError);
 			return le ? html`<div class="market-error mt-1" data-testid="market-hindsight-last-error">${le}</div>` : "";
@@ -1729,7 +1962,7 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 	const canStop = state === "managed-running" || state === "managed-unhealthy" || state === "managed-starting";
 	return html`
 		<div class="market-hindsight-actions flex items-center gap-1.5 flex-wrap mt-2" data-testid="market-hindsight-actions">
-			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" @click=${() => openHindsightPanel()}>${icon(Settings, "xs")} Configure</button>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" aria-expanded=${hindsightConfigFormOpen ? "true" : "false"} @click=${() => toggleHindsightConfigForm(pack)}>${icon(Settings, "xs")} Configure</button>
 			<button class="market-btn" data-testid="market-hindsight-test" ?disabled=${testing || !configured} @click=${() => handleHindsightTest()}>${icon(Plug, "xs", testing ? "animate-spin" : "")} Test connection</button>
 			${s?.uiUrl
 				? html`<a class="market-btn" data-testid="market-hindsight-open-ui" href=${s.uiUrl} target="_blank" rel="noopener noreferrer">${icon(ExternalLink, "xs")} Open Hindsight UI</a>`
@@ -1747,9 +1980,339 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 	`;
 }
 
-/** Open the native Hindsight config/status panel — the primary setup path. */
+/** Open the native Hindsight config/status panel — the in-session setup path, still
+ *  reachable from the command palette / git-widget panel entrypoints. The Marketplace
+ *  Configure button uses the inline form ({@link toggleHindsightConfigForm}) instead,
+ *  because `#/market` has no active chat session to mount a pack side-panel against. */
 function openHindsightPanel(): void {
 	void import("./pack-panels.js").then((m) => m.openPackPanel({ panelId: HINDSIGHT_PANEL_ID }, HINDSIGHT_PACK));
+}
+void openHindsightPanel; // retained: the in-session panel path is unchanged.
+
+/** Default the inline form values (used when the config read hasn't populated a field). */
+function defaultHindsightForm(): HindsightConfigFormValues {
+	return {
+		mode: "external",
+		externalUrl: "",
+		uiUrl: "",
+		bank: "bobbit",
+		namespace: "default",
+		recallScope: "project",
+		autoRecall: true,
+		autoRetain: true,
+		timeoutMs: "1500",
+		recallBudget: "1200",
+		apiKey: "",
+	};
+}
+
+/** Toggle the inline Configure form. Opening hydrates it from the `config` route over
+ *  the SESSIONLESS built-in seam (pure read, no Docker). */
+function toggleHindsightConfigForm(pack: InstalledPackWire): void {
+	if (hindsightConfigFormOpen) {
+		hindsightConfigFormOpen = false;
+		renderApp();
+		return;
+	}
+	hindsightConfigFormOpen = true;
+	hindsightConfigResult = null;
+	renderApp();
+	void loadHindsightConfigForm(pack);
+}
+
+/** Hydrate the inline form + the touched-field baseline from the `config` route GET.
+ *  The apiKey input ALWAYS loads blank (the secret is never echoed); leaving it blank
+ *  keeps the stored secret on save. */
+async function loadHindsightConfigForm(pack: InstalledPackWire): Promise<void> {
+	// Always pass the current projectId for the built-in row so the route can return
+	// the EFFECTIVE config + the per-project override metadata (when supported).
+	const projectId = currentProjectId();
+	const res = await readBuiltinPackRoute<HindsightConfigGetWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		projectId,
+	});
+	const base = defaultHindsightForm();
+	if (res.ok && res.data) applyHindsightOverrideMeta(res.data, projectId);
+	// Seed the editable per-project override form from the stored overlay ("" =
+	// inherit global). Done here (Configure open) rather than in the background load.
+	const ov = hindsightProjectOverride;
+	hindsightOverrideForm = { recallScope: ov?.recallScope ?? "", bank: ov?.bank ?? "" };
+	hindsightOverrideResult = null;
+	// Hydrate the GLOBAL inline Configure fields (Bank, Recall scope, …) from
+	// `globalConfig` when the route exposes it — NOT from `config`, which is the
+	// overlay-resolved EFFECTIVE config. If a per-project override is active, `config`
+	// reflects the override, so seeding the global form from it would show project
+	// values as global and risk silently writing them back as global. `config` is for
+	// the effective summary/status row only. Fall back to `config` when the route
+	// predates the overlay contract (no `globalConfig`).
+	const globalCfg = res.ok ? (res.data?.globalConfig ?? res.data?.config) : undefined;
+	if (res.ok && globalCfg) {
+		const c = globalCfg;
+		const form: HindsightConfigFormValues = {
+			mode: c.mode ?? base.mode,
+			externalUrl: c.externalUrl ?? "",
+			uiUrl: c.uiUrl ?? "",
+			bank: c.bank ?? base.bank,
+			namespace: c.namespace ?? base.namespace,
+			recallScope: c.recallScope ?? base.recallScope,
+			autoRecall: typeof c.autoRecall === "boolean" ? c.autoRecall : base.autoRecall,
+			autoRetain: typeof c.autoRetain === "boolean" ? c.autoRetain : base.autoRetain,
+			timeoutMs: typeof c.timeoutMs === "number" ? String(c.timeoutMs) : base.timeoutMs,
+			recallBudget: typeof c.recallBudget === "number" ? String(c.recallBudget) : base.recallBudget,
+			apiKey: "",
+		};
+		hindsightConfigApiKeySet = !!c.apiKeySet;
+		hindsightConfigForm = form;
+		hindsightConfigLoaded = { ...form };
+	} else {
+		hindsightConfigApiKeySet = false;
+		hindsightConfigForm = base;
+		hindsightConfigLoaded = { ...base };
+	}
+	renderApp();
+}
+
+/** Mutate one inline-form field (string/boolean) and repaint. */
+function setHindsightFormField<K extends keyof HindsightConfigFormValues>(key: K, value: HindsightConfigFormValues[K]): void {
+	if (!hindsightConfigForm) hindsightConfigForm = defaultHindsightForm();
+	hindsightConfigForm = { ...hindsightConfigForm, [key]: value };
+	renderApp();
+}
+
+/** Build the POST body with TOUCHED-FIELD semantics: include a field ONLY when its
+ *  current input differs from the loaded baseline. The apiKey baseline is "" — an
+ *  untouched blank input is therefore never sent, so it cannot clobber a stored
+ *  secret; an explicitly cleared field that previously held a non-empty loaded value
+ *  is sent as "" to clear it. */
+function buildHindsightConfigDiff(form: HindsightConfigFormValues, loaded: HindsightConfigFormValues): Record<string, unknown> {
+	const body: Record<string, unknown> = {};
+	if (form.mode !== loaded.mode) body.mode = form.mode;
+	if (form.externalUrl !== loaded.externalUrl) body.externalUrl = form.externalUrl;
+	if (form.uiUrl !== loaded.uiUrl) body.uiUrl = form.uiUrl;
+	if (form.bank !== loaded.bank) body.bank = form.bank;
+	if (form.namespace !== loaded.namespace) body.namespace = form.namespace;
+	if (form.recallScope !== loaded.recallScope) body.recallScope = form.recallScope;
+	if (form.autoRecall !== loaded.autoRecall) body.autoRecall = form.autoRecall;
+	if (form.autoRetain !== loaded.autoRetain) body.autoRetain = form.autoRetain;
+	if (form.timeoutMs !== loaded.timeoutMs) {
+		const n = Number(form.timeoutMs);
+		if (Number.isFinite(n) && n > 0) body.timeoutMs = n;
+	}
+	if (form.recallBudget !== loaded.recallBudget) {
+		const n = Number(form.recallBudget);
+		if (Number.isFinite(n) && n > 0) body.recallBudget = n;
+	}
+	// apiKey baseline is always "" — only sent when the user typed something.
+	if (form.apiKey !== loaded.apiKey) body.apiKey = form.apiKey;
+	return body;
+}
+
+/** Save the inline form via the SESSIONLESS config-write seam, then re-read status +
+ *  config so the row + form reflect the persisted values. Shows an ok/error lozenge. */
+async function handleHindsightConfigSave(pack: InstalledPackWire): Promise<void> {
+	if (!hindsightConfigForm || !hindsightConfigLoaded) return;
+	const body = buildHindsightConfigDiff(hindsightConfigForm, hindsightConfigLoaded);
+	if (Object.keys(body).length === 0) {
+		hindsightConfigResult = { ok: true, message: "No changes" };
+		renderApp();
+		return;
+	}
+	busy.add("hindsight:config");
+	hindsightConfigResult = null;
+	renderApp();
+	const res = await writeBuiltinPackRoute<{ ok?: boolean; error?: string; errors?: string[] }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		body,
+		projectId: currentProjectId(),
+	});
+	busy.delete("hindsight:config");
+	if (res.ok && res.data?.ok !== false) {
+		hindsightConfigResult = { ok: true, message: "Saved" };
+		// Re-hydrate the form baseline + the status/config row from the persisted state.
+		await loadHindsightConfigForm(pack);
+		await loadHindsightState();
+	} else {
+		const errs = res.ok ? (res.data?.errors ?? []).join("; ") : res.error;
+		hindsightConfigResult = { ok: false, message: errs || "Save failed" };
+	}
+	renderApp();
+}
+
+/** Mutate one per-project override field and repaint. */
+function setHindsightOverrideField(key: "recallScope" | "bank", value: string): void {
+	if (!hindsightOverrideForm) hindsightOverrideForm = { recallScope: "", bank: "" };
+	hindsightOverrideForm = { ...hindsightOverrideForm, [key]: value };
+	renderApp();
+}
+
+/** Save the per-project memory override via the config route's `projectOverride`
+ *  payload (design hindsight-memory-quality). "" recallScope / "" bank CLEAR that key
+ *  back to the global value. The global config write path is untouched — this only
+ *  ever sends the `projectOverride` envelope, scoped to the current projectId. */
+async function handleHindsightOverrideSave(pack: InstalledPackWire): Promise<void> {
+	if (!hindsightOverrideForm) return;
+	const projectId = currentProjectId();
+	if (!projectId) {
+		hindsightOverrideResult = { ok: false, message: "No active project" };
+		renderApp();
+		return;
+	}
+	const f = hindsightOverrideForm;
+	// Empty ⇒ null (clear → inherit global). Non-empty ⇒ the override value.
+	const projectOverride: Record<string, unknown> = {
+		recallScope: f.recallScope ? f.recallScope : null,
+		bank: f.bank.trim() ? f.bank.trim() : null,
+	};
+	busy.add("hindsight:override");
+	hindsightOverrideResult = null;
+	renderApp();
+	const res = await writeBuiltinPackRoute<{ ok?: boolean; error?: string; errors?: string[] }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		body: { projectOverride },
+		projectId,
+	});
+	busy.delete("hindsight:override");
+	if (res.ok && res.data?.ok !== false) {
+		// loadHindsightConfigForm resets hindsightOverrideResult to null, so set the
+		// success lozenge AFTER re-hydrating the form to keep it visible.
+		await loadHindsightConfigForm(pack);
+		await loadHindsightState();
+		hindsightOverrideResult = { ok: true, message: "Saved" };
+	} else {
+		const errs = res.ok ? (res.data?.errors ?? []).join("; ") : res.error;
+		hindsightOverrideResult = { ok: false, message: errs || "Save failed" };
+	}
+	renderApp();
+}
+
+/** The compact per-project memory-override section in the inline Configure form.
+ *  Hidden entirely unless the route exposed the overlay contract for a real project.
+ *  Recall scope can inherit (global) or pin project/all; bank blank ⇒ inherit global. */
+function renderHindsightOverrideSection(pack: InstalledPackWire): TemplateResult | string {
+	if (!hindsightOverrideSupported || !hindsightOverrideProjectId) return "";
+	const f = hindsightOverrideForm ?? { recallScope: "", bank: "" };
+	const saving = busy.has("hindsight:override");
+	const globalScope = hindsightGlobalConfig?.recallScope || "project";
+	const globalBank = hindsightGlobalConfig?.bank || "bobbit";
+	return html`
+		<div class="market-hindsight-override mt-1 flex flex-col gap-2" data-testid="market-hindsight-override">
+			<div class="market-field-label" style="font-weight:600;">Per-project override — ${hindsightProjectName()}</div>
+			<div class="market-field-help">Overrides the global memory config for this project only. Recall scope: <code>project</code> = this project + shared/global memories; <code>all</code> = every project in the shared bank.</div>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall scope (this project)</span>
+					<select class="market-input" data-testid="market-hindsight-override-recallscope" .value=${f.recallScope} @change=${(e: Event) => setHindsightOverrideField("recallScope", (e.target as HTMLSelectElement).value)}>
+						<option value="" ?selected=${f.recallScope === ""}>Inherit global (${globalScope})</option>
+						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
+						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
+					</select>
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Bank (this project)</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-override-bank" placeholder=${`inherit (${globalBank})`} .value=${f.bank} @input=${(e: Event) => setHindsightOverrideField("bank", (e.target as HTMLInputElement).value)} />
+					<span class="market-field-help">Blank inherits the global bank.</span>
+				</label>
+			</div>
+			<div class="flex items-center gap-2 flex-wrap">
+				<button class="market-btn" data-testid="market-hindsight-override-save" ?disabled=${saving} @click=${() => handleHindsightOverrideSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save project override</button>
+				${hindsightOverrideResult
+					? html`<span
+							class="market-lozenge ${hindsightOverrideResult.ok ? "" : "market-lozenge--warning"}"
+							data-testid="market-hindsight-override-result"
+							style=${hindsightOverrideResult.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+						>${icon(hindsightOverrideResult.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightOverrideResult.message}</span>`
+					: ""}
+			</div>
+		</div>
+	`;
+}
+
+/** The inline Configure form rendered in the Hindsight row. Mirrors the panel fields
+ *  and distinguishes the API/data-plane URL (dialed by Bobbit) from the Dashboard UI
+ *  URL (opened by humans, never dialed). */
+function renderHindsightConfigForm(pack: InstalledPackWire): TemplateResult {
+	const f = hindsightConfigForm;
+	const saving = busy.has("hindsight:config");
+	if (!f) {
+		return html`<div class="market-hindsight-config-form mt-2" data-testid="market-hindsight-config-form"><div class="text-[11px] text-muted-foreground">Loading configuration…</div></div>`;
+	}
+	return html`
+		<div class="market-hindsight-config-form mt-2 flex flex-col gap-2" data-testid="market-hindsight-config-form">
+			<label class="market-field">
+				<span class="market-field-label">Deployment mode</span>
+				<select class="market-input" data-testid="market-hindsight-form-mode" .value=${f.mode} @change=${(e: Event) => setHindsightFormField("mode", (e.target as HTMLSelectElement).value)}>
+					<option value="external" ?selected=${f.mode === "external"}>External (point at existing Hindsight)</option>
+					<option value="managed" ?selected=${f.mode === "managed"}>Managed (Bobbit runs Hindsight + Postgres)</option>
+					<option value="managed-external-postgres" ?selected=${f.mode === "managed-external-postgres"}>Managed + external Postgres</option>
+				</select>
+			</label>
+			<label class="market-field">
+				<span class="market-field-label">API / data-plane URL</span>
+				<input class="market-input" type="text" data-testid="market-hindsight-form-externalurl" placeholder="http://localhost:9177" .value=${f.externalUrl} @input=${(e: Event) => setHindsightFormField("externalUrl", (e.target as HTMLInputElement).value)} />
+				<span class="market-field-help">The data-plane URL Bobbit dials for recall/retain. Required for external mode.</span>
+			</label>
+			<label class="market-field">
+				<span class="market-field-label">Dashboard UI URL</span>
+				<input class="market-input" type="text" data-testid="market-hindsight-form-uiurl" placeholder="http://localhost:19177/banks/bobbit?view=data" .value=${f.uiUrl} @input=${(e: Event) => setHindsightFormField("uiUrl", (e.target as HTMLInputElement).value)} />
+				<span class="market-field-help">The human-facing dashboard opened by "Open Hindsight UI". Never dialed by Bobbit.</span>
+			</label>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Bank</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-form-bank" .value=${f.bank} @input=${(e: Event) => setHindsightFormField("bank", (e.target as HTMLInputElement).value)} />
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Namespace</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-form-namespace" .value=${f.namespace} @input=${(e: Event) => setHindsightFormField("namespace", (e.target as HTMLInputElement).value)} />
+				</label>
+			</div>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall scope</span>
+					<select class="market-input" data-testid="market-hindsight-form-recallscope" .value=${f.recallScope} @change=${(e: Event) => setHindsightFormField("recallScope", (e.target as HTMLSelectElement).value)}>
+						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
+						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
+					</select>
+					<span class="market-field-help">project = this project + shared/global memories; all = every project in the shared bank.</span>
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Timeout (ms)</span>
+					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-timeoutms" .value=${f.timeoutMs} @input=${(e: Event) => setHindsightFormField("timeoutMs", (e.target as HTMLInputElement).value)} />
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall budget</span>
+					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-recallbudget" .value=${f.recallBudget} @input=${(e: Event) => setHindsightFormField("recallBudget", (e.target as HTMLInputElement).value)} />
+				</label>
+			</div>
+			<div class="flex gap-3 flex-wrap items-center">
+				<label class="flex items-center gap-1.5 text-[12px]">
+					<input type="checkbox" data-testid="market-hindsight-form-autorecall" .checked=${f.autoRecall} @change=${(e: Event) => setHindsightFormField("autoRecall", (e.target as HTMLInputElement).checked)} /> Auto recall
+				</label>
+				<label class="flex items-center gap-1.5 text-[12px]">
+					<input type="checkbox" data-testid="market-hindsight-form-autoretain" .checked=${f.autoRetain} @change=${(e: Event) => setHindsightFormField("autoRetain", (e.target as HTMLInputElement).checked)} /> Auto retain
+				</label>
+			</div>
+			<label class="market-field">
+				<span class="market-field-label">API key ${hindsightConfigApiKeySet ? html`<span class="text-muted-foreground">(set — leave blank to keep)</span>` : html`<span class="text-muted-foreground">(blank)</span>`}</span>
+				<input class="market-input" type="password" autocomplete="off" data-testid="market-hindsight-form-apikey" placeholder=${hindsightConfigApiKeySet ? "••••••••" : "optional"} .value=${f.apiKey} @input=${(e: Event) => setHindsightFormField("apiKey", (e.target as HTMLInputElement).value)} />
+			</label>
+			${renderHindsightOverrideSection(pack)}
+			<div class="flex items-center gap-2 flex-wrap">
+				<button class="market-btn market-btn--primary" data-testid="market-hindsight-config-save" ?disabled=${saving} @click=${() => handleHindsightConfigSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save configuration</button>
+				<button class="market-btn" data-testid="market-hindsight-config-cancel" @click=${() => { hindsightConfigFormOpen = false; renderApp(); }}>Close</button>
+				${hindsightConfigResult
+					? html`<span
+							class="market-lozenge ${hindsightConfigResult.ok ? "" : "market-lozenge--warning"}"
+							data-testid="market-hindsight-config-result"
+							style=${hindsightConfigResult.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+						>${icon(hindsightConfigResult.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightConfigResult.message}</span>`
+					: ""}
+			</div>
+		</div>
+	`;
 }
 
 /** Test connection == re-read the pack `status` route (pure, no Docker). Updates the
@@ -1823,6 +2386,476 @@ async function handleHindsightLogs(pack: InstalledPackWire): Promise<void> {
 	busy.delete("hindsight:logs");
 	hindsightLogs = res.ok ? res.data.logs : `Failed to load logs: ${res.error}`;
 	renderApp();
+}
+
+// ============================================================================
+// HINDSIGHT GUIDED SETUP WIZARD
+// ============================================================================
+
+const WIZARD_STEPS: Array<{ id: HindsightWizardStep; label: string }> = [
+	{ id: "mode", label: "Mode" },
+	{ id: "configure", label: "Configure" },
+	{ id: "connect", label: "Connect" },
+	{ id: "smoke", label: "Smoke test" },
+];
+
+function defaultWizardForm(): HindsightWizardForm {
+	return {
+		mode: "external",
+		externalUrl: "",
+		uiUrl: "",
+		apiKey: "",
+		llmApiKey: "",
+		externalDatabaseUrl: "",
+		dataDir: "~/.hindsight",
+		bank: "bobbit",
+		namespace: "default",
+		recallScope: "project",
+		autoRecall: true,
+		autoRetain: true,
+		timeoutMs: "1500",
+		recallMaxInputChars: "3000",
+	};
+}
+
+function isHindsightWizardOpenFor(pack: InstalledPackWire): boolean {
+	return hindsightWizardOpen && hindsightWizardPackKey === `${pack.scope}:${pack.packName}`;
+}
+
+/** Wizard-scoped runtime capability cache, keyed by the SELECTED deployment mode so
+ *  the managed consent disclosure reflects the wizard's chosen mode BEFORE config is
+ *  persisted (the row-level {@link runtimeCapabilities} cache keys on the server's
+ *  CURRENT effective mode, which is still dormant/external mid-wizard). */
+const wizardRuntimeCap = new Map<string, PackRuntimeCapabilitySummary | null>();
+const wizardRuntimeCapInFlight = new Set<string>();
+
+function wizardCapKey(pack: InstalledPackWire, runtimeId: string, mode: string): string {
+	return `${runtimeRestPackId(pack)}:${runtimeId}:${mode}`;
+}
+
+/** Lazily fetch the capability disclosure for the wizard's selected mode (a pure GET
+ *  — never starts Docker). Best-effort: a missing route caches `null` and the card
+ *  falls back to static copy. */
+function ensureWizardCapabilities(pack: InstalledPackWire, runtimeId: string, mode: string): void {
+	const key = wizardCapKey(pack, runtimeId, mode);
+	if (wizardRuntimeCap.has(key) || wizardRuntimeCapInFlight.has(key)) return;
+	wizardRuntimeCapInFlight.add(key);
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	void getPackRuntimeCapabilities({ packId: runtimeRestPackId(pack), runtimeId, projectId, mode }).then((res) => {
+		wizardRuntimeCapInFlight.delete(key);
+		wizardRuntimeCap.set(key, res.ok ? res.data : null);
+		renderApp();
+	});
+}
+
+/** Open the guided wizard for a disabled built-in Hindsight row. Resets all wizard
+ *  state to a fresh defaults form (nothing is persisted until the user runs the
+ *  connect/start action or Finish). */
+function openHindsightWizard(pack: InstalledPackWire): void {
+	hindsightWizardOpen = true;
+	hindsightWizardPackKey = `${pack.scope}:${pack.packName}`;
+	hindsightWizardStep = "mode";
+	hindsightWizardForm = defaultWizardForm();
+	hindsightWizardConsent = false;
+	hindsightWizardConfigSaved = false;
+	hindsightWizardConnect = null;
+	hindsightWizardSmoke = null;
+	hindsightWizardError = "";
+	renderApp();
+}
+
+/** Cancel/close the wizard. Persists nothing and leaves the pack disabled. */
+function cancelHindsightWizard(): void {
+	hindsightWizardOpen = false;
+	hindsightWizardPackKey = null;
+	hindsightWizardForm = null;
+	hindsightWizardConsent = false;
+	hindsightWizardConfigSaved = false;
+	hindsightWizardConnect = null;
+	hindsightWizardSmoke = null;
+	hindsightWizardError = "";
+	renderApp();
+}
+
+function setWizardField<K extends keyof HindsightWizardForm>(key: K, value: HindsightWizardForm[K]): void {
+	if (!hindsightWizardForm) hindsightWizardForm = defaultWizardForm();
+	hindsightWizardForm = { ...hindsightWizardForm, [key]: value };
+	// Changing mode invalidates a prior connect/start result + consent.
+	if (key === "mode") {
+		hindsightWizardConnect = null;
+		hindsightWizardSmoke = null;
+		hindsightWizardConsent = false;
+	}
+	renderApp();
+}
+
+function wizardGoStep(step: HindsightWizardStep): void {
+	hindsightWizardStep = step;
+	renderApp();
+}
+
+/** Whether the Configure step has the minimum required fields for the chosen mode. */
+function wizardConfigureReady(f: HindsightWizardForm): boolean {
+	if (f.mode === "external") return f.externalUrl.trim().length > 0;
+	if (f.mode === "managed-external-postgres") return f.externalDatabaseUrl.trim().length > 0;
+	return true; // managed: dataDir is defaulted; the LLM key is recommended, not required
+}
+
+/** Build the config-route POST body for the chosen mode. Sends only the fields
+ *  relevant to the mode + the always-relevant shared fields, so an empty optional
+ *  secret never clobbers an unrelated stored value. */
+function buildWizardConfigBody(f: HindsightWizardForm): Record<string, unknown> {
+	const body: Record<string, unknown> = {
+		mode: f.mode,
+		bank: f.bank.trim() || "bobbit",
+		namespace: f.namespace.trim() || "default",
+		recallScope: f.recallScope,
+		autoRecall: f.autoRecall,
+		autoRetain: f.autoRetain,
+	};
+	const t = Number(f.timeoutMs);
+	if (Number.isFinite(t) && t > 0) body.timeoutMs = t;
+	const r = Number(f.recallMaxInputChars);
+	if (Number.isFinite(r) && r > 0) body.recallMaxInputChars = r;
+	if (f.mode === "external") {
+		body.externalUrl = f.externalUrl.trim();
+		if (f.uiUrl.trim()) body.uiUrl = f.uiUrl.trim();
+		if (f.apiKey) body.apiKey = f.apiKey;
+	} else {
+		if (f.dataDir.trim()) body.dataDir = f.dataDir.trim();
+		if (f.llmApiKey) body.llmApiKey = f.llmApiKey;
+		if (f.mode === "managed-external-postgres" && f.externalDatabaseUrl.trim()) {
+			body.externalDatabaseUrl = f.externalDatabaseUrl.trim();
+		}
+	}
+	return body;
+}
+
+/** Persist the wizard's config via the SESSIONLESS config-write seam (the same path
+ *  the inline Configure form uses). Sets {@link hindsightWizardError} + returns false
+ *  on validation/save failure. */
+async function persistWizardConfig(pack: InstalledPackWire): Promise<boolean> {
+	if (!hindsightWizardForm) return false;
+	const body = buildWizardConfigBody(hindsightWizardForm);
+	const res = await writeBuiltinPackRoute<{ ok?: boolean; error?: string; errors?: string[] }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		body,
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+	});
+	if (res.ok && res.data?.ok !== false) {
+		hindsightWizardConfigSaved = true;
+		hindsightWizardError = "";
+		return true;
+	}
+	hindsightWizardError = res.ok ? ((res.data?.errors ?? []).join("; ") || res.data?.error || "Save failed") : res.error;
+	return false;
+}
+
+/** EXTERNAL connect action: persist config, then re-read the `status` route (a PURE
+ *  read — no Docker) so the health probe reflects the just-entered data-plane URL. */
+async function handleWizardTest(pack: InstalledPackWire): Promise<void> {
+	busy.add("hindsight:wizard");
+	hindsightWizardConnect = null;
+	hindsightWizardError = "";
+	renderApp();
+	const saved = await persistWizardConfig(pack);
+	if (!saved) { busy.delete("hindsight:wizard"); renderApp(); return; }
+	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "status",
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+	});
+	busy.delete("hindsight:wizard");
+	if (statusRes.ok) {
+		hindsightStatus = statusRes.data ?? null;
+		hindsightStatusLoaded = true;
+		const ok = !!statusRes.data?.healthy;
+		hindsightWizardConnect = { ok, message: ok ? "Connected" : "Unreachable — check the URL" };
+	} else {
+		hindsightWizardConnect = { ok: false, message: statusRes.error || "Connection failed" };
+	}
+	renderApp();
+}
+
+/** MANAGED connect action — the ONLY Docker-starting path in the wizard. Gated behind
+ *  the consent tick; persists config, then issues a single explicit start. Polls the
+ *  (pure) status reads afterward to surface stopped→starting→running progress. */
+async function handleWizardStart(pack: InstalledPackWire): Promise<void> {
+	if (!hindsightWizardConsent || !hindsightWizardForm) return;
+	busy.add("hindsight:wizard");
+	hindsightWizardConnect = null;
+	hindsightWizardError = "";
+	renderApp();
+	const saved = await persistWizardConfig(pack);
+	if (!saved) { busy.delete("hindsight:wizard"); renderApp(); return; }
+	const res = await startPackRuntime({
+		packId: runtimeRestPackId(pack),
+		runtimeId: HINDSIGHT_RUNTIME,
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+		mode: hindsightWizardForm.mode,
+	});
+	busy.delete("hindsight:wizard");
+	if (res.ok) {
+		hindsightWizardConnect = { ok: true, message: "Runtime starting…" };
+		renderApp();
+		await pollWizardManagedStatus(pack);
+	} else {
+		hindsightWizardConnect = { ok: false, message: res.error };
+		renderApp();
+	}
+}
+
+/** Poll the runtime/status reads (GET only — never starts Docker) until the managed
+ *  runtime reaches a terminal state, so the connect step shows live progress. */
+async function pollWizardManagedStatus(pack: InstalledPackWire): Promise<void> {
+	for (let i = 0; i < 20 && isHindsightWizardOpenFor(pack); i++) {
+		await loadHindsightState();
+		const rt = hindsightRuntime();
+		if (rt && (rt.status === "running" || rt.status === "unhealthy" || rt.status === "docker-unavailable")) break;
+		await new Promise((r) => setTimeout(r, 1000));
+	}
+}
+
+/** Best-effort SMOKE TEST: re-probe the `status` route end-to-end (the only data-plane
+ *  round-trip reachable over the sessionless seam — recall/retain are POST-only and the
+ *  sessionless seam allows POST only for `config`). Non-fatal: a failure shows a hint
+ *  and the user can still Finish. */
+async function handleWizardSmoke(pack: InstalledPackWire): Promise<void> {
+	busy.add("hindsight:wizard");
+	hindsightWizardSmoke = null;
+	renderApp();
+	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "status",
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+	});
+	busy.delete("hindsight:wizard");
+	if (statusRes.ok) {
+		hindsightStatus = statusRes.data ?? null;
+		hindsightStatusLoaded = true;
+	}
+	if (statusRes.ok && statusRes.data?.healthy) {
+		hindsightWizardSmoke = { ok: true, message: "Memory data plane reachable" };
+	} else {
+		hindsightWizardSmoke = { ok: false, message: "Could not reach the data plane yet — you can finish and retry later from the row." };
+	}
+	renderApp();
+}
+
+/** Enable the built-in Hindsight pack by clearing every disabled ref (all entities +
+ *  the runtime become active). Reuses the activation PUT seam. */
+async function enableHindsightPack(pack: InstalledPackWire): Promise<void> {
+	const disabled: DisabledRefs = {
+		roles: [], tools: [], skills: [], entrypoints: [],
+		providers: [], hooks: [], mcp: [], piExtensions: [], runtimes: [], workflows: [],
+	};
+	await savePackActivation(pack, disabled, `activation:${pack.scope}:${pack.packName}:all`);
+}
+
+/** FINISH: ensure config is persisted (idempotent), then ENABLE the pack. The row
+ *  then reflects the connected/running state derived from the live status. */
+async function handleWizardFinish(pack: InstalledPackWire): Promise<void> {
+	busy.add("hindsight:wizard");
+	hindsightWizardError = "";
+	renderApp();
+	if (!hindsightWizardConfigSaved) {
+		const ok = await persistWizardConfig(pack);
+		if (!ok) { busy.delete("hindsight:wizard"); renderApp(); return; }
+	}
+	await enableHindsightPack(pack);
+	busy.delete("hindsight:wizard");
+	cancelHindsightWizard();
+	await loadHindsightState();
+}
+
+function renderHindsightWizard(pack: InstalledPackWire): TemplateResult {
+	const f = hindsightWizardForm ?? defaultWizardForm();
+	return html`
+		<div class="market-hindsight-wizard mt-3" data-testid="market-hindsight-wizard" data-step=${hindsightWizardStep}>
+			<div class="market-wizard-header">
+				<div class="market-wizard-title">Set up Hindsight memory</div>
+				<button class="market-icon-btn" data-testid="market-hindsight-wizard-cancel" title="Cancel setup" @click=${() => cancelHindsightWizard()}>${icon(XCircle, "xs")}</button>
+			</div>
+			${renderWizardStepper()}
+			${hindsightWizardError ? html`<div class="market-error mt-2" data-testid="market-hindsight-wizard-error">${hindsightWizardError}</div>` : ""}
+			<div class="market-wizard-body mt-2">
+				${hindsightWizardStep === "mode"
+					? renderWizardModeStep(f)
+					: hindsightWizardStep === "configure"
+						? renderWizardConfigureStep(f)
+						: hindsightWizardStep === "connect"
+							? renderWizardConnectStep(pack, f)
+							: renderWizardSmokeStep(pack)}
+			</div>
+		</div>
+	`;
+}
+
+function renderWizardStepper(): TemplateResult {
+	const idx = WIZARD_STEPS.findIndex((s) => s.id === hindsightWizardStep);
+	return html`
+		<ol class="market-wizard-steps" data-testid="market-hindsight-wizard-step" data-current=${hindsightWizardStep}>
+			${WIZARD_STEPS.map((s, i) => html`
+				<li class="market-wizard-step ${i === idx ? "market-wizard-step--current" : ""} ${i < idx ? "market-wizard-step--done" : ""}">
+					<span class="market-wizard-step-num">${i < idx ? icon(CheckCircle2, "xs") : String(i + 1)}</span>
+					<span>${s.label}</span>
+				</li>
+			`)}
+		</ol>
+	`;
+}
+
+function renderWizardModeStep(f: HindsightWizardForm): TemplateResult {
+	const card = (mode: HindsightWizardMode, ic: IconNode, title: string, blurb: string, note: string): TemplateResult => html`
+		<button
+			type="button"
+			class="market-wizard-mode-card ${f.mode === mode ? "market-wizard-mode-card--selected" : ""}"
+			data-testid="market-hindsight-wizard-mode-${mode}"
+			aria-pressed=${f.mode === mode ? "true" : "false"}
+			@click=${() => setWizardField("mode", mode)}
+		>
+			<div class="market-wizard-mode-title">${icon(ic, "xs")} ${title}</div>
+			<div class="market-wizard-mode-blurb">${blurb}</div>
+			<div class="market-wizard-mode-note">${note}</div>
+		</button>
+	`;
+	return html`
+		<p class="market-wizard-help">Choose how Bobbit talks to Hindsight. You can change this later from Configure.</p>
+		<div class="market-wizard-modes">
+			${card("external", Plug, "External", "Point Bobbit at an existing Hindsight data-plane URL you already run.", "Bobbit manages nothing — you run Hindsight + Postgres. No Docker.")}
+			${card("managed", Database, "Managed (Docker)", "Bobbit runs Hindsight + Postgres locally via Docker.", "Bobbit manages containers, ports & the data volume. You provide an LLM API key + a data dir.")}
+			${card("managed-external-postgres", Package, "Managed + external Postgres", "Bobbit runs only the Hindsight container against a Postgres URL you supply.", "Bobbit manages the Hindsight container. You provide a Postgres URL + an LLM API key.")}
+		</div>
+		<div class="market-wizard-actions">
+			<span class="flex-1"></span>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-next" @click=${() => wizardGoStep("configure")}>Next ${icon(ChevronRight, "xs")}</button>
+		</div>
+	`;
+}
+
+function renderWizardConfigureStep(f: HindsightWizardForm): TemplateResult {
+	const text = (key: keyof HindsightWizardForm, testid: string, placeholder: string, type = "text"): TemplateResult => html`
+		<input class="market-input" type=${type} autocomplete="off" data-testid=${testid} placeholder=${placeholder} .value=${String(f[key])} @input=${(e: Event) => setWizardField(key, (e.target as HTMLInputElement).value as HindsightWizardForm[typeof key])} />
+	`;
+	const field = (label: string, why: string, input: TemplateResult): TemplateResult => html`
+		<label class="market-field"><span class="market-field-label">${label}</span>${input}<span class="market-field-help">${why}</span></label>
+	`;
+	const modeFields = f.mode === "external"
+		? html`
+			${field("API / data-plane URL", "The data-plane URL Bobbit dials for recall/retain. Required.", text("externalUrl", "market-hindsight-wizard-externalurl", "http://localhost:9177"))}
+			${field("Dashboard UI URL (optional)", "The human dashboard opened by 'Open Hindsight UI'. Never dialed by Bobbit.", text("uiUrl", "market-hindsight-wizard-uiurl", "http://localhost:19177/banks/bobbit?view=data"))}
+			${field("API key (optional)", "Sent as the data-plane auth header if your Hindsight requires one.", text("apiKey", "market-hindsight-wizard-apikey", "optional", "password"))}
+		`
+		: html`
+			${f.mode === "managed-external-postgres"
+				? field("Postgres URL", "Bobbit points the managed Hindsight container at this Postgres. Required.", text("externalDatabaseUrl", "market-hindsight-wizard-externaldburl", "postgresql://user:pass@host:5432/db"))
+				: field("Data dir", "Host path the managed Postgres volume bind-mounts to (so data is on a visible local path you can back up).", text("dataDir", "market-hindsight-wizard-datadir", "~/.hindsight"))}
+			${field("LLM API key", "Used by Hindsight (not Bobbit) for memory extraction. Stored as a secret.", text("llmApiKey", "market-hindsight-wizard-llmapikey", "sk-…", "password"))}
+		`;
+	return html`
+		<p class="market-wizard-help">Recommended defaults are prefilled — each field explains why.</p>
+		<div class="market-wizard-fields">
+			${modeFields}
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1"><span class="market-field-label">Bank</span>${text("bank", "market-hindsight-wizard-bank", "bobbit")}<span class="market-field-help">Shared memory bank. Default 'bobbit'; to join an existing bank (e.g. 'hermes') enter it here.</span></label>
+				<label class="market-field flex-1"><span class="market-field-label">Namespace</span>${text("namespace", "market-hindsight-wizard-namespace", "default")}<span class="market-field-help">Hindsight namespace. 'default' for most setups.</span></label>
+			</div>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1"><span class="market-field-label">Recall scope</span>
+					<select class="market-input" data-testid="market-hindsight-wizard-recallscope" .value=${f.recallScope} @change=${(e: Event) => setWizardField("recallScope", (e.target as HTMLSelectElement).value)}>
+						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
+						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
+					</select>
+					<span class="market-field-help">What agents recall by default: project = this project + shared/global memories; all = every project in the shared bank.</span>
+				</label>
+				<label class="market-field flex-1"><span class="market-field-label">Timeout (ms)</span>${text("timeoutMs", "market-hindsight-wizard-timeoutms", "1500", "number")}<span class="market-field-help">Max time Bobbit waits on a recall/retain call.</span></label>
+				<label class="market-field flex-1"><span class="market-field-label">Recall max input chars</span>${text("recallMaxInputChars", "market-hindsight-wizard-recallmaxinputchars", "3000", "number")}<span class="market-field-help">Clamps the recall query so Hindsight's 500-token cap isn't hit. Default 3000.</span></label>
+			</div>
+			<div class="flex gap-3 flex-wrap items-center">
+				<label class="flex items-center gap-1.5 text-[12px]"><input type="checkbox" data-testid="market-hindsight-wizard-autorecall" .checked=${f.autoRecall} @change=${(e: Event) => setWizardField("autoRecall", (e.target as HTMLInputElement).checked)} /> Auto recall <span class="text-muted-foreground">(pull memories into turns)</span></label>
+				<label class="flex items-center gap-1.5 text-[12px]"><input type="checkbox" data-testid="market-hindsight-wizard-autoretain" .checked=${f.autoRetain} @change=${(e: Event) => setWizardField("autoRetain", (e.target as HTMLInputElement).checked)} /> Auto retain <span class="text-muted-foreground">(save memories async)</span></label>
+			</div>
+		</div>
+		<div class="market-wizard-actions">
+			<button class="market-btn" data-testid="market-hindsight-wizard-back" @click=${() => wizardGoStep("mode")}>${icon(ArrowLeft, "xs")} Back</button>
+			<span class="flex-1"></span>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-next" ?disabled=${!wizardConfigureReady(f)} @click=${() => wizardGoStep("connect")}>Next ${icon(ChevronRight, "xs")}</button>
+		</div>
+	`;
+}
+
+function renderWizardConnectStep(pack: InstalledPackWire, f: HindsightWizardForm): TemplateResult {
+	const busyWizard = busy.has("hindsight:wizard");
+	const resultLozenge = hindsightWizardConnect
+		? html`<span
+				class="market-lozenge ${hindsightWizardConnect.ok ? "" : "market-lozenge--warning"}"
+				data-testid="market-hindsight-wizard-connect-result"
+				style=${hindsightWizardConnect.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+			>${icon(hindsightWizardConnect.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightWizardConnect.message}</span>`
+		: "";
+
+	if (f.mode === "external") {
+		return html`
+			<p class="market-wizard-help">Test that Bobbit can reach your Hindsight data plane.</p>
+			<div class="flex items-center gap-2 flex-wrap">
+				<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-test" ?disabled=${busyWizard} @click=${() => handleWizardTest(pack)}>${icon(Plug, "xs", busyWizard ? "animate-spin" : "")} Test connection</button>
+				${resultLozenge}
+			</div>
+			<div class="market-wizard-actions">
+				<button class="market-btn" data-testid="market-hindsight-wizard-back" @click=${() => wizardGoStep("configure")}>${icon(ArrowLeft, "xs")} Back</button>
+				<span class="flex-1"></span>
+				<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-next" ?disabled=${busyWizard} @click=${() => wizardGoStep("smoke")}>Next ${icon(ChevronRight, "xs")}</button>
+			</div>
+		`;
+	}
+
+	// Managed / managed-external-postgres: consent-gated explicit Start (the only
+	// Docker-start path). Reuses the runtime consent disclosure card.
+	const rt = hindsightRuntime();
+	const started = !!hindsightWizardConnect?.ok;
+	ensureWizardCapabilities(pack, HINDSIGHT_RUNTIME, f.mode);
+	const cap = wizardRuntimeCap.get(wizardCapKey(pack, HINDSIGHT_RUNTIME, f.mode));
+	return html`
+		<p class="market-wizard-help">Starting brings up local Docker containers. Review what runs, then start it explicitly.</p>
+		${renderRuntimeConsentCardView(HINDSIGHT_RUNTIME, cap)}
+		<label class="market-wizard-consent" data-testid="market-hindsight-wizard-consent-label">
+			<input type="checkbox" data-testid="market-hindsight-wizard-consent" .checked=${hindsightWizardConsent} @change=${(e: Event) => { hindsightWizardConsent = (e.target as HTMLInputElement).checked; renderApp(); }} />
+			<span>I understand this starts local Docker containers that store memory.</span>
+		</label>
+		<div class="flex items-center gap-2 flex-wrap">
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-start" ?disabled=${busyWizard || !hindsightWizardConsent} @click=${() => handleWizardStart(pack)}>${icon(Play, "xs", busyWizard ? "animate-spin" : "")} Start (starts Docker)</button>
+			${resultLozenge}
+			${rt ? html`<span class="market-lozenge" data-testid="market-hindsight-wizard-runtime-status">${rt.status}</span>` : ""}
+		</div>
+		<div class="market-wizard-actions">
+			<button class="market-btn" data-testid="market-hindsight-wizard-back" @click=${() => wizardGoStep("configure")}>${icon(ArrowLeft, "xs")} Back</button>
+			<span class="flex-1"></span>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-next" ?disabled=${busyWizard || !started} @click=${() => wizardGoStep("smoke")}>Next ${icon(ChevronRight, "xs")}</button>
+		</div>
+	`;
+}
+
+function renderWizardSmokeStep(pack: InstalledPackWire): TemplateResult {
+	const busyWizard = busy.has("hindsight:wizard");
+	return html`
+		<p class="market-wizard-help">Quick end-to-end check (best-effort). You can finish even if it fails.</p>
+		<div class="flex items-center gap-2 flex-wrap">
+			<button class="market-btn" data-testid="market-hindsight-wizard-smoke" ?disabled=${busyWizard} @click=${() => handleWizardSmoke(pack)}>${icon(RotateCw, "xs", busyWizard ? "animate-spin" : "")} Run smoke test</button>
+			${hindsightWizardSmoke
+				? html`<span
+						class="market-lozenge ${hindsightWizardSmoke.ok ? "" : "market-lozenge--warning"}"
+						data-testid="market-hindsight-wizard-smoke-result"
+						style=${hindsightWizardSmoke.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+					>${icon(hindsightWizardSmoke.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightWizardSmoke.message}</span>`
+				: ""}
+		</div>
+		<div class="market-wizard-actions">
+			<button class="market-btn" data-testid="market-hindsight-wizard-back" @click=${() => wizardGoStep("connect")}>${icon(ArrowLeft, "xs")} Back</button>
+			<span class="flex-1"></span>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-wizard-finish" ?disabled=${busyWizard} @click=${() => handleWizardFinish(pack)}>${icon(CheckCircle2, "xs")} Finish &amp; enable</button>
+		</div>
+	`;
 }
 
 function renderConflictDetails(packConflicts: ConflictWire[]): TemplateResult {

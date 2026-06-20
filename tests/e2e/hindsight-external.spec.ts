@@ -40,6 +40,7 @@ import {
 	createSession,
 	createGoal,
 	deleteSession,
+	defaultProjectId,
 	connectWs,
 	agentEndPredicate,
 	messageEndPredicate,
@@ -306,6 +307,27 @@ describe("hindsight pack — external mode (stub)", () => {
 		const recallCalls = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path));
 		expect(recallCalls.length).toBeGreaterThan(0);
 		expect(recallCalls.every((c) => c.bank === "bobbit")).toBeTruthy();
+	});
+
+	test("default config recall scope is project+global: untagged + own-project recalled, other-project excluded", async () => {
+		// No explicit recallScope ⇒ the new default (`project`, tags_match `any`). This
+		// proves the acceptance criterion: global/untagged memories ARE still injected
+		// under the default scope, while another project's tagged memories are NOT.
+		seedConfig(bobbitDir, defaultConfig(stub.url, { recallScope: undefined }));
+		await setProviderDisabled([]);
+		const projectId = (await defaultProjectId())!;
+		stub.seedMemories("bobbit", [
+			{ text: "GLOBAL untagged knowledge.", id: "g1" }, // untagged/global ⇒ included by `any`
+			{ text: "MINE project knowledge.", id: "p1", tags: [`project:${projectId}`] }, // included
+			{ text: "THEIRS other-project secret.", id: "o1", tags: ["project:some-other-project"] }, // excluded
+		]);
+
+		const { id } = await newSession("default-scope");
+		const before = await callBeforePrompt(id, "what do we know?");
+		expect(before.status).toBe(200);
+		expect(before.tail).toContain("GLOBAL untagged knowledge.");
+		expect(before.tail).toContain("MINE project knowledge.");
+		expect(before.tail).not.toContain("other-project secret");
 	});
 
 	test("a turn remains unaffected while the Hindsight provider is configured", async () => {

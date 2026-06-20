@@ -356,6 +356,16 @@ export class ProjectConfigStore {
 	private sandboxTokens: SandboxTokenEntry[] = [];
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
+	/** Optional read-time overlay for default-disabled built-in packs (injected by
+	 *  server.ts). Given (scope, packName, rawStoredRefs) it returns a synthesized
+	 *  all-disabled override to make a dormant default-disabled pack resolve as
+	 *  disabled, or `undefined` to use the raw stored refs. The overlay is NEVER
+	 *  persisted — see src/server/agent/pack-default-activation.ts. */
+	private defaultActivationResolver?: (
+		scope: PackOrderScope,
+		packName: string,
+		stored: DisabledRefs,
+	) => DisabledRefs | undefined;
 	/** Track whether each migrated field was explicitly present on disk. */
 	private present = {
 		config_directories: false,
@@ -857,15 +867,32 @@ export class ProjectConfigStore {
 
 	// ── Pack activation overrides (pack-schema-v1 §6.7) ──────────────
 
-	/** Read the disabled-entity refs for a pack at a scope (defensive copy).
-	 *  Missing ⇒ {} (all enabled). */
+	/** Inject the default-disabled overlay resolver (server.ts wires it after the
+	 *  pack registries are built). A no-op until set; only the SERVER-scope store
+	 *  needs it (built-in packs toggle at server scope). */
+	setDefaultActivationResolver(
+		fn: (scope: PackOrderScope, packName: string, stored: DisabledRefs) => DisabledRefs | undefined,
+	): void {
+		this.defaultActivationResolver = fn;
+	}
+
+	/** Read the EFFECTIVE disabled-entity refs for a pack at a scope (defensive
+	 *  copy). Missing ⇒ {} (all enabled), UNLESS the injected default-disabled
+	 *  overlay synthesizes an all-disabled set for a dormant built-in pack (e.g.
+	 *  Hindsight before it is enabled/configured). The overlay is read-time only —
+	 *  it never mutates or persists `this.packActivation`. */
 	getPackActivation(scope: PackOrderScope, packName: string): DisabledRefs {
 		const refs = this.packActivation[scope]?.[packName];
-		if (!refs) return {};
 		const out: DisabledRefs = {};
-		for (const kind of ACTIVATION_KINDS) {
-			const arr = refs[kind];
-			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
+		if (refs) {
+			for (const kind of ACTIVATION_KINDS) {
+				const arr = refs[kind];
+				if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
+			}
+		}
+		if (this.defaultActivationResolver) {
+			const overlay = this.defaultActivationResolver(scope, packName, out);
+			if (overlay) return overlay;
 		}
 		return out;
 	}

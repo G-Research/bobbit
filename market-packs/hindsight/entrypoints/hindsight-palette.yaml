@@ -1,9 +1,0 @@
-id: hindsight.palette
-kind: command-palette
-label: Hindsight Memory
-# A command-palette LAUNCHER whose target is a bare PanelTarget (NO action:"spawn"):
-# its click opens hindsight.panel in the ACTIVE (owner) session via openPackPanel.
-# This is the config/status surface — there is no sub-agent to mint, unlike the
-# pr-walkthrough spawn launchers.
-target:
-  panelId: hindsight.panel

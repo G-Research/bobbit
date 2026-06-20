@@ -720,3 +720,205 @@
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* Inline Configure form on the built-in Hindsight row. */
+.market-hindsight-config-form {
+	padding: 0.625rem;
+	border-radius: 0.5rem;
+	border: 1px solid var(--border);
+	background: color-mix(in oklch, var(--muted) 40%, transparent);
+}
+
+/* Per-project memory override sub-section inside the inline Configure form. A
+ * subtle inset block so it reads as a scoped overlay on top of the global config. */
+.market-hindsight-override {
+	padding: 0.5rem 0.625rem;
+	border-radius: 0.5rem;
+	border: 1px dashed color-mix(in oklch, var(--border) 80%, var(--foreground));
+	background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+}
+
+/* "Project override active" badge on the read-only summary. */
+.market-hindsight-override-badge {
+	gap: 0.25rem;
+	border-color: color-mix(in oklch, var(--chart-1) 40%, transparent);
+	background: color-mix(in oklch, var(--chart-1) 12%, transparent);
+	color: var(--foreground);
+}
+
+.market-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	min-width: 0;
+}
+
+.market-field-label {
+	font-size: 0.6875rem;
+	font-weight: 500;
+	color: var(--foreground);
+}
+
+.market-field-help {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+	line-height: 1.4;
+}
+
+/* ── Hindsight guided setup wizard ───────────────────────────────────────────
+ * Inline guided flow launched when Enable is clicked on a disabled built-in
+ * Hindsight row: mode → configure → connect → smoke test → finish. Theme tokens
+ * only; reuses .market-btn / .market-field / .market-lozenge / the runtime
+ * consent card. */
+.market-hindsight-wizard {
+	padding: 0.75rem;
+	border-radius: 0.5rem;
+	border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
+	background: color-mix(in oklch, var(--primary) 5%, var(--card));
+}
+
+.market-wizard-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.market-wizard-title {
+	font-size: 0.8125rem;
+	font-weight: 650;
+	color: var(--foreground);
+}
+
+.market-wizard-steps {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem 0.875rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	counter-reset: none;
+}
+
+.market-wizard-step {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3125rem;
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+	white-space: nowrap;
+}
+
+.market-wizard-step--current {
+	color: var(--foreground);
+	font-weight: 600;
+}
+
+.market-wizard-step-num {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.125rem;
+	height: 1.125rem;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--muted);
+	font-size: 0.625rem;
+	font-weight: 600;
+}
+
+.market-wizard-step--current .market-wizard-step-num {
+	border-color: color-mix(in oklch, var(--primary) 55%, var(--border));
+	background: color-mix(in oklch, var(--primary) 18%, transparent);
+	color: var(--primary);
+}
+
+.market-wizard-step--done .market-wizard-step-num {
+	border-color: color-mix(in oklch, var(--positive) 45%, transparent);
+	background: color-mix(in oklch, var(--positive) 14%, transparent);
+	color: var(--positive);
+}
+
+.market-wizard-help {
+	margin: 0;
+	font-size: 0.6875rem;
+	line-height: 1.45;
+	color: var(--muted-foreground);
+}
+
+.market-wizard-fields {
+	display: flex;
+	flex-direction: column;
+	gap: 0.625rem;
+	margin-top: 0.5rem;
+}
+
+.market-wizard-modes {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+
+.market-wizard-mode-card {
+	display: flex;
+	flex-direction: column;
+	gap: 0.1875rem;
+	text-align: left;
+	padding: 0.625rem 0.75rem;
+	border-radius: 0.5rem;
+	border: 1px solid var(--border);
+	background: var(--background);
+	cursor: pointer;
+	transition: border-color 0.15s, background 0.15s;
+}
+
+.market-wizard-mode-card:hover {
+	border-color: color-mix(in oklch, var(--border) 55%, var(--foreground));
+}
+
+.market-wizard-mode-card--selected {
+	border-color: color-mix(in oklch, var(--primary) 55%, transparent);
+	background: color-mix(in oklch, var(--primary) 9%, transparent);
+}
+
+.market-wizard-mode-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3125rem;
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+.market-wizard-mode-blurb {
+	font-size: 0.6875rem;
+	color: var(--foreground);
+}
+
+.market-wizard-mode-note {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+	line-height: 1.4;
+}
+
+.market-wizard-consent {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.4375rem;
+	margin-top: 0.5rem;
+	font-size: 0.6875rem;
+	line-height: 1.4;
+	color: var(--foreground);
+	cursor: pointer;
+}
+
+.market-wizard-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 0.75rem;
+	padding-top: 0.625rem;
+	border-top: 1px dashed var(--border);
+}

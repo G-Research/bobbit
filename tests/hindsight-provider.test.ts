@@ -13,10 +13,17 @@ import assert from "node:assert/strict";
 import provider, { __setClientFactory } from "../market-packs/hindsight/src/provider.ts";
 import { routes } from "../market-packs/hindsight/src/routes.ts";
 import {
+	CONFIG_DEFAULTS,
 	CONFIG_KEY,
+	LAST_ERROR_KEY,
 	PROJECT_RECALL_TAGS_MATCH,
 	QUEUE_KEY,
+	clampRecallQuery,
+	loadEffectiveConfig,
+	projectConfigKey,
 	recallTagFilter,
+	validateConfigOverrides,
+	validateProjectOverride,
 } from "../market-packs/hindsight/src/shared.ts";
 
 // ── recallTagFilter — the shared project/all tag-scope source of truth ─────────
@@ -42,6 +49,23 @@ test("recallTagFilter: 'all' scope, or project scope with no id ⇒ no tag filte
 	assert.equal(recallTagFilter("project", "   "), undefined);
 });
 
+// ── clampRecallQuery — pure helper (core fix for the 500-token "Query too long") ─
+test("clampRecallQuery: short unchanged, long truncated, maxChars<=0 returns trimmed full", () => {
+	// Short query (and whitespace-trimmed) passes through unchanged.
+	assert.equal(clampRecallQuery("hello", 1200), "hello");
+	assert.equal(clampRecallQuery("  hello  ", 1200), "hello");
+	// Long query is sliced to at most maxChars characters.
+	const long = "x".repeat(5000);
+	assert.equal(clampRecallQuery(long, 1200).length, 1200);
+	assert.equal(clampRecallQuery(long, 50).length, 50);
+	// maxChars <= 0 (and non-finite) disables clamping ⇒ returns the trimmed full string.
+	assert.equal(clampRecallQuery(`  ${long}  `, 0), long);
+	assert.equal(clampRecallQuery(long, -10), long);
+	assert.equal(clampRecallQuery(long, Number.NaN), long);
+	// Never throws on nullish input.
+	assert.equal(clampRecallQuery(undefined as unknown as string, 100), "");
+});
+
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
 	const map = new Map<string, unknown>();
@@ -61,15 +85,17 @@ interface FakeState {
 	failRecall: boolean;
 	failRetain: boolean;
 	failEnsureBank: boolean;
+	failUpdateBankConfig: boolean;
 }
 
 function makeClient() {
-	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false };
+	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
 	const calls = {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
 		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
 		ensureBank: [] as string[],
 		reflect: [] as { bank: string; prompt: string; opts?: { tags?: Record<string, string>; tagsMatch?: string } }[],
+		updateBankConfig: [] as { bank: string; updates: Record<string, string> }[],
 		health: 0,
 		listBanks: 0,
 	};
@@ -99,18 +125,29 @@ function makeClient() {
 			calls.listBanks++;
 			return { banks: ["bobbit"] };
 		},
+		updateBankConfig: async (bank: string, updates: Record<string, string>) => {
+			calls.updateBankConfig.push({ bank, updates });
+			if (state.failUpdateBankConfig) throw new Error("updateBankConfig failed");
+		},
 	};
 	return { client, calls, state };
 }
 
+// retainEveryNTurns:1 + retainOverlapTurns:0 keeps these tests on the OLD per-turn
+// behavior (each turn flushes a single-turn aggregate = the turn summary verbatim).
+// Batching (default 5), max-delay, and overlap are exercised by dedicated tests below.
 const ACTIVE = {
 	mode: "external",
 	externalUrl: "http://localhost:8888",
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all" as const,
+	tagsMatch: "any" as const,
 	autoRecall: true,
 	autoRetain: true,
+	retainEveryNTurns: 1,
+	retainMaxDelayMs: 1_800_000,
+	retainOverlapTurns: 0,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -145,6 +182,75 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 		assert.deepEqual(await provider.sessionShutdown(base), { blocks: [] });
 		assert.equal(factoryCalls, 0, "no client should be constructed while dormant");
 		assert.equal(store.map.size, 0, "no store writes while dormant");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("doRecall clamps a long query to recallMaxInputChars before calling the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const longPrompt = "q".repeat(5000);
+		const c = { config: { ...ACTIVE, recallMaxInputChars: 64 }, host: { store: makeStore() }, prompt: longPrompt };
+		await provider.beforePrompt(c);
+		assert.equal(calls.recall.length, 1);
+		assert.ok(calls.recall[0].query.length <= 64, "clamped query is at most recallMaxInputChars chars");
+		assert.equal(calls.recall[0].query.length, 64);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall clamps a long query to recallMaxInputChars before calling the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallMaxInputChars: 80 });
+		const longQuery = "z".repeat(5000);
+		await routes.recall({ host: { store } } as never, { body: { query: longQuery } } as never);
+		assert.equal(calls.recall.length, 1);
+		assert.ok(calls.recall[0].query.length <= 80, "route clamps the resolved query");
+		assert.equal(calls.recall[0].query.length, 80);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("sticky lastError is cleared after a SUCCESSFUL recall (provider + route)", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		// Provider: a prior error in the store is cleared on the next successful recall.
+		const pStore = makeStore();
+		await pStore.put(LAST_ERROR_KEY, { message: "Query too long", ts: 1 });
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: pStore }, prompt: "q" });
+		assert.equal(await pStore.get(LAST_ERROR_KEY), null, "provider clears lastError on recall success");
+
+		// Route: same behavior via the recall route.
+		const rStore = makeStore();
+		await rStore.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		await rStore.put(LAST_ERROR_KEY, { message: "Query too long", ts: 1 });
+		await routes.recall({ host: { store: rStore } } as never, { body: { query: "q" } } as never);
+		assert.equal(await rStore.get(LAST_ERROR_KEY), null, "route clears lastError on recall success");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("lastError is NOT cleared when recall fails", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.failRecall = true;
+		const store = makeStore();
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store }, prompt: "q" });
+		const err = (await store.get(LAST_ERROR_KEY)) as { message: string } | null;
+		assert.ok(err && /recall failed/.test(err.message), "failure records (does not clear) lastError");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -285,6 +391,79 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "s" });
 		q = (await store.get(QUEUE_KEY)) as unknown[];
 		assert.equal(q.length, 0, "shutdown drained the remaining queue");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: a failed retain replays into its ORIGINAL bank, not the next hook's per-project bank", async () => {
+	// Per-project bank overrides mean two projects share ONE pack-store retry queue but
+	// route to DIFFERENT banks. A failed retain from project A must replay into A's
+	// bank even when the draining hook belongs to project B (B's cfg.bank differs).
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// Project overlays: projA → bankA, projB → bankB (overlay can set `bank`).
+		await store.put(projectConfigKey("projA"), { bank: "bankA" });
+		await store.put(projectConfigKey("projB"), { bank: "bankB" });
+
+		// Project A's retain FAILS ⇒ durably queued, captured against bankA/default.
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sA", projectId: "projA", prompt: "from A" });
+		let q = (await store.get(QUEUE_KEY)) as { content: string; bank?: string; namespace?: string }[];
+		assert.equal(q.length, 1, "project A's failed retain is queued");
+		assert.equal(q[0].bank, "bankA", "queue entry captures the ORIGINAL target bank");
+		assert.equal(q[0].namespace, "default", "queue entry captures the ORIGINAL namespace");
+
+		// Project B's next (succeeding) turn drains the queue HEAD before its own retain.
+		// The replay MUST land in bankA — never project B's bankB.
+		state.failRetain = false;
+		calls.retain.length = 0;
+		calls.ensureBank.length = 0;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sB", projectId: "projB", prompt: "from B" });
+		const replay = calls.retain.find((r) => /from A/.test(r.content));
+		assert.ok(replay, "the queued project-A entry was replayed");
+		assert.equal(replay!.bank, "bankA", "replay lands in the ORIGINAL bank (bankA), not project B's bankB");
+		// The replay ensured bankA (not bankB) before retaining.
+		assert.ok(calls.ensureBank.includes("bankA"), "ensureBank targets the original bankA on replay");
+		// Project B's OWN retain still goes to its own bankB.
+		const own = calls.retain.find((r) => /from B/.test(r.content));
+		assert.ok(own, "project B's own turn retained");
+		assert.equal(own!.bank, "bankB", "project B's own retain uses bankB");
+		// Queue fully drained.
+		q = (await store.get(QUEUE_KEY)) as unknown[];
+		assert.equal(q.length, 0, "head drained");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("sessionShutdown drain replays each entry into its OWN captured bank (mixed-bank queue)", async () => {
+	// A single shutdown drain must route each queued entry to the bank it was enqueued
+	// against — a mixed-bank queue (projA→bankA, projB→bankB) must not collapse onto
+	// the draining hook's cfg.bank.
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		await store.put(projectConfigKey("projA"), { bank: "bankA" });
+		await store.put(projectConfigKey("projB"), { bank: "bankB" });
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sA", projectId: "projA", prompt: "alpha" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sB", projectId: "projB", prompt: "beta" });
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 2);
+
+		state.failRetain = false;
+		calls.retain.length = 0;
+		// Drain from a NEUTRAL hook (no project overlay ⇒ cfg.bank = bobbit).
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "sC" });
+		const a = calls.retain.find((r) => /alpha/.test(r.content));
+		const b = calls.retain.find((r) => /beta/.test(r.content));
+		assert.equal(a?.bank, "bankA", "alpha replays into bankA");
+		assert.equal(b?.bank, "bankB", "beta replays into bankB");
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 0, "queue drained");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -434,8 +613,12 @@ const MANAGED = {
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all" as const,
+	tagsMatch: "any" as const,
 	autoRecall: true,
 	autoRetain: true,
+	retainEveryNTurns: 1,
+	retainMaxDelayMs: 1_800_000,
+	retainOverlapTurns: 0,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -699,6 +882,440 @@ test("routes recall: managed mode WITH a running runtime dials the injected runt
 		assert.equal(res.memories[0].text, "managed-route-mem");
 		assert.equal(cap.baseUrl(), "http://127.0.0.1:38080", "recall dials the managed runtime base URL");
 		assert.equal(cap.calls.recall[0].bank, "bobbit");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── Memory-quality: defaults, scope/tags, cadence, missions, per-project overlay ─
+
+test("config defaults: project scope + tags_match any + cadence 5 + observation-biased recall", () => {
+	assert.equal(CONFIG_DEFAULTS.recallScope, "project", "default recall is project (project + global)");
+	assert.equal(CONFIG_DEFAULTS.tagsMatch, "any", "any includes untagged/global memory");
+	assert.equal(CONFIG_DEFAULTS.retainEveryNTurns, 5, "cost-conscious auto-retain batch size");
+	assert.equal(CONFIG_DEFAULTS.retainMaxDelayMs, 1_800_000, "30m hook-observed max-delay flush");
+	assert.equal(CONFIG_DEFAULTS.retainOverlapTurns, 2, "bounded overlap carry-forward");
+	assert.deepEqual(CONFIG_DEFAULTS.recallTypes, ["observation", "world", "experience"]);
+	assert.ok(CONFIG_DEFAULTS.retainMission.length > 0);
+	assert.ok(CONFIG_DEFAULTS.observationsMission.length > 0);
+	assert.ok(CONFIG_DEFAULTS.reflectMission.length > 0);
+});
+
+test("recallTagFilter: tagsMatch + extraTags variants (extra tags NARROW, never broaden)", () => {
+	// any_strict (hard-isolation) opt-in for project scope.
+	assert.deepEqual(recallTagFilter("project", "p", "any_strict"), { tags: { project: "p" }, tagsMatch: "any_strict" });
+	// Extra tags NARROW a project recall: require project AND every extra tag and
+	// EXCLUDE untagged/global + other projects (all_strict) — never the old `any`-merge
+	// that broadened recall to untagged/global AND other-project goal:g memories.
+	assert.deepEqual(recallTagFilter("project", "p", "any", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// Even with `any_strict` config, extra tags still narrow via all_strict.
+	assert.deepEqual(recallTagFilter("project", "p", "any_strict", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// tags.project can NEVER override the route-derived project tag (it is dropped).
+	assert.deepEqual(recallTagFilter("project", "p", "any", { project: "other", goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// An extra map that is ONLY `project` is fully stripped ⇒ plain project scope (no
+	// spurious narrowing, and still cannot override the real project).
+	assert.deepEqual(recallTagFilter("project", "p", "any", { project: "other" }), { tags: { project: "p" }, tagsMatch: "any" });
+	// scope all + extra tags ⇒ additive filter (no fabricated project tag), tags_match any.
+	assert.deepEqual(recallTagFilter("all", "p", "any", { project: "other" }), { tags: { project: "other" }, tagsMatch: "any" });
+	// scope all without extra tags ⇒ no filter (whole bank).
+	assert.equal(recallTagFilter("all", "p", "any"), undefined);
+});
+
+test("validateConfigOverrides: tagsMatch, retainEveryNTurns, recallTypes, missions", () => {
+	const ok = validateConfigOverrides({ tagsMatch: "any_strict", retainEveryNTurns: 3, recallTypes: ["observation"], retainMission: "x" });
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value, { tagsMatch: "any_strict", retainEveryNTurns: 3, recallTypes: ["observation"], retainMission: "x" });
+	assert.equal(validateConfigOverrides({ tagsMatch: "nope" }).ok, false);
+	assert.equal(validateConfigOverrides({ retainEveryNTurns: 0 }).ok, false);
+	assert.equal(validateConfigOverrides({ recallTypes: [] }).ok, false);
+	assert.equal(validateConfigOverrides({ recallTypes: ["bogus"] }).ok, false);
+});
+
+test("validateConfigOverrides: retainMaxDelayMs + retainOverlapTurns (batching cost levers)", () => {
+	const ok = validateConfigOverrides({ retainMaxDelayMs: 60000, retainOverlapTurns: 3 });
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value, { retainMaxDelayMs: 60000, retainOverlapTurns: 3 });
+	// 0 is valid for both (max-delay disabled / no overlap).
+	assert.deepEqual(validateConfigOverrides({ retainMaxDelayMs: 0, retainOverlapTurns: 0 }).value, { retainMaxDelayMs: 0, retainOverlapTurns: 0 });
+	// Negatives + non-numbers rejected.
+	assert.equal(validateConfigOverrides({ retainMaxDelayMs: -1 }).ok, false);
+	assert.equal(validateConfigOverrides({ retainOverlapTurns: -2 }).ok, false);
+	assert.equal(validateConfigOverrides({ retainOverlapTurns: "x" }).ok, false);
+});
+
+test("validateProjectOverride: safe keys only; cleared keys dropped; unsafe keys ignored", () => {
+	const ok = validateProjectOverride({ recallScope: "all", bank: "team-bank", tagsMatch: "any_strict", recallBudget: 800, recallTypes: ["observation"] });
+	assert.deepEqual(ok.value, { recallScope: "all", bank: "team-bank", tagsMatch: "any_strict", recallBudget: 800, recallTypes: ["observation"] });
+	// Empty/null clears (dropped from the result).
+	assert.deepEqual(validateProjectOverride({ recallScope: "", bank: null }).value, {});
+	// Unsafe deployment/secret keys are ignored (never appear in the overlay).
+	assert.deepEqual(validateProjectOverride({ mode: "managed", externalUrl: "http://x", apiKey: "k", recallScope: "project" }).value, { recallScope: "project" });
+	assert.equal(validateProjectOverride({ recallScope: "bogus" }).ok, false);
+});
+
+test("loadEffectiveConfig precedence: project override > global > defaults", async () => {
+	const store = makeStore();
+	// No global, no overlay → defaults.
+	let cfg = await loadEffectiveConfig(store);
+	assert.equal(cfg.recallScope, "project");
+	assert.equal(cfg.bank, "bobbit");
+	// Global overrides defaults.
+	await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "all", bank: "global-bank" });
+	cfg = await loadEffectiveConfig(store, "proj-1");
+	assert.equal(cfg.recallScope, "all");
+	assert.equal(cfg.bank, "global-bank");
+	// Project overlay wins over global (safe keys only).
+	await store.put(projectConfigKey("proj-1"), { recallScope: "project", bank: "proj-bank" });
+	cfg = await loadEffectiveConfig(store, "proj-1");
+	assert.equal(cfg.recallScope, "project");
+	assert.equal(cfg.bank, "proj-bank");
+	// A different project does NOT see proj-1's overlay.
+	const other = await loadEffectiveConfig(store, "proj-2");
+	assert.equal(other.recallScope, "all");
+	assert.equal(other.bank, "global-bank");
+});
+
+test("provider recall applies the per-project overlay (overlay recallScope wins) + observation bias", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		// Global base scope is `all`; the project overlay flips it to `project`.
+		await store.put(projectConfigKey("proj-7"), { recallScope: "project" });
+		await provider.beforePrompt({ config: { ...ACTIVE, recallScope: "all" }, host: { store }, projectId: "proj-7", prompt: "q" });
+		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string; types?: string[] };
+		assert.deepEqual(o.tags, { project: "proj-7" }, "overlay forced project scope ⇒ project tag");
+		assert.equal(o.tagsMatch, "any", "project + global by default");
+		assert.deepEqual(o.types, ["observation", "world", "experience"], "recall is observation-biased by default");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall: tagsMatch any_strict (hard-isolation) flows through to the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await provider.beforePrompt({ config: { ...ACTIVE, recallScope: "project", tagsMatch: "any_strict" }, host: { store }, projectId: "p", prompt: "q" });
+		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(o.tags, { project: "p" });
+		assert.equal(o.tagsMatch, "any_strict", "any_strict excludes global (project-only)");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: default N buffers 4 turns then flushes ALL 5 in one aggregate", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 5 };
+		for (let i = 1; i <= 4; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 0, "first four turns are buffered (no LLM extraction yet)");
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "turn 5" });
+		assert.equal(calls.retain.length, 1, "the fifth turn flushes ONE aggregate retain");
+		// ALL FIVE buffered turns appear in the single aggregate — batched, never sampled.
+		for (let i = 1; i <= 5; i++) {
+			assert.match(calls.retain[0].content, new RegExp(`User: turn ${i}\\b`), `turn ${i} is in the aggregate`);
+		}
+		assert.equal(calls.retain[0].opts.tags?.kind, "turn");
+		// The pending buffer's primary turns are cleared after the flush (count advances).
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "primary pending turns cleared after flush");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: N=10 buffers nine turns then flushes all ten in one aggregate", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 10 };
+		for (let i = 1; i <= 9; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 0, "nine turns buffered, nothing flushed yet");
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "turn 10" });
+		assert.equal(calls.retain.length, 1, "tenth turn flushes one aggregate");
+		for (let i = 1; i <= 10; i++) {
+			assert.match(calls.retain[0].content, new RegExp(`User: turn ${i}\\b`), `turn ${i} is in the N=10 aggregate`);
+		}
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: no buffered turn is silently dropped across consecutive batches", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// overlapTurns:0 ⇒ each turn appears EXACTLY once across the two aggregates.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 3, retainOverlapTurns: 0 };
+		for (let i = 1; i <= 6; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 2, "two full batches ⇒ two aggregate retains");
+		const all = `${calls.retain[0].content}\n${calls.retain[1].content}`;
+		for (let i = 1; i <= 6; i++) {
+			assert.match(all, new RegExp(`User: turn ${i}\\b`), `turn ${i} appears in some aggregate (never dropped)`);
+		}
+		// First aggregate is turns 1-3, second is 4-6 (no overlap ⇒ clean partition).
+		assert.match(calls.retain[0].content, /User: turn 1[\s\S]*User: turn 3/);
+		assert.match(calls.retain[1].content, /User: turn 4[\s\S]*User: turn 6/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: retainOverlapTurns carries the last summaries into the next aggregate", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 3, retainOverlapTurns: 2 };
+		// First batch: turns 1-3 ⇒ flush; overlap carries turns 2 & 3 forward.
+		for (let i = 1; i <= 3; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 1);
+		// Second batch: turns 4-6 ⇒ flush; aggregate INCLUDES overlap turns 2 & 3.
+		for (let i = 4; i <= 6; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 2);
+		const second = calls.retain[1].content;
+		assert.match(second, /Earlier context \(overlap\)/, "overlap context header present");
+		assert.match(second, /User: turn 2\b/, "overlap turn 2 carried forward");
+		assert.match(second, /User: turn 3\b/, "overlap turn 3 carried forward");
+		assert.match(second, /User: turn 4\b/);
+		assert.match(second, /User: turn 6\b/);
+		// Overlap is BOUNDED — only the last 2 of the prior batch, not turn 1.
+		assert.doesNotMatch(second, /User: turn 1\b/, "overlap is bounded (turn 1 not carried)");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: a later hook flushes a buffer older than retainMaxDelayMs", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// Big batch size so count never triggers; tiny max delay so age does.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 100, retainMaxDelayMs: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "stale turn" });
+		assert.equal(calls.retain.length, 0, "single turn below the batch size is buffered, not flushed");
+		// Backdate the pending turn so it is older than retainMaxDelayMs.
+		const buf = (await store.get("retain-pending:s")) as { turns: { summary: string; ts: number }[]; overlap: string[] };
+		buf.turns[0].ts = Date.now() - 10_000;
+		await store.put("retain-pending:s", buf);
+		// A LATER hook observes the stale buffer and flushes it (no provider timers).
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "later turn" });
+		assert.equal(calls.retain.length, 1, "stale buffer flushed by the later hook");
+		assert.match(calls.retain[0].content, /User: stale turn/);
+		assert.match(calls.retain[0].content, /User: later turn/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: beforeCompact synchronously flushes pending buffered turns first", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// High batch size ⇒ the two turns stay buffered until compaction flushes them.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "buffered 1" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "buffered 2" });
+		assert.equal(calls.retain.length, 0, "buffered, not yet flushed");
+		await provider.beforeCompact({ config: { ...cfg }, host: { store }, sessionId: "s", summary: "lost span" });
+		// Two retains: the flushed aggregate (sync) THEN the compact span (sync).
+		assert.equal(calls.retain.length, 2);
+		assert.match(calls.retain[0].content, /User: buffered 1[\s\S]*User: buffered 2/, "aggregate flushed first");
+		assert.equal(calls.retain[0].opts.sync, true, "pending flush on compaction is synchronous");
+		assert.equal(calls.retain[0].opts.tags?.kind, "turn");
+		assert.equal(calls.retain[1].content, "lost span");
+		assert.equal(calls.retain[1].opts.tags?.kind, "compaction");
+		// Buffer cleared after the synchronous flush.
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: sessionShutdown flushes the pending buffer (best-effort)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		const cfg = { ...ACTIVE, retainEveryNTurns: 50 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "tail turn" });
+		assert.equal(calls.retain.length, 0, "buffered below the batch size");
+		await provider.sessionShutdown({ config: { ...cfg }, host: { store }, sessionId: "s" });
+		assert.equal(calls.retain.length, 1, "shutdown flushes the remaining buffered turns");
+		assert.match(calls.retain[0].content, /User: tail turn/);
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "buffer drained on shutdown");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: a failed flush is durably QUEUED, never dropped, and the buffer advances", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		state.failRetain = true;
+		const cfg = { ...ACTIVE, retainEveryNTurns: 2, retainOverlapTurns: 0 };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t1" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t2" });
+		// Flush attempted (and failed) ⇒ the aggregate is preserved on the retry queue.
+		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		assert.equal(q.length, 1, "failed aggregate flush is durably queued");
+		assert.match(q[0].content, /User: t1[\s\S]*User: t2/);
+		// Buffer advanced so the count keeps moving (no unbounded growth on failure).
+		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "primary pending cleared even on a failed flush");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain batching: retainEveryNTurns=1 preserves per-turn retain", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		for (let i = 1; i <= 3; i++) {
+			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: `t${i}` });
+		}
+		assert.equal(calls.retain.length, 3, "every turn retains when N=1");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("beforeCompact retains regardless of cadence (always captures the lost span)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// A high cadence would skip a turn retain, but compaction is cadence-exempt.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 100 };
+		await provider.beforeCompact({ config: { ...cfg }, host: { store }, sessionId: "s", summary: "span" });
+		assert.equal(calls.retain.length, 1);
+		assert.equal(calls.retain[0].opts.sync, true);
+		assert.equal(calls.retain[0].opts.tags?.kind, "compaction");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("bank mission: PATCHed once per signature, re-applied only on change", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainMission: "M1" };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "a" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "b" });
+		assert.equal(calls.updateBankConfig.length, 1, "PATCH only once for the same mission signature");
+		assert.equal(calls.updateBankConfig[0].updates.retain_mission, "M1");
+		assert.ok(calls.updateBankConfig[0].updates.observations_mission, "all missions are sent");
+		// A mission change re-applies (signature differs).
+		await provider.afterTurn({ config: { ...cfg, retainMission: "M2" }, host: { store }, sessionId: "s", prompt: "c" });
+		assert.equal(calls.updateBankConfig.length, 2, "signature change ⇒ re-PATCH");
+		assert.equal(calls.updateBankConfig[1].updates.retain_mission, "M2");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("bank mission PATCH failure is non-fatal — retain still proceeds", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.failUpdateBankConfig = true;
+		const store = makeStore();
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "x" });
+		assert.equal(calls.updateBankConfig.length, 1, "mission PATCH was attempted");
+		assert.equal(calls.retain.length, 1, "retain proceeds despite a mission PATCH failure");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes config: projectOverride write/read with precedence (requires a project ctx)", async () => {
+	__setClientFactory(() => makeClient().client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "all", bank: "global-bank" });
+		// No project ctx ⇒ a projectOverride write is rejected.
+		const noProj = (await routes.config(
+			{ host: { store } } as never,
+			{ method: "POST", body: { projectOverride: { recallScope: "project" } } } as never,
+		)) as { ok: boolean; error?: string };
+		assert.equal(noProj.ok, false);
+		assert.equal(noProj.error, "NO_PROJECT");
+
+		// With a project ctx the overlay persists, GET reflects effective + meta.
+		const set = (await routes.config(
+			{ host: { store }, projectId: "proj-1" } as never,
+			{ method: "POST", body: { projectOverride: { recallScope: "project", bank: "proj-bank" } } } as never,
+		)) as { ok: boolean; config: Record<string, unknown>; projectOverride: unknown; globalConfig: Record<string, unknown> };
+		assert.equal(set.ok, true);
+		assert.equal(set.config.recallScope, "project");
+		assert.equal(set.config.bank, "proj-bank");
+		assert.deepEqual(set.projectOverride, { recallScope: "project", bank: "proj-bank" });
+		assert.equal(set.globalConfig.recallScope, "all", "globalConfig meta shows the un-overlaid global");
+
+		// GET round-trips the overlay.
+		const get = (await routes.config({ host: { store }, projectId: "proj-1" } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal(get.config.bank, "proj-bank");
+		// A different project sees only the global.
+		const other = (await routes.config({ host: { store }, projectId: "proj-2" } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal(other.config.bank, "global-bank");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall/reflect: optional tags NARROW a project recall (all_strict, no broadening)", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "project" });
+		// project scope + { goal } NARROWS: project AND goal, all_strict (no untagged/
+		// global, no other-project goal:g leakage).
+		await routes.recall({ host: { store }, projectId: "p1" } as never, { body: { query: "q", tags: { goal: "g9" } } } as never);
+		const ro = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(ro.tags, { project: "p1", goal: "g9" });
+		assert.equal(ro.tagsMatch, "all_strict");
+
+		// A caller-supplied tags.project can NOT override the route-derived project.
+		await routes.recall({ host: { store }, projectId: "p1" } as never, { body: { query: "q", tags: { project: "evil", goal: "g9" } } } as never);
+		const ro2 = calls.recall[1].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(ro2.tags, { project: "p1", goal: "g9" });
+		assert.equal(ro2.tagsMatch, "all_strict");
+
+		await routes.reflect({ host: { store }, projectId: "p1" } as never, { body: { prompt: "x", scope: "project", tags: { topic: "auth" } } } as never);
+		assert.deepEqual(calls.reflect[0].opts?.tags, { project: "p1", topic: "auth" });
+		assert.equal(calls.reflect[0].opts?.tagsMatch, "all_strict");
 	} finally {
 		__setClientFactory(null);
 	}

@@ -38,10 +38,41 @@ config:
   dataDir: { type: string, default: ~/.hindsight }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
+  # Recall scope: project = this project + shared/global memories (tags_match `any`);
+  # all = every project in the shared bank. Default is now `project` (excludes other
+  # projects' noise while keeping global memories visible).
+  recallScope: { type: enum, values: [project, all], default: project }
+  # Tag-match for PROJECT scope: `any` = project + global (default; never hides
+  # global); `any_strict` = project-only, EXCLUDING global (rare hard-isolation opt-in).
+  tagsMatch: { type: enum, values: [any, any_strict], default: any }
   autoRecall: { type: boolean, default: true }
   autoRetain: { type: boolean, default: true }
+  # Auto-retain BATCH size: hold compact turn summaries in a durable per-session
+  # buffer and flush ONE aggregate retain (all pending turns) once N have buffered
+  # (cost lever; 1 ≈ every turn). Turns are batched, never sampled — nothing is
+  # dropped. beforeCompact flushes the buffer synchronously regardless.
+  retainEveryNTurns: { type: number, default: 5 }
+  # Hook-observed max age (ms) of the oldest pending buffered turn before it flushes
+  # even when the batch is not full (default 30m). A later hook observing a stale
+  # buffer flushes it — no provider-local timers. 0 disables the time-based flush.
+  retainMaxDelayMs: { type: number, default: 1800000 }
+  # Turn summaries carried forward as bounded OVERLAP context into the next
+  # aggregate (thread continuity). Primary turns are cleared after each flush so the
+  # count always advances; overlap never grows unbounded.
+  retainOverlapTurns: { type: number, default: 2 }
   recallBudget: { type: number, default: 1200 }
+  # Hindsight recall `types` filter — bias recall toward consolidated knowledge.
+  recallTypes: { type: list, default: [observation, world, experience] }
+  # Bank-config missions applied idempotently to the shared bank: steer extraction/
+  # consolidation/reflection toward durable knowledge, away from transient noise.
+  retainMission: { type: string, optional: true }
+  observationsMission: { type: string, optional: true }
+  reflectMission: { type: string, optional: true }
+  # Max characters of the recall QUERY sent to the data plane. The Hindsight recall
+  # API caps queries at 500 tokens and returns HTTP 400 ("Query too long") for
+  # longer queries; clamping keeps non-trivial turns working. Mirrors Hermes'
+  # recall_max_input_chars. <= 0 disables clamping.
+  recallMaxInputChars: { type: number, default: 3000 }
   timeoutMs: { type: number, default: 1500 }
 activation:
   # EXTERNAL-mode dormancy gate: the host omits the provider entirely (no bridge

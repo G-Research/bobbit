@@ -81,6 +81,19 @@ describe("#1 pack discovery & manifest parsing", () => {
 		assert.equal(validateManifest({ name: "p", description: "d", version: "1", contents: { roles: [], tools: [] } }), null);
 	});
 
+	it("parses defaultDisabled: true (and only the literal boolean true)", () => {
+		// Built-in dormant packs (e.g. hindsight) opt into default-disabled.
+		const m = validateManifest({ name: "p", description: "d", version: "1", defaultDisabled: true, contents: { roles: [], tools: [], skills: [] } });
+		assert.ok(m);
+		assert.equal(m!.defaultDisabled, true);
+		// Anything other than literal `true` is ignored (default-enabled).
+		for (const v of [false, "true", 1, undefined]) {
+			const mm = validateManifest({ name: "p", description: "d", version: "1", defaultDisabled: v, contents: { roles: [], tools: [], skills: [] } });
+			assert.ok(mm);
+			assert.equal(mm!.defaultDisabled, undefined);
+		}
+	});
+
 	it("ignores unknown top-level keys (forward-compat)", () => {
 		const m = validateManifest({ name: "p", description: "d", version: "1", futureKey: 42, contents: { roles: [], tools: [], skills: [] } });
 		assert.ok(m);

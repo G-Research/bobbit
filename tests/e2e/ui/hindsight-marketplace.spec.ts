@@ -97,8 +97,46 @@ async function putHindsightConfig(overrides: Record<string, unknown>): Promise<v
 	await getPackStore().put(PACK, CONFIG_KEY, overrides);
 }
 
+/** Return the built-in DEFAULT-DISABLED Hindsight pack to its baseline (no stored
+ *  activation record, no force-enable marker) so this spec is robust to a leaked
+ *  enabled state from a sibling spec file (e.g. hindsight-pack) sharing the worker's
+ *  in-process gateway + server-scope activation store. PUT every catalogue entity
+ *  disabled WHILE UNCONFIGURED equals the pack's default ⇒ the server clears the
+ *  record + drops the marker. Call AFTER clearing config so the pack is unconfigured. */
+async function resetHindsightActivation(): Promise<void> {
+	try {
+		const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
+		if (!res.ok) return;
+		const cat = ((await res.json()).catalogue ?? {}) as Record<string, unknown>;
+		const arr = (k: string): string[] =>
+			Array.isArray(cat[k])
+				? (cat[k] as Array<{ listName?: string } | string>).map((e) => (typeof e === "string" ? e : e.listName ?? "")).filter(Boolean)
+				: [];
+		const disabled = {
+			roles: arr("roles"), tools: arr("tools"), skills: arr("skills"), entrypoints: arr("entrypoints"),
+			providers: arr("providers"), hooks: arr("hooks"), mcp: arr("mcp"), piExtensions: arr("piExtensions"),
+			runtimes: arr("runtimes"), workflows: arr("workflows"),
+		};
+		await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT",
+			body: JSON.stringify({ scope: "server", packName: PACK, disabled }),
+		});
+	} catch { /* best-effort */ }
+}
+
 async function reconcile(page: Page): Promise<void> {
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => { /* race */ });
+}
+
+/** Does the `config` route expose the per-project override contract (globalConfig /
+ *  projectOverride) in THIS environment? The route partition that adds it (design
+ *  hindsight-memory-quality) may not have merged when this spec file runs alone, so
+ *  the override UI test guards on this probe rather than failing. */
+async function overrideContractReady(): Promise<boolean> {
+	const res = await apiFetch(`/api/ext/pack-route/${PACK}/config?projectId=__probe__`);
+	if (!res.ok) return false;
+	const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+	return Object.prototype.hasOwnProperty.call(data, "globalConfig") || Object.prototype.hasOwnProperty.call(data, "projectOverride");
 }
 
 /** Open the app, create + select a session (so the marketplace can mint the pack
@@ -179,27 +217,38 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		const mod = await import("../../../dist/server/server.js");
 		mod.registerPackRuntimeSupervisorFactory(null);
 		await putHindsightConfig({});
+		await resetHindsightActivation();
 		if (stub) await stub.close().catch(() => { /* ignore */ });
 	});
 
 	test.beforeEach(async () => {
+		// Clean slate, ORDER-INDEPENDENT of sibling spec files sharing this worker's
+		// gateway: clear config, then reset the built-in pack to its DEFAULT-DISABLED
+		// baseline (drops any leaked force-enable marker / stored record). The first
+		// test then sees the true "disabled" state; connected/managed tests re-enable
+		// the pack via putHindsightConfig (the configured-rule). Reset BEFORE clearing
+		// supCalls so a runtime stop fired by the reset PUT does not pollute assertions.
 		await putHindsightConfig({});
+		await resetHindsightActivation();
 		supCalls.length = 0;
 		managedRuntimeStatus = "stopped";
 		stub.setHealthy(true);
 	});
 
-	test("first-run: the built-in row shows Dormant and surfaces Configure as the primary setup path", async ({ page }) => {
+	test("first-run: the built-in row shows Disabled and surfaces Configure as the primary setup path", async ({ page }) => {
 		test.skip(!ready, "Hindsight pack contribution not served in this environment");
 		await openWithSession(page);
 		const row = await openMarketRow(page);
 
-		// Unconfigured ⇒ Dormant (NOT a flat "Enabled"). This is the headline state
-		// distinction + proves the sessionless built-in pack-route status read works
-		// after #/market navigation has cleared the active chat session.
-		await expect(stateBadge(row), "an unconfigured built-in Hindsight row is Dormant").toHaveAttribute("data-state", "dormant", { timeout: 20_000 });
+		// The built-in Hindsight pack ships DEFAULT-DISABLED (manifest `defaultDisabled:
+		// true`): a fresh, unconfigured, untouched server resolves it with every entity
+		// de-activated, so the row's headline state is "disabled" (NOT a flat "Enabled",
+		// and NOT "dormant" — dormant is the enabled-but-unconfigured state). Enabling or
+		// configuring it flips this. Also proves the sessionless built-in pack-route
+		// status read still works after #/market cleared the active chat session.
+		await expect(stateBadge(row), "an unconfigured built-in Hindsight row is Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
 
-		// Configure is surfaced as the primary setup affordance on the dormant row.
+		// Configure is surfaced as the primary setup affordance on the row.
 		// (Opening the native panel itself requires an active session to bind to — a
 		// separate session-context concern exercised by hindsight-pack.spec.ts, which
 		// opens the panel via the command-palette launcher inside a live session. The
@@ -236,6 +285,49 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await row.locator('[data-testid="market-hindsight-test"]').click();
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]'), "Test connection reports a result lozenge").toBeVisible({ timeout: 20_000 });
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toContainText("Connected");
+	});
+
+	test("inline Configure form saves config sessionlessly and persists across reload", async ({ page }) => {
+		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		// Start disabled (default-disabled built-in, no config). The inline form is the
+		// #/market setup path — there is no active chat session to mount the native panel
+		// against, so Configure must write config over the SESSIONLESS built-in pack-route
+		// config-write seam. Saving an externalUrl configures the pack, which (per the
+		// live-setup-preservation rule) also flips it out of the default-disabled state.
+		await openWithSession(page);
+		let row = await openMarketRow(page);
+		await expect(stateBadge(row), "an unconfigured default-disabled row starts Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
+
+		// Configure toggles the inline form (NOT the native panel) on #/market.
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const form = row.locator('[data-testid="market-hindsight-config-form"]');
+		await expect(form, "Configure opens the inline config form").toBeVisible({ timeout: 15_000 });
+		// The form hydrates from the config route; the mode select appears once loaded.
+		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
+
+		// Set the API/data-plane URL (dialed), bank, and the DISTINCT Dashboard UI URL.
+		await form.locator('[data-testid="market-hindsight-form-externalurl"]').fill(stub.url);
+		await form.locator('[data-testid="market-hindsight-form-bank"]').fill("hermes");
+		await form.locator('[data-testid="market-hindsight-form-uiurl"]').fill(EX_UI_URL);
+		expect(EX_UI_URL).not.toBe(stub.url);
+
+		// Save writes via the sessionless config-write seam and reports a result lozenge.
+		await form.locator('[data-testid="market-hindsight-config-save"]').click();
+		await expect(form.locator('[data-testid="market-hindsight-config-result"]'), "save reports a result").toContainText("Saved", { timeout: 20_000 });
+
+		// Reload the page entirely — the persisted config must survive (sessionless read).
+		await page.reload();
+		row = await openMarketRow(page);
+
+		// The row reflects the saved deployment after reload (persistence).
+		const summary = row.locator('[data-testid="market-hindsight-config"]');
+		await expect(summary, "the saved config surfaces after reload").toBeVisible({ timeout: 20_000 });
+		await expect(summary).toContainText("hermes");
+
+		// Open Hindsight UI links to the saved (distinct) UI URL verbatim.
+		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
+		await expect(openUi, "Open Hindsight UI surfaces the saved UI URL").toBeVisible({ timeout: 15_000 });
+		await expect(openUi).toHaveAttribute("href", EX_UI_URL);
 	});
 
 	test("managed: the row tracks mocked runtime status (stopped→starting→running) and loading never starts Docker", async ({ page }) => {
@@ -318,6 +410,57 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toBeVisible({ timeout: 20_000 });
 		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
+	});
+
+	// ── Per-project memory override (design hindsight-memory-quality): the inline
+	//    Configure form surfaces a compact override section for the CURRENT project;
+	//    saving a project recall-scope override persists across a full reload and the
+	//    summary shows a "project override active" badge. Guarded on the route exposing
+	//    the override contract so the spec stays green where that partition hasn't
+	//    merged. ──
+	test("per-project override: recall scope override saves and persists across reload", async ({ page }) => {
+		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!(await overrideContractReady()), "config route does not expose the per-project override contract here");
+		// Configure a healthy external deployment so the pack is configured + the row enabled.
+		await putHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
+
+		await openWithSession(page);
+		let row = await openMarketRow(page);
+
+		// Open Configure → the per-project override section appears for the current project.
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const form = row.locator('[data-testid="market-hindsight-config-form"]');
+		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
+		const override = row.locator('[data-testid="market-hindsight-override"]');
+		await expect(override, "the per-project override section is shown").toBeVisible({ timeout: 15_000 });
+
+		// Pin THIS project's recall scope to `all` (override the global default), and save.
+		await override.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("all");
+		await override.locator('[data-testid="market-hindsight-override-save"]').click();
+		await expect(override.locator('[data-testid="market-hindsight-override-result"]'), "the override save reports a result").toContainText("Saved", { timeout: 20_000 });
+
+		// The read-only summary now flags the active project override.
+		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge appears").toBeVisible({ timeout: 20_000 });
+
+		// The GLOBAL inline Configure field must keep showing the GLOBAL value (`project`,
+		// the default — global config seeded no recallScope), NOT the project override
+		// (`all`). The global form hydrates from `globalConfig`, never the overlay-resolved
+		// effective `config`; otherwise the override would masquerade as a global setting
+		// and risk being written back as global.
+		await expect(form.locator('[data-testid="market-hindsight-form-recallscope"]'), "the global recall-scope field shows the global value, not the project override").toHaveValue("project", { timeout: 15_000 });
+
+		// Reload the whole page — the project override must survive (sessionless read).
+		await page.reload();
+		row = await openMarketRow(page);
+		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge persists across reload").toBeVisible({ timeout: 20_000 });
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const override2 = row.locator('[data-testid="market-hindsight-override"]');
+		await expect(override2.locator('[data-testid="market-hindsight-override-recallscope"]'), "the saved override value persists").toHaveValue("all", { timeout: 15_000 });
+
+		// Hygiene: clear the override back to inherit so the project overlay does not leak.
+		await override2.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("");
+		await override2.locator('[data-testid="market-hindsight-override-save"]').click();
+		await expect(override2.locator('[data-testid="market-hindsight-override-result"]')).toContainText("Saved", { timeout: 20_000 });
 	});
 
 	// ── The route persists `lastError` as an OBJECT ({ message, ts }); the row must

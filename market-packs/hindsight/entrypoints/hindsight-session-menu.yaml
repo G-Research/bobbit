@@ -1,0 +1,15 @@
+id: hindsight.session-menu
+kind: session-menu
+label: Hindsight Memory
+# A session-menu LAUNCHER (the sidebar/chat session actions overflow menu),
+# surfaced alongside PR Walkthrough. Replaces the legacy command-palette +
+# git-widget-button entrypoints (those kinds were removed when pack launchers
+# moved to session menus, #829). Unlike pr-walkthrough's spawn launcher this is a
+# BARE PanelTarget (NO action:"spawn"): its selection opens hindsight.panel in the
+# ACTIVE (owner) session via openPackPanel — the config/status surface, with no
+# sub-agent to mint. The Marketplace remains the PRIMARY setup path; this is a
+# secondary in-session discoverability surface. The panel renders the
+# dormant/configure state itself, so the entry stays pack-agnostic (no per-render
+# pack-route calls / no "show only when configured" gate).
+target:
+  panelId: hindsight.panel
