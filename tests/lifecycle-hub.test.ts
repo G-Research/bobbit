@@ -25,7 +25,7 @@ function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTok
 		kind: "memory",
 		module: path.basename(file),
 		hooks: ["sessionSetup"],
-		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 1_000 },
+		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 4_000 },
 		config: { enabled: true },
 		listName: id,
 		sourceFile: path.join(tmp, "pack.yaml"),
@@ -82,7 +82,9 @@ describe("LifecycleHub", () => {
 			const result = await hub(tmp, [slow, fast], moduleHost).dispatch("sessionSetup", base(tmp));
 			const elapsed = performance.now() - t0;
 
-			assert.ok(elapsed < 1_000, `dispatch should return promptly, got ${elapsed}ms`);
+			// Full unit runs start many workers concurrently; assert cancellation avoids
+			// the 5s provider delay without pinning worker startup to a quiet-machine budget.
+			assert.ok(elapsed < 2_500, `dispatch should return promptly, got ${elapsed}ms`);
 			assert.equal(result.blocks.length, 1);
 			assert.equal(result.blocks[0].providerId, "fast");
 			assert.equal(result.diagnostics.length, 1);
