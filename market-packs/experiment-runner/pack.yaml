@@ -9,9 +9,6 @@ contents:
   roles: []
   tools: []
   skills: []
-  # Plain panel-opening launchers (NOT spawn launchers): clicking opens the one
-  # four-view panel (mode-select → define → confirm → dashboard); the panel calls
-  # the routes from explicit user gestures.
   entrypoints: [experiment-runner-open, experiment-runner-palette, experiment-runner-route]
   providers: []
   hooks: []
