@@ -3,8 +3,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { ArrowLeft, Pencil, Plus, Trash2, X } from "lucide";
+import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo, type RoleFieldSource } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError, confirmAction } from "./dialogs.js";
@@ -13,7 +13,7 @@ import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
-import { renderModelRow, formatModelPref, formatRoleDefaultModelLabel, ensureModelDefaultsLoaded } from "./settings-page.js";
+import { renderModelRow, formatModelPref, getRoleDefaultModel, getRoleDefaultModelPrefKey, ensureModelDefaultsLoaded } from "./settings-page.js";
 
 // ============================================================================
 // HELPERS
@@ -72,6 +72,18 @@ let deleting = false;
 // transient "Saved" flash next to its label, plus the clear-timer handle.
 let savedModelFlashRole: string | null = null;
 let savedModelFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Inline list-row save race guard. Inline model/thinking edits are auto-saved
+// asynchronously, but a save round-trips through customize + PUT + a full
+// refetch before the row objects refresh. If a user picks a model and then
+// quickly changes thinking, the second handler would otherwise read the model
+// off the STALE row object (still showing no override) and clobber the
+// just-selected model with "". To prevent that we keep a per-role pending draft
+// (the latest desired { model, thinkingLevel } for that scope) and a per-role
+// serialized save loop that coalesces rapid edits into ordered PUTs built from
+// the merged draft rather than from any stale row snapshot.
+const pendingInlineEdits = new Map<string, { model: string; thinkingLevel: string }>();
+const inlineSaveActive = new Set<string>();
 
 // Group policies loaded from server
 let groupPolicies: Record<string, string> = {};
@@ -280,6 +292,19 @@ async function handleSave(): Promise<void> {
  * has already surfaced the error via `showConnectionError`; we just rerender.
  */
 async function persistInlineModel(role: RoleData, model: string, thinkingLevel: string): Promise<void> {
+	const projectId = getConfigProjectId();
+	// Project scope: an inherited role has no project-layer override yet, so the
+	// PUT /api/roles/:name?projectId= path 404s ("Role not found in project").
+	// Copy the resolved role into the project layer first so every editable list
+	// row can be saved inline. System-scope builtins are auto-promoted to a
+	// server override by the PUT handler, so no explicit customize is needed there.
+	if (projectId && isInherited((role as any).origin as ConfigOrigin | undefined)) {
+		const customized = await customizeItem("roles", role.name, "project", projectId);
+		if (!customized) {
+			renderApp();
+			return;
+		}
+	}
 	const ok = await updateRole(role.name, {
 		label: role.label,
 		promptTemplate: role.promptTemplate,
@@ -287,7 +312,7 @@ async function persistInlineModel(role: RoleData, model: string, thinkingLevel: 
 		toolPolicies: role.toolPolicies ?? {},
 		model,
 		thinkingLevel,
-	}, getConfigProjectId() || undefined);
+	}, projectId || undefined);
 	if (!ok) {
 		renderApp();
 		return;
@@ -301,6 +326,57 @@ async function persistInlineModel(role: RoleData, model: string, thinkingLevel: 
 		savedModelFlashTimer = null;
 		if (currentView === "list") renderApp();
 	}, 1800);
+}
+
+/**
+ * Merge a single inline field change into the role's pending draft and kick off
+ * (or coalesce into) its serialized save loop. The draft base is the role's
+ * existing pending draft when one is in flight, else the current-scope
+ * overrides off the freshly-rendered row — so the "model picked, then thinking
+ * changed before refetch" race never reads a stale model/thinking off the row.
+ */
+function queueInlineEdit(role: RoleData, patch: { model?: string; thinkingLevel?: string }): void {
+	const base = pendingInlineEdits.get(role.name) ?? currentScopeRoleOverrides(role);
+	pendingInlineEdits.set(role.name, {
+		model: patch.model ?? base.model,
+		thinkingLevel: patch.thinkingLevel ?? base.thinkingLevel,
+	});
+	scheduleInlineSave(role.name);
+}
+
+/**
+ * Per-role serialized save loop. Drains the pending draft for `name` one PUT at
+ * a time; a newer edit that arrives mid-save is picked up on the next loop turn
+ * rather than racing the in-flight save. Always builds the PUT from the latest
+ * fetched row object (so origin/customize state is fresh) merged with the
+ * pending model/thinking draft.
+ */
+function scheduleInlineSave(name: string): void {
+	if (inlineSaveActive.has(name)) return; // a loop is already draining this role
+	inlineSaveActive.add(name);
+	void (async () => {
+		try {
+			let desired = pendingInlineEdits.get(name);
+			while (desired) {
+				// Use the freshest row object so a save that already promoted the
+				// role into the project layer is not re-customized, and label/prompt/
+				// accessory/tools reflect the latest fetch.
+				const current = roles.find(r => r.name === name);
+				if (!current) { pendingInlineEdits.delete(name); break; }
+				await persistInlineModel(current, desired.model, desired.thinkingLevel);
+				const after = pendingInlineEdits.get(name);
+				if (after && after.model === desired.model && after.thinkingLevel === desired.thinkingLevel) {
+					// No newer edit arrived during the save — drain complete.
+					pendingInlineEdits.delete(name);
+					desired = undefined;
+				} else {
+					desired = after; // a newer edit landed mid-save; persist it next.
+				}
+			}
+		} finally {
+			inlineSaveActive.delete(name);
+		}
+	})();
 }
 
 async function handleDelete(): Promise<void> {
@@ -531,39 +607,247 @@ interface RoleRowOptions {
 	modelControl?: RoleRowModelControl;
 }
 
+// ----------------------------------------------------------------------------
+// Inline list-row model/thinking source resolution
+//
+// Each list row shows two independent fields (model + thinking) with a compact
+// source badge. When the server attaches field-level `modelResolution`
+// metadata we use it; otherwise we degrade using `origin` / `isInherited` plus
+// the default-pref display heuristic so the row always shows meaningful info.
+// ----------------------------------------------------------------------------
+
+const THINKING_LEVEL_LABELS: Record<string, string> = {
+	off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high",
+};
+
+type RoleFieldSourceUiKind = "role" | "inherited-role" | "default" | "auto";
+
+interface RoleFieldDisplay {
+	/**
+	 * Source kind. `"role"` (current-scope override) is the ONLY kind that feeds
+	 * the editable picker and exposes clear/reset; everything else displays the
+	 * effective value + badge read-only (findings #1, #2).
+	 */
+	kind: RoleFieldSourceUiKind;
+	/** Compact source badge text, e.g. "Role override", "Session default". */
+	badge: string;
+	/** Resolved value text (model id / thinking label) for the source line. */
+	effectiveLabel: string;
+	/**
+	 * Raw effective value (model id / thinking level) used ONLY for the
+	 * read-only source-line label (incl. inherited-role / default values).
+	 *
+	 * It is deliberately NOT fed into the editable picker: doing so let the
+	 * shared `renderModelRow` clamp an inherited/unsupported thinking value at
+	 * render time and auto-persist it as a spurious current-scope override
+	 * (review finding #1). The picker is fed only `currentScopeRoleOverrides`.
+	 */
+	effectiveValue: string;
+}
+
 /**
- * Inline model/thinking control rendered in the middle of a list row. Reuses
- * the shared `renderModelRow`. Inherited rows (no `role.model`) show the
- * resolved default label and dim the thinking selector; override rows show the
- * actual model with clear/Test from `renderModelRow`.
+ * The model/thinking values that are CURRENT-SCOPE overrides (the layer the
+ * inline list row would write to), as opposed to inherited/default values.
+ *
+ * Used both to derive the row `data-model-state` and to persist inline edits
+ * without accidentally promoting an inherited value into a fresh current-scope
+ * override (e.g. changing only thinking must not bake the inherited model in,
+ * and clearing the model must not wipe a thinking override). Prefers the
+ * server's `modelResolution` (source === "role" ⇒ current editable layer);
+ * falls back to the top-level fields for drafts that carry no metadata.
+ */
+function currentScopeRoleOverrides(role: RoleData): { model: string; thinkingLevel: string } {
+	const meta = role.modelResolution;
+	if (meta) {
+		return {
+			model: meta.model.source === "role" ? (meta.model.value ?? "") : "",
+			thinkingLevel: meta.thinkingLevel.source === "role" ? (meta.thinkingLevel.value ?? "") : "",
+		};
+	}
+	return { model: role.model ?? "", thinkingLevel: role.thinkingLevel ?? "" };
+}
+
+interface RoleModelDisplay {
+	/** Pack-managed roles are read-only inline (manage via the Marketplace). */
+	packReadonly: boolean;
+	packName?: string | null;
+	model: RoleFieldDisplay;
+	thinking: RoleFieldDisplay;
+	state: "override" | "thinking-override" | "inherited" | "readonly";
+}
+
+function roleOriginDetailLabel(origin?: ConfigOrigin, packName?: string | null): string {
+	if (packName) return `pack ${packName}`;
+	switch (origin) {
+		case "project": return "Project";
+		case "server": return "Server";
+		case "builtin": return "Built-in";
+		case "user": return "User";
+		default: return "";
+	}
+}
+
+function thinkingLevelLabel(value: string): string {
+	return THINKING_LEVEL_LABELS[value] ?? value;
+}
+
+/**
+ * Resolve the model + thinking display (effective value + source badge) for a
+ * list row. Prefers the server's field-level `modelResolution` metadata when
+ * present; otherwise degrades using the default-pref display heuristic. A
+ * present top-level `model` / `thinkingLevel` with no metadata is shown as a
+ * "Role override" — only metadata can attribute a value to an inherited role.
+ */
+function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
+	const directPackName = (role as any).originPackName as string | null | undefined;
+	const packId = (role as any).originPackId as string | null | undefined;
+	const meta = role.modelResolution;
+	const prefKey = getRoleDefaultModelPrefKey(role.name);
+	const def = getRoleDefaultModel(role.name);
+
+	// The default-tier badge follows the session/review heuristic, downgrading to
+	// "Auto default" only when no default model is configured at all (the tier is
+	// effectively auto-selected). Applied consistently to model + thinking.
+	const autoTier = !def.model;
+	const defaultBadge = autoTier
+		? "Auto default"
+		: (prefKey === "default.reviewModel" ? "Review default" : "Session default");
+	const defaultKind: RoleFieldSourceUiKind = autoTier ? "auto" : "default";
+
+	const packName = directPackName ?? meta?.model?.originPackName ?? meta?.thinkingLevel?.originPackName ?? undefined;
+	// Pack-managed roles (or any field the server flags non-editable) are
+	// read-only inline — manage them via the Marketplace.
+	const metaReadonly = !!meta && (meta.model.editable === false || meta.thinkingLevel.editable === false);
+	const packReadonly = !!(directPackName || packId) || metaReadonly;
+
+	const inheritedBadge = (m: RoleFieldSource): string => {
+		const detail = m.sourceLabel || roleOriginDetailLabel(m.origin as ConfigOrigin | undefined, m.originPackName ?? packName);
+		return detail ? `Inherited role override · ${detail}` : "Inherited role override";
+	};
+
+	const fromMeta = (m: RoleFieldSource, format: (v: string) => string, emptyLabel: string): RoleFieldDisplay => {
+		const value = m.value ?? "";
+		const effectiveLabel = value ? format(value) : emptyLabel;
+		switch (m.source) {
+			// `effectiveValue` only feeds the read-only source-line label; the
+			// editable picker is fed `currentScopeRoleOverrides` so inherited
+			// values are never clamped/auto-saved (finding #1).
+			case "role": return { kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
+			case "inherited-role": return { kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value };
+			default: return { kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "" };
+		}
+	};
+
+	// MODEL
+	let model: RoleFieldDisplay;
+	if (meta) {
+		model = fromMeta(meta.model, (v) => formatModelPref(v), formatModelPref(def.model));
+	} else if (role.model) {
+		model = { kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model), effectiveValue: role.model };
+	} else {
+		model = { kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "" };
+	}
+
+	// THINKING
+	const defThinkingLabel = def.thinking ? thinkingLevelLabel(def.thinking) : "Default";
+	let thinking: RoleFieldDisplay;
+	if (meta) {
+		thinking = fromMeta(meta.thinkingLevel, (v) => thinkingLevelLabel(v), defThinkingLabel);
+	} else if (role.thinkingLevel) {
+		thinking = { kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel), effectiveValue: role.thinkingLevel };
+	} else {
+		thinking = { kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "" };
+	}
+
+	// State follows the CURRENT-SCOPE override (not the resolved winner): an
+	// inherited-role value must read as "inherited", not "override".
+	const overrides = currentScopeRoleOverrides(role);
+	let state: RoleModelDisplay["state"];
+	if (packReadonly) state = "readonly";
+	else if (overrides.model) state = "override";
+	else if (overrides.thinkingLevel) state = "thinking-override";
+	else state = "inherited";
+
+	return { packReadonly, packName, model, thinking, state };
+}
+
+/**
+ * Inline model/thinking control rendered in the middle of a list row.
+ *
+ * Editable rows reuse the shared `renderModelRow` (model picker + clear/Test +
+ * thinking select) as the interactive line, then add a compact source line
+ * showing where each field's effective value comes from. Model and thinking are
+ * independent: clearing the model leaves any thinking override in place (shown
+ * as a thinking-only override), and thinking can be set/cleared on its own.
+ * Read-only pack rows render a static effective-value summary plus the reason.
  */
 function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl): TemplateResult {
-	const overridden = !!(role.model && role.model.length > 0);
-	const stateClass = overridden ? "role-row-model-control--override" : "role-row-model-control--inherited";
+	const display = computeRoleModelDisplay(role);
 	const stopRow = (e: Event) => e.stopPropagation();
+
+	if (display.packReadonly) {
+		const reason = display.packName
+			? html`<span class="rrm-badge rrm-badge--pack"
+					title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName}</span>`
+			: html`<span class="rrm-badge rrm-badge--pack" title="This role is read-only in the current scope.">Read-only</span>`;
+		return html`
+			<div class="role-row-model-control role-row-model-control--readonly"
+				data-testid="role-row-model-control" data-model-state="readonly"
+				@click=${stopRow} @keydown=${stopRow}>
+				<div class="role-row-model-readonly" data-testid="role-row-model-readonly">
+					<div class="rrm-ro-row"><span class="rrm-ro-key">Model</span><span class="rrm-ro-val" title="${display.model.effectiveLabel}">${display.model.effectiveLabel}</span></div>
+					<div class="rrm-ro-row"><span class="rrm-ro-key">Thinking</span><span class="rrm-ro-val">${display.thinking.effectiveLabel}</span></div>
+				</div>
+				${reason}
+			</div>
+		`;
+	}
+
+	// Only a CURRENT-SCOPE role override (source === "role") gets the picker's
+	// effective value and the clear/reset affordances. Inherited-role and
+	// default fields show their effective value + source in the read-only
+	// source line, but the picker is fed the empty current-scope override (so it
+	// renders "(use default)" and never clamps/auto-saves an inherited value),
+	// and no model-clear / thinking-reset control is exposed for them — clearing
+	// an empty local field would be a confusing no-op (review findings #1, #2).
+	const overrides = currentScopeRoleOverrides(role);
+
+	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string, clearTestid?: string) => {
+		const currentOverride = f.kind === "role";
+		return html`
+		<span class="rrm-src" data-testid="${testid}">
+			<span class="rrm-src-key">${key}</span>
+			${currentOverride ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
+			<span class="rrm-badge rrm-badge--${f.kind}">${f.badge}</span>
+			${clearTestid && currentOverride ? html`<button class="rrm-clear-btn" data-testid="${clearTestid}"
+				title="Reset thinking to default"
+				@click=${(e: Event) => { e.stopPropagation(); control.onThinkingChange(role, ""); }}>${icon(X, "xs")}</button>` : nothing}
+		</span>
+	`;
+	};
+
 	return html`
-		<div class="role-row-model-control ${stateClass}"
+		<div class="role-row-model-control role-row-model-control--${display.state}"
 			data-testid="role-row-model-control"
-			data-model-state="${overridden ? "override" : "inherited"}"
+			data-model-state="${display.state}"
 			@click=${stopRow}
 			@keydown=${stopRow}>
-			${renderModelRow(
-				"",
-				"",
-				overridden ? (role.model ?? "") : "",
-				(v) => control.onModelChange(role, v),
-				overridden ? (role.thinkingLevel ?? "") : "",
-				(v) => {
-					// Inherited rows must never auto-save a thinking-only override
-					// while no model override exists. renderModelRow's reactive
-					// clamp also fires onThinkingChange via queueMicrotask — ignore
-					// it here so an inherited row stays inherited.
-					if (!overridden) return;
-					control.onThinkingChange(role, v);
-				},
-				"",
-				{ fallbackLabel: overridden ? "(use default)" : formatRoleDefaultModelLabel(role.name) },
-			)}
+			<div class="role-row-model-control-main">
+				${renderModelRow(
+					"",
+					"",
+					overrides.model,
+					(v) => control.onModelChange(role, v),
+					overrides.thinkingLevel,
+					(v) => control.onThinkingChange(role, v),
+					"",
+					{ fallbackLabel: "(use default)" },
+				)}
+			</div>
+			<div class="role-row-model-sources">
+				${sourceLine("Model", display.model, "role-row-model-source")}
+				${sourceLine("Thinking", display.thinking, "role-row-thinking-source", "role-row-thinking-clear-btn")}
+			</div>
 		</div>
 	`;
 }
@@ -670,13 +954,21 @@ function renderListView(): TemplateResult {
 		modelControl: {
 			savedFlashRole: savedModelFlashRole,
 			onModelChange: (role, model) => {
-				// Inherited -> override: preserve existing thinking if present.
-				// Clear -> fully revert to inherited/default display.
-				void persistInlineModel(role, model, model ? (role.thinkingLevel ?? "") : "");
+				// Model and thinking are independent. Setting OR clearing the model
+				// preserves any existing thinking override — clearing the model must
+				// never write thinkingLevel:"" (thinking is reset only by its own
+				// dedicated clear control, role-row-thinking-clear-btn). The pending
+				// draft (not the stale row) supplies the preserved thinking value so a
+				// rapid follow-up thinking edit cannot clobber this model choice.
+				queueInlineEdit(role, { model });
 			},
 			onThinkingChange: (role, thinking) => {
-				// Only fired for override rows (guarded in the inline control).
-				void persistInlineModel(role, role.model ?? "", thinking);
+				// Thinking is editable/clearable independently of the model. The pending
+				// draft supplies the preserved current-scope model OVERRIDE so a
+				// thinking-only change never promotes an inherited model into a fresh
+				// current-scope model override — and a model picked moments earlier
+				// (still mid-save) is preserved instead of being overwritten with "".
+				queueInlineEdit(role, { thinkingLevel: thinking });
 			},
 		},
 	});
@@ -900,7 +1192,7 @@ export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
 		const thinkingDisplay = thinkingLevel || "(default)";
 		return html`
 			<p class="roles-tools-note" data-testid="roles-model-tab">
-				Overrides the global default for sessions running as this role. Leave blank to inherit.
+				Role override — empty inherits the role/default hierarchy (inherited role override, then session/review default).
 			</p>
 			<div class="flex flex-col gap-1" data-testid="roles-model-readonly">
 				<div class="flex items-center gap-2">
@@ -916,7 +1208,7 @@ export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
 	}
 	return html`
 		<p class="roles-tools-note" data-testid="roles-model-tab">
-			Overrides the global default for sessions running as this role. Leave blank to inherit.
+			Role override — empty inherits the role/default hierarchy (inherited role override, then session/review default).
 		</p>
 		${renderModelRow(
 			"Model",
