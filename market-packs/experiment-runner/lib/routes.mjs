@@ -101,6 +101,11 @@ function validateDef(input) {
 		const stop = input.stop || {};
 		const hasStop = Number.isFinite(stop.plateauK) || typeof stop.target === "number";
 		if (!hasStop) return { ok: false, error: "AR_NO_STOP" };
+		// The fixed-per-iteration-budget guardrail: autoresearch refuses to run without
+		// a positive comparable per-run budget (A/B keeps perRunBudget optional).
+		if (!(Number.isFinite(input.perRunBudget) && input.perRunBudget > 0)) {
+			return { ok: false, error: "PER_RUN_BUDGET_REQUIRED" };
+		}
 	}
 	return { ok: true, mode };
 }

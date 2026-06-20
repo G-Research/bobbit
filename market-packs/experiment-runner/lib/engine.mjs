@@ -145,17 +145,30 @@ export function newRunRecord(exp, { armId, repeat, iteration, runId, runKey }) {
 export function parseRawOutcome({ cost, gates, tasks, meta } = {}) {
 	const raw = {};
 	if (cost && typeof cost === "object") {
-		if (typeof cost.totalCostUsd === "number") raw.costUsd = cost.totalCostUsd;
+		// Real gateway shape (GET /api/goals/:id/cost):
+		//   { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalCost, cacheHitRate }.
+		// Keep tolerant fallbacks for legacy/unit-stub field names. The cost endpoint
+		// carries NO wall-clock — wallClockMs is sourced from the goal's timestamps (see meta).
+		if (typeof cost.totalCost === "number") raw.costUsd = cost.totalCost;
+		else if (typeof cost.totalCostUsd === "number") raw.costUsd = cost.totalCostUsd;
 		else if (typeof cost.costUsd === "number") raw.costUsd = cost.costUsd;
-		if (typeof cost.tokensIn === "number") raw.tokensIn = cost.tokensIn;
-		if (typeof cost.tokensOut === "number") raw.tokensOut = cost.tokensOut;
+		if (typeof cost.inputTokens === "number") raw.tokensIn = cost.inputTokens;
+		else if (typeof cost.tokensIn === "number") raw.tokensIn = cost.tokensIn;
+		if (typeof cost.outputTokens === "number") raw.tokensOut = cost.outputTokens;
+		else if (typeof cost.tokensOut === "number") raw.tokensOut = cost.tokensOut;
 		if (typeof cost.cacheHitRate === "number") raw.cacheHitRate = cost.cacheHitRate;
 		if (typeof cost.wallClockMs === "number") raw.wallClockMs = cost.wallClockMs;
 	}
 	if (gates && Array.isArray(gates.gates)) {
+		// Real gateway shape (GET /api/goals/:id/gates): rows keyed `gateId` with
+		// `status` ("passed"|"failed"|"pending"|"bypassed"). Fall back to id/verdict
+		// for legacy/unit stubs.
 		raw.gateVerdicts = {};
 		for (const g of gates.gates) {
-			if (g && g.id) raw.gateVerdicts[g.id] = normalizeVerdict(g.verdict || g.status);
+			if (!g) continue;
+			const key = g.gateId || g.id;
+			if (!key) continue;
+			raw.gateVerdicts[key] = normalizeVerdict(g.status || g.verdict);
 		}
 	} else if (gates && typeof gates === "object" && gates.gateVerdicts) {
 		raw.gateVerdicts = gates.gateVerdicts;
@@ -167,15 +180,36 @@ export function parseRawOutcome({ cost, gates, tasks, meta } = {}) {
 	} else if (tasks && tasks.taskCounts) {
 		raw.taskCounts = tasks.taskCounts;
 	}
+	// Wall-clock from the goal's lifecycle timestamps when the cost channel didn't
+	// supply it (the real cost endpoint never does). Absent when not determinable —
+	// never fabricated.
+	if (typeof raw.wallClockMs !== "number") {
+		const wc = wallClockFromMeta(meta);
+		if (typeof wc === "number") raw.wallClockMs = wc;
+	}
 	const userMetrics = extractUserMetrics(meta);
 	if (userMetrics) raw.userMetrics = userMetrics;
 	return raw;
 }
 
 function normalizeVerdict(v) {
-	if (v === "passed" || v === "pass") return "passed";
+	// A human-bypassed gate is an accepted pass.
+	if (v === "passed" || v === "pass" || v === "bypassed") return "passed";
 	if (v === "failed" || v === "fail") return "failed";
 	return "pending";
+}
+
+/**
+ * Derive wall-clock ms from a PersistedGoal's lifecycle timestamps:
+ * (archivedAt ?? updatedAt) − createdAt. Returns undefined when not determinable.
+ */
+function wallClockFromMeta(meta) {
+	if (!meta || typeof meta !== "object") return undefined;
+	const start = typeof meta.createdAt === "number" ? meta.createdAt : undefined;
+	const end = typeof meta.archivedAt === "number" ? meta.archivedAt : typeof meta.updatedAt === "number" ? meta.updatedAt : undefined;
+	if (typeof start !== "number" || typeof end !== "number") return undefined;
+	const ms = end - start;
+	return ms >= 0 ? ms : undefined;
 }
 
 function extractUserMetrics(meta) {
@@ -306,7 +340,16 @@ export function createGoalReader(io = {}) {
 		cost: (goalId) => get(`/api/goals/${goalId}/cost`),
 		gates: (goalId) => get(`/api/goals/${goalId}/gates`),
 		tasks: (goalId) => get(`/api/goals/${goalId}/tasks`),
-		meta: (goalId) => get(`/api/goals/${goalId}`),
+		// There is NO GET /api/goals/:goalId single-goal endpoint. GET /api/goals
+		// returns { generation, goals: PersistedGoal[] } (each goal has top-level
+		// `metadata` + lifecycle timestamps); resolve the child goal by id so
+		// metadata.experiment.userMetrics + wall-clock are reachable.
+		meta: async (goalId) => {
+			const list = await get(`/api/goals`);
+			const goals = list && Array.isArray(list.goals) ? list.goals : null;
+			if (!goals) return null;
+			return goals.find((g) => g && g.id === goalId) || null;
+		},
 		/** Read all four channels for a goal and assemble a RawOutcome. */
 		async readOutcome(goalId) {
 			const [cost, gates, tasks, meta] = await Promise.all([

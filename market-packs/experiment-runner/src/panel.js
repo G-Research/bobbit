@@ -342,6 +342,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				return { ok: false, error: "routes-unavailable" };
 			}
 			const data = await host.callRoute(name, init);
+			// A route that resolves with an { error } envelope is a FAILURE, not a
+			// success — callers branch on res.ok, so surface it as ok:false. This stops
+			// doLaunch from mirroring a rejected def to the store or navigating onward.
+			if (data && typeof data === "object" && data.error) return { ok: false, error: data.error };
 			return { ok: true, data };
 		} catch (err) {
 			return { ok: false, error: err && err.message ? String(err.message) : String(err) };
@@ -519,6 +523,13 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		// Persist the definition (route-first, then store mirror for resilience).
 		// defineExperiment reads req.body DIRECTLY (the def object IS the body).
 		const defined = await callRoute(host, "defineExperiment", { method: "POST", body: definition });
+		// A real route rejection (e.g. PER_RUN_BUDGET_REQUIRED / OBJECTIVE_REQUIRED) must
+		// NOT mirror a bad def to the store or navigate to the dashboard. routes-unavailable
+		// is the offline fallback that still persists via the store mirror below.
+		if (!defined.ok && defined.error !== "routes-unavailable") {
+			patch(host, instanceKey, { launching: false, launchError: defined.error });
+			return;
+		}
 		let experimentId = d.experimentId;
 		if (defined.ok && defined.data && defined.data.experimentId) experimentId = defined.data.experimentId;
 		if (!experimentId) experimentId = `${safeId(definition.title)}-${Date.now().toString(36)}`;
@@ -649,20 +660,28 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	}
 
 	// ── treatment (key/value) editor ──
-	function renderTreatmentEditor(host, instanceKey, rows, onChange, testid) {
-		const setRows = (next) => onChange(next.length ? next : emptyTreatmentRows());
+	// `mutate(updater)` applies updater(currentRows) against the LIVE draft. Cell
+	// edits MUST NOT rebuild from the render-closure `rows` snapshot: the editor
+	// re-renders asynchronously while patchDraft updates the draft synchronously, so
+	// editing a row's key then its value before a repaint would otherwise drop the
+	// first edit (an empty key is dropped by rowsToObject, leaving variants "identical").
+	function renderTreatmentEditor(host, instanceKey, rows, mutate, testid) {
+		const nonEmpty = (next) => (next.length ? next : emptyTreatmentRows());
+		const setCell = (i, field, value) => mutate((cur) => { const next = cur.slice(); next[i] = { ...next[i], [field]: value }; return next; });
+		const removeRow = (i) => mutate((cur) => { const next = cur.slice(); next.splice(i, 1); return nonEmpty(next); });
+		const addRow = () => mutate((cur) => [...cur, { key: "", value: "" }]);
 		return html`
 			<div class="exp-kv" data-testid=${testid}>
 				${arrayOf(rows).map((row, i) => html`
 					<div class="exp-kv-row">
 						<input class="exp-input exp-kv-key" type="text" placeholder="key" .value=${asText(row.key)}
-							@input=${(e) => { const next = rows.slice(); next[i] = { ...row, key: e.currentTarget.value }; setRows(next); }} />
+							@input=${(e) => setCell(i, "key", e.currentTarget.value)} />
 						<input class="exp-input exp-kv-val" type="text" placeholder="value" .value=${asText(row.value)}
-							@input=${(e) => { const next = rows.slice(); next[i] = { ...row, value: e.currentTarget.value }; setRows(next); }} />
+							@input=${(e) => setCell(i, "value", e.currentTarget.value)} />
 						<button class="exp-icon-btn" type="button" title="Remove" aria-label="Remove key"
-							@click=${() => { const next = rows.slice(); next.splice(i, 1); setRows(next); }}>✕</button>
+							@click=${() => removeRow(i)}>✕</button>
 					</div>`)}
-				<button class="exp-btn secondary tiny" type="button" @click=${() => setRows([...arrayOf(rows), { key: "", value: "" }])}>+ Add key</button>
+				<button class="exp-btn secondary tiny" type="button" @click=${addRow}>+ Add key</button>
 			</div>
 		`;
 	}
@@ -740,7 +759,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 								@click=${() => removeVariant(i)}>Remove</button>
 						</div>
 						<div class="exp-field-label">Metadata treatment</div>
-						${renderTreatmentEditor(host, instanceKey, v.metadata, (rows) => setVariant(i, { metadata: rows }), "experiment-runner-variant-metadata")}
+						${renderTreatmentEditor(host, instanceKey, v.metadata, (updater) => patchDraft(host, instanceKey, (dd) => {
+							const next = arrayOf(dd.ab && dd.ab.variants).slice();
+							const cur = arrayOf(next[i] && next[i].metadata).slice();
+							next[i] = { ...next[i], metadata: updater(cur) };
+							dd.ab = { ...dd.ab, variants: next };
+						}), "experiment-runner-variant-metadata")}
 						<details class="exp-details" ?open=${v.rolesOpen}>
 							<summary @click=${() => setVariant(i, { rolesOpen: !v.rolesOpen })}>Advanced: per-arm roles</summary>
 							<textarea class="exp-input exp-mono" rows="3" placeholder='{"coder": {"model": "…"}}'
@@ -806,7 +830,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					<span class="exp-hint">Candidates failing verification are rejected even if the objective improves.</span>
 				</label>
 				<div class="exp-field-label">Search seed (iteration-0 candidate)</div>
-				${renderTreatmentEditor(host, instanceKey, auto.seed, (rows) => setAuto({ seed: rows }), "experiment-runner-seed-metadata")}
+				${renderTreatmentEditor(host, instanceKey, auto.seed, (updater) => patchDraft(host, instanceKey, (dd) => {
+					dd.auto = { ...dd.auto, seed: updater(arrayOf(dd.auto && dd.auto.seed).slice()) };
+				}), "experiment-runner-seed-metadata")}
 			</section>
 
 			<section class="exp-card" data-testid="experiment-runner-auto-caps">

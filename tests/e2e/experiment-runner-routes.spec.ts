@@ -76,6 +76,42 @@ async function loadRoutes(): Promise<Record<string, (ctx: any, req: any) => Prom
 	return mod.routes as Record<string, (ctx: any, req: any) => Promise<any>>;
 }
 
+const ENGINE_MODULE = resolve(PROJECT_ROOT, "market-packs", "experiment-runner", "lib", "engine.mjs");
+async function loadCreateGoalReader(): Promise<(io: any) => any> {
+	const mod = await import(pathToFileURL(ENGINE_MODULE).href);
+	return mod.createGoalReader as (io: any) => any;
+}
+
+/**
+ * A mock fetch returning the REAL gateway REST response shapes (src/server/server.ts)
+ * for every spawned arm, so the SHIPPED engine.parseRawOutcome / createGoalReader is
+ * exercised end-to-end (NOT a pre-normalized RawOutcome stub). This is the gap the
+ * code-quality review found: the previous reader bypassed the parser entirely.
+ */
+function makeRestFetch(byGoalId: Map<string, any>) {
+	const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+	return async (url: string) => {
+		const path = String(url).replace(/^https?:\/\/[^/]+/, "");
+		if (path === "/api/goals") {
+			const goals = [...byGoalId.entries()].map(([goalId, opts]) => ({
+				id: goalId,
+				createdAt: 10_000,
+				updatedAt: 25_000,
+				// Mirror the arm's objective into the goal metadata, exactly as a settled
+				// arm would surface it (metadata.experiment.userMetrics).
+				metadata: { experiment: { userMetrics: { objective: opts?.metadata?.experiment?.iteration ?? 1 } } },
+			}));
+			return ok({ generation: 1, goals });
+		}
+		const m = path.match(/^\/api\/goals\/([^/]+)\/(cost|gates|tasks)$/);
+		if (!m) return { ok: false, status: 404, json: async () => ({}) };
+		const kind = m[2];
+		if (kind === "cost") return ok({ inputTokens: 800, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0.1, cacheHitRate: 0.5 });
+		if (kind === "gates") return ok({ gates: [{ gateId: "build", status: "passed" }, { gateId: "review", status: "bypassed" }] });
+		return ok({ tasks: [{ state: "complete" }] });
+	};
+}
+
 async function buildHost(gateway: any, ownerId: string, spawnChildGoal: any): Promise<any> {
 	const { createServerHostApi } = await import("../../dist/server/extension-host/server-host-api.js");
 	const { getPackStore } = await import("../../dist/server/extension-host/pack-store.js");
@@ -179,6 +215,63 @@ test.describe("experiment-runner routes — A/B fan-out via the spawnGoal seam",
 			expect(armIds.has("baseline")).toBe(true);
 			expect(armIds.has("hi")).toBe(true);
 			expect(agg.comparisons.length).toBeGreaterThan(0);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — A/B fan-out through the LIVE REST parser", () => {
+	test("define → launch → poll → collect → aggregate via createGoalReader + real REST shapes", async ({ gateway }) => {
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const createGoalReader = await loadCreateGoalReader();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			// The REAL reader: an injected fetch returning the gateway's actual cost/gates/
+			// tasks/goals-list shapes, so the shipped parser (NOT a normalized stub) runs.
+			const reader = createGoalReader({ fetchImpl: makeRestFetch(byGoalId), creds: { gatewayUrl: "https://gw", token: "tok" } });
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ab-live", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ab-live-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ab live e2e",
+				mode: "ab",
+				runnable: { kind: "command", command: "echo metric" },
+				variants: [
+					{ armId: "baseline", label: "baseline", metadata: { temperature: 0.2 } },
+					{ armId: "hi", label: "hi", metadata: { temperature: 0.9 } },
+				],
+				repeats: 2,
+				perRunBudget: 1,
+			};
+
+			const defined = await routes.defineExperiment(ctx, { body: def });
+			expect(defined.error).toBeUndefined();
+			const launched = await routes.launch(ctx, { body: { experimentId } });
+			expect(launched.error).toBeUndefined();
+			expect(spawned).toHaveLength(4);
+
+			// poll/collect must advance THROUGH the live parser: all-passed (+bypassed)
+			// gates settle the runs; the real cost shape feeds costUsd.
+			const polled = await routes.poll(ctx, { body: { experimentId } });
+			expect(polled.allSettled).toBe(true);
+			const collected = await routes.collect(ctx, { body: { experimentId } });
+			expect(collected.runs).toHaveLength(4);
+			expect(collected.runs.every((r: any) => r.status === "collected")).toBe(true);
+			expect(collected.runs.every((r: any) => r.completionBar === "passed")).toBe(true);
+			// The bypassed gate normalized to passed → verified; cost parsed from totalCost.
+			expect(collected.runs.every((r: any) => r.verified === true)).toBe(true);
+			expect(collected.runs.every((r: any) => r.cost && r.cost.costUsd === 0.1)).toBe(true);
+			expect(collected.runs.every((r: any) => r.rawOutcome && r.rawOutcome.tokensIn === 800)).toBe(true);
+
+			const agg = await routes.aggregate(ctx, { body: { experimentId } });
+			expect(agg.mode).toBe("ab");
+			const armIds = new Set(agg.aggregates.map((a: any) => a.armId));
+			expect(armIds.has("baseline")).toBe(true);
+			expect(armIds.has("hi")).toBe(true);
 		} finally {
 			await deleteSession(owner);
 		}
