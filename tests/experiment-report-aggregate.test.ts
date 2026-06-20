@@ -99,6 +99,26 @@ describe("aggregate: same-completion-bar filtering", () => {
 		];
 		assert.equal(filterByBar(runs).length, 1);
 	});
+
+	it("bar 'all' disables same-bar filtering (keeps every run)", () => {
+		const runs = [
+			run({ runId: "r1", armId: "A", completionBar: "passed", metrics: { m: 10 } }),
+			run({ runId: "r2", armId: "A", completionBar: "failed", metrics: { m: 20 } }),
+			run({ runId: "r3", armId: "A", completionBar: "incomplete", metrics: { m: 30 } }),
+		];
+		// filterByBar keeps all rows under 'all'.
+		assert.equal(filterByBar(runs, "all").length, 3);
+		// aggregateArm under 'all' aggregates across every bar (median 10,20,30 = 20),
+		// with nothing dropped — vs the default 'passed' which keeps only r1.
+		const all = aggregateArm(runs, "A", { metricId: "m", bar: "all" });
+		assert.equal(all.value, 20);
+		assert.equal(all.n, 3);
+		assert.equal(all.droppedN, 0);
+		const passed = aggregateArm(runs, "A", { metricId: "m" });
+		assert.equal(passed.value, 10);
+		assert.equal(passed.n, 1);
+		assert.equal(passed.droppedN, 2);
+	});
 });
 
 describe("aggregate: edge cases", () => {

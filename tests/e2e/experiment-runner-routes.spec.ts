@@ -320,6 +320,17 @@ test.describe("experiment-runner routes — autoresearch loop on a stub objectiv
 			expect(defined.error).toBeUndefined();
 			expect(defined.experimentId).toBe(experimentId);
 
+			// Fix #1a regression guard: poll/collect must NOT flip an autoresearch
+			// experiment to a terminal "done" state. Before the fix, the first collected
+			// candidate made every run terminal → state "done" → the panel stopped driving
+			// the loop after iteration 0. Terminality is owned ONLY by iterate's stop.
+			await routes.iterate(ctx, { body: { experimentId } }); // spawn iter-0
+			await routes.poll(ctx, { body: { experimentId } });
+			await routes.collect(ctx, { body: { experimentId } });
+			const midState = await (await packStore()).get(PACK_ID, `exp/${experimentId}/state`);
+			expect(midState.status).not.toBe("done");
+			expect(midState.stopped).toBeFalsy();
+
 			// Drive the deterministic loop one step at a time until it stops.
 			let res: any = {};
 			let guard = 0;
@@ -345,6 +356,126 @@ test.describe("experiment-runner routes — autoresearch loop on a stub objectiv
 			// The experiment state is terminal with the plateau stop reason.
 			const state = await store.get(PACK_ID, `exp/${experimentId}/state`);
 			expect(state.stopped.reason).toMatch(/plateau/i);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — autoresearch iteration-0 carries the search seed", () => {
+	test("the first candidate's spawn args carry def.seed metadata + inlineRoles", async ({ gateway }) => {
+		// Pins fix #2: defineExperiment persists def.seed and seedCandidate returns it
+		// for iteration 0, so the user's search-seed treatment actually reaches the
+		// first candidate (it was persisted-then-ignored before).
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, () => ({
+				costUsd: 0.1,
+				gateVerdicts: { review: "passed" },
+				userMetrics: { objective: 1 },
+			}));
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ar-seed", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ar-seed-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ar seed e2e",
+				mode: "autoresearch",
+				runnable: { kind: "agent", spec: "optimize the thing" },
+				objective: { metricId: "objective.value", direction: "max" },
+				caps: { maxIterations: 6 },
+				stop: { plateauK: 3 },
+				perRunBudget: 1,
+				seed: { metadata: { tempSeed: 0.5, retries: 3 }, inlineRoles: { coder: { model: "seed-model" } } },
+			};
+			const defined = await routes.defineExperiment(ctx, { body: def });
+			expect(defined.error).toBeUndefined();
+
+			// The seed survives persistence (was dropped before).
+			const store = await packStore();
+			const storedDef = await store.get(PACK_ID, `exp/${experimentId}`);
+			expect(storedDef.seed).toEqual(def.seed);
+
+			// The first candidate carries the seed treatment in its spawn args.
+			const first = await routes.iterate(ctx, { body: { experimentId } });
+			expect(first.action).toBe("spawned");
+			expect(first.candidateRun.iteration).toBe(0);
+			expect(spawned).toHaveLength(1);
+			expect(spawned[0].opts.metadata.tempSeed).toBe(0.5);
+			expect(spawned[0].opts.metadata.retries).toBe(3);
+			expect(spawned[0].opts.inlineRoles).toEqual({ coder: { model: "seed-model" } });
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — A/B sameCompletionBar gates aggregation", () => {
+	test("mixed-bar runs aggregate differently when sameCompletionBar is false vs true", async ({ gateway }) => {
+		// Pins fix #3: defineExperiment persists sameCompletionBar and aggregate honours
+		// it (false = aggregate across ALL bars; true/default = only the 'passed' bar).
+		const owner = await createSession();
+		const { byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			// Repeat 0 of each arm passes; repeat 1 fails — so every arm has one passed +
+			// one failed collected run, giving same-bar filtering something to drop.
+			const reader = makeGoalReader(byGoalId, (opts) => {
+				const repeat = opts?.metadata?.experiment?.repeat ?? 0;
+				return {
+					costUsd: 0.1,
+					gateVerdicts: { build: repeat === 0 ? "passed" : "failed" },
+					taskCounts: { complete: 1, total: 1 },
+				};
+			});
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ab-bar", tool: "experiment-runner/routes" };
+
+			const baseDef = (extra) => ({
+				title: "ab bar e2e",
+				mode: "ab",
+				runnable: { kind: "command", command: "echo metric" },
+				variants: [
+					{ armId: "baseline", label: "baseline", metadata: { temperature: 0.2 } },
+					{ armId: "hi", label: "hi", metadata: { temperature: 0.9 } },
+				],
+				repeats: 2,
+				metrics: [{ metricId: "cost.totalUsd" }],
+				perRunBudget: 1,
+				...extra,
+			});
+
+			const runExperiment = async (experimentId, extra) => {
+				await routes.defineExperiment(ctx, { body: { experimentId, ...baseDef(extra) } });
+				await routes.launch(ctx, { body: { experimentId } });
+				await routes.poll(ctx, { body: { experimentId } });
+				await routes.collect(ctx, { body: { experimentId } });
+				return routes.aggregate(ctx, { body: { experimentId } });
+			};
+
+			// Default (sameCompletionBar omitted → true): only the passed run per arm counts.
+			const sameId = `e2e-ab-samebar-${uid()}`;
+			const sameAgg = await runExperiment(sameId);
+			const sameCost = sameAgg.aggregates.filter((a) => a.metricId === "cost.totalUsd");
+			expect(sameCost.length).toBe(2);
+			expect(sameCost.every((a) => a.n === 1)).toBe(true);
+			expect(sameCost.every((a) => a.droppedN === 1)).toBe(true);
+
+			// sameCompletionBar:false → aggregate across BOTH bars (nothing dropped).
+			const allId = `e2e-ab-allbar-${uid()}`;
+			const allAgg = await runExperiment(allId, { sameCompletionBar: false });
+			const allCost = allAgg.aggregates.filter((a) => a.metricId === "cost.totalUsd");
+			expect(allCost.length).toBe(2);
+			expect(allCost.every((a) => a.n === 2)).toBe(true);
+			expect(allCost.every((a) => a.droppedN === 0)).toBe(true);
+
+			// The persisted def records the choice.
+			const store = await packStore();
+			expect((await store.get(PACK_ID, `exp/${sameId}`)).sameCompletionBar).toBe(true);
+			expect((await store.get(PACK_ID, `exp/${allId}`)).sameCompletionBar).toBe(false);
 		} finally {
 			await deleteSession(owner);
 		}

@@ -257,6 +257,64 @@ test("autoresearch launches successfully via iterate (not the A/B-only launch ro
 	await expect(launchError).toHaveCount(0);
 });
 
+test("autoresearch dashboard reflects a loop that advanced beyond iteration 0 (≥2 ledger entries + stop reason)", async ({ page }) => {
+	// Regression for fix #1: the autoresearch loop must continue past the first
+	// candidate (a prior terminal-state bug flipped the experiment to "done" after
+	// iteration 0). The dashboard must surface a MULTI-iteration ledger and the
+	// deterministic stop — not just a single iteration-0 row.
+	await installPack();
+
+	const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+	const experimentId = "seed-ar-1";
+	const def = {
+		experimentId, title: "seeded optimize", mode: "autoresearch",
+		runnable: { kind: "agent", spec: "optimize the thing" },
+		objective: { metricId: "objective.value", direction: "max" },
+		caps: { maxIterations: 10 }, stop: { plateauK: 2 }, perRunBudget: 1,
+		metrics: [{ metricId: "objective.value", primary: true }],
+	};
+	// A candidate run per iteration: improves (1→2) then plateaus (2, 2).
+	const mkRun = (iteration: number, objective: number, decision: "accepted" | "rejected") => ({
+		experimentId, runId: `iter-${iteration}`, armId: `iter-${iteration}`, iteration,
+		runKey: `${experimentId}:iter-${iteration}`, status: "collected",
+		completionBar: "passed", verified: true,
+		metrics: { "objective.value": objective }, cost: { costUsd: 0.1 },
+		candidate: { decision },
+	});
+	const ledger = [
+		{ iteration: 0, runId: "iter-0", candidate: {}, objective: 1, decision: "accepted", bestObjectiveAfter: 1, reason: "improved & passed" },
+		{ iteration: 1, runId: "iter-1", candidate: {}, objective: 2, decision: "accepted", bestObjectiveAfter: 2, reason: "improved & passed" },
+		{ iteration: 2, runId: "iter-2", candidate: {}, objective: 2, decision: "rejected", bestObjectiveAfter: 2, reason: "regressed" },
+		{ iteration: 3, runId: "iter-3", candidate: {}, objective: 2, decision: "rejected", bestObjectiveAfter: 2, reason: "regressed" },
+	];
+	const store = getPackStore();
+	await store.put(PACK, `exp/${experimentId}`, def);
+	// Stopped (NOT running) so the dashboard renders deterministically without
+	// driving a real spawn through the loop.
+	await store.put(PACK, `exp/${experimentId}/state`, { status: "done", stopped: { reason: "plateau over K=2" } });
+	await store.put(PACK, `exp/${experimentId}/metrics`, def.metrics);
+	await store.put(PACK, `exp/${experimentId}/ledger`, ledger);
+	for (const r of [mkRun(0, 1, "accepted"), mkRun(1, 2, "accepted"), mkRun(2, 2, "rejected"), mkRun(3, 2, "rejected")]) {
+		await store.put(PACK, `exp/${experimentId}/run/${r.runId}`, r);
+	}
+	await store.put(PACK, "index/experiments", [experimentId]);
+
+	await openWithPack(page);
+	await openPanelDeepLink(page, `?experimentId=${experimentId}&view=dashboard`);
+
+	await expect(page.locator(tid("experiment-runner-view-dashboard"))).toBeVisible({ timeout: 20_000 });
+	await expect(page.locator(tid("experiment-runner-dashboard-body"))).toBeVisible({ timeout: 20_000 });
+
+	// The ledger widget shows MULTIPLE iterations (the loop advanced beyond #0).
+	const ledgerRows = page.locator(`${tid("experiment-runner-widget")}[data-widget-type="ledger-table"] tbody tr`);
+	await expect.poll(async () => ledgerRows.count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+
+	// The deterministic stop is surfaced on the objective curve.
+	const body = page.locator(tid("experiment-runner-dashboard-body"));
+	await expect(body).toContainText(/Stopped:/i);
+	await expect(body).toContainText(/plateau/i);
+});
+
 test("dashboard renders a seeded A/B experiment; editing the spec re-renders without a re-run; uninstall reconciles", async ({ page }) => {
 	await installPack();
 

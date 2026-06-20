@@ -165,6 +165,16 @@ export const routes = {
 			stop: input.stop,
 			maxConcurrency: Number.isFinite(input.maxConcurrency) ? input.maxConcurrency : undefined,
 			perRunBudget: Number.isFinite(input.perRunBudget) ? input.perRunBudget : undefined,
+			// A/B same-completion-bar filtering toggle (default true). When false the
+			// aggregate/report routes aggregate across ALL completion bars.
+			sameCompletionBar: input.sameCompletionBar !== false,
+			// Autoresearch search seed ({ metadata, inlineRoles }) for the iteration-0
+			// candidate, plus the remaining AR knobs the panel emits. Persisted here so
+			// iterate can carry them forward (seedCandidate reads def.seed).
+			seed: input.seed && typeof input.seed === "object" ? input.seed : undefined,
+			correctnessGateId: strOf(input.correctnessGateId),
+			strategy: strOf(input.strategy),
+			batchSize: Number.isFinite(input.batchSize) ? input.batchSize : undefined,
 			createdAt: nowMs(),
 		};
 		await ctx.host.store.put(keys.experimentKey(experimentId), def);
@@ -262,8 +272,10 @@ export const routes = {
 			await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
 		}
 		// Persist a terminal state once every run has settled so the panel stops
-		// polling a finished experiment.
-		await markDoneIfFinished(ctx, experimentId, runs, allSettled);
+		// polling a finished A/B experiment. Autoresearch terminality is owned SOLELY
+		// by iterate's deterministic stop (state.stopped) — flipping "done" here after
+		// the first candidate collects would kill the loop before it can iterate.
+		if (def.mode !== "autoresearch") await markDoneIfFinished(ctx, experimentId, runs, allSettled);
 		return { runs, allSettled };
 	},
 
@@ -301,7 +313,9 @@ export const routes = {
 		// When collecting the WHOLE experiment (no onlyRunId), flip to done once
 		// every run is terminal (collected/failed/cancelled) so the panel stops
 		// treating it as running.
-		if (!onlyRunId) {
+		// A/B only: autoresearch terminality is owned by iterate's deterministic stop
+		// (a single collected candidate must NOT flip the experiment to "done").
+		if (!onlyRunId && def.mode !== "autoresearch") {
 			const allTerminal = runs.length > 0 && runs.every((r) => TERMINAL_RUN_STATUSES.includes(r.status));
 			await markDoneIfFinished(ctx, experimentId, runs, allTerminal);
 		}
@@ -317,11 +331,13 @@ export const routes = {
 		if (!def) return { error: "NOT_FOUND" };
 		const runs = await loadRuns(ctx, experimentId);
 		const { resolved } = await resolvedMetricsFor(ctx, experimentId, def);
+		// sameCompletionBar=false ⇒ aggregate across ALL bars (no same-bar filtering).
+		const bar = def.sameCompletionBar === false ? "all" : "passed";
 		if (def.mode === "autoresearch") {
 			const ledger = buildLedger({ runs, objective: def.objective });
-			return { mode: "autoresearch", ledger, aggregation: aggregateExperiment({ def, runs, metrics: resolved }) };
+			return { mode: "autoresearch", ledger, aggregation: aggregateExperiment({ def, runs, metrics: resolved, bar }) };
 		}
-		return aggregateExperiment({ def, runs, metrics: resolved });
+		return aggregateExperiment({ def, runs, metrics: resolved, bar });
 	},
 
 	// ── iterate (autoresearch only) — ONE deterministic loop step ──────────────
@@ -384,7 +400,7 @@ export const routes = {
 
 		// Generate + evaluate the next candidate (ledger-seeded; treatment from body).
 		const nextIteration = runs.filter((r) => typeof r.iteration === "number").length;
-		const candidate = bodyOf(req).candidate || seedCandidate(ledger, def);
+		const candidate = bodyOf(req).candidate || seedCandidate(ledger, def, nextIteration);
 		const item = { armId: `iter-${nextIteration}`, iteration: nextIteration, runId: keys.arRunId(nextIteration), runKey: keys.spawnRunKey(experimentId, keys.arRunId(nextIteration)) };
 		const run = newRunRecord(def, item);
 		try {
@@ -470,7 +486,9 @@ export const routes = {
 		]);
 		const { resolved } = await resolvedMetricsFor(ctx, experimentId, def);
 		const ledger = Array.isArray(ledgerStored) ? ledgerStored : def.mode === "autoresearch" ? buildLedger({ runs, objective: def.objective }) : [];
-		const model = buildReportModel({ def, runs, ledger, dashboard, metrics: resolved, state });
+		// Thread the experiment's same-completion-bar choice into the A/B aggregation.
+		const bar = def.sameCompletionBar === false ? "all" : "passed";
+		const model = buildReportModel({ def, runs, ledger, dashboard, metrics: resolved, state, bar });
 		return { model, html: renderReportHtml(model) };
 	},
 
@@ -504,8 +522,21 @@ export const routes = {
 	},
 };
 
-/** v1 simple proposer: greedy seed around best-so-far from the ledger. Deterministic input. */
-function seedCandidate(ledger, def) {
+/**
+ * v1 simple proposer (deterministic input).
+ * - Iteration 0 carries the user's persisted search seed ({ metadata, inlineRoles })
+ *   so the first candidate runs under the seed treatment.
+ * - Later iterations greedily seed around the best-so-far from the ledger.
+ * buildCandidateSpawnArgs forwards candidate.metadata + candidate.inlineRoles.
+ */
+function seedCandidate(ledger, def, iteration = 0) {
+	if (iteration === 0 && def && def.seed && typeof def.seed === "object") {
+		return {
+			summary: "establish a baseline candidate from the search seed",
+			metadata: def.seed.metadata || {},
+			inlineRoles: def.seed.inlineRoles,
+		};
+	}
 	const accepted = (ledger || []).filter((e) => e.decision === "accepted");
 	const best = accepted.length ? accepted[accepted.length - 1] : undefined;
 	return {

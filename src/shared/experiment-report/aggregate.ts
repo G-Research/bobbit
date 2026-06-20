@@ -96,8 +96,16 @@ export function spreadOf(values: number[]): Spread | null {
 	};
 }
 
-/** Keep only runs whose completionBar matches the requested bar (default 'passed'). */
-export function filterByBar(runs: RunRecord[], bar: CompletionBar = "passed"): RunRecord[] {
+/** A bar filter: a concrete completion bar, or 'all' (no same-bar filtering). */
+export type BarFilter = CompletionBar | "all";
+
+/**
+ * Keep only runs whose completionBar matches the requested bar (default
+ * 'passed'). The special value 'all' disables same-completion-bar filtering and
+ * keeps every run (used when an experiment opts out of same-bar aggregation).
+ */
+export function filterByBar(runs: RunRecord[], bar: BarFilter = "passed"): RunRecord[] {
+	if (bar === "all") return [...runs];
 	return runs.filter((r) => (r.completionBar ?? "incomplete") === bar);
 }
 
@@ -124,7 +132,7 @@ export function aggregateArm(
 	selection: MetricSelection,
 ): ArmAggregate {
 	const metricId = selection.metricId;
-	const bar = selection.bar ?? "passed";
+	const bar: BarFilter = selection.bar ?? "passed";
 	const armRuns = runs.filter((r) => r.armId === armId);
 	const kept = filterByBar(armRuns, bar);
 	const droppedN = armRuns.length - kept.length;

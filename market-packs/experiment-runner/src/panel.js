@@ -506,13 +506,31 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		// rawOutcome, completionBar, and verified are written ONLY by `collect`. So
 		// follow the poll with a `collect` (idempotent — it only touches `settled`
 		// runs, best-effort) BEFORE `report`, otherwise live A/B aggregates are empty.
+		// Autoresearch is an autonomous LOOP: `iterate` collects the settled candidate,
+		// makes the deterministic accept/reject decision, and spawns the NEXT candidate
+		// (or records the deterministic stop). Driving poll+collect here would collect
+		// the candidate but never advance the loop. A/B keeps the poll(+collect) path —
+		// `poll` only settles + stores cost, so collect must follow to extract metrics.
 		const hasSettled = (rs) => arrayOf(rs).some((r) => r && r.status === "settled");
 		if (state && state.status === "running") {
-			const polled = await callRoute(host, "poll", { method: "POST", body: { experimentId } });
-			if (polled.ok && polled.data && Array.isArray(polled.data.runs)) runs = polled.data.runs;
-			if (hasSettled(runs)) {
-				const collected = await callRoute(host, "collect", { method: "POST", body: { experimentId } });
-				if (collected.ok && collected.data && Array.isArray(collected.data.runs)) runs = collected.data.runs;
+			if (def && def.mode === "autoresearch") {
+				// Best-effort, idempotent: one loop step per dashboard load.
+				const iterated = await callRoute(host, "iterate", { method: "POST", body: { experimentId } });
+				if (iterated.ok && iterated.data && Array.isArray(iterated.data.ledger)) ledger = iterated.data.ledger;
+				// Re-read runs/state so the dashboard reflects the spawn/stop just made.
+				const refreshed = await callRoute(host, "getExperiment", { method: "GET", query: { experimentId } });
+				if (refreshed.ok && refreshed.data && refreshed.data.def) {
+					state = refreshed.data.state;
+					runs = arrayOf(refreshed.data.runs);
+					if (arrayOf(refreshed.data.ledger).length) ledger = refreshed.data.ledger;
+				}
+			} else {
+				const polled = await callRoute(host, "poll", { method: "POST", body: { experimentId } });
+				if (polled.ok && polled.data && Array.isArray(polled.data.runs)) runs = polled.data.runs;
+				if (hasSettled(runs)) {
+					const collected = await callRoute(host, "collect", { method: "POST", body: { experimentId } });
+					if (collected.ok && collected.data && Array.isArray(collected.data.runs)) runs = collected.data.runs;
+				}
 			}
 		}
 

@@ -7,12 +7,11 @@
 // Pure module: no node:/server imports, so build:packs bundles it into the pack's
 // confined worker as lib/experiment-report.mjs.
 
-import { aggregateAB, compareAll, metricDirection } from "./aggregate.js";
+import { aggregateAB, compareAll, metricDirection, type BarFilter } from "./aggregate.js";
 import { bestObjective, buildObjectiveSeries, cumulativeCost, exceedsCaps, stopFromLedger } from "./series.js";
 import type {
 	ArmAggregate,
 	AutoresearchCaps,
-	CompletionBar,
 	DashboardSpec,
 	ExperimentDef,
 	ExperimentMode,
@@ -71,15 +70,15 @@ export function aggregateExperiment(input: {
 	def?: ExperimentDef;
 	runs?: RunRecord[];
 	metrics?: MetricSelection[];
-	bar?: CompletionBar;
+	bar?: BarFilter;
 }): {
 	mode: ExperimentMode;
-	bar: CompletionBar;
+	bar: BarFilter;
 	aggregates: ArmAggregate[];
 	comparisons: MetricComparison[];
 } {
 	const runs = input.runs ?? [];
-	const bar: CompletionBar = input.bar ?? "passed";
+	const bar: BarFilter = input.bar ?? "passed";
 	// Apply the experiment-level bar as a default for selections that don't pin one.
 	const metrics = (input.metrics ?? []).map((m) => (m.bar ? m : { ...m, bar }));
 	const aggregates = aggregateAB(input.def, runs, metrics);
@@ -235,6 +234,8 @@ export function buildReportModel(input: {
 	dashboard?: DashboardSpec | null;
 	metrics?: MetricSelection[];
 	stop?: StopAnnotation | null;
+	/** Same-completion-bar filter for A/B aggregation ('all' = no filtering; default 'passed'). */
+	bar?: BarFilter;
 }): ReportModel {
 	const runs = input.runs ?? [];
 	const ledger = input.ledger ?? [];
@@ -248,8 +249,11 @@ export function buildReportModel(input: {
 	let stop: StopAnnotation | null = input.stop ?? null;
 
 	if (mode === "ab") {
-		aggregates = aggregateAB(input.def, runs, metrics);
-		comparisons = compareAll(aggregates, metrics);
+		// Apply the experiment-level bar as the default for selections that don't pin one.
+		const bar: BarFilter = input.bar ?? "passed";
+		const barMetrics = metrics.map((m) => (m.bar ? m : { ...m, bar }));
+		aggregates = aggregateAB(input.def, runs, barMetrics);
+		comparisons = compareAll(aggregates, barMetrics);
 	} else {
 		const objectiveMetricId = input.def?.objective?.metricId ?? metrics.find((m) => m.primary)?.metricId;
 		if (objectiveMetricId) {

@@ -180,8 +180,8 @@ export interface MetricSelection {
 	aggregation?: Aggregation;
 	/** Override the built-in direction for winner determination. */
 	directionOverride?: Direction;
-	/** Which completion bar to keep when aggregating (default 'passed'). */
-	bar?: CompletionBar;
+	/** Which completion bar to keep when aggregating ('all' = no same-bar filtering; default 'passed'). */
+	bar?: CompletionBar | "all";
 	/** Marks the primary metric (used for headline/summary surfaces). */
 	primary?: boolean;
 }
