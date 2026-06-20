@@ -21,6 +21,7 @@ import {
 	existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, normalize, relative, resolve, sep } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 import { fileURLToPath } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.js";
 
@@ -153,7 +154,7 @@ test.describe("Nested project root — integration", () => {
 		ti.setTimeout(180_000);
 		port = await freePort();
 
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		const fixtureRoot = join(tmp, `bobbit-nested-${port}`);
 		rmSync(fixtureRoot, { recursive: true, force: true });
 		mkdirSync(fixtureRoot, { recursive: true });
@@ -221,7 +222,7 @@ test.describe("Nested project root — integration", () => {
 	test.afterAll(async ({}, ti) => {
 		ti.setTimeout(60_000);
 		if (gw) await stopGW(gw);
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		try { rmSync(join(tmp, `bobbit-nested-${port}`), { recursive: true, force: true }); } catch {}
 	});
 

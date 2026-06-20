@@ -35,10 +35,14 @@ export interface PersistedGoal {
 	setupStatus?: "ready" | "preparing" | "error";
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
-	/** Optional host command run once after component setup during this goal's worktree provisioning. */
-	worktreeSetupCommand?: string;
-	/** Optional per-goal setup timeout override in milliseconds. */
-	worktreeSetupTimeoutMs?: number;
+	/**
+	 * Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys,
+	 * e.g. `bobbit.disabledProviders`, `bobbit.disabledTools`,
+	 * `bobbit.promptSectionOrder`, `hindsight.memory.enabled`). Resolved via
+	 * `resolveGoalMetadata` which deep-merges ancestors → self. Absent ⇒
+	 * current behaviour at every edge. See docs/design/goal-metadata.md.
+	 */
+	metadata?: Record<string, unknown>;
 	/** If this goal is a re-attempt of another goal, the original goal's ID */
 	reattemptOf?: string;
 	/** Whether this goal has been archived (soft-deleted) */
@@ -184,12 +188,16 @@ export class GoalStore {
 							if (!g.setupStatus) {
 								g.setupStatus = "ready";
 							}
-							// Defensively drop an invalid persisted per-goal setup
-							// timeout (absent ⇒ default resolution; a finite positive
-							// integer is the only valid override).
-							if (g.worktreeSetupTimeoutMs !== undefined
-								&& !(Number.isFinite(g.worktreeSetupTimeoutMs) && g.worktreeSetupTimeoutMs > 0)) {
-								delete g.worktreeSetupTimeoutMs;
+							// Drop legacy per-goal worktree setup fields (PR #816,
+							// superseded by metadata + the goalProvisioned lifecycle
+							// hook). Component/project setup commands are unaffected.
+							if (g.worktreeSetupCommand !== undefined) delete g.worktreeSetupCommand;
+							if (g.worktreeSetupTimeoutMs !== undefined) delete g.worktreeSetupTimeoutMs;
+							// Drop malformed persisted metadata (must be a plain object).
+							if (g.metadata !== undefined
+								&& (typeof g.metadata !== "object" || g.metadata === null || Array.isArray(g.metadata))) {
+								console.warn(`[goal-store] Dropping malformed metadata on goal ${g.id}`);
+								delete g.metadata;
 							}
 							// Lazy-migrate workflow snapshots that were written
 							// in YAML shape (snake_case `depends_on`,

@@ -107,6 +107,42 @@ describe("goal proposal round-trip", () => {
 		}
 	});
 
+	it("round-trips arbitrary per-goal metadata", async () => {
+		const mdSid = "sess-goal-metadata";
+		await writeProposalFile(stateDir, mdSid, "goal", {
+			title: "Metadata Goal",
+			spec: "Body.\n",
+			metadata: {
+				"hindsight.memory.enabled": false,
+				"bobbit.disabledTools": ["browser_navigate"],
+			},
+		});
+		const raw = await readProposalFile(stateDir, mdSid, "goal");
+		assert.match(raw!, /hindsight\.memory\.enabled/);
+		const parsed = await parseProposalFile(stateDir, mdSid, "goal");
+		assert.equal(parsed.ok, true, JSON.stringify(parsed));
+		if (parsed.ok) {
+			assert.deepEqual(parsed.value.fields.metadata, {
+				"hindsight.memory.enabled": false,
+				"bobbit.disabledTools": ["browser_navigate"],
+			});
+		}
+	});
+
+	it("drops an empty metadata object on serialize (no override)", async () => {
+		const emptySid = "sess-goal-metadata-empty";
+		await writeProposalFile(stateDir, emptySid, "goal", {
+			title: "No Metadata Goal",
+			spec: "Body.\n",
+			metadata: {},
+		});
+		const raw = await readProposalFile(stateDir, emptySid, "goal");
+		assert.doesNotMatch(raw!, /metadata:/);
+		const parsed = await parseProposalFile(stateDir, emptySid, "goal");
+		assert.equal(parsed.ok, true, JSON.stringify(parsed));
+		if (parsed.ok) assert.equal(parsed.value.fields.metadata, undefined);
+	});
+
 	it("rejects malformed Sub-goals tab fields with STRUCTURAL_VALIDATION_FAILED", async () => {
 		const fp = proposalFilePath(stateDir, sid, "goal");
 		const cases = [
@@ -114,6 +150,8 @@ describe("goal proposal round-trip", () => {
 			"maxConcurrentChildren: 99",
 			"maxNestingDepth: 0",
 			"subgoalsAllowed: maybe",
+			"metadata: not-an-object",
+			"metadata:\n  - arrays-are-not-objects",
 		];
 		for (const bad of cases) {
 			fs.writeFileSync(fp, `---\ntitle: G\n${bad}\n---\nbody\n`);

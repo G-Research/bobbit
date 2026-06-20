@@ -1581,8 +1581,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, worktreeSetupCommand, worktreeSetupTimeoutMs } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -1600,15 +1600,11 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (divergencePolicy !== undefined) body.divergencePolicy = divergencePolicy;
 		if (maxConcurrentChildren !== undefined) body.maxConcurrentChildren = maxConcurrentChildren;
 		if (parentGoalId) body.parentGoalId = parentGoalId;
-		// Per-goal worktree setup hook: forward only when meaningful. An empty
-		// command and a non-positive/non-finite timeout are dropped so the goal
-		// resolves to default (no hook; 120s timeout) — matching the server's
-		// own parse-and-skip semantics.
-		if (typeof worktreeSetupCommand === "string" && worktreeSetupCommand.trim() !== "") {
-			body.worktreeSetupCommand = worktreeSetupCommand.trim();
-		}
-		if (typeof worktreeSetupTimeoutMs === "number" && Number.isInteger(worktreeSetupTimeoutMs) && worktreeSetupTimeoutMs > 0) {
-			body.worktreeSetupTimeoutMs = worktreeSetupTimeoutMs;
+		// Hierarchical per-goal metadata: forward only when it is a non-empty
+		// plain object. Absent/empty metadata is dropped entirely so the goal
+		// resolves to no override — byte-identical to current behaviour.
+		if (metadata && typeof metadata === "object" && !Array.isArray(metadata) && Object.keys(metadata).length > 0) {
+			body.metadata = metadata;
 		}
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",

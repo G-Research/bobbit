@@ -1,0 +1,140 @@
+/**
+ * Focused regression tests for the SECOND implementation review findings on the
+ * hierarchical goal-metadata goal:
+ *
+ *   F2. system-prompt: a role-only session (rolePrompt, no goalSpec) with NO
+ *       `bobbit.promptSectionOrder` must keep its historical prompt shape — the
+ *       role prompt rendered inside a `# Goal` section. A metadata-supplied
+ *       order keeps `Role` as a standalone, independently-reorderable section.
+ *   F3. src/app/session-manager.ts::mirrorGoalSetupFields must not leave STALE
+ *       `previewMetadataRows` when authoritative proposal metadata is empty/
+ *       absent (verified via source-shape assertions — the function is a private
+ *       DOM-bound mutator with no exported behavioural seam).
+ *   F4. tool-activation: the no-`toolManager` fallback path must apply
+ *       `disabledTools` to the fallback builtins, including built-in file tools.
+ */
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { computeToolActivationArgs, type EffectiveTool } from "../src/server/agent/tool-activation.ts";
+import { assembleSystemPrompt, initPromptDirs } from "../src/server/agent/system-prompt.ts";
+
+// ── F4. tool-activation: fallback path honours disabledTools ─────────────────
+
+describe("computeToolActivationArgs — no-toolManager fallback honours disabledTools (F4)", () => {
+	it("drops a disabled built-in file tool from the fallback builtins", () => {
+		// No tool manager ⇒ fallback registers the six file builtins. A
+		// goal-metadata disablement must still strip the disabled one.
+		const result = computeToolActivationArgs(undefined, undefined, undefined, undefined, new Set(["write"]));
+		const builtins = result.env.BOBBIT_BUILTIN_TOOLS.split(",").filter(Boolean);
+		assert.ok(!builtins.includes("write"), "disabled built-in file tool must not be registered in fallback");
+		assert.ok(builtins.includes("read"), "non-disabled file tools still registered");
+		assert.ok(builtins.includes("edit"));
+	});
+
+	it("matches case-insensitively against the lower-cased disabled set", () => {
+		const result = computeToolActivationArgs(undefined, undefined, undefined, undefined, new Set(["read", "grep"]));
+		const builtins = result.env.BOBBIT_BUILTIN_TOOLS.split(",").filter(Boolean);
+		assert.ok(!builtins.includes("read"));
+		assert.ok(!builtins.includes("grep"));
+		assert.deepEqual(builtins.slice().sort(), ["edit", "find", "ls", "write"]);
+	});
+
+	it("empty/absent disabled set keeps all six fallback builtins (byte-identical)", () => {
+		const baseline = computeToolActivationArgs(undefined, undefined);
+		const empty = computeToolActivationArgs(undefined, undefined, undefined, undefined, new Set());
+		assert.equal(baseline.env.BOBBIT_BUILTIN_TOOLS, "edit,find,grep,ls,read,write");
+		assert.deepEqual(empty.env, baseline.env);
+		assert.deepEqual(empty.args, baseline.args);
+	});
+});
+
+// ── F2. system-prompt: role-only backward compatibility ──────────────────────
+
+describe("assembleSystemPrompt — role-only backward compatibility (F2)", () => {
+	let stateDir: string;
+	let cwdDir: string;
+	beforeEach(() => {
+		const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sp-role-only-")));
+		stateDir = path.join(tmp, "state");
+		fs.mkdirSync(path.join(stateDir, "session-prompts"), { recursive: true });
+		process.env.BOBBIT_DIR = tmp;
+		initPromptDirs(stateDir);
+		cwdDir = fs.mkdtempSync(path.join(os.tmpdir(), "sp-role-only-cwd-"));
+	});
+	afterEach(() => { try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+	it("renders a role-only session inside a `# Goal` section when no order given", () => {
+		// Historical shape: with no goalSpec the role prompt rendered under a
+		// `# Goal` header. Absent metadata MUST keep that shape.
+		const p = assembleSystemPrompt("role-only-default", {
+			cwd: cwdDir,
+			rolePrompt: "You are a coder. Do the thing.",
+			roleName: "coder",
+		} as Parameters<typeof assembleSystemPrompt>[1]);
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		assert.ok(content.includes("# Goal\n\nYou are a coder. Do the thing."),
+			"role-only default output must keep the historical `# Goal`-wrapped role shape");
+	});
+
+	it("keeps Role as a standalone section (no `# Goal` header) when an order is supplied", () => {
+		const p = assembleSystemPrompt("role-only-ordered", {
+			cwd: cwdDir,
+			rolePrompt: "You are a coder. Do the thing.",
+			roleName: "coder",
+			sectionOrder: ["Role"],
+		} as Parameters<typeof assembleSystemPrompt>[1]);
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		assert.ok(content.includes("You are a coder. Do the thing."), "role prompt must still be present");
+		assert.ok(!content.includes("# Goal"),
+			"with an explicit order and no goal spec, Role is standalone and not wrapped in `# Goal`");
+	});
+
+	it("goalSpec + role with no order keeps the merged historical shape", () => {
+		const p = assembleSystemPrompt("goal-and-role", {
+			cwd: cwdDir,
+			goalTitle: "G",
+			goalState: "in-progress",
+			goalSpec: "spec body",
+			rolePrompt: "role body",
+			roleName: "coder",
+		} as Parameters<typeof assembleSystemPrompt>[1]);
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		assert.ok(content.includes("# Goal\n\n**G** (Status: in-progress)\n\nspec body\n\n---\n\nrole body"),
+			"Goal+Role default must equal the previous single merged Goal section");
+	});
+});
+
+// ── F3. mirrorGoalSetupFields stale-rows clearing (source-shape) ─────────────
+
+describe("mirrorGoalSetupFields clears stale rows for authoritative empty/absent metadata (F3)", () => {
+	const src = fs.readFileSync(path.join(process.cwd(), "src/app/session-manager.ts"), "utf-8");
+
+	it("takes an `authoritative` option and clears rows when set", () => {
+		assert.match(src, /function mirrorGoalSetupFields\(src: \{ metadata\?: unknown \}, opts\?: \{ authoritative\?: boolean \}\)/,
+			"mirrorGoalSetupFields must accept an authoritative option");
+		assert.match(src, /if \(opts\?\.authoritative\) state\.previewMetadataRows = \[\];/,
+			"absent/empty metadata on an authoritative source must clear stale rows");
+	});
+
+	it("mirrors a present object exactly so an empty {} clears rows via metadataObjectToRows", () => {
+		assert.match(src, /state\.previewMetadataRows = metadataObjectToRows\(m\);/,
+			"present metadata (incl. empty {}) must be mirrored exactly");
+	});
+
+	it("the authoritative slot/merged mirror call sites pass { authoritative: true }", () => {
+		const authoritativeCalls = src.match(/mirrorGoalSetupFields\(g, \{ authoritative: true \}\)/g) ?? [];
+		assert.ok(authoritativeCalls.length >= 2,
+			"both the slot-reconcile and merged-proposal mirror paths must mark the source authoritative");
+		// The raw streaming tool-use partial stays NON-authoritative so it never
+		// clobbers in-progress rows when it simply hasn't streamed metadata yet.
+		assert.match(src, /mirrorGoalSetupFields\(proposal\);/,
+			"the raw streaming proposal mirror must remain non-authoritative");
+	});
+});
