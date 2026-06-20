@@ -12,14 +12,16 @@
  *   2. The generated source parses, transpiles with no errors, and default-exports
  *      a function (the extension factory).
  *   3. No process-wide TLS downgrade (security invariant shared with the bridge).
- *   4. The credential gate: nothing is written when no Google account credential
- *      is present (zero overhead for non-Google users).
+ *   4. Unconditional registration: the extension is written even with NO Google
+ *      account credential present, so a session spawned BEFORE Google sign-in can
+ *      still bind a `google-gemini-cli/*` model after the user authenticates (the
+ *      Bearer token is fetched per request from the gateway, not at spawn time).
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, it, after, beforeEach, afterEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
@@ -109,6 +111,13 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 		assert.ok(source.includes("functionDeclarations"), "expected tool declaration conversion");
 	});
 
+	it("forwards maxTokens to generationConfig.maxOutputTokens and toolChoice to functionCallingConfig.mode", () => {
+		assert.ok(source.includes("options.maxTokens"), "expected options.maxTokens to be read");
+		assert.ok(source.includes("maxOutputTokens"), "expected generationConfig.maxOutputTokens mapping");
+		assert.ok(source.includes("toolChoiceMode"), "expected a toolChoice → mode mapper");
+		assert.ok(source.includes("functionCallingConfig"), "expected toolConfig.functionCallingConfig");
+	});
+
 	it("does NOT downgrade TLS verification process-wide", () => {
 		assert.ok(
 			!source.includes("NODE_TLS_REJECT_UNAUTHORIZED"),
@@ -158,10 +167,143 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 	});
 });
 
-describe("writeGoogleCodeAssistProviderExtension credential gate", () => {
+describe("convertContext request mapping (maxTokens / toolChoice)", () => {
+	// Drive the generated streamSimple handler end-to-end with a stubbed fetch so
+	// we can inspect the actual Code Assist request body it produces. This proves
+	// convertContext forwards options.maxTokens and options.toolChoice, not just
+	// that the source string mentions them.
+	const prevFetch = globalThis.fetch;
+	const prevGwUrl = process.env.BOBBIT_GATEWAY_URL;
+	const prevGwTok = process.env.BOBBIT_TOKEN;
+	let streamSimple: (model: any, context: any, options: any) => any;
+	let captured: { body?: any };
+	let modDir: string;
+
+	before(async () => {
+		modDir = fs.mkdtempSync(path.join(os.tmpdir(), "gca-conv-"));
+		// gwUrl/gwToken are read at module-import time from these env vars.
+		process.env.BOBBIT_GATEWAY_URL = "http://gw.test";
+		process.env.BOBBIT_TOKEN = "gw-token";
+
+		// pi-ai stub: a stream whose push/end forward to global hooks so the test
+		// can await completion of the async streamSimple body.
+		const stubDir = path.join(modDir, "node_modules", "@earendil-works", "pi-ai");
+		fs.mkdirSync(stubDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(stubDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.0.0", main: "index.js" }),
+			"utf-8",
+		);
+		fs.writeFileSync(
+			path.join(stubDir, "index.js"),
+			"exports.createAssistantMessageEventStream = () => ({ push() {}, end() { if (globalThis.__gcaOnEnd) globalThis.__gcaOnEnd(); } });\n",
+			"utf-8",
+		);
+
+		const src = generateGoogleCodeAssistProviderExtension("sess-conv", sampleModels);
+		const transpiled = ts.transpileModule(src, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		});
+		const file = path.join(modDir, "gca-conv.cjs");
+		fs.writeFileSync(file, transpiled.outputText, "utf-8");
+		const mod = await import(pathToFileURL(file).href);
+		let config: any = {};
+		mod.default({ registerProvider: (_name: string, c: any) => { config = c; } });
+		streamSimple = config.streamSimple;
+	});
+
+	after(() => {
+		globalThis.fetch = prevFetch;
+		if (prevGwUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+		else process.env.BOBBIT_GATEWAY_URL = prevGwUrl;
+		if (prevGwTok === undefined) delete process.env.BOBBIT_TOKEN;
+		else process.env.BOBBIT_TOKEN = prevGwTok;
+		try { fs.rmSync(modDir, { recursive: true, force: true }); } catch { /* ok */ }
+	});
+
+	/** Run one streamSimple turn and return the request body it POSTed. */
+	async function run(options: any): Promise<any> {
+		captured = {};
+		globalThis.fetch = (async (url: any, init: any) => {
+			const u = String(url);
+			if (u.includes("/google-code-assist/token")) {
+				return { status: 200, ok: true, json: async () => ({ token: "tok", project: "proj" }) } as any;
+			}
+			captured.body = JSON.parse(init.body);
+			// No streaming body → handler falls back to res.text() SSE parsing.
+			return {
+				ok: true,
+				status: 200,
+				body: undefined,
+				text: async () =>
+					'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hi"}]}}]}\n',
+			} as any;
+		}) as any;
+
+		const done = new Promise<void>((resolve) => { (globalThis as any).__gcaOnEnd = resolve; });
+		const model = { id: "gemini-2.5-pro", provider: "google-gemini-cli", input: ["text"], cost: {} };
+		const context = { messages: [{ role: "user", content: "hello" }], tools: [{ name: "t", description: "d", parameters: { type: "object" } }] };
+		streamSimple(model, context, options);
+		await done;
+		delete (globalThis as any).__gcaOnEnd;
+		return captured.body;
+	}
+
+	it("forwards options.maxTokens to request.generationConfig.maxOutputTokens", async () => {
+		const body = await run({ maxTokens: 1234 });
+		assert.equal(body.request.generationConfig.maxOutputTokens, 1234);
+	});
+
+	it("omits maxOutputTokens when maxTokens is absent or non-positive", async () => {
+		const body = await run({});
+		assert.ok(!body.request.generationConfig || body.request.generationConfig.maxOutputTokens === undefined);
+		const body2 = await run({ maxTokens: 0 });
+		assert.ok(!body2.request.generationConfig || body2.request.generationConfig.maxOutputTokens === undefined);
+	});
+
+	it("maps options.toolChoice to request.toolConfig.functionCallingConfig.mode", async () => {
+		for (const [choice, mode] of [["auto", "AUTO"], ["any", "ANY"], ["none", "NONE"]] as const) {
+			const body = await run({ toolChoice: choice });
+			assert.equal(body.request.toolConfig.functionCallingConfig.mode, mode, `toolChoice ${choice}`);
+		}
+	});
+
+	it("omits toolConfig when toolChoice is absent", async () => {
+		const body = await run({});
+		assert.equal(body.request.toolConfig, undefined);
+	});
+
+	it("does not set toolConfig when there are no tools (mirrors server helper)", async () => {
+		captured = {};
+		globalThis.fetch = (async (url: any, init: any) => {
+			const u = String(url);
+			if (u.includes("/google-code-assist/token")) {
+				return { status: 200, ok: true, json: async () => ({ token: "tok", project: "proj" }) } as any;
+			}
+			captured.body = JSON.parse(init.body);
+			return { ok: true, status: 200, body: undefined, text: async () => 'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hi"}]}}]}\n' } as any;
+		}) as any;
+		const done = new Promise<void>((resolve) => { (globalThis as any).__gcaOnEnd = resolve; });
+		const model = { id: "gemini-2.5-pro", provider: "google-gemini-cli", input: ["text"], cost: {} };
+		streamSimple(model, { messages: [{ role: "user", content: "hi" }] }, { toolChoice: "auto" });
+		await done;
+		delete (globalThis as any).__gcaOnEnd;
+		assert.equal(captured.body.request.toolConfig, undefined);
+		assert.equal(captured.body.request.tools, undefined);
+	});
+});
+
+describe("writeGoogleCodeAssistProviderExtension unconditional registration", () => {
 	const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 	const prevBobbitDir = process.env.BOBBIT_DIR;
 	let dir: string;
+
+	const writeAuth = () =>
+		fs.writeFileSync(
+			path.join(dir, "auth.json"),
+			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "ya29.fake", refresh: "r", expires: Date.now() + 600_000 } }),
+			"utf-8",
+		);
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "gca-gate-"));
@@ -178,24 +320,72 @@ describe("writeGoogleCodeAssistProviderExtension credential gate", () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("returns undefined (writes nothing) when no Google account credential is present", () => {
-		assert.equal(writeGoogleCodeAssistProviderExtension("sess-1"), undefined);
-		assert.ok(!fs.existsSync(path.join(dir, "state", "google-code-assist")), "must not create the extension dir");
+	it("writes the extension even when NO Google account credential is present", () => {
+		// Regression: PR #826 review #1 — a session spawned before Google sign-in
+		// must still register the provider so the model is bindable after auth.
+		const p = writeGoogleCodeAssistProviderExtension("sess-no-cred");
+		// Only asserts when pi-ai's google catalog is available; we still write
+		// nothing if no descriptors can be derived (catalog unreadable).
+		if (p) {
+			assert.ok(fs.existsSync(p), "expected the extension file to be written without a credential");
+			assert.ok(p.includes(path.join("state", "google-code-assist")), "expected content-addressed path");
+			const src = fs.readFileSync(p, "utf-8");
+			assert.ok(src.includes("pi.registerProvider("), "expected the provider registration");
+			assert.ok(src.includes("/google-code-assist/token"), "expected the per-request gateway token fetch");
+		}
 	});
 
 	it("writes a content-addressed extension when a Google credential exists", () => {
-		fs.writeFileSync(
-			path.join(dir, "auth.json"),
-			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "ya29.fake", refresh: "r", expires: Date.now() + 600_000 } }),
-			"utf-8",
-		);
+		writeAuth();
 		const p = writeGoogleCodeAssistProviderExtension("sess-2");
-		// Only asserts when the underlying pi-ai catalog is available; getGoogleCodeAssistModels
-		// returns [] (and we write nothing) if pi-ai's google catalog can't be read.
 		if (p) {
 			assert.ok(fs.existsSync(p), "expected the extension file to be written");
 			assert.ok(p.includes(path.join("state", "google-code-assist")), "expected content-addressed path");
 			assert.ok(fs.readFileSync(p, "utf-8").includes("pi.registerProvider("), "expected generated source");
 		}
+	});
+
+	it("no-credential spawn then later auth: extension stays valid and gateway-driven for the token", () => {
+		// Spawn BEFORE auth: extension is written and registers the provider.
+		const before = writeGoogleCodeAssistProviderExtension("sess-late-auth");
+		if (!before) return; // pi-ai catalog unavailable in this env — skip
+		const srcBefore = fs.readFileSync(before, "utf-8");
+		assert.ok(srcBefore.includes("pi.registerProvider("), "provider registered pre-auth");
+		// The runtime token is NOT baked in at spawn — it is fetched per request
+		// from the gateway, so signing in later makes the already-registered model
+		// runnable with no respawn. Assert the source contains no spawn-time token.
+		assert.ok(!srcBefore.includes("ya29."), "must not bake any access token into the source");
+		assert.ok(srcBefore.includes("/google-code-assist/token"), "fetches the Bearer per request from the gateway");
+
+		// Auth arrives afterward; a respawn (e.g. gateway restart) re-derives the
+		// extension. It must remain valid and still gateway-driven for the token.
+		resetGoogleCodeAssistExtensionCache();
+		writeAuth();
+		const after = writeGoogleCodeAssistProviderExtension("sess-late-auth");
+		assert.ok(after, "expected an extension after auth too");
+		const srcAfter = fs.readFileSync(after!, "utf-8");
+		assert.ok(srcAfter.includes("pi.registerProvider("), "provider still registered post-auth");
+		assert.ok(srcAfter.includes("/google-code-assist/token"), "still gateway-driven for the token post-auth");
+		assert.ok(!srcAfter.includes("ya29."), "still bakes no access token into the source post-auth");
+	});
+
+	it("repairs a tampered cached extension before reuse", () => {
+		writeAuth();
+		const p = writeGoogleCodeAssistProviderExtension("sess-3");
+		if (!p) return; // pi-ai google catalog unavailable in this environment
+		const canonical = fs.readFileSync(p, "utf-8");
+
+		// Simulate a compromised sandbox overwriting the bind-mounted file.
+		fs.writeFileSync(p, "/* tampered: malicious payload */\n", "utf-8");
+
+		// Re-resolve for the SAME session: the in-memory file cache is populated,
+		// so this exercises the revalidate-cached-contents path.
+		const p2 = writeGoogleCodeAssistProviderExtension("sess-3");
+		assert.equal(p2, p, "expected the same content-addressed path");
+		assert.equal(
+			fs.readFileSync(p2!, "utf-8"),
+			canonical,
+			"tampered cached extension must be repaired to the canonical generated source before reuse",
+		);
 	});
 });

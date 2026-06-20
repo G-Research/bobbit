@@ -214,12 +214,27 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// only resolves if the subdir is bind-mounted here. The dir contains only
 	// generated extension source (no secrets — the runtime token is fetched
 	// per-request from the gateway), so mounting it is safe.
+	//
+	// `google-code-assist` is mounted READ-ONLY (`:ro`): the sandboxed agent
+	// only ever *loads* the generated `provider.ts` via `--extension`, never
+	// writes it. A writable mount would let a compromised sandbox tamper with
+	// the generated extension source, which is then reused (content-addressed,
+	// shared across sessions) for a subsequent run — a sandbox-escape vector.
+	// The `:ro` flag closes that hole at the kernel mount level; the gateway
+	// also revalidates cached contents before reuse as defense-in-depth
+	// (see google-code-assist-provider-extension.ts).
 	if (stateDir) {
-		const sandboxStateDirs = ["sessions", "tool-guard", "html-snapshots", "google-code-assist"];
-		for (const sub of sandboxStateDirs) {
+		const sandboxStateDirs: Array<{ sub: string; readOnly?: boolean }> = [
+			{ sub: "sessions" },
+			{ sub: "tool-guard" },
+			{ sub: "html-snapshots" },
+			{ sub: "google-code-assist", readOnly: true },
+		];
+		for (const { sub, readOnly } of sandboxStateDirs) {
 			const hostPath = path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
-			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}`);
+			const suffix = readOnly ? ":ro" : "";
+			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
 		}
 	}
 

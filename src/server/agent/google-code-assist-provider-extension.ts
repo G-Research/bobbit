@@ -35,7 +35,6 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import {
 	GOOGLE_CODE_ASSIST_API,
 	GOOGLE_GEMINI_CLI_PROVIDER,
-	hasGoogleCodeAssistCredential,
 } from "./google-code-assist.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 
@@ -63,7 +62,10 @@ export interface CodeAssistModelDescriptor {
  * what the gateway emits — no separate hand-maintained descriptor list to drift.
  */
 export function codeAssistModelDescriptors(): CodeAssistModelDescriptor[] {
-	return getGoogleCodeAssistModels().map((m) => ({
+	// `ignoreCredential: true` — the provider is registered in EVERY spawned agent
+	// (see writeGoogleCodeAssistProviderExtension), not only when a credential is
+	// present at spawn time, so the descriptor list must not be credential-gated.
+	return getGoogleCodeAssistModels({ ignoreCredential: true }).map((m) => ({
 		id: m.id,
 		// Account models carry a "(Google account)" suffix already; the provider
 		// `name` distinguishes them in pi UIs.
@@ -262,15 +264,34 @@ function convertTools(tools) {
   }];
 }
 
+// pi toolChoice ("auto"|"any"|"none") → Gemini functionCallingConfig.mode
+// (mirrors toolChoiceMode in google-code-assist.ts).
+function toolChoiceMode(choice) {
+  switch (choice) {
+    case "auto": return "AUTO";
+    case "any": return "ANY";
+    case "none": return "NONE";
+    default: return undefined;
+  }
+}
+
 function convertContext(model, context, options) {
   const request = { contents: convertMessages(model, context) };
   if (context.systemPrompt && context.systemPrompt.trim()) {
     request.systemInstruction = { role: "user", parts: [{ text: context.systemPrompt }] };
   }
   const tools = convertTools(context.tools);
-  if (tools) request.tools = tools;
+  if (tools) {
+    request.tools = tools;
+    // toolChoice only applies when tools are present (mirrors server-side helper).
+    const mode = options && toolChoiceMode(options.toolChoice);
+    if (mode) request.toolConfig = { functionCallingConfig: { mode } };
+  }
 
   const generationConfig = {};
+  if (options && typeof options.maxTokens === "number" && options.maxTokens > 0) {
+    generationConfig.maxOutputTokens = options.maxTokens;
+  }
   const reasoning = options && options.reasoning;
   if (reasoning && reasoning !== "off") {
     const budget = THINKING_BUDGET[reasoning];
@@ -499,15 +520,24 @@ const extFileCache = new Map<string, string>();
 
 /**
  * Write the Code Assist provider extension to disk and return its file path, or
- * `undefined` when no Google account credential is present (zero overhead for
- * non-Google users) or no account models are emitted.
+ * `undefined` only when no account models can be derived (e.g. pi-ai's `google`
+ * catalog is unreadable).
+ *
+ * The extension is written UNCONDITIONALLY — even with no Google account
+ * credential present — so the `google-code-assist` provider is registered inside
+ * every spawned agent. This closes a gap where a session spawned BEFORE Google
+ * sign-in had no provider registered, so selecting a `google-gemini-cli/*` model
+ * in that already-running session failed with "No API provider registered for
+ * api: google-code-assist". Registering always is safe: the runtime Bearer token
+ * is fetched per request from the gateway (which returns a clear re-auth error
+ * when no account is authenticated), nothing account-scoped is baked in at spawn
+ * time, the gateway-side model selector still only surfaces these models once
+ * authenticated, and the generated source contains no secrets.
  *
  * Content-addressed under `.bobbit/state/google-code-assist/<hash>/provider.ts`
  * for dedup, mirroring `writeProviderBridgeExtension`.
  */
 export function writeGoogleCodeAssistProviderExtension(sessionId: string): string | undefined {
-	if (!hasGoogleCodeAssistCredential()) return undefined;
-
 	let code = extCodeCache.get(sessionId);
 	if (!code) {
 		const models = codeAssistModelDescriptors();
@@ -516,8 +546,17 @@ export function writeGoogleCodeAssistProviderExtension(sessionId: string): strin
 		extCodeCache.set(sessionId, code);
 	}
 
+	// Revalidate a cached path before reuse: the file lives under a shared,
+	// content-addressed dir that is bind-mounted into sandboxes. Even though the
+	// mount is read-only (docker-args.ts), repair-on-reuse is defense-in-depth —
+	// a tampered or truncated `provider.ts` must never be loaded into a session.
 	const cachedPath = extFileCache.get(sessionId);
-	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
+	if (cachedPath) {
+		try {
+			if (fs.readFileSync(cachedPath, "utf-8") === code) return cachedPath;
+		} catch { /* missing/unreadable — fall through to rewrite below */ }
+		extFileCache.delete(sessionId);
+	}
 
 	try {
 		const baseDir = path.join(bobbitStateDir(), "google-code-assist");
@@ -533,6 +572,8 @@ export function writeGoogleCodeAssistProviderExtension(sessionId: string): strin
 				return filePath;
 			}
 		} catch { /* file doesn't exist yet */ }
+		// File missing OR contents drifted from the freshly generated source
+		// (tampering / partial write) — repair by rewriting the canonical bytes.
 		fs.writeFileSync(filePath, code, "utf-8");
 		extFileCache.set(sessionId, filePath);
 		return filePath;
