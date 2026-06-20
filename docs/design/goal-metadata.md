@@ -1,6 +1,20 @@
 # Hierarchical goal metadata
 
-Status: design (implementable). Branch: `goal/f6c39aa2/*` off `master`.
+Status: **implemented** (`goal/f6c39aa2/*` off `master`). This document is the
+as-built reference; it began as a design and has been reconciled with the
+shipped code. Where the implementation chose differently from the original
+proposal (the `goalProvisioned` hook shipped here rather than in a separate PR;
+the legacy per-goal `worktreeSetupCommand` was removed rather than deferred; the
+disabled-tools filter covers unrestricted sessions too), the as-built behaviour
+is described and the original intent noted.
+
+Key source: `src/server/agent/goal-metadata.ts` (resolver), `goal-store.ts`
+(field + migration), `lifecycle-hub.ts` (`goalProvisioned` + provider
+filtering), `session-setup.ts` / `session-manager.ts` / `goal-manager.ts` (edge
+wiring + hook dispatch), `tool-activation.ts` (tool filter), `system-prompt.ts`
+(section order), `src/app/proposal-helpers.ts` + `proposal-panels.ts` (UI
+editor). Unit tests: `tests/goal-metadata*.test.ts`; E2E:
+`tests/e2e/goal-metadata-hierarchy.spec.ts`, `tests/e2e/ui/goal-metadata.spec.ts`.
 
 ## 1. Problem & tenet
 
@@ -82,7 +96,7 @@ export interface GoalMetadataLookup {
 }
 
 /** Deep-merge ancestors → self (descendant overrides). Objects merge
- *  recursively; arrays and scalars REPLACE wholesale. Bounded to 32 hops with a
+ *  recursively; arrays and scalars REPLACE wholesale. Bounded to 64 hops with a
  *  cycle guard. Returns a fresh object (never a reference into the store). */
 export function resolveGoalMetadata(lookup: GoalMetadataLookup, goalId: string | undefined): GoalMetadata;
 
@@ -93,7 +107,8 @@ export function deepMergeMetadata(base: GoalMetadata, override: GoalMetadata): G
 ### 3.1 Algorithm
 
 1. From `goalId`, walk `parentGoalId` into a chain `[self, parent, …, root]`,
-   stopping at a missing ref, a cycle (`seen` set), or 32 hops.
+   stopping at a missing ref, a cycle (`seen` set), or
+   `GOAL_METADATA_WALK_DEPTH_CAP` (64) hops.
 2. Reverse to root-first: `[root, …, parent, self]`.
 3. Reduce with `deepMergeMetadata`, left→right, starting from `{}`. Each goal's
    own `metadata ?? {}` is merged on top of the accumulated ancestor metadata.
@@ -111,6 +126,13 @@ Rationale: a child setting `bobbit.disabledTools: ["X"]` fully replaces the
 parent's list (predictable for experiments); a child that omits the key inherits
 the parent's list unchanged. Nested objects (e.g. `hindsight.memory`) merge so a
 child can flip one sub-key without restating the whole object.
+
+**Immutability.** The resolver returns a fresh object whose arrays and nested
+objects are deep-cloned (`cloneValue`), never references into the persisted goal
+record. This matters because consumers receive the resolved metadata directly —
+without the clone, a consumer that sorts or pushes onto a resolved
+`bobbit.disabledTools` array would silently corrupt the stored goal. Pinned by
+the `deepMergeMetadata` immutability unit tests.
 
 ### 3.3 Wiring (no duplicated lookups)
 
@@ -215,13 +237,27 @@ surface entirely. No change to `tool-activation.ts` policy cascade; the metadata
 filter is a thin post-filter layered on top so the policy/cache logic is
 untouched. (`asStringArray` is a 3-line guard: array-of-strings or `[]`.)
 
-> Note: `effectiveAllowedTools` empty/undefined means "all tools" in
-> `computeToolActivationArgs`. Filtering only applies when the array is present
-> (role-scoped sessions). If an experiment must disable a tool for an
-> unrestricted session, the filter still applies because we filter the array
-> in place only when it exists; for the "all tools" case, document that a
-> disabled-tools treatment requires a role with an explicit tool set (the team
-> roles already have one). Out of scope to synthesise an allowlist from "all".
+**Unrestricted / all-tools sessions are covered too (hard invariant).** The
+original design left the "all tools" case out of scope; the shipped code closes
+it. There are two complementary application points:
+
+1. **Allowlist filter** (`applyDisabledToolsFilter` in `session-setup.ts`):
+   filters `plan.effectiveAllowedTools` in place **before** the prompt /
+   tool-docs / skills catalogue are assembled, so a disabled tool is never even
+   advertised. This step preserves the `undefined` (unrestricted) vs `[]`
+   (explicit no-tools) distinction — `undefined` stays `undefined` and is never
+   widened, `[]` (a session whose entire allowlist was removed by
+   `bobbit.disabledTools`) stays `[]` and never collapses back to all tools.
+2. **Activation/proxy/guard builders** (`tool-activation.ts`): the disabled set
+   is threaded into `computeToolActivationArgs`, `writeMcpProxyExtensions`, and
+   `writeToolGuardExtension`, which drop disabled entries in BOTH the allowlist
+   branch AND the unrestricted/all-tools branch (built-in file tools, extension
+   tools, and MCP meta-tools alike). The guard extension additionally pins a
+   disabled tool's policy to `never` for defense in depth.
+
+So a `bobbit.disabledTools` treatment applies even to a role-less / unrestricted
+session — not just role-scoped ones. The set is matched case-insensitively
+(names lower-cased on both sides). Empty/absent ⇒ byte-identical to today.
 
 ### 5.3 Prompt section order
 
@@ -257,10 +293,11 @@ provider dispatch to today. Pinned by the no-metadata unit + E2E tests (§8).
 
 ## 6. Extension goal-lifecycle hook
 
-### 6.1 Contract (coordinate with maintainer's hook PR)
+### 6.1 Contract
 
-A new lifecycle hook kind `goalProvisioned`. Unlike the context hooks it does NOT
-return context blocks — it is a fire-and-forget filesystem-treatment hook.
+A lifecycle hook kind `goalProvisioned` (shipped in this work; the original plan
+assumed a separate maintainer PR). Unlike the context hooks it does NOT return
+context blocks — it is a fire-and-forget filesystem-treatment hook.
 
 - Add `"goalProvisioned"` to `LifecycleHook` (`lifecycle-hub.ts`) and to
   `PROVIDER_HOOKS` (`pack-contributions.ts`) so providers may declare it.
@@ -278,18 +315,20 @@ async dispatchGoalProvisioned(ctx: {
 }): Promise<void>;
 ```
 
-It enumerates `listProviders(projectId)` declaring `goalProvisioned`, invokes each
-via `moduleHost.invoke({ exportKind: "providers", member: "goalProvisioned", ctx })`
-with the SAME provider-scoped least-privilege host, swallows/logs errors
+It enumerates `listProviders(projectId)` declaring `goalProvisioned`, drops any
+provider whose `id` is in the goal's resolved `bobbit.disabledProviders`, invokes
+each via `moduleHost.invoke({ exportKind: "providers", member: "goalProvisioned",
+ctx })` with the SAME provider-scoped least-privilege host, swallows/logs errors
 (non-fatal — a failing hook must never block goal/session start), and ignores any
 return value. Per-provider budget/timeout reuse the provider's `budget.timeoutMs`.
+`"goalProvisioned"` is declared in `PROVIDER_HOOKS` (`pack-contributions.ts`) so
+providers may list it in their YAML `hooks:`.
 
-If the maintainer's in-flight hook PR lands first with a compatible
-`goalProvisioned` (or differently-named) contract, **consume it** instead of
-adding our own; this section is the fallback definition. Either way the resolved
-metadata MUST be passed to the hook.
-
-Authors keep the hook cheap + idempotent via a shared content-addressed cache
+**Idempotency is mandatory, not advisory.** The same worktree subtree can be
+provisioned by several paths, and respawn/restore paths may re-enter dispatch
+sites. Providers MUST therefore be idempotent — re-running on an
+already-treated worktree must be a cheap no-op and must never error. Authors
+achieve this via a shared content-addressed cache
 (the "New Era" pattern): e.g. Graphify writes `graphify-out/` keyed by a content
 hash, skipping work when the marker already exists. `graphify-out/` is gitignored
 and not branch-propagated, which is exactly why the hook must fire on **every**
@@ -300,35 +339,85 @@ worktree (§6.2), not once per goal.
 The hook must fire wherever a worktree is materialised, so filesystem treatments
 land on every agent/sub-goal worktree (not just the goal's first worktree):
 
-1. **Goal worktree** — `goal-manager.ts::_doSetupWorktree`, after
-   `_provisionGoalWorktree` returns and after `runPerGoalSetupOrFail`, before/at
-   the `setupStatus:"ready"` flip. This single site covers BOTH the
-   `createWorktree` path AND the **pool-claim early return** (the pool claim
-   returns up into `_provisionGoalWorktree`, so `_doSetupWorktree` still runs the
-   hook afterward — see the existing comment "the per-goal hook is goal-specific
-   and still runs"). Pass `metadata = getEffectiveGoalMetadata(goal.id)`.
-2. **Per-session cold-path worktree** — `session-setup.ts` cold path, after
-   `runComponentSetups` (~L919). Fires for `team_spawn` members and
-   `team_delegate` sub-agents that create their own sub-branch worktree. Pass
-   `metadata = resolveGoalMetadata(effectiveGoalId)`.
-3. **Per-session pool/pre-built worktree** — `session-setup.ts` `preBuiltWorktreePath`
-   branch (~L856). A pooled session worktree skips component setup, so the hook
-   must fire here too, else pooled sessions miss the treatment. (Idempotent cache
-   makes a double-fire harmless if a worktree is both pool-filled and hooked.)
+1. **Goal worktree** — `goal-manager.ts::_doSetupWorktree` /
+   `_dispatchGoalProvisioned`, after `_provisionGoalWorktree` returns and before
+   the `setupStatus:"ready"` flip. This single site covers BOTH cold
+   `createWorktree` AND the **pool-claim** path, because both return through
+   `_provisionGoalWorktree`. Resolves `getEffectiveGoalMetadata(goal.id)`.
+2. **Per-session cold-path worktree** — `session-setup.ts`
+   (`dispatchGoalProvisionedHook`), after the cold-path worktree is created and
+   component setups run. Fires for `team_spawn` members and `team_delegate`
+   sub-agents that create their own sub-branch worktree.
+3. **Per-session pool/pre-built worktree** — `session-setup.ts`
+   `preBuiltWorktreePath` branch. A pooled session worktree skips component
+   setup, so the hook must fire here too, else pooled sessions miss the
+   treatment.
+4. **Team member worktree** — `team-manager.ts` calls
+   `sessionManager.dispatchGoalProvisionedForWorktree(...)` for a freshly created
+   member worktree (non-sandboxed members).
+5. **Sandboxed worktree** — `session-manager.ts` sandbox wiring dispatches with
+   HOST coordinates (see §6.3), because team-manager skips its own dispatch for
+   sandboxed members and the session-setup provisioning dispatch never runs for
+   container worktrees.
 
-All three resolve the effective goal's metadata and call
-`hub.dispatchGoalProvisioned`. Guard with `hub.hasProvidersForHooks(projectId,
-["goalProvisioned"], goalId)` so zero-provider installs do no work (and a
-goal-disabled provider via `bobbit.disabledProviders` is also skipped).
+Every site resolves the effective goal's metadata (via the injected resolver) and
+calls `dispatchGoalProvisioned`. The hub guards internally: it enumerates only
+providers that declare `goalProvisioned`, so a zero-provider install does no
+work, and a provider disabled for this goal via `bobbit.disabledProviders` is
+skipped.
 
 The hook is **never** dispatched once-per-goal only — that would regress
-filesystem treatments for sub-agent and sub-goal worktrees.
+filesystem treatments for sub-agent and sub-goal worktrees. Because several of
+these sites can fire for overlapping worktrees (and respawn/restore can re-enter
+them), providers must be idempotent (§6.1).
 
-### 6.3 Relationship to `worktreeSetupCommand`
+### 6.3 Sandbox (Docker) worktrees — host-path dispatch
 
-The bespoke per-goal `worktreeSetupCommand` (already on `master`) remains
-untouched for backward compatibility. The metadata + `goalProvisioned` hook is the
-general path going forward; removing the bespoke field is out of scope here.
+The `goalProvisioned` provider runs **host-side**: `dispatchGoalProvisioned`
+executes the provider module on the host with `workingDir: ctx.cwd`. For
+sandboxed (Docker) sessions the agent's runtime cwd is remapped to a
+container-internal worktree (`/workspace-wt/<branch>`) that lives in a Docker
+volume and is **not reachable from the host**. If the hook were handed that
+container path, the provider's marker write would silently land nowhere (the
+hook is non-fatal), so metadata-driven filesystem treatments would never appear
+on sandboxed worktrees.
+
+The fix (`session-manager.ts`, sandbox wiring): capture the **host-side**
+working directory BEFORE it is remapped into the container, and dispatch
+`goalProvisioned` with those host coordinates (`worktreePath`/`cwd` = host
+worktree cwd), not the container path. Only the host-side provider dispatch uses
+host coordinates; the agent still boots in the container worktree. Restore /
+respawn paths arrive with `bridgeOptions.cwd` already pointing at a
+container-internal path (`isSandboxContainerPath`), so dispatch is skipped there
+— the worktree was provisioned (and the marker written) on first creation, and
+providers are idempotent, so re-dispatch is unnecessary.
+
+### 6.4 Relationship to `worktreeSetupCommand` (superseded)
+
+The bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` surface
+(PR #816) is **removed** by this work — metadata + the `goalProvisioned` hook is
+its general replacement. See §6.5 below for the exact removal scope. The
+project/component setup-command surface (`components[*].worktree_setup_command`)
+is a different mechanism and is **unchanged**.
+
+### 6.5 Supersession of per-goal `worktreeSetupCommand` (PR #816)
+
+What was removed:
+
+- `PersistedGoal.worktreeSetupCommand` / `worktreeSetupTimeoutMs`. `GoalStore`
+  drops both on load (legacy goals are migrated transparently) — see
+  `goal-store.ts`.
+- The goal-route parsing and `createGoal` options/persistence for those fields,
+  and the per-goal setup-command runner.
+- The `propose_goal` schema fields and the goal-creation UI control + state for
+  the per-goal command and timeout.
+
+What is **kept** (do not confuse the two):
+
+- `components[*].worktree_setup_command` (project/component setup commands) and
+  the project-proposal field that configures them. This is the canonical,
+  unchanged mechanism for per-component worktree setup; posting a legacy per-goal
+  `worktreeSetupCommand` to the goal route now has no effect and does not persist.
 
 ## 7. Creation surfaces
 
@@ -368,7 +457,34 @@ if (metadata && typeof metadata === "object" && !Array.isArray(metadata)
   `metadata` object from the proposal and seed the dialog state
   (`_proposalGoalMetadata`).
 
-### 7.4 Goal-creation UI dialog
+### 7.4 Metadata value parsing & string preservation (UI editor)
+
+The goal-creation / proposal dialog exposes a simple key/value metadata editor.
+Internally it stores ordered `[key, value]` **string** rows for direct `<input>`
+round-tripping; the conversion helpers live in `src/app/proposal-helpers.ts` and
+are shared by the editor, the submit path, and the proposal-mirror seeding so
+every surface converts identically.
+
+- **Rows → object** (`metadataRowsToObject`, at submit): blank keys are dropped;
+  each value is JSON-parsed when it parses (numbers, booleans, arrays, objects,
+  JSON-quoted strings), otherwise kept as the raw string. Returns `undefined`
+  when no usable rows remain, so an empty editor sends **no** `metadata` field
+  (empty = no override).
+- **Object → rows** (`metadataObjectToRows`, when seeding the editor): each value
+  is rendered back to a row string that round-trips losslessly through
+  `metadataRowsToObject`.
+
+**JSON-literal-like strings are preserved as strings.** A string value whose text
+would itself re-parse as a different JSON type — e.g. `"false"`, `"42"`,
+`'["x"]'`, or a whitespace-padded number — is JSON-quoted when rendered into the
+editor row (`renderMetadataValue`), so feeding it back through the parser yields
+the original *string*, not the boolean/number/array it looks like. A plain string
+that already round-trips is shown verbatim; non-strings are `JSON.stringify`-d.
+This guarantees the editor never silently coerces a value's type across a
+seed → edit → submit cycle. Pinned by the proposal-helpers metadata round-trip
+unit tests.
+
+### 7.5 Goal-creation UI dialog
 
 - `src/app/state.ts`: add `previewGoalMetadata?: Record<string, unknown>` (or a
   raw key/value editor model — array of `{ key, value }` rows like the existing
@@ -464,6 +580,5 @@ worktree provisioning + the extension host, also `npm run test:manual`.
 - Advanced metadata typing/validation beyond namespaced key/value.
 - Graphify/Gemini/Hindsight content itself — only the generic metadata + hook +
   edges.
-- Removing the bespoke `worktreeSetupCommand` field.
 </content>
 </invoke>
