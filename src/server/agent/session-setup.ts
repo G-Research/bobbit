@@ -41,6 +41,7 @@ import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -700,6 +701,16 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
 		}
+	}
+
+	// Register the Google account (Code Assist) provider INSIDE the agent process
+	// so `google-gemini-cli/*` models can run as session models. Emitted only when
+	// a Google OAuth credential is present (zero overhead otherwise). Without this
+	// the agent's pi-ai has no `google-code-assist` api and binding such a model
+	// would throw "No API provider registered for api: google-code-assist".
+	const codeAssistPath = writeGoogleCodeAssistProviderExtension(plan.id);
+	if (codeAssistPath) {
+		plan.bridgeOptions.args.push("--extension", codeAssistPath);
 	}
 }
 
