@@ -189,17 +189,20 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		stub.setHealthy(true);
 	});
 
-	test("first-run: the built-in row shows Dormant and surfaces Configure as the primary setup path", async ({ page }) => {
+	test("first-run: the built-in row shows Disabled and surfaces Configure as the primary setup path", async ({ page }) => {
 		test.skip(!ready, "Hindsight pack contribution not served in this environment");
 		await openWithSession(page);
 		const row = await openMarketRow(page);
 
-		// Unconfigured ⇒ Dormant (NOT a flat "Enabled"). This is the headline state
-		// distinction + proves the sessionless built-in pack-route status read works
-		// after #/market navigation has cleared the active chat session.
-		await expect(stateBadge(row), "an unconfigured built-in Hindsight row is Dormant").toHaveAttribute("data-state", "dormant", { timeout: 20_000 });
+		// The built-in Hindsight pack ships DEFAULT-DISABLED (manifest `defaultDisabled:
+		// true`): a fresh, unconfigured, untouched server resolves it with every entity
+		// de-activated, so the row's headline state is "disabled" (NOT a flat "Enabled",
+		// and NOT "dormant" — dormant is the enabled-but-unconfigured state). Enabling or
+		// configuring it flips this. Also proves the sessionless built-in pack-route
+		// status read still works after #/market cleared the active chat session.
+		await expect(stateBadge(row), "an unconfigured built-in Hindsight row is Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
 
-		// Configure is surfaced as the primary setup affordance on the dormant row.
+		// Configure is surfaced as the primary setup affordance on the row.
 		// (Opening the native panel itself requires an active session to bind to — a
 		// separate session-context concern exercised by hindsight-pack.spec.ts, which
 		// opens the panel via the command-palette launcher inside a live session. The
@@ -240,12 +243,14 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 
 	test("inline Configure form saves config sessionlessly and persists across reload", async ({ page }) => {
 		test.skip(!ready, "Hindsight pack contribution not served in this environment");
-		// Start dormant (no config). The inline form is the #/market setup path — there
-		// is no active chat session to mount the native panel against, so Configure must
-		// write config over the SESSIONLESS built-in pack-route config-write seam.
+		// Start disabled (default-disabled built-in, no config). The inline form is the
+		// #/market setup path — there is no active chat session to mount the native panel
+		// against, so Configure must write config over the SESSIONLESS built-in pack-route
+		// config-write seam. Saving an externalUrl configures the pack, which (per the
+		// live-setup-preservation rule) also flips it out of the default-disabled state.
 		await openWithSession(page);
 		let row = await openMarketRow(page);
-		await expect(stateBadge(row), "an unconfigured row starts Dormant").toHaveAttribute("data-state", "dormant", { timeout: 20_000 });
+		await expect(stateBadge(row), "an unconfigured default-disabled row starts Disabled").toHaveAttribute("data-state", "disabled", { timeout: 20_000 });
 
 		// Configure toggles the inline form (NOT the native panel) on #/market.
 		await row.locator('[data-testid="market-hindsight-configure"]').click();

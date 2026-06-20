@@ -81,6 +81,13 @@ export interface InstalledPackWire {
 	/** `"unknown"` when the source can't be checked (removed / never-synced / no
 	 *  version data) — disambiguates "up to date" from "source unknown". */
 	sourceStatus: "ok" | "unknown";
+	/** Mirrors `manifest.defaultDisabled`: the pack ships DORMANT (default-disabled)
+	 *  and resolves with all entities de-activated until explicitly enabled or
+	 *  already configured. Stable wire field the Marketplace UI keys on. */
+	defaultDisabled?: boolean;
+	/** UI intent alias of {@link defaultDisabled}: enabling a default-disabled pack
+	 *  should route through the guided setup wizard rather than a bare toggle. */
+	requiresGuidedSetup?: boolean;
 }
 
 /** Coded error so the REST layer can map to HTTP statuses. */
@@ -653,7 +660,7 @@ export class MarketplaceInstaller {
 				if (manifest && meta) {
 					// `packId` (structural) === the on-disk dir name (`d.name`), which is
 					// what `packIdFromRoot` derives for an installed pack at this scope.
-					rows.set(d.name, { scope: c.scope, packName: d.name, packId: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta) });
+					rows.set(d.name, { scope: c.scope, packName: d.name, packId: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta), defaultDisabled: manifest.defaultDisabled === true, requiresGuidedSetup: manifest.defaultDisabled === true });
 				} else if (manifest || meta) {
 					// Partial / corrupt install — surface so the UI can offer cleanup.
 					// Corrupt rows never offer an update and report an unknown source.

@@ -5,6 +5,12 @@ description: >-
   tag-scoped bank). Dormant until a Hindsight URL is configured. See
   docs/design/hindsight-pack-external.md and docs/design/agent-memory.md.
 version: 1.0.0
+# Ships DEFAULT-DISABLED: a fresh server lists this pack in the built-in band but
+# does NOT activate its tools/provider/entrypoints/runtime until the user enables
+# it (via the Marketplace toggle / guided setup) OR it is already configured
+# (a persisted Hindsight config with a non-empty externalUrl or a managed mode).
+# Resolution priority lives in src/server/agent/pack-default-activation.ts.
+defaultDisabled: true
 contents:
   roles: []
   tools: [hindsight] # explicit hindsight_recall/retain/reflect agent tools (P5)

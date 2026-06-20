@@ -62,6 +62,36 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 			const store = new ProjectConfigStore(tmpDir);
 			assert.deepEqual(store.getPackActivation("project", "never-set"), {});
 		});
+
+		it("default-disabled overlay synthesizes all-disabled refs (read-time only, never persisted)", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			const overlay = { tools: ["hindsight_recall"], providers: ["memory"] };
+			// Inject an overlay resolver that disables the `dormant` pack at server scope
+			// only when there is no explicit stored record.
+			store.setDefaultActivationResolver((scope, packName, stored) => {
+				if (scope === "server" && packName === "dormant" && Object.keys(stored).length === 0) return overlay;
+				return undefined;
+			});
+			// Fresh (no stored record) ⇒ effective = synthesized overlay.
+			assert.deepEqual(store.getPackActivation("server", "dormant"), overlay);
+			// Overlay is read-time only: nothing was written to disk (no record persisted).
+			assert.equal(fs.existsSync(yamlPath()) && (readYaml().pack_activation !== undefined), false);
+			// Other packs / scopes are unaffected (resolver returns undefined ⇒ raw refs).
+			assert.deepEqual(store.getPackActivation("project", "dormant"), {});
+			assert.deepEqual(store.getPackActivation("server", "other"), {});
+		});
+
+		it("an explicit stored record suppresses the overlay (explicit choice wins)", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setDefaultActivationResolver((scope, packName, stored) =>
+				scope === "server" && packName === "dormant" && Object.keys(stored).length === 0
+					? { tools: ["a"], providers: ["memory"] }
+					: undefined,
+			);
+			store.setPackActivation("server", "dormant", { tools: ["only-this"] });
+			// Stored is non-empty ⇒ the resolver sees it and returns undefined ⇒ raw refs.
+			assert.deepEqual(store.getPackActivation("server", "dormant"), { tools: ["only-this"] });
+		});
 	});
 
 	describe("config_directories", () => {
