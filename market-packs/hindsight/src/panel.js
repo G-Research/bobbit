@@ -99,6 +99,12 @@ function freshEntry() {
 		configured: false,
 		draft: null, // editable form values
 		secretTouched: { apiKey: false, externalDatabaseUrl: false, llmApiKey: false },
+		// Non-secret fields the user has ACTUALLY edited this draft session. Save
+		// builds the POST body ONLY from touched fields (+ touched secrets), so a
+		// stale-but-untouched field can never clobber a config that changed on the
+		// server after mount (the headline B2 regression). Reset whenever the draft
+		// is re-seeded from the persisted config (clean load / save / discard).
+		touched: {},
 		dirty: false,
 		saving: false,
 		saveErrors: [],
@@ -212,6 +218,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (!entry.dirty) {
 			entry.draft = draftFromConfig(entry.config);
 			entry.secretTouched = { apiKey: false, externalDatabaseUrl: false, llmApiKey: false };
+			entry.touched = {};
 		} else if (!entry.draft) {
 			// Defensive: never leave the form without a draft to render.
 			entry.draft = draftFromConfig(entry.config);
@@ -271,25 +278,34 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		loadStatus(host, key);
 	};
 
-	/** Build the POST body: only CHANGED non-secret fields + TOUCHED secrets. The
-	 *  diff base is `entry.config`, which Save refreshes first (see `save`) so it is
-	 *  never stale — an untouched field equal to the live value is omitted (the
-	 *  server preserves omitted keys) and can never clobber a good config. */
+	/** Build the POST body from ONLY the fields the user actually edited this draft
+	 *  session — `entry.touched[f]` for non-secrets, `entry.secretTouched[f]` for
+	 *  secrets. An UNTOUCHED field is NEVER sent, even if its (stale) draft value
+	 *  differs from the freshly-loaded config: this is the headline B2 fix. Example:
+	 *  the panel mounts dormant (externalUrl="", bank="bobbit", timeoutMs=1500), the
+	 *  server config changes out-of-band to external/hermes/15000, the user toggles
+	 *  ONLY autoRetain and Saves. A diff-everything body would POST the stale
+	 *  externalUrl/bank/timeout and clobber the good config; gating on `touched`
+	 *  sends just `{ autoRetain }`. Touched fields are still diffed against the live
+	 *  config (refreshed by Save first) so an unchanged value is a harmless no-op. */
 	function buildSaveBody(entry) {
 		const cfg = entry.config || {};
 		const d = entry.draft || {};
+		const t = entry.touched || {};
 		const body = {};
-		if (d.mode !== cfg.mode) body.mode = d.mode;
+		if (t.mode && d.mode !== cfg.mode) body.mode = d.mode;
 		for (const f of ["externalUrl", "uiUrl", "bank", "namespace", "dataDir"]) {
+			if (!t[f]) continue;
 			const cur = asText(d[f], "");
 			const orig = asText(cfg[f], "");
 			if (cur !== orig) body[f] = cur;
 		}
-		if (d.recallScope !== (cfg.recallScope === "project" ? "project" : "all")) body.recallScope = d.recallScope;
+		if (t.recallScope && d.recallScope !== (cfg.recallScope === "project" ? "project" : "all")) body.recallScope = d.recallScope;
 		for (const f of ["autoRecall", "autoRetain"]) {
-			if (Boolean(d[f]) !== (cfg[f] !== false)) body[f] = Boolean(d[f]);
+			if (t[f] && Boolean(d[f]) !== (cfg[f] !== false)) body[f] = Boolean(d[f]);
 		}
 		for (const f of ["recallBudget", "timeoutMs"]) {
+			if (!t[f]) continue;
 			const n = Number(d[f]);
 			if (Number.isFinite(n) && n > 0 && n !== Number(cfg[f])) body[f] = n;
 		}
@@ -338,6 +354,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			e2.configured = !!(res && res.configured);
 			e2.draft = draftFromConfig(e2.config);
 			e2.secretTouched = { apiKey: false, externalDatabaseUrl: false, llmApiKey: false };
+			e2.touched = {};
 			e2.dirty = false;
 			e2.pollTicks = 0;
 			loadStatus(host, key); // refresh status after a successful save.
@@ -358,6 +375,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (!entry) return;
 		entry.draft = draftFromConfig(entry.config);
 		entry.secretTouched = { apiKey: false, externalDatabaseUrl: false, llmApiKey: false };
+		entry.touched = {};
 		entry.dirty = false;
 		repaint(host);
 	};
@@ -529,6 +547,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const entry = get(key);
 		if (!entry || !entry.draft) return;
 		entry.draft = { ...entry.draft, [field]: value };
+		entry.touched = { ...entry.touched, [field]: true };
 		entry.dirty = true;
 		repaint(host);
 	};
@@ -548,19 +567,38 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const entry = get(key);
 		if (!entry || !entry.draft) return;
 		const patch = { ...entry.draft };
+		const touched = { ...(entry.touched || {}) };
 		if (preset === "external") {
 			patch.mode = "external";
+			touched.mode = true;
 		} else if (preset === "managed" || preset === "managed-external-postgres") {
 			patch.mode = preset;
+			touched.mode = true;
 		} else if (preset === "hermes") {
 			patch.mode = "external";
 			patch.externalUrl = EX_API_URL;
 			patch.bank = "hermes";
-			if (!asText(patch.uiUrl, "").trim()) patch.uiUrl = EX_UI_URL;
+			touched.mode = true;
+			touched.externalUrl = true;
+			touched.bank = true;
+			if (!asText(patch.uiUrl, "").trim()) { patch.uiUrl = EX_UI_URL; touched.uiUrl = true; }
 		}
 		entry.draft = patch;
+		entry.touched = touched;
 		entry.dirty = true;
 		repaint(host);
+	};
+
+	/** Which deployment preset the current draft matches — VALUE-based, so the
+	 *  External and Hermes-local cards (both `mode: external`) are never both shown
+	 *  selected. Hermes wins only when the draft carries its baked API URL + bank;
+	 *  generic External is "external mode that is NOT the Hermes preset". */
+	const matchesPreset = (d, preset) => {
+		const mode = asText(d && d.mode, "external");
+		const isHermes = mode === "external" && asText(d && d.externalUrl, "") === EX_API_URL && asText(d && d.bank, "") === "hermes";
+		if (preset === "hermes") return isHermes;
+		if (preset === "external") return mode === "external" && !isHermes;
+		return mode === preset;
 	};
 
 	// ── Badge derivation — the 8-state model (UX doc §2), status-driven with a
@@ -776,20 +814,23 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				</div>
 				<p class="hs-muted">Pick how Hindsight runs. Selecting a managed option only sets the mode — nothing starts until you press <strong>Start runtime</strong>.</p>
 				<div class="hs-deploy-grid">
-					${DEPLOY_CARDS.map((c) => html`
+					${DEPLOY_CARDS.map((c) => {
+						const selected = matchesPreset(d, c.preset);
+						return html`
 						<button
 							class="hs-deploy-card"
 							data-testid=${`hindsight-deploy-${c.preset}`}
 							type="button"
-							aria-pressed=${d.mode === c.mode ? "true" : "false"}
-							data-selected=${d.mode === c.mode ? "true" : "false"}
+							aria-pressed=${selected ? "true" : "false"}
+							data-selected=${selected ? "true" : "false"}
 							@click=${() => applyDeploymentPreset(host, key, c.preset)}
 						>
 							<span class="hs-deploy-title">${c.title}</span>
 							<span class="hs-deploy-meta"><strong>Bobbit:</strong> ${c.bobbit}</span>
 							<span class="hs-deploy-meta"><strong>You:</strong> ${c.you}</span>
 							<span class="hs-deploy-note">${c.note}</span>
-						</button>`)}
+						</button>`;
+					})}
 				</div>
 				${renderOwnership()}
 				${renderDefaultsExplainer()}

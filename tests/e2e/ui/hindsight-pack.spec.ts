@@ -341,6 +341,7 @@ const f = {
 	bank: (p: Page) => p.locator('[data-testid="hindsight-bank"]'),
 	timeout: (p: Page) => p.locator('[data-testid="hindsight-timeout"]'),
 	namespace: (p: Page) => p.locator('[data-testid="hindsight-namespace"]'),
+	autoRetain: (p: Page) => p.locator('[data-testid="hindsight-auto-retain"]'),
 };
 
 /** Seed the persisted Hindsight config in the shared in-process pack store OUT OF
@@ -501,6 +502,42 @@ describe("Hindsight pack — UX polish (panel)", () => {
 		await expect(f.externalUrl(page), "untouched external URL preserved").toHaveValue(stub.url);
 		await expect(f.timeout(page), "untouched timeout preserved").toHaveValue("15000");
 		await expect(statusBadge(page)).toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "a successful Save clears the dirty banner").toHaveCount(0);
+	});
+
+	// ── Headline B2 (the high-severity clobber): a panel that mounted dormant and was
+	//    NEVER refreshed, where the user edits ONLY ONE field (autoRetain), must send
+	//    JUST that field on Save — the stale untouched defaults (externalUrl/bank/timeout)
+	//    must NOT clobber a config that landed server-side after mount. This is the case
+	//    a diff-everything Save would still break even though the pre-save refresh runs:
+	//    the dirty draft keeps the stale defaults, so every untouched field would diff
+	//    against the fresh config and POST. Only TOUCHED-field gating prevents it. ──
+	test("stale-form B2: a dirty single-field edit (autoRetain) never clobbers untouched server-side config", async ({ page }) => {
+		await mountHindsightPanel(page);
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "dormant", { timeout: 15_000 });
+
+		// The form shows the mount-time DEFAULTS; autoRetain defaults ON.
+		await expect(f.externalUrl(page)).toHaveValue("");
+		await expect(f.bank(page)).toHaveValue("bobbit");
+		await expect(f.timeout(page)).toHaveValue("1500");
+		await expect(f.autoRetain(page)).toBeChecked();
+
+		// Another agent / the route lands a GOOD config AFTER mount (autoRetain on).
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", timeoutMs: 15000, autoRetain: true });
+
+		// Edit ONLY autoRetain (toggle off) WITHOUT refreshing, then Save. The form still
+		// holds the stale dormant defaults for every other field.
+		await f.autoRetain(page).uncheck();
+		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "the single-field edit marks the draft dirty").toBeVisible();
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// The good config SURVIVES: status connects to the seeded external Hindsight and the
+		// untouched fields are preserved — only autoRetain changed (the field the user edited).
+		await expect(statusBadge(page), "the seeded config is preserved → connected").toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+		await expect(f.externalUrl(page), "Save did not clobber the external URL").toHaveValue(stub.url, { timeout: 15_000 });
+		await expect(f.bank(page), "Save did not clobber the bank").toHaveValue("hermes");
+		await expect(f.timeout(page), "Save did not clobber the timeout").toHaveValue("15000");
+		await expect(f.autoRetain(page), "the one edited field (autoRetain) is changed").not.toBeChecked();
 		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "a successful Save clears the dirty banner").toHaveCount(0);
 	});
 
