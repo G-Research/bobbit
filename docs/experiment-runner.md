@@ -6,6 +6,16 @@ This guide details the architecture, execution modes, stable contracts, results 
 
 ---
 
+## 0. Availability & Access
+
+The Experiment Runner **ships as a first-party built-in pack** — it is on the explicit `FIRST_PARTY_PACKS` allowlist in `scripts/copy-builtin-packs.mjs` (alongside `pr-walkthrough` and `hindsight`), so it is **active by default** and resolved by the built-in resolver band with **no install step**. There is no "install from a marketplace source" flow: it is already present.
+
+- **Where to find it**: Marketplace → **Installed** → the **Built-in (shipped)** group, where it is flagged `builtin: true`.
+- **How to open it**: the session-menu **"New experiment"** launcher, the **`/Experiments`** composer-slash command, or the **`#/ext/experiment-runner`** deep-link (which restores a specific experiment/view via `?experimentId=…&view=…`).
+- **Disabling it**: because it is a built-in, it **cannot be uninstalled** (`DELETE /api/marketplace/installed` returns `403`). The "clean install/uninstall" contract is satisfied by the **enable/disable toggle** in the Market Built-in group: toggling its entrypoints off removes the launcher + deep-link (the deep-link then shows the dismissible "feature unavailable" empty state), and toggling them back on restores the panel. The toggle state is server-scope and survives reloads.
+
+---
+
 ## 1. High-Level Architecture & Flow
 
 The Experiment Runner consists of a **frontend UI panel**, a **confined worker route module**, a **results registry (store)**, and **one core/host extension API**: `host.agents.spawnGoal`.
@@ -65,6 +75,12 @@ spawnGoal(opts: {
     When a child is spawned, the start request flows through `verificationHarness.requestChildStart`. If the root's `maxConcurrentChildren` limit is reached, the scheduler parks the child goal, marking it `state: "blocked"`, and queues its worktree setup and team execution until a permit is freed.
 *   **Uniform Metadata & Roles Propagation**:
     The customized `metadata` and `inlineRoles` are persisted on the child goal. Thanks to PR #822's hierarchical resolver (`resolveGoalMetadata`), this treatment merges uniformly and propagates to every descendant session, delegate, subgoal, and workspace sandbox in the child's subtree—eliminating execution asymmetries.
+
+---
+
+## 2.2 Security / trust model
+
+The pack's server-side routes read child-goal outcomes (cost, gates, tasks, goal metadata) by calling the gateway REST API over `https://localhost`, authenticating with the gateway bearer token. That token is read from disk — `.bobbit/state/token` and `.bobbit/state/gateway-url` under the **project root** (discovered by walking up from the route worker's cwd and, failing that, deriving the root from `git rev-parse --git-common-dir`), never from the environment. This is a deliberate v1 choice: keeping outcome reads on the existing authenticated REST surface lets the only core change be `host.agents.spawnGoal`, instead of adding a second host capability. The consequence is that an enabled experiment-runner route runs with authenticated gateway API access as the user — the same ambient-OS trust level any pack route with `os` access already has, which is why the pack ships **disabled by default** and is opt-in. This is not a privilege escalation beyond that baseline. A future hardening would add a scoped, read-only goal-outcome host capability so the pack could read child results without reading the bearer token at all; the outcome-reader is already isolated behind `goalReaderFor`/`loadCreds` in `lib/engine.mjs`, so that swap is contained.
 
 ---
 

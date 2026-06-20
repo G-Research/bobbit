@@ -20,10 +20,11 @@
 import fs from "node:fs";
 import path from "node:path";
 
-// experiment-runner is intentionally NOT shipped as a built-in: it is a
-// marketplace-installable pack (design requirement: clean install/uninstall), so
-// it must not be present as a builtin contribution that survives uninstall.
-const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight"]; // explicit allowlist
+// experiment-runner ships as a first-party built-in (panel + entrypoints +
+// routes + the bundled lib). Its "clean install/uninstall" requirement is met by
+// the built-in enable/disable toggle model (server-scope activation, like
+// pr-walkthrough/hindsight), not by excluding it from the shipped tree.
+const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "experiment-runner"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";
 

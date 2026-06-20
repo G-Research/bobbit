@@ -74,7 +74,10 @@ export function buildLedger({ runs = [], objective, eps = 0 }) {
 			bestObjectiveAfter: decided.bestAfter,
 			reason: decided.reason,
 		});
-		// Only accepted runs advance the best-so-far baseline used downstream.
+		// Push every collected run into the prior set, not just accepted ones. The
+		// best-so-far baseline does NOT shift for rejected runs because
+		// computeBestSoFar filters internally (correctness gate + non-improving
+		// candidates are excluded), so feeding it the full history is correct.
 		prior.push(run);
 	}
 	return ledger;

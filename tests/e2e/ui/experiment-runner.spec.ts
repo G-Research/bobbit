@@ -1,33 +1,46 @@
 /**
- * Browser E2E — the experiment-runner market pack PANEL + entrypoints (design
- * docs/design/experiment-runner-panel-ux.md §12). Installed via the marketplace
- * (it is NOT a built-in band pack), mirroring tests/e2e/ui/artifacts-pack.spec.ts
- * for install/uninstall and tests/e2e/ui/pr-walkthrough-pack.spec.ts for the
- * reconcile + deep-link + pack-store seeding patterns.
+ * Browser E2E — the experiment-runner FIRST-PARTY BUILT-IN pack PANEL +
+ * entrypoints (design docs/design/experiment-runner-panel-ux.md §12). The pack
+ * ships as a built-in (FIRST_PARTY_PACKS in scripts/copy-builtin-packs.mjs,
+ * alongside pr-walkthrough/hindsight) BUT — unlike the others — it ships
+ * present-but-DISABLED by default (opt-in): the server boot seed
+ * (src/server/agent/builtin-pack-defaults.ts) writes a server-scope
+ * pack_activation entry disabling all of its entrypoints, so its launchers +
+ * the #/ext/experiment-runner deep-link are absent until the user flips the
+ * Market "Built-in" toggle on. Enabling clears the DisabledRefs; a durable
+ * marker keeps it enabled across restarts.
  *
  * Coverage:
- *   1. INSTALL → contributions (panel + the canonical routes + 3 entrypoints) →
- *      deep-link opens the panel at MODE-SELECT, defaulting to A/B (autoresearch
- *      carries the opt-in warning eyebrow).
+ *   0. OPT-IN DEFAULT — the pack is PRESENT (in /api/marketplace/installed flagged
+ *      builtin:true) but DISABLED by the boot seed: GET pack-activation shows the
+ *      entrypoints disabled, /api/ext/contributions exposes 0 entrypoints, and the
+ *      deep-link resolves to the "feature unavailable" empty state (no panel).
+ *   1. ENABLE — flipping the Market Built-in toggle on (PUT pack-activation, server
+ *      scope, cleared disabled refs) restores the panel + the 15 routes + the 3
+ *      entrypoints; the deep-link opens the panel at MODE-SELECT defaulting to A/B
+ *      (autoresearch carries the opt-in warning eyebrow).
  *   2. A/B VALIDATION — identical variants + zero budget block launch; making them
  *      distinct + setting a per-run budget enables it; the projection strip shows
  *      the run count + bounded cost.
  *   3. AUTORESEARCH GUARDRAILS — switching to autoresearch shows the danger banner;
  *      launch stays blocked until ≥1 cap, ≥1 stop, and the explicit ack are set;
- *      the draft persists across a reload.
+ *      the draft persists across a reload; a fully-capped launch advances the loop
+ *      beyond iteration 0.
  *   4. DASHBOARD — a seeded experiment renders the comparison; editing the
  *      dashboard spec adds a widget that re-renders from the stored outcomes (no
- *      re-run); toggling a metric re-renders; UNINSTALL drops the panel +
- *      entrypoints and the stale deep-link no-ops.
+ *      re-run); toggling a metric re-renders.
+ *   5. DISABLE / RE-ENABLE + NON-REMOVABLE — toggling the pack's entrypoints off in
+ *      the Market "Built-in" group removes the launcher + the #/ext/experiment-runner
+ *      deep-link (which then shows the empty state); toggling back on restores the
+ *      panel; the state survives a reload; the built-in pack cannot be uninstalled
+ *      (DELETE /installed → 403).
  */
-import { fileURLToPath } from "node:url";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, base, readE2ETokenAsync } from "../e2e-setup.js";
-import { openApp, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash } from "./ui-helpers.js";
 
 test.describe.configure({ mode: "serial" });
 
-const SOURCE_DIR = fileURLToPath(new URL("../../../market-packs", import.meta.url));
 const PACK = "experiment-runner";
 const PANEL_ID = "experiment-runner.panel";
 const ROUTE_ID = "experiment-runner";
@@ -36,54 +49,18 @@ const CANONICAL_ROUTES = [
 	"iterate", "listExperiments", "getExperiment", "saveMetrics", "saveDashboard",
 	"report", "listMetrics", "listWidgets", "cancel",
 ];
+const ENTRYPOINT_LIST_NAMES = ["experiment-runner-open", "experiment-runner-palette", "experiment-runner-route"];
+// The session-menu LAUNCHER ("New experiment") — its listName is the entrypoint
+// file basename; the activation toggle is keyed by listName.
+const SESSION_MENU_LIST_NAME = "experiment-runner-palette";
+const SESSION_MENU_LABEL = "New experiment";
 
 const tid = (id: string) => `[data-testid="${id}"]`;
-
-async function installPack(): Promise<void> {
-	const addRes = await apiFetch("/api/marketplace/sources", {
-		method: "POST",
-		body: JSON.stringify({ url: SOURCE_DIR }),
-	});
-	const addBody = await addRes.text();
-	expect([201, 409].includes(addRes.status), addBody).toBe(true);
-	let sourceId: string;
-	if (addRes.status === 201) {
-		sourceId = (JSON.parse(addBody) as { source: { id: string } }).source.id;
-	} else {
-		const res = await apiFetch("/api/marketplace/sources");
-		const sources = ((await res.json()).sources ?? []) as Array<{ id: string; url?: string }>;
-		sourceId = (sources.find((s) => s.url === SOURCE_DIR) ?? sources[0]).id;
-	}
-	const instRes = await apiFetch("/api/marketplace/install", {
-		method: "POST",
-		body: JSON.stringify({ sourceId, dirName: PACK, scope: "server" }),
-	});
-	const instBody = await instRes.text();
-	expect(instRes.status, instBody).toBe(201);
-}
-
-async function uninstallPack(): Promise<void> {
-	await apiFetch("/api/marketplace/installed", {
-		method: "DELETE",
-		body: JSON.stringify({ scope: "server", packName: PACK }),
-	}).catch(() => {});
-}
-
-async function cleanup(): Promise<void> {
-	await uninstallPack();
-	try {
-		const res = await apiFetch("/api/marketplace/sources");
-		for (const s of ((await res.json()).sources ?? []) as Array<{ id: string; builtin?: boolean }>) {
-			if (s.builtin) continue;
-			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(s.id)}`, { method: "DELETE" }).catch(() => {});
-		}
-	} catch { /* ignore */ }
-}
 
 interface PackContributionsMeta {
 	packId: string;
 	panels: { id: string }[];
-	entrypoints: Array<{ id: string; kind: string; routeId?: string }>;
+	entrypoints: Array<{ id: string; kind: string; routeId?: string; listName: string; label?: string }>;
 	routeNames?: string[];
 }
 
@@ -93,8 +70,38 @@ async function listContributions(): Promise<PackContributionsMeta[]> {
 	return (await res.json()).packs as PackContributionsMeta[];
 }
 
+async function listInstalled(): Promise<Array<{ packName: string; scope: string; builtin?: boolean }>> {
+	const res = await apiFetch("/api/marketplace/installed");
+	expect(res.ok).toBe(true);
+	return (await res.json()).installed as Array<{ packName: string; scope: string; builtin?: boolean }>;
+}
+
+async function getActivation(): Promise<{ disabled?: { entrypoints?: string[] } }> {
+	const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
+	expect(res.ok).toBe(true);
+	return (await res.json()) as { disabled?: { entrypoints?: string[] } };
+}
+
+/** ENABLE the opt-in built-in: clear its DisabledRefs (the Market "Built-in"
+ *  toggle path). Mirrors marketplace-page.ts's enable payload. */
+async function enablePack(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [] } }),
+	});
+}
+
+/** DISABLE the pack: disable all of its entrypoints (matches the boot-seed shape
+ *  and the user toggling every entrypoint off). */
+async function disablePack(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [...ENTRYPOINT_LIST_NAMES] } }),
+	});
+}
+
 /** Open the app, create a session, and force a pack-contribution reconcile so the
- *  freshly-installed panel + entrypoints register without a reload. */
+ *  built-in panel + entrypoints register without a reload. */
 async function openWithPack(page: import("@playwright/test").Page): Promise<void> {
 	await page.setViewportSize({ width: 1400, height: 1000 });
 	await openApp(page);
@@ -109,21 +116,60 @@ async function openPanelDeepLink(page: import("@playwright/test").Page, query = 
 	await expect(page.locator(tid("experiment-runner-panel-root")).first()).toBeVisible({ timeout: 20_000 });
 }
 
+// Each test restores the seeded opt-in default (disabled) on the way OUT, so the
+// "ships disabled by default" assertion is deterministic even on a serial retry
+// (the worker-scoped gateway — and its persisted server-scope activation — are
+// reused across retries). Functional tests ENABLE the pack at their top.
 test.afterEach(async () => {
-	await cleanup();
+	await disablePack().catch(() => {});
 });
 
-test("install → panel + routes + entrypoints register; deep-link opens mode-select defaulting to A/B", async ({ page }) => {
-	await installPack();
+test("ships present-but-disabled by default (opt-in); deep-link shows the unavailable empty state", async ({ page }) => {
+	// The boot seed (src/server/agent/builtin-pack-defaults.ts) disables every
+	// entrypoint at server scope, so the pack is PRESENT but OFF until enabled.
+	const activation = await getActivation();
+	expect(activation.disabled?.entrypoints ?? [], "the boot seed must disable all 3 entrypoints by default").toEqual(
+		expect.arrayContaining(ENTRYPOINT_LIST_NAMES),
+	);
 
+	// It still appears in the Installed list flagged builtin:true (present, not removed).
+	const builtinRow = (await listInstalled()).find((p) => p.packName === PACK && p.builtin);
+	expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
+	expect(builtinRow?.scope).toBe("server");
+
+	// No entrypoints are contributed while disabled (the panel + routes survive —
+	// they are not entrypoints — but the launchers + deep-link are gone).
 	const meta = (await listContributions()).find((p) => p.packId === PACK);
-	expect(meta, "the experiment-runner pack must contribute").toBeTruthy();
+	expect(meta, "the built-in pack metadata must still resolve while disabled").toBeTruthy();
+	expect(meta?.entrypoints?.length ?? 0, "disabled-by-default ⇒ 0 entrypoints contributed").toBe(0);
+
+	// The deep-link resolves to the dismissible "feature unavailable" empty state.
+	await openWithPack(page);
+	await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${ROUTE_ID}`);
+	const unavailable = page.locator('[data-testid="ext-route-unavailable"]');
+	await expect(unavailable).toBeVisible({ timeout: 15_000 });
+	await expect(unavailable).toContainText("unavailable");
+	await expect(page.locator(tid("experiment-runner-panel-root"))).toHaveCount(0);
+});
+
+test("enable via the Market Built-in toggle: built-in band contributes panel + 15 routes + 3 entrypoints; deep-link opens mode-select defaulting to A/B", async ({ page }) => {
+	// ENABLE — flip the Market Built-in toggle on (clear DisabledRefs).
+	await enablePack();
+	const meta = (await listContributions()).find((p) => p.packId === PACK);
+	expect(meta, "the built-in experiment-runner pack must be resolved with NO install").toBeTruthy();
 	expect(meta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
+	expect(meta?.routeNames, "all 15 canonical routes must be contributed").toEqual(expect.arrayContaining(CANONICAL_ROUTES));
 	expect(meta?.entrypoints?.map((e) => e.id) ?? []).toEqual(
 		expect.arrayContaining(["experiment-runner.open", "experiment-runner.palette", "experiment-runner.route"]),
 	);
+	expect((meta?.entrypoints ?? []).map((e) => e.listName)).toEqual(expect.arrayContaining(ENTRYPOINT_LIST_NAMES));
 	expect(meta?.entrypoints?.some((e) => e.kind === "route" && e.routeId === ROUTE_ID)).toBe(true);
-	if (meta?.routeNames) expect(meta.routeNames).toEqual(expect.arrayContaining(CANONICAL_ROUTES));
+	expect(meta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === SESSION_MENU_LABEL)).toBe(true);
+
+	// The built-in pack appears in the Installed list flagged builtin:true.
+	const builtinRow = (await listInstalled()).find((p) => p.packName === PACK && p.builtin);
+	expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
+	expect(builtinRow?.scope).toBe("server");
 
 	await openWithPack(page);
 	await openPanelDeepLink(page);
@@ -144,7 +190,7 @@ test("install → panel + routes + entrypoints register; deep-link opens mode-se
 });
 
 test("A/B define: identical variants + missing budget block launch; distinct + budget enables it", async ({ page }) => {
-	await installPack();
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 	await page.locator(tid("experiment-runner-mode-ab")).click();
@@ -179,7 +225,7 @@ test("A/B define: identical variants + missing budget block launch; distinct + b
 });
 
 test("autoresearch refuses to start uncapped; draft persists across reload", async ({ page }) => {
-	await installPack();
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 
@@ -225,7 +271,7 @@ test("autoresearch launches successfully via iterate (not the A/B-only launch ro
 	// Regression for panel doLaunch fix #1: autoresearch used to call the A/B-only
 	// `launch` route, which returns LAUNCH_AB_ONLY, surfaced as a launch error and
 	// never navigated. The panel must branch to `iterate` and reach the dashboard.
-	await installPack();
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 
@@ -261,9 +307,8 @@ test("autoresearch dashboard reflects a loop that advanced beyond iteration 0 (�
 	// Regression for fix #1: the autoresearch loop must continue past the first
 	// candidate (a prior terminal-state bug flipped the experiment to "done" after
 	// iteration 0). The dashboard must surface a MULTI-iteration ledger and the
-	// deterministic stop — not just a single iteration-0 row.
-	await installPack();
-
+	// deterministic stop — not just a single iteration-0 row. Seed the pack store
+	// directly (same in-process pack-store singleton the gateway serves).
 	const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
 	const experimentId = "seed-ar-1";
 	const def = {
@@ -299,6 +344,7 @@ test("autoresearch dashboard reflects a loop that advanced beyond iteration 0 (�
 	}
 	await store.put(PACK, "index/experiments", [experimentId]);
 
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page, `?experimentId=${experimentId}&view=dashboard`);
 
@@ -315,9 +361,7 @@ test("autoresearch dashboard reflects a loop that advanced beyond iteration 0 (�
 	await expect(body).toContainText(/plateau/i);
 });
 
-test("dashboard renders a seeded A/B experiment; editing the spec re-renders without a re-run; uninstall reconciles", async ({ page }) => {
-	await installPack();
-
+test("dashboard renders a seeded A/B experiment; editing the spec re-renders without a re-run; toggling a metric re-renders", async ({ page }) => {
 	// Seed the pack registry directly (same in-process pack-store singleton the
 	// gateway serves) so the dashboard has outcomes to render without a real run.
 	const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
@@ -351,6 +395,7 @@ test("dashboard renders a seeded A/B experiment; editing the spec re-renders wit
 	}
 	await store.put(PACK, "index/experiments", { experiments: [{ experimentId, title: def.title, mode: "ab", status: "complete" }] });
 
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page, `?experimentId=${experimentId}&view=dashboard`);
 
@@ -370,20 +415,121 @@ test("dashboard renders a seeded A/B experiment; editing the spec re-renders wit
 	await page.locator(tid("experiment-runner-save-dashboard")).click();
 	await expect(page.locator(`${tid("experiment-runner-widget")}[data-widget-type="objective-curve"]`).first()).toBeVisible({ timeout: 15_000 });
 
-	// UNINSTALL → panel + entrypoints dropped; the deep-link no longer resolves.
-	const delRes = await apiFetch("/api/marketplace/installed", {
-		method: "DELETE",
-		body: JSON.stringify({ scope: "server", packName: PACK }),
-	});
-	expect(delRes.status).toBe(204);
+	// Toggle a metric off via the dashboard metrics editor → re-renders from the
+	// stored outcomes (re-extract, no re-run).
+	const metricsPanel = page.locator(tid("experiment-runner-metrics-panel"));
+	await metricsPanel.locator("summary").click();
+	const metricToggle = metricsPanel.locator(`${tid("experiment-runner-dash-metric-collect")}[data-metric="cost.totalUsd"]`).first();
+	await expect(metricToggle).toBeVisible({ timeout: 10_000 });
+	await expect(metricToggle).toBeChecked();
+	const saveMetrics = page.waitForResponse((r) => /\/api\/ext\/route\/saveMetrics\b/.test(r.url()) && r.request().method() === "POST");
+	await metricToggle.click();
+	await saveMetrics;
+	await expect(metricToggle).not.toBeChecked();
+	// The dashboard still renders the comparison arms after the metric edit.
+	await expect(page.locator(`${tid("experiment-runner-comparison-arm")}[data-arm="baseline"]`)).toBeVisible({ timeout: 15_000 });
+});
+
+test("built-in disable/re-enable removes & restores the launcher + deep-link; pack is non-removable", async ({ page }) => {
+	// Start from the ENABLED state (opt-in toggle on), then exercise disable→re-enable.
+	await enablePack();
+	await openWithPack(page);
+
+	// ── DISABLE via the Market built-in group → launcher + deep-link gone. ──
+	await navigateToHash(page, "#/market");
+	const builtinGroup = page.locator('[data-testid="market-builtin-group"]');
+	await expect(builtinGroup, "the Market Installed tab must show a Built-in group").toBeVisible({ timeout: 15_000 });
+	const card = builtinGroup.locator(`[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="${PACK}"]`).first();
+	await expect(card, "the built-in experiment-runner card must render").toBeVisible({ timeout: 15_000 });
+	// The built-in pack has no Uninstall control.
+	await expect(card.locator('[data-testid="market-uninstall-pack"]')).toHaveCount(0);
+
+	// The pack exposes its three entrypoint toggles (no tools/roles/skills).
+	for (const kind of ["Session menu", "Slash", "Route"]) {
+		await expect(card.getByText(kind, { exact: true }), `entrypoint kind ${kind} must be visible`).toBeVisible();
+	}
+	const sessionMenuToggle = card.locator(`[data-testid="market-toggle-entrypoint-${SESSION_MENU_LIST_NAME}"]`);
+	await expect(sessionMenuToggle, "the built-in pack's entrypoint toggles must render").toBeVisible({ timeout: 15_000 });
+
+	// Disable every entrypoint.
+	for (const listName of ENTRYPOINT_LIST_NAMES) {
+		const toggle = card.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
+		await expect(toggle).toBeVisible({ timeout: 10_000 });
+		if (await toggle.isChecked()) {
+			const put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
+			await toggle.click();
+			await put;
+		}
+	}
+
+	// The deep-link no longer resolves to a registered route → the dismissible
+	// "feature unavailable" empty state (no panel, no crash).
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-	await expect.poll(async () => {
-		const meta = (await listContributions()).find((p) => p.packId === PACK);
-		return meta ? (meta.panels?.length ?? 0) + (meta.entrypoints?.length ?? 0) : 0;
-	}, { timeout: 15_000 }).toBe(0);
-	await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${ROUTE_ID}?experimentId=${experimentId}&view=dashboard`);
+	await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${ROUTE_ID}`);
 	await expect.poll(async () => {
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 		return page.locator(tid("experiment-runner-panel-root")).count();
 	}, { timeout: 15_000 }).toBe(0);
+	const unavailable = page.locator('[data-testid="ext-route-unavailable"]');
+	await expect(unavailable).toBeVisible({ timeout: 10_000 });
+	await expect(unavailable).toContainText("unavailable");
+	await page.locator('[data-testid="ext-route-unavailable-dismiss"]').click();
+	await expect(unavailable).toHaveCount(0);
+	// The entrypoints are dropped from the contribution registry, but the panel +
+	// routes survive (they are not entrypoints).
+	await expect.poll(async () => {
+		const meta = (await listContributions()).find((p) => p.packId === PACK);
+		return meta?.entrypoints?.length ?? 0;
+	}, { timeout: 10_000 }).toBe(0);
+	const metaAfterDisable = (await listContributions()).find((p) => p.packId === PACK);
+	expect(metaAfterDisable?.panels?.some((p) => p.id === PANEL_ID), "entrypoint disable must not remove the pack panel").toBe(true);
+	expect(metaAfterDisable?.routeNames, "entrypoint disable must not remove pack routes").toEqual(expect.arrayContaining(CANONICAL_ROUTES));
+
+	// Disabled state survives a reload (server-scope override is persisted).
+	const token = await readE2ETokenAsync();
+	await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/market`);
+	const group2 = page.locator('[data-testid="market-builtin-group"]');
+	await expect(group2).toBeVisible({ timeout: 20_000 });
+	const card2 = group2.locator(`[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="${PACK}"]`).first();
+	await expect(card2).toBeVisible({ timeout: 15_000 });
+	const sessionMenuToggleAfterReload = card2.locator(`[data-testid="market-toggle-entrypoint-${SESSION_MENU_LIST_NAME}"]`);
+	await expect(sessionMenuToggleAfterReload).toBeVisible({ timeout: 15_000 });
+	await expect(sessionMenuToggleAfterReload, "disable must survive reload (toggle stays off)").not.toBeChecked();
+	await expect.poll(async () => {
+		const meta = (await listContributions()).find((p) => p.packId === PACK);
+		return meta?.entrypoints?.length ?? 0;
+	}, { timeout: 10_000 }).toBe(0);
+
+	// ── RE-ENABLE → the launcher + deep-link are restored. ──
+	for (const listName of ENTRYPOINT_LIST_NAMES) {
+		const toggle = card2.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
+		await expect(toggle).toBeVisible({ timeout: 10_000 });
+		if (!(await toggle.isChecked())) {
+			const put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
+			await toggle.click();
+			await put;
+		}
+	}
+	await expect.poll(async () => {
+		const meta = (await listContributions()).find((p) => p.packId === PACK);
+		return meta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === SESSION_MENU_LABEL) ? "ok" : "no";
+	}, { timeout: 10_000 }).toBe("ok");
+	// The deep-link resolves again from a CLEAN context.
+	const sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+	if (sid) {
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	} else {
+		await openWithPack(page);
+	}
+	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
+	await openPanelDeepLink(page);
+	await expect(page.locator(tid("experiment-runner-panel-root")).first()).toHaveAttribute("data-view", "mode-select");
+
+	// ── NON-REMOVABLE — the built-in pack cannot be uninstalled. ──
+	const delPack = await apiFetch("/api/marketplace/installed", {
+		method: "DELETE",
+		body: JSON.stringify({ scope: "server", packName: PACK }),
+	});
+	expect(delPack.status, "the built-in pack must not be uninstallable").toBe(403);
 });
