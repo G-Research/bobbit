@@ -589,3 +589,48 @@ model under a different id" class of bug.
 | `tests/manual-integration/role-model-override.test.ts` | Manual binding-verification test. |
 | `AGENTS.md` | Add a Recipes bullet: **"Per-role model override"** → role yaml `model:`/`thinkingLevel:`; bound at session start by `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` (`session-manager.ts:2814`); reviewer/QA path in `verification-harness.ts` 3 sites. |
 | `docs/internals.md` | Brief note under "Per-project config" or a new "Per-role model" subsection cross-linking this design doc. |
+
+---
+
+## 8. Roles Model UI Reshuffle & Save-Hang Fix
+
+To make per-role model and thinking level overrides visible at a glance and editable in one place, the Roles UI was reshuffled (not redesigning the underlying model) to introduce list-row inline model controls, a relocated detail-page Model section, and a bug-fix for a save-button race condition.
+
+### 8.1 Roles List View Inline Controls & Heuristic
+
+The Roles list page (`src/app/role-manager-page.ts`) now renders an inline model + thinking level control in the middle of each list row by reusing the existing `renderModelRow` component.
+
+*   **Auto-Save on Change:** Interacting with the inline control (selecting a model, changing thinking level, or clearing an override) immediately persists the change to the backend via `updateRole` (scoped to the current project). A transient `"Saved"` confirmation badge briefly flashes next to the role name on success.
+*   **Propagation Stopping:** Events (`click`, `keydown`) inside the inline control container call `stopPropagation` to prevent triggering the outer list-row's click handler (which navigates to the role editor).
+*   **Overridden State:** When a role override is active, the model picker displays with an filled accent style, the thinking dropdown is fully interactive, and both clear (`×`) and Test (flask) buttons are exposed.
+*   **Inherited State Heuristic:** When no role override exists, the list row displays a resolved, greyed-out effective default model label formatted as `<resolved-model> · default` with the thinking dropdown disabled and clear/Test buttons hidden. Since inherited default resolution is contextual at session-start (reviewer sessions use review defaults, others use session defaults), the list UI uses a deterministic display-only heuristic:
+    *   **Review Default Allowlist (`default.reviewModel`):** `architect`, `code-reviewer`, `reviewer`, `security-reviewer`, `spec-auditor`, and `qa-tester` display the review-model default.
+    *   **Session Default (`default.sessionModel`):** All other roles (including custom roles) display the session-model default.
+
+### 8.2 Role Detail Editor Relocation
+
+In the role detail editor (`renderRoleEditor`):
+
+*   **Removed Tab:** The dedicated "Model" tab is removed; the tab bar now exposes only "Prompt" and "Tool Access".
+*   **Static Section:** Model and thinking controls are presented as a static section placed between the **Accessory** selector and the tab bar, styled identically to the Accessory selector.
+*   **Draft-Based Saves:** Unlike the list page, modifications within the detail-page Model section do not auto-save. They are draft-based and only committed when the user clicks the main **Save** button.
+*   **Read-Only Inspector:** The read-only inspector (`renderRoleInspector` used in the goal-proposal modal) is updated to reflect the new vertical layout, rendering the Model section as read-only.
+
+### 8.3 Save-Hang Bug Fix
+
+*   **Root Cause:** Inside the `handleSave` function of `role-manager-page.ts`, the successful PUT path calls `showEdit(updated)` -> `setHashRoute("role-edit", name)`. If the user saved changes while already on that role's edit page, `window.location.hash` was already current. Consequently, `setHashRoute` was a no-op that did not trigger a `hashchange` event. Because rendering was only bound to route/hash transitions, the DOM was never refreshed; the Save button remained stuck showing "Saving…" even though `saving` was set to `false` in memory.
+*   **Fix:** Explicitly call `renderApp()` in the success path of `handleSave` (after `showEdit`/`showList`) so that the DOM is guaranteed to re-render and return the button to the idle "Save" state regardless of whether the hash changed.
+
+### 8.4 Test Coverage
+
+*   **UI Fixture Tests (`tests/ui-fixtures/settings-admin-fixture.spec.ts`):**
+    *   Asserts inherited list rows display the correct default model label according to the allowance heuristic (e.g., `coder` shows session default, `reviewer` shows review default).
+    *   Asserts inline model selection auto-saves, flips row state to override, reveals clear/Test buttons, does not trigger edit page navigation, and survives page reloads.
+    *   Asserts clearing an override reverts the row back to the inherited display state and clears backend fields.
+    *   Asserts the detail page vertical section ordering (Accessory -> Model section -> Tab bar) and draft-based saving.
+    *   Asserts the Save button returns to idle "Save" after saving (regression check for the save-hang).
+*   **Browser E2E (`tests/e2e/ui/roles-model-reshuffle.spec.ts`):**
+    *   Real browser-driven spec verifying section layout ordering, tab bar composition (exposing only Prompt and Tool Access), and the Save button transition lifecycle under direct text changes on a real gateway.
+*   **Marketplace E2E (`tests/e2e/ui/marketplace.spec.ts`):**
+    *   Adjusted row-edit navigation. Because list rows now host interactive inline model controls, the test specifically clicks the explicit Pencil Edit action (`button[title="Edit"]`) in the row instead of clicking anywhere on the row.
+
