@@ -6,6 +6,16 @@ This guide details the architecture, execution modes, stable contracts, results 
 
 ---
 
+## 0. Availability & Access
+
+The Experiment Runner **ships as a first-party built-in pack** — it is on the explicit `FIRST_PARTY_PACKS` allowlist in `scripts/copy-builtin-packs.mjs` (alongside `pr-walkthrough` and `hindsight`), so it is **active by default** and resolved by the built-in resolver band with **no install step**. There is no "install from a marketplace source" flow: it is already present.
+
+- **Where to find it**: Marketplace → **Installed** → the **Built-in (shipped)** group, where it is flagged `builtin: true`.
+- **How to open it**: the session-menu **"New experiment"** launcher, the **`/Experiments`** composer-slash command, or the **`#/ext/experiment-runner`** deep-link (which restores a specific experiment/view via `?experimentId=…&view=…`).
+- **Disabling it**: because it is a built-in, it **cannot be uninstalled** (`DELETE /api/marketplace/installed` returns `403`). The "clean install/uninstall" contract is satisfied by the **enable/disable toggle** in the Market Built-in group: toggling its entrypoints off removes the launcher + deep-link (the deep-link then shows the dismissible "feature unavailable" empty state), and toggling them back on restores the panel. The toggle state is server-scope and survives reloads.
+
+---
+
 ## 1. High-Level Architecture & Flow
 
 The Experiment Runner consists of a **frontend UI panel**, a **confined worker route module**, a **results registry (store)**, and **one core/host extension API**: `host.agents.spawnGoal`.
