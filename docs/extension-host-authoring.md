@@ -702,7 +702,7 @@ is not loaded).
 ```yaml
 # entrypoints/viewer-open.yaml
 id: my-pack.open
-kind: composer-slash          # composer-slash | git-widget-button | command-palette
+kind: composer-slash          # composer-slash | session-menu
 label: My Viewer              # required for launcher kinds
 target:
   route: my-pack              # OR { panelId: ... }
@@ -737,7 +737,7 @@ host.ui.navigate({ route: "artifacts", params: { artifactId } });
 ```yaml
 # entrypoints/reviewer-launch.yaml
 id: my-pack.launch
-kind: git-widget-button       # any launcher kind
+kind: session-menu            # any launcher kind
 label: Run Reviewer
 target:
   action: spawn               # discriminates a SpawnLaunchTarget
@@ -750,8 +750,8 @@ On click the platform launcher dispatch (`src/app/pack-entrypoints.ts`) calls th
 opens `panelId` **in that child session** and auto-switches the view to it via
 `host.ui.openPanel({ panelId, sessionId: childSessionId })` (contract-v2 `PanelTarget.sessionId`,
 a real session switch). A `{ ok: false }` result (e.g. `{ code, error }`) is **not** opened as a
-panel — it is handed back to the launching surface, which renders it inline (the
-git-status-widget dropdown shows `data-testid="git-widget-launcher-error"`); nothing is spawned
+panel — it is handed back to the launching surface, which emits visible launcher feedback
+(for example the session header toast from `bobbit-launcher-feedback`); nothing is spawned
 and the view does not switch. This is how the **PR-walkthrough** launchers work — a click spawns
 a fresh read-only reviewer sub-agent and the panel lives only in that child session (see
 [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
@@ -1133,7 +1133,7 @@ example for combining pack-bound UI surfaces with normal role/tool-policy-resolv
 
 ```
 pr-walkthrough/
-  pack.yaml                              # contents.tools: [pr-walkthrough] + contents.roles: [pr-reviewer] + contents.entrypoints: [4 files] + routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
+  pack.yaml                              # contents.tools: [pr-walkthrough] + contents.roles: [pr-reviewer] + contents.entrypoints: [3 files] + routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
   roles/pr-reviewer.yaml                 # read-only reviewer role; allows the "PR Walkthrough" group, denies all else
   tools/pr-walkthrough/
     readonly_bash.yaml                   # concrete tool name: readonly_bash
@@ -1144,8 +1144,7 @@ pr-walkthrough/
   panels/pr-walkthrough-panel.yaml       # id: pr-walkthrough.panel, entry: ../lib/panel.js
   entrypoints/
     pr-walkthrough-open.yaml             # composer-slash launcher
-    pr-walkthrough-git-widget.yaml       # git-widget-button launcher
-    pr-walkthrough-palette.yaml          # command-palette launcher
+    pr-walkthrough-session-menu.yaml     # session-menu launcher
     pr-walkthrough-route.yaml            # kind: route, routeId: pr-walkthrough
   lib/
     panel.js                             # built viewer panel
@@ -1156,10 +1155,10 @@ pr-walkthrough/
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
 | Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. They are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
-| Launch — spawn-on-click, a real isolated reviewer | all three launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces inline in the git-widget dropdown; nothing is spawned |
+| Launch — spawn-on-click, a real isolated reviewer | both launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds the `binding/<child>` and `submitted/<jobId>` routing keys for the reviewer child. The old `reviewer/` dedup index and owner `last/` recovery pointer were removed (always-fresh launch + child-self recovery only) |
-| Deep-link + launchers | four `entrypoints/*.yaml` — three **spawn launchers** (composer-slash, git-widget-button, command-palette) all carrying `target.action: spawn` **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) that re-registers the panel so a child-session reload restores `#/ext/pr-walkthrough` |
+| Deep-link + launchers | three `entrypoints/*.yaml` — two **spawn launchers** (composer-slash and session-menu) both carrying `target.action: spawn` **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) that re-registers the panel so a child-session reload restores `#/ext/pr-walkthrough` |
 | Reload recovery | the `recover` route is **child-self only**: the reviewer child pane auto-invokes it on mount (the read-only carve-out) and it resolves the persisted YAML from the child's own `binding/<childSessionId>` (`binding/<self>` → `submitted/<jobId>`). The old owner-scoped `last/<sessionId>` branch and the manual "Load walkthrough" gesture were removed with the owner-session surface |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 

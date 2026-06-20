@@ -14,6 +14,7 @@
  *     the pack-addressed bearer-only /panels/ endpoint);
  *   - uninstall reconcile drops the route + launchers (a later navigate no-ops);
  *   - duplicate routeId across packs is rejected (lookupPackRoute undefined);
+ *   - old command-palette/git-widget launcher kinds are ignored;
  *   - NO auto-invoke on mount (reconcile alone touches no panel endpoint + no hash).
  *
  * Pattern mirrors pack-panels-reconcile.spec.ts: esbuild bundles the entry once, a
@@ -137,15 +138,19 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 		});
 		expect(hash).toBe("#/ext/thirdparty.route");
 
-		// All launcher kinds register + enumerate (composer-slash/git-widget/command-palette).
+		// Supported launcher kinds register + enumerate; removed legacy kinds do not.
 		const launchers = await page.evaluate(() => ({
 			slash: (window as any).__launchers("composer-slash"),
-			git: (window as any).__launchers("git-widget-button"),
-			palette: (window as any).__launchers("command-palette"),
+			sessionMenu: (window as any).__launchers("session-menu"),
+			legacyGit: (window as any).__launchers("git-widget-button"),
+			legacyPalette: (window as any).__launchers("command-palette"),
+			all: (window as any).__launchers(),
 		}));
 		expect(launchers.slash).toContain("tp.slash");
-		expect(launchers.git).toContain("tp.gitbtn");
-		expect(launchers.palette).toContain("tp.navlaunch");
+		expect(launchers.sessionMenu).toEqual(expect.arrayContaining(["tp.navlaunch", "tp.menubtn", "tp.spawn"]));
+		expect(launchers.legacyGit).toEqual([]);
+		expect(launchers.legacyPalette).toEqual([]);
+		expect(launchers.all).not.toEqual(expect.arrayContaining(["tp.git-old", "tp.palette-old"]));
 	});
 
 	test("uninstall reconcile drops the route + launchers (a later navigate no-ops; no hash, no panel fetch)", async ({ page }) => {
@@ -178,12 +183,12 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 	test("two packs declaring the SAME launcher id are BOTH addressable by their compound key (no collision)", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// pack_a + pack_b each declare a `command-palette` launcher with the SAME id
+		// pack_a + pack_b each declare a `session-menu` launcher with the SAME id
 		// "open" targeting their OWN panel — panel/entrypoint ids are pack-local.
 		const entries = await page.evaluate(async () => {
 			(window as any).__setContributions([
-				{ packId: "pack_a", packName: "pack_a", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "command-palette", label: "Open A", target: { panelId: "viewer" }, listName: "open" }] },
-				{ packId: "pack_b", packName: "pack_b", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "command-palette", label: "Open B", target: { panelId: "viewer" }, listName: "open" }] },
+				{ packId: "pack_a", packName: "pack_a", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "session-menu", label: "Open A", target: { panelId: "viewer" }, listName: "open" }] },
+				{ packId: "pack_b", packName: "pack_b", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "session-menu", label: "Open B", target: { panelId: "viewer" }, listName: "open" }] },
 			]);
 			await (window as any).__reconcile("COLLIDE");
 			// Register both packs' panels together so a panel-target launcher resolves +
@@ -192,7 +197,7 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 				{ packId: "pack_a", panelId: "viewer" },
 				{ packId: "pack_b", panelId: "viewer" },
 			], "COLLIDE");
-			return (window as any).__launcherEntries("command-palette");
+			return (window as any).__launcherEntries("session-menu");
 		});
 		// BOTH launchers survive — neither overwrote the other.
 		expect(entries.length).toBe(2);
@@ -229,15 +234,15 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 	// detection must keep it OFF the openPackPanel path; the within-gesture guard must
 	// suppress a re-entrant double-click.
 
-	test("T-10 — a SpawnLaunchTarget survives registration + enumeration (registered as a launcher)", async ({ page }) => {
+	test("T-10 — a SpawnLaunchTarget survives registration + enumeration (registered as a session-menu launcher)", async ({ page }) => {
 		await gotoAndWait(page);
 		const ids = await page.evaluate(async () => {
 			await (window as any).__reconcile("A");
-			return (window as any).__launchers("git-widget-button");
+			return (window as any).__launchers("session-menu");
 		});
-		// The spawn launcher is registered alongside the panel-target git-widget launcher.
+		// The spawn launcher is registered alongside the panel-target session-menu launcher.
 		expect(ids).toContain("tp.spawn");
-		expect(ids).toContain("tp.gitbtn");
+		expect(ids).toContain("tp.menubtn");
 	});
 
 	test("T-1 — spawn launcher calls `run`, opens the panel in the returned child, mounts NO owner panel", async ({ page }) => {

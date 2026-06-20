@@ -1,0 +1,13 @@
+id: pr-walkthrough.session-menu
+kind: session-menu
+label: PR Walkthrough
+# A session-menu LAUNCHER (the sidebar/chat session actions overflow menu). Its
+# selection IS the user gesture. SPAWN-ON-CLICK model (launch UX correction): like
+# every launch surface, it calls the pack `run` route to mint a fresh read-only
+# reviewer sub-agent, then opens the panel in the returned child session and
+# auto-switches to it. No owner-session panel is ever mounted; a NO_PR / spawn
+# failure spawns nothing.
+target:
+  action: spawn
+  route: run
+  panelId: pr-walkthrough.panel

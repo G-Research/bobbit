@@ -22,11 +22,11 @@ export interface GateSignalStep {
 	/** Durable diagnostics for completed command steps, stored under Bobbit state. */
 	diagnostics?: GateStepDiagnostics;
 	/**
-	 * Lifecycle status for in-flight rows. Set on initial enumeration by
+	 * Lifecycle status for in-flight rows and durable terminal verdict for
+	 * completed rows. Set on initial enumeration by
 	 * `VerificationHarness.beginVerification()` so the gate-store signal
-	 * carries useful progress information from the moment it is recorded
-	 * (eliminating the gate-store ↔ activeVerifications race). Omitted on
-	 * fully-completed rows where `passed`/`skipped` already carry the verdict.
+	 * carries useful progress information from the moment it is recorded,
+	 * then preserved as `passed`/`failed`/`skipped` for historical rendering.
 	 */
 	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
 	/** Optional phase number, mirrored from the workflow VerifyStep for ordering. */

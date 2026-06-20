@@ -25,10 +25,14 @@ const DEFAULT_IMAGE_MODELS = [
 	{ id: "imagen-4.0-fast-generate-001", name: "Imagen 4 Fast", provider: "google", api: "google-imagen", authenticated: true },
 ];
 
+// Full model shape so the shared ModelSelector dialog renders selectable rows
+// (it reads input/contextWindow/maxTokens/cost when building each item — a
+// minimal {id,provider,reasoning} stub throws on `model.input.includes`).
+const MODEL_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const DEFAULT_MODELS = [
-	{ id: "claude-opus-4-1", provider: "anthropic", reasoning: true },
-	{ id: "claude-sonnet", provider: "anthropic", reasoning: true },
-	{ id: "gpt-4o", provider: "openai", reasoning: false },
+	{ id: "claude-opus-4-1", name: "Claude Opus 4.1", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
+	{ id: "claude-sonnet", name: "Claude Sonnet", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 64_000, reasoning: true, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
+	{ id: "gpt-4o", name: "GPT-4o", provider: "openai", api: "openai-responses", contextWindow: 128_000, maxTokens: 16_000, reasoning: false, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
 ];
 
 function defaultRoles(): RoleData[] {

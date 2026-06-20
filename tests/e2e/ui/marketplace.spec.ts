@@ -112,7 +112,7 @@ function writePack(repo: string, spec: PackSpec): void {
 		writeFileSync(
 			join(packDir, "entrypoints", `${e.listName}.yaml`),
 			`id: ${e.id ?? `${e.listName}-id`}\n` +
-				`kind: command-palette\n` +
+				`kind: session-menu\n` +
 				`label: ${e.label ?? e.listName}\n` +
 				(e.description ? `description: ${e.description}\n` : "") +
 				`target:\n  panelId: ${e.panelId ?? `${e.listName}-panel`}\n`,
@@ -399,7 +399,10 @@ test.describe("Marketplace UI", () => {
 		// finding #2 — a market-pack entity is READ-ONLY: opening its editor shows
 		// a "Manage in Marketplace" note, NOT the legacy customize/revert buttons
 		// (those call override endpoints that can't remove an installed pack).
-		await roleRow.click();
+		// Click the explicit Edit action: role rows now contain an inline model
+		// control in the middle, so a center-point row click can legitimately target
+		// that control instead of navigating to the editor.
+		await roleRow.locator('button[title="Edit"]').click();
 		await expect(page.locator('[data-testid="market-readonly-note"]')).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(".config-action-btn")).toHaveCount(0);
 

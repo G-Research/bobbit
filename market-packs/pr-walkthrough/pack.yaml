@@ -13,8 +13,7 @@ contents:
   skills: []
   entrypoints:
     - pr-walkthrough-open
-    - pr-walkthrough-git-widget
-    - pr-walkthrough-palette
+    - pr-walkthrough-session-menu
     - pr-walkthrough-route
 # ── routes: (pack-level) — re-expresses handlePrWalkthroughApiRoute under the
 #    pack's namespace. Reached via host.callRoute("bundle"|"publish"). The server

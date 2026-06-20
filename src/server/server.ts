@@ -7729,7 +7729,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -7748,10 +7748,10 @@ async function handleApiRoute(
 			} else {
 				delete descriptions.tools;
 			}
-			// Entrypoint display metadata (best-effort) from the entrypoint files.
-			// The Market UI needs the kind/route to distinguish duplicate labels such as
-			// "PR Walkthrough" in different launch surfaces.
-			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>();
+			// Valid entrypoint display metadata from the entrypoint files. Invalid or
+			// unsupported entrypoint kinds are omitted so retired launch surfaces do not
+			// render as activation toggles.
+			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "session-menu" | "route"; routeId?: string }>();
 			try {
 				for (const ep of loadPackContributions(entry.path, entry.manifest).entrypoints) {
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
@@ -7761,9 +7761,9 @@ async function handleApiRoute(
 				roles: [...c.roles],
 				tools: concreteTools.tools,
 				skills: [...c.skills],
-				entrypoints: (c.entrypoints ?? []).map((listName) => {
+				entrypoints: (c.entrypoints ?? []).flatMap((listName) => {
 					const meta = entrypointByListName.get(listName);
-					return meta ? { listName, ...meta } : { listName };
+					return meta ? [{ listName, ...meta }] : [];
 				}),
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never
@@ -9316,6 +9316,17 @@ async function handleApiRoute(
 					&& !s.verification.steps.some(step => step.type === "human-signoff")
 				);
 				if (priorPassed?.verification) {
+					const phaseByStepName = new Map((gateDef.verify || []).map((s: any) => [s.name, s.phase ?? 0]));
+					const cachedSteps = priorPassed.verification.steps.map((s: any) => {
+						const status = s.skipped ? "skipped" : (s.status ?? (s.passed ? "passed" : "failed"));
+						return {
+							...s,
+							status,
+							...(status === "skipped" ? { skipped: true } : {}),
+							phase: s.phase ?? phaseByStepName.get(s.name) ?? 0,
+							output: `[cached from prior signal] ${s.output}`,
+						};
+					});
 					// Create a signal record with cached results
 					const cachedSignal = {
 						id: randomUUID(),
@@ -9329,7 +9340,7 @@ async function handleApiRoute(
 						contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
 						verification: {
 							status: "passed" as const,
-							steps: priorPassed.verification.steps.map(s => ({ ...s, output: `[cached from prior signal] ${s.output}` })),
+							steps: cachedSteps,
 						},
 					};
 					gateStore.recordSignal(cachedSignal);
@@ -9343,7 +9354,16 @@ async function handleApiRoute(
 					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
 					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
 					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
-					const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+					const verifySteps = cachedSignal.verification.steps.map((s: any) => ({
+						name: s.name,
+						type: s.type,
+						status: s.status,
+						passed: s.passed,
+						skipped: s.skipped,
+						phase: s.phase,
+						duration_ms: s.duration_ms,
+						output: s.output,
+					}));
 					json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
 					return;
 				}
@@ -9447,7 +9467,16 @@ async function handleApiRoute(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
-		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+		const verifySteps = initialSteps.map((s: any) => ({
+			name: s.name,
+			type: s.type,
+			status: s.status,
+			passed: s.passed,
+			skipped: s.skipped,
+			phase: s.phase,
+			duration_ms: s.duration_ms,
+			output: s.output,
+		}));
 		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
 		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
 		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
