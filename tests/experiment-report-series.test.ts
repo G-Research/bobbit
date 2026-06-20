@@ -65,6 +65,28 @@ describe("series: best-so-far curve (correctness gate)", () => {
 		const series = buildObjectiveSeries(runs, { metricId: "objective.value", direction: "min" });
 		assert.deepEqual(series.map((p) => p.bestSoFar), [10, 8, 8]);
 	});
+
+	it("plateauEps gates marginal improvements in the curve (sub-eps gain not accepted)", () => {
+		// iter1's +0.005 gain is below eps=0.01 → NOT accepted; best stays 10. iter2's
+		// +0.5 clears eps → accepted. Pins StopSpec.plateauEps threaded into the series
+		// (the loop AND the dashboard curve share this).
+		const runs = [arRun(0, 10), arRun(1, 10.005), arRun(2, 10.5)];
+		const series = buildObjectiveSeries(runs, OBJ, 0.01);
+		assert.deepEqual(series.map((p) => p.accepted), [true, false, true]);
+		assert.deepEqual(series.map((p) => p.bestSoFar), [10, 10, 10.5]);
+		// At the exact eps boundary the gain must EXCEED eps (strict >): +0.01 is not enough.
+		const boundary = buildObjectiveSeries([arRun(0, 10), arRun(1, 10.01)], OBJ, 0.01);
+		assert.equal(boundary[1].accepted, false);
+		// eps=0 (the default) reduces to strict-improvement: the same +0.005 is accepted.
+		const strict = buildObjectiveSeries([arRun(0, 10), arRun(1, 10.005)], OBJ);
+		assert.equal(strict[1].accepted, true);
+	});
+
+	it("plateauEps makes a sub-eps run count toward a plateau stop", () => {
+		// Two sub-eps improvements after the baseline → neither accepted → plateau over K=2.
+		const series = buildObjectiveSeries([arRun(0, 10), arRun(1, 10.004), arRun(2, 10.008)], OBJ, 0.01);
+		assert.equal(isPlateau(series, 2), true);
+	});
 });
 
 describe("series: isRunVerified", () => {

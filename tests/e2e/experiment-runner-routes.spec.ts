@@ -660,6 +660,125 @@ test.describe("experiment-runner routes — validateDef guardrails (defineExperi
 	});
 });
 
+test.describe("experiment-runner routes — maxConcurrency batches A/B spawns", () => {
+	test("maxConcurrency=1 spawns one child at a time, topping up as runs collect", async ({ gateway }) => {
+		// Pins the A/B concurrency fix: launch must spawn pending runs only up to
+		// def.maxConcurrency minus in-flight, leaving the rest pending; the panel
+		// re-invokes launch after poll/collect to top up. Before the fix, launch
+		// spawned ALL planned runs at once and the cap did nothing.
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, () => ({
+				costUsd: 0.1,
+				gateVerdicts: { build: "passed" },
+				taskCounts: { complete: 1, total: 1 },
+			}));
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-cc", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ab-cc-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ab concurrency e2e",
+				mode: "ab",
+				runnable: { kind: "command", command: "echo metric" },
+				variants: [
+					{ armId: "baseline", label: "baseline", metadata: { t: 0.2 } },
+					{ armId: "hi", label: "hi", metadata: { t: 0.9 } },
+				],
+				repeats: 2, // 4 planned runs
+				maxConcurrency: 1,
+				perRunBudget: 1,
+			};
+			await routes.defineExperiment(ctx, { body: def });
+
+			// First launch spawns only ONE child (cap=1); the other 3 stay pending.
+			const first = await routes.launch(ctx, { body: { experimentId } });
+			expect(spawned).toHaveLength(1);
+			expect(first.launched.filter((r: any) => r.status === "spawned")).toHaveLength(1);
+			expect(first.launched.filter((r: any) => r.status === "pending")).toHaveLength(3);
+
+			// Drive poll → collect → launch top-up until all four collect, asserting at most
+			// ONE run is ever in-flight (spawned/running/settled) at a time.
+			const IN_FLIGHT = ["spawned", "running", "settled"];
+			let collectedCount = 0;
+			let guard = 0;
+			while (collectedCount < 4 && guard++ < 20) {
+				await routes.poll(ctx, { body: { experimentId } });
+				await routes.collect(ctx, { body: { experimentId } });
+				const topUp = await routes.launch(ctx, { body: { experimentId } });
+				const inFlight = topUp.launched.filter((r: any) => IN_FLIGHT.includes(r.status));
+				expect(inFlight.length).toBeLessThanOrEqual(1);
+				collectedCount = topUp.launched.filter((r: any) => r.status === "collected").length;
+			}
+			expect(spawned).toHaveLength(4); // all four eventually spawned, one at a time
+			expect(collectedCount).toBe(4);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — wall-clock cap fires off the persisted createdAt", () => {
+	test("define persists createdAt; iterate computes elapsedMs from it and stops on the wall-clock cap", async ({ gateway }) => {
+		// Pins the panel doLaunch mirror-write fix at the route contract level:
+		// defineExperiment is the ONLY writer of `createdAt`, and iterate computes
+		// elapsedMs from it for the wall-clock cap. If a later write erased createdAt
+		// (the panel mirror bug), elapsedMs would stay ~0 and a wall-clock-only cap could
+		// never fire — a validated autoresearch run would become effectively uncapped.
+		const owner = await createSession();
+		const { spawned, byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, (opts) => {
+				const iter = opts?.metadata?.experiment?.iteration ?? 0;
+				return { costUsd: 0.01, gateVerdicts: { review: "passed" }, userMetrics: { objective: iter + 1 } };
+			});
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-ar-wc", tool: "experiment-runner/routes" };
+
+			const experimentId = `e2e-ar-wallclock-${uid()}`;
+			const def = {
+				experimentId,
+				title: "ar wallclock e2e",
+				mode: "autoresearch",
+				runnable: { kind: "agent", spec: "optimize" },
+				objective: { metricId: "objective.value", direction: "max" },
+				caps: { maxIterations: 50, maxWallClockMs: 60_000 }, // wall-clock is the only effective cap
+				stop: { plateauK: 50 }, // effectively disabled — wall-clock must be the stop
+				perRunBudget: 1,
+			};
+			await routes.defineExperiment(ctx, { body: def });
+
+			const store = await packStore();
+			const stored = await store.get(PACK_ID, `exp/${experimentId}`);
+			expect(typeof stored.createdAt).toBe("number");
+
+			// Backdate createdAt past the wall-clock cap (simulate a long-running
+			// experiment) — the CORRECT state the panel must preserve. iterate reads it.
+			await store.put(PACK_ID, `exp/${experimentId}`, { ...stored, createdAt: stored.createdAt - 600_000 });
+
+			let res: any = {};
+			let guard = 0;
+			do {
+				res = await routes.iterate(ctx, { body: { experimentId } });
+				expect(res.error).toBeUndefined();
+			} while (!res.stopped && guard++ < 20);
+
+			expect(res.stopped).toBeTruthy();
+			expect(String(res.stopped.reason)).toMatch(/wallclock|wall|budget/i);
+			// The pre-spawn cap blocked every candidate (≤ 1 spawn before the stop).
+			expect(spawned.length).toBeLessThanOrEqual(1);
+			// createdAt is never wiped by the loop.
+			expect(typeof (await store.get(PACK_ID, `exp/${experimentId}`)).createdAt).toBe("number");
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
 test.describe("experiment-runner routes — maxCostUsd is enforced PRE-SPAWN", () => {
 	test("the loop stops on budget when cumulative + perRunBudget would exceed the cap, with no extra spawn", async ({ gateway }) => {
 		// Pins fix #4: shouldStop passes def.perRunBudget as the projected next-run

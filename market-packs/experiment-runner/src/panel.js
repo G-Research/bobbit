@@ -531,6 +531,14 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					const collected = await callRoute(host, "collect", { method: "POST", body: { experimentId } });
 					if (collected.ok && collected.data && Array.isArray(collected.data.runs)) runs = collected.data.runs;
 				}
+				// Concurrency top-up: `launch` is idempotent + capacity-aware, so re-invoking
+				// it after poll/collect spawns the NEXT batch of still-pending runs as in-flight
+				// ones settle/collect — honoring def.maxConcurrency (the batching the launch route
+				// enforces). Without this the parked-pending runs would never start.
+				if (arrayOf(runs).some((r) => r && r.status === "pending")) {
+					const topUp = await callRoute(host, "launch", { method: "POST", body: { experimentId } });
+					if (topUp.ok && topUp.data && Array.isArray(topUp.data.launched)) runs = topUp.data.launched;
+				}
 			}
 		}
 
@@ -569,8 +577,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (defined.ok && defined.data && defined.data.experimentId) experimentId = defined.data.experimentId;
 		if (!experimentId) experimentId = `${safeId(definition.title)}-${Date.now().toString(36)}`;
 		definition.experimentId = experimentId;
-		await storePut(host, K.exp(experimentId), definition);
-		await storePut(host, K.metrics(experimentId), definition.metrics);
+		// When the route SUCCEEDED, defineExperiment already persisted the SERVER-
+		// normalized def — the ONLY copy carrying `createdAt`, which `iterate` uses to
+		// compute elapsedMs for the wall-clock cap. Overwriting exp/<id> with the client
+		// definition would erase createdAt and silently defeat a wall-clock-only cap
+		// (elapsedMs stays ~0 forever → the validated run becomes effectively uncapped).
+		// So mirror to the store ONLY as the offline fallback (route unavailable/errored).
+		if (!defined.ok) {
+			await storePut(host, K.exp(experimentId), definition);
+			await storePut(host, K.metrics(experimentId), definition.metrics);
+		}
 		await appendIndex(host, instanceKey, { experimentId, title: definition.title, mode: definition.mode, status: "running" });
 
 		// Branch on mode: the `launch` route is A/B-only (it returns LAUNCH_AB_ONLY

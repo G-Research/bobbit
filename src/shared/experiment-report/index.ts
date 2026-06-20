@@ -87,18 +87,20 @@ export function aggregateExperiment(input: {
 }
 
 /** Running best objective among verified+passed runs (null if none). */
-export function computeBestSoFar(runs?: RunRecord[], objective?: ObjectiveSpec): number | null {
+export function computeBestSoFar(runs?: RunRecord[], objective?: ObjectiveSpec, eps = 0): number | null {
 	if (!objective) return null;
-	return bestObjective(buildObjectiveSeries(runs ?? [], objective));
+	return bestObjective(buildObjectiveSeries(runs ?? [], objective, eps));
 }
 
 /** Best-objective-vs-iteration curve in object form (empty without an objective). */
 export function objectiveSeries(input: {
 	runs?: RunRecord[];
 	objective?: ObjectiveSpec;
+	/** StopSpec.plateauEps — a sub-eps improvement counts as no improvement. */
+	eps?: number;
 }): ObjectivePoint[] {
 	if (!input?.objective) return [];
-	return buildObjectiveSeries(input.runs ?? [], input.objective);
+	return buildObjectiveSeries(input.runs ?? [], input.objective, input.eps ?? 0);
 }
 
 /** Hard-cap budget check in object form (delegates to exceedsCaps). */
@@ -258,7 +260,11 @@ export function buildReportModel(input: {
 		const objectiveMetricId = input.def?.objective?.metricId ?? metrics.find((m) => m.primary)?.metricId;
 		if (objectiveMetricId) {
 			const direction = input.def?.objective?.direction ?? metricDirection(objectiveMetricId, metrics.find((m) => m.metricId === objectiveMetricId));
-			series = buildObjectiveSeries(runs, { metricId: objectiveMetricId, direction, target: input.def?.objective?.target });
+			series = buildObjectiveSeries(
+				runs,
+				{ metricId: objectiveMetricId, direction, target: input.def?.objective?.target },
+				input.def?.stop?.plateauEps ?? 0,
+			);
 		}
 		// Annotate a stop if not supplied: derive a plateau annotation from the ledger.
 		if (!stop) {

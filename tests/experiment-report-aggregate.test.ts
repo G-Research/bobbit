@@ -20,6 +20,9 @@ import type {
 	MetricSelection,
 	RunRecord,
 } from "../src/shared/experiment-report/types.ts";
+// The pack's metric registry — proves a code-registered custom metric's direction
+// reaches the shared comparison (resolveSelection must surface it as directionOverride).
+import { registerMetric, resolveSelection } from "../market-packs/experiment-runner/lib/metrics.mjs";
 
 function run(partial: Partial<RunRecord> & Pick<RunRecord, "armId" | "runId">): RunRecord {
 	return {
@@ -190,5 +193,24 @@ describe("aggregate: direction-aware comparison", () => {
 		const sel: MetricSelection = { metricId: "m", directionOverride: "max" };
 		const aggs = aggregateAB(def, runs, [sel]);
 		assert.equal(compareMetric(aggs, sel).winnerArmId, "A");
+	});
+
+	it("custom (code-registered) min-metric is compared by min via resolveSelection", () => {
+		// A custom metric registered direction:'min' but absent from the built-in table.
+		// metricDirection reads ONLY directionOverride or the built-in table, so unless
+		// resolveSelection threads the registered direction into directionOverride, the
+		// comparison defaults to 'max' and the WRONG (higher) arm wins.
+		registerMetric({ id: "custom.latencyMs", label: "Latency", direction: "min", extract: (raw: any) => raw.latencyMs ?? null });
+		const [resolved] = resolveSelection([{ metricId: "custom.latencyMs" }]) as MetricSelection[];
+		assert.equal(resolved.directionOverride, "min");
+		assert.equal(metricDirection("custom.latencyMs", resolved), "min");
+
+		const runs = [
+			run({ runId: "a1", armId: "A", metrics: { "custom.latencyMs": 200 } }),
+			run({ runId: "b1", armId: "B", metrics: { "custom.latencyMs": 50 } }),
+		];
+		const aggs = aggregateAB(def, runs, [resolved]);
+		// min wins → the lower-latency arm B, not the higher-value arm A.
+		assert.equal(compareMetric(aggs, resolved).winnerArmId, "B");
 	});
 });

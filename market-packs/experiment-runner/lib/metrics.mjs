@@ -62,10 +62,17 @@ export function resolveSelection(selection = []) {
 		if (!id) continue;
 		const ex = getMetric(id);
 		if (!ex) continue;
+		// The user's explicit override wins; otherwise the metric's REGISTERED direction
+		// (built-in OR code-registered custom). Emit it as `directionOverride` too, because
+		// the shared winner selection (aggregate.ts::metricDirection) reads ONLY
+		// directionOverride or its built-in table — a custom min-metric would otherwise be
+		// compared as max. So the resolved direction must travel as the override.
+		const direction = (sel && sel.directionOverride) || ex.direction;
 		out.push({
 			metricId: id,
 			label: ex.label,
-			direction: (sel && sel.directionOverride) || ex.direction,
+			direction,
+			directionOverride: direction,
 			unit: ex.unit,
 			aggregation: (sel && sel.aggregation) || "median",
 		});

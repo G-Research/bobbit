@@ -3,7 +3,6 @@
 // loop and the dashboard curve share THESE functions, so the chart can never
 // disagree with what the loop actually did. Pure functions over plain arrays.
 
-import { isBetter } from "./aggregate.js";
 import type {
 	AutoresearchCaps,
 	Direction,
@@ -40,7 +39,7 @@ export function sortByIteration(runs: RunRecord[]): RunRecord[] {
  * not rise. This is the single source for both the loop's accept decision and the
  * dashboard curve.
  */
-export function buildObjectiveSeries(runs: RunRecord[], objective: ObjectiveSpec): ObjectivePoint[] {
+export function buildObjectiveSeries(runs: RunRecord[], objective: ObjectiveSpec, eps = 0): ObjectivePoint[] {
 	const ordered = sortByIteration(runs.filter((r) => r.iteration !== undefined));
 	const out: ObjectivePoint[] = [];
 	let best: number | null = null;
@@ -49,7 +48,10 @@ export function buildObjectiveSeries(runs: RunRecord[], objective: ObjectiveSpec
 		const verified = isRunVerified(r);
 		let accepted = false;
 		if (verified && obj !== null) {
-			if (best === null || isBetter(obj, best, objective.direction)) {
+			// eps gates marginal improvements: a sub-eps gain counts as no improvement,
+			// so bestSoFar does not rise and the candidate is not accepted. Threaded from
+			// StopSpec.plateauEps so the loop AND the dashboard curve agree.
+			if (best === null || improvesBy(obj, best, objective.direction, eps)) {
 				best = obj;
 				accepted = true;
 			}
@@ -76,6 +78,16 @@ export function bestObjective(series: ObjectivePoint[]): number | null {
 }
 
 /**
+ * True if `candidate` improves on `incumbent` by MORE than eps (direction-aware).
+ * eps=0 reduces to strict-improvement (`isBetter`). The single eps-aware
+ * improvement predicate, shared by the curve and the accept decision.
+ */
+export function improvesBy(candidate: number, incumbent: number, direction: Direction, eps = 0): boolean {
+	const improvement = direction === "max" ? candidate - incumbent : incumbent - candidate;
+	return improvement > eps;
+}
+
+/**
  * Deterministic accept/reject for ONE candidate against the current best.
  * Accept iff verified AND objective improves by more than eps (direction-aware).
  * The framework decides; the LLM only proposes.
@@ -92,8 +104,7 @@ export function decideCandidate(args: {
 	if (!verified) return { decision: "rejected", reason: "failed-correctness-gate" };
 	if (objective === null) return { decision: "rejected", reason: "no-objective" };
 	if (best === null) return { decision: "accepted", reason: "improved & passed" };
-	const improvement = direction === "max" ? objective - best : best - objective;
-	if (improvement > eps) return { decision: "accepted", reason: "improved & passed" };
+	if (improvesBy(objective, best, direction, eps)) return { decision: "accepted", reason: "improved & passed" };
 	return { decision: "rejected", reason: "regressed" };
 }
 

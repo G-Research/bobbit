@@ -27,19 +27,20 @@ export { computeBestSoFar, decideCandidate, evaluateStop, objectiveSeries, budge
  * @param {{ run:object, priorRuns:object[], objective:object }} input
  * @returns {{ decision:'accepted'|'rejected', reason:string, objective:(number|null), best:(number|null), bestAfter:(number|null) }}
  */
-export function decideRun({ run, priorRuns = [], objective }) {
+export function decideRun({ run, priorRuns = [], objective, eps = 0 }) {
 	const dir = (objective && objective.direction) || "max";
-	const best = computeBestSoFar(priorRuns, objective);
+	const best = computeBestSoFar(priorRuns, objective, eps);
 	const value = run && run.metrics ? run.metrics[objective.metricId] : undefined;
 	const objValue = typeof value === "number" && Number.isFinite(value) ? value : null;
 	// Correctness gate (verified AND passed bar) is folded into one boolean by the
 	// shared isRunVerified, since the canonical decideCandidate keys off `verified`.
+	// `eps` (StopSpec.plateauEps) makes a sub-eps gain count as no improvement.
 	const result = decideCandidate({
 		objective: objValue,
 		verified: run ? isRunVerified(run) : false,
 		best,
 		direction: dir,
-		eps: 0,
+		eps,
 	});
 	const bestAfter = result.decision === "accepted" ? objValue : best;
 	return { ...result, objective: objValue, best, bestAfter };
@@ -53,7 +54,7 @@ export function decideRun({ run, priorRuns = [], objective }) {
  * @param {{ runs:object[], objective:object }} input
  * @returns {object[]} LedgerEntry[]
  */
-export function buildLedger({ runs = [], objective }) {
+export function buildLedger({ runs = [], objective, eps = 0 }) {
 	if (!objective) return [];
 	const iters = runs
 		.filter((r) => typeof r.iteration === "number" && r.status === "collected")
@@ -62,7 +63,7 @@ export function buildLedger({ runs = [], objective }) {
 	const ledger = [];
 	const prior = [];
 	for (const run of iters) {
-		const decided = decideRun({ run, priorRuns: prior, objective });
+		const decided = decideRun({ run, priorRuns: prior, objective, eps });
 		ledger.push({
 			iteration: run.iteration,
 			runId: run.runId,
@@ -89,7 +90,10 @@ export function shouldStop({ runs = [], def, cumulativeCostUsd = 0, elapsedMs = 
 	const objective = def && def.objective;
 	// No objective ⇒ no deterministic stop basis (autoresearch always has one).
 	if (!objective) return { stopped: false };
-	const series = objectiveSeries({ runs, objective });
+	// StopSpec.plateauEps gates marginal improvements in the shared series, so the
+	// plateau predicate counts a sub-eps gain as a non-improving iteration.
+	const eps = def && def.stop && Number.isFinite(def.stop.plateauEps) ? def.stop.plateauEps : 0;
+	const series = objectiveSeries({ runs, objective, eps });
 	// Pass the comparable per-run budget as the projected next-candidate cost so
 	// the shared `maxCostUsd` cap is enforced PRE-SPAWN (refuse to launch another
 	// candidate when cumulative + perRunBudget would exceed the cap). Math stays

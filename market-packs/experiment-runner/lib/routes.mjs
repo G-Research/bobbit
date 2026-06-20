@@ -44,6 +44,13 @@ function nowMs() {
 	return Date.now();
 }
 
+/** StopSpec.plateauEps as a finite number (0 when unset) — threaded into the
+ *  shared deterministic decision/series path so sub-eps gains count as no
+ *  improvement (the documented contract). */
+function plateauEpsOf(def) {
+	return def && def.stop && Number.isFinite(def.stop.plateauEps) ? def.stop.plateauEps : 0;
+}
+
 function goalReaderFor(ctx) {
 	return ctx && ctx.goalReader ? ctx.goalReader : createGoalReader();
 }
@@ -199,6 +206,12 @@ export const routes = {
 	// ── launch (A/B only) ───────────────────────────────────────────────────────
 	// Fan out variant × repeat child goals via spawnGoal. Idempotent on runKey, so
 	// re-invoking for a parked arm never double-spawns. Writes exp/<id>/run/*.
+	//
+	// PER-EXPERIMENT CONCURRENCY: spawn pending runs only up to def.maxConcurrency
+	// MINUS the current in-flight count (spawned/running/settled-not-collected),
+	// leaving the rest `pending`. Idempotent + re-entrant: the panel re-invokes
+	// launch after each poll/collect, so the next batch starts as in-flight runs
+	// settle/collect. An unset/non-positive cap is unbounded (spawn everything).
 	launch: async (ctx, req) => {
 		const experimentId = strOf(bodyOf(req).experimentId);
 		if (!experimentId) return { error: "EXPERIMENT_ID_REQUIRED" };
@@ -210,6 +223,9 @@ export const routes = {
 		const existing = await loadRuns(ctx, experimentId);
 		const byRunId = new Map(existing.map((r) => [r.runId, r]));
 		const plan = planAbRuns(def);
+		const IN_FLIGHT = new Set(["spawned", "running", "settled"]);
+		const cap = Number.isFinite(def.maxConcurrency) && def.maxConcurrency > 0 ? def.maxConcurrency : Infinity;
+		let inFlight = existing.filter((r) => IN_FLIGHT.has(r.status)).length;
 		const launched = [];
 		for (const item of plan) {
 			let run = byRunId.get(item.runId);
@@ -217,14 +233,23 @@ export const routes = {
 				launched.push(run);
 				continue; // already spawned/settled/collected — idempotent
 			}
-			const variant = def.variants.find((v) => v.armId === item.armId);
 			run = run || newRunRecord(def, item);
+			if (inFlight >= cap) {
+				// At capacity — leave this run for a later top-up. Persist a NEW run as
+				// pending so a re-entrant launch can find + spawn it; an existing
+				// pending/failed record is left untouched (still eligible next pass).
+				if (!byRunId.has(item.runId)) await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
+				launched.push(run);
+				continue;
+			}
+			const variant = def.variants.find((v) => v.armId === item.armId);
 			try {
 				const { goalId } = await ctx.host.agents.spawnGoal(buildAbSpawnArgs(def, variant, item.repeat));
 				run.childGoalId = goalId;
 				run.status = "spawned";
 				run.spawnedAt = nowMs();
 				run.error = undefined;
+				inFlight++;
 			} catch (e) {
 				run.status = "failed";
 				run.error = e && e.message ? String(e.message) : String(e);
@@ -334,7 +359,7 @@ export const routes = {
 		// sameCompletionBar=false ⇒ aggregate across ALL bars (no same-bar filtering).
 		const bar = def.sameCompletionBar === false ? "all" : "passed";
 		if (def.mode === "autoresearch") {
-			const ledger = buildLedger({ runs, objective: def.objective });
+			const ledger = buildLedger({ runs, objective: def.objective, eps: plateauEpsOf(def) });
 			return { mode: "autoresearch", ledger, aggregation: aggregateExperiment({ def, runs, metrics: resolved, bar }) };
 		}
 		return aggregateExperiment({ def, runs, metrics: resolved, bar });
@@ -387,7 +412,7 @@ export const routes = {
 		}
 
 		// Deterministic ledger + stop evaluation from the registry.
-		const ledger = buildLedger({ runs, objective: def.objective });
+		const ledger = buildLedger({ runs, objective: def.objective, eps: plateauEpsOf(def) });
 		await ctx.host.store.put(keys.ledgerKey(experimentId), ledger);
 		const cumulativeCostUsd = runs.reduce((acc, r) => acc + (r.cost && typeof r.cost.costUsd === "number" ? r.cost.costUsd : 0), 0);
 		const elapsedMs = nowMs() - (def.createdAt || nowMs());
@@ -485,7 +510,7 @@ export const routes = {
 			ctx.host.store.get(keys.stateKey(experimentId)),
 		]);
 		const { resolved } = await resolvedMetricsFor(ctx, experimentId, def);
-		const ledger = Array.isArray(ledgerStored) ? ledgerStored : def.mode === "autoresearch" ? buildLedger({ runs, objective: def.objective }) : [];
+		const ledger = Array.isArray(ledgerStored) ? ledgerStored : def.mode === "autoresearch" ? buildLedger({ runs, objective: def.objective, eps: plateauEpsOf(def) }) : [];
 		// Thread the experiment's same-completion-bar choice into the A/B aggregation.
 		const bar = def.sameCompletionBar === false ? "all" : "passed";
 		const model = buildReportModel({ def, runs, ledger, dashboard, metrics: resolved, state, bar });
