@@ -276,8 +276,10 @@ test.describe("fork worktree choice", () => {
 			const trueBody = await trueResp.json();
 			created.push(trueBody.id);
 			expect(trueBody.title).toMatch(/^Fork: /);
+			expect(trueBody.projectId).toBe(projectId);
 
 			const freshRec = await waitUntilReady(trueBody.id);
+			expect(freshRec.projectId).toBe(projectId);
 			expect(freshRec.archived).toBeFalsy();
 			expect(freshRec.worktreePath).toBeTruthy();
 			expect(freshRec.worktreePath).not.toBe(srcRec.worktreePath);
@@ -297,9 +299,11 @@ test.describe("fork worktree choice", () => {
 			expect(reuseResp.status).toBe(201);
 			const reuseBody = await reuseResp.json();
 			created.push(reuseBody.id);
+			expect(reuseBody.projectId).toBe(projectId);
 			expect(reuseBody.cwd).toBe(srcRec.worktreePath);
 
 			const reuseRec = await waitUntilReady(reuseBody.id);
+			expect(reuseRec.projectId).toBe(projectId);
 			expect(reuseRec.cwd).toBe(srcRec.worktreePath);
 			expect(reuseRec.worktreePath).toBeFalsy();
 			const reusePs = gateway.sessionManager.getPersistedSession(reuseBody.id);
