@@ -35,9 +35,16 @@ export const RECALL_TYPES: readonly RecallType[] = ["observation", "world", "exp
 /** Resolve the recall/reflect tag filter for a deployment scope on the single
  *  shared bank (the single source of truth shared by the provider auto-recall and
  *  the `recall`/`reflect` routes):
- *   - `project` scope WITH a real project id ⇒ `{ project:<id>, ...extraTags }`
+ *   - `project` scope WITH a real project id, NO extra tags ⇒ `{ project:<id> }`
  *     matched with `tagsMatch` (default `any` = project-tagged PLUS untagged/global;
  *     `any_strict` = project-only, EXCLUDING global — a rare opt-in).
+ *   - `project` scope WITH extra tags ⇒ the extra tags NARROW the recall: require
+ *     the project tag AND every extra tag, EXCLUDING untagged/global (`all_strict`).
+ *     This never broadens past the current project — an extra tag (e.g. `goal:g`)
+ *     can NOT pull in untagged/global memories nor OTHER projects that merely share
+ *     that tag. The route-derived project tag is AUTHORITATIVE: an extra `project`
+ *     tag can NEVER override it (it is dropped). Compound boolean queries are a
+ *     direct-API escape hatch only (no `tag_groups` is ever exposed to tools).
  *   - `scope: all` (or no project id): NO fabricated project tag. An explicit
  *     `extraTags` filter (a simple targeted cross-project/goal query) is still
  *     applied additively, with `any` so global/untagged stays visible. */
@@ -49,7 +56,19 @@ export function recallTagFilter(
 ): { tags: Tags; tagsMatch: TagsMatch } | undefined {
 	const pid = typeof projectId === "string" && projectId.trim().length > 0 ? projectId.trim() : undefined;
 	const extra = extraTags && Object.keys(extraTags).length > 0 ? { ...extraTags } : undefined;
-	if (scope === "project" && pid) return { tags: { project: pid, ...(extra ?? {}) }, tagsMatch };
+	if (scope === "project" && pid) {
+		// The route-derived project tag is AUTHORITATIVE: drop any extra `project` so a
+		// caller-supplied tag can never override the current project.
+		const rest = { ...(extra ?? {}) };
+		delete rest.project;
+		if (Object.keys(rest).length > 0) {
+			// Extra tags NARROW: require project AND every extra tag, EXCLUDE untagged/
+			// global (all_strict). Replaces the old `any`-merge that broadened recall to
+			// untagged/global AND other-project memories sharing an extra tag.
+			return { tags: { project: pid, ...rest }, tagsMatch: "all_strict" };
+		}
+		return { tags: { project: pid }, tagsMatch };
+	}
 	if (extra) return { tags: extra, tagsMatch: "any" };
 	return undefined;
 }
@@ -373,6 +392,13 @@ export interface QueueEntry {
 	content: string;
 	tags: Tags;
 	ts: number;
+	/** Target bank captured at ENQUEUE time so a retry always replays into the bank
+	 *  the retain was originally routed to — never the next hook's (possibly
+	 *  per-project-overridden) `cfg.bank`. Optional for backward compat with entries
+	 *  queued before this field existed (drain falls back to the current cfg). */
+	bank?: string;
+	/** Target namespace captured at ENQUEUE time (mirrors {@link bank}). */
+	namespace?: string;
 }
 
 export const QUEUE_KEY = "retain-queue";

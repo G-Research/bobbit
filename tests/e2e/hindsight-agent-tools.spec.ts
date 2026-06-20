@@ -438,7 +438,7 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		expect(retained[retained.length - 1].tags).toContain(`project:${projectId}`);
 	});
 
-	test("recall accepts an optional tags filter merged additively with the scope filter", async () => {
+	test("recall: an optional tags filter NARROWS a project recall (all_strict, no broadening)", async () => {
 		seedConfig(bobbitDir, externalConfig(stub.url));
 		const id = await newSession();
 		const mark = stub.calls.length;
@@ -447,10 +447,25 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		const calls = recallCalls(stub, mark);
 		expect(calls.length).toBe(1);
 		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`goal:g9`, `project:${projectId}`].sort());
-		expect(calls[0].body?.tags_match).toBe("any");
+		// all_strict ⇒ require project AND goal, exclude untagged/global + other projects
+		// (the optional tag NARROWS recall instead of broadening it via `any`).
+		expect(calls[0].body?.tags_match).toBe("all_strict");
 	});
 
-	test("reflect accepts an optional tags filter merged additively with the scope filter", async () => {
+	test("recall: an optional tags.project can NOT override the route-derived project", async () => {
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const mark = stub.calls.length;
+		const res = await invokeTool(id, RECALL, "recall", { query: "q", scope: "project", tags: { project: "evil", goal: "g9" } });
+		expect(res.status).toBe(200);
+		const calls = recallCalls(stub, mark);
+		expect(calls.length).toBe(1);
+		// The caller's project:evil is dropped; the session's real project tag wins.
+		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`goal:g9`, `project:${projectId}`].sort());
+		expect(calls[0].body?.tags_match).toBe("all_strict");
+	});
+
+	test("reflect: an optional tags filter NARROWS a project reflect (all_strict, no broadening)", async () => {
 		seedConfig(bobbitDir, externalConfig(stub.url));
 		const id = await newSession();
 		const mark = stub.calls.length;
@@ -459,7 +474,7 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		const calls = reflectCalls(stub, mark);
 		expect(calls.length).toBe(1);
 		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`project:${projectId}`, "topic:auth"].sort());
-		expect(calls[0].body?.tags_match).toBe("any");
+		expect(calls[0].body?.tags_match).toBe("all_strict");
 	});
 
 	test("recall/reflect descriptors expose a simple `tags` param but NOT a tag_groups param", () => {
