@@ -144,18 +144,65 @@ async function resetHindsightConfig(): Promise<void> {
 	} catch { /* best-effort */ }
 }
 
+/** Force-enable the built-in DEFAULT-DISABLED Hindsight pack at server scope so its
+ *  panel + entrypoints + routes are SERVED regardless of worker ordering. A fresh
+ *  server resolves a default-disabled pack DORMANT (contributions absent), which
+ *  would make every panel test skip; PUT all-enabled records the force-enable
+ *  marker. The pack then sits ENABLED-but-unconfigured = dormant, the exact initial
+ *  state these panel tests expect (they configure within each test). */
+async function forceEnableHindsight(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: {} }),
+	}).catch(() => { /* best-effort */ });
+}
+
+/** Return the built-in Hindsight pack to its DEFAULT-DISABLED baseline (no stored
+ *  activation record, no force-enable marker) so the enabled state cannot LEAK to
+ *  sibling spec files sharing the worker's in-process gateway + server-scope
+ *  activation store. PUT every catalogue entity disabled WHILE UNCONFIGURED equals
+ *  the pack's default, so the server clears the record + drops the marker. Call
+ *  AFTER resetHindsightConfig() so the pack is unconfigured. */
+async function resetHindsightActivation(): Promise<void> {
+	try {
+		const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
+		if (!res.ok) return;
+		const cat = ((await res.json()).catalogue ?? {}) as Record<string, unknown>;
+		const arr = (k: string): string[] =>
+			Array.isArray(cat[k])
+				? (cat[k] as Array<{ listName?: string } | string>).map((e) => (typeof e === "string" ? e : e.listName ?? "")).filter(Boolean)
+				: [];
+		const disabled = {
+			roles: arr("roles"), tools: arr("tools"), skills: arr("skills"), entrypoints: arr("entrypoints"),
+			providers: arr("providers"), hooks: arr("hooks"), mcp: arr("mcp"), piExtensions: arr("piExtensions"),
+			runtimes: arr("runtimes"), workflows: arr("workflows"),
+		};
+		await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT",
+			body: JSON.stringify({ scope: "server", packName: PACK, disabled }),
+		});
+	} catch { /* best-effort */ }
+}
+
 describe.configure({ mode: "serial" });
 
 describe("Hindsight pack — native config/status panel (built-in band)", () => {
 	let stub: HindsightStub;
 
 	test.beforeAll(async () => {
+		// Force-enable the default-disabled built-in pack BEFORE readiness resolves so
+		// the panel/entrypoints/routes are served deterministically (else every test
+		// skips). The pack stays dormant (unconfigured) for the panel tests.
+		await forceEnableHindsight();
 		await resetHindsightConfig();
 		stub = await startStub();
 	});
 
 	test.afterAll(async () => {
 		await resetHindsightConfig();
+		// Return the pack to default-disabled so the enabled state cannot leak to
+		// sibling spec files sharing this worker's gateway.
+		await resetHindsightActivation();
 		if (stub) await stub.close().catch(() => { /* ignore */ });
 	});
 
@@ -410,6 +457,9 @@ describe("Hindsight pack — UX polish (panel)", () => {
 	test.beforeAll(async () => {
 		const mod = await import("../../../dist/server/server.js");
 		mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor as never);
+		// See the first describe: enable the default-disabled pack so its contributions
+		// are served before per-test readiness resolution.
+		await forceEnableHindsight();
 		stub = await startStub();
 	});
 
@@ -417,6 +467,7 @@ describe("Hindsight pack — UX polish (panel)", () => {
 		const mod = await import("../../../dist/server/server.js");
 		mod.registerPackRuntimeSupervisorFactory(null);
 		await resetHindsightConfig();
+		await resetHindsightActivation();
 		if (stub) await stub.close().catch(() => { /* ignore */ });
 	});
 
