@@ -3,8 +3,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { ArrowLeft, Pencil, Plus, Trash2, X } from "lucide";
+import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo, type RoleFieldSource } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError, confirmAction } from "./dialogs.js";
@@ -557,26 +557,12 @@ const THINKING_LEVEL_LABELS: Record<string, string> = {
 	off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high",
 };
 
-/** Optional backwards-compatible field-level source metadata from /api/roles.
- *  Attached by the server on `role.modelResolution`; absent on older API data. */
-interface RoleFieldResolution {
-	value?: string;
-	source?: "role" | "inherited-role" | "default" | "auto";
-	origin?: ConfigOrigin;
-	originPackName?: string | null;
-	editable?: boolean;
-}
-interface RoleModelResolution {
-	model?: RoleFieldResolution;
-	thinkingLevel?: RoleFieldResolution;
-}
-
-type RoleFieldSourceKind = "role" | "inherited-role" | "default" | "auto";
+type RoleFieldSourceUiKind = "role" | "inherited-role" | "default" | "auto";
 
 interface RoleFieldDisplay {
 	/** True when the value comes from a role-level override (current or inherited role). */
 	override: boolean;
-	kind: RoleFieldSourceKind;
+	kind: RoleFieldSourceUiKind;
 	/** Compact source badge text, e.g. "Role override", "Session default". */
 	badge: string;
 	/** Resolved value text (model id / thinking label) for the source line. */
@@ -609,64 +595,67 @@ function thinkingLevelLabel(value: string): string {
 
 /**
  * Resolve the model + thinking display (effective value + source badge) for a
- * list row. Prefers server `modelResolution` metadata when present; otherwise
- * degrades using `origin` / `isInherited` plus the default-pref heuristic.
+ * list row. Prefers the server's field-level `modelResolution` metadata when
+ * present; otherwise degrades using the default-pref display heuristic. A
+ * present top-level `model` / `thinkingLevel` with no metadata is shown as a
+ * "Role override" — only metadata can attribute a value to an inherited role.
  */
 function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
-	const origin = (role as any).origin as ConfigOrigin | undefined;
-	const packName = (role as any).originPackName as string | null | undefined;
+	const directPackName = (role as any).originPackName as string | null | undefined;
 	const packId = (role as any).originPackId as string | null | undefined;
-	const meta = (role as any).modelResolution as RoleModelResolution | undefined;
-	const packReadonly = !!(packName || packId);
-	const inheritedRole = isInherited(origin);
+	const meta = role.modelResolution;
 	const prefKey = getRoleDefaultModelPrefKey(role.name);
 	const def = getRoleDefaultModel(role.name);
-	const defaultBadge = prefKey === "default.reviewModel" ? "Review default" : "Session default";
 
-	const inheritedBadge = (m: { origin?: ConfigOrigin; originPackName?: string | null }): string => {
-		const detail = roleOriginDetailLabel(m.origin ?? origin, m.originPackName ?? packName);
+	// The default-tier badge follows the session/review heuristic, downgrading to
+	// "Auto default" only when no default model is configured at all (the tier is
+	// effectively auto-selected). Applied consistently to model + thinking.
+	const autoTier = !def.model;
+	const defaultBadge = autoTier
+		? "Auto default"
+		: (prefKey === "default.reviewModel" ? "Review default" : "Session default");
+	const defaultKind: RoleFieldSourceUiKind = autoTier ? "auto" : "default";
+
+	const packName = directPackName ?? meta?.model?.originPackName ?? meta?.thinkingLevel?.originPackName ?? undefined;
+	// Pack-managed roles (or any field the server flags non-editable) are
+	// read-only inline — manage them via the Marketplace.
+	const metaReadonly = !!meta && (meta.model.editable === false || meta.thinkingLevel.editable === false);
+	const packReadonly = !!(directPackName || packId) || metaReadonly;
+
+	const inheritedBadge = (m: RoleFieldSource): string => {
+		const detail = m.sourceLabel || roleOriginDetailLabel(m.origin as ConfigOrigin | undefined, m.originPackName ?? packName);
 		return detail ? `Inherited role override · ${detail}` : "Inherited role override";
 	};
 
-	const fromMeta = (m: RoleFieldResolution, format: (v: string) => string, emptyLabel: string): RoleFieldDisplay => {
+	const fromMeta = (m: RoleFieldSource, format: (v: string) => string, emptyLabel: string): RoleFieldDisplay => {
 		const value = m.value ?? "";
 		const effectiveLabel = value ? format(value) : emptyLabel;
 		switch (m.source) {
 			case "role": return { override: true, kind: "role", badge: "Role override", effectiveLabel };
 			case "inherited-role": return { override: true, kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel };
-			case "auto": return { override: false, kind: "auto", badge: "Auto default", effectiveLabel };
-			default: return { override: false, kind: "default", badge: defaultBadge, effectiveLabel };
+			default: return { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel };
 		}
 	};
 
-	const overrideField = (value: string, format: (v: string) => string): RoleFieldDisplay =>
-		inheritedRole
-			? { override: true, kind: "inherited-role", badge: inheritedBadge({}), effectiveLabel: format(value) }
-			: { override: true, kind: "role", badge: "Role override", effectiveLabel: format(value) };
-
 	// MODEL
 	let model: RoleFieldDisplay;
-	if (meta?.model?.source) {
+	if (meta) {
 		model = fromMeta(meta.model, (v) => formatModelPref(v), formatModelPref(def.model));
 	} else if (role.model) {
-		model = overrideField(role.model, (v) => formatModelPref(v));
+		model = { override: true, kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model) };
 	} else {
-		model = def.model
-			? { override: false, kind: "default", badge: defaultBadge, effectiveLabel: formatModelPref(def.model) }
-			: { override: false, kind: "auto", badge: "Auto default", effectiveLabel: formatModelPref("") };
+		model = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model) };
 	}
 
 	// THINKING
 	const defThinkingLabel = def.thinking ? thinkingLevelLabel(def.thinking) : "Default";
 	let thinking: RoleFieldDisplay;
-	if (meta?.thinkingLevel?.source) {
+	if (meta) {
 		thinking = fromMeta(meta.thinkingLevel, (v) => thinkingLevelLabel(v), defThinkingLabel);
 	} else if (role.thinkingLevel) {
-		thinking = overrideField(role.thinkingLevel, (v) => thinkingLevelLabel(v));
+		thinking = { override: true, kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel) };
 	} else {
-		thinking = def.thinking
-			? { override: false, kind: "default", badge: defaultBadge, effectiveLabel: defThinkingLabel }
-			: { override: false, kind: "auto", badge: "Auto default", effectiveLabel: "Default" };
+		thinking = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel };
 	}
 
 	let state: RoleModelDisplay["state"];
@@ -693,25 +682,31 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 	const stopRow = (e: Event) => e.stopPropagation();
 
 	if (display.packReadonly) {
+		const reason = display.packName
+			? html`<span class="rrm-badge rrm-badge--pack"
+					title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName}</span>`
+			: html`<span class="rrm-badge rrm-badge--pack" title="This role is read-only in the current scope.">Read-only</span>`;
 		return html`
 			<div class="role-row-model-control role-row-model-control--readonly"
 				data-testid="role-row-model-control" data-model-state="readonly"
 				@click=${stopRow} @keydown=${stopRow}>
-				<div class="role-row-model-readonly">
+				<div class="role-row-model-readonly" data-testid="role-row-model-readonly">
 					<div class="rrm-ro-row"><span class="rrm-ro-key">Model</span><span class="rrm-ro-val" title="${display.model.effectiveLabel}">${display.model.effectiveLabel}</span></div>
 					<div class="rrm-ro-row"><span class="rrm-ro-key">Thinking</span><span class="rrm-ro-val">${display.thinking.effectiveLabel}</span></div>
 				</div>
-				<span class="rrm-badge rrm-badge--pack" data-testid="role-row-model-source"
-					title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName}</span>
+				${reason}
 			</div>
 		`;
 	}
 
-	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string) => html`
+	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string, clearTestid?: string) => html`
 		<span class="rrm-src" data-testid="${testid}">
 			<span class="rrm-src-key">${key}</span>
 			${f.override ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
 			<span class="rrm-badge rrm-badge--${f.kind}">${f.badge}</span>
+			${clearTestid && f.override ? html`<button class="rrm-clear-btn" data-testid="${clearTestid}"
+				title="Reset thinking to default"
+				@click=${(e: Event) => { e.stopPropagation(); control.onThinkingChange(role, ""); }}>${icon(X, "xs")}</button>` : nothing}
 		</span>
 	`;
 
@@ -735,7 +730,7 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 			</div>
 			<div class="role-row-model-sources">
 				${sourceLine("Model", display.model, "role-row-model-source")}
-				${sourceLine("Thinking", display.thinking, "role-row-thinking-source")}
+				${sourceLine("Thinking", display.thinking, "role-row-thinking-source", "role-row-thinking-clear-btn")}
 			</div>
 		</div>
 	`;
@@ -843,10 +838,10 @@ function renderListView(): TemplateResult {
 		modelControl: {
 			savedFlashRole: savedModelFlashRole,
 			onModelChange: (role, model) => {
-				// Model and thinking are independent overrides. Setting/clearing the
-				// model preserves any existing thinking override — clearing the model
-				// alone yields a thinking-only override (shown clearly in the row).
-				void persistInlineModel(role, model, role.thinkingLevel ?? "");
+				// Picking a model keeps any existing thinking override; the model
+				// clear button (X) resets the whole role override (model + thinking).
+				// Thinking can still be reset on its own via role-row-thinking-clear-btn.
+				void persistInlineModel(role, model, model ? (role.thinkingLevel ?? "") : "");
 			},
 			onThinkingChange: (role, thinking) => {
 				// Thinking is editable/clearable independently of the model, so even

@@ -305,6 +305,23 @@
 	background: var(--muted);
 	border-color: var(--border);
 }
+/* Independent thinking reset button on the source line. */
+.rrm-clear-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 1px;
+	border-radius: 4px;
+	border: none;
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background 150ms, color 150ms;
+}
+.rrm-clear-btn:hover {
+	color: var(--foreground);
+	background: var(--secondary);
+}
 
 /* Read-only pack rows: static effective-value summary, no pickers. */
 .role-row-model-control--readonly {
