@@ -188,13 +188,18 @@ function token(): string {
 }
 
 /**
- * Routes where POST must carry a registered projectId (or a cwd matching one).
+ * Collection-create routes where POST must carry a registered projectId (or a
+ * cwd matching one). Session subroutes such as `/api/sessions/:id/fork` and
+ * `/continue` derive project scope from the source session; injecting the
+ * harness default into those bodies can leak stale default-project config into
+ * cross-project worktree tests.
+ *
  * The E2E harness registers a "default" project at startup; tests that omit
  * projectId get it injected automatically so they don't need to know about
  * the underlying server requirement. Tests that deliberately exercise the
  * 400-path bypass this helper by calling `fetch(...)` directly.
  */
-const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$|\/)/;
+const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$)/;
 
 /**
  * Routes where workflow mutations need projectId. Workflows are now project-scoped
