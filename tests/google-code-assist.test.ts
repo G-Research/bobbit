@@ -260,7 +260,9 @@ describe("session-selectability guard (Code Assist runtime now registered)", () 
 		assert.equal(isSessionSelectableModelString("no-slash"), true);
 	});
 
-	it("every emitted Code Assist model passes the binding guard", () => {
+	it("emits Code Assist models as session-selectable and passing the binding guard", () => {
+		// Runtime support now exists (generated provider extension), so account models
+		// are emitted without a sessionSelectable:false gate or unavailable reason.
 		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
 		const models = getGoogleCodeAssistModels();
 		assert.ok(models.length > 0, "expected at least one Code Assist model");
@@ -271,6 +273,8 @@ describe("session-selectability guard (Code Assist runtime now registered)", () 
 				true,
 				`${m.provider}/${m.id} must pass the binding guard`,
 			);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
+			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
 	});
 });

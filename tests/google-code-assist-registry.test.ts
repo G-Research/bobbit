@@ -6,6 +6,8 @@
  *     auth.json token must NOT make the API-key-only `google` provider look usable.
  *  2. google-gemini-cli Gemini models are emitted (with api "google-code-assist")
  *     only when a Google account credential is present.
+ *  3. Once agent-side Code Assist runtime support exists, account models are
+ *     session-selectable (no sessionSelectable:false gate).
  */
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -15,7 +17,6 @@ import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../src/server/agent/model-registry.js";
-import { GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON } from "../src/server/agent/google-code-assist-models.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;
@@ -75,16 +76,16 @@ describe("Google account model emission + auth isolation", () => {
 		}
 	});
 
-	it("marks google-gemini-cli account models as not selectable for sessions, with a reason", async () => {
-		// Gap mitigation: the Code Assist adapter is server-side only; pi-coding-agent
-		// has no google-gemini-cli provider, so these must NOT be bindable to a session.
+	it("marks google-gemini-cli account models as session-selectable (runtime support exists)", async () => {
+		// The generated Code Assist provider extension registers a google-code-assist
+		// api in the agent runtime, so account models can now be bound to a session.
 		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
 		const models = await getAvailableModels(prefs);
 		const account = models.filter((m) => m.provider === "google-gemini-cli");
 		assert.ok(account.length > 0, "expected at least one google-gemini-cli model");
 		for (const m of account) {
-			assert.equal(m.sessionSelectable, false, `${m.id} must be gated from sessions`);
-			assert.equal(m.sessionUnavailableReason, GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
+			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
 	});
 
