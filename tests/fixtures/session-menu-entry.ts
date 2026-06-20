@@ -16,15 +16,17 @@ let lastActions: SessionActionDescriptor[] = [];
 let activePopover: HTMLElement | null = null;
 let currentSurface: "sidebar" | "header" | null = null;
 let feedbackText = "";
+let activeSessionId = "active-session";
+let sidebarSessionId = "sidebar-session";
 
 type SpawnBehavior = "defer" | "nopr" | "throw";
 let resolveSpawnRoute: ((value: { ok: boolean; childSessionId?: string }) => void) | null = null;
-const callRouteCalls: Array<{ route: string; body?: unknown; packId: string; contributionId: string }> = [];
+const callRouteCalls: Array<{ route: string; body?: unknown; sessionId?: string; packId: string; contributionId: string }> = [];
 const openPanelCalls: Array<{ panelId?: string; sessionId?: string }> = [];
 
-function fakeSession(): GatewaySession {
+function fakeSession(id: string): GatewaySession {
 	return {
-		id: "s1",
+		id,
 		title: "Fixture session",
 		cwd: "/tmp/project",
 		status: "idle",
@@ -66,10 +68,10 @@ function installSpawnHost(behavior: SpawnBehavior): void {
 	callRouteCalls.length = 0;
 	openPanelCalls.length = 0;
 	resolveSpawnRoute = null;
-	setLauncherHostFactory((_sessionId, packId, contributionId) => ({
+	setLauncherHostFactory((sessionId, packId, contributionId) => ({
 		capabilities: { callRoute: true } as any,
 		callRoute: async (route: string, init?: { body?: unknown }) => {
-			callRouteCalls.push({ route, body: init?.body, packId, contributionId });
+			callRouteCalls.push({ route, body: init?.body, sessionId, packId, contributionId });
 			if (behavior === "nopr") return { ok: false, code: "NO_PR", error: "No open GitHub PR for the current branch." };
 			if (behavior === "throw") throw new Error("route exploded");
 			return await new Promise<{ ok: boolean; childSessionId?: string }>((resolve) => { resolveSpawnRoute = resolve; });
@@ -92,7 +94,7 @@ function renderFixture(): void {
 			#feedback { margin: 0 20px; min-height: 1.4em; color: #075985; }
 		</style>
 		<div class="surface">
-			<button id="sidebar-trigger" type="button" data-testid="sidebar-actions-trigger" data-sidebar-actions-kind="session" data-sidebar-actions-id="s1" @click=${() => openSurface("sidebar")}>Sidebar menu</button>
+			<button id="sidebar-trigger" type="button" data-testid="sidebar-actions-trigger" data-sidebar-actions-kind="session" data-sidebar-actions-id=${sidebarSessionId} @click=${() => openSurface("sidebar")}>Sidebar menu</button>
 			<button id="header-trigger" type="button" data-testid="session-actions-trigger" data-session-action-surface="header" @click=${() => openSurface("header")}>Header menu</button>
 		</div>
 		<div id="feedback" role="status">${feedbackText}</div>
@@ -100,7 +102,8 @@ function renderFixture(): void {
 }
 
 function buildActions(): SessionActionDescriptor[] {
-	lastActions = buildSessionActions({ session: fakeSession(), displayTitle: "Fixture session" });
+	const sessionId = currentSurface === "sidebar" ? sidebarSessionId : activeSessionId;
+	lastActions = buildSessionActions({ session: fakeSession(sessionId), displayTitle: "Fixture session" });
 	return lastActions;
 }
 
@@ -228,6 +231,11 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 (window as any).__clearHash = () => { history.replaceState({}, "", window.location.pathname); };
 (window as any).__feedbackText = () => normalizeLabel(feedbackText || document.getElementById("feedback")?.textContent);
 (window as any).__callRouteCalls = () => callRouteCalls.slice();
+(window as any).__setSessionIds = (active: string, sidebar: string) => {
+	activeSessionId = active;
+	sidebarSessionId = sidebar;
+	renderFixture();
+};
 (window as any).__openPanelCalls = () => openPanelCalls.slice();
 (window as any).__resolveSpawnSuccess = () => {
 	feedbackText = "PR walkthrough opened";
@@ -252,6 +260,8 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 	openPanelCalls.length = 0;
 	resolveSpawnRoute = null;
 	clearEntrypoints();
+	activeSessionId = "active-session";
+	sidebarSessionId = "sidebar-session";
 	history.replaceState({}, "", window.location.pathname);
 	renderFixture();
 };

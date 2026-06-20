@@ -84,7 +84,7 @@ export function setPanelHostFactory(
 /** Sibling of {@link panelHostFactory} for LAUNCHER entrypoints (pack schema V1
  *  §8.4). A spawn launcher needs `callRoute` (to call its pack `run` route) +
  *  `ui.openPanel` (to open the returned child's pane) bound to THE PACK and THE
- *  ACTIVE (owner) session — so the route's `ctx.sessionId` is the owner and resolves
+ *  chosen owner session — so the route's `ctx.sessionId` is the owner and resolves
  *  the owner branch's PR. host-api.ts self-registers it at bootstrap (binding the
  *  `{kind:"pack", contributionKind:"entrypoint"}` surface), mirroring
  *  {@link panelHostFactory}, so pack-panels stays free of a host-api import cycle.
@@ -99,8 +99,8 @@ let launcherHostFactory: ((sessionId: string | undefined, packId: string, contri
 export function setLauncherHostFactory(fn: (sessionId: string | undefined, packId: string, contributionId: string) => HostApi): void {
 	launcherHostFactory = fn;
 }
-export function getLauncherHost(packId: string, contributionId: string): HostApi | undefined {
-	return launcherHostFactory?.(currentSessionIdForPanel(), packId, contributionId);
+export function getLauncherHost(packId: string, contributionId: string, sessionId?: string): HostApi | undefined {
+	return launcherHostFactory?.(sessionId ?? currentSessionIdForPanel(), packId, contributionId);
 }
 
 /** The CANONICAL session-switch entrypoint (`connectToSession(sessionId, false)`

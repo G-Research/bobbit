@@ -105,6 +105,23 @@ test.describe("pack launcher session-menu surfaces", () => {
 		expect(success.panels).toEqual([{ panelId: "demo.viewer", sessionId: "child-prw" }]);
 	});
 
+	test("sidebar launchers bind to the row session even when another session is active", async ({ page }) => {
+		await ready(page);
+		const out = await page.evaluate(async () => {
+			const w = window as any;
+			w.__setSessionIds("active-session", "inactive-sidebar-session");
+			w.__registerSessionMenu();
+			w.__installSpawnHost("defer");
+			await w.__openSurface("sidebar");
+			await w.__clickMenuEntry(w.__key("sm.spawn"));
+			await w.__flush();
+			return { calls: w.__callRouteCalls(), active: "active-session", sidebar: "inactive-sidebar-session" };
+		});
+		expect(out.calls).toHaveLength(1);
+		expect(out.calls[0]).toMatchObject({ route: "run", sessionId: out.sidebar, packId: "tp", contributionId: "sm.spawn" });
+		expect(out.calls[0].sessionId).not.toBe(out.active);
+	});
+
 	test("NO_PR and thrown route failures show visible feedback without opening or switching", async ({ page }) => {
 		await ready(page);
 		const noPr = await page.evaluate(async () => {
