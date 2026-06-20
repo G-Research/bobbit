@@ -227,6 +227,29 @@ test("copy link fallback uses legacy execCommand without surfacing a modal", asy
 	);
 });
 
+test("goal GitHub action labels PR-numbered pull requests and opens the cached URL", async ({ page }) => {
+	const ids = await loadFixture(page);
+	const prUrl = "https://github.com/acme/widget/pull/1241";
+
+	await page.evaluate(({ goalId, url }) => {
+		(window as any).__bobbitState.prStatusCache.set(goalId, { state: "OPEN", url, number: 1241 });
+	}, { goalId: ids.goal, url: prUrl });
+
+	await openMenu(page, "goal", ids.goal);
+	await expect(item(page, "open-github")).toHaveText("Open #1241 on GitHub");
+	await expect(item(page, "open-github")).toHaveAttribute("title", "Open this goal's pull request on GitHub");
+	await item(page, "open-github").click();
+	await expectNoPopover(page);
+	await expect.poll(() => page.evaluate(() => (window as any).__sidebarActionsOpenedUrls.at(-1))).toBe(prUrl);
+
+	await page.evaluate(({ goalId, url }) => {
+		(window as any).__bobbitState.prStatusCache.set(goalId, { state: "OPEN", url });
+	}, { goalId: ids.goal, url: prUrl });
+
+	await openMenu(page, "goal", ids.goal);
+	await expect(item(page, "open-github")).toHaveText("Open on GitHub");
+});
+
 test("fork checkbox toggles independently and fork reads the current New worktree state", async ({ page }) => {
 	const ids = await loadFixture(page);
 
