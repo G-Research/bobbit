@@ -746,7 +746,15 @@ so the cases most comparable to Claude Code pay the most overhead relative to th
 ### 9.5 Remediation — latency workstream (CE-G8)
 
 Hand-off format matches §6. Lane independent of G0–G7 except where noted. **CE-G8.1 and CE-G8.3
-are the quick wins; do them first.** Behaviour-affecting items are BENCH-GATED on CE-G0.3 plus a
+are the quick wins; do them first.**
+
+> **Deepened by measured loop data + new levers:** see
+> [verification-loop-economics.md](verification-loop-economics.md) — a 2026-06-20 snapshot showing
+> 51% of gate signals are retries (70% reviewer-driven, ~40 h of repeated impl verification) and
+> adding goals **CE-G8.7** (severity floor + round budget), **CE-G8.8** (affected-only
+> re-verification), **CE-G8.9** (goal-author-composed / agent-right-sized workflows), **CE-G8.10**
+> (plan→cheap-exec→frontier-review + per-role thinking tiering), **CE-G8.11** (team-lead diet).
+> It leads with the **trust-first north star**: no lever ships if it raises the escaped-defect rate. Behaviour-affecting items are BENCH-GATED on CE-G0.3 plus a
 **wall-clock** comparison (extend the bench report with `wallClock`, `startupMs`, `verifyMs`).
 
 #### CE-G8.1 Risk-proportional verification gates (M) **[BENCH-GATED]** — *biggest latency win*
