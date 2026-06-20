@@ -1814,7 +1814,7 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean },
+	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean; onThinkingClear?: () => void; clearModelTitle?: string; clearThinkingTitle?: string },
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
 
@@ -1890,7 +1890,8 @@ export function renderModelRow(
 					${modelValue ? html`
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-							title=${showUnavailable ? "Clear unavailable model" : "Reset model to auto"}
+							title=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
+							aria-label=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
 							data-testid="model-clear-btn"
 							@click=${() => {
 								delete modelTestResults[modelValue];
@@ -1948,6 +1949,17 @@ export function renderModelRow(
 							fitContent: opts?.thinkingFitContent ?? true,
 						})}
 					</div>
+					<!-- Optional in-box thinking reset: keeps model + thinking resets in
+					     the SAME control (opt-in; Settings rows don't pass it). -->
+					${opts?.onThinkingClear && thinkingValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
+							aria-label=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
+							data-testid="model-thinking-clear-btn"
+							@click=${() => opts.onThinkingClear!()}
+						>${icon(X, "xs")}</button>
+					` : ""}
 				</div>
 			</div>
 			${testResult && !testing ? html`

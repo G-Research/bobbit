@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roles list — model/thinking row polish options</title>
+<!--
+  ============================================================================
+  ROLES LIST — MODEL / THINKING ROW POLISH (mockup, not production)
+  ============================================================================
+  Goal: fix the readability + affordance problems in the inline model/thinking
+  control on the Roles list page, WITHOUT inventing a new visual language.
+
+  Problems being addressed (from user feedback):
+    1. Model names + origin/source labels truncate with "…" despite free space.
+    2. Built-in / Custom / pack origin text must be fully readable, never "…".
+    3. Source chips ("Review default") look like clickable buttons but do
+       nothing -> make inheritance/source display clearly INFORMATIONAL.
+    4. Reset is inconsistent: model clear (×) lives in the control box, but
+       thinking reset (×) lives on the source caption line. Make reset
+       consistent + obvious for BOTH fields.
+    5. Need to see more / the full model name + thinking profile while staying
+       compact and professional.
+
+  Theme: uses Bobbit theme tokens only (mirrored verbatim from src/ui/app.css
+  light + dark). No hardcoded colours in component CSS — everything references
+  var(--token). A light/dark toggle is provided so reviewers can verify both.
+
+  This is a static design spec. Pickers are non-functional; only the theme
+  toggle and the width sliders do anything.
+  ============================================================================
+-->
+<style>
+  /* ---- Theme tokens mirrored verbatim from src/ui/app.css ---- */
+  :root {
+    --background: oklch(0.935 0.012 148);
+    --foreground: oklch(0.18 0.014 142);
+    --card: oklch(0.945 0.010 146);
+    --card-foreground: oklch(0.18 0.014 142);
+    --popover: oklch(0.95 0.009 146);
+    --secondary: oklch(0.905 0.015 146);
+    --secondary-foreground: oklch(0.22 0.014 142);
+    --muted: oklch(0.905 0.015 146);
+    --muted-foreground: oklch(0.44 0.014 142);
+    --accent: oklch(0.91 0.018 146);
+    --accent-foreground: oklch(0.36 0.08 148);
+    --border: oklch(0.86 0.014 146);
+    --input: oklch(0.88 0.014 146);
+    --ring: oklch(0.48 0.06 148);
+    --primary: oklch(0.42 0.14 148);
+    --primary-foreground: oklch(0.96 0.008 146);
+    --destructive: oklch(0.55 0.18 25);
+    --positive: oklch(0.55 0.15 145);
+    --warning: oklch(0.62 0.15 75);
+    --info: oklch(0.55 0.16 230);
+    --font-mono: ui-monospace, "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    --radius: 8px;
+  }
+  .dark {
+    --background: oklch(0.21 0.008 145);
+    --foreground: oklch(0.96 0.008 140);
+    --card: oklch(0.24 0.01 145);
+    --card-foreground: oklch(0.96 0.008 140);
+    --popover: oklch(0.27 0.01 145);
+    --secondary: oklch(0.27 0.012 145);
+    --secondary-foreground: oklch(0.96 0.008 140);
+    --muted: oklch(0.27 0.012 145);
+    --muted-foreground: oklch(0.65 0.012 140);
+    --accent: oklch(0.32 0.015 145);
+    --accent-foreground: oklch(0.78 0.08 130);
+    --border: oklch(0.30 0.012 145);
+    --input: oklch(0.34 0.012 145);
+    --ring: oklch(0.50 0.06 145);
+    --primary: oklch(0.72 0.12 140);
+    --primary-foreground: oklch(0.18 0.01 145);
+    --destructive: oklch(0.72 0.15 25);
+    --positive: oklch(0.72 0.14 145);
+    --warning: oklch(0.78 0.14 75);
+    --info: oklch(0.72 0.14 230);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- Page chrome (mockup-only, not part of the spec) ---- */
+  .page { max-width: 1000px; margin: 0 auto; padding: 28px 24px 96px; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  h1 { font-size: 20px; font-weight: 650; margin: 0; }
+  .subtitle { color: var(--muted-foreground); font-size: 13px; margin: 4px 0 0; }
+  .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .ctl { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted-foreground); }
+  .ctl input[type="range"] { width: 150px; accent-color: var(--primary); }
+  .btn {
+    font: inherit; font-size: 12px; font-weight: 550;
+    padding: 6px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--secondary);
+    color: var(--foreground); cursor: pointer;
+  }
+  .btn:hover { background: var(--accent); }
+
+  .legend {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px 20px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; margin: 18px 0 26px; font-size: 12.5px;
+  }
+  .legend b { color: var(--foreground); font-weight: 600; }
+  .legend p { margin: 0; color: var(--muted-foreground); }
+
+  .opt-head { margin: 36px 0 10px; }
+  .opt-head h2 { font-size: 15px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .opt-head p { margin: 5px 0 0; color: var(--muted-foreground); font-size: 12.5px; max-width: 760px; }
+  .rec-pill {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--primary-foreground); background: var(--primary);
+    padding: 2px 8px; border-radius: 999px;
+  }
+
+  /* The list canvas reproduces .roles-body / .roles-list density. */
+  .list-canvas { background: var(--background); padding: 4px 0; }
+  .roles-list {
+    display: flex; flex-direction: column; gap: 8px;
+    margin: 0 auto;
+    /* widened from production's 600px so model names + sources stop truncating */
+    max-width: var(--list-w, 820px);
+  }
+
+  /* ====================================================================== *
+   * Shared row primitives — match src/app/role-manager.css
+   * ====================================================================== */
+  .role-row {
+    display: flex; flex-direction: row; align-items: center; gap: 12px;
+    padding: 8px 14px;
+    background: var(--secondary); border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer;
+    transition: background 150ms, border-color 150ms;
+  }
+  .role-row:hover { background: var(--accent); border-color: color-mix(in oklch, var(--muted-foreground) 25%, transparent); }
+
+  .role-avatar {
+    width: 34px; height: 34px; flex-shrink: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in oklch, var(--primary) 14%, var(--card));
+    color: var(--primary);
+  }
+
+  .role-row-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .role-row-label { font-size: 14px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .role-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .role-row-slug {
+    font-size: 11px; font-family: var(--font-mono); color: var(--muted-foreground);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Origin badge — readable, full words, never truncated (fix #2). */
+  .origin-badge {
+    flex-shrink: 0;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+    padding: 1px 7px; border-radius: 999px;
+    white-space: nowrap;
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+    background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  }
+  .origin-badge--builtin { }
+  .origin-badge--custom { color: var(--accent-foreground); border-color: color-mix(in oklch, var(--accent-foreground) 35%, var(--border)); }
+  .origin-badge--pack   { color: var(--info); border-color: color-mix(in oklch, var(--info) 35%, var(--border)); }
+
+  .role-row-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
+  .icon-btn {
+    width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; border: none; background: transparent; color: var(--muted-foreground); cursor: pointer;
+    transition: background 150ms, color 150ms;
+  }
+  .icon-btn:hover { background: var(--secondary); color: var(--foreground); }
+  .icon-btn.delete:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+
+  svg.lu { width: 15px; height: 15px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  svg.lu.xs { width: 13px; height: 13px; }
+  svg.lu.sm { width: 14px; height: 14px; }
+
+  /* ====================================================================== *
+   * The reused renderModelRow control box (model picker + thinking select).
+   * Matches the Tailwind classes renderModelRow emits, expressed in plain CSS.
+   * ====================================================================== */
+  .model-box {
+    display: flex; align-items: center; gap: 6px;
+    border: 1px solid var(--input); background: var(--background);
+    border-radius: 10px; padding: 4px; min-width: 0;
+  }
+  .model-pick {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 9px; border-radius: 6px; border: none; cursor: pointer;
+    background: transparent; color: var(--foreground); font: inherit; font-size: 13px;
+    flex: 1 1 auto; min-width: 0; text-align: left;
+  }
+  .model-pick:hover { background: var(--secondary); }
+  .model-pick .muted { color: var(--muted-foreground); }
+  /* The model name is allowed to use the available space; it only ellipsises
+     as a last resort at very narrow widths, never in the default layout. */
+  .model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
+  .model-pick--inherit .model-name { color: var(--muted-foreground); font-family: inherit; font-size: 13px; }
+
+  .inline-reset {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; flex-shrink: 0;
+    border-radius: 6px; border: none; background: transparent;
+    color: var(--muted-foreground); cursor: pointer; transition: background 150ms, color 150ms;
+  }
+  .inline-reset:hover { color: var(--foreground); background: var(--secondary); }
+  .model-test { color: var(--muted-foreground); }
+  .model-test:hover { color: var(--foreground); }
+  .box-divider { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+
+  .thinking-select {
+    display: flex; align-items: center; gap: 5px; flex-shrink: 0;
+    padding: 5px 8px; border-radius: 6px; border: none; background: transparent;
+    color: var(--foreground); font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .thinking-select:hover { background: var(--secondary); }
+  .thinking-select .muted { color: var(--muted-foreground); }
+  .thinking-select.is-inherit { color: var(--muted-foreground); }
+
+  /* Override accent on the control box — primary tint, theme tokens only. */
+  .model-box.is-override {
+    border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+    background: color-mix(in oklch, var(--primary) 8%, var(--background));
+  }
+
+  /* ====================================================================== *
+   * SOURCE / INHERITANCE CAPTION — informational, NOT button-like (fix #3)
+   * Plain muted text, leading ↳ glyph, no pill, no border, no hover.
+   * ====================================================================== */
+  .source-caption {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+    font-size: 11.5px; color: var(--muted-foreground); line-height: 1.5;
+    cursor: default;
+  }
+  .source-caption .src-item { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; }
+  .src-key { font-weight: 600; opacity: 0.7; }
+  /* full value, readable; only clips at extreme narrow widths */
+  .src-val { color: var(--foreground); }
+  .src-from { opacity: 0.85; }
+  .src-arrow { opacity: 0.6; }
+  /* "Override" status is a quiet text marker (accent dot + word), deliberately
+     flat so it reads as a STATE, not a tappable chip. */
+  .src-state-override { display: inline-flex; align-items: center; gap: 5px; color: var(--primary); font-weight: 600; }
+  .src-state-override::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--primary); display: inline-block;
+  }
+
+  /* ====================================================================== *
+   * OPTION A — control box + single quiet source caption (RECOMMENDED)
+   * ====================================================================== */
+  .optA .role-row { align-items: flex-start; }
+  .optA .role-row-info { flex: 0 0 188px; padding-top: 3px; }
+  .optA .a-control { flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .optA .role-row-actions { padding-top: 3px; }
+
+  /* ====================================================================== *
+   * OPTION B — explicit two labelled field rows
+   * ====================================================================== */
+  .optB .role-row { align-items: flex-start; }
+  .optB .role-row-info { flex: 0 0 188px; padding-top: 3px; }
+  .optB .b-fields { flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .optB .b-field { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 10px; }
+  .optB .b-field-key { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted-foreground); }
+  .optB .b-field-src { font-size: 11.5px; color: var(--muted-foreground); margin-top: 2px; }
+  .optB .role-row-actions { padding-top: 3px; }
+
+  /* ====================================================================== *
+   * OPTION C — compact single line (dense), source as trailing muted text
+   * ====================================================================== */
+  .optC .role-row { align-items: center; }
+  .optC .role-row-info { flex: 0 0 170px; }
+  .optC .c-control { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .optC .c-source { font-size: 11px; color: var(--muted-foreground); white-space: nowrap; }
+  .optC .model-box { flex: 0 1 360px; }
+
+  /* ====================================================================== *
+   * NARROW WIDTH — container query so a 360px list wraps even inside a wide
+   * viewport (mirrors the @media(max-width:768px) rules in role-manager.css).
+   * ====================================================================== */
+  .roles-list.narrow { container-type: inline-size; }
+  @container (max-width: 440px) {
+    .narrow .role-row { flex-wrap: wrap; align-items: center; }
+    .narrow .role-row-info { flex: 1 1 auto; padding-top: 0; }
+    .narrow .role-row-slug { display: none; }
+    .narrow .a-control { flex: 1 1 100%; order: 5; }
+    .narrow .role-row-actions { margin-left: auto; padding-top: 0; }
+    /* Stack inside the box: model picker gets its own full-width line so the
+       complete model name is always visible (never ellipsised for key info);
+       resets + thinking wrap to a second line. */
+    .narrow .model-box { flex: 1 1 100%; flex-wrap: wrap; }
+    .narrow .model-pick { flex: 1 1 100%; }
+    .narrow .model-name { white-space: normal; word-break: break-word; }
+    .narrow .box-divider { display: none; }
+  }
+
+  .note {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-top: 14px; font-size: 12.5px; color: var(--muted-foreground);
+  }
+  .note h3 { margin: 0 0 8px; font-size: 13px; color: var(--foreground); }
+  .note ul { margin: 6px 0 0; padding-left: 18px; }
+  .note li { margin: 3px 0; }
+  .note code { font-family: var(--font-mono); font-size: 11.5px; background: var(--secondary); padding: 1px 5px; border-radius: 4px; color: var(--foreground); }
+
+  .divider { height: 1px; background: var(--border); margin: 40px 0 0; }
+  .pack-reason { font-size: 11.5px; color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="topbar">
+    <div>
+      <h1>Roles list — model / thinking row polish</h1>
+      <p class="subtitle">Three layout options for the inline model + thinking control. Recommendation marked below. Theme tokens only.</p>
+    </div>
+    <div class="controls">
+      <label class="ctl">Width
+        <input id="widthRange" type="range" min="560" max="940" value="820" />
+        <span id="widthOut" style="font-variant-numeric:tabular-nums;">820px</span>
+      </label>
+      <button class="btn" id="themeBtn">Toggle dark</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><b>The fixes</b><p>What each option must deliver, verified visually below.</p></div>
+    <div><b>1 · No ellipsis on key info</b><p>Full model name + source always readable.</p></div>
+    <div><b>2 · Readable origin</b><p>Built-in / Custom / Pack spelled out, never “…”.</p></div>
+    <div><b>3 · Source = information</b><p>Inheritance is flat muted text, not a fake button.</p></div>
+    <div><b>4 · Consistent reset</b><p>Model + thinking reset live in the same place, same affordance.</p></div>
+    <div><b>5 · Compact + professional</b><p>Density preserved; works down to narrow widths.</p></div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- OPTION A — RECOMMENDED                                                 -->
+  <!-- ===================================================================== -->
+  <div class="opt-head">
+    <h2>Option A — Control box + quiet source caption <span class="rec-pill">Recommended</span></h2>
+    <p>
+      Keep the existing <code>renderModelRow</code> control box exactly as-is, but (a) reset lives <em>inside</em> the box
+      for <strong>both</strong> model and thinking (identical small × buttons, only shown when that field is overridden),
+      and (b) attribution moves to one flat caption line below — leading ↳, plain muted text, no pills, no borders, no hover.
+      Overridden fields are signalled by the box’s primary tint plus a quiet “● Override” word. Widening the list to ~820px
+      removes all truncation of model names and source text.
+    </p>
+  </div>
+  <div class="list-canvas">
+    <div class="roles-list optA" id="listA"><!-- rows injected --></div>
+  </div>
+  <div class="note">
+    <h3>Why A is recommended</h3>
+    <ul>
+      <li><b>Smallest delta from production.</b> Reuses the current control box + source-line slot; only the reset placement and caption styling change.</li>
+      <li><b>Reset is unambiguous &amp; symmetric.</b> Model × and thinking × are the same control in the same box (fix #4). The caption never carries a button (fix #3).</li>
+      <li><b>One scan line per concept.</b> Row 1 = what it is + what it runs; caption = where that comes from. Full names, no “…” (fixes #1, #2, #5).</li>
+    </ul>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ===================================================================== -->
+  <!-- OPTION B                                                               -->
+  <!-- ===================================================================== -->
+  <div class="opt-head">
+    <h2>Option B — Two explicit labelled field rows</h2>
+    <p>
+      Model and Thinking each get their own <code>KEY · control · source</code> line. Most explicit and self-documenting,
+      and reset is obviously per-field. Cost: taller rows (≈2× height) and it drifts further from the current single-control
+      layout, so it needs more new CSS. Good if we want maximum clarity over density.
+    </p>
+  </div>
+  <div class="list-canvas">
+    <div class="roles-list optB" id="listB"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ===================================================================== -->
+  <!-- OPTION C                                                               -->
+  <!-- ===================================================================== -->
+  <div class="opt-head">
+    <h2>Option C — Compact single line</h2>
+    <p>
+      Everything on one line: control box + trailing muted source text. Densest option, closest to today’s height.
+      The trade-off: at this density the source text has to stay terse and the model box still competes for width, so it’s
+      the most likely to clip on narrow viewports. Reset is in-box (same as A) for consistency.
+    </p>
+  </div>
+  <div class="list-canvas">
+    <div class="roles-list optC" id="listC"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ===================================================================== -->
+  <!-- NARROW WIDTH — Option A at a phone-ish width                           -->
+  <!-- ===================================================================== -->
+  <div class="opt-head">
+    <h2>Narrow-width behaviour (Option A @ 360px)</h2>
+    <p>
+      At narrow widths the control wraps beneath the identity, the slug hides, the model box goes full-width, and the source
+      caption wraps to its own line. Edit/delete stay reachable on the header line. Key info still never relies on “…”.
+    </p>
+  </div>
+  <div class="list-canvas">
+    <div class="roles-list optA narrow" id="listNarrow" style="max-width:360px;"></div>
+  </div>
+
+  <div class="note">
+    <h3>Consistency rationale (per role-manager.css / renderModelRow)</h3>
+    <ul>
+      <li><b>Same control:</b> rows reuse the <code>renderModelRow</code> box (model picker, divider, thinking select). No new picker.</li>
+      <li><b>Same tokens:</b> override tint is <code>color-mix(in oklch, var(--primary) 45/8%, …)</code> — already in <code>.role-row-model-control--override</code>.</li>
+      <li><b>Same badges:</b> origin badge mirrors <code>renderOriginBadge</code> pill shape; source line replaces the <code>.rrm-badge</code> pills with flat text so nothing reads as a button.</li>
+      <li><b>Reset relocation:</b> the only structural change vs. today is moving the thinking reset out of the caption and into the control box next to the model reset, so both are <code>data-testid</code>-able as in-box buttons.</li>
+      <li><b>Stable hooks:</b> keep <code>data-testid="role-row-model-control"</code>, <code>data-model-state</code>, <code>role-row-model-source</code>, <code>role-row-thinking-source</code>; thinking reset moves to an in-box <code>model-thinking-clear-btn</code> hook.</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+  // ---- Lucide-style icons (inline, no deps) ----
+  const I = {
+    sparkles: '<svg class="lu sm" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.14 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"/></svg>',
+    brain: '<svg class="lu sm" viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-5.99.14 3 3 0 0 0-2.01 5.17A3 3 0 0 0 5 16a3 3 0 0 0 5.5 1.5"/><path d="M12 5a3 3 0 1 1 5.99.14 3 3 0 0 1 2.01 5.17A3 3 0 0 1 19 16a3 3 0 0 1-5.5 1.5"/><path d="M12 5v13"/></svg>',
+    x: '<svg class="lu xs" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    flask: '<svg class="lu xs" viewBox="0 0 24 24"><path d="M14 2v6l5.5 9.5a2 2 0 0 1-1.7 3H6.2a2 2 0 0 1-1.7-3L10 8V2"/><path d="M8.5 2h7M7 16h10"/></svg>',
+    chevron: '<svg class="lu xs" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
+    pencil: '<svg class="lu sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+    trash: '<svg class="lu sm" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+    persona: '<svg class="lu" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
+  };
+
+  // ---- Sample data: covers every required state ----
+  const ROWS = [
+    { label: "Coder", slug: "coder", origin: "builtin",
+      model: { state: "inherit", value: "claude-sonnet-4.6", from: "Session default" },
+      think: { state: "inherit", value: "Medium", from: "Session default" } },
+
+    { label: "Code Reviewer", slug: "code-reviewer", origin: "builtin",
+      model: { state: "inherit", value: "gpt-5.5-codex", from: "Review default" },
+      think: { state: "inherit", value: "High", from: "Review default" } },
+
+    { label: "Architect", slug: "architect", origin: "builtin",
+      model: { state: "override", value: "claude-opus-4-7-20251015", from: "Review default" },
+      think: { state: "inherit", value: "High", from: "Review default" } },
+
+    { label: "QA Tester", slug: "qa-tester", origin: "builtin",
+      model: { state: "inherit", value: "gpt-5.5-codex", from: "Review default" },
+      think: { state: "override", value: "Extra high", from: "Review default" } },
+
+    { label: "Data Analyst", slug: "data-analyst", origin: "custom",
+      model: { state: "override", value: "gemini-3-pro-preview-11-2025", from: "Session default" },
+      think: { state: "override", value: "Low", from: "Session default" } },
+
+    { label: "Docs Writer", slug: "docs-writer", origin: "custom",
+      model: { state: "inherit", value: "Auto (best available)", from: "Session default", auto: true },
+      think: { state: "inherit", value: "Medium", from: "Session default" } },
+
+    { label: "Security Reviewer", slug: "security-reviewer", origin: "pack", pack: "secops-suite",
+      readonly: true,
+      model: { value: "claude-opus-4-7-20251015" },
+      think: { value: "Extra high" } },
+  ];
+
+  const NARROW_ROWS = [
+    ROWS[2], // model override, built-in
+    ROWS[4], // both overrides, custom
+    ROWS[1], // inherited review default
+  ];
+
+  function originBadge(origin, pack) {
+    if (origin === "pack") return `<span class="origin-badge origin-badge--pack" title="Installed from pack ${pack}">Pack · ${pack}</span>`;
+    if (origin === "custom") return `<span class="origin-badge origin-badge--custom">Custom</span>`;
+    return `<span class="origin-badge origin-badge--builtin">Built-in</span>`;
+  }
+
+  // The reusable control box. `field` flags decide override tint + in-box resets.
+  function modelBox(r, opts) {
+    const mOver = r.model.state === "override";
+    const tOver = r.think.state === "override";
+    const boxOver = (mOver || tOver) ? " is-override" : "";
+    const modelText = mOver
+      ? `<span class="model-name">${r.model.value}</span>`
+      : `<span class="model-name muted">${r.model.value}</span>`;
+    const modelPickCls = mOver ? "model-pick" : "model-pick model-pick--inherit";
+
+    const modelReset = mOver
+      ? `<button class="inline-reset" data-testid="model-clear-btn" title="Reset model to default">${I.x}</button>` : "";
+    const modelTest = mOver
+      ? `<button class="inline-reset model-test" data-testid="model-test-btn" title="Test model">${I.flask}</button>` : "";
+
+    const thinkCls = tOver ? "thinking-select" : "thinking-select is-inherit";
+    const thinkText = tOver ? r.think.value : r.think.value;
+    const thinkReset = tOver
+      ? `<button class="inline-reset" data-testid="model-thinking-clear-btn" title="Reset thinking to default">${I.x}</button>` : "";
+
+    return `
+      <div class="model-box${boxOver}" data-testid="role-row-model-control">
+        <button class="${modelPickCls}" title="Choose model">
+          <span class="muted">${I.sparkles}</span>${modelText}
+        </button>
+        ${modelReset}${modelTest}
+        <div class="box-divider"></div>
+        <button class="${thinkCls}" title="Thinking level">
+          <span class="muted">${I.brain}</span><span>${thinkText}</span>${I.chevron}
+        </button>
+        ${thinkReset}
+      </div>`;
+  }
+
+  // Flat, informational source caption (fix #3) — no buttons, no pills.
+  function sourceCaption(r) {
+    function part(key, f) {
+      if (f.state === "override") {
+        return `<span class="src-item" data-testid="role-row-${key.toLowerCase()}-source">
+                  <span class="src-key">${key}</span>
+                  <span class="src-state-override">Override</span>
+                  <span class="src-arrow">↩</span>
+                  <span class="src-from">resets to ${f.from}</span>
+                </span>`;
+      }
+      const auto = f.auto ? ' · auto' : '';
+      return `<span class="src-item" data-testid="role-row-${key.toLowerCase()}-source">
+                <span class="src-arrow">↳</span>
+                <span class="src-key">${key}</span>
+                <span class="src-val">${f.value}</span>
+                <span class="src-from">· ${f.from}${auto}</span>
+              </span>`;
+    }
+    return `<div class="source-caption">${part("Model", r.model)}${part("Thinking", r.think)}</div>`;
+  }
+
+  function actions() {
+    return `<div class="role-row-actions">
+      <button class="icon-btn" title="Edit">${I.pencil}</button>
+      <button class="icon-btn delete" title="Delete">${I.trash}</button>
+    </div>`;
+  }
+
+  function identity(r) {
+    return `<div class="role-row-info">
+      <div class="role-row-label">${r.label}</div>
+      <div class="role-meta">
+        <span class="role-row-slug">${r.slug}</span>
+        ${originBadge(r.origin, r.pack)}
+      </div>
+    </div>`;
+  }
+
+  function avatar() { return `<div class="role-avatar">${I.persona}</div>`; }
+
+  // ---- Read-only (pack) row: static effective summary, no pickers ----
+  function readonlySummary(r) {
+    return `<div class="model-box" style="cursor:default;" data-testid="role-row-model-control" data-model-state="readonly">
+        <span class="model-pick" style="cursor:default;"><span class="muted">${I.sparkles}</span><span class="model-name">${r.model.value}</span></span>
+        <div class="box-divider"></div>
+        <span class="thinking-select" style="cursor:default;"><span class="muted">${I.brain}</span><span>${r.think.value}</span></span>
+      </div>`;
+  }
+  function packReason(r) {
+    return `<div class="source-caption"><span class="pack-reason">↳ Managed by pack “${r.pack}” — edit it in the Marketplace. Read-only here.</span></div>`;
+  }
+
+  // ---------- OPTION A ----------
+  function rowA(r) {
+    if (r.readonly) {
+      return `<div class="role-row">${avatar()}${identity(r)}
+        <div class="a-control">${readonlySummary(r)}${packReason(r)}</div>${actions()}</div>`;
+    }
+    return `<div class="role-row">${avatar()}${identity(r)}
+      <div class="a-control">${modelBox(r)}${sourceCaption(r)}</div>${actions()}</div>`;
+  }
+
+  // ---------- OPTION B ----------
+  function rowB(r) {
+    if (r.readonly) {
+      return `<div class="role-row">${avatar()}${identity(r)}
+        <div class="b-fields">${readonlySummary(r)}${packReason(r)}</div>${actions()}</div>`;
+    }
+    const mOver = r.model.state === "override";
+    const tOver = r.think.state === "override";
+    const mName = `<span class="model-name${mOver ? '' : ' muted'}">${r.model.value}</span>`;
+    const mReset = mOver ? `<button class="inline-reset" title="Reset model">${I.x}</button>` : "";
+    const tReset = tOver ? `<button class="inline-reset" title="Reset thinking">${I.x}</button>` : "";
+    const mSrc = mOver ? `<span class="src-state-override">Override</span> <span class="src-from">· resets to ${r.model.from}</span>`
+                       : `↳ ${r.model.from}${r.model.auto ? ' · auto' : ''}`;
+    const tSrc = tOver ? `<span class="src-state-override">Override</span> <span class="src-from">· resets to ${r.think.from}</span>`
+                       : `↳ ${r.think.from}`;
+    return `<div class="role-row">${avatar()}${identity(r)}
+      <div class="b-fields">
+        <div>
+          <div class="b-field">
+            <span class="b-field-key">Model</span>
+            <div class="model-box${mOver ? ' is-override' : ''}" style="max-width:420px;">
+              <button class="model-pick${mOver ? '' : ' model-pick--inherit'}"><span class="muted">${I.sparkles}</span>${mName}</button>
+              ${mReset}${mOver ? `<button class="inline-reset model-test" title="Test">${I.flask}</button>` : ''}
+            </div>
+          </div>
+          <div class="b-field-src" style="padding-left:74px;">${mSrc}</div>
+        </div>
+        <div>
+          <div class="b-field">
+            <span class="b-field-key">Thinking</span>
+            <div class="model-box${tOver ? ' is-override' : ''}" style="max-width:220px;">
+              <button class="thinking-select${tOver ? '' : ' is-inherit'}" style="flex:1 1 auto;"><span class="muted">${I.brain}</span><span style="flex:1 1 auto;text-align:left;">${r.think.value}</span>${I.chevron}</button>
+              ${tReset}
+            </div>
+          </div>
+          <div class="b-field-src" style="padding-left:74px;">${tSrc}</div>
+        </div>
+      </div>${actions()}</div>`;
+  }
+
+  // ---------- OPTION C ----------
+  function rowC(r) {
+    if (r.readonly) {
+      return `<div class="role-row">${avatar()}${identity(r)}
+        <div class="c-control">${readonlySummary(r)}<span class="c-source">↳ pack “${r.pack}” · read-only</span></div>${actions()}</div>`;
+    }
+    const mOver = r.model.state === "override";
+    const tOver = r.think.state === "override";
+    let src;
+    if (mOver || tOver) {
+      src = `<span class="c-source"><span class="src-state-override">Override</span></span>`;
+    } else {
+      src = `<span class="c-source">↳ ${r.model.from}</span>`;
+    }
+    return `<div class="role-row">${avatar()}${identity(r)}
+      <div class="c-control">${modelBox(r)}${src}</div>${actions()}</div>`;
+  }
+
+  function render() {
+    document.getElementById("listA").innerHTML = ROWS.map(rowA).join("");
+    document.getElementById("listB").innerHTML = ROWS.map(rowB).join("");
+    document.getElementById("listC").innerHTML = ROWS.map(rowC).join("");
+    document.getElementById("listNarrow").innerHTML = NARROW_ROWS.map(rowA).join("");
+  }
+  render();
+
+  // ---- Width control (applies to A / B / C lists, not the narrow demo) ----
+  const wr = document.getElementById("widthRange");
+  const wo = document.getElementById("widthOut");
+  function applyWidth() {
+    const w = wr.value + "px";
+    wo.textContent = w;
+    ["listA","listB","listC"].forEach(id => document.getElementById(id).style.maxWidth = w);
+  }
+  wr.addEventListener("input", applyWidth);
+  applyWidth();
+
+  // ---- Theme toggle ----
+  const tb = document.getElementById("themeBtn");
+  tb.addEventListener("click", () => {
+    document.documentElement.classList.toggle("dark");
+    tb.textContent = document.documentElement.classList.contains("dark") ? "Toggle light" : "Toggle dark";
+  });
+</script>
+</body>
+</html>

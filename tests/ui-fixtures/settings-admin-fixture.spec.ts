@@ -38,20 +38,24 @@ const DETAIL_MODEL_SECTION = "[data-testid='roles-model-section']";
 // thinking-only override a first-class, clearable state. These hooks are the
 // agreed contract between the implementation tasks (server source metadata +
 // compact list controls) and this test suite. Implementation should expose:
-//   - [data-testid='role-row-model-source']   — model source badge
-//   - [data-testid='role-row-thinking-source'] — thinking source badge
-//   - [data-testid='role-row-thinking-clear-btn'] — reset thinking independently
+//   - [data-testid='role-row-model-source']   — model source caption (flat text)
+//   - [data-testid='role-row-thinking-source'] — thinking source caption (flat text)
+//   - [data-testid='model-thinking-clear-btn'] — reset thinking independently
+//     (in the control box, beside the model reset — Option A keeps both resets
+//     in the same place rather than splitting them across the source line)
 //   - [data-testid='role-row-model-readonly'] — read-only pack summary line
 //   - data-model-state ∈ inherited | override | thinking-override | readonly
 const LIST_MODEL_SOURCE = "[data-testid='role-row-model-source']";
 const LIST_THINKING_SOURCE = "[data-testid='role-row-thinking-source']";
-const LIST_THINKING_CLEAR = "[data-testid='role-row-thinking-clear-btn']";
+const LIST_THINKING_CLEAR = "[data-testid='model-thinking-clear-btn']";
 
-// Design-doc source-label language (recommended badges).
+// Source-caption language. Inherited captions read as a self-explanatory
+// sentence ("Model inherits from session default: …" / "… <scope> role
+// override: …"), so these match the source phrase case-insensitively.
 const SRC_ROLE_OVERRIDE = /Role override/;
-const SRC_INHERITED_ROLE = /Inherited role override/;
-const SRC_SESSION_DEFAULT = /Session default/;
-const SRC_REVIEW_DEFAULT = /Review default/;
+const SRC_INHERITED_ROLE = /role override/i;
+const SRC_SESSION_DEFAULT = /session default/i;
+const SRC_REVIEW_DEFAULT = /review default/i;
 const SRC_ANY_DEFAULT = /default/i;
 
 function roleRow(page: Page, name: string) {
