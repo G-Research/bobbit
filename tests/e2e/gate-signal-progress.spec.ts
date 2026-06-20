@@ -30,6 +30,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 // A deterministic "slow" command that keeps the gate's phase-0 step
 // running for ~3s — long enough to catch the in-flight active state
@@ -48,6 +49,19 @@ const EXPECTED_STEPS: Array<{ name: string; phase: number }> = [
 	{ name: "Type check",  phase: 1 }, // waiting
 	{ name: "Unit tests",  phase: 1 }, // waiting
 	{ name: "E2E tests",   phase: 2 }, // waiting
+];
+
+const EXPECTED_IN_FLIGHT_STEP_STATE: Array<{ name: string; phase: number; status: string }> = [
+	{ name: "Slow build", phase: 0, status: "running" },
+	{ name: "Type check", phase: 1, status: "waiting" },
+	{ name: "Unit tests", phase: 1, status: "waiting" },
+	{ name: "E2E tests", phase: 2, status: "waiting" },
+];
+
+const EXPECTED_DOWNSTREAM_SKIP_STEPS: Array<{ name: string; status: string; skipped: boolean; phase: number }> = [
+	{ name: "Failing check", status: "failed", skipped: false, phase: 0 },
+	{ name: "Later command", status: "skipped", skipped: true, phase: 1 },
+	{ name: "Final command", status: "skipped", skipped: true, phase: 2 },
 ];
 
 /**
@@ -85,6 +99,46 @@ async function deleteTestWorkflow(workflowId: string): Promise<void> {
 	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
 }
 
+async function createFailingTestWorkflow(workflowId: string): Promise<void> {
+	const res = await apiFetch("/api/workflows", {
+		method: "POST",
+		body: JSON.stringify({
+			id: workflowId,
+			name: "Phase Skip Regression Test",
+			description: "Inline workflow pinning terminal status/phase for skipped downstream phases.",
+			gates: [
+				{
+					id: "failing-multi",
+					name: "Failing Multi-Phase",
+					dependsOn: [],
+					verify: [
+						{ name: "Failing check", type: "command", run: "node -e \"process.exit(7)\"" },
+						{ name: "Later command", type: "command", phase: 1, run: "echo should-not-run" },
+						{ name: "Final command", type: "command", phase: 2, run: "echo should-not-run" },
+					],
+				},
+			],
+		}),
+	});
+	expect(res.status, "GATE_SIGNAL_PHASE_STATUS: workflow creation must succeed").toBe(201);
+}
+
+async function waitForSignalVerificationStatus(
+	goalId: string,
+	gateId: string,
+	signalId: string,
+	targetStatus: string,
+	timeoutMs = 15_000,
+): Promise<any> {
+	return pollUntil(async () => {
+		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		const signal = body.signals?.find((s: any) => s.id === signalId);
+		return signal?.verification?.status === targetStatus ? signal : null;
+	}, { timeoutMs, intervalMs: 50, label: `signal ${signalId} verification=${targetStatus}` });
+}
+
 test.describe("Gate-signal step enumeration race (verification-progress race)", () => {
 	test("persisted gate-store steps[] matches POST response within the same scheduler tick — GATE_SIGNAL_PROGRESS_RACE", async () => {
 		const workflowId = makeWorkflowId();
@@ -110,13 +164,17 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			).toBe(201);
 			const postBody = await postResp.json();
 			const postSignalId: string = postBody.signal.id;
-			const postSteps: Array<{ name: string; type: string }> = postBody.signal.steps;
+			const postSteps: Array<{ name: string; type: string; phase?: number; status?: string }> = postBody.signal.steps;
 
 			// AC #1: POST response carries the enumerated step list.
 			expect(
 				postSteps.map((s) => s.name),
 				"GATE_SIGNAL_PROGRESS_RACE: POST response steps[] must mirror gate.verify[] names",
 			).toEqual(EXPECTED_STEPS.map((s) => s.name));
+			expect(
+				postSteps.map((s) => ({ name: s.name, phase: s.phase, status: s.status })),
+				"GATE_SIGNAL_PHASE_STATUS: POST response must preserve initialized phase/status metadata for the chat renderer",
+			).toEqual(EXPECTED_IN_FLIGHT_STEP_STATE);
 			expect(postBody.signal.status).toBe("running");
 
 			// ── 2. Summary view — the path the dashboard's gate-status poll
@@ -238,6 +296,37 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			const waitingCount = matching.steps.filter((s: { status: string }) => s.status === "waiting").length;
 			expect(runningCount).toBeGreaterThanOrEqual(1);
 			expect(waitingCount).toBeGreaterThanOrEqual(1);
+		} finally {
+			await deleteGoal(goalId);
+			await deleteTestWorkflow(workflowId);
+		}
+	});
+
+	test("terminal downstream phase skips persist explicit skipped status and phase — GATE_SIGNAL_PHASE_STATUS", async () => {
+		const workflowId = makeWorkflowId();
+		await createFailingTestWorkflow(workflowId);
+		const goal = await createGoal({
+			title: `Phase Skip ${Date.now()}`,
+			workflowId,
+		});
+		const goalId = goal.id;
+
+		try {
+			const postResp = await apiFetch(`/api/goals/${goalId}/gates/failing-multi/signal`, {
+				method: "POST",
+				body: JSON.stringify({}),
+			});
+			expect(postResp.status, "GATE_SIGNAL_PHASE_STATUS: signal POST must succeed").toBe(201);
+			const postBody = await postResp.json();
+			const signalId: string = postBody.signal.id;
+
+			const signal = await waitForSignalVerificationStatus(goalId, "failing-multi", signalId, "failed");
+			const steps = signal.verification.steps ?? [];
+
+			expect(
+				steps.map((s: any) => ({ name: s.name, status: s.status, skipped: !!s.skipped, phase: s.phase })),
+				"GATE_SIGNAL_PHASE_STATUS: failed phase-0 must leave later phases persisted as explicit skipped steps with original phases",
+			).toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS);
 		} finally {
 			await deleteGoal(goalId);
 			await deleteTestWorkflow(workflowId);
