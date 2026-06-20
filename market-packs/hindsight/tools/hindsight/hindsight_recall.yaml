@@ -1,20 +1,25 @@
 name: hindsight_recall
 description: "Recall relevant memories from the Hindsight bank for a query."
 summary: "Recall long-term memories for a query"
-params: [query, scope?]
+params: [query, scope?, tags?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Hindsight
 docs: |-
-  Required: `query`. Optional: `scope` (`project` | `all`).
+  Required: `query`. Optional: `scope` (`project` | `all`), `tags` (simple
+  key→value map).
 
-  Fetches durable memories from the shared Hindsight bank. `scope: project`
-  restricts to this project (route adds a `project:<id>` tag when a real project
-  id is present); `scope: all` searches the whole bank. When `scope` is omitted
-  the pack's configured `recallScope` applies. Returns a concise list plus the
-  structured route result under `details`. Dormant (unconfigured) Hindsight
-  returns an empty result, not an error.
+  Fetches durable memories from the shared Hindsight bank. Omit `scope` for the
+  configured default (`project` = this project + shared/global memories);
+  `scope: all` searches every project in the bank. `scope: project` restricts to
+  this project (route adds a `project:<id>` tag when a real project id is present)
+  while still surfacing untagged/global memories. Use `tags` only for a simple
+  targeted filter (e.g. `{ goal: "..." }` or `{ project: "..." }`) — compound
+  boolean `tag_groups` queries are a direct Hindsight API escape hatch documented
+  in docs/hindsight-memory.md. Returns a concise list plus the structured route
+  result under `details`. Dormant (unconfigured) Hindsight returns an empty
+  result, not an error.
 detail_docs: >-
   ## Purpose
 
@@ -39,9 +44,12 @@ detail_docs: >-
 
   | `query` | string | **Yes** | What to recall. |
 
-  | `scope` | `project` \| `all` | No | `project` scopes to this project via a
-  project tag; `all` searches the shared bank. Defaults to the pack's configured
-  `recallScope`. |
+  | `scope` | `project` \| `all` | No | `project` scopes to this project (plus
+  shared/global) via a project tag; `all` searches the whole bank. Defaults to the
+  pack's configured `recallScope` (`project`). |
+
+  | `tags` | map | No | Simple key→value filter for a targeted query (e.g. `{ goal:
+  "..." }`). Merged additively with the scope filter. |
 
 
   ## Notes
@@ -49,7 +57,12 @@ detail_docs: >-
 
   - Scope maps to tag filters on the SAME shared bank — never a different bank.
 
-  - A `project` recall only adds a `project:<id>` filter when the session has a
-  real project id; otherwise no project tag is fabricated.
+  - `project` scope returns this project's memories AND untagged/global ones
+  (`tags_match: any`), excluding only other projects; it adds a `project:<id>`
+  filter only when the session has a real project id.
+
+  - `tags` is intentionally a flat map. Compound boolean `tag_groups` queries are a
+  direct Hindsight data-plane API escape hatch (see docs/hindsight-memory.md), not
+  exposed to the agent.
 
   - Unconfigured Hindsight returns an empty list (dormant), not an error.

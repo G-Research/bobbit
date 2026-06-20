@@ -12,6 +12,8 @@
 // unconfigured pack contributes no active provider at all.
 
 import {
+	applyBankMission,
+	bumpRetainCounter,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
@@ -19,10 +21,12 @@ import {
 	isActive,
 	loadQueue,
 	makeClient,
+	overlayProjectConfig,
 	recallTagFilter,
 	recordError,
 	resolveConfig,
 	saveQueue,
+	shouldRetainOnCount,
 	truncate,
 	type EffectiveConfig,
 	type RuntimeContext,
@@ -73,6 +77,18 @@ function getStore(ctx: ProviderCtx): StoreLike | null {
 	return ctx?.host?.store ?? null;
 }
 
+function projectIdOf(ctx: ProviderCtx): string | undefined {
+	return ctx.projectId !== undefined ? String(ctx.projectId) : undefined;
+}
+
+/** Resolve the effective config for a hook: the host-merged `ctx.config`
+ *  (server/global base) with the per-project overlay (safe memory-quality keys)
+ *  layered on top. Activation/dormancy is gated on the BASE elsewhere; the overlay
+ *  never changes mode/externalUrl. */
+async function effectiveConfig(ctx: ProviderCtx, base: EffectiveConfig): Promise<EffectiveConfig> {
+	return overlayProjectConfig(base, getStore(ctx), projectIdOf(ctx));
+}
+
 function textOf(v: unknown): string | undefined {
 	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
@@ -107,9 +123,9 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	const q = (query ?? "").trim();
 	if (!q) return [];
 
-	// Project scope maps to a project-tagged + untagged/global filter on the shared
-	// bank (recallTagFilter / PROJECT_RECALL_TAGS_MATCH); `all` scope sends no filter.
-	const filter = recallTagFilter(cfg.recallScope, ctx.projectId !== undefined ? String(ctx.projectId) : undefined);
+	// Project scope maps to a project-tagged + (with tagsMatch `any`) untagged/global
+	// filter on the shared bank; `any_strict` excludes global; `all` scope sends none.
+	const filter = recallTagFilter(cfg.recallScope, projectIdOf(ctx), cfg.tagsMatch);
 	const store = getStore(ctx);
 	// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
 	const clampedQuery = clampRecallQuery(q, cfg.recallMaxInputChars);
@@ -117,6 +133,7 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		const res = await client.recall(cfg.bank, clampedQuery, {
 			maxTokens: cfg.recallBudget,
+			types: cfg.recallTypes,
 			...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 		});
 		if (store) await clearError(store);
@@ -146,6 +163,7 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: 
 	try {
 		const client = await makeClient(clientConfig(cfg, runtime));
 		await client.ensureBank(cfg.bank);
+		await applyBankMission(store, client, cfg);
 		await client.retain(cfg.bank, head.content, { tags: head.tags, sync: false });
 		q.shift();
 		await saveQueue(store, q);
@@ -165,6 +183,7 @@ async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, runtime?: R
 		return;
 	}
 	const remaining = [];
+	await applyBankMission(store, client, cfg);
 	for (const entry of q) {
 		try {
 			await client.ensureBank(cfg.bank);
@@ -182,6 +201,7 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
+		await applyBankMission(store, client, cfg);
 		await client.retain(cfg.bank, summary, { tags, sync });
 		if (store) await clearError(store);
 	} catch (e) {
@@ -194,39 +214,54 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async beforePrompt(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async afterTurn(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime) || !base.autoRetain) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
 		if (store) await drainQueueHead(store, cfg, ctx.runtime);
 		const summary = buildTurnSummary(ctx);
-		if (summary) await retainWithQueue(ctx, cfg, summary, "turn", false);
+		if (!summary) return { blocks: [] };
+		// Cost lever: auto-retain runs an LLM extraction only on one in
+		// retainEveryNTurns turns. Without a store+session to track cadence we cannot
+		// count, so we retain (the safe capture-everything fallback).
+		let shouldRetain = true;
+		if (store && ctx.sessionId) {
+			const count = await bumpRetainCounter(store, String(ctx.sessionId));
+			shouldRetain = shouldRetainOnCount(count, cfg.retainEveryNTurns);
+		}
+		if (shouldRetain) await retainWithQueue(ctx, cfg, summary, "turn", false);
 		return { blocks: [] };
 	},
 
 	async beforeCompact(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime) || !base.autoRetain) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		const summary = buildCompactSummary(ctx);
-		// sync:true — land the about-to-be-lost span before context is dropped.
+		// sync:true, cadence-EXEMPT — always land the about-to-be-lost span before
+		// context is dropped, regardless of retainEveryNTurns.
 		if (summary) await retainWithQueue(ctx, cfg, summary, "compaction", true);
 		return { blocks: [] };
 	},
 
 	async sessionShutdown(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
-		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
+		const base = resolveConfig(ctx.config);
+		if (!isActive(base, ctx.runtime)) return { blocks: [] };
+		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
 		if (store) await drainQueueAll(store, cfg, ctx.runtime);
 		return { blocks: [] };

@@ -161,6 +161,7 @@ async function callRoute(
 }
 
 const SCOPE_DESC = "Memory scope: 'project' (this project) or 'all' (shared bank). Defaults to config.";
+const TAGS_DESC = "Optional simple key→value tag filter for a targeted query (no boolean DSL).";
 
 interface ToolError {
 	content: Array<{ type: "text"; text: string }>;
@@ -188,8 +189,13 @@ const extension: ExtensionFactory = (pi) => {
 			scope: Type.Optional(
 				Type.Union([Type.Literal("project"), Type.Literal("all")], { description: SCOPE_DESC }),
 			),
+			tags: Type.Optional(Type.Record(Type.String(), Type.String(), { description: TAGS_DESC })),
 		}),
-		async execute(_toolCallId: string, params: { query?: string; scope?: "project" | "all" }, signal?: AbortSignal) {
+		async execute(
+			_toolCallId: string,
+			params: { query?: string; scope?: "project" | "all"; tags?: Record<string, string> },
+			signal?: AbortSignal,
+		) {
 			const query = typeof params.query === "string" ? params.query.trim() : "";
 			if (!query) return errorResult("query is required", { query: params.query });
 			let res: { configured?: boolean; memories?: unknown[]; error?: string };
@@ -197,7 +203,7 @@ const extension: ExtensionFactory = (pi) => {
 				res = (await callRoute(
 					"hindsight_recall",
 					"recall",
-					{ query, ...(params.scope ? { scope: params.scope } : {}) },
+					{ query, ...(params.scope ? { scope: params.scope } : {}), ...(params.tags ? { tags: params.tags } : {}) },
 					signal,
 				)) as typeof res;
 			} catch (e) {
@@ -311,8 +317,13 @@ const extension: ExtensionFactory = (pi) => {
 			scope: Type.Optional(
 				Type.Union([Type.Literal("project"), Type.Literal("all")], { description: SCOPE_DESC }),
 			),
+			tags: Type.Optional(Type.Record(Type.String(), Type.String(), { description: TAGS_DESC })),
 		}),
-		async execute(_toolCallId: string, params: { prompt?: string; scope?: "project" | "all" }, signal?: AbortSignal) {
+		async execute(
+			_toolCallId: string,
+			params: { prompt?: string; scope?: "project" | "all"; tags?: Record<string, string> },
+			signal?: AbortSignal,
+		) {
 			const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
 			if (!prompt) return errorResult("prompt is required", {});
 			let res: { configured?: boolean; text?: string; error?: string };
@@ -320,7 +331,7 @@ const extension: ExtensionFactory = (pi) => {
 				res = (await callRoute(
 					"hindsight_reflect",
 					"reflect",
-					{ prompt, ...(params.scope ? { scope: params.scope } : {}) },
+					{ prompt, ...(params.scope ? { scope: params.scope } : {}), ...(params.tags ? { tags: params.tags } : {}) },
 					signal,
 				)) as typeof res;
 			} catch (e) {
