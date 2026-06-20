@@ -17,6 +17,15 @@ function tmpDir(): string {
 }
 
 let seq = 0;
+// The per-provider budget timer in ModuleHost.invoke starts the moment the worker
+// is CREATED, so it bounds worker-thread spawn + tsx transpilation of the bootstrap
+// AND pack module, not just handler execution. In isolation that startup fits inside
+// a tight budget, but under full-suite concurrent load (many tsx test processes each
+// spawning module-host workers) it routinely exceeds ~1s — which used to 504 every
+// non-timeout provider hook here (diagnostics flagged "timed out", blocks empty).
+// Default to a generous 30s budget (matching ModuleHost's own default) so these
+// tests assert PRODUCT behavior, not wall-clock worker-startup jitter. Tests that
+// deliberately exercise the timeout path pass an explicit small `timeoutMs`.
 function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTokens?: number; timeoutMs?: number } = {}): ProviderContribution {
 	const file = path.join(tmp, `${id}-${seq++}.mjs`);
 	fs.writeFileSync(file, body);
@@ -25,7 +34,7 @@ function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTok
 		kind: "memory",
 		module: path.basename(file),
 		hooks: ["sessionSetup"],
-		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 1_000 },
+		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 30_000 },
 		config: { enabled: true },
 		listName: id,
 		sourceFile: path.join(tmp, "pack.yaml"),
@@ -75,14 +84,22 @@ describe("LifecycleHub", () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
 		try {
-			const slow = fixtureProvider(tmp, "slow", `export default { async sessionSetup() { await new Promise((r) => setTimeout(r, 5000)); return { blocks: [{ id: "slow", title: "slow", authority: "memory", content: "late", reason: "r", priority: 10 }] }; } };`, { timeoutMs: 200 });
+			// The slow provider would take 30s to "complete"; its 200ms budget must cut it
+		// off long before that. We keep the completion path far beyond any plausible
+		// worker-startup time so the elapsed bound proves the timeout fired (rather than
+		// asserting a tight wall-clock value that flakes when fast's worker startup is
+		// slow under load). The timeout=true diagnostic + fast block are the wall-clock-
+		// independent core assertions.
+		const slow = fixtureProvider(tmp, "slow", `export default { async sessionSetup() { await new Promise((r) => setTimeout(r, 30000)); return { blocks: [{ id: "slow", title: "slow", authority: "memory", content: "late", reason: "r", priority: 10 }] }; } };`, { timeoutMs: 200 });
 			const fast = fixtureProvider(tmp, "fast", `export default { async sessionSetup() { return { blocks: [{ id: "fast", title: "fast", authority: "memory", content: "ok", reason: "r", priority: 9 }] }; } };`);
 
 			const t0 = performance.now();
 			const result = await hub(tmp, [slow, fast], moduleHost).dispatch("sessionSetup", base(tmp));
 			const elapsed = performance.now() - t0;
 
-			assert.ok(elapsed < 1_000, `dispatch should return promptly, got ${elapsed}ms`);
+			// Far below the slow provider's 30s completion ⇒ the 200ms timeout cut it off,
+			// yet generous enough to absorb fast's worker-startup jitter under load.
+			assert.ok(elapsed < 5_000, `dispatch should return well before the slow provider's 30s completion, got ${elapsed}ms`);
 			assert.equal(result.blocks.length, 1);
 			assert.equal(result.blocks[0].providerId, "fast");
 			assert.equal(result.diagnostics.length, 1);
