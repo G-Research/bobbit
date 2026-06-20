@@ -219,6 +219,96 @@ On a `live-event` user message_end with text `T` and id `S`:
 Text-fallback is bounded: at most one optimistic per turn is in flight, and
 the search scope is `_origin:"optimistic"` only.
 
+### 6.3 Settling unreconciled optimistic rows on turn termination
+
+**Root cause.** §6.1's sentinel scheme assumes the reconciling echo in §6.2
+*always arrives*. The "Race: snapshot arrival after pending optimistic" row in
+§11 even leans on it ("the follow-up live echo at `seq = N` then replaces by
+id"). That assumption is false when a turn **terminates before emitting the
+user echo** — e.g. a prompt sent while the agent is idle on a model that 404s
+immediately. The server never persists the prompt to the agent `.jsonl` and
+never echoes it, so nothing ever replaces the optimistic row. Left at
+`_order ≈ Number.MAX_SAFE_INTEGER`, it sorts *after every server-ordered
+message*, including ones that arrive or complete later (especially in team-lead
+sessions, which receive independent server events — status polls, task-complete
+notifications, snapshots). The user's earlier message renders permanently
+stranded at the bottom of the transcript and is absent from the persisted
+history (so it would vanish on reload). Reproduced live in session
+`3d8bdbe4-ff32-415c-aaaa-a04590092152`.
+
+**Chosen mechanism: a pure `settle-optimistic` reducer action.** It is
+dispatched from `RemoteAgent` on **both** turn-termination paths — `case
+"error"` in `handleServerMessage` and `case "agent_end"` in
+`handleAgentEvent`. Settling only on turn termination (never eagerly) is what
+distinguishes a genuine strand from the legitimate in-flight pending case.
+
+**Settlement behaviour.** `settle-optimistic` re-stamps any `_origin:
+"optimistic"` row still pinned at the sentinel (`_order >
+OPTIMISTIC_ORDER_BASE`, where `OPTIMISTIC_ORDER_BASE = Number.MAX_SAFE_INTEGER
+- 1e9`) to `highestSeq + SETTLE_EPSILON` (`0.5`) — just after the latest live
+message the client has consumed — so subsequent live server events naturally
+sort *after* it. The row:
+
+- **stays visible** — it is re-stamped, never deleted; the user needs to see
+  what they sent;
+- **keeps `_origin:"optimistic"` and its `optimistic_` id**, so a late,
+  against-the-odds server echo can still reconcile it in place (id or text
+  fallback) instead of stacking a duplicate;
+- **is flagged `_settled: true`** (a durable marker — see snapshot behaviour).
+
+Already-reconciled (now `_origin:"server"`) and already-settled rows are
+untouched, so the action is a pure no-op on the happy path and idempotent on
+re-dispatch (both `error` and `agent_end` may fire). The reducer stays pure —
+no `Date.now()`, no DOM; `settleOrder` is derived from `state.highestSeq`.
+
+A **pending** optimistic row (echo not yet arrived *and* turn not yet ended)
+is deliberately left at the sentinel. That is the legitimate in-flight case
+(§11 race row), not a strand, and the eventual echo will reconcile it.
+
+**Snapshot behaviour (why `_settled` must be durable).** A single
+`highestSeq + 0.5` settle order is not enough on its own. Independent snapshots
+— routine in team-lead sessions — land their rows in the negative
+`SNAPSHOT_ORDER_FLOOR` (`-1e9 + i`) range, so a settled row at a small positive
+order would again sort *after the entire snapshot*, re-stranding the prompt
+below content newer than it. The `snapshot` survivor pass therefore re-stamps a
+`_settled` optimistic survivor to just below the snapshot's max `_order`
+whenever it currently sorts after it — keeping the user's prompt above the
+snapshot tail rather than at the absolute bottom. This re-stamp is gated on
+`_settled === true`: **pending** (un-`_settled`) optimistic rows are left at the
+sentinel so the legitimate pending case (test (5)) is preserved. The `_settled`
+flag survives across reduces precisely so this pass can keep re-anchoring the
+row against each new snapshot.
+
+**Tests.**
+
+- `tests/message-reducer.test.ts` — pure-reducer suite **R1–R4**:
+  - **R1** errored turn settles the prompt so a *later* live event sorts after
+    it (and the row is not deleted);
+  - **R2** team-session strand — a settled row sorts before an *independent*
+    snapshot's tail (no id/text match), not below the whole snapshot;
+  - **R3** settle after the echo already reconciled is a no-op (happy path
+    unchanged);
+  - **R4** a late server echo still reconciles a *settled* row with no
+    duplicate.
+  - Corrected **case (5)** now asserts the *pending* contract: an optimistic
+    row with no echo **and no turn-end** stays at the sentinel after a snapshot
+    (previously this case enshrined the buggy permanent-tail ordering as if it
+    were correct even post-termination).
+- `tests/remote-agent-settle.spec.ts` — wiring spec that drives the bundled
+  production handlers with a stub transport and asserts both the `error` and
+  `agent_end` paths move the row out of the sentinel while keeping it visible.
+  The assertions are **mechanism-agnostic** (they check observable `_order`
+  relative to the sentinel floor, not an action name), so the wiring is pinned
+  without coupling to the action's internals.
+
+**Reverted-fix proof (for the PR description).** All of R1–R4 and the
+`remote-agent-settle` spec are **RED before the production fix** — the reducer
+returns `undefined` for the unknown `settle-optimistic` action and the handlers
+never re-stamp, so the row stays at the sentinel (`_order > floor`) and every
+"settled below the floor / sorts before later rows" assertion fails — and
+**GREEN after**. This satisfies the goal's requirement that the new tests
+demonstrably fail when the fix is reverted.
+
 ## 7. Render contract
 
 ### 7.1 Id-keyed render
@@ -430,7 +520,7 @@ Pass criterion: byte-equal output array of `(id, _order)` pairs.
 | **ST-DEDUP-01 regression** — replay pacing | Untouched by this change. The reducer doesn't care whether events arrive paced or burst — it sorts by seq either way. |
 | **`tests/remote-agent-snapshot-merge.test.ts`** — current test reaches into private buckets via reflection | Rewrite as reducer test (pure function, no reflection). Keeps the same behavioural assertions: server-snapshot id wins, compaction marker dedup by text, permission cards survive only when not superseded. |
 | **Very-old persisted `.jsonl` lacking `seq`** | Server's `getMessages` always assigns `_order = -1e9 + i` from snapshot index, regardless of whether the underlying JSONL had `seq`. Old data is invisible to the reducer; it sees only the snapshot. |
-| **Race: snapshot arrival after pending optimistic** | Optimistic rows sit at `_order ≈ MAX_SAFE_INTEGER`, so a snapshot that doesn't contain the optimistic id cannot displace it. The follow-up live echo at `seq = N` then replaces by id (or by text). Worst case: the optimistic row visibly persists for one extra render frame after the snapshot — same as today, no regression. |
+| **Race: snapshot arrival after pending optimistic** | Optimistic rows sit at `_order ≈ MAX_SAFE_INTEGER`, so a snapshot that doesn't contain the optimistic id cannot displace it. The follow-up live echo at `seq = N` then replaces by id (or by text). Worst case: the optimistic row visibly persists for one extra render frame after the snapshot — same as today, no regression. **Caveat: this holds only while the echo is still pending. If the turn *terminates* without an echo (immediate model 404), the row must not stay at the sentinel — `settle-optimistic` re-stamps it into chronological position (§6.3).** |
 | **`__preview_snapshot_v1__` marker interactions** | Reducer doesn't inspect tool-result text. Marker handling stays in `PreviewRenderer.ts` / `truncate-large-content.ts` and is not affected. |
 | **Proposal scan double-fire** | `_processedProposalIds` is keyed by block id, not message position; safe across reducer migration. The streaming flag `state.proposalStreamingByTag` is similarly id-keyed (see `proposal-panel-streaming-ux.md`). |
 | **AI Gateway / restart-resume reviewer reminder** | Verification harness uses `waitForIdle`/`waitForStreaming`, not transcript ordering. No coupling. |
