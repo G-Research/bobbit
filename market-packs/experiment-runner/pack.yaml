@@ -1,0 +1,34 @@
+schema: 2
+name: experiment-runner
+description: >-
+  Data-driven experimentation + autonomous optimization. A/B comparison (default,
+  bounded) and an opt-in, hard-capped autoresearch loop over Bobbit runs, with
+  pluggable metrics and a spec-driven dashboard.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  # Plain panel-opening launchers (NOT spawn launchers): clicking opens the one
+  # four-view panel (mode-select → define → confirm → dashboard); the panel calls
+  # the routes from explicit user gestures.
+  entrypoints: [experiment-runner-open, experiment-runner-palette, experiment-runner-route]
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []
+provides: []
+requires: []
+# Pack-level routes — the orchestration brain. Reached via host.callRoute(<name>);
+# executed in the confined worker with ambient OS access + the injected ctx.host
+# (store, agents incl. spawnGoal, session). The hand-authored lib/routes.mjs is
+# served as-is; the shared reporting lib (lib/experiment-report.mjs) is the
+# build:packs bundle of src/shared/experiment-report/. `module` resolves relative
+# to THIS pack.yaml and stays inside the pack root.
+routes:
+  module: lib/routes.mjs
+  names: [defineExperiment, projectCost, launch, poll, collect, aggregate,
+          iterate, listExperiments, getExperiment, saveMetrics, saveDashboard,
+          report, listMetrics, listWidgets, cancel]
