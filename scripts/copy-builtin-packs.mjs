@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight"]; // explicit allowlist
+const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "experiment-runner"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";
 

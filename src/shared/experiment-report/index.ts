@@ -8,9 +8,11 @@
 // confined worker as lib/experiment-report.mjs.
 
 import { aggregateAB, compareAll, metricDirection } from "./aggregate.js";
-import { bestObjective, buildObjectiveSeries, cumulativeCost, stopFromLedger } from "./series.js";
+import { bestObjective, buildObjectiveSeries, cumulativeCost, exceedsCaps, stopFromLedger } from "./series.js";
 import type {
 	ArmAggregate,
+	AutoresearchCaps,
+	CompletionBar,
 	DashboardSpec,
 	ExperimentDef,
 	ExperimentMode,
@@ -18,6 +20,7 @@ import type {
 	MetricComparison,
 	MetricSelection,
 	ObjectivePoint,
+	ObjectiveSpec,
 	ReportModel,
 	ReportSummary,
 	RunRecord,
@@ -55,6 +58,64 @@ export {
 	fmtPct,
 	fmtValue,
 } from "./widgets/theme.js";
+
+// ─────────────────────────── object-form facades ───────────────────────────
+// Thin, object-argument wrappers over the canonical positional helpers in
+// aggregate.ts / series.ts. They exist ONLY so the pack's bundled adapters
+// (lib/aggregate.mjs, lib/autoresearch.mjs, lib/routes.mjs) reach the single
+// source through one named import shape. They add NO median/percentile/accept-stop
+// math of their own — every value is computed by the shared functions.
+
+/** A/B aggregation in object form: arm×metric aggregates + per-metric comparisons. */
+export function aggregateExperiment(input: {
+	def?: ExperimentDef;
+	runs?: RunRecord[];
+	metrics?: MetricSelection[];
+	bar?: CompletionBar;
+}): {
+	mode: ExperimentMode;
+	bar: CompletionBar;
+	aggregates: ArmAggregate[];
+	comparisons: MetricComparison[];
+} {
+	const runs = input.runs ?? [];
+	const bar: CompletionBar = input.bar ?? "passed";
+	// Apply the experiment-level bar as a default for selections that don't pin one.
+	const metrics = (input.metrics ?? []).map((m) => (m.bar ? m : { ...m, bar }));
+	const aggregates = aggregateAB(input.def, runs, metrics);
+	const comparisons = compareAll(aggregates, metrics);
+	return { mode: input.def?.mode ?? "ab", bar, aggregates, comparisons };
+}
+
+/** Running best objective among verified+passed runs (null if none). */
+export function computeBestSoFar(runs?: RunRecord[], objective?: ObjectiveSpec): number | null {
+	if (!objective) return null;
+	return bestObjective(buildObjectiveSeries(runs ?? [], objective));
+}
+
+/** Best-objective-vs-iteration curve in object form (empty without an objective). */
+export function objectiveSeries(input: {
+	runs?: RunRecord[];
+	objective?: ObjectiveSpec;
+}): ObjectivePoint[] {
+	if (!input?.objective) return [];
+	return buildObjectiveSeries(input.runs ?? [], input.objective);
+}
+
+/** Hard-cap budget check in object form (delegates to exceedsCaps). */
+export function budgetStatus(input: {
+	cumulativeCostUsd?: number;
+	iterations?: number;
+	elapsedMs?: number;
+	caps?: AutoresearchCaps;
+}): { exceeded: boolean; reason?: string } {
+	return exceedsCaps({
+		caps: input.caps,
+		iterations: input.iterations ?? 0,
+		cumulativeCostUsd: input.cumulativeCostUsd ?? 0,
+		elapsedMs: input.elapsedMs ?? 0,
+	});
+}
 
 /** Default dashboard layout per mode (the single per-mode default). */
 export function defaultDashboardFor(mode: ExperimentMode): DashboardSpec {

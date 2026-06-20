@@ -120,6 +120,14 @@ const PACKS = [
 			// panels/experiment-runner-panel.yaml). The hand-authored lib/routes.mjs +
 			// other server lib modules are relocated as-is — NOT bundled here.
 			{ in: "panel.js", out: "lib/panel.js" },
+			// SERVER reporting bundle: the SINGLE SOURCE reporting library
+			// (src/shared/experiment-report) bundled to lib/experiment-report.mjs.
+			// The hand-authored adapters (aggregate/autoresearch/widgets/routes.mjs)
+			// import from THIS generated file, so report logic never forks. `inFromRoot`
+			// resolves from the repo root (not the pack src dir). platform:"node"
+			// because routes run in the confined Node worker; the module is pure (no
+			// node:* imports) so it also loads fine in the browser dashboard path.
+			{ inFromRoot: "src/shared/experiment-report/index.ts", out: "lib/experiment-report.mjs", platform: "node" },
 		],
 	},
 	{
@@ -146,7 +154,9 @@ async function main() {
 		const packRoot = path.join(projectRoot, "market-packs", pack);
 		const srcDir = path.join(packRoot, "src");
 		for (const entry of entries) {
-			const inFile = path.join(srcDir, entry.in);
+			// `inFromRoot` resolves from the repo root (for shared libs bundled into a
+			// pack, e.g. src/shared/*); otherwise `in` resolves from the pack's src dir.
+			const inFile = entry.inFromRoot ? path.join(projectRoot, entry.inFromRoot) : path.join(srcDir, entry.in);
 			const outFile = path.join(packRoot, entry.out);
 			await build({
 				entryPoints: [inFile],
@@ -175,7 +185,7 @@ async function main() {
 				logLevel: "info",
 			});
 			// eslint-disable-next-line no-console
-			console.log(`[build:packs] ${pack}/src/${entry.in} → ${pack}/${entry.out}`);
+			console.log(`[build:packs] ${entry.inFromRoot ?? `${pack}/src/${entry.in}`} → ${pack}/${entry.out}`);
 		}
 	}
 }

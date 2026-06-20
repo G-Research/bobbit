@@ -14,10 +14,11 @@ import {
 	budgetStatus,
 	isPlateau,
 	hitTarget,
+	isRunVerified,
 } from "./experiment-report.mjs";
 
 // Re-export the shared decision surface so the loop reaches it through the adapter.
-export { computeBestSoFar, decideCandidate, evaluateStop, objectiveSeries, budgetStatus, isPlateau, hitTarget } from "./experiment-report.mjs";
+export { computeBestSoFar, decideCandidate, evaluateStop, objectiveSeries, budgetStatus, isPlateau, hitTarget, isRunVerified } from "./experiment-report.mjs";
 
 /**
  * Decide accept/reject for a settled candidate run against the best-so-far
@@ -31,13 +32,14 @@ export function decideRun({ run, priorRuns = [], objective }) {
 	const best = computeBestSoFar(priorRuns, objective);
 	const value = run && run.metrics ? run.metrics[objective.metricId] : undefined;
 	const objValue = typeof value === "number" && Number.isFinite(value) ? value : null;
+	// Correctness gate (verified AND passed bar) is folded into one boolean by the
+	// shared isRunVerified, since the canonical decideCandidate keys off `verified`.
 	const result = decideCandidate({
 		objective: objValue,
-		verified: run ? run.verified : undefined,
-		completionBar: run ? run.completionBar : undefined,
+		verified: run ? isRunVerified(run) : false,
 		best,
 		direction: dir,
-		plateauEps: 0,
+		eps: 0,
 	});
 	const bestAfter = result.decision === "accepted" ? objValue : best;
 	return { ...result, objective: objValue, best, bestAfter };
@@ -85,8 +87,9 @@ export function buildLedger({ runs = [], objective }) {
  */
 export function shouldStop({ runs = [], def, cumulativeCostUsd = 0, elapsedMs = 0 }) {
 	const objective = def && def.objective;
+	// No objective ⇒ no deterministic stop basis (autoresearch always has one).
+	if (!objective) return { stopped: false };
 	const series = objectiveSeries({ runs, objective });
-	const iterations = runs.filter((r) => typeof r.iteration === "number").length;
 	return evaluateStop({
 		series,
 		caps: (def && def.caps) || {},
@@ -94,6 +97,5 @@ export function shouldStop({ runs = [], def, cumulativeCostUsd = 0, elapsedMs = 
 		objective,
 		cumulativeCostUsd,
 		elapsedMs,
-		iterations,
 	});
 }

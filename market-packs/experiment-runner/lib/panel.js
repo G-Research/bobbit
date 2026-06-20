@@ -1,555 +1,4 @@
-// Experiment Runner — pack CLIENT panel module (SOURCE; bundled to lib/panel.js
-// by scripts/build-market-packs.mjs). One side panel that is a four-view state
-// machine — mode-select → define → confirm → dashboard — per
-// docs/design/experiment-runner-panel-ux.md.
-//
-// Two front doors, never a buried toggle:
-//   • A/B comparison  — the safe, bounded DEFAULT. Fans out variant × repeat
-//     child goals; run-count + cost projection shown BEFORE launch.
-//   • Autoresearch    — explicit opt-in, OFF by default. Refuses to launch until
-//     at least one hard cap AND one stop condition are set, a per-iteration
-//     budget is given, and an explicit danger acknowledgement is ticked.
-//
-// ALL dynamic data flows through the bound Host API — never a raw fetch:
-//   • host.callRoute(<name>, …) — the pack's OWN routes (the canonical 15). The
-//     panel calls ONLY the canonical names: defineExperiment, projectCost,
-//     launch, poll, collect, aggregate, iterate, listExperiments, getExperiment,
-//     saveMetrics, saveDashboard, report, listMetrics, listWidgets, cancel.
-//   • host.store.* — the results registry + draft autosave (best-effort; a
-//     localStorage mirror gives instant cold paint).
-//   • host.requestRender() — repaint after any state patch.
-//   • host.ui.navigate(...) — write the deep-link hash on launch + view changes.
-//
-// The panel renders the dashboard from the `report` route's { model, html } (the
-// shared reporting lib's single source of truth). When the route is unavailable
-// it degrades to a client-side render of the same widget spec over the stored raw
-// outcomes — so the dashboard, metrics edits and dashboard-spec edits always
-// re-render WITHOUT a re-run.
-//
-// Theme tokens only (var(--background/foreground/card/muted-foreground/border/
-// primary), the categorical --chart-1..6, and --positive/--negative/--warning for
-// accept/reject/cap signals). No hardcoded colours, no :root palette.
-
-// ── Canonical ids (owned by the backend; mirrored here as the offline default so
-//    the metrics + dashboard editors render before any route responds). ──
-const BUILTIN_METRIC_IDS = [
-	"cost.totalUsd",
-	"cost.tokensTotal",
-	"cost.cacheHitRate",
-	"gates.passRate",
-	"gates.firstPassClean",
-	"tasks.completionRate",
-	"time.wallClockMs",
-	"objective.value",
-	"command.metric",
-];
-
-const METRIC_DIRECTION = {
-	"cost.totalUsd": "lower-better",
-	"cost.tokensTotal": "lower-better",
-	"cost.cacheHitRate": "higher-better",
-	"gates.passRate": "higher-better",
-	"gates.firstPassClean": "higher-better",
-	"tasks.completionRate": "higher-better",
-	"time.wallClockMs": "lower-better",
-	"objective.value": "higher-better",
-	"command.metric": "neutral",
-};
-
-const DEFAULT_COLLECTED = new Set(["cost.totalUsd", "time.wallClockMs", "gates.passRate", "objective.value"]);
-
-const BUILTIN_WIDGETS = [
-	{ id: "comparison-table", label: "Comparison table" },
-	{ id: "score-bars", label: "Score bars" },
-	{ id: "objective-curve", label: "Objective curve" },
-	{ id: "ledger-table", label: "Ledger" },
-	{ id: "summary-cards", label: "Summary cards" },
-	{ id: "raw-drilldown", label: "Raw runs" },
-];
-
-const AGGREGATIONS = ["median", "mean", "p90", "min", "max", "count"];
-
-// ── Store-key schema (mirrors lib/store-keys.mjs — the backend's single source). ──
-const K = {
-	exp: (id) => `exp/${id}`,
-	state: (id) => `exp/${id}/state`,
-	runPrefix: (id) => `exp/${id}/run/`,
-	ledger: (id) => `exp/${id}/ledger`,
-	dashboard: (id) => `exp/${id}/dashboard`,
-	metrics: (id) => `exp/${id}/metrics`,
-	index: "index/experiments",
-	draft: (key) => `drafts/${key}`,
-};
-
-const LOCAL_DRAFT_PREFIX = "bobbit:experiment-runner:draft:";
-
-const arrayOf = (v) => (Array.isArray(v) ? v : []);
-const asText = (v, fb = "") => (v == null ? fb : String(v));
-const num = (v) => {
-	const n = Number(v);
-	return Number.isFinite(n) ? n : undefined;
-};
-const safeId = (v) => asText(v, "exp").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "exp";
-
-/** Parse a metadata-treatment value: number → boolean → JSON → string. */
-function parseTreatmentValue(raw) {
-	const t = asText(raw).trim();
-	if (t === "") return "";
-	if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
-	if (t === "true") return true;
-	if (t === "false") return false;
-	if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
-		try { return JSON.parse(t); } catch { /* fall through to string */ }
-	}
-	return t;
-}
-
-/** Convert a [{key,value}] editor list into a treatment object. */
-function rowsToObject(rows) {
-	const out = {};
-	for (const row of arrayOf(rows)) {
-		const key = asText(row && row.key).trim();
-		if (!key) continue;
-		out[key] = parseTreatmentValue(row && row.value);
-	}
-	return out;
-}
-
-function parseRolesJson(text) {
-	const t = asText(text).trim();
-	if (!t) return undefined;
-	try {
-		const parsed = JSON.parse(t);
-		return parsed && typeof parsed === "object" ? parsed : undefined;
-	} catch { return undefined; }
-}
-
-const median = (xs) => {
-	const a = xs.filter((x) => Number.isFinite(x)).slice().sort((x, y) => x - y);
-	if (!a.length) return undefined;
-	const mid = Math.floor(a.length / 2);
-	return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
-};
-const aggregate = (xs, mode) => {
-	const a = xs.filter((x) => Number.isFinite(x));
-	if (mode === "count") return a.length;
-	if (!a.length) return undefined;
-	switch (mode) {
-		case "mean": return a.reduce((s, x) => s + x, 0) / a.length;
-		case "min": return Math.min(...a);
-		case "max": return Math.max(...a);
-		case "p90": { const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(0.9 * s.length))]; }
-		default: return median(a);
-	}
-};
-const fmt = (v) => {
-	if (v == null || !Number.isFinite(v)) return "—";
-	const abs = Math.abs(v);
-	if (abs !== 0 && abs < 0.01) return v.toExponential(2);
-	if (Number.isInteger(v)) return String(v);
-	return v.toFixed(abs >= 100 ? 1 : 3);
-};
-const usd = (v) => (v == null || !Number.isFinite(v) ? "—" : `$${v.toFixed(2)}`);
-
-// ── Default draft ──────────────────────────────────────────────────────────────
-function emptyTreatmentRows() { return [{ key: "", value: "" }]; }
-
-function defaultMetricsSelection() {
-	return BUILTIN_METRIC_IDS.map((id) => ({
-		metric: id,
-		source: "built-in",
-		collect: DEFAULT_COLLECTED.has(id),
-		aggregation: "median",
-		direction: METRIC_DIRECTION[id] || "neutral",
-		primary: id === "gates.passRate",
-	}));
-}
-
-function defaultDraft() {
-	return {
-		view: "mode-select",
-		mode: null,
-		experimentId: undefined,
-		basics: { name: "", runnableUnit: "command", body: "", workflowId: "" },
-		ab: {
-			variants: [
-				{ label: "baseline", metadata: emptyTreatmentRows(), rolesJson: "", rolesOpen: false },
-				{ label: "variant-b", metadata: emptyTreatmentRows(), rolesJson: "", rolesOpen: false },
-			],
-			repeats: 3,
-			sameCompletionBar: true,
-			concurrency: 3,
-		},
-		auto: {
-			objectiveMetric: "objective.value",
-			direction: "maximize",
-			correctnessGateId: "",
-			seed: emptyTreatmentRows(),
-			seedRolesJson: "",
-			caps: { maxIterations: "", wallClockHours: "", costUsd: "", perIterBudget: "" },
-			stops: { plateauK: "", target: "" },
-			strategy: "greedy",
-			batchSize: "",
-		},
-		metrics: defaultMetricsSelection(),
-		perRunBudget: "",
-		confirmAck: false,
-	};
-}
-
-// Module-level state: instanceKey → entry (survives panel re-creation in a page
-// session, mirroring the pr-walkthrough `byJob` pattern).
-const byInstance = globalThis.__bobbitExperimentRunnerState || (globalThis.__bobbitExperimentRunnerState = new Map());
-
-// ── Validation ───────────────────────────────────────────────────────────────
-function validateAB(d) {
-	const errors = [];
-	const basics = d.basics || {};
-	if (!asText(basics.name).trim()) errors.push("Name is required");
-	if (!asText(basics.body).trim()) errors.push("Spec / command body is required");
-	const variants = arrayOf(d.ab && d.ab.variants);
-	if (variants.length < 2) errors.push("A/B needs at least two variants");
-	const labels = new Set();
-	const signatures = [];
-	variants.forEach((v, i) => {
-		const label = asText(v.label).trim();
-		if (!label) errors.push(`Variant ${i + 1} needs a label`);
-		else if (labels.has(label)) errors.push(`Variant label "${label}" is duplicated`);
-		labels.add(label);
-		signatures.push(JSON.stringify({ m: rowsToObject(v.metadata), r: parseRolesJson(v.rolesJson) || null }));
-	});
-	for (let i = 0; i < signatures.length; i++) {
-		for (let j = i + 1; j < signatures.length; j++) {
-			if (signatures[i] === signatures[j]) {
-				errors.push(`Variant "${asText(variants[j].label).trim() || j + 1}" is identical to "${asText(variants[i].label).trim() || i + 1}"`);
-			}
-		}
-	}
-	const repeats = num(d.ab && d.ab.repeats);
-	if (!repeats || repeats < 1) errors.push("Repeats must be ≥ 1");
-	const budget = num(d.perRunBudget);
-	if (!budget || budget <= 0) errors.push("Set a per-run budget");
-	const concurrency = num(d.ab && d.ab.concurrency);
-	if (concurrency != null && (concurrency < 1 || concurrency > 8)) errors.push("Concurrency must be 1–8");
-	if (!arrayOf(d.metrics).some((m) => m.collect)) errors.push("Select at least one metric");
-	const runCount = variants.length * (repeats || 0);
-	const estCostMax = budget ? runCount * budget : undefined;
-	return { valid: errors.length === 0, errors, runCount, estCostMax };
-}
-
-function validateAuto(d) {
-	const errors = [];
-	const checklist = [];
-	const basics = d.basics || {};
-	if (!asText(basics.name).trim()) errors.push("Name is required");
-	if (!asText(basics.body).trim()) errors.push("Spec / command body is required");
-	const auto = d.auto || {};
-	if (!asText(auto.objectiveMetric).trim()) errors.push("Choose an objective metric");
-	const perIter = num(auto.caps && auto.caps.perIterBudget);
-	if (!perIter || perIter <= 0) errors.push("Set a per-iteration budget");
-
-	const caps = auto.caps || {};
-	const hasCap = num(caps.maxIterations) > 0 || num(caps.wallClockHours) > 0 || num(caps.costUsd) > 0;
-	const stops = auto.stops || {};
-	const hasStop = num(stops.plateauK) > 0 || stops.target !== "" && Number.isFinite(num(stops.target));
-
-	if (!hasCap) checklist.push("Set at least one hard cap (max-iterations, wall-clock, or cost)");
-	if (!hasStop) checklist.push("Set at least one stop condition (plateau-K or target)");
-	if (!d.confirmAck) checklist.push("Acknowledge the autonomous-run warning");
-
-	const maxIter = num(caps.maxIterations);
-	const costCap = num(caps.costUsd);
-	let estCostMax;
-	if (perIter && maxIter) estCostMax = maxIter * perIter;
-	if (costCap != null) estCostMax = estCostMax == null ? costCap : Math.min(estCostMax, costCap);
-
-	const valid = errors.length === 0 && checklist.length === 0;
-	return { valid, errors, checklist, estCostMax, hasCap, hasStop };
-}
-
-function projectionFor(d) {
-	return d.mode === "autoresearch" ? validateAuto(d) : validateAB(d);
-}
-
-// ── Definition serialization (the shape the routes consume) ─────────────────────
-function buildDefinition(d) {
-	const basics = d.basics || {};
-	const metrics = arrayOf(d.metrics).filter((m) => m.collect).map((m) => ({
-		metric: m.metric, aggregation: m.aggregation, direction: m.direction, primary: !!m.primary,
-	}));
-	const def = {
-		experimentId: d.experimentId,
-		title: asText(basics.name).trim(),
-		mode: d.mode === "autoresearch" ? "autoresearch" : "ab",
-		runnable: { kind: basics.runnableUnit === "goal" ? "goal" : "command", body: asText(basics.body) },
-		workflowId: asText(basics.workflowId).trim() || undefined,
-		metrics,
-	};
-	if (def.mode === "ab") {
-		const ab = d.ab || {};
-		def.variants = arrayOf(ab.variants).map((v, i) => ({
-			armId: safeId(asText(v.label).trim() || `arm-${i}`),
-			label: asText(v.label).trim() || `arm-${i}`,
-			metadata: rowsToObject(v.metadata),
-			inlineRoles: parseRolesJson(v.rolesJson),
-		}));
-		def.repeats = num(ab.repeats) || 1;
-		def.sameCompletionBar = ab.sameCompletionBar !== false;
-		def.maxConcurrency = num(ab.concurrency) || 3;
-		def.perRunBudget = num(d.perRunBudget);
-	} else {
-		const auto = d.auto || {};
-		def.objective = { metric: auto.objectiveMetric, direction: auto.direction === "minimize" ? "minimize" : "maximize" };
-		def.correctnessGateId = asText(auto.correctnessGateId).trim() || undefined;
-		def.seed = { metadata: rowsToObject(auto.seed), inlineRoles: parseRolesJson(auto.seedRolesJson) };
-		def.caps = {
-			maxIterations: num(auto.caps && auto.caps.maxIterations),
-			wallClockMs: num(auto.caps && auto.caps.wallClockHours) ? num(auto.caps.wallClockHours) * 3_600_000 : undefined,
-			maxCostUsd: num(auto.caps && auto.caps.costUsd),
-			perRunBudget: num(auto.caps && auto.caps.perIterBudget),
-		};
-		def.stop = { plateauK: num(auto.stops && auto.stops.plateauK), target: num(auto.stops && auto.stops.target) };
-		def.strategy = auto.strategy === "best-of-batch" ? "best-of-batch" : "greedy";
-		def.batchSize = num(auto.batchSize);
-		def.perRunBudget = num(auto.caps && auto.caps.perIterBudget);
-	}
-	return def;
-}
-
-export default function createPanel({ html, nothing, renderHeader }) {
-	void renderHeader;
-
-	// ── host wrappers (all best-effort / graceful) ──
-	const callRoute = async (host, name, init) => {
-		try {
-			if (!host || !host.capabilities || !host.capabilities.callRoute || !host.callRoute) {
-				return { ok: false, error: "routes-unavailable" };
-			}
-			const data = await host.callRoute(name, init);
-			return { ok: true, data };
-		} catch (err) {
-			return { ok: false, error: err && err.message ? String(err.message) : String(err) };
-		}
-	};
-	const storeGet = async (host, key) => {
-		try { return host && host.store && host.store.get ? await host.store.get(key) : null; }
-		catch { return null; }
-	};
-	const storePut = async (host, key, value) => {
-		try { if (host && host.store && host.store.put) await host.store.put(key, value); }
-		catch { /* best-effort */ }
-	};
-	const storeList = async (host, prefix) => {
-		try { return host && host.store && host.store.list ? (await host.store.list(prefix)) || [] : []; }
-		catch { return []; }
-	};
-
-	const repaint = (host) => { try { host && host.requestRender && host.requestRender(); } catch { /* non-DOM */ } };
-
-	const navigate = (host, params) => {
-		try {
-			if (host && host.capabilities && host.capabilities.ui && host.ui && host.ui.navigate) {
-				host.ui.navigate({ route: "experiment-runner", params });
-			}
-		} catch { /* best-effort */ }
-	};
-
-	const localKey = (instanceKey) => `${LOCAL_DRAFT_PREFIX}${safeId(instanceKey)}`;
-	const readLocalDraft = (instanceKey) => {
-		try { const raw = globalThis.localStorage && globalThis.localStorage.getItem(localKey(instanceKey)); return raw ? JSON.parse(raw) : undefined; }
-		catch { return undefined; }
-	};
-	const writeLocalDraft = (instanceKey, draft) => {
-		try { globalThis.localStorage && globalThis.localStorage.setItem(localKey(instanceKey), JSON.stringify(draft)); }
-		catch { /* unavailable/full */ }
-	};
-
-	const getEntry = (instanceKey) => byInstance.get(instanceKey);
-	const setEntry = (host, instanceKey, entry) => { byInstance.set(instanceKey, entry); repaint(host); };
-	const patch = (host, instanceKey, p) => {
-		const cur = byInstance.get(instanceKey) || {};
-		const next = { ...cur, ...p };
-		byInstance.set(instanceKey, next);
-		repaint(host);
-		return next;
-	};
-	const patchDraft = (host, instanceKey, mutate) => {
-		const cur = byInstance.get(instanceKey) || {};
-		const draft = { ...(cur.draft || defaultDraft()) };
-		mutate(draft);
-		const next = { ...cur, draft };
-		byInstance.set(instanceKey, next);
-		// Autosave the draft (debounced via microtask coalescing through store).
-		writeLocalDraft(instanceKey, draft);
-		void storePut(cur.host, K.draft(instanceKey), draft);
-		repaint(host);
-	};
-
-	// ── Hydration: kick off ONCE per instance (render stays pure). ──
-	function ensureHydrated(host, instanceKey, focusExperimentId, focusView) {
-		let entry = byInstance.get(instanceKey);
-		if (entry && entry.hydrated) {
-			entry.host = host;
-			// A deep-link arriving after first mount still focuses its experiment.
-			if (focusExperimentId && entry.draft && entry.draft.experimentId !== focusExperimentId) {
-				void openExperiment(host, instanceKey, focusExperimentId, focusView);
-			}
-			return entry;
-		}
-		entry = { hydrated: false, host, draft: readLocalDraft(instanceKey) || defaultDraft(), dashboard: null, experiments: [] };
-		byInstance.set(instanceKey, entry);
-		(async () => {
-			// Restore a persisted draft from the store (authoritative over local).
-			const storedDraft = await storeGet(host, K.draft(instanceKey));
-			const cur = byInstance.get(instanceKey) || entry;
-			let draft = (storedDraft && typeof storedDraft === "object") ? storedDraft : cur.draft;
-			// A deep-link experimentId always wins → land on the dashboard.
-			if (focusExperimentId) {
-				draft = { ...draft, experimentId: focusExperimentId, view: focusView || "dashboard" };
-			}
-			byInstance.set(instanceKey, { ...cur, hydrated: true, draft });
-			repaint(host);
-			void refreshExperimentIndex(host, instanceKey);
-			if (draft.experimentId && draft.view === "dashboard") {
-				void loadDashboard(host, instanceKey, draft.experimentId);
-			}
-		})();
-		return byInstance.get(instanceKey);
-	}
-
-	async function refreshExperimentIndex(host, instanceKey) {
-		const res = await callRoute(host, "listExperiments", { method: "GET" });
-		let experiments = [];
-		if (res.ok && res.data && Array.isArray(res.data.experiments)) experiments = res.data.experiments;
-		else {
-			const idx = await storeGet(host, K.index);
-			if (idx && Array.isArray(idx.experiments)) experiments = idx.experiments;
-		}
-		patch(host, instanceKey, { experiments });
-	}
-
-	async function openExperiment(host, instanceKey, experimentId, view) {
-		patchDraft(host, instanceKey, (d) => { d.experimentId = experimentId; d.view = view || "dashboard"; });
-		await loadDashboard(host, instanceKey, experimentId);
-	}
-
-	// ── Dashboard data load (route-first, store-fallback). ──
-	async function loadDashboard(host, instanceKey, experimentId) {
-		patch(host, instanceKey, { dashboardLoading: true });
-		let def, state, runs = [], ledger = [], dashboardSpec, metrics;
-
-		const got = await callRoute(host, "getExperiment", { method: "GET", query: { experimentId } });
-		if (got.ok && got.data && got.data.def) {
-			def = got.data.def; state = got.data.state;
-			runs = arrayOf(got.data.runs); ledger = arrayOf(got.data.ledger);
-			dashboardSpec = got.data.dashboard; metrics = got.data.metrics;
-		}
-		if (!def) {
-			def = await storeGet(host, K.exp(experimentId));
-			state = await storeGet(host, K.state(experimentId));
-			ledger = arrayOf(await storeGet(host, K.ledger(experimentId)));
-			dashboardSpec = await storeGet(host, K.dashboard(experimentId));
-			metrics = await storeGet(host, K.metrics(experimentId));
-			const keys = await storeList(host, K.runPrefix(experimentId));
-			for (const key of keys) {
-				const r = await storeGet(host, key);
-				if (r && typeof r === "object") runs.push(r);
-			}
-		}
-
-		// The editable dashboard spec + metric selection persist in the store; pull
-		// them in whenever the route didn't already supply them (so a saved spec edit
-		// re-renders without a re-run regardless of getExperiment's payload).
-		if (dashboardSpec == null) dashboardSpec = await storeGet(host, K.dashboard(experimentId));
-		if (!arrayOf(metrics).length) {
-			const storedMetrics = await storeGet(host, K.metrics(experimentId));
-			if (arrayOf(storedMetrics).length) metrics = storedMetrics;
-		}
-
-		// Poll live runs if the experiment is still running (after a user gesture only).
-		if (state && state.status === "running") {
-			const polled = await callRoute(host, "poll", { method: "POST", body: { experimentId } });
-			if (polled.ok && polled.data && Array.isArray(polled.data.runs)) runs = polled.data.runs;
-		}
-
-		// Render model from the shared reporting lib when the route is available.
-		const reported = await callRoute(host, "report", { method: "POST", body: { experimentId } });
-		const report = reported.ok && reported.data ? reported.data : null;
-
-		patch(host, instanceKey, {
-			dashboardLoading: false,
-			dashboard: {
-				experimentId, def, state, runs, ledger,
-				spec: dashboardSpec, metrics: arrayOf(metrics).length ? metrics : (def && def.metrics) || [],
-				report,
-			},
-		});
-	}
-
-	// ── Mutations ──
-	async function doLaunch(host, instanceKey) {
-		const entry = byInstance.get(instanceKey);
-		const d = entry.draft;
-		patch(host, instanceKey, { launching: true, launchError: undefined });
-		const definition = buildDefinition(d);
-
-		// Persist the definition (route-first, then store mirror for resilience).
-		const defined = await callRoute(host, "defineExperiment", { method: "POST", body: { definition } });
-		let experimentId = d.experimentId;
-		if (defined.ok && defined.data && defined.data.experimentId) experimentId = defined.data.experimentId;
-		if (!experimentId) experimentId = `${safeId(definition.title)}-${Date.now().toString(36)}`;
-		definition.experimentId = experimentId;
-		await storePut(host, K.exp(experimentId), definition);
-		await storePut(host, K.metrics(experimentId), definition.metrics);
-		await appendIndex(host, instanceKey, { experimentId, title: definition.title, mode: definition.mode, status: "running" });
-
-		const launched = await callRoute(host, "launch", { method: "POST", body: { experimentId } });
-		if (!launched.ok && launched.error !== "routes-unavailable") {
-			patch(host, instanceKey, { launching: false, launchError: launched.error });
-			return;
-		}
-		patchDraft(host, instanceKey, (dd) => { dd.experimentId = experimentId; dd.view = "dashboard"; });
-		patch(host, instanceKey, { launching: false });
-		navigate(host, { experimentId, view: "dashboard" });
-		await loadDashboard(host, instanceKey, experimentId);
-		// Kick the autoresearch loop forward once on launch.
-		if (definition.mode === "autoresearch") await callRoute(host, "iterate", { method: "POST", body: { experimentId } });
-	}
-
-	async function appendIndex(host, instanceKey, row) {
-		const idx = (await storeGet(host, K.index)) || { experiments: [] };
-		const experiments = arrayOf(idx.experiments).filter((e) => e.experimentId !== row.experimentId);
-		experiments.push(row);
-		await storePut(host, K.index, { experiments });
-		patch(host, instanceKey, { experiments });
-	}
-
-	async function doCancel(host, instanceKey, experimentId) {
-		await callRoute(host, "cancel", { method: "POST", body: { experimentId } });
-		await loadDashboard(host, instanceKey, experimentId);
-	}
-
-	async function saveMetricsSelection(host, instanceKey, experimentId, metrics) {
-		await callRoute(host, "saveMetrics", { method: "POST", body: { experimentId, metrics } });
-		await storePut(host, K.metrics(experimentId), metrics);
-		await loadDashboard(host, instanceKey, experimentId);
-	}
-
-	async function saveDashboardSpec(host, instanceKey, experimentId, spec) {
-		await callRoute(host, "saveDashboard", { method: "POST", body: { experimentId, dashboard: spec } });
-		await storePut(host, K.dashboard(experimentId), spec);
-		patch(host, instanceKey, { dashboardEditing: false });
-		await loadDashboard(host, instanceKey, experimentId);
-	}
-
-	// ════════════════════════════════════════════════════════════════════════
-	// Views
-	// ════════════════════════════════════════════════════════════════════════
-	const setView = (host, instanceKey, view) => patchDraft(host, instanceKey, (d) => { d.view = view; });
-
-	function renderModeSelect(host, instanceKey, d) {
-		const pick = (mode) => patchDraft(host, instanceKey, (dd) => { dd.mode = mode; dd.view = "define"; });
-		return html`
+var ze=["cost.totalUsd","cost.tokensTotal","cost.cacheHitRate","gates.passRate","gates.firstPassClean","tasks.completionRate","time.wallClockMs","objective.value","command.metric"],Ee={"cost.totalUsd":"lower-better","cost.tokensTotal":"lower-better","cost.cacheHitRate":"higher-better","gates.passRate":"higher-better","gates.firstPassClean":"higher-better","tasks.completionRate":"higher-better","time.wallClockMs":"lower-better","objective.value":"higher-better","command.metric":"neutral"},Be=new Set(["cost.totalUsd","time.wallClockMs","gates.passRate","objective.value"]),Z=[{id:"comparison-table",label:"Comparison table"},{id:"score-bars",label:"Score bars"},{id:"objective-curve",label:"Objective curve"},{id:"ledger-table",label:"Ledger"},{id:"summary-cards",label:"Summary cards"},{id:"raw-drilldown",label:"Raw runs"}],je=["median","mean","p90","min","max","count"],C={exp:n=>`exp/${n}`,state:n=>`exp/${n}/state`,runPrefix:n=>`exp/${n}/run/`,ledger:n=>`exp/${n}/ledger`,dashboard:n=>`exp/${n}/dashboard`,metrics:n=>`exp/${n}/metrics`,index:"index/experiments",draft:n=>`drafts/${n}`},Oe="bobbit:experiment-runner:draft:",f=n=>Array.isArray(n)?n:[],b=(n,l="")=>n==null?l:String(n),v=n=>{let l=Number(n);return Number.isFinite(l)?l:void 0},D=n=>b(n,"exp").replace(/[^a-zA-Z0-9_-]+/g,"-").replace(/^-+|-+$/g,"")||"exp";function De(n){let l=b(n).trim();if(l==="")return"";if(/^-?\d+(\.\d+)?$/.test(l))return Number(l);if(l==="true")return!0;if(l==="false")return!1;if(l.startsWith("{")&&l.endsWith("}")||l.startsWith("[")&&l.endsWith("]"))try{return JSON.parse(l)}catch{}return l}function H(n){let l={};for(let h of f(n)){let m=b(h&&h.key).trim();m&&(l[m]=De(h&&h.value))}return l}function V(n){let l=b(n).trim();if(l)try{let h=JSON.parse(l);return h&&typeof h=="object"?h:void 0}catch{return}}var Ne=n=>{let l=n.filter(m=>Number.isFinite(m)).slice().sort((m,p)=>m-p);if(!l.length)return;let h=Math.floor(l.length/2);return l.length%2?l[h]:(l[h-1]+l[h])/2},Q=(n,l)=>{let h=n.filter(m=>Number.isFinite(m));if(l==="count")return h.length;if(h.length)switch(l){case"mean":return h.reduce((m,p)=>m+p,0)/h.length;case"min":return Math.min(...h);case"max":return Math.max(...h);case"p90":{let m=h.slice().sort((p,w)=>p-w);return m[Math.min(m.length-1,Math.floor(.9*m.length))]}default:return Ne(h)}},j=n=>{if(n==null||!Number.isFinite(n))return"\u2014";let l=Math.abs(n);return l!==0&&l<.01?n.toExponential(2):Number.isInteger(n)?String(n):n.toFixed(l>=100?1:3)},O=n=>n==null||!Number.isFinite(n)?"\u2014":`$${n.toFixed(2)}`;function F(){return[{key:"",value:""}]}function ee(){return ze.map(n=>({metric:n,source:"built-in",collect:Be.has(n),aggregation:"median",direction:Ee[n]||"neutral",primary:n==="gates.passRate"}))}function G(){return{view:"mode-select",mode:null,experimentId:void 0,basics:{name:"",runnableUnit:"command",body:"",workflowId:""},ab:{variants:[{label:"baseline",metadata:F(),rolesJson:"",rolesOpen:!1},{label:"variant-b",metadata:F(),rolesJson:"",rolesOpen:!1}],repeats:3,sameCompletionBar:!0,concurrency:3},auto:{objectiveMetric:"objective.value",direction:"maximize",correctnessGateId:"",seed:F(),seedRolesJson:"",caps:{maxIterations:"",wallClockHours:"",costUsd:"",perIterBudget:""},stops:{plateauK:"",target:""},strategy:"greedy",batchSize:""},metrics:ee(),perRunBudget:"",confirmAck:!1}}var R=globalThis.__bobbitExperimentRunnerState||(globalThis.__bobbitExperimentRunnerState=new Map);function Ue(n){let l=[],h=n.basics||{};b(h.name).trim()||l.push("Name is required"),b(h.body).trim()||l.push("Spec / command body is required");let m=f(n.ab&&n.ab.variants);m.length<2&&l.push("A/B needs at least two variants");let p=new Set,w=[];m.forEach((k,M)=>{let L=b(k.label).trim();L?p.has(L)&&l.push(`Variant label "${L}" is duplicated`):l.push(`Variant ${M+1} needs a label`),p.add(L),w.push(JSON.stringify({m:H(k.metadata),r:V(k.rolesJson)||null}))});for(let k=0;k<w.length;k++)for(let M=k+1;M<w.length;M++)w[k]===w[M]&&l.push(`Variant "${b(m[M].label).trim()||M+1}" is identical to "${b(m[k].label).trim()||k+1}"`);let I=v(n.ab&&n.ab.repeats);(!I||I<1)&&l.push("Repeats must be \u2265 1");let z=v(n.perRunBudget);(!z||z<=0)&&l.push("Set a per-run budget");let E=v(n.ab&&n.ab.concurrency);E!=null&&(E<1||E>8)&&l.push("Concurrency must be 1\u20138"),f(n.metrics).some(k=>k.collect)||l.push("Select at least one metric");let B=m.length*(I||0),U=z?B*z:void 0;return{valid:l.length===0,errors:l,runCount:B,estCostMax:U}}function Le(n){let l=[],h=[],m=n.basics||{};b(m.name).trim()||l.push("Name is required"),b(m.body).trim()||l.push("Spec / command body is required");let p=n.auto||{};b(p.objectiveMetric).trim()||l.push("Choose an objective metric");let w=v(p.caps&&p.caps.perIterBudget);(!w||w<=0)&&l.push("Set a per-iteration budget");let I=p.caps||{},z=v(I.maxIterations)>0||v(I.wallClockHours)>0||v(I.costUsd)>0,E=p.stops||{},B=v(E.plateauK)>0||E.target!==""&&Number.isFinite(v(E.target));z||h.push("Set at least one hard cap (max-iterations, wall-clock, or cost)"),B||h.push("Set at least one stop condition (plateau-K or target)"),n.confirmAck||h.push("Acknowledge the autonomous-run warning");let U=v(I.maxIterations),k=v(I.costUsd),M;return w&&U&&(M=U*w),k!=null&&(M=M==null?k:Math.min(M,k)),{valid:l.length===0&&h.length===0,errors:l,checklist:h,estCostMax:M,hasCap:z,hasStop:B}}function K(n){return n.mode==="autoresearch"?Le(n):Ue(n)}function Pe(n){let l=n.basics||{},h=f(n.metrics).filter(p=>p.collect).map(p=>({metric:p.metric,aggregation:p.aggregation,direction:p.direction,primary:!!p.primary})),m={experimentId:n.experimentId,title:b(l.name).trim(),mode:n.mode==="autoresearch"?"autoresearch":"ab",runnable:{kind:l.runnableUnit==="goal"?"goal":"command",body:b(l.body)},workflowId:b(l.workflowId).trim()||void 0,metrics:h};if(m.mode==="ab"){let p=n.ab||{};m.variants=f(p.variants).map((w,I)=>({armId:D(b(w.label).trim()||`arm-${I}`),label:b(w.label).trim()||`arm-${I}`,metadata:H(w.metadata),inlineRoles:V(w.rolesJson)})),m.repeats=v(p.repeats)||1,m.sameCompletionBar=p.sameCompletionBar!==!1,m.maxConcurrency=v(p.concurrency)||3,m.perRunBudget=v(n.perRunBudget)}else{let p=n.auto||{};m.objective={metric:p.objectiveMetric,direction:p.direction==="minimize"?"minimize":"maximize"},m.correctnessGateId=b(p.correctnessGateId).trim()||void 0,m.seed={metadata:H(p.seed),inlineRoles:V(p.seedRolesJson)},m.caps={maxIterations:v(p.caps&&p.caps.maxIterations),wallClockMs:v(p.caps&&p.caps.wallClockHours)?v(p.caps.wallClockHours)*36e5:void 0,maxCostUsd:v(p.caps&&p.caps.costUsd),perRunBudget:v(p.caps&&p.caps.perIterBudget)},m.stop={plateauK:v(p.stops&&p.stops.plateauK),target:v(p.stops&&p.stops.target)},m.strategy=p.strategy==="best-of-batch"?"best-of-batch":"greedy",m.batchSize=v(p.batchSize),m.perRunBudget=v(p.caps&&p.caps.perIterBudget)}return m}function Fe({html:n,nothing:l,renderHeader:h}){let m=async(e,t,a)=>{try{return!e||!e.capabilities||!e.capabilities.callRoute||!e.callRoute?{ok:!1,error:"routes-unavailable"}:{ok:!0,data:await e.callRoute(t,a)}}catch(r){return{ok:!1,error:r&&r.message?String(r.message):String(r)}}},p=async(e,t)=>{try{return e&&e.store&&e.store.get?await e.store.get(t):null}catch{return null}},w=async(e,t,a)=>{try{e&&e.store&&e.store.put&&await e.store.put(t,a)}catch{}},I=async(e,t)=>{try{return e&&e.store&&e.store.list?await e.store.list(t)||[]:[]}catch{return[]}},z=e=>{try{e&&e.requestRender&&e.requestRender()}catch{}},E=(e,t)=>{try{e&&e.capabilities&&e.capabilities.ui&&e.ui&&e.ui.navigate&&e.ui.navigate({route:"experiment-runner",params:t})}catch{}},B=e=>`${Oe}${D(e)}`,U=e=>{try{let t=globalThis.localStorage&&globalThis.localStorage.getItem(B(e));return t?JSON.parse(t):void 0}catch{return}},k=(e,t)=>{try{globalThis.localStorage&&globalThis.localStorage.setItem(B(e),JSON.stringify(t))}catch{}},M=e=>R.get(e),L=(e,t,a)=>{R.set(t,a),z(e)},A=(e,t,a)=>{let s={...R.get(t)||{},...a};return R.set(t,s),z(e),s},T=(e,t,a)=>{let r=R.get(t)||{},s={...r.draft||G()};a(s);let i={...r,draft:s};R.set(t,i),k(t,s),w(r.host,C.draft(t),s),z(e)};function te(e,t,a,r){let s=R.get(t);return s&&s.hydrated?(s.host=e,a&&s.draft&&s.draft.experimentId!==a&&re(e,t,a,r),s):(s={hydrated:!1,host:e,draft:U(t)||G(),dashboard:null,experiments:[]},R.set(t,s),(async()=>{let i=await p(e,C.draft(t)),c=R.get(t)||s,d=i&&typeof i=="object"?i:c.draft;a&&(d={...d,experimentId:a,view:r||"dashboard"}),R.set(t,{...c,hydrated:!0,draft:d}),z(e),ae(e,t),d.experimentId&&d.view==="dashboard"&&N(e,t,d.experimentId)})(),R.get(t))}async function ae(e,t){let a=await m(e,"listExperiments",{method:"GET"}),r=[];if(a.ok&&a.data&&Array.isArray(a.data.experiments))r=a.data.experiments;else{let s=await p(e,C.index);s&&Array.isArray(s.experiments)&&(r=s.experiments)}A(e,t,{experiments:r})}async function re(e,t,a,r){T(e,t,s=>{s.experimentId=a,s.view=r||"dashboard"}),await N(e,t,a)}async function N(e,t,a){A(e,t,{dashboardLoading:!0});let r,s,i=[],c=[],d,o,u=await m(e,"getExperiment",{method:"GET",query:{experimentId:a}});if(u.ok&&u.data&&u.data.def&&(r=u.data.def,s=u.data.state,i=f(u.data.runs),c=f(u.data.ledger),d=u.data.dashboard,o=u.data.metrics),!r){r=await p(e,C.exp(a)),s=await p(e,C.state(a)),c=f(await p(e,C.ledger(a))),d=await p(e,C.dashboard(a)),o=await p(e,C.metrics(a));let x=await I(e,C.runPrefix(a));for(let y of x){let S=await p(e,y);S&&typeof S=="object"&&i.push(S)}}if(d==null&&(d=await p(e,C.dashboard(a))),!f(o).length){let x=await p(e,C.metrics(a));f(x).length&&(o=x)}if(s&&s.status==="running"){let x=await m(e,"poll",{method:"POST",body:{experimentId:a}});x.ok&&x.data&&Array.isArray(x.data.runs)&&(i=x.data.runs)}let g=await m(e,"report",{method:"POST",body:{experimentId:a}}),$=g.ok&&g.data?g.data:null;A(e,t,{dashboardLoading:!1,dashboard:{experimentId:a,def:r,state:s,runs:i,ledger:c,spec:d,metrics:f(o).length?o:r&&r.metrics||[],report:$}})}async function ne(e,t){let r=R.get(t).draft;A(e,t,{launching:!0,launchError:void 0});let s=Pe(r),i=await m(e,"defineExperiment",{method:"POST",body:{definition:s}}),c=r.experimentId;i.ok&&i.data&&i.data.experimentId&&(c=i.data.experimentId),c||(c=`${D(s.title)}-${Date.now().toString(36)}`),s.experimentId=c,await w(e,C.exp(c),s),await w(e,C.metrics(c),s.metrics),await se(e,t,{experimentId:c,title:s.title,mode:s.mode,status:"running"});let d=await m(e,"launch",{method:"POST",body:{experimentId:c}});if(!d.ok&&d.error!=="routes-unavailable"){A(e,t,{launching:!1,launchError:d.error});return}T(e,t,o=>{o.experimentId=c,o.view="dashboard"}),A(e,t,{launching:!1}),E(e,{experimentId:c,view:"dashboard"}),await N(e,t,c),s.mode==="autoresearch"&&await m(e,"iterate",{method:"POST",body:{experimentId:c}})}async function se(e,t,a){let r=await p(e,C.index)||{experiments:[]},s=f(r.experiments).filter(i=>i.experimentId!==a.experimentId);s.push(a),await w(e,C.index,{experiments:s}),A(e,t,{experiments:s})}async function ie(e,t,a){await m(e,"cancel",{method:"POST",body:{experimentId:a}}),await N(e,t,a)}async function oe(e,t,a,r){await m(e,"saveMetrics",{method:"POST",body:{experimentId:a,metrics:r}}),await w(e,C.metrics(a),r),await N(e,t,a)}async function ce(e,t,a,r){await m(e,"saveDashboard",{method:"POST",body:{experimentId:a,dashboard:r}}),await w(e,C.dashboard(a),r),A(e,t,{dashboardEditing:!1}),await N(e,t,a)}let _=(e,t,a)=>T(e,t,r=>{r.view=a});function de(e,t,a){let r=s=>T(e,t,i=>{i.mode=s,i.view="define"});return n`
 			<div class="exp-view" data-testid="experiment-runner-view-mode-select">
 				<h1 class="exp-h1">New experiment</h1>
 				<p class="exp-sub">Pick how you want to run it. A/B is the safe, bounded default; Autoresearch is an opt-in autonomous loop.</p>
@@ -559,7 +8,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						data-testid="experiment-runner-mode-ab"
 						type="button"
 						autofocus
-						@click=${() => pick("ab")}
+						@click=${()=>r("ab")}
 					>
 						<span class="exp-eyebrow">Recommended · bounded cost</span>
 						<span class="exp-mode-title">A/B comparison</span>
@@ -569,7 +18,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						class="exp-mode-card danger"
 						data-testid="experiment-runner-mode-autoresearch"
 						type="button"
-						@click=${() => pick("autoresearch")}
+						@click=${()=>r("autoresearch")}
 					>
 						<span class="exp-eyebrow warn">Autonomous · opt-in · hard caps required</span>
 						<span class="exp-mode-title">Autoresearch</span>
@@ -577,175 +26,114 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					</button>
 				</div>
 			</div>
-		`;
-	}
-
-	// ── shared "basics" block ──
-	function renderBasics(host, instanceKey, d) {
-		const b = d.basics || {};
-		const set = (k, v) => patchDraft(host, instanceKey, (dd) => { dd.basics = { ...dd.basics, [k]: v }; });
-		return html`
+		`}function le(e,t,a){let r=a.basics||{},s=(i,c)=>T(e,t,d=>{d.basics={...d.basics,[i]:c}});return n`
 			<section class="exp-card" data-testid="experiment-runner-basics">
 				<h2 class="exp-h2">Experiment basics</h2>
 				<label class="exp-label">Experiment name
 					<input class="exp-input" data-testid="experiment-runner-name" type="text" maxlength="80"
-						placeholder="e.g. retry-temperature-sweep" .value=${asText(b.name)}
-						@input=${(e) => set("name", e.currentTarget.value)} />
+						placeholder="e.g. retry-temperature-sweep" .value=${b(r.name)}
+						@input=${i=>s("name",i.currentTarget.value)} />
 				</label>
 				<div class="exp-label">Runnable unit
 					<div class="exp-radio-row" role="radiogroup" aria-label="Runnable unit">
-						<label class="exp-radio"><input type="radio" name="exp-runnable-${safeId(instanceKey)}" data-testid="experiment-runner-runnable-goal"
-							?checked=${b.runnableUnit === "goal"} @change=${() => set("runnableUnit", "goal")} /> Goal spec</label>
-						<label class="exp-radio"><input type="radio" name="exp-runnable-${safeId(instanceKey)}" data-testid="experiment-runner-runnable-command"
-							?checked=${b.runnableUnit !== "goal"} @change=${() => set("runnableUnit", "command")} /> Command</label>
+						<label class="exp-radio"><input type="radio" name="exp-runnable-${D(t)}" data-testid="experiment-runner-runnable-goal"
+							?checked=${r.runnableUnit==="goal"} @change=${()=>s("runnableUnit","goal")} /> Goal spec</label>
+						<label class="exp-radio"><input type="radio" name="exp-runnable-${D(t)}" data-testid="experiment-runner-runnable-command"
+							?checked=${r.runnableUnit!=="goal"} @change=${()=>s("runnableUnit","command")} /> Command</label>
 					</div>
 				</div>
-				<label class="exp-label">${b.runnableUnit === "goal" ? "Goal spec" : "Command"} body
+				<label class="exp-label">${r.runnableUnit==="goal"?"Goal spec":"Command"} body
 					<textarea class="exp-input exp-mono" data-testid="experiment-runner-body" rows="4"
-						placeholder=${b.runnableUnit === "goal" ? "A goal spec template…" : "A shell command emitting { \"metric\": <name>, \"value\": <n> } on stdout…"}
-						.value=${asText(b.body)} @input=${(e) => set("body", e.currentTarget.value)}></textarea>
+						placeholder=${r.runnableUnit==="goal"?"A goal spec template\u2026":'A shell command emitting { "metric": <name>, "value": <n> } on stdout\u2026'}
+						.value=${b(r.body)} @input=${i=>s("body",i.currentTarget.value)}></textarea>
 				</label>
 				<label class="exp-label">Workflow (optional)
 					<input class="exp-input" data-testid="experiment-runner-workflow" type="text"
-						placeholder="workflow id (optional)" .value=${asText(b.workflowId)}
-						@input=${(e) => set("workflowId", e.currentTarget.value)} />
+						placeholder="workflow id (optional)" .value=${b(r.workflowId)}
+						@input=${i=>s("workflowId",i.currentTarget.value)} />
 				</label>
 			</section>
-		`;
-	}
-
-	// ── treatment (key/value) editor ──
-	function renderTreatmentEditor(host, instanceKey, rows, onChange, testid) {
-		const setRows = (next) => onChange(next.length ? next : emptyTreatmentRows());
-		return html`
-			<div class="exp-kv" data-testid=${testid}>
-				${arrayOf(rows).map((row, i) => html`
+		`}function W(e,t,a,r,s){let i=c=>r(c.length?c:F());return n`
+			<div class="exp-kv" data-testid=${s}>
+				${f(a).map((c,d)=>n`
 					<div class="exp-kv-row">
-						<input class="exp-input exp-kv-key" type="text" placeholder="key" .value=${asText(row.key)}
-							@input=${(e) => { const next = rows.slice(); next[i] = { ...row, key: e.currentTarget.value }; setRows(next); }} />
-						<input class="exp-input exp-kv-val" type="text" placeholder="value" .value=${asText(row.value)}
-							@input=${(e) => { const next = rows.slice(); next[i] = { ...row, value: e.currentTarget.value }; setRows(next); }} />
+						<input class="exp-input exp-kv-key" type="text" placeholder="key" .value=${b(c.key)}
+							@input=${o=>{let u=a.slice();u[d]={...c,key:o.currentTarget.value},i(u)}} />
+						<input class="exp-input exp-kv-val" type="text" placeholder="value" .value=${b(c.value)}
+							@input=${o=>{let u=a.slice();u[d]={...c,value:o.currentTarget.value},i(u)}} />
 						<button class="exp-icon-btn" type="button" title="Remove" aria-label="Remove key"
-							@click=${() => { const next = rows.slice(); next.splice(i, 1); setRows(next); }}>✕</button>
+							@click=${()=>{let o=a.slice();o.splice(d,1),i(o)}}>✕</button>
 					</div>`)}
-				<button class="exp-btn secondary tiny" type="button" @click=${() => setRows([...arrayOf(rows), { key: "", value: "" }])}>+ Add key</button>
+				<button class="exp-btn secondary tiny" type="button" @click=${()=>i([...f(a),{key:"",value:""}])}>+ Add key</button>
 			</div>
-		`;
-	}
-
-	// ── metrics editor (shared) ──
-	function renderMetricsEditor(host, instanceKey, d) {
-		const metrics = arrayOf(d.metrics);
-		const setMetric = (i, p) => patchDraft(host, instanceKey, (dd) => {
-			const next = arrayOf(dd.metrics).slice();
-			if (p.primary) next.forEach((m, j) => { next[j] = { ...m, primary: j === i }; });
-			next[i] = { ...next[i], ...p };
-			dd.metrics = next;
-		});
-		return html`
+		`}function pe(e,t,a){let r=f(a.metrics),s=(i,c)=>T(e,t,d=>{let o=f(d.metrics).slice();c.primary&&o.forEach((u,g)=>{o[g]={...u,primary:g===i}}),o[i]={...o[i],...c},d.metrics=o});return n`
 			<section class="exp-card" data-testid="experiment-runner-metrics">
 				<h2 class="exp-h2">Metrics</h2>
 				<p class="exp-hint">What to collect for every run — editable later without a re-run.</p>
 				<table class="exp-table">
 					<thead><tr><th>Collect</th><th>Metric</th><th>Aggregation</th><th>Direction</th><th>Primary</th></tr></thead>
 					<tbody>
-						${metrics.map((m, i) => html`<tr data-testid="experiment-runner-metric-row" data-metric=${m.metric}>
-							<td><input type="checkbox" data-testid="experiment-runner-metric-collect" data-metric=${m.metric}
-								?checked=${!!m.collect} @change=${(e) => setMetric(i, { collect: e.currentTarget.checked })} /></td>
-							<td><span class="exp-mono">${m.metric}</span> <span class="exp-badge">${m.source || "built-in"}</span></td>
-							<td><select class="exp-input" ?disabled=${!m.collect} @change=${(e) => setMetric(i, { aggregation: e.currentTarget.value })}>
-								${AGGREGATIONS.map((a) => html`<option value=${a} ?selected=${m.aggregation === a}>${a}</option>`)}
+						${r.map((i,c)=>n`<tr data-testid="experiment-runner-metric-row" data-metric=${i.metric}>
+							<td><input type="checkbox" data-testid="experiment-runner-metric-collect" data-metric=${i.metric}
+								?checked=${!!i.collect} @change=${d=>s(c,{collect:d.currentTarget.checked})} /></td>
+							<td><span class="exp-mono">${i.metric}</span> <span class="exp-badge">${i.source||"built-in"}</span></td>
+							<td><select class="exp-input" ?disabled=${!i.collect} @change=${d=>s(c,{aggregation:d.currentTarget.value})}>
+								${je.map(d=>n`<option value=${d} ?selected=${i.aggregation===d}>${d}</option>`)}
 							</select></td>
-							<td><select class="exp-input" ?disabled=${!m.collect} @change=${(e) => setMetric(i, { direction: e.currentTarget.value })}>
-								${["higher-better", "lower-better", "neutral"].map((dir) => html`<option value=${dir} ?selected=${m.direction === dir}>${dir}</option>`)}
+							<td><select class="exp-input" ?disabled=${!i.collect} @change=${d=>s(c,{direction:d.currentTarget.value})}>
+								${["higher-better","lower-better","neutral"].map(d=>n`<option value=${d} ?selected=${i.direction===d}>${d}</option>`)}
 							</select></td>
-							<td><input type="radio" name="exp-primary-${safeId(instanceKey)}" data-testid="experiment-runner-metric-primary" data-metric=${m.metric}
-								?checked=${!!m.primary} ?disabled=${!m.collect} @change=${() => setMetric(i, { primary: true })} /></td>
+							<td><input type="radio" name="exp-primary-${D(t)}" data-testid="experiment-runner-metric-primary" data-metric=${i.metric}
+								?checked=${!!i.primary} ?disabled=${!i.collect} @change=${()=>s(c,{primary:!0})} /></td>
 						</tr>`)}
 					</tbody>
 				</table>
 			</section>
-		`;
-	}
-
-	// ── A/B variants block ──
-	function renderABForm(host, instanceKey, d) {
-		const ab = d.ab || {};
-		const variants = arrayOf(ab.variants);
-		const setAb = (p) => patchDraft(host, instanceKey, (dd) => { dd.ab = { ...dd.ab, ...p }; });
-		const setVariant = (i, p) => patchDraft(host, instanceKey, (dd) => {
-			const next = arrayOf(dd.ab.variants).slice(); next[i] = { ...next[i], ...p }; dd.ab = { ...dd.ab, variants: next };
-		});
-		const removeVariant = (i) => patchDraft(host, instanceKey, (dd) => {
-			const next = arrayOf(dd.ab.variants).slice(); next.splice(i, 1); dd.ab = { ...dd.ab, variants: next };
-		});
-		const addVariant = (clone) => patchDraft(host, instanceKey, (dd) => {
-			const next = arrayOf(dd.ab.variants).slice();
-			const base = clone != null ? next[clone] : null;
-			next.push({
-				label: `variant-${next.length + 1}`,
-				metadata: base ? base.metadata.map((r) => ({ ...r })) : emptyTreatmentRows(),
-				rolesJson: base ? base.rolesJson : "",
-				rolesOpen: false,
-			});
-			dd.ab = { ...dd.ab, variants: next };
-		});
-		const repeats = num(ab.repeats);
-		return html`
+		`}function ue(e,t,a){let r=a.ab||{},s=f(r.variants),i=g=>T(e,t,$=>{$.ab={...$.ab,...g}}),c=(g,$)=>T(e,t,x=>{let y=f(x.ab.variants).slice();y[g]={...y[g],...$},x.ab={...x.ab,variants:y}}),d=g=>T(e,t,$=>{let x=f($.ab.variants).slice();x.splice(g,1),$.ab={...$.ab,variants:x}}),o=g=>T(e,t,$=>{let x=f($.ab.variants).slice(),y=g!=null?x[g]:null;x.push({label:`variant-${x.length+1}`,metadata:y?y.metadata.map(S=>({...S})):F(),rolesJson:y?y.rolesJson:"",rolesOpen:!1}),$.ab={...$.ab,variants:x}}),u=v(r.repeats);return n`
 			<section class="exp-card" data-testid="experiment-runner-ab-form">
 				<h2 class="exp-h2">Variants</h2>
-				${variants.map((v, i) => html`
-					<div class="exp-variant" data-testid="experiment-runner-variant-row" data-variant-index=${i}>
+				${s.map((g,$)=>n`
+					<div class="exp-variant" data-testid="experiment-runner-variant-row" data-variant-index=${$}>
 						<div class="exp-variant-head">
 							<input class="exp-input" type="text" data-testid="experiment-runner-variant-label" placeholder="variant label"
-								.value=${asText(v.label)} @input=${(e) => setVariant(i, { label: e.currentTarget.value })} />
-							<button class="exp-btn secondary tiny" type="button" @click=${() => addVariant(i)}>Duplicate</button>
+								.value=${b(g.label)} @input=${x=>c($,{label:x.currentTarget.value})} />
+							<button class="exp-btn secondary tiny" type="button" @click=${()=>o($)}>Duplicate</button>
 							<button class="exp-btn secondary tiny" type="button" data-testid="experiment-runner-remove-variant"
-								?disabled=${variants.length <= 2}
-								title=${variants.length <= 2 ? "A/B needs at least two variants" : "Remove variant"}
-								@click=${() => removeVariant(i)}>Remove</button>
+								?disabled=${s.length<=2}
+								title=${s.length<=2?"A/B needs at least two variants":"Remove variant"}
+								@click=${()=>d($)}>Remove</button>
 						</div>
 						<div class="exp-field-label">Metadata treatment</div>
-						${renderTreatmentEditor(host, instanceKey, v.metadata, (rows) => setVariant(i, { metadata: rows }), "experiment-runner-variant-metadata")}
-						<details class="exp-details" ?open=${v.rolesOpen}>
-							<summary @click=${() => setVariant(i, { rolesOpen: !v.rolesOpen })}>Advanced: per-arm roles</summary>
+						${W(e,t,g.metadata,x=>c($,{metadata:x}),"experiment-runner-variant-metadata")}
+						<details class="exp-details" ?open=${g.rolesOpen}>
+							<summary @click=${()=>c($,{rolesOpen:!g.rolesOpen})}>Advanced: per-arm roles</summary>
 							<textarea class="exp-input exp-mono" rows="3" placeholder='{"coder": {"model": "…"}}'
-								.value=${asText(v.rolesJson)} @input=${(e) => setVariant(i, { rolesJson: e.currentTarget.value })}></textarea>
+								.value=${b(g.rolesJson)} @input=${x=>c($,{rolesJson:x.currentTarget.value})}></textarea>
 						</details>
 					</div>`)}
-				<button class="exp-btn secondary" type="button" data-testid="experiment-runner-add-variant" @click=${() => addVariant(null)}>+ Add variant</button>
+				<button class="exp-btn secondary" type="button" data-testid="experiment-runner-add-variant" @click=${()=>o(null)}>+ Add variant</button>
 
 				<div class="exp-grid2">
 					<label class="exp-label">Repeats per variant
 						<input class="exp-input" type="number" min="1" max="20" data-testid="experiment-runner-repeats"
-							.value=${asText(ab.repeats)} @input=${(e) => setAb({ repeats: e.currentTarget.value })} />
-						${repeats > 10 ? html`<span class="exp-warn-hint">high run count</span>` : nothing}
+							.value=${b(r.repeats)} @input=${g=>i({repeats:g.currentTarget.value})} />
+						${u>10?n`<span class="exp-warn-hint">high run count</span>`:l}
 					</label>
 					<label class="exp-label">Concurrency cap
 						<input class="exp-input" type="number" min="1" max="8" data-testid="experiment-runner-concurrency"
-							.value=${asText(ab.concurrency)} @input=${(e) => setAb({ concurrency: e.currentTarget.value })} />
+							.value=${b(r.concurrency)} @input=${g=>i({concurrency:g.currentTarget.value})} />
 					</label>
 				</div>
 				<label class="exp-checkbox"><input type="checkbox" data-testid="experiment-runner-same-bar"
-					?checked=${ab.sameCompletionBar !== false} @change=${(e) => setAb({ sameCompletionBar: e.currentTarget.checked })} />
+					?checked=${r.sameCompletionBar!==!1} @change=${g=>i({sameCompletionBar:g.currentTarget.checked})} />
 					Only aggregate runs that reached the same completion bar</label>
 				<label class="exp-label">Per-run budget (USD, the fixed comparable budget)
 					<input class="exp-input" type="number" min="0" step="0.5" data-testid="experiment-runner-per-run-budget"
-						placeholder="e.g. 0.80" .value=${asText(d.perRunBudget)}
-						@input=${(e) => patchDraft(host, instanceKey, (dd) => { dd.perRunBudget = e.currentTarget.value; })} />
+						placeholder="e.g. 0.80" .value=${b(a.perRunBudget)}
+						@input=${g=>T(e,t,$=>{$.perRunBudget=g.currentTarget.value})} />
 				</label>
 			</section>
-		`;
-	}
-
-	// ── Autoresearch form ──
-	function renderAutoForm(host, instanceKey, d) {
-		const auto = d.auto || {};
-		const setAuto = (p) => patchDraft(host, instanceKey, (dd) => { dd.auto = { ...dd.auto, ...p }; });
-		const setCaps = (p) => patchDraft(host, instanceKey, (dd) => { dd.auto = { ...dd.auto, caps: { ...dd.auto.caps, ...p } }; });
-		const setStops = (p) => patchDraft(host, instanceKey, (dd) => { dd.auto = { ...dd.auto, stops: { ...dd.auto.stops, ...p } }; });
-		const metricOptions = arrayOf(d.metrics).map((m) => m.metric);
-		return html`
+		`}function xe(e,t,a){let r=a.auto||{},s=o=>T(e,t,u=>{u.auto={...u.auto,...o}}),i=o=>T(e,t,u=>{u.auto={...u.auto,caps:{...u.auto.caps,...o}}}),c=o=>T(e,t,u=>{u.auto={...u.auto,stops:{...u.auto.stops,...o}}}),d=f(a.metrics).map(o=>o.metric);return n`
 			<div class="exp-warn-banner" data-testid="experiment-runner-autoresearch-banner">
 				Autonomous optimization — runs unattended until a cap or stop condition is hit. Candidates failing verification are rejected even if the objective improves.
 			</div>
@@ -753,26 +141,26 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<h2 class="exp-h2">Objective</h2>
 				<div class="exp-grid2">
 					<label class="exp-label">Objective metric
-						<select class="exp-input" data-testid="experiment-runner-objective-metric" @change=${(e) => setAuto({ objectiveMetric: e.currentTarget.value })}>
-							${metricOptions.map((m) => html`<option value=${m} ?selected=${auto.objectiveMetric === m}>${m}</option>`)}
+						<select class="exp-input" data-testid="experiment-runner-objective-metric" @change=${o=>s({objectiveMetric:o.currentTarget.value})}>
+							${d.map(o=>n`<option value=${o} ?selected=${r.objectiveMetric===o}>${o}</option>`)}
 						</select>
 					</label>
 					<div class="exp-label">Direction
 						<div class="exp-radio-row" role="radiogroup" aria-label="Objective direction">
-							<label class="exp-radio"><input type="radio" name="exp-dir-${safeId(instanceKey)}" data-testid="experiment-runner-direction-maximize"
-								?checked=${auto.direction !== "minimize"} @change=${() => setAuto({ direction: "maximize" })} /> maximize</label>
-							<label class="exp-radio"><input type="radio" name="exp-dir-${safeId(instanceKey)}" data-testid="experiment-runner-direction-minimize"
-								?checked=${auto.direction === "minimize"} @change=${() => setAuto({ direction: "minimize" })} /> minimize</label>
+							<label class="exp-radio"><input type="radio" name="exp-dir-${D(t)}" data-testid="experiment-runner-direction-maximize"
+								?checked=${r.direction!=="minimize"} @change=${()=>s({direction:"maximize"})} /> maximize</label>
+							<label class="exp-radio"><input type="radio" name="exp-dir-${D(t)}" data-testid="experiment-runner-direction-minimize"
+								?checked=${r.direction==="minimize"} @change=${()=>s({direction:"minimize"})} /> minimize</label>
 						</div>
 					</div>
 				</div>
 				<label class="exp-label">Correctness gate (optional workflow gate)
 					<input class="exp-input" type="text" data-testid="experiment-runner-correctness-gate" placeholder="review-findings gate id (optional)"
-						.value=${asText(auto.correctnessGateId)} @input=${(e) => setAuto({ correctnessGateId: e.currentTarget.value })} />
+						.value=${b(r.correctnessGateId)} @input=${o=>s({correctnessGateId:o.currentTarget.value})} />
 					<span class="exp-hint">Candidates failing verification are rejected even if the objective improves.</span>
 				</label>
 				<div class="exp-field-label">Search seed (iteration-0 candidate)</div>
-				${renderTreatmentEditor(host, instanceKey, auto.seed, (rows) => setAuto({ seed: rows }), "experiment-runner-seed-metadata")}
+				${W(e,t,r.seed,o=>s({seed:o}),"experiment-runner-seed-metadata")}
 			</section>
 
 			<section class="exp-card" data-testid="experiment-runner-auto-caps">
@@ -780,19 +168,19 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="exp-grid2">
 					<label class="exp-label">Max iterations
 						<input class="exp-input" type="number" min="1" data-testid="experiment-runner-cap-max-iterations"
-							.value=${asText(auto.caps.maxIterations)} @input=${(e) => setCaps({ maxIterations: e.currentTarget.value })} />
+							.value=${b(r.caps.maxIterations)} @input=${o=>i({maxIterations:o.currentTarget.value})} />
 					</label>
 					<label class="exp-label">Wall-clock cap (hours)
 						<input class="exp-input" type="number" min="0" step="0.5" data-testid="experiment-runner-cap-wallclock"
-							.value=${asText(auto.caps.wallClockHours)} @input=${(e) => setCaps({ wallClockHours: e.currentTarget.value })} />
+							.value=${b(r.caps.wallClockHours)} @input=${o=>i({wallClockHours:o.currentTarget.value})} />
 					</label>
 					<label class="exp-label">Cost cap (USD)
 						<input class="exp-input" type="number" min="0" step="1" data-testid="experiment-runner-cap-cost"
-							.value=${asText(auto.caps.costUsd)} @input=${(e) => setCaps({ costUsd: e.currentTarget.value })} />
+							.value=${b(r.caps.costUsd)} @input=${o=>i({costUsd:o.currentTarget.value})} />
 					</label>
 					<label class="exp-label">Per-iteration budget (USD, required)
 						<input class="exp-input" type="number" min="0" step="0.5" data-testid="experiment-runner-per-iter-budget"
-							.value=${asText(auto.caps.perIterBudget)} @input=${(e) => setCaps({ perIterBudget: e.currentTarget.value })} />
+							.value=${b(r.caps.perIterBudget)} @input=${o=>i({perIterBudget:o.currentTarget.value})} />
 					</label>
 				</div>
 			</section>
@@ -802,407 +190,189 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="exp-grid2">
 					<label class="exp-label">Plateau over K iterations
 						<input class="exp-input" type="number" min="1" data-testid="experiment-runner-stop-plateau"
-							.value=${asText(auto.stops.plateauK)} @input=${(e) => setStops({ plateauK: e.currentTarget.value })} />
+							.value=${b(r.stops.plateauK)} @input=${o=>c({plateauK:o.currentTarget.value})} />
 					</label>
 					<label class="exp-label">Target value
 						<input class="exp-input" type="number" step="any" data-testid="experiment-runner-stop-target"
-							.value=${asText(auto.stops.target)} @input=${(e) => setStops({ target: e.currentTarget.value })} />
+							.value=${b(r.stops.target)} @input=${o=>c({target:o.currentTarget.value})} />
 					</label>
 				</div>
 				<details class="exp-details">
 					<summary>Advanced: search strategy</summary>
 					<div class="exp-grid2">
 						<label class="exp-label">Strategy
-							<select class="exp-input" @change=${(e) => setAuto({ strategy: e.currentTarget.value })}>
-								<option value="greedy" ?selected=${auto.strategy !== "best-of-batch"}>greedy</option>
-								<option value="best-of-batch" ?selected=${auto.strategy === "best-of-batch"}>best-of-batch</option>
+							<select class="exp-input" @change=${o=>s({strategy:o.currentTarget.value})}>
+								<option value="greedy" ?selected=${r.strategy!=="best-of-batch"}>greedy</option>
+								<option value="best-of-batch" ?selected=${r.strategy==="best-of-batch"}>best-of-batch</option>
 							</select>
 						</label>
 						<label class="exp-label">Batch size
-							<input class="exp-input" type="number" min="1" max="8" .value=${asText(auto.batchSize)}
-								@input=${(e) => setAuto({ batchSize: e.currentTarget.value })} />
+							<input class="exp-input" type="number" min="1" max="8" .value=${b(r.batchSize)}
+								@input=${o=>s({batchSize:o.currentTarget.value})} />
 						</label>
 					</div>
 				</details>
 			</section>
-		`;
-	}
-
-	// ── projection strip (sticky footer) ──
-	function renderProjection(host, instanceKey, d, proj) {
-		if (d.mode === "autoresearch") {
-			const checklist = arrayOf(proj.checklist);
-			return html`
+		`}function be(e,t,a,r){if(a.mode==="autoresearch"){let s=f(r.checklist);return n`
 				<footer class="exp-projection" data-testid="experiment-runner-projection">
 					<div class="exp-proj-stats">
-						<span data-testid="experiment-runner-cost">${proj.estCostMax != null ? `≤ ${usd(proj.estCostMax)}` : "cost unbounded by iterations"}</span>
-						${proj.hasStop ? html`<span class="exp-pos">stop set</span>` : nothing}
+						<span data-testid="experiment-runner-cost">${r.estCostMax!=null?`\u2264 ${O(r.estCostMax)}`:"cost unbounded by iterations"}</span>
+						${r.hasStop?n`<span class="exp-pos">stop set</span>`:l}
 					</div>
-					${checklist.length ? html`<ul class="exp-checklist" data-testid="experiment-runner-guardrail-checklist">
-						${checklist.map((c) => html`<li class="exp-neg">✗ ${c}</li>`)}
-					</ul>` : nothing}
-					${arrayOf(proj.errors).length ? html`<ul class="exp-checklist" data-testid="experiment-runner-error">
-						${proj.errors.map((e) => html`<li class="exp-neg">✗ ${e}</li>`)}
-					</ul>` : nothing}
+					${s.length?n`<ul class="exp-checklist" data-testid="experiment-runner-guardrail-checklist">
+						${s.map(i=>n`<li class="exp-neg">✗ ${i}</li>`)}
+					</ul>`:l}
+					${f(r.errors).length?n`<ul class="exp-checklist" data-testid="experiment-runner-error">
+						${r.errors.map(i=>n`<li class="exp-neg">✗ ${i}</li>`)}
+					</ul>`:l}
 					<label class="exp-checkbox danger"><input type="checkbox" data-testid="experiment-runner-confirm-ack"
-						?checked=${!!d.confirmAck} @change=${(e) => patchDraft(host, instanceKey, (dd) => { dd.confirmAck = e.currentTarget.checked; })} />
-						I understand this runs autonomously and may cost ${proj.estCostMax != null ? `up to ${usd(proj.estCostMax)}` : "an unbounded amount until a cap is hit"}.</label>
-					<button class="exp-btn primary" type="button" data-testid="experiment-runner-review-launch" ?disabled=${!proj.valid}
-						title=${proj.valid ? "Review & launch" : "Set caps + stop condition + acknowledge"}
-						@click=${() => setView(host, instanceKey, "confirm")}>Review &amp; launch →</button>
+						?checked=${!!a.confirmAck} @change=${i=>T(e,t,c=>{c.confirmAck=i.currentTarget.checked})} />
+						I understand this runs autonomously and may cost ${r.estCostMax!=null?`up to ${O(r.estCostMax)}`:"an unbounded amount until a cap is hit"}.</label>
+					<button class="exp-btn primary" type="button" data-testid="experiment-runner-review-launch" ?disabled=${!r.valid}
+						title=${r.valid?"Review & launch":"Set caps + stop condition + acknowledge"}
+						@click=${()=>_(e,t,"confirm")}>Review &amp; launch →</button>
 				</footer>
-			`;
-		}
-		return html`
+			`}return n`
 			<footer class="exp-projection" data-testid="experiment-runner-projection">
 				<div class="exp-proj-stats">
-					<span data-testid="experiment-runner-run-count">${arrayOf(d.ab && d.ab.variants).length} variants × ${num(d.ab && d.ab.repeats) || 0} repeats = ${proj.runCount} runs</span>
-					<span data-testid="experiment-runner-cost">${proj.estCostMax != null ? `est. ≤ ${usd(proj.estCostMax)}` : "est. — set a per-run budget"}</span>
-					<span>~${num(d.ab && d.ab.concurrency) || 1} concurrent</span>
+					<span data-testid="experiment-runner-run-count">${f(a.ab&&a.ab.variants).length} variants × ${v(a.ab&&a.ab.repeats)||0} repeats = ${r.runCount} runs</span>
+					<span data-testid="experiment-runner-cost">${r.estCostMax!=null?`est. \u2264 ${O(r.estCostMax)}`:"est. \u2014 set a per-run budget"}</span>
+					<span>~${v(a.ab&&a.ab.concurrency)||1} concurrent</span>
 				</div>
-				${arrayOf(proj.errors).length ? html`<ul class="exp-checklist" data-testid="experiment-runner-error">
-					${proj.errors.map((e) => html`<li class="exp-neg">✗ ${e}</li>`)}
-				</ul>` : nothing}
-				<button class="exp-btn primary" type="button" data-testid="experiment-runner-review-launch" ?disabled=${!proj.valid}
-					title=${proj.valid ? "Review & launch" : (arrayOf(proj.errors)[0] || "Complete the form")}
-					@click=${() => setView(host, instanceKey, "confirm")}>Review &amp; launch →</button>
+				${f(r.errors).length?n`<ul class="exp-checklist" data-testid="experiment-runner-error">
+					${r.errors.map(s=>n`<li class="exp-neg">✗ ${s}</li>`)}
+				</ul>`:l}
+				<button class="exp-btn primary" type="button" data-testid="experiment-runner-review-launch" ?disabled=${!r.valid}
+					title=${r.valid?"Review & launch":f(r.errors)[0]||"Complete the form"}
+					@click=${()=>_(e,t,"confirm")}>Review &amp; launch →</button>
 			</footer>
-		`;
-	}
-
-	function renderDefine(host, instanceKey, d) {
-		const proj = projectionFor(d);
-		return html`
-			<div class="exp-view exp-define" data-testid="experiment-runner-view-define" data-mode=${d.mode || "ab"}>
+		`}function me(e,t,a){let r=K(a);return n`
+			<div class="exp-view exp-define" data-testid="experiment-runner-view-define" data-mode=${a.mode||"ab"}>
 				<div class="exp-define-head">
-					<button class="exp-btn link" type="button" @click=${() => setView(host, instanceKey, "mode-select")}>← mode</button>
-					<span class="exp-mode-badge ${d.mode === "autoresearch" ? "warn" : ""}">${d.mode === "autoresearch" ? "AUTORESEARCH" : "A/B"}</span>
+					<button class="exp-btn link" type="button" @click=${()=>_(e,t,"mode-select")}>← mode</button>
+					<span class="exp-mode-badge ${a.mode==="autoresearch"?"warn":""}">${a.mode==="autoresearch"?"AUTORESEARCH":"A/B"}</span>
 				</div>
-				${renderBasics(host, instanceKey, d)}
-				${d.mode === "autoresearch" ? renderAutoForm(host, instanceKey, d) : renderABForm(host, instanceKey, d)}
-				${renderMetricsEditor(host, instanceKey, d)}
-				${renderProjection(host, instanceKey, d, proj)}
+				${le(e,t,a)}
+				${a.mode==="autoresearch"?xe(e,t,a):ue(e,t,a)}
+				${pe(e,t,a)}
+				${be(e,t,a,r)}
 			</div>
-		`;
-	}
-
-	function renderConfirm(host, instanceKey, d) {
-		const proj = projectionFor(d);
-		const isAuto = d.mode === "autoresearch";
-		const entry = byInstance.get(instanceKey) || {};
-		return html`
+		`}function ge(e,t,a){let r=K(a),s=a.mode==="autoresearch",i=R.get(t)||{};return n`
 			<div class="exp-view" data-testid="experiment-runner-view-confirm">
 				<h1 class="exp-h1">Confirm launch</h1>
 				<section class="exp-card">
-					<div class="exp-confirm-row"><span>Mode</span><strong>${isAuto ? "Autoresearch" : "A/B comparison"}</strong></div>
-					<div class="exp-confirm-row"><span>Name</span><strong>${asText(d.basics && d.basics.name)}</strong></div>
-					${isAuto
-						? html`
-							<div class="exp-confirm-row"><span>Objective</span><strong>${asText(d.auto && d.auto.objectiveMetric)} (${asText(d.auto && d.auto.direction)})</strong></div>
-							<div class="exp-confirm-row"><span>Caps</span><strong>${asText(num(d.auto.caps.maxIterations) ? `≤ ${num(d.auto.caps.maxIterations)} iters` : "")} ${num(d.auto.caps.wallClockHours) ? `≤ ${num(d.auto.caps.wallClockHours)}h` : ""} ${num(d.auto.caps.costUsd) ? `≤ ${usd(num(d.auto.caps.costUsd))}` : ""}</strong></div>
-							<div class="exp-confirm-row"><span>Worst-case cost</span><strong>${proj.estCostMax != null ? `≤ ${usd(proj.estCostMax)}` : "unbounded by iterations"}</strong></div>
-							<div class="exp-confirm-note">A candidate that fails verification is discarded even if its objective improved.</div>`
-						: html`
-							<div class="exp-confirm-row"><span>Fan-out</span><strong>${proj.runCount} child goals (${arrayOf(d.ab.variants).length} variants × ${num(d.ab.repeats)} repeats)</strong></div>
-							<div class="exp-confirm-row"><span>Projected cost</span><strong>${proj.estCostMax != null ? `≤ ${usd(proj.estCostMax)}` : "—"}</strong></div>`}
+					<div class="exp-confirm-row"><span>Mode</span><strong>${s?"Autoresearch":"A/B comparison"}</strong></div>
+					<div class="exp-confirm-row"><span>Name</span><strong>${b(a.basics&&a.basics.name)}</strong></div>
+					${s?n`
+							<div class="exp-confirm-row"><span>Objective</span><strong>${b(a.auto&&a.auto.objectiveMetric)} (${b(a.auto&&a.auto.direction)})</strong></div>
+							<div class="exp-confirm-row"><span>Caps</span><strong>${b(v(a.auto.caps.maxIterations)?`\u2264 ${v(a.auto.caps.maxIterations)} iters`:"")} ${v(a.auto.caps.wallClockHours)?`\u2264 ${v(a.auto.caps.wallClockHours)}h`:""} ${v(a.auto.caps.costUsd)?`\u2264 ${O(v(a.auto.caps.costUsd))}`:""}</strong></div>
+							<div class="exp-confirm-row"><span>Worst-case cost</span><strong>${r.estCostMax!=null?`\u2264 ${O(r.estCostMax)}`:"unbounded by iterations"}</strong></div>
+							<div class="exp-confirm-note">A candidate that fails verification is discarded even if its objective improved.</div>`:n`
+							<div class="exp-confirm-row"><span>Fan-out</span><strong>${r.runCount} child goals (${f(a.ab.variants).length} variants × ${v(a.ab.repeats)} repeats)</strong></div>
+							<div class="exp-confirm-row"><span>Projected cost</span><strong>${r.estCostMax!=null?`\u2264 ${O(r.estCostMax)}`:"\u2014"}</strong></div>`}
 				</section>
-				${entry.launchError ? html`<div class="exp-error-box" data-testid="experiment-runner-launch-error">${entry.launchError}</div>` : nothing}
+				${i.launchError?n`<div class="exp-error-box" data-testid="experiment-runner-launch-error">${i.launchError}</div>`:l}
 				<div class="exp-confirm-actions">
-					<button class="exp-btn secondary" type="button" @click=${() => setView(host, instanceKey, "define")}>← Back</button>
-					<button class="exp-btn primary" type="button" data-testid="experiment-runner-launch" ?disabled=${!proj.valid || entry.launching}
-						@click=${() => doLaunch(host, instanceKey)}>${entry.launching ? "Launching…" : isAuto ? `Launch loop (≤ ${proj.estCostMax != null ? usd(proj.estCostMax) : "capped"})` : `Launch ${proj.runCount} runs`}</button>
+					<button class="exp-btn secondary" type="button" @click=${()=>_(e,t,"define")}>← Back</button>
+					<button class="exp-btn primary" type="button" data-testid="experiment-runner-launch" ?disabled=${!r.valid||i.launching}
+						@click=${()=>ne(e,t)}>${i.launching?"Launching\u2026":s?`Launch loop (\u2264 ${r.estCostMax!=null?O(r.estCostMax):"capped"})`:`Launch ${r.runCount} runs`}</button>
 				</div>
 			</div>
-		`;
-	}
-
-	// ════════════════════════════════════════════════════════════════════════
-	// Dashboard
-	// ════════════════════════════════════════════════════════════════════════
-	function effectiveSpec(dash) {
-		const spec = dash && Array.isArray(dash.spec) ? dash.spec : (dash && dash.spec && Array.isArray(dash.spec.widgets) ? dash.spec.widgets : null);
-		if (spec && spec.length) return spec;
-		const isAuto = dash && dash.def && dash.def.mode === "autoresearch";
-		return isAuto
-			? [
-				{ type: "summary-cards", title: "Summary" },
-				{ type: "objective-curve", title: "Best objective vs iteration" },
-				{ type: "ledger-table", title: "Ledger" },
-				{ type: "raw-drilldown", title: "Iterations" },
-			]
-			: [
-				{ type: "summary-cards", title: "Summary" },
-				{ type: "comparison-table", title: "Comparison" },
-				{ type: "score-bars", title: "Secondary metrics" },
-				{ type: "raw-drilldown", title: "Runs" },
-			];
-	}
-
-	function collectedMetricIds(dash) {
-		const sel = arrayOf(dash && dash.metrics);
-		const ids = sel.filter((m) => m.collect !== false).map((m) => m.metric);
-		return ids.length ? ids : ["objective.value", "cost.totalUsd", "time.wallClockMs"];
-	}
-	function primaryMetricId(dash) {
-		const sel = arrayOf(dash && dash.metrics);
-		const p = sel.find((m) => m.primary);
-		if (p) return p.metric;
-		if (dash && dash.def && dash.def.objective) return dash.def.objective.metric;
-		return collectedMetricIds(dash)[0];
-	}
-	const metricValue = (run, id) => {
-		const m = run && run.metrics;
-		const v = m ? m[id] : undefined;
-		return Number.isFinite(Number(v)) ? Number(v) : (v && Number.isFinite(Number(v.value)) ? Number(v.value) : undefined);
-	};
-	function runsByArm(dash) {
-		const map = new Map();
-		for (const r of arrayOf(dash && dash.runs)) {
-			const arm = asText(r.armId, "arm");
-			if (!map.has(arm)) map.set(arm, []);
-			map.get(arm).push(r);
-		}
-		return map;
-	}
-
-	function widgetComparisonTable(host, dash) {
-		const metricIds = collectedMetricIds(dash);
-		const sameBar = !(dash.def && dash.def.sameCompletionBar === false);
-		const arms = runsByArm(dash);
-		const sel = arrayOf(dash.metrics);
-		const aggOf = (id) => (sel.find((m) => m.metric === id) || {}).aggregation || "median";
-		return html`<table class="exp-table" data-testid="experiment-runner-widget-comparison-table">
-			<thead><tr><th>Variant</th>${metricIds.map((id) => html`<th class="exp-mono">${id}</th>`)}<th>n</th></tr></thead>
+		`}function X(e){let t=e&&Array.isArray(e.spec)?e.spec:e&&e.spec&&Array.isArray(e.spec.widgets)?e.spec.widgets:null;return t&&t.length?t:e&&e.def&&e.def.mode==="autoresearch"?[{type:"summary-cards",title:"Summary"},{type:"objective-curve",title:"Best objective vs iteration"},{type:"ledger-table",title:"Ledger"},{type:"raw-drilldown",title:"Iterations"}]:[{type:"summary-cards",title:"Summary"},{type:"comparison-table",title:"Comparison"},{type:"score-bars",title:"Secondary metrics"},{type:"raw-drilldown",title:"Runs"}]}function J(e){let a=f(e&&e.metrics).filter(r=>r.collect!==!1).map(r=>r.metric);return a.length?a:["objective.value","cost.totalUsd","time.wallClockMs"]}function fe(e){let a=f(e&&e.metrics).find(r=>r.primary);return a?a.metric:e&&e.def&&e.def.objective?e.def.objective.metric:J(e)[0]}let P=(e,t)=>{let a=e&&e.metrics,r=a?a[t]:void 0;return Number.isFinite(Number(r))?Number(r):r&&Number.isFinite(Number(r.value))?Number(r.value):void 0};function Y(e){let t=new Map;for(let a of f(e&&e.runs)){let r=b(a.armId,"arm");t.has(r)||t.set(r,[]),t.get(r).push(a)}return t}function ve(e,t){let a=J(t),r=!(t.def&&t.def.sameCompletionBar===!1),s=Y(t),i=f(t.metrics),c=d=>(i.find(o=>o.metric===d)||{}).aggregation||"median";return n`<table class="exp-table" data-testid="experiment-runner-widget-comparison-table">
+			<thead><tr><th>Variant</th>${a.map(d=>n`<th class="exp-mono">${d}</th>`)}<th>n</th></tr></thead>
 			<tbody>
-				${[...arms.entries()].map(([arm, runs]) => {
-					const eligible = sameBar ? runs.filter((r) => r.completionBar === "passed") : runs;
-					const used = eligible.length ? eligible : runs;
-					return html`<tr data-testid="experiment-runner-comparison-arm" data-arm=${arm}>
-						<td><strong>${arm}</strong></td>
-						${metricIds.map((id) => html`<td class="exp-mono">${fmt(aggregate(used.map((r) => metricValue(r, id)), aggOf(id)))}</td>`)}
-						<td>${used.length}</td>
-					</tr>`;
-				})}
+				${[...s.entries()].map(([d,o])=>{let u=r?o.filter($=>$.completionBar==="passed"):o,g=u.length?u:o;return n`<tr data-testid="experiment-runner-comparison-arm" data-arm=${d}>
+						<td><strong>${d}</strong></td>
+						${a.map($=>n`<td class="exp-mono">${j(Q(g.map(x=>P(x,$)),c($)))}</td>`)}
+						<td>${g.length}</td>
+					</tr>`})}
 			</tbody>
-		</table>`;
-	}
-
-	function widgetScoreBars(host, dash) {
-		const metricIds = collectedMetricIds(dash);
-		const arms = runsByArm(dash);
-		return html`<div class="exp-scorebars" data-testid="experiment-runner-widget-score-bars">
-			${metricIds.map((id, mi) => {
-				const rows = [...arms.entries()].map(([arm, runs]) => ({ arm, v: aggregate(runs.map((r) => metricValue(r, id)), "median") }));
-				const max = Math.max(1, ...rows.map((r) => (Number.isFinite(r.v) ? Math.abs(r.v) : 0)));
-				return html`<div class="exp-scorebar-group"><div class="exp-field-label exp-mono">${id}</div>
-					${rows.map((r) => html`<div class="exp-scorebar-row"><span class="exp-scorebar-label">${r.arm}</span>
-						<span class="exp-scorebar-track"><span class="exp-scorebar-fill" style=${`width:${Math.round((Number.isFinite(r.v) ? Math.abs(r.v) : 0) / max * 100)}%;background:var(--chart-${(mi % 6) + 1})`}></span></span>
-						<span class="exp-mono">${fmt(r.v)}</span></div>`)}
-				</div>`;
-			})}
-		</div>`;
-	}
-
-	function widgetObjectiveCurve(host, dash) {
-		const id = primaryMetricId(dash);
-		const dir = (dash.def && dash.def.objective && dash.def.objective.direction) || "maximize";
-		const iters = arrayOf(dash.runs).filter((r) => r.iteration != null).sort((a, b) => a.iteration - b.iteration);
-		let best = null;
-		const points = iters.map((r) => {
-			const v = metricValue(r, id);
-			if (Number.isFinite(v)) best = best == null ? v : (dir === "minimize" ? Math.min(best, v) : Math.max(best, v));
-			return { iteration: r.iteration, v, best, kept: r.verified !== false && r.completionBar !== "failed" };
-		});
-		const target = num(dash.def && dash.def.stop && dash.def.stop.target);
-		return html`<div data-testid="experiment-runner-widget-objective-curve">
-			${target != null ? html`<div class="exp-hint">target ${dir === "minimize" ? "≤" : "≥"} ${fmt(target)}</div>` : nothing}
+		</table>`}function he(e,t){let a=J(t),r=Y(t);return n`<div class="exp-scorebars" data-testid="experiment-runner-widget-score-bars">
+			${a.map((s,i)=>{let c=[...r.entries()].map(([o,u])=>({arm:o,v:Q(u.map(g=>P(g,s)),"median")})),d=Math.max(1,...c.map(o=>Number.isFinite(o.v)?Math.abs(o.v):0));return n`<div class="exp-scorebar-group"><div class="exp-field-label exp-mono">${s}</div>
+					${c.map(o=>n`<div class="exp-scorebar-row"><span class="exp-scorebar-label">${o.arm}</span>
+						<span class="exp-scorebar-track"><span class="exp-scorebar-fill" style=${`width:${Math.round((Number.isFinite(o.v)?Math.abs(o.v):0)/d*100)}%;background:var(--chart-${i%6+1})`}></span></span>
+						<span class="exp-mono">${j(o.v)}</span></div>`)}
+				</div>`})}
+		</div>`}function $e(e,t){let a=fe(t),r=t.def&&t.def.objective&&t.def.objective.direction||"maximize",s=f(t.runs).filter(o=>o.iteration!=null).sort((o,u)=>o.iteration-u.iteration),i=null,c=s.map(o=>{let u=P(o,a);return Number.isFinite(u)&&(i=i==null?u:r==="minimize"?Math.min(i,u):Math.max(i,u)),{iteration:o.iteration,v:u,best:i,kept:o.verified!==!1&&o.completionBar!=="failed"}}),d=v(t.def&&t.def.stop&&t.def.stop.target);return n`<div data-testid="experiment-runner-widget-objective-curve">
+			${d!=null?n`<div class="exp-hint">target ${r==="minimize"?"\u2264":"\u2265"} ${j(d)}</div>`:l}
 			<table class="exp-table"><thead><tr><th>Iter</th><th>objective</th><th>best</th><th>verdict</th></tr></thead>
-				<tbody>${points.map((p) => html`<tr><td>${p.iteration}</td><td class="exp-mono">${fmt(p.v)}</td><td class="exp-mono exp-pos">${fmt(p.best)}</td><td>${p.kept ? html`<span class="exp-pos">●</span>` : html`<span class="exp-neg">○</span>`}</td></tr>`)}</tbody>
+				<tbody>${c.map(o=>n`<tr><td>${o.iteration}</td><td class="exp-mono">${j(o.v)}</td><td class="exp-mono exp-pos">${j(o.best)}</td><td>${o.kept?n`<span class="exp-pos">●</span>`:n`<span class="exp-neg">○</span>`}</td></tr>`)}</tbody>
 			</table>
-		</div>`;
-	}
-
-	function widgetLedgerTable(host, dash) {
-		const ledger = arrayOf(dash.ledger);
-		return html`<table class="exp-table" data-testid="experiment-runner-widget-ledger-table">
+		</div>`}function ye(e,t){let a=f(t.ledger);return n`<table class="exp-table" data-testid="experiment-runner-widget-ledger-table">
 			<thead><tr><th>Iter</th><th>verdict</th><th>objective</th><th>best</th></tr></thead>
-			<tbody>${ledger.map((l) => {
-				const verdict = asText(l.verdict || l.decision, "—");
-				const cls = /kept|accept/i.test(verdict) ? "exp-pos" : /verification|failed/i.test(verdict) ? "exp-neg" : "exp-muted";
-				return html`<tr data-testid="experiment-runner-ledger-row"><td>${asText(l.iteration)}</td><td class=${cls}>${verdict}</td><td class="exp-mono">${fmt(num(l.objective))}</td><td class="exp-mono">${fmt(num(l.best))}</td></tr>`;
-			})}</tbody>
-		</table>`;
-	}
-
-	function widgetSummaryCards(host, dash) {
-		const runs = arrayOf(dash.runs);
-		const settled = runs.filter((r) => ["settled", "collected", "failed"].includes(r.status)).length;
-		const passed = runs.filter((r) => r.completionBar === "passed").length;
-		const cost = runs.reduce((s, r) => s + (num(r.cost && r.cost.totalUsd) || metricValue(r, "cost.totalUsd") || 0), 0);
-		return html`<div class="exp-cards" data-testid="experiment-runner-widget-summary-cards">
-			<div class="exp-stat"><span class="exp-stat-n">${runs.length}</span><span class="exp-stat-l">runs</span></div>
-			<div class="exp-stat"><span class="exp-stat-n">${settled}</span><span class="exp-stat-l">settled</span></div>
-			<div class="exp-stat"><span class="exp-stat-n exp-pos">${passed}</span><span class="exp-stat-l">passed bar</span></div>
-			<div class="exp-stat"><span class="exp-stat-n">${usd(cost)}</span><span class="exp-stat-l">spend</span></div>
-		</div>`;
-	}
-
-	function widgetRawDrilldown(host, dash) {
-		const metricIds = collectedMetricIds(dash);
-		const runs = arrayOf(dash.runs);
-		return html`<table class="exp-table" data-testid="experiment-runner-widget-raw-drilldown">
-			<thead><tr><th>run</th><th>arm</th><th>${dash.def && dash.def.mode === "autoresearch" ? "iter" : "rep"}</th><th>status</th><th>bar</th>${metricIds.map((id) => html`<th class="exp-mono">${id}</th>`)}</tr></thead>
-			<tbody>${runs.map((r) => {
-				const excluded = (dash.def && dash.def.sameCompletionBar !== false) && r.completionBar && r.completionBar !== "passed";
-				return html`<tr class=${excluded ? "exp-excluded" : ""} data-testid="experiment-runner-run-row" data-run=${asText(r.runId)}>
-					<td class="exp-mono">${asText(r.runId)}</td><td>${asText(r.armId)}</td>
-					<td>${asText(r.iteration != null ? r.iteration : r.repeat)}</td>
-					<td>${asText(r.status)}</td><td>${asText(r.completionBar)}${excluded ? html` <span class="exp-tag">excluded</span>` : nothing}</td>
-					${metricIds.map((id) => html`<td class="exp-mono">${fmt(metricValue(r, id))}</td>`)}
-				</tr>`;
-			})}</tbody>
-		</table>`;
-	}
-
-	const WIDGET_RENDERERS = {
-		"comparison-table": widgetComparisonTable,
-		"score-bars": widgetScoreBars,
-		"objective-curve": widgetObjectiveCurve,
-		"ledger-table": widgetLedgerTable,
-		"summary-cards": widgetSummaryCards,
-		"raw-drilldown": widgetRawDrilldown,
-	};
-
-	function renderReportHtml(htmlString) {
-		try {
-			const node = document.createElement("div");
-			node.setAttribute("data-testid", "experiment-runner-report-html");
-			node.innerHTML = String(htmlString);
-			return node;
-		} catch { return nothing; }
-	}
-
-	function renderDashboardBody(host, instanceKey, dash) {
-		// Prefer the shared reporting lib's rendered html (single source of truth).
-		if (dash.report && typeof dash.report.html === "string" && dash.report.html.trim()) {
-			return html`<div class="exp-dashboard-body" data-testid="experiment-runner-dashboard-body">${renderReportHtml(dash.report.html)}</div>`;
-		}
-		const spec = effectiveSpec(dash);
-		return html`<div class="exp-dashboard-body" data-testid="experiment-runner-dashboard-body">
-			${spec.map((w) => {
-				const renderer = WIDGET_RENDERERS[w.type];
-				return html`<section class="exp-widget exp-card" data-testid="experiment-runner-widget" data-widget-type=${w.type}>
-					<h3 class="exp-widget-title">${asText(w.title, w.type)}</h3>
-					${renderer ? renderer(host, dash) : html`<div class="exp-hint">Unknown widget: ${w.type}</div>`}
-				</section>`;
-			})}
-		</div>`;
-	}
-
-	function renderDashboardEditor(host, instanceKey, dash) {
-		const spec = effectiveSpec(dash).slice();
-		const setSpec = (next) => patch(host, instanceKey, { dashboardDraftSpec: next });
-		const entry = byInstance.get(instanceKey) || {};
-		const draftSpec = entry.dashboardDraftSpec || spec;
-		const move = (i, delta) => {
-			const next = draftSpec.slice();
-			const j = i + delta;
-			if (j < 0 || j >= next.length) return;
-			[next[i], next[j]] = [next[j], next[i]];
-			setSpec(next);
-		};
-		const remove = (i) => { const next = draftSpec.slice(); next.splice(i, 1); setSpec(next); };
-		const add = (type) => setSpec([...draftSpec, { type, title: (BUILTIN_WIDGETS.find((w) => w.id === type) || {}).label || type }]);
-		const setTitle = (i, title) => { const next = draftSpec.slice(); next[i] = { ...next[i], title }; setSpec(next); };
-		const widgetTypes = entry.widgetTypes && entry.widgetTypes.length ? entry.widgetTypes : BUILTIN_WIDGETS;
-		return html`<div class="exp-card" data-testid="experiment-runner-dashboard-editor">
+			<tbody>${a.map(r=>{let s=b(r.verdict||r.decision,"\u2014"),i=/kept|accept/i.test(s)?"exp-pos":/verification|failed/i.test(s)?"exp-neg":"exp-muted";return n`<tr data-testid="experiment-runner-ledger-row"><td>${b(r.iteration)}</td><td class=${i}>${s}</td><td class="exp-mono">${j(v(r.objective))}</td><td class="exp-mono">${j(v(r.best))}</td></tr>`})}</tbody>
+		</table>`}function we(e,t){let a=f(t.runs),r=a.filter(c=>["settled","collected","failed"].includes(c.status)).length,s=a.filter(c=>c.completionBar==="passed").length,i=a.reduce((c,d)=>c+(v(d.cost&&d.cost.totalUsd)||P(d,"cost.totalUsd")||0),0);return n`<div class="exp-cards" data-testid="experiment-runner-widget-summary-cards">
+			<div class="exp-stat"><span class="exp-stat-n">${a.length}</span><span class="exp-stat-l">runs</span></div>
+			<div class="exp-stat"><span class="exp-stat-n">${r}</span><span class="exp-stat-l">settled</span></div>
+			<div class="exp-stat"><span class="exp-stat-n exp-pos">${s}</span><span class="exp-stat-l">passed bar</span></div>
+			<div class="exp-stat"><span class="exp-stat-n">${O(i)}</span><span class="exp-stat-l">spend</span></div>
+		</div>`}function ke(e,t){let a=J(t),r=f(t.runs);return n`<table class="exp-table" data-testid="experiment-runner-widget-raw-drilldown">
+			<thead><tr><th>run</th><th>arm</th><th>${t.def&&t.def.mode==="autoresearch"?"iter":"rep"}</th><th>status</th><th>bar</th>${a.map(s=>n`<th class="exp-mono">${s}</th>`)}</tr></thead>
+			<tbody>${r.map(s=>{let i=t.def&&t.def.sameCompletionBar!==!1&&s.completionBar&&s.completionBar!=="passed";return n`<tr class=${i?"exp-excluded":""} data-testid="experiment-runner-run-row" data-run=${b(s.runId)}>
+					<td class="exp-mono">${b(s.runId)}</td><td>${b(s.armId)}</td>
+					<td>${b(s.iteration!=null?s.iteration:s.repeat)}</td>
+					<td>${b(s.status)}</td><td>${b(s.completionBar)}${i?n` <span class="exp-tag">excluded</span>`:l}</td>
+					${a.map(c=>n`<td class="exp-mono">${j(P(s,c))}</td>`)}
+				</tr>`})}</tbody>
+		</table>`}let Se={"comparison-table":ve,"score-bars":he,"objective-curve":$e,"ledger-table":ye,"summary-cards":we,"raw-drilldown":ke};function Ce(e){try{let t=document.createElement("div");return t.setAttribute("data-testid","experiment-runner-report-html"),t.innerHTML=String(e),t}catch{return l}}function Te(e,t,a){if(a.report&&typeof a.report.html=="string"&&a.report.html.trim())return n`<div class="exp-dashboard-body" data-testid="experiment-runner-dashboard-body">${Ce(a.report.html)}</div>`;let r=X(a);return n`<div class="exp-dashboard-body" data-testid="experiment-runner-dashboard-body">
+			${r.map(s=>{let i=Se[s.type];return n`<section class="exp-widget exp-card" data-testid="experiment-runner-widget" data-widget-type=${s.type}>
+					<h3 class="exp-widget-title">${b(s.title,s.type)}</h3>
+					${i?i(e,a):n`<div class="exp-hint">Unknown widget: ${s.type}</div>`}
+				</section>`})}
+		</div>`}function Re(e,t,a){let r=X(a).slice(),s=x=>A(e,t,{dashboardDraftSpec:x}),i=R.get(t)||{},c=i.dashboardDraftSpec||r,d=(x,y)=>{let S=c.slice(),q=x+y;q<0||q>=S.length||([S[x],S[q]]=[S[q],S[x]],s(S))},o=x=>{let y=c.slice();y.splice(x,1),s(y)},u=x=>s([...c,{type:x,title:(Z.find(y=>y.id===x)||{}).label||x}]),g=(x,y)=>{let S=c.slice();S[x]={...S[x],title:y},s(S)},$=i.widgetTypes&&i.widgetTypes.length?i.widgetTypes:Z;return n`<div class="exp-card" data-testid="experiment-runner-dashboard-editor">
 			<h3 class="exp-h2">Edit dashboard</h3>
-			${draftSpec.map((w, i) => html`<div class="exp-editor-row" data-testid="experiment-runner-editor-widget" data-widget-type=${w.type}>
-				<input class="exp-input" type="text" .value=${asText(w.title)} @input=${(e) => setTitle(i, e.currentTarget.value)} />
-				<span class="exp-badge exp-mono">${w.type}</span>
-				<button class="exp-icon-btn" type="button" title="Move up" @click=${() => move(i, -1)}>↑</button>
-				<button class="exp-icon-btn" type="button" title="Move down" @click=${() => move(i, 1)}>↓</button>
-				<button class="exp-icon-btn" type="button" title="Remove" @click=${() => remove(i)}>✕</button>
+			${c.map((x,y)=>n`<div class="exp-editor-row" data-testid="experiment-runner-editor-widget" data-widget-type=${x.type}>
+				<input class="exp-input" type="text" .value=${b(x.title)} @input=${S=>g(y,S.currentTarget.value)} />
+				<span class="exp-badge exp-mono">${x.type}</span>
+				<button class="exp-icon-btn" type="button" title="Move up" @click=${()=>d(y,-1)}>↑</button>
+				<button class="exp-icon-btn" type="button" title="Move down" @click=${()=>d(y,1)}>↓</button>
+				<button class="exp-icon-btn" type="button" title="Remove" @click=${()=>o(y)}>✕</button>
 			</div>`)}
 			<div class="exp-editor-add">
 				<select class="exp-input" data-testid="experiment-runner-add-widget-type">
-					${widgetTypes.map((w) => html`<option value=${w.id}>${w.label || w.id}</option>`)}
+					${$.map(x=>n`<option value=${x.id}>${x.label||x.id}</option>`)}
 				</select>
 				<button class="exp-btn secondary" type="button" data-testid="experiment-runner-add-widget"
-					@click=${(e) => { const sel = e.currentTarget.parentElement.querySelector("select"); add(sel.value); }}>+ Add widget</button>
+					@click=${x=>{let y=x.currentTarget.parentElement.querySelector("select");u(y.value)}}>+ Add widget</button>
 			</div>
 			<div class="exp-confirm-actions">
-				<button class="exp-btn secondary" type="button" @click=${() => patch(host, instanceKey, { dashboardEditing: false, dashboardDraftSpec: undefined })}>Cancel</button>
+				<button class="exp-btn secondary" type="button" @click=${()=>A(e,t,{dashboardEditing:!1,dashboardDraftSpec:void 0})}>Cancel</button>
 				<button class="exp-btn primary" type="button" data-testid="experiment-runner-save-dashboard"
-					@click=${() => { patch(host, instanceKey, { dashboardDraftSpec: undefined }); void saveDashboardSpec(host, instanceKey, dash.experimentId, draftSpec); }}>Save dashboard</button>
+					@click=${()=>{A(e,t,{dashboardDraftSpec:void 0}),ce(e,t,a.experimentId,c)}}>Save dashboard</button>
 			</div>
-		</div>`;
-	}
-
-	function renderDashboard(host, instanceKey, d) {
-		const entry = byInstance.get(instanceKey) || {};
-		const dash = entry.dashboard;
-		const newExperiment = () => patch(host, instanceKey, { dashboard: null }) && patchDraft(host, instanceKey, (dd) => { Object.assign(dd, defaultDraft()); });
-		if (entry.dashboardLoading && !dash) {
-			return html`<div class="exp-view" data-testid="experiment-runner-view-dashboard"><div class="exp-hint">Loading experiment…</div></div>`;
-		}
-		if (!dash) {
-			return html`<div class="exp-view" data-testid="experiment-runner-view-dashboard">
+		</div>`}function Ie(e,t,a){let r=R.get(t)||{},s=r.dashboard,i=()=>A(e,t,{dashboard:null})&&T(e,t,y=>{Object.assign(y,G())});if(r.dashboardLoading&&!s)return n`<div class="exp-view" data-testid="experiment-runner-view-dashboard"><div class="exp-hint">Loading experiment…</div></div>`;if(!s)return n`<div class="exp-view" data-testid="experiment-runner-view-dashboard">
 				<div class="exp-empty">No experiment loaded.</div>
-				<button class="exp-btn primary" type="button" data-testid="experiment-runner-new-experiment" @click=${newExperiment}>New experiment</button>
-			</div>`;
-		}
-		const def = dash.def || {};
-		const state = dash.state || {};
-		const isAuto = def.mode === "autoresearch";
-		const status = asText(state.status, "running");
-		const runs = arrayOf(dash.runs);
-		const settled = runs.filter((r) => ["settled", "collected", "failed"].includes(r.status)).length;
-		const stopReason = state.stopReason ? `stopped: ${state.stopReason}` : status;
-		return html`
-			<div class="exp-view" data-testid="experiment-runner-view-dashboard" data-experiment-id=${dash.experimentId}>
+				<button class="exp-btn primary" type="button" data-testid="experiment-runner-new-experiment" @click=${i}>New experiment</button>
+			</div>`;let c=s.def||{},d=s.state||{},o=c.mode==="autoresearch",u=b(d.status,"running"),g=f(s.runs),$=g.filter(y=>["settled","collected","failed"].includes(y.status)).length,x=d.stopReason?`stopped: ${d.stopReason}`:u;return n`
+			<div class="exp-view" data-testid="experiment-runner-view-dashboard" data-experiment-id=${s.experimentId}>
 				<header class="exp-dash-head">
 					<div class="exp-dash-titles">
-						<span class="exp-mode-badge ${isAuto ? "warn" : ""}">${isAuto ? "AUTORESEARCH" : "A/B"}</span>
-						<h1 class="exp-h1">${asText(def.title, dash.experimentId)}</h1>
+						<span class="exp-mode-badge ${o?"warn":""}">${o?"AUTORESEARCH":"A/B"}</span>
+						<h1 class="exp-h1">${b(c.title,s.experimentId)}</h1>
 					</div>
 					<div class="exp-dash-meta">
-						<span class="exp-status" data-testid="experiment-runner-status" role="status">${status === "running" ? `running ${settled}/${runs.length}` : stopReason}</span>
+						<span class="exp-status" data-testid="experiment-runner-status" role="status">${u==="running"?`running ${$}/${g.length}`:x}</span>
 					</div>
 					<div class="exp-dash-actions">
-						${status === "running" ? html`<button class="exp-btn secondary" type="button" data-testid="experiment-runner-stop" @click=${() => doCancel(host, instanceKey, dash.experimentId)}>Stop experiment</button>` : nothing}
-						<button class="exp-btn secondary" type="button" data-testid="experiment-runner-refresh" @click=${() => loadDashboard(host, instanceKey, dash.experimentId)}>Refresh</button>
+						${u==="running"?n`<button class="exp-btn secondary" type="button" data-testid="experiment-runner-stop" @click=${()=>ie(e,t,s.experimentId)}>Stop experiment</button>`:l}
+						<button class="exp-btn secondary" type="button" data-testid="experiment-runner-refresh" @click=${()=>N(e,t,s.experimentId)}>Refresh</button>
 						<button class="exp-btn secondary" type="button" data-testid="experiment-runner-edit-dashboard"
-							@click=${() => patch(host, instanceKey, { dashboardEditing: !entry.dashboardEditing, dashboardDraftSpec: undefined })}>${entry.dashboardEditing ? "Close editor" : "Edit dashboard"}</button>
-						<button class="exp-btn link" type="button" data-testid="experiment-runner-new-experiment" @click=${newExperiment}>New experiment</button>
+							@click=${()=>A(e,t,{dashboardEditing:!r.dashboardEditing,dashboardDraftSpec:void 0})}>${r.dashboardEditing?"Close editor":"Edit dashboard"}</button>
+						<button class="exp-btn link" type="button" data-testid="experiment-runner-new-experiment" @click=${i}>New experiment</button>
 					</div>
 				</header>
-				${entry.dashboardEditing ? renderDashboardEditor(host, instanceKey, dash) : nothing}
+				${r.dashboardEditing?Re(e,t,s):l}
 				<details class="exp-details" data-testid="experiment-runner-metrics-panel">
 					<summary>Metrics — edit what is collected (re-extracts from stored outcomes, no re-run)</summary>
-					${renderDashboardMetricsEditor(host, instanceKey, dash)}
+					${Me(e,t,s)}
 				</details>
-				${renderDashboardBody(host, instanceKey, dash)}
+				${Te(e,t,s)}
 			</div>
-		`;
-	}
-
-	function renderDashboardMetricsEditor(host, instanceKey, dash) {
-		const metrics = arrayOf(dash.metrics).length ? arrayOf(dash.metrics) : defaultMetricsSelection();
-		const toggle = (i, collect) => {
-			const next = metrics.map((m, j) => (j === i ? { ...m, collect } : m));
-			patch(host, instanceKey, { dashboard: { ...dash, metrics: next } });
-			void saveMetricsSelection(host, instanceKey, dash.experimentId, next);
-		};
-		return html`<table class="exp-table">
+		`}function Me(e,t,a){let r=f(a.metrics).length?f(a.metrics):ee(),s=(i,c)=>{let d=r.map((o,u)=>u===i?{...o,collect:c}:o);A(e,t,{dashboard:{...a,metrics:d}}),oe(e,t,a.experimentId,d)};return n`<table class="exp-table">
 			<thead><tr><th>Collect</th><th>Metric</th></tr></thead>
-			<tbody>${metrics.map((m, i) => html`<tr><td><input type="checkbox" data-testid="experiment-runner-dash-metric-collect" data-metric=${m.metric}
-				?checked=${m.collect !== false} @change=${(e) => toggle(i, e.currentTarget.checked)} /></td><td class="exp-mono">${m.metric}</td></tr>`)}</tbody>
-		</table>`;
-	}
-
-	// ── styles ──
-	const STYLE = `
+			<tbody>${r.map((i,c)=>n`<tr><td><input type="checkbox" data-testid="experiment-runner-dash-metric-collect" data-metric=${i.metric}
+				?checked=${i.collect!==!1} @change=${d=>s(c,d.currentTarget.checked)} /></td><td class="exp-mono">${i.metric}</td></tr>`)}</tbody>
+		</table>`}let Ae=`
 		.exp-root{display:flex;flex-direction:column;height:100%;overflow:auto;background:var(--background);color:var(--foreground);font-size:13px;}
 		.exp-view{padding:16px;display:flex;flex-direction:column;gap:14px;}
 		.exp-h1{font-size:18px;font-weight:600;margin:0;}
@@ -1274,31 +444,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		.exp-editor-row{display:flex;gap:6px;align-items:center;margin:4px 0;}
 		.exp-editor-row .exp-input{flex:1;}
 		.exp-editor-add{display:flex;gap:6px;align-items:center;margin-top:8px;}
-	`;
-
-	return {
-		render(params, host) {
-			const sessionId = params && typeof params.__sessionId === "string" ? params.__sessionId : "";
-			const explicitId = params && typeof params.experimentId === "string" ? params.experimentId : "";
-			const focusView = params && typeof params.view === "string" ? params.view : undefined;
-			const instanceKey = sessionId || "experiment-runner";
-
-			const entry = ensureHydrated(host, instanceKey, explicitId, focusView);
-			const d = (entry && entry.draft) || defaultDraft();
-			const view = d.view || "mode-select";
-
-			let body;
-			if (view === "dashboard") body = renderDashboard(host, instanceKey, d);
-			else if (view === "confirm") body = renderConfirm(host, instanceKey, d);
-			else if (view === "define") body = renderDefine(host, instanceKey, d);
-			else body = renderModeSelect(host, instanceKey, d);
-
-			return html`
-				<style>${STYLE}</style>
-				<div class="exp-root" data-testid="experiment-runner-panel-root" data-view=${view} data-mode=${d.mode || ""}>
-					${body}
+	`;return{render(e,t){let a=e&&typeof e.__sessionId=="string"?e.__sessionId:"",r=e&&typeof e.experimentId=="string"?e.experimentId:"",s=e&&typeof e.view=="string"?e.view:void 0,i=a||"experiment-runner",c=te(t,i,r,s),d=c&&c.draft||G(),o=d.view||"mode-select",u;return o==="dashboard"?u=Ie(t,i,d):o==="confirm"?u=ge(t,i,d):o==="define"?u=me(t,i,d):u=de(t,i,d),n`
+				<style>${Ae}</style>
+				<div class="exp-root" data-testid="experiment-runner-panel-root" data-view=${o} data-mode=${d.mode||""}>
+					${u}
 				</div>
-			`;
-		},
-	};
-}
+			`}}}export{Fe as default};
