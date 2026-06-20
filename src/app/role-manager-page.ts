@@ -643,6 +643,11 @@ interface RoleFieldDisplay {
 	 * (review finding #1). The picker is fed only `currentScopeRoleOverrides`.
 	 */
 	effectiveValue: string;
+	/**
+	 * Hover tooltip explaining the inherited source (e.g. what "session default"
+	 * means). Only set for inherited tiers; the override caption needs none.
+	 */
+	title?: string;
 }
 
 /**
@@ -713,6 +718,14 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 		? "Auto default"
 		: (prefKey === "default.reviewModel" ? "Review default" : "Session default");
 	const defaultKind: RoleFieldSourceUiKind = autoTier ? "auto" : "default";
+	// Hover copy that spells out what each inherited source means, so the flat
+	// "session/review default" captions are never cryptic. Plain text only.
+	const defaultTitle = autoTier
+		? "No default model is configured for this role, so the gateway auto-selects the best available model. Set a default in Settings → Models."
+		: (prefKey === "default.reviewModel"
+			? "Review default — the model and thinking effort used by reviewer / QA-kind roles. Change it in Settings → Models."
+			: "Session default — the model and thinking effort used by normal agent sessions. Change it in Settings → Models.");
+	const inheritedRoleTitle = "Inherited from a lower-scope role override. Pick a model here to override it for the current scope.";
 
 	const packName = directPackName ?? meta?.model?.originPackName ?? meta?.thinkingLevel?.originPackName ?? undefined;
 	// Pack-managed roles (or any field the server flags non-editable) are
@@ -722,7 +735,7 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 
 	const inheritedBadge = (m: RoleFieldSource): string => {
 		const detail = m.sourceLabel || roleOriginDetailLabel(m.origin as ConfigOrigin | undefined, m.originPackName ?? packName);
-		return detail ? `Inherited role override · ${detail}` : "Inherited role override";
+		return detail ? `${detail} role override` : "a lower-scope role override";
 	};
 
 	const fromMeta = (m: RoleFieldSource, format: (v: string) => string, emptyLabel: string): RoleFieldDisplay => {
@@ -733,8 +746,8 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 			// editable picker is fed `currentScopeRoleOverrides` so inherited
 			// values are never clamped/auto-saved (finding #1).
 			case "role": return { kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
-			case "inherited-role": return { kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value };
-			default: return { kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "" };
+			case "inherited-role": return { kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value, title: inheritedRoleTitle };
+			default: return { kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "", title: defaultTitle };
 		}
 	};
 
@@ -745,7 +758,7 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	} else if (role.model) {
 		model = { kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model), effectiveValue: role.model };
 	} else {
-		model = { kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "" };
+		model = { kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "", title: defaultTitle };
 	}
 
 	// THINKING
@@ -756,7 +769,7 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	} else if (role.thinkingLevel) {
 		thinking = { kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel), effectiveValue: role.thinkingLevel };
 	} else {
-		thinking = { kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "" };
+		thinking = { kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "", title: defaultTitle };
 	}
 
 	// State follows the CURRENT-SCOPE override (not the resolved winner): an
@@ -798,7 +811,7 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					<div class="rrm-ro-row"><span class="rrm-ro-key">Thinking</span><span class="rrm-ro-val">${display.thinking.effectiveLabel}</span></div>
 				</div>
 				<div class="role-row-model-sources">
-					<span class="rrm-src"><span class="rrm-src-arrow" aria-hidden="true">↳</span>${reason}</span>
+					<span class="rrm-src">${reason}</span>
 				</div>
 			</div>
 		`;
@@ -813,26 +826,32 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 	// an empty local field would be a confusing no-op (review findings #1, #2).
 	const overrides = currentScopeRoleOverrides(role);
 
-	// Flat, informational source caption (Option A). NOT a pill/chip/button:
+	// Flat, informational source caption (Option A). NOT a pill/chip/button, and
+	// no clickable-looking marker — the caption reads as a sentence so it is
+	// obviously descriptive rather than actionable:
 	//  - Override field: "<Key> Role override" (quiet accent text + leading dot via
 	//    CSS). The value lives in the editable box; its reset is the in-box ×.
-	//  - Inherited field: "↳ <Key> <effective value> · <source>" — muted text with
-	//    the resolved value readable in the foreground colour, never ellipsised to
-	//    a bare "…" for the source/origin text.
+	//  - Inherited field: "<Key> inherits from <source>: <effective value>" — muted
+	//    text spelling out the hierarchy, with the resolved value readable in the
+	//    foreground colour and never ellipsised to a bare "…". A hover title
+	//    explains what "session/review default" means.
 	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string) => {
 		if (f.kind === "role") {
 			return html`
-			<span class="rrm-src rrm-src--override" data-testid="${testid}">
+			<span class="rrm-src rrm-src--override" data-testid="${testid}"
+				title="This role overrides the ${key.toLowerCase()} default for the current scope. Use the reset (×) in the control to clear it.">
 				<span class="rrm-src-key">${key}</span>
 				<span class="rrm-src-state">Role override</span>
 			</span>`;
 		}
+		// Inherited-role phrases already read as "<scope> role override"; the
+		// session/review/auto default badges are lowercased to flow mid-sentence.
+		const phrase = f.kind === "inherited-role" ? f.badge : f.badge.toLowerCase();
 		return html`
-			<span class="rrm-src" data-testid="${testid}">
-				<span class="rrm-src-arrow" aria-hidden="true">↳</span>
+			<span class="rrm-src rrm-src--inherited" data-testid="${testid}" title="${f.title ?? ""}">
 				<span class="rrm-src-key">${key}</span>
+				<span class="rrm-src-inherits">inherits from ${phrase}:</span>
 				<span class="rrm-src-val">${f.effectiveLabel}</span>
-				<span class="rrm-src-from">· ${f.badge}</span>
 			</span>`;
 	};
 
@@ -861,6 +880,11 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 						thinkingWidth: "132px",
 						thinkingFitContent: false,
 						onThinkingClear: () => control.onThinkingChange(role, ""),
+						// In the Roles list these resets clear a per-role OVERRIDE
+						// (reverting to the inherited default), so name them precisely
+						// rather than the generic Settings "Reset to auto/default".
+						clearModelTitle: "Reset model override",
+						clearThinkingTitle: "Reset thinking override",
 					},
 				)}
 			</div>

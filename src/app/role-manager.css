@@ -290,8 +290,10 @@
 	gap: 4px;
 	min-width: 0;
 }
-.rrm-src-arrow {
-	opacity: 0.6;
+/* Descriptive lead-in ("inherits from <source>:") — quiet, non-interactive
+ * text so the caption reads as a sentence, never a clickable control. */
+.rrm-src-inherits {
+	opacity: 0.85;
 }
 .rrm-src-key {
 	font-weight: 600;
