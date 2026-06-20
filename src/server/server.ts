@@ -5273,6 +5273,13 @@ async function handleApiRoute(
 						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
 						return;
 					}
+					if (nestResult.code === "PARENT_SUBGOALS_DISABLED") {
+						json({
+							error: `Parent goal "${resolvedParentGoal.title}" doesn't allow sub-goals`,
+							code: "PARENT_SUBGOALS_DISABLED",
+						}, 422);
+						return;
+					}
 					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
 						json({
 							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,
@@ -5340,7 +5347,11 @@ async function handleApiRoute(
 			// the single source of truth.
 			const nestingPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
 			const inheritedNesting = (parentGoalId && resolvedParentGoal)
-				? inheritedChildOverrides(resolvedParentGoal, nestingPrefs)
+				? inheritedChildOverrides(
+					resolvedParentGoal,
+					nestingPrefs,
+					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
+				)
 				: undefined;
 			const ceilSubgoalsAllowed = inheritedNesting
 				? inheritedNesting.subgoalsAllowed

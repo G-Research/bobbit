@@ -991,6 +991,10 @@ export class GoalManager {
 		replanCount?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous";
 		maxConcurrentChildren?: number;
+		/** Per-goal sub-goal opt-in (editable post-creation via PATCH /policy). */
+		subgoalsAllowed?: boolean;
+		/** Per-goal nesting cap (clamped to system ceiling at the route layer). */
+		maxNestingDepth?: number;
 		acceptanceCriteria?: string[];
 		suggestedRole?: string;
 		spawnedBySessionId?: string;
