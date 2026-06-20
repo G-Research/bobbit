@@ -262,15 +262,34 @@ function convertTools(tools) {
   }];
 }
 
+// pi toolChoice ("auto"|"any"|"none") → Gemini functionCallingConfig.mode
+// (mirrors toolChoiceMode in google-code-assist.ts).
+function toolChoiceMode(choice) {
+  switch (choice) {
+    case "auto": return "AUTO";
+    case "any": return "ANY";
+    case "none": return "NONE";
+    default: return undefined;
+  }
+}
+
 function convertContext(model, context, options) {
   const request = { contents: convertMessages(model, context) };
   if (context.systemPrompt && context.systemPrompt.trim()) {
     request.systemInstruction = { role: "user", parts: [{ text: context.systemPrompt }] };
   }
   const tools = convertTools(context.tools);
-  if (tools) request.tools = tools;
+  if (tools) {
+    request.tools = tools;
+    // toolChoice only applies when tools are present (mirrors server-side helper).
+    const mode = options && toolChoiceMode(options.toolChoice);
+    if (mode) request.toolConfig = { functionCallingConfig: { mode } };
+  }
 
   const generationConfig = {};
+  if (options && typeof options.maxTokens === "number" && options.maxTokens > 0) {
+    generationConfig.maxOutputTokens = options.maxTokens;
+  }
   const reasoning = options && options.reasoning;
   if (reasoning && reasoning !== "off") {
     const budget = THINKING_BUDGET[reasoning];
