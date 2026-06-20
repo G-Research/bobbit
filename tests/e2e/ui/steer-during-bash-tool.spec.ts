@@ -27,14 +27,28 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
-	let remaining = await page.locator(".queue-pill .steer-btn").count();
+	const buttons = page.locator(".queue-pill .steer-btn");
+	let remaining = await buttons.count();
 	while (remaining > 0) {
-		await page.locator(".queue-pill .steer-btn").first().evaluate((el: HTMLElement) => el.click());
-		await expect.poll(async () => page.locator(".queue-pill .steer-btn").count(), { timeout: 5_000 }).toBeLessThan(remaining);
-		remaining = await page.locator(".queue-pill .steer-btn").count();
+		// Under full-suite load, a queued row can drain between the count above
+		// and the click. Query synchronously in the page so a vanished button is
+		// treated as already drained instead of waiting for a selector that
+		// should not reappear.
+		const clicked = await page.evaluate(() => {
+			const button = document.querySelector<HTMLButtonElement>(".queue-pill .steer-btn");
+			if (!button) return false;
+			button.click();
+			return true;
+		});
+
+		if (clicked) {
+			await expect.poll(async () => buttons.count(), { timeout: 5_000 }).toBeLessThan(remaining);
+		}
+
+		remaining = await buttons.count();
 	}
 }
 
@@ -45,6 +59,8 @@ async function clickStopIfPresent(page: any): Promise<void> {
 }
 
 test.describe("steer subsystem — queue + steer + abort with errored agent_end", () => {
+	test.setTimeout(60_000);
+
 	test.beforeAll(async () => {
 		// Switch the in-process mock bridge to real-agent-shape abort: the
 		// abort handler emits a `message_end` with `stopReason:"error"` before
@@ -62,7 +78,11 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 		await waitForSessionStatus(sessionId, "idle");
 
 		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await page.waitForFunction((id) => {
+			return window.location.hash.includes(`/session/${id}`)
+				&& (window as any).bobbitState?.selectedSessionId === id;
+		}, sessionId, { timeout: 15_000 });
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await rec.capture("Empty composer ready");
 
