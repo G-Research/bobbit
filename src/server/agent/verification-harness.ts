@@ -693,6 +693,14 @@ export interface ActiveVerification {
 	cancelled?: boolean;
 }
 
+type TerminalGateSignalStepStatus = "passed" | "failed" | "skipped";
+
+function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): TerminalGateSignalStepStatus {
+	if (step.skipped || step.status === "skipped") return "skipped";
+	if (step.status === "passed" || step.status === "failed") return step.status;
+	return step.passed ? "passed" : "failed";
+}
+
 /**
  * Build the combined system prompt for a review step.
  *
@@ -1177,7 +1185,7 @@ export class VerificationHarness {
 					try {
 						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 							status: "failed",
-							steps: [{ name: "Resume Interrupted", type: "command", passed: false, output: `Reviewer agent was not ready / timed out while resuming after server restart: ${errMsg}`, duration_ms: 0 }],
+							steps: [{ name: "Resume Interrupted", type: "command", passed: false, status: "failed", phase: 0, output: `Reviewer agent was not ready / timed out while resuming after server restart: ${errMsg}`, duration_ms: 0 }],
 						});
 						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "pending");
 					} catch (storeErr) {
@@ -1203,7 +1211,7 @@ export class VerificationHarness {
 					try {
 						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 							status: "failed",
-							steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
+							steps: [{ name: "Resume Error", type: "command", passed: false, status: "failed", phase: 0, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
 						});
 						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
 					} catch (storeErr) {
@@ -1301,7 +1309,7 @@ export class VerificationHarness {
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
-		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }> = [];
+		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; phase?: number; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }> = [];
 
 		for (const step of v.steps) {
 			if (step.status !== "running") {
@@ -1311,6 +1319,9 @@ export class VerificationHarness {
 					name: step.name,
 					type: step.type,
 					passed: step.status === "passed" || step.status === "skipped",
+					...(step.status === "skipped" ? { skipped: true } : {}),
+					status: step.status,
+					phase: step.phase ?? 0,
 					output: step.output || "",
 					duration_ms: step.durationMs || 0,
 				});
@@ -1355,7 +1366,10 @@ export class VerificationHarness {
 				}
 				resolvedSteps.push({
 					name: step.name, type: step.type,
-					passed, output,
+					passed,
+					status: passed ? "passed" : "failed",
+					phase: step.phase ?? 0,
+					output,
 					duration_ms: Date.now() - step.startedAt,
 				});
 				continue;
@@ -1388,13 +1402,15 @@ export class VerificationHarness {
 			}
 
 			if (resumeResult) {
-				resolvedSteps.push(resumeResult);
+				resolvedSteps.push({ ...resumeResult, status: terminalStatusForStep(resumeResult), phase: step.phase ?? 0 });
 			} else {
 				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({
 					name: step.name,
 					type: step.type,
 					passed: false,
+					status: "failed",
+					phase: step.phase ?? 0,
 					output: "Step was running but had no session ID — cannot resume after restart.",
 					duration_ms: Date.now() - step.startedAt,
 				});
@@ -1402,7 +1418,7 @@ export class VerificationHarness {
 		}
 
 		// Compute overall result
-		const allPassed = resolvedSteps.every(r => r.passed);
+		const allPassed = computeAllPassed(resolvedSteps as GateSignalStep[]);
 
 		// restart-interrupt suppression — Restart-interrupt suppression. If every failed step is a
 		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
@@ -1421,10 +1437,14 @@ export class VerificationHarness {
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
 			steps: resolvedSteps.map(r => {
+				const status = terminalStatusForStep(r);
 				const stepResult: GateSignalStep = {
 					name: r.name,
 					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
 					passed: r.passed,
+					...(status === "skipped" ? { skipped: true } : {}),
+					status,
+					phase: r.phase ?? 0,
 					output: r.output,
 					duration_ms: r.duration_ms,
 				};
@@ -2054,7 +2074,7 @@ export class VerificationHarness {
 			// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
 			this.resolveGateStore(goalId).updateSignalVerification(signalId, {
 				status: "failed",
-				steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
+				steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
 			});
 			// Note: gate status is NOT updated here — the caller decides whether to set it
 			// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
@@ -2240,7 +2260,8 @@ export class VerificationHarness {
 				const s = steps[idx];
 				const skipResult: GateSignalStep = {
 					name: s.name, type: s.type as GateSignalStep["type"],
-					passed: true, skipped: true, output: "Skipped — not enabled for this goal", duration_ms: 0,
+					passed: true, skipped: true, status: "skipped", phase: s.phase ?? 0,
+					output: "Skipped — not enabled for this goal", duration_ms: 0,
 				};
 				allResults[idx] = skipResult;
 				const av = this.activeVerifications.get(signal.id);
@@ -2263,7 +2284,8 @@ export class VerificationHarness {
 				const results: GateSignalStep[] = steps.map((s, i) => {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
 					const cached = cachedSteps.get(s.name)!;
-					return { ...cached, output: `[cached from prior signal] ${cached.output}` };
+					const cachedStatus = terminalStatusForStep(cached);
+					return { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? s.phase ?? 0, output: `[cached from prior signal] ${cached.output}` };
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
@@ -2277,9 +2299,9 @@ export class VerificationHarness {
 						type: "gate_verification_step_complete",
 						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 						stepIndex: index, stepName: r.name,
-						status: r.passed ? "passed" : "failed",
+						status: terminalStatusForStep(r),
 						durationMs: r.duration_ms || 0, output: r.output,
-						phase: steps[index].phase ?? 0,
+						phase: r.phase ?? steps[index].phase ?? 0,
 					});
 				});
 				this.broadcastFn(signal.goalId, {
@@ -2352,6 +2374,8 @@ export class VerificationHarness {
 							type: step.type,
 							passed: false,
 							skipped: true,
+							status: "skipped",
+							phase,
 							output: "Skipped — earlier phase failed",
 							duration_ms: 0,
 							expect: step.expect,
@@ -2398,24 +2422,25 @@ export class VerificationHarness {
 					async ({ step, index }) => {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
-							const cachedResult: GateSignalStep = { ...cached, output: `[cached from prior signal] ${cached.output}` };
+							const cachedStatus = terminalStatusForStep(cached);
+							const cachedResult: GateSignalStep = { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? phase, output: `[cached from prior signal] ${cached.output}` };
 							if (!active.cancelled) this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_complete",
 								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 								stepIndex: index, stepName: step.name,
-								status: cachedResult.passed ? "passed" : "failed",
+								status: cachedResult.status ?? terminalStatusForStep(cachedResult),
 								durationMs: cachedResult.duration_ms || 0, output: cachedResult.output,
-								phase,
+								phase: cachedResult.phase ?? phase,
 							});
 							const av = this.activeVerifications.get(signal.id);
 							if (av && av.steps[index]) {
-								av.steps[index] = { ...av.steps[index], status: cachedResult.passed ? "passed" : "failed", durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+								av.steps[index] = { ...av.steps[index], status: cachedResult.status ?? terminalStatusForStep(cachedResult), phase: cachedResult.phase ?? phase, durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
 								this._persistActive();
 							}
 							return { index, stepResult: cachedResult };
 						}
 
-						let result: { passed: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
+						let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
 						let artifact: GateSignalStep["artifact"];
 						const startTime = Date.now();
 
@@ -2468,7 +2493,7 @@ export class VerificationHarness {
 								const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
 								result = { passed: false, output: msg };
 								const duration_ms = Date.now() - startTime;
-								return { index, stepResult: { name: step.name, type: step.type, passed: false, output: msg, duration_ms, expect: step.expect } };
+								return { index, stepResult: { name: step.name, type: step.type, passed: false, status: "failed" as const, phase, output: msg, duration_ms, expect: step.expect } };
 							}
 							const cmd = this.substituteVars(resolvedRun, builtinVars, projectVars, agentVars, allGateStates);
 							// Auto-skip command steps whose run string is empty or contains
@@ -2481,7 +2506,7 @@ export class VerificationHarness {
 							if (requiredBuiltinFailure) {
 								result = { passed: false, output: requiredBuiltinFailure };
 							} else if (skipReason) {
-								result = { passed: true, output: skipReason };
+								result = { passed: true, skipped: true, output: skipReason };
 							} else {
 								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
 								if (!pushSafety.ok) {
@@ -2716,23 +2741,27 @@ export class VerificationHarness {
 							};
 						}
 
+						const resultStatus: TerminalGateSignalStepStatus = result.skipped ? "skipped" : result.passed ? "passed" : "failed";
 						if (!active.cancelled) this.broadcastFn(signal.goalId, {
 							type: "gate_verification_step_complete",
 							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 							stepIndex: index, stepName: step.name,
-							status: result.passed ? "passed" : "failed",
+							status: resultStatus,
 							durationMs: duration_ms, output: result.output || "",
 							sessionId: result.sessionId, phase,
 						});
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
-							av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
+							av.steps[index] = { ...av.steps[index], status: resultStatus, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
 							this._persistActive();
 						}
 						const stepResult: GateSignalStep = {
 							name: step.name,
 							type: step.type,
 							passed: result.passed,
+							...(result.skipped ? { skipped: true } : {}),
+							status: resultStatus,
+							phase,
 							output: result.output,
 							duration_ms,
 							expect: step.expect,
@@ -2766,6 +2795,8 @@ export class VerificationHarness {
 				name: steps[i].name,
 				type: steps[i].type,
 				passed: false,
+				status: "failed" as const,
+				phase: steps[i].phase ?? 0,
 				output: "No result collected",
 				duration_ms: 0,
 				expect: steps[i].expect,
@@ -2799,7 +2830,7 @@ export class VerificationHarness {
 				this._persistActive();
 				return;
 			}
-			const errorStep = { name: "Error", type: "command" as const, passed: false, output: err.message, duration_ms: 0 };
+			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [errorStep],

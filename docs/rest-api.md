@@ -1060,7 +1060,7 @@ Returns the latest signal only. Content body is replaced with `hasContent` + `co
 }
 ```
 
-Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps. Completed signals keep their persisted final results.
+Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Completed signals keep their persisted final results, including each step's explicit terminal `status`, `phase`, and `skipped` flag. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps.
 
 **`GET /api/goals/:id/tasks?view=summary`**
 
@@ -1081,6 +1081,39 @@ Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`,
   }]
 }
 ```
+
+### Gate signal endpoint
+
+**`POST /api/goals/:id/gates/:gateId/signal`** records a new gate signal and starts verification asynchronously. The response includes the signal id, gate id, goal id, current verification status, and the initialized step snapshot.
+
+Verification step rows preserve the same durable fields used by gate inspection and history:
+
+- `phase` — copied from the workflow step so clients can group and order phases;
+- `status` — explicit lifecycle or terminal status (`waiting`, `running`, `passed`, `failed`, or `skipped`);
+- `skipped` — `true` when a step was intentionally skipped, including disabled optional steps and downstream phase skips.
+
+Fresh responses return the initialized rows from the verification harness. Cached same-commit responses return the persisted terminal `verification.steps[]` from the prior signal rather than rebuilding from workflow definitions, so cached cards retain skipped and phase metadata.
+
+```json
+{
+  "id": "sig-22",
+  "gateId": "implementation",
+  "goalId": "goal-1",
+  "status": "running",
+  "steps": [
+    { "name": "Type check", "type": "command", "phase": 0, "status": "running", "passed": false },
+    { "name": "Unit tests", "type": "command", "phase": 1, "status": "waiting", "passed": false }
+  ]
+}
+```
+
+A completed or cached signal may include terminal rows such as:
+
+```json
+{ "name": "Later review", "type": "llm-review", "phase": 1, "status": "skipped", "skipped": true, "passed": false }
+```
+
+Skipped rows are intentional non-runs and are ignored by aggregate pass calculation; consumers should render them distinctly instead of inferring pass/fail from `passed` alone.
 
 ### Sign-off endpoint
 
@@ -1306,7 +1339,7 @@ Pass `step=<name>` to scope the snapshot to a single verification step. When set
 }
 ```
 
-Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` means it will not run because an earlier phase failed. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
+Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` is an active-snapshot derived state for a step blocked by an earlier phase failure; terminal persisted rows use `status: "skipped"` with `skipped: true` and their original `phase`. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
 
 Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
 

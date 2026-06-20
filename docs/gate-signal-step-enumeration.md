@@ -37,6 +37,12 @@ an empty step list. The `POST` response itself hid the bug because it
 returned a step list built directly from the workflow definition, before
 the persistence round-trip.
 
+A later regression had the same shape for different metadata: active
+verification kept each step's `phase`, lifecycle `status`, and `skipped`
+flag, but `POST`, cached responses, persisted terminal rows, and historical
+chat cards could drop those fields. Clients then collapsed all steps into one
+phase or rendered skipped rows as ordinary passes/failures.
+
 The window widened with verification-harness setup cost. On the
 `implementation` gate (eight steps spanning build → typecheck → unit → e2e
 → multiple llm-reviews) it could last tens of seconds; on a single-step
@@ -114,6 +120,13 @@ Two ordering details matter:
    `activeVerifications` map land in the same scheduler tick with matching
    step lists.
 
+The response uses the same initialized step shape, not a stripped workflow
+projection. Each returned step preserves `name`, `type`, `phase`, explicit
+`status`, `passed`, `skipped`, duration, and output when known. Cached
+same-commit responses also return the prior persisted `verification.steps[]`
+so historical and cached chat cards see the same terminal metadata as gate
+inspection.
+
 ### Reuse in `verifyGateSignal`
 
 `verifyGateSignal` now reuses the pre-seeded `activeVerifications` entry
@@ -159,31 +172,36 @@ handler.
 
 ## `GateSignalStep` carries lifecycle status
 
-The persisted `GateSignalStep` (`gate-store.ts`) gained two optional
-fields populated by `beginVerification`:
+The persisted `GateSignalStep` (`gate-store.ts`) carries durable step
+metadata:
 
 | Field | Values | When set |
 |---|---|---|
-| `status` | `"waiting" \| "running" \| "passed" \| "failed" \| "skipped"` | On initial enumeration and during execution. Omitted on terminal-state rows where `passed`/`skipped` already carry the verdict. |
-| `phase` | `number` (default 0) | Mirrored from the workflow `VerifyStep` for ordering. |
+| `status` | `"waiting" \| "running" \| "passed" \| "failed" \| "skipped"` | On initial enumeration, during execution, and on terminal rows. Terminal rows preserve the explicit verdict instead of requiring clients to infer from booleans. |
+| `phase` | `number` (default 0) | Mirrored from the workflow `VerifyStep` for ordering and phase grouping. |
+| `skipped` | `boolean` | `true` for disabled optional steps, command auto-skips, and downstream phase steps skipped after an earlier phase failed. |
 
-The dashboard renderer (`goal-dashboard.ts`) consults `step.status` first
-for in-flight signals. Without this, a freshly-seeded row with
-`passed: false` and `status: "running"` would have rendered as a failed
-step until the live `ActiveVerification` entry caught up via the next
-poll. The renderer logic is:
+The explicit fields make persisted/API data the source of truth for both live
+and historical rendering. A freshly seeded row with `status: "running"` must
+not render as failed just because `passed` is not true yet; a terminal row with
+`status: "skipped"` and `skipped: true` must not render as an ordinary pass.
 
-```ts
-const inFlight = vStatus === "running" && step.status
-              && step.status !== "passed" && step.status !== "failed";
-const stepClass = inFlight
-  ? (step.status === "running" ? "running"
-   : step.status === "skipped" ? "skip" : "waiting")
-  : (step.passed ? "pass" : "fail");
-```
+Skipped rows remain non-blocking for the aggregate gate result: the harness's
+`computeAllPassed()` semantics ignore skipped steps while still failing the
+gate for real failed steps. This is why downstream phase skips can be persisted
+with their original `phase` and `status: "skipped"` without turning into gate
+failures of their own.
 
-Completed signals leave `status` unset and fall back to the boolean
-`passed` verdict — the historical shape is unchanged.
+Older persisted rows without `status` are still tolerated by falling back to
+`skipped` and `passed`, but new rows should preserve all three fields.
+
+## Chat renderer handoff
+
+The `gate_signal` tool renderer passes terminal step snapshots into
+`<gate-verification-live>` as `.initialSteps` in both running and completed
+cards. Completed cards also pass `.finalStatus`, but the step array remains
+necessary: it preserves phase grouping, skipped icons, output, and durations
+when a historical chat card is rendered without live WebSocket events.
 
 ## Stale-verification cancellation ordering
 
@@ -206,10 +224,9 @@ async `verifyGateSignal`.
   `"skipped"` and broadcasts `gate_verification_step_started` /
   `gate_verification_step_complete`. None of that path moved.
 - **Resume-on-restart.** `resumeInterruptedVerifications` reads the
-  persisted `active-verifications.json` exactly as before. The new
-  per-step `status` field is additive; older persisted entries without
-  it are treated as if `status` were absent (the boolean `passed` flag
-  still drives terminal rendering).
+  persisted `active-verifications.json` exactly as before. The per-step
+  `status`, `phase`, and `skipped` fields are additive; older persisted
+  entries without them are tolerated by legacy fallback logic.
 - **Polling interval / batching on the dashboard side.** The fix holds
   even with a 1 ms-interval poller, by construction.
 
@@ -220,12 +237,14 @@ async `verifyGateSignal`.
 | `src/server/agent/verification-harness.ts` | `beginVerification(signal, gate)` | Synchronous step enumeration + `activeVerifications` seed. Returns `GateSignalStep[]` ready to assign to `signal.verification.steps`. No WS broadcast. |
 | `src/server/agent/verification-harness.ts` | `getActiveVerification(signalId)` | Public lookup so the REST handler can read back `startedAt` after `beginVerification` to emit `gate_verification_started` in the correct order. |
 | `src/server/agent/verification-harness.ts` | `verifyGateSignal(signal, gate, …)` | Reuses the pre-seeded `activeVerifications` entry when present; falls back to legacy inline construction (and its own `gate_verification_started` broadcast) only for callers that bypass the REST handler. |
-| `src/server/agent/gate-store.ts` | `GateSignalStep.status` / `phase` | Persisted lifecycle fields populated by `beginVerification`. |
-| `src/server/server.ts` | `/api/goals/:id/gates/:gateId/signal` POST handler | Orchestrates the cancel-stale → begin → record → broadcast sequence. |
+| `src/server/agent/gate-store.ts` | `GateSignalStep.status` / `phase` / `skipped` | Persisted lifecycle and terminal-verdict fields. |
+| `src/server/server.ts` | `/api/goals/:id/gates/:gateId/signal` POST handler | Orchestrates the cancel-stale → begin → record → broadcast sequence and returns initialized/persisted step metadata for both fresh and cached responses. |
 | `src/app/goal-dashboard.ts` | Signal-entry renderer | Consults `step.status` first for in-flight signals so seeded `running`/`waiting` rows don't render as failed. |
-| `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase` additions. |
+| `src/ui/tools/renderers/GateToolRenderers.ts` | `gate_signal` renderer | Passes `initialSteps` to `<gate-verification-live>` for both running and completed cards. |
+| `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase`/`skipped` additions. |
 | `tests/gate-signal-step-enumeration.test.ts` | Unit | Asserts the gate-store signal and `activeVerifications` agree on `steps[]` immediately after `recordSignal`. |
-| `tests/e2e/gate-signal-progress.spec.ts` | API E2E | POSTs a signal, immediately re-reads the gate via summary / inspect / active endpoints and asserts identical step lists within the same scheduler tick. |
+| `tests/e2e/gate-signal-progress.spec.ts` | API E2E | Pins fresh `POST` and cached responses, persisted terminal skipped steps, and phase/status preservation across summary / inspect / active endpoints. |
+| `tests/gate-signal-renderer.spec.ts` | Browser fixture | Asserts completed `gate_signal` cards pass terminal `verification.steps` as `initialSteps` alongside `finalStatus`. |
 | `tests/e2e/ui/verification-progress-indicator.spec.ts` | Browser E2E | Asserts the dashboard renders named verify-card chips immediately after signal (no empty "Verification in progress…" placeholder) and that the chips survive a page reload (rendered from persisted gate-store state alone). |
 
 ## Origin
