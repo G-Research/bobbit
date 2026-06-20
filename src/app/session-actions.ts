@@ -102,7 +102,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 	const staffId = input.staffId ?? session.staffId;
 	const isTeamLead = session.role === "team-lead";
 	const copyLink = input.copyLink ?? defaultCopySidebarLink;
-	const launcherActions = buildSessionMenuLauncherActions(onRefreshStateChanged);
+	const launcherActions = buildSessionMenuLauncherActions(session.id, onRefreshStateChanged);
 	const actions: SessionActionDescriptor[] = [
 		{
 			id: "modify",
@@ -219,7 +219,7 @@ function isChildSession(session: GatewaySession): boolean {
 	return !!(session.parentSessionId || session.delegateOf);
 }
 
-function buildSessionMenuLauncherActions(onRefreshStateChanged?: () => void): SessionActionDescriptor[] {
+function buildSessionMenuLauncherActions(sessionId: string, onRefreshStateChanged?: () => void): SessionActionDescriptor[] {
 	let launchers: ReturnType<typeof listLauncherEntrypoints> = [];
 	try {
 		launchers = listLauncherEntrypoints("session-menu");
@@ -244,7 +244,7 @@ function buildSessionMenuLauncherActions(onRefreshStateChanged?: () => void): Se
 						if (result.ok) return;
 						emitLauncherFeedback("error", launcherFailureMessage(launcher.label, result));
 						onRefreshStateChanged?.();
-					});
+					}, { sessionId });
 				} catch (error) {
 					emitLauncherFeedback("error", error instanceof Error ? error.message : `Could not run ${launcher.label}.`);
 				}

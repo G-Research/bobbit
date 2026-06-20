@@ -265,7 +265,7 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
  * success (backward-compatible).
  */
 export interface LauncherDispatchResult { ok: boolean; error?: string; code?: string; }
-export interface LauncherDispatchOptions { body?: Record<string, unknown>; }
+export interface LauncherDispatchOptions { body?: Record<string, unknown>; sessionId?: string; }
 
 export function runLauncherEntrypoint(
 	keyOrId: string,
@@ -288,9 +288,14 @@ export function runLauncherEntrypoint(
 	}
 	// Spawn launcher FIRST (it also carries a `panelId`, so an `action`-first check
 	// keeps it from being mis-routed to `openPackPanel`; design §3.1 / R3).
-	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult, options?.body); return; }
-	if (isPanelTarget(l.target)) { openPackPanel(l.target, l.packId); onResult?.({ ok: true }); return; }
-	navigateToTarget(l.target as RouteTarget);
+	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult, options); return; }
+	if (isPanelTarget(l.target)) {
+		const target = options?.sessionId ? { ...l.target, sessionId: options.sessionId } : l.target;
+		openPackPanel(target, l.packId);
+		onResult?.({ ok: true });
+		return;
+	}
+	navigateToTarget(l.target as RouteTarget, options?.sessionId ? { sessionId: options.sessionId } : undefined);
 	onResult?.({ ok: true });
 }
 
@@ -309,16 +314,16 @@ async function runSpawnLauncher(
 	l: RegisteredLauncher,
 	target: SpawnLaunchTarget,
 	onResult?: (r: LauncherDispatchResult) => void,
-	body?: Record<string, unknown>,
+	options?: LauncherDispatchOptions,
 ): Promise<void> {
 	if (inFlightSpawnLaunch.has(l.key)) return;      // ignore re-entrant click
 	inFlightSpawnLaunch.add(l.key);
 	try {
-		const host = getLauncherHost(l.packId, l.id);
+		const host = getLauncherHost(l.packId, l.id, options?.sessionId);
 		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: "PR Walkthrough is unavailable." }); return; }
 		let res: { ok?: boolean; childSessionId?: string; error?: string; code?: string } | undefined;
 		try {
-			res = await host.callRoute(target.route, { method: "POST", body: body ?? {} });
+			res = await host.callRoute(target.route, { method: "POST", body: options?.body ?? {} });
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			onResult?.({ ok: false, error: message });
@@ -339,11 +344,12 @@ async function runSpawnLauncher(
  * Map a structured `RouteTarget` → the SPA router's `#/ext/<routeId>?<params>`
  * hash scheme (design §7 C1.2). The pack passes ONLY a structured target; this
  * looks the `route` up in the registry, filters `params` to the registered
- * `paramKeys`, and hands the encoding to `routing.ts::setExtRoute` — the pack
- * never constructs a URL. An unknown `route` (e.g. owning pack uninstalled) is a
- * no-op (no crash, no raw URL).
+ * `paramKeys`, optionally opens the resolved panel in an explicitly-bound session,
+ * and hands the encoding to `routing.ts::setExtRoute` — the pack never constructs
+ * a URL. An unknown `route` (e.g. owning pack uninstalled) is a no-op (no crash,
+ * no raw URL).
  */
-export function navigateToTarget(target: RouteTarget): void {
+export function navigateToTarget(target: RouteTarget, options?: { sessionId?: string }): void {
 	const routeId = target?.route;
 	if (typeof routeId !== "string" || !routeId) return;
 	const entry = routes.get(routeId);
@@ -357,6 +363,9 @@ export function navigateToTarget(target: RouteTarget): void {
 		for (const key of entry.paramKeys) {
 			if (key in target.params) filtered[key] = target.params[key];
 		}
+	}
+	if (options?.sessionId) {
+		openPackPanel({ panelId: entry.targetPanelId, params: filtered, sessionId: options.sessionId }, entry.packId);
 	}
 	setExtRoute(routeId, filtered);
 }
