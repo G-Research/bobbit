@@ -49,11 +49,46 @@ import { getHostApi } from "../../src/app/host-api.js";
 			case "store.get": h.store.get("k"); break;
 			case "store.put": h.store.put("k", 1); break;
 			case "store.list": h.store.list(); break;
+			case "store.delete": h.store.delete("k"); break;
+			case "store.deletePrefix": h.store.deletePrefix("pre"); break;
+			case "store.stats": h.store.stats("pre"); break;
 			default: return "unknown-stub";
 		}
 		return null; // did not throw → failure
 	} catch (e) {
 		return e instanceof Error ? e.message : String(e);
+	}
+};
+
+(window as any).__storeMethods = () => {
+	const h: any = getHostApi("sess-1", "tu-1");
+	return ["get", "put", "list", "delete", "deletePrefix", "stats"].map((name) => `${name}:${typeof h.store[name]}`);
+};
+
+(window as any).__callRouteHttpError = async () => {
+	const originalFetch = window.fetch;
+	window.fetch = async (input: RequestInfo | URL) => {
+		const url = String(input);
+		if (url.includes("/api/ext/surface-token")) {
+			return new Response(JSON.stringify({ token: "surface-token" }), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		if (url.includes("/api/ext/route/publish")) {
+			return new Response(JSON.stringify({
+				code: "STORE_QUOTA_EXCEEDED",
+				error: "Review payload is too large to save.",
+				details: { errors: [{ path: "reviews/job/final/payload", message: "maxTotalBytes exceeded" }] },
+			}), { status: 500, headers: { "content-type": "application/json" } });
+		}
+		return new Response("not found", { status: 404 });
+	};
+	try {
+		const h: any = getHostApi("sess-1", undefined, { kind: "pack", packId: "pr-walkthrough", contributionKind: "panel", contributionId: "pr-walkthrough.panel" } as any);
+		await h.callRoute("publish", { method: "POST", body: {} });
+		return null;
+	} catch (e: any) {
+		return { message: e?.message, status: e?.status, code: e?.code, routeError: e?.routeError, details: e?.details };
+	} finally {
+		window.fetch = originalFetch;
 	}
 };
 
