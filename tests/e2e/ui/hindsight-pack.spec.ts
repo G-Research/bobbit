@@ -318,3 +318,287 @@ describe("Hindsight pack — native config/status panel (built-in band)", () => 
 		).toBeVisible({ timeout: 15_000 });
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UX POLISH — design docs/design/hindsight-ux-polish.md + ...-implementation.md
+// (Partition E). Extends the panel coverage with the seven required scenarios that
+// live on the panel surface: the stale-form refresh REGRESSION (B1/B2 + dirty +
+// discard), Open Hindsight UI, the guided-setup defaults/explanations + connection
+// smoke test, and managed-mode NO-AUTO-START + explicit Start + progress. Runtime
+// is MOCKED via registerPackRuntimeSupervisorFactory (no Docker); external data is
+// the in-process hindsight stub. See the marketplace spec for the row-level states.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AJ-baked UI dashboard URL example (distinct from the API/data-plane URL) — mirrors
+// the panel's EX_UI_URL copy; used to prove "Open Hindsight UI" opens THIS, never a
+// value fabricated from the API URL.
+const EX_UI_URL = "http://localhost:19177/banks/hermes?view=data";
+
+/** Field locators (the config form). */
+const f = {
+	externalUrl: (p: Page) => p.locator('[data-testid="hindsight-external-url"]'),
+	uiUrl: (p: Page) => p.locator('[data-testid="hindsight-ui-url"]'),
+	bank: (p: Page) => p.locator('[data-testid="hindsight-bank"]'),
+	timeout: (p: Page) => p.locator('[data-testid="hindsight-timeout"]'),
+	namespace: (p: Page) => p.locator('[data-testid="hindsight-namespace"]'),
+};
+
+/** Seed the persisted Hindsight config in the shared in-process pack store OUT OF
+ *  BAND — exactly the way another session/agent (or the `config` route) would land a
+ *  record after the panel mounted. This is the trigger for the stale-form regression:
+ *  the form must re-hydrate from THIS on a Refresh, and Save must never clobber it. */
+async function seedHindsightConfig(overrides: Record<string, unknown>): Promise<void> {
+	const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+	await getPackStore().put(PACK, CONFIG_KEY, overrides);
+}
+
+/** Open the Hindsight panel in a fresh session via the command-palette launcher
+ *  (the same chain a palette click drives), mirroring the suite above. Returns the
+ *  discovered contribution so the caller can deep-link if needed. Skips when the
+ *  built-in band does not serve the panel contribution in this environment. */
+async function mountHindsightPanel(page: Page): Promise<HindsightContribution> {
+	const contribution = await resolveHindsightContribution();
+	test.skip(
+		!contribution,
+		"Hindsight pack panel contribution is not served in this environment (panel/entrypoints/routes not built or not merged)",
+	);
+	const { paletteEntrypointId } = contribution!;
+	await openApp(page);
+	const sid = await createSessionViaUI(page);
+	expect(sid, "a session must be selected").toBeTruthy();
+	await waitForSessionStatus(sid, "idle").catch(() => { /* best-effort */ });
+	await reconcile(page);
+	await expect.poll(async () => {
+		await reconcile(page);
+		await page.evaluate((key) => (window as any).__bobbitRunPackLauncher?.(key), launcherKey(paletteEntrypointId)).catch(() => { /* race */ });
+		return panel(page).count();
+	}, { timeout: 20_000 }).toBeGreaterThan(0);
+	await expect(panel(page), "the Hindsight panel must mount in the active session").toBeVisible({ timeout: 15_000 });
+	return contribution!;
+}
+
+// ── Mocked managed runtime supervisor (NO Docker). Mutable status so a test can
+//    drive stopped→running; records every control call so we can assert the
+//    no-auto-start invariant (mount/select/save NEVER call start). Mirrors the shape
+//    exercised by tests/e2e/marketplace-runtime-activation.spec.ts. `ports: []` in the
+//    capability summary keeps the route runtime-context unresolved, so the panel's
+//    managed badge stays a deterministic "starting" (never flips to running off a
+//    fabricated base URL). ──
+interface SupCall { op: "start" | "stop" | "restart" | "down"; }
+const supCalls: SupCall[] = [];
+let managedRuntimeStatus: "stopped" | "starting" | "running" | "unhealthy" | "docker-unavailable" = "stopped";
+function rtStatus(status: string) {
+	return { id: "hindsight:hindsight", packId: PACK, packName: PACK, runtimeId: "hindsight", status, mode: "managed-postgres", composeProject: "bobbit-pack-hindsight-test" };
+}
+const fakeSupervisor = {
+	async list() { return [rtStatus(managedRuntimeStatus)]; },
+	async status() { return rtStatus(managedRuntimeStatus); },
+	async start() { supCalls.push({ op: "start" }); managedRuntimeStatus = "running"; return rtStatus("running"); },
+	async stop() { supCalls.push({ op: "stop" }); managedRuntimeStatus = "stopped"; return rtStatus("stopped"); },
+	async restart() { supCalls.push({ op: "restart" }); managedRuntimeStatus = "running"; return rtStatus("running"); },
+	async down() { supCalls.push({ op: "down" }); managedRuntimeStatus = "stopped"; return rtStatus("stopped"); },
+	async logs() { return "managed-runtime log line\n"; },
+	async capabilitySummary() {
+		return { ...rtStatus(managedRuntimeStatus), startPolicy: "on-enable", services: ["api", "db"], images: ["hindsight/api", "postgres"], ports: [], volumePath: "~/.hindsight", trust: "local" };
+	},
+};
+
+describe("Hindsight pack — UX polish (panel)", () => {
+	let stub: HindsightStub;
+
+	test.beforeAll(async () => {
+		const mod = await import("../../../dist/server/server.js");
+		mod.registerPackRuntimeSupervisorFactory(() => fakeSupervisor as never);
+		stub = await startStub();
+	});
+
+	test.afterAll(async () => {
+		const mod = await import("../../../dist/server/server.js");
+		mod.registerPackRuntimeSupervisorFactory(null);
+		await resetHindsightConfig();
+		if (stub) await stub.close().catch(() => { /* ignore */ });
+	});
+
+	test.beforeEach(async () => {
+		// Clean slate per test — the config store is shared across the worker.
+		await resetHindsightConfig();
+		supCalls.length = 0;
+		managedRuntimeStatus = "stopped";
+	});
+
+	// ── Headline B1: Refresh re-hydrates the FORM (not just the status card) from the
+	//    persisted config; a dirty edit survives Refresh; Discard reverts. ──
+	test("stale-form B1: Refresh re-hydrates the form from the persisted config; dirty edits survive; Discard reverts", async ({ page }) => {
+		await mountHindsightPanel(page);
+
+		// Dormant first-run: the form shows the mount-time DEFAULTS.
+		await expect(statusBadge(page), "unconfigured panel starts dormant").toHaveAttribute("data-state", "dormant", { timeout: 15_000 });
+		await expect(f.externalUrl(page)).toHaveValue("");
+		await expect(f.bank(page)).toHaveValue("bobbit");
+		await expect(f.timeout(page)).toHaveValue("1500");
+
+		// Another agent / the route lands a good config AFTER mount.
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", timeoutMs: 15000 });
+
+		// B1 — Refresh re-hydrates BOTH config + status: the FORM now reflects the
+		// persisted values (not the stale defaults), and the badge flips to connected.
+		await page.locator('[data-testid="hindsight-refresh"]').click();
+		await expect(f.externalUrl(page), "Refresh re-seeds the external URL from the persisted config").toHaveValue(stub.url, { timeout: 15_000 });
+		await expect(f.bank(page), "Refresh re-seeds the bank").toHaveValue("hermes");
+		await expect(f.timeout(page), "Refresh re-seeds the timeout").toHaveValue("15000");
+		await expect(statusBadge(page), "a healthy external Hindsight is connected").toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+
+		// A DIRTY edit must NOT be clobbered by a subsequent Refresh ("unless the user
+		// has unsaved edits"). The unsaved banner appears.
+		await f.bank(page).fill("edited-bank");
+		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "a dirty draft shows the unsaved-changes banner").toBeVisible();
+		await page.locator('[data-testid="hindsight-refresh"]').click();
+		await expect(f.bank(page), "Refresh preserves the in-progress edit").toHaveValue("edited-bank");
+		await expect(page.locator('[data-testid="hindsight-unsaved"]')).toBeVisible();
+
+		// Discard reverts the draft to the persisted config and clears the banner.
+		await page.locator('[data-testid="hindsight-discard"]').click();
+		await expect(f.bank(page), "Discard reverts to the persisted bank").toHaveValue("hermes");
+		await expect(page.locator('[data-testid="hindsight-unsaved"]')).toHaveCount(0);
+	});
+
+	// ── Headline B2: the exact observed reproduction — a panel that mounted dormant
+	//    and was NEVER refreshed must not clobber a config that landed server-side. ──
+	test("stale-form B2: Save from a never-refreshed dormant form does NOT clobber a server-side config", async ({ page }) => {
+		await mountHindsightPanel(page);
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "dormant", { timeout: 15_000 });
+
+		// Another agent configures Hindsight while the form still shows dormant defaults.
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", timeoutMs: 15000 });
+
+		// Press Save WITHOUT refreshing. The fix re-reads the live config first and
+		// diffs against it, so the empty/default draft sends nothing that overwrites the
+		// good record. Pre-fix this clobbered it back to bobbit/empty/1500.
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// The good config survives: status connects to the seeded external Hindsight and
+		// the form re-seeds from the live config (bank hermes, not bobbit).
+		await expect(statusBadge(page), "the seeded config is preserved → connected").toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+		await expect(f.bank(page), "Save did not clobber the bank").toHaveValue("hermes", { timeout: 15_000 });
+		await expect(f.externalUrl(page), "Save did not clobber the external URL").toHaveValue(stub.url);
+		await expect(f.timeout(page), "Save did not clobber the timeout").toHaveValue("15000");
+	});
+
+	// ── Save with a dirty edit sends ONLY the changed key — untouched keys survive. ──
+	test("stale-form B2: a dirty Save sends only the changed key and preserves untouched keys", async ({ page }) => {
+		await mountHindsightPanel(page);
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes", timeoutMs: 15000 });
+		await page.locator('[data-testid="hindsight-refresh"]').click();
+		await expect(f.bank(page)).toHaveValue("hermes", { timeout: 15_000 });
+
+		// Change ONLY the bank, then Save.
+		await f.bank(page).fill("project-bank");
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// The bank is updated; the untouched external URL + timeout are preserved (not
+		// reset to defaults — proving Save diffs against the live config, not a stale base).
+		await expect(f.bank(page)).toHaveValue("project-bank", { timeout: 15_000 });
+		await expect(f.externalUrl(page), "untouched external URL preserved").toHaveValue(stub.url);
+		await expect(f.timeout(page), "untouched timeout preserved").toHaveValue("15000");
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "a successful Save clears the dirty banner").toHaveCount(0);
+	});
+
+	// ── Open Hindsight UI — distinct from the API URL; link present only with a uiUrl. ──
+	test("Open Hindsight UI: the link appears only when a UI URL is configured, with the exact href", async ({ page }) => {
+		await mountHindsightPanel(page);
+
+		// No UI URL configured → no Open-Hindsight-UI link.
+		await expect(page.locator('[data-testid="hindsight-open-ui"]'), "no UI URL ⇒ no Open-UI link").toHaveCount(0);
+
+		// Configure the API URL (data plane) AND a DISTINCT dashboard UI URL, then Save.
+		await f.externalUrl(page).fill(stub.url);
+		await f.uiUrl(page).fill(EX_UI_URL);
+		await page.locator('[data-testid="hindsight-save"]').click();
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+
+		const link = page.locator('[data-testid="hindsight-open-ui"]');
+		await expect(link, "a configured UI URL surfaces the Open-Hindsight-UI link").toBeVisible({ timeout: 15_000 });
+		await expect(link, "the link opens the UI URL verbatim (never fabricated from the API URL)").toHaveAttribute("href", EX_UI_URL);
+		await expect(link).toHaveAttribute("target", "_blank");
+		// The API URL and the UI URL are DISTINCT — the link is not the data-plane URL.
+		expect(EX_UI_URL).not.toBe(stub.url);
+	});
+
+	// ── Guided setup: first-run shows the chooser + recommended-defaults explainer +
+	//    ownership matrix; the connection smoke test reaches ok against a healthy stub. ──
+	test("guided setup: first-run shows the chooser, defaults explainer + ownership matrix; the smoke test reaches ok", async ({ page }) => {
+		await mountHindsightPanel(page);
+
+		// First-run (dormant) auto-opens the guided setup with all three explainers.
+		await expect(page.locator('[data-testid="hindsight-setup"]'), "first-run shows the guided setup").toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="hindsight-defaults-explainer"]'), "recommended-defaults explainer is shown").toBeVisible();
+		await expect(page.locator('[data-testid="hindsight-ownership"]'), "the who-manages-what matrix is shown").toBeVisible();
+		// The deployment chooser offers the four documented deployments incl. Hermes-local.
+		await expect(page.locator('[data-testid="hindsight-deploy-external"]')).toBeVisible();
+		await expect(page.locator('[data-testid="hindsight-deploy-hermes"]')).toBeVisible();
+		await expect(page.locator('[data-testid="hindsight-deploy-managed"]')).toBeVisible();
+
+		// Seed a healthy external config + a recallable memory so the smoke test passes,
+		// then run the connection + recall smoke test from the setup card.
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "bobbit" });
+		stub.seedMemories("bobbit", [{ text: "setup smoke probe", id: "smoke-1", score: 0.9 }]);
+
+		await page.locator('[data-testid="hindsight-setup-test"]').click();
+		const progress = page.locator('[data-testid="hindsight-setup-progress"]');
+		await expect(progress, "the smoke-test renders a per-step progress list").toBeVisible({ timeout: 15_000 });
+		// Both steps (connection health probe + recall smoke) reach ok against the stub.
+		await expect.poll(async () => progress.locator('.hs-progress-row[data-state="ok"]').count(), { timeout: 20_000 }).toBe(2);
+		await expect(progress.locator('.hs-progress-row[data-state="fail"]')).toHaveCount(0);
+	});
+
+	// ── Managed mode: NO auto-start. Selecting managed + Save persists config ONLY;
+	//    Docker starts solely from the explicit, consent-gated Start button. ──
+	test("managed mode: select + Save never starts Docker; explicit Start fires exactly one /start and shows progress", async ({ page }) => {
+		await mountHindsightPanel(page);
+
+		// Record EVERY runtime /start request the page issues (the no-auto-start probe).
+		const startRequests: string[] = [];
+		page.on("request", (r) => {
+			if (/\/api\/pack-runtimes\/[^/]+\/start(\?|$)/.test(r.url())) startRequests.push(r.url());
+		});
+
+		// Select managed mode + provide the required LLM key, then Save (config ONLY).
+		await page.locator('[data-testid="hindsight-mode"]').selectOption("managed");
+		await page.locator('[data-testid="hindsight-llm-api-key"]').fill("sk-managed-test");
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// The managed control card appears with an explicit Start button; the badge is
+		// Stopped (configured, not running). Crucially: NOTHING started Docker.
+		await expect(page.locator('[data-testid="hindsight-managed-card"]'), "managed mode shows the managed control card").toBeVisible({ timeout: 15_000 });
+		// The badge reaching "stopped" proves Save's config-POST + the follow-up status
+		// read both completed — so any (buggy) auto-start would already have fired.
+		await expect(statusBadge(page), "managed + configured but not started ⇒ stopped").toHaveAttribute("data-state", "stopped", { timeout: 20_000 });
+		expect(startRequests, "select + Save must NOT start Docker (no-auto-start invariant)").toHaveLength(0);
+		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start must not be called by Save").toHaveLength(0);
+
+		// Start is gated behind the consent acknowledgement.
+		const startBtn = page.locator('[data-testid="hindsight-start-runtime"]');
+		await expect(startBtn, "Start is disabled until consent is acknowledged").toBeDisabled();
+		await page.locator('[data-testid="hindsight-managed-consent-ack"]').check();
+		await expect(startBtn, "Start enables once required inputs + consent are present").toBeEnabled();
+
+		// The explicit Start click is the ONLY Docker-starting path → exactly one /start.
+		const [startReq] = await Promise.all([
+			page.waitForRequest(/\/api\/pack-runtimes\/[^/]+\/start(\?|$)/, { timeout: 20_000 }),
+			startBtn.click(),
+		]);
+		expect(startReq.url()).toMatch(/\/api\/pack-runtimes\/[^/]+\/start/);
+
+		// Progress renders and the badge advances to Starting (driven by the explicit
+		// start gesture + mocked runtime; never auto-resolved off a fabricated base URL).
+		await expect(page.locator('[data-testid="hindsight-runtime-progress"]'), "the runtime progress list renders after Start").toBeVisible({ timeout: 15_000 });
+		await expect(statusBadge(page), "the badge advances to starting after the explicit Start").toHaveAttribute("data-state", "starting", { timeout: 15_000 });
+
+		// Exactly ONE start request total (no duplicate / retry storms). The badge
+		// reaching "starting" gates on the start fetch + the follow-up status read, so
+		// the request has already been observed by the listener.
+		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
+		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
+	});
+});
