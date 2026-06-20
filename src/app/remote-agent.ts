@@ -2041,6 +2041,10 @@ export class RemoteAgent {
 				this._state.error = msg.message || "Unknown server error";
 				this._pendingAttachments = null;
 				this._pendingSkillExpansions = null;
+				// Turn died (e.g. immediate model 404) possibly BEFORE the server
+				// echoed the user prompt. Settle any unreconciled optimistic row out
+				// of the far-future tail sentinel so it doesn't strand at the bottom.
+				this.apply({ type: "settle-optimistic" });
 				this.apply({
 					type: "error",
 					message: {
@@ -2524,6 +2528,10 @@ export class RemoteAgent {
 
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;
+				// Turn ended. If a prompt/steer was sent but never echoed back as a
+				// server user row, settle the optimistic row into chronological
+				// position instead of leaving it pinned at the tail sentinel.
+				this.apply({ type: "settle-optimistic" });
 				break;
 			}
 
