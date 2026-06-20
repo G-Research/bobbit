@@ -383,66 +383,14 @@ describe("SessionStore", () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
-	// Attachment-draft storage contract (Bug 1 regression)
-	//
-	// The composer must persist pasted/attached images so they survive a
-	// session switch / reload. Whatever dedicated draft type the fix uses,
-	// the underlying SessionStore must round-trip attachment-shaped payloads,
-	// keep them isolated from the text ("prompt") draft, and apply the same
-	// gen staleness guard so out-of-order attachment saves cannot clobber
-	// newer ones. These tests pin the store-level contract independently of
-	// the chosen draft-type name.
-	// -----------------------------------------------------------------------
-
-	describe("attachment draft storage contract", () => {
-		const ATTACH_TYPE = "prompt-attachments";
-		function makeAttachmentDraft(gen: number) {
-			return {
-				gen,
-				attachments: [
-					{ name: "pasted.png", mimeType: "image/png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" },
-				],
-			};
-		}
-
-		it("round-trips an attachment-shaped draft under a dedicated type", () => {
-			const store = freshStore();
-			store.put(makeSession());
-			const draft = makeAttachmentDraft(1);
-			assert.equal(store.setDraft("sess-1", ATTACH_TYPE, draft), true);
-			assert.deepEqual(store.getDraft("sess-1", ATTACH_TYPE), draft);
-		});
-
-		it("keeps attachment drafts isolated from the text prompt draft", () => {
-			const store = freshStore();
-			store.put(makeSession());
-			store.setDraft("sess-1", "prompt", { text: "some text", gen: 1 });
-			store.setDraft("sess-1", ATTACH_TYPE, makeAttachmentDraft(1));
-			// Deleting the text draft must not remove the attachment draft.
-			store.deleteDraft("sess-1", "prompt");
-			assert.equal(store.getDraft("sess-1", "prompt"), undefined);
-			assert.deepEqual(store.getDraft("sess-1", ATTACH_TYPE), makeAttachmentDraft(1));
-		});
-
-		it("applies the gen staleness guard to attachment drafts", () => {
-			const store = freshStore();
-			store.put(makeSession());
-			store.setDraft("sess-1", ATTACH_TYPE, makeAttachmentDraft(2));
-			// Out-of-order older attachment save must be discarded.
-			store.setDraft("sess-1", ATTACH_TYPE, makeAttachmentDraft(1));
-			assert.deepEqual(store.getDraft("sess-1", ATTACH_TYPE), makeAttachmentDraft(2));
-		});
-
-		it("persists attachment drafts across a disk reload", () => {
-			const store1 = freshStore();
-			store1.put(makeSession());
-			store1.setDraft("sess-1", ATTACH_TYPE, makeAttachmentDraft(1));
-			store1.flush();
-			const store2 = freshStore();
-			assert.deepEqual(store2.getDraft("sess-1", ATTACH_TYPE), makeAttachmentDraft(1));
-		});
-	});
+	// NOTE: Composer attachment drafts are deliberately NOT stored in the server
+	// SessionStore. They live client-side in IndexedDB (PromptDraftAttachmentsStore)
+	// because base64 image blobs are too large for the inline sessions.json draft
+	// map, and there is no persistent gen guard on them — stale-load resurrection
+	// is prevented by the in-flight async-load generation guard in AgentInterface.
+	// Store-level caps/eviction are covered by tests/prompt-draft-attachments-store.test.ts;
+	// the in-flight guard is covered by tests/agent-interface-attachment-draft-race.test.ts.
+	// See docs/design/composer-draft-persistence.md.
 
 	// -----------------------------------------------------------------------
 	// Persistence round-trips
