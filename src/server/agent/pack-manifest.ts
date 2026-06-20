@@ -12,8 +12,10 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import type { PackManifest, PackMeta, PackRoutesRef, PackScope } from "./pack-types.js";
 
-/** Route name guard — mirrors the per-pack route allowlist token shape. */
-const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+/** Route name guard — mirrors the per-pack route allowlist token shape.
+ *  Allows camelCase (e.g. `defineExperiment`) so packs can name routes with the
+ *  same identifiers their JS modules export. */
+const ROUTE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 /** Pack name guard — used as a directory name; reject traversal/unsafe. */
 const PACK_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;

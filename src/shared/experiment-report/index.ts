@@ -293,17 +293,26 @@ export function buildReportModel(input: {
 	};
 }
 
-/** Render one widget spec through the shared registry; unknown types degrade gracefully. */
+/**
+ * Render one widget spec through the shared registry; unknown types degrade
+ * gracefully. The output is wrapped in a stable, theme-neutral element carrying
+ * the canonical `experiment-runner-widget` test id + `data-widget-type` so the
+ * report HTML (the single source of truth) is addressable exactly like the
+ * panel's client-side fallback render — regardless of which path produced it.
+ */
 export function renderWidget(model: ReportModel, spec: WidgetSpec): string {
 	const renderer = getWidget(spec.type);
+	let inner: string;
 	if (!renderer) {
-		return card(spec.title ?? spec.type, emptyNote(`Unknown widget type: ${spec.type}`));
+		inner = card(spec.title ?? spec.type, emptyNote(`Unknown widget type: ${spec.type}`));
+	} else {
+		try {
+			inner = renderer.render({ model, spec });
+		} catch (err) {
+			inner = card(spec.title ?? spec.type, emptyNote(`Widget render error: ${(err as Error)?.message ?? err}`));
+		}
 	}
-	try {
-		return renderer.render({ model, spec });
-	} catch (err) {
-		return card(spec.title ?? spec.type, emptyNote(`Widget render error: ${(err as Error)?.message ?? err}`));
-	}
+	return `<div data-testid="experiment-runner-widget" data-widget-type="${escapeHtml(spec.type)}">${inner}</div>`;
 }
 
 /**

@@ -536,8 +536,13 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	}
 
 	async function saveDashboardSpec(host, instanceKey, experimentId, spec) {
-		await callRoute(host, "saveDashboard", { method: "POST", body: { experimentId, dashboard: spec } });
-		await storePut(host, K.dashboard(experimentId), spec);
+		// The store + saveDashboard route both speak the canonical { widgets: [...] }
+		// DashboardSpec shape (resolveDashboard only honours stored.widgets); the
+		// editor works with a bare widget array, so normalise here so an edited spec
+		// survives the report-route path and re-renders without a re-run.
+		const dashboard = Array.isArray(spec) ? { widgets: spec } : (spec && Array.isArray(spec.widgets) ? spec : { widgets: [] });
+		await callRoute(host, "saveDashboard", { method: "POST", body: { experimentId, dashboard } });
+		await storePut(host, K.dashboard(experimentId), dashboard);
 		patch(host, instanceKey, { dashboardEditing: false });
 		await loadDashboard(host, instanceKey, experimentId);
 	}
