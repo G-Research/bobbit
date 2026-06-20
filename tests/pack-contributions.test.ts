@@ -76,6 +76,11 @@ describe("validateManifest (§1.2)", () => {
 		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names: ["bundle", "publish"] } });
 		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names: ["bundle", "publish"] });
 	});
+	it("accepts camelCase route names (e.g. defineExperiment)", () => {
+		const names = ["defineExperiment", "getExperiment", "saveDashboard", "listWidgets"];
+		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names } });
+		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names });
+	});
 	it("still rejects contents.mcp at schema 1; carries no stores schema", () => {
 		const problems: string[] = [];
 		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, mcp: ["x"] } }, problems), null);

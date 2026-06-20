@@ -40,7 +40,7 @@ const comparisonTable: WidgetRenderer = {
 			armIds
 				.map(
 					(a) =>
-						`<th style="text-align:right;padding:4px 8px;color:var(--muted-foreground);border-bottom:1px solid var(--border);">${escapeHtml(a)}</th>`,
+						`<th data-testid="experiment-runner-comparison-arm" data-arm="${escapeHtml(a)}" style="text-align:right;padding:4px 8px;color:var(--muted-foreground);border-bottom:1px solid var(--border);">${escapeHtml(a)}</th>`,
 				)
 				.join("") +
 			`</tr>`;
