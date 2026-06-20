@@ -1814,7 +1814,7 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: { fallbackLabel?: string },
+	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean },
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
 
@@ -1940,7 +1940,12 @@ export function renderModelRow(
 							onChange: (value: string) => { onThinkingChange(value); },
 							size: "sm",
 							variant: "ghost",
-							fitContent: true,
+							// Settings callers pass neither opt → Select keeps its default
+							// 180px fit-content sizing. Compact list rows pass an explicit
+							// fixed width + fitContent:false so the trigger never injects an
+							// inline min-width:180px that overflows the narrow row cell.
+							...(opts?.thinkingWidth ? { width: opts.thinkingWidth } : {}),
+							fitContent: opts?.thinkingFitContent ?? true,
 						})}
 					</div>
 				</div>

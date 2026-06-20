@@ -232,12 +232,14 @@
 	padding: 2px;
 	gap: 2px;
 }
-/* The thinking Select defaults to a 180px min-width which bloats the row and
- * pushes its chevron past the control edge. Clamp it so the chevron (a
- * flex-shrink-0, justify-between child) stays inside the button bounds. */
+/* The thinking Select is rendered compact-by-construction for list rows
+ * (renderModelRow opts: thinkingWidth=132px, fitContent=false), so its trigger
+ * carries an inline width:132px and NO inline min-width:180px. These rules are
+ * a defensive cap only — they reinforce the fixed width without fighting it via
+ * !important, so the chevron (a flex-shrink-0, justify-between child) always
+ * stays inside the button bounds and inside the row control. */
 .role-row-model-control [data-testid="model-row"] [role="combobox"] {
-	min-width: 0 !important;
-	width: auto !important;
+	min-width: 0;
 	max-width: 132px;
 }
 
