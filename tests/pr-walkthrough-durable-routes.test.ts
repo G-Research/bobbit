@@ -142,6 +142,48 @@ test("PR walkthrough chunks are idempotent and finalized into review-scoped payl
 	assert.equal(bundle.cards.length, 3);
 });
 
+test("PR walkthrough metadata chunk trusted fields are merged without duplicate pr keys", async () => {
+	const { ctx, store } = seedCtx();
+	await saveChunk(ctx, "metadata", `provider: gitlab
+owner: attacker
+repo: wrong
+number: 999
+url: https://example.invalid/wrong
+base_sha: ${"c".repeat(40)}
+head_sha: ${"d".repeat(40)}
+title: Reviewer title
+original_description:
+  body: preserved body
+  source: gh_api
+  fetched_at: "2026-05-30T00:00:00.000Z"
+stats:
+  files_changed: 3
+  additions: 10
+  deletions: 2`);
+	await saveChunk(ctx, "context", "why_created: A\nproblem_solved: B\nwhy_worth_merging: C\nmerge_concerns: D\nauthor_intent: E\nreviewer_map: F");
+	await saveChunk(ctx, "merge_assessment", "recommendation: comment\nconfidence: medium\nsummary: S\nblocking_concerns: []\nnon_blocking_concerns: []");
+	await saveChunk(ctx, "audit", "remaining_changed_areas: []\nlow_signal_or_mechanical_changes: []\ngenerated_or_binary_files: []\nreviewer_checklist:\n  - ok");
+	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
+
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	const yaml = finalPayload.yaml;
+	for (const key of ["provider", "owner", "repo", "number", "url", "base_sha", "head_sha"]) {
+		assert.equal((yaml.match(new RegExp(`^  ${key}:`, "gm")) || []).length, 1, `${key} should be emitted once`);
+	}
+	assert.match(yaml, /^  provider: "github"$/m);
+	assert.match(yaml, /^  owner: "SuuBro"$/m);
+	assert.match(yaml, /^  repo: "bobbit"$/m);
+	assert.match(yaml, /^  number: 42$/m);
+	assert.match(yaml, /^  url: "https:\/\/github\.com\/SuuBro\/bobbit\/pull\/42"$/m);
+	assert.match(yaml, new RegExp(`^  base_sha: "${baseSha}"$`, "m"));
+	assert.match(yaml, new RegExp(`^  head_sha: "${headSha}"$`, "m"));
+	assert.match(yaml, /^  title: "Reviewer title"$/m);
+	assert.match(yaml, /^    files_changed: 3$/m);
+	assert.match(yaml, /^    body: "preserved body"$/m);
+});
+
 test("submit_pr_walkthrough_yaml rejects before writing document over incremental chunks", async () => {
 	const { ctx, store } = seedCtx();
 	await saveChunk(ctx, "metadata", "title: Partial\nstats:\n  files_changed: 1\n  additions: 1\n  deletions: 0\noriginal_description:\n  body: test\n  source: gh_api\n  fetched_at: \"2026-05-30T00:00:00.000Z\"");

@@ -595,8 +595,7 @@ async function assembleSubmission(store, binding) {
 	const docParts = [
 		"schema_version: 1",
 		"pr:",
-		indentYaml(byId.get("metadata").yaml, 2),
-		trustedPrYaml(binding, 2),
+		mergedPrYaml(byId.get("metadata"), binding, 2),
 		"walkthrough:",
 		"  context:",
 		indentYaml(byId.get("context").yaml, 4),
@@ -639,13 +638,48 @@ function trustedPrFields(binding) {
 	return out;
 }
 
-function trustedPrYaml(binding, indent) {
-	return Object.entries(trustedPrFields(binding)).map(([key, value]) => `${" ".repeat(indent)}${key}: ${yamlScalar(value)}`).join("\n");
+function mergedPrYaml(metadataRecord, binding, indent) {
+	const metadata = parseYamlValue(metadataRecord?.yaml, "metadata");
+	if (!isObject(metadata)) throw prwError("PRW_CHUNK_INVALID", "metadata must be a YAML mapping.");
+	return yamlBlock({ ...metadata, ...trustedPrFields(binding) }, indent);
 }
 
 function yamlScalar(value) {
-	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value === null) return "null";
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
+	if (typeof value === "boolean") return String(value);
 	return JSON.stringify(String(value));
+}
+
+function yamlKey(key) {
+	return /^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(String(key));
+}
+
+function yamlBlock(value, spaces) {
+	const pad = " ".repeat(spaces);
+	if (Array.isArray(value)) {
+		if (value.length === 0) return `${pad}[]`;
+		return value.map((item) => {
+			if (isObject(item) || Array.isArray(item)) return `${pad}-\n${yamlBlock(item, spaces + 2)}`;
+			return `${pad}- ${yamlScalar(item)}`;
+		}).join("\n");
+	}
+	if (isObject(value)) {
+		const entries = Object.entries(value).filter(([, item]) => item !== undefined);
+		if (entries.length === 0) return `${pad}{}`;
+		return entries.map(([key, item]) => {
+			if (Array.isArray(item)) {
+				if (item.length === 0) return `${pad}${yamlKey(key)}: []`;
+				return `${pad}${yamlKey(key)}:\n${yamlBlock(item, spaces + 2)}`;
+			}
+			if (isObject(item)) {
+				const nested = Object.entries(item).some(([, nestedItem]) => nestedItem !== undefined);
+				return nested ? `${pad}${yamlKey(key)}:\n${yamlBlock(item, spaces + 2)}` : `${pad}${yamlKey(key)}: {}`;
+			}
+			return `${pad}${yamlKey(key)}: ${yamlScalar(item)}`;
+		}).join("\n");
+	}
+	return `${pad}${yamlScalar(value)}`;
 }
 
 function indentYaml(yamlText, spaces) {
