@@ -6964,7 +6964,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6983,10 +6983,10 @@ async function handleApiRoute(
 			} else {
 				delete descriptions.tools;
 			}
-			// Entrypoint display metadata (best-effort) from the entrypoint files.
-			// The Market UI needs the kind/route to distinguish duplicate labels such as
-			// "PR Walkthrough" in different launch surfaces.
-			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>();
+			// Valid entrypoint display metadata from the entrypoint files. Invalid or
+			// unsupported entrypoint kinds are omitted so retired launch surfaces do not
+			// render as activation toggles.
+			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "session-menu" | "route"; routeId?: string }>();
 			try {
 				for (const ep of loadPackContributions(entry.path, entry.manifest).entrypoints) {
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
@@ -6996,9 +6996,9 @@ async function handleApiRoute(
 				roles: [...c.roles],
 				tools: concreteTools.tools,
 				skills: [...c.skills],
-				entrypoints: (c.entrypoints ?? []).map((listName) => {
+				entrypoints: (c.entrypoints ?? []).flatMap((listName) => {
 					const meta = entrypointByListName.get(listName);
-					return meta ? { listName, ...meta } : { listName };
+					return meta ? [{ listName, ...meta }] : [];
 				}),
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never

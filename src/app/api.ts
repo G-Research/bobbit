@@ -2480,7 +2480,7 @@ export interface PackPanelWire {
  *  and (for `kind:"route"`) the deep-link routeId. */
 export interface PackEntrypointWire {
 	id: string;
-	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
 	routeId?: string;
 	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
