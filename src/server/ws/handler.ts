@@ -750,25 +750,43 @@ export function handleWebSocketConnection(
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
 							const endedAtMs = Date.now();
 							session.isCompacting = false;
-							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
-							const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
-							// Persist the sidecar row so the card survives reload.
-							appendCompactionSidecarEntry(sessionId, {
-								schemaVersion: 1,
-								id: compactionId,
-								trigger: "manual",
-								tokensBefore,
-								tokensAfter: null,
-								durationMs: endedAtMs - startedAtMs,
-								startedAt: new Date(startedAtMs).toISOString(),
-								endedAt: new Date(endedAtMs).toISOString(),
-								success: true,
-								firstKeptEntryId,
-							});
+							// session-manager's manual `compaction_end` branch writes
+							// the SUCCESS sidecar row synchronously BEFORE its
+							// refreshAfterCompaction() so the post-compaction snapshot
+							// carries the orphan-boundary anchor (otherwise the live
+							// card stays positive-ordered and sorts after the preserved
+							// tail). The agent emits that event before this RPC promise
+							// resolves, so by here the row is already persisted. Skip our
+							// own success append to avoid a duplicate sidecar line. We
+							// only write here as a fallback when session-manager did NOT
+							// (e.g. the agent emitted no successful manual compaction_end
+							// with a result payload).
+							const alreadyWritten = (session as any)._manualSidecarWritten === compactionId;
+							(session as any)._manualSidecarWritten = undefined;
+							if (!alreadyWritten) {
+								const tokensBefore = compactResult?.data?.tokensBefore ?? null;
+								const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
+								// Persist the sidecar row so the card survives reload.
+								appendCompactionSidecarEntry(sessionId, {
+									schemaVersion: 1,
+									id: compactionId,
+									trigger: "manual",
+									tokensBefore,
+									tokensAfter: null,
+									durationMs: endedAtMs - startedAtMs,
+									startedAt: new Date(startedAtMs).toISOString(),
+									endedAt: new Date(endedAtMs).toISOString(),
+									success: true,
+									firstKeptEntryId,
+								});
+							}
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							const endedAtMs = Date.now();
 							session.isCompacting = false;
+							// RPC rejected: own the failure append. session-manager only
+							// writes the success row, so clear the dedup marker defensively.
+							(session as any)._manualSidecarWritten = undefined;
 							appendCompactionSidecarEntry(sessionId, {
 								schemaVersion: 1,
 								id: compactionId,
