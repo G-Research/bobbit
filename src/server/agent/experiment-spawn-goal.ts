@@ -66,6 +66,25 @@ export interface SpawnChildGoalOpts {
 	workflow?: Workflow;
 }
 
+/**
+ * In-flight spawn reservations, keyed by `parentGoalId\0runKey`.
+ *
+ * Idempotency on `runKey` is a check-then-create against the goal store's
+ * siblings. Two concurrent `spawnGoal` calls with the same parent+runKey can
+ * BOTH pass the sibling scan before either has created (and stamped) its child,
+ * producing duplicate child goals (TOCTOU). This module-level map collapses
+ * concurrent duplicates onto a single in-flight creation: the first caller owns
+ * the promise; every concurrent caller with the same key awaits and returns the
+ * SAME `{ goalId }`. The reservation is released in a `finally`, so a later
+ * SEQUENTIAL re-call falls through to the (now-populated) sibling scan and still
+ * returns the existing child — never a second goal.
+ */
+const inFlightSpawns = new Map<string, Promise<{ goalId: string }>>();
+
+function reservationKey(parentGoalId: string, runKey: string): string {
+	return `${parentGoalId}\u0000${runKey}`;
+}
+
 /** A coded error so the pack can branch on `.code` (the host shell's
  *  recursion/backend guards throw plain `Error`s, matching the other `agents`
  *  verbs). */
@@ -179,6 +198,32 @@ export async function spawnExperimentChildGoal(
 	assertPlainObject(opts.metadata, "INVALID_METADATA", "metadata");
 	assertPlainObject(opts.inlineRoles, "INVALID_INLINE_ROLES", "inlineRoles");
 
+	// Idempotency reservation: collapse concurrent duplicate (parent+runKey) calls
+	// onto ONE in-flight creation so a TOCTOU race can't create two child goals.
+	const key = reservationKey(parentGoalId, opts.runKey);
+	const existing = inFlightSpawns.get(key);
+	if (existing) return existing;
+	const work = createReservedChildGoal(deps, parentGoalId, opts);
+	inFlightSpawns.set(key, work);
+	try {
+		return await work;
+	} finally {
+		inFlightSpawns.delete(key);
+	}
+}
+
+/**
+ * The reserved creation body — runs at most once concurrently per
+ * (parentGoalId, runKey) thanks to `inFlightSpawns`. Resolves project context,
+ * enforces idempotency/pause/nesting guards, maps the arm bundle onto
+ * `createGoal`, stamps the idempotency key, initializes gates, broadcasts, and
+ * requests a scheduled team start.
+ */
+async function createReservedChildGoal(
+	deps: SpawnExperimentChildGoalDeps,
+	parentGoalId: string,
+	opts: SpawnChildGoalOpts,
+): Promise<{ goalId: string }> {
 	const ctx = deps.projectContextManager.getContextForGoal(parentGoalId);
 	if (!ctx) {
 		throw new SpawnGoalError("PARENT_GOAL_NOT_FOUND", `parent goal ${parentGoalId} project context not found`);

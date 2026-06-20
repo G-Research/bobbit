@@ -13,13 +13,20 @@
 //   GET /api/goals           → { generation, goals: [ PersistedGoal incl. metadata ] }
 //   (there is NO GET /api/goals/:goalId single-goal endpoint)
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import https from "node:https";
+import type { AddressInfo } from "node:net";
 
 import {
 	parseRawOutcome,
 	isSettledFromRaw,
 	completionBarFromRaw,
 	createGoalReader,
+	loadCreds,
 } from "../market-packs/experiment-runner/lib/engine.mjs";
 
 // ── parseRawOutcome against the EXACT REST shapes ─────────────────────────────
@@ -157,5 +164,116 @@ describe("createGoalReader: assembles a RawOutcome from live REST responses", ()
 		const reader = createGoalReader({ fetchImpl: (async () => { throw new Error("network"); }) as any, creds: { gatewayUrl: "https://gw" } });
 		const raw = await reader.readOutcome(GOAL_ID);
 		assert.deepEqual(raw, {});
+	});
+});
+
+// ── PRODUCTION transport + cred discovery (no injected fetch/creds stubs) ──────
+// The code-quality review found the live reader unusable in production: the pack
+// route worker runs with cwd = the SESSION WORKTREE and an EMPTY env, so (a) the
+// relative `.bobbit/state/token` read found nothing, and (b) global fetch rejected
+// the gateway's SELF-SIGNED cert. These tests pin the REAL paths: cred discovery
+// from a parent dir, and a TLS-tolerant GET against an actual self-signed HTTPS
+// server with NO io.fetchImpl injection.
+describe("loadCreds: discovers .bobbit/state from a PARENT of the start dir", () => {
+	const tmpRoots: string[] = [];
+	after(() => { for (const d of tmpRoots) rmSync(d, { recursive: true, force: true }); });
+
+	it("walks up to find creds when the state dir sits above cwd (worktree/subdir case)", () => {
+		const root = mkdtempSync(join(tmpdir(), "exp-creds-"));
+		tmpRoots.push(root);
+		const stateDir = join(root, ".bobbit", "state");
+		mkdirSync(stateDir, { recursive: true });
+		writeFileSync(join(stateDir, "gateway-url"), "https://gw.example:3001\n");
+		writeFileSync(join(stateDir, "token"), "secret-token\n");
+		// A worktree-like nested subdir whose creds live several levels UP.
+		const sub = join(root, "worktrees", "goal-x", "deep", "sub");
+		mkdirSync(sub, { recursive: true });
+
+		const creds = loadCreds(sub);
+		assert.equal(creds.gatewayUrl, "https://gw.example:3001");
+		assert.equal(creds.token, "secret-token");
+	});
+
+	it("returns empty (null-safe) creds when no state dir exists anywhere above", () => {
+		const root = mkdtempSync(join(tmpdir(), "exp-nocreds-"));
+		tmpRoots.push(root);
+		const sub = join(root, "a", "b");
+		mkdirSync(sub, { recursive: true });
+		const creds = loadCreds(sub);
+		assert.equal(creds.gatewayUrl, undefined);
+		assert.equal(creds.token, undefined);
+	});
+});
+
+describe("createGoalReader: real self-signed HTTPS gateway (no injected fetch)", () => {
+	const GOAL_ID = "child-goal-tls";
+	let server: https.Server | undefined;
+	let baseUrl = "";
+	const certDir = mkdtempSync(join(tmpdir(), "exp-tls-"));
+	const seenPaths: string[] = [];
+
+	const goalsList = {
+		generation: 1,
+		goals: [
+			{ id: GOAL_ID, createdAt: 1_000, updatedAt: 6_000, metadata: { experiment: { userMetrics: { objective: 99 } } } },
+		],
+	};
+	const bodyFor = (path: string): unknown => {
+		if (path === `/api/goals/${GOAL_ID}/cost`) return { inputTokens: 700, outputTokens: 100, totalCost: 0.22, cacheHitRate: 0.4 };
+		if (path === `/api/goals/${GOAL_ID}/gates`) return { gates: [{ gateId: "build", status: "passed" }, { gateId: "review", status: "passed" }] };
+		if (path === `/api/goals/${GOAL_ID}/tasks`) return { tasks: [{ state: "complete" }, { state: "todo" }] };
+		if (path === "/api/goals") return goalsList;
+		return undefined;
+	};
+
+	after(() => {
+		server?.close();
+		rmSync(certDir, { recursive: true, force: true });
+	});
+
+	it("readOutcome() works through node:https against a self-signed cert + Bearer auth", async () => {
+		// Generate a throwaway self-signed cert at test time (mirrors the gateway).
+		execFileSync("openssl", [
+			"req", "-x509", "-newkey", "rsa:2048",
+			"-keyout", join(certDir, "key.pem"),
+			"-out", join(certDir, "cert.pem"),
+			"-days", "1", "-nodes", "-subj", "/CN=localhost",
+		], { stdio: "ignore" });
+
+		const { readFileSync } = await import("node:fs");
+		let authSeen = "";
+		server = https.createServer(
+			{ cert: readFileSync(join(certDir, "cert.pem")), key: readFileSync(join(certDir, "key.pem")) },
+			(req, res) => {
+				authSeen = String(req.headers["authorization"] || "");
+				const path = (req.url || "").split("?")[0];
+				seenPaths.push(path);
+				const body = bodyFor(path);
+				if (body === undefined) { res.statusCode = 404; res.end("{}"); return; }
+				res.setHeader("content-type", "application/json");
+				res.end(JSON.stringify(body));
+			},
+		);
+		await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		baseUrl = `https://127.0.0.1:${port}`;
+
+		// NO io.fetchImpl — this exercises the SHIPPED node:https transport with
+		// rejectUnauthorized:false. creds injection is allowed (bypasses discovery).
+		const reader = createGoalReader({ creds: { gatewayUrl: baseUrl, token: "tok-123" } });
+		const raw = await reader.readOutcome(GOAL_ID);
+
+		assert.equal(raw.costUsd, 0.22);
+		assert.equal(raw.tokensIn, 700);
+		assert.equal(raw.tokensOut, 100);
+		assert.deepEqual(raw.gateVerdicts, { build: "passed", review: "passed" });
+		assert.deepEqual(raw.taskCounts, { complete: 1, total: 2 });
+		assert.deepEqual(raw.userMetrics, { objective: 99 });
+		assert.equal(raw.wallClockMs, 5_000);
+		assert.equal(isSettledFromRaw(raw), true);
+		assert.equal(completionBarFromRaw(raw), "passed");
+		// The Bearer token from creds reached the server, and meta resolved via the list.
+		assert.equal(authSeen, "Bearer tok-123");
+		assert.ok(seenPaths.includes("/api/goals"));
 	});
 });

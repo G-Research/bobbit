@@ -72,6 +72,23 @@ async function resolvedMetricsFor(ctx, experimentId, def) {
 	return { selection, resolved: resolveSelection(selection) };
 }
 
+const TERMINAL_RUN_STATUSES = ["collected", "failed", "cancelled"];
+
+/**
+ * Flip exp/<id>/state.status → "done" once every run has reached a terminal
+ * state (or all settled, for poll), so the panel stops polling/showing a
+ * finished A/B experiment. Idempotent and never clobbers a cancelled/stopped
+ * state. `allTerminal` lets the caller decide what "finished" means: collect
+ * passes its all-collected check; poll passes allSettled.
+ */
+async function markDoneIfFinished(ctx, experimentId, runs, finished) {
+	if (!runs.length || !finished) return;
+	const state = (await ctx.host.store.get(keys.stateKey(experimentId))) || {};
+	// Don't overwrite an explicit terminal/cancelled state or a prior done.
+	if (state.status === "done" || state.status === "cancelled" || state.stopped) return;
+	await ctx.host.store.put(keys.stateKey(experimentId), { ...state, status: "done" });
+}
+
 async function addToIndex(ctx, experimentId) {
 	const idx = await ctx.host.store.get(keys.INDEX_KEY);
 	const list = Array.isArray(idx) ? idx.slice() : [];
@@ -85,10 +102,12 @@ function validateDef(input) {
 	const mode = input.mode === "autoresearch" ? "autoresearch" : "ab";
 	if (!input.runnable || typeof input.runnable !== "object") return { ok: false, error: "RUNNABLE_REQUIRED" };
 	if (mode === "ab") {
+		// A/B is a COMPARISON — a single arm is not one. Require ≥2 variants.
 		const variants = Array.isArray(input.variants) ? input.variants : [];
-		if (variants.length < 1) return { ok: false, error: "VARIANTS_REQUIRED" };
+		if (variants.length < 2) return { ok: false, error: "VARIANTS_REQUIRED" };
+		// Repeats must be a whole positive count — reject fractional (e.g. 1.5).
 		const repeats = Number(input.repeats);
-		if (!Number.isFinite(repeats) || repeats < 1) return { ok: false, error: "REPEATS_REQUIRED" };
+		if (!Number.isInteger(repeats) || repeats < 1) return { ok: false, error: "REPEATS_REQUIRED" };
 	} else {
 		// Autoresearch guardrails: objective + at least one finite cap + at least one stop.
 		const obj = input.objective;
@@ -98,9 +117,13 @@ function validateDef(input) {
 		const caps = input.caps || {};
 		const hasCap = [caps.maxIterations, caps.maxWallClockMs, caps.maxCostUsd].some((v) => Number.isFinite(v) && v > 0);
 		if (!hasCap) return { ok: false, error: "AR_UNCAPPED" };
+		// A stop condition must be able to ACTUALLY fire: an integer plateauK ≥ 1
+		// (a window of non-improving iterations), OR a finite target. `plateauK<=0`
+		// and a NaN/non-finite target are ineffective and rejected.
 		const stop = input.stop || {};
-		const hasStop = Number.isFinite(stop.plateauK) || typeof stop.target === "number";
-		if (!hasStop) return { ok: false, error: "AR_NO_STOP" };
+		const hasPlateau = Number.isInteger(stop.plateauK) && stop.plateauK >= 1;
+		const hasTarget = Number.isFinite(stop.target);
+		if (!hasPlateau && !hasTarget) return { ok: false, error: "AR_NO_STOP" };
 		// The fixed-per-iteration-budget guardrail: autoresearch refuses to run without
 		// a positive comparable per-run budget (A/B keeps perRunBudget optional).
 		if (!(Number.isFinite(input.perRunBudget) && input.perRunBudget > 0)) {
@@ -238,6 +261,9 @@ export const routes = {
 			}
 			await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
 		}
+		// Persist a terminal state once every run has settled so the panel stops
+		// polling a finished experiment.
+		await markDoneIfFinished(ctx, experimentId, runs, allSettled);
 		return { runs, allSettled };
 	},
 
@@ -271,6 +297,13 @@ export const routes = {
 				run.collectedAt = nowMs();
 			}
 			await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
+		}
+		// When collecting the WHOLE experiment (no onlyRunId), flip to done once
+		// every run is terminal (collected/failed/cancelled) so the panel stops
+		// treating it as running.
+		if (!onlyRunId) {
+			const allTerminal = runs.length > 0 && runs.every((r) => TERMINAL_RUN_STATUSES.includes(r.status));
+			await markDoneIfFinished(ctx, experimentId, runs, allTerminal);
 		}
 		return { runs: runs.filter((r) => !onlyRunId || r.runId === onlyRunId) };
 	},

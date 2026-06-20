@@ -10,7 +10,11 @@
 // live under the centralized .bobbit/state and a sandboxed arm's files may be on a
 // container path the pack cannot reach (design-doc §5.2 / §11).
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import http from "node:http";
+import https from "node:https";
+import path from "node:path";
 import { abRunId, arRunId, spawnRunKey } from "./store-keys.mjs";
 
 const DEFAULT_PRIOR_USD = 0.5;
@@ -302,19 +306,108 @@ function numberOr(v, fallback) {
 
 // ── injectable goal-id-keyed REST reader ──
 
-/** Read gateway creds from disk (never env). Returns { token, gatewayUrl }. */
-export function loadCreds() {
-	const token = tryRead(".bobbit/state/token");
-	const gatewayUrl = tryRead(".bobbit/state/gateway-url");
+/**
+ * Read gateway creds from disk (never env). Returns { token, gatewayUrl }.
+ *
+ * PRODUCTION REALITY: the pack route worker runs with process.cwd = the SESSION
+ * WORKTREE and an EMPTY env. The gateway creds live under the PROJECT ROOT's
+ * `.bobbit/state/` — NOT inside the worktree — so a bare relative read returns
+ * nothing. We therefore discover the state dir robustly:
+ *   1. walk UP from process.cwd() looking for `.bobbit/state/gateway-url`, then
+ *   2. fall back to the project root derived from `git rev-parse --git-common-dir`
+ *      (→ `<root>/.git`; root = dirname, stripping a trailing `.git`).
+ * Best-effort + null-safe; `io.creds` injection bypasses discovery in tests.
+ * `startDir` overrides the search origin (defaults to process.cwd()) — used by
+ * tests to exercise discovery without a racy global chdir.
+ */
+export function loadCreds(startDir) {
+	const dir = discoverStateDir(startDir);
+	if (!dir) return { token: undefined, gatewayUrl: undefined };
+	const token = tryRead(path.join(dir, "token"));
+	const gatewayUrl = tryRead(path.join(dir, "gateway-url"));
 	return { token: token ? token.trim() : undefined, gatewayUrl: gatewayUrl ? gatewayUrl.trim() : undefined };
 }
 
-function tryRead(path) {
+/** Locate the `.bobbit/state` directory that actually holds the gateway creds. */
+function discoverStateDir(startDir) {
+	// 1. Walk UP from cwd — handles worktrees/subdirs whose state dir is a parent.
+	let cur = startDir || process.cwd();
+	for (let i = 0; i < 64; i++) {
+		const candidate = path.join(cur, ".bobbit", "state");
+		if (existsSync(path.join(candidate, "gateway-url"))) return candidate;
+		const parent = path.dirname(cur);
+		if (parent === cur) break;
+		cur = parent;
+	}
+	// 2. Derive the project root via the git common dir (→ <root>/.git).
 	try {
-		return readFileSync(path, "utf-8");
+		const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+			cwd: startDir || process.cwd(),
+			encoding: "utf-8",
+		}).trim();
+		if (out) {
+			let common = path.isAbsolute(out) ? out : path.resolve(startDir || process.cwd(), out);
+			const root = path.basename(common) === ".git" ? path.dirname(common) : common;
+			const candidate = path.join(root, ".bobbit", "state");
+			if (existsSync(path.join(candidate, "gateway-url"))) return candidate;
+		}
+	} catch {
+		// git unavailable / not a repo — fall through to undefined (null-safe).
+	}
+	return undefined;
+}
+
+function tryRead(p) {
+	try {
+		return readFileSync(p, "utf-8");
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * TLS-tolerant goal-id-keyed GET. The gateway serves HTTPS with a SELF-SIGNED
+ * cert and the worker env is empty (no NODE_TLS_REJECT_UNAUTHORIZED), so global
+ * `fetch` rejects the cert and the run never settles. We use node:https with
+ * `rejectUnauthorized:false` (the sanctioned pattern — see src/server/watchdog.ts),
+ * and node:http for `http:` URLs. Returns a minimal fetch-like response so the
+ * reader code (and the io.fetchImpl test seam) stay identical. Never throws.
+ */
+function nodeHttpGet(url, opts = {}) {
+	return new Promise((resolve) => {
+		let lib;
+		try {
+			lib = new URL(url).protocol === "http:" ? http : https;
+		} catch {
+			resolve({ ok: false, status: 0, json: async () => null });
+			return;
+		}
+		let req;
+		try {
+			req = lib.request(
+				url,
+				{ method: "GET", headers: opts.headers || {}, rejectUnauthorized: false },
+				(res) => {
+					const chunks = [];
+					res.on("data", (c) => chunks.push(c));
+					res.on("end", () => {
+						const status = res.statusCode || 0;
+						const text = Buffer.concat(chunks).toString("utf-8");
+						resolve({
+							ok: status >= 200 && status < 300,
+							status,
+							json: async () => JSON.parse(text),
+						});
+					});
+				},
+			);
+		} catch {
+			resolve({ ok: false, status: 0, json: async () => null });
+			return;
+		}
+		req.on("error", () => resolve({ ok: false, status: 0, json: async () => null }));
+		req.end();
+	});
 }
 
 /**
@@ -323,7 +416,10 @@ function tryRead(path) {
  */
 export function createGoalReader(io = {}) {
 	const creds = io.creds || loadCreds();
-	const fetchImpl = io.fetchImpl || (typeof fetch === "function" ? fetch : undefined);
+	// Default transport is the TLS-tolerant node:https/node:http GET (NOT global
+	// fetch — that rejects the self-signed gateway cert with an empty env). The
+	// io.fetchImpl injection is still honored verbatim for tests.
+	const fetchImpl = io.fetchImpl || nodeHttpGet;
 	async function get(path) {
 		if (!fetchImpl || !creds.gatewayUrl) return null;
 		try {

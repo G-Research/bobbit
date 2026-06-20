@@ -208,6 +208,11 @@ test.describe("experiment-runner routes — A/B fan-out via the spawnGoal seam",
 			expect(collected.runs.every((r: any) => r.status === "collected")).toBe(true);
 			expect(collected.runs.every((r: any) => r.completionBar === "passed")).toBe(true);
 
+			// Fix #5: a fully-collected A/B experiment flips to a terminal "done"
+			// state so the panel stops polling it as "running".
+			const doneState = await store.get(PACK_ID, `exp/${experimentId}/state`);
+			expect(doneState.status).toBe("done");
+
 			// aggregate computes a comparison across both arms from the registry.
 			const agg = await routes.aggregate(ctx, { body: { experimentId } });
 			expect(agg.mode).toBe("ab");
@@ -457,6 +462,67 @@ test.describe("experiment-runner routes — live A/B poll → collect → aggreg
 			const objAgg = agg.aggregates.find((a: any) => a.metricId === "objective.value");
 			expect(objAgg).toBeTruthy();
 			expect(objAgg.value).toBe(5);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+});
+
+test.describe("experiment-runner routes — validateDef guardrails (defineExperiment)", () => {
+	test("rejects ineffective AR stops, single-arm A/B, and fractional repeats", async ({ gateway }) => {
+		const owner = await createSession();
+		const { byGoalId, spawnChildGoal } = makeSpawnStub();
+		try {
+			const routes = await loadRoutes();
+			const host = await buildHost(gateway, owner, spawnChildGoal);
+			const reader = makeGoalReader(byGoalId, () => ({}));
+			const ctx = { host, sessionId: owner, goalReader: reader, toolUseId: "tu-guard", tool: "experiment-runner/routes" };
+
+			const arBase = {
+				title: "ar guard",
+				mode: "autoresearch",
+				runnable: { kind: "agent", spec: "x" },
+				objective: { metricId: "objective.value", direction: "max" },
+				caps: { maxIterations: 5 },
+				perRunBudget: 1,
+			};
+
+			// Fix #3: plateauK ≤ 0 is not an effective stop → AR_NO_STOP.
+			const zeroK = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `g-${uid()}`, stop: { plateauK: 0 } } });
+			expect(zeroK.error).toBe("AR_NO_STOP");
+			const negK = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `g-${uid()}`, stop: { plateauK: -2 } } });
+			expect(negK.error).toBe("AR_NO_STOP");
+			// Fix #3: a non-integer plateauK is rejected (must be a whole window).
+			const fracK = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `g-${uid()}`, stop: { plateauK: 1.5 } } });
+			expect(fracK.error).toBe("AR_NO_STOP");
+			// Fix #3: NaN / non-finite target is not an effective stop → AR_NO_STOP.
+			const nanTarget = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `g-${uid()}`, stop: { target: NaN } } });
+			expect(nanTarget.error).toBe("AR_NO_STOP");
+			// A finite target IS a valid stop (control — accepted).
+			const okTarget = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `ok-${uid()}`, stop: { target: 0.9 } } });
+			expect(okTarget.error).toBeUndefined();
+			// An integer plateauK ≥ 1 IS a valid stop (control — accepted).
+			const okK = await routes.defineExperiment(ctx, { body: { ...arBase, experimentId: `ok-${uid()}`, stop: { plateauK: 2 } } });
+			expect(okK.error).toBeUndefined();
+
+			const abBase = {
+				title: "ab guard",
+				mode: "ab",
+				runnable: { kind: "command", command: "echo" },
+			};
+			// Fix #4: a single arm is not a comparison → VARIANTS_REQUIRED.
+			const oneArm = await routes.defineExperiment(ctx, { body: { ...abBase, experimentId: `g-${uid()}`, variants: [{ armId: "a", label: "a", metadata: {} }], repeats: 1 } });
+			expect(oneArm.error).toBe("VARIANTS_REQUIRED");
+			// Fix #4: fractional repeats are rejected → REPEATS_REQUIRED.
+			const fracRepeats = await routes.defineExperiment(ctx, {
+				body: { ...abBase, experimentId: `g-${uid()}`, variants: [{ armId: "a", label: "a", metadata: {} }, { armId: "b", label: "b", metadata: {} }], repeats: 1.5 },
+			});
+			expect(fracRepeats.error).toBe("REPEATS_REQUIRED");
+			// Two arms + integer repeats IS valid (control — accepted).
+			const okAb = await routes.defineExperiment(ctx, {
+				body: { ...abBase, experimentId: `ok-${uid()}`, variants: [{ armId: "a", label: "a", metadata: {} }, { armId: "b", label: "b", metadata: {} }], repeats: 2 },
+			});
+			expect(okAb.error).toBeUndefined();
 		} finally {
 			await deleteSession(owner);
 		}

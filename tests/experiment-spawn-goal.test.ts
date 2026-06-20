@@ -46,6 +46,9 @@ class Harness {
 	prefs: SubgoalNestingPrefs = { subgoalsEnabled: true, maxNestingDepth: 3 };
 	owner: { goalId?: string; teamGoalId?: string } | undefined = { goalId: "exp-goal" };
 	startOutcome: "started" | "capacity-blocked" = "started";
+	/** When >0, createGoal awaits this long before creating — widens the TOCTOU
+	 *  window so the concurrent-duplicate reservation is genuinely exercised. */
+	createGoalDelayMs = 0;
 	private seq = 0;
 
 	constructor() {
@@ -70,6 +73,7 @@ class Harness {
 	};
 	private goalManager = {
 		createGoal: async (title: string, cwd: string, opts: any) => {
+			if (this.createGoalDelayMs > 0) await new Promise((r) => setTimeout(r, this.createGoalDelayMs));
 			this.createGoalCalls.push({ title, cwd, opts });
 			const id = `child-${++this.seq}`;
 			const g: Goal = {
@@ -218,6 +222,38 @@ describe("spawnExperimentChildGoal — idempotency", () => {
 		assert.equal(second.goalId, first.goalId);
 		assert.equal(h.createGoalCalls.length, 1);
 		assert.equal(h.startCalls.length, 1);
+	});
+
+	it("collapses CONCURRENT duplicate (parent+runKey) calls onto exactly ONE child (TOCTOU)", async () => {
+		// Without the in-flight reservation both calls pass the sibling scan before
+		// either creates+stamps, producing two child goals. A widened createGoal
+		// window makes the race real; the reservation must still yield ONE child.
+		const h = new Harness();
+		h.createGoalDelayMs = 25;
+		const deps = h.deps();
+		const [a, b] = await Promise.all([
+			spawnExperimentChildGoal(deps, "owner-1", baseOpts({ runKey: "race" })),
+			spawnExperimentChildGoal(deps, "owner-1", baseOpts({ runKey: "race" })),
+		]);
+		assert.equal(a.goalId, b.goalId);
+		assert.equal(h.createGoalCalls.length, 1, "exactly one createGoal for concurrent dups");
+		assert.equal(h.startCalls.length, 1, "exactly one scheduled start");
+		// A later SEQUENTIAL re-call still returns the same existing child (sibling scan).
+		const c = await spawnExperimentChildGoal(deps, "owner-1", baseOpts({ runKey: "race" }));
+		assert.equal(c.goalId, a.goalId);
+		assert.equal(h.createGoalCalls.length, 1);
+	});
+
+	it("distinct runKeys under the same parent still create distinct children concurrently", async () => {
+		const h = new Harness();
+		h.createGoalDelayMs = 10;
+		const deps = h.deps();
+		const [a, b] = await Promise.all([
+			spawnExperimentChildGoal(deps, "owner-1", baseOpts({ runKey: "k-a" })),
+			spawnExperimentChildGoal(deps, "owner-1", baseOpts({ runKey: "k-b" })),
+		]);
+		assert.notEqual(a.goalId, b.goalId);
+		assert.equal(h.createGoalCalls.length, 2);
 	});
 });
 
