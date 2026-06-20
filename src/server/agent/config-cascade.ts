@@ -298,6 +298,49 @@ export class ConfigCascade {
 		packName: string | null,
 	): RoleFieldSource {
 		const editable = !packManaged;
+
+		// Rank a cascade band to mirror PackResolver precedence (low→high):
+		//   builtin < server-market < server < global-user-market < global-user
+		//   < project-market < project. Market packs sit just below their scope's
+		//   user pack (design §3.2).
+		const bandRank = (scope: PackScope, isMarket: boolean): number => {
+			const base = { builtin: 0, server: 2, "global-user": 4, project: 6 }[scope];
+			return base - (isMarket ? 1 : 0);
+		};
+		// The directly-editable band for this view: the project's own local layer
+		// when scoped to a project, otherwise the server-level store.
+		const editableRank = projectId ? bandRank("project", false) : bandRank("server", false);
+
+		// The whole-role winner is the highest band that *defines* the role. When
+		// it supplies the field, that value outranks any lower-band field carried
+		// by a server/builtin role with the same name (finding #4) — so a market /
+		// global-user / project role shadows the legacy plain-layer walk below.
+		if (entry) {
+			const wv = (entry.item as any)[field];
+			if (typeof wv === "string" && wv.trim().length > 0) {
+				const origin = scopeToOrigin(entry.origin.scope);
+				const winnerRank = bandRank(entry.origin.scope, entry.origin.kind === "market");
+				if (winnerRank >= editableRank) {
+					// At or above the editable band. Equal rank ⇒ the winner IS the
+					// editable layer (a direct, user-editable override). Higher rank
+					// ⇒ an effective value the user cannot edit at this scope.
+					const isEditableLayer = winnerRank === editableRank && entry.origin.kind !== "market";
+					return {
+						value: wv,
+						source: isEditableLayer ? "role" : "inherited-role",
+						origin,
+						originPackName: packName,
+						editable,
+						sourceLabel: packName ?? originSourceLabel(origin),
+					};
+				}
+				// winnerRank < editableRank: the editable layer does not define the
+				// field (else the winner would BE that band). Fall through to the
+				// field-level walk, which finds this value as a lower-band inherited
+				// override (or the pack fallback at the end).
+			}
+		}
+
 		if (projectId) {
 			// Current editable layer: the project's own local override.
 			const local = this.localRoleField(projectId, roleName, field);
@@ -334,7 +377,8 @@ export class ConfigCascade {
 			}
 		}
 		// Pack / winner fallback: covers fields that only exist on a role defined
-		// by a market pack (which the plain-layer walk above does not read).
+		// by a lower-precedence market pack (server-market / builtin-pack) which
+		// the plain-layer walk above does not read.
 		if (entry) {
 			const wv = (entry.item as any)[field];
 			if (typeof wv === "string" && wv.trim().length > 0) {

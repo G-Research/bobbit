@@ -423,6 +423,78 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(/Server/i);
 	});
 
+	test("list view shows inherited-role effective model + thinking even when top-level fields are absent (finding #2)", async ({ page }) => {
+		// The role carries NO top-level model/thinkingLevel; the effective values
+		// live only in modelResolution (inherited from the server role layer). The
+		// row MUST surface those effective values in the picker, not "(use default)".
+		await resetFixture(page, {
+			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
+			roles: [
+				{
+					name: "coder", label: "Coder", promptTemplate: "You write code.",
+					accessory: "none", toolPolicies: {},
+					createdAt: 1, updatedAt: 1, origin: "project",
+					modelResolution: {
+						model: { value: TEST_MODEL, source: "inherited-role", origin: "server", editable: true },
+						thinkingLevel: { value: TEST_THINKING, source: "inherited-role", origin: "server", editable: true },
+					},
+				} as any,
+			],
+		});
+		await loadRoles(page, "#/roles");
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toBeVisible();
+		// Current scope did not override → the row reads as inherited, NOT override.
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+		// Effective model surfaces in the picker (no "(use default)" placeholder).
+		const modelPicker = control.locator("[data-testid='model-row'] button[title='Choose model']");
+		await expect(modelPicker).toContainText("claude-opus-4-1");
+		await expect(modelPicker).not.toContainText("(use default)");
+		// Effective thinking surfaces in the thinking selector.
+		await expect(control.locator("[data-testid='model-row'] button[role='combobox']")).toContainText("High");
+		// Both fields are badged as inherited-role overrides naming their source.
+		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(SRC_INHERITED_ROLE);
+		await expect(control.locator(LIST_THINKING_SOURCE)).toHaveText(SRC_INHERITED_ROLE);
+	});
+
+	test("list view thinking-only change does not promote an inherited model into an override (finding #3)", async ({ page }) => {
+		// Model is inherited (no current-scope override). Changing only the thinking
+		// level must persist ONLY the thinking change — it must never bake the
+		// inherited model into a fresh current-scope model override.
+		await resetFixture(page, {
+			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
+			roles: [
+				{
+					name: "coder", label: "Coder", promptTemplate: "You write code.",
+					accessory: "none", toolPolicies: {},
+					createdAt: 1, updatedAt: 1, origin: "project",
+					modelResolution: {
+						model: { value: TEST_MODEL, source: "inherited-role", origin: "server", editable: true },
+						thinkingLevel: { value: "", source: "default", editable: true },
+					},
+				} as any,
+			],
+		});
+		await loadRoles(page, "#/roles");
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+
+		// Change ONLY thinking via the inline thinking selector.
+		await control.locator("[data-testid='model-row'] button[role='combobox']").click();
+		await page.getByRole("option", { name: "High", exact: true }).click();
+
+		// Only thinkingLevel is persisted; the inherited model is NOT written as an
+		// override. (The persisted store is the source of truth here — the fixture's
+		// GET does not recompute modelResolution the way the real server does, so we
+		// assert on the stored role, which pins the finding-#3 fix precisely.)
+		await expect.poll(async () => {
+			const c = await storedRole(page, "coder");
+			return [c?.model ?? "", c?.thinkingLevel ?? ""];
+		}).toEqual(["", TEST_THINKING]);
+	});
+
 	test("list view inline model pick + thinking auto-saves and persists across reload", async ({ page }) => {
 		await resetFixture(page, { prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL } });
 		await loadRoles(page, "#/roles");
@@ -462,7 +534,7 @@ test.describe("Settings/admin UI fixture", () => {
 		expect([after?.model ?? "", after?.thinkingLevel ?? ""]).toEqual([TEST_MODEL, TEST_THINKING]);
 	});
 
-	test("list view clearing an override reverts model + thinking to inherited", async ({ page }) => {
+	test("list view clearing the model preserves an existing thinking override (finding #1)", async ({ page }) => {
 		await resetFixture(page, {
 			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
 			roles: [
@@ -482,17 +554,28 @@ test.describe("Settings/admin UI fixture", () => {
 
 		await clearBtn.click();
 
-		// Both model and thinking revert to empty so the row inherits/defaults.
+		// Clearing the model must NOT write thinkingLevel:"" — the thinking
+		// override is preserved (it is reset only by its own control).
+		await expect.poll(async () => {
+			const c = await storedRole(page, "coder");
+			return [c?.model ?? "", c?.thinkingLevel ?? ""];
+		}).toEqual(["", TEST_THINKING]);
+
+		// Row drops to a first-class thinking-only override: model now inherits the
+		// session default, thinking is still a Role override with its own reset.
+		await expect(control).toHaveAttribute("data-model-state", /thinking-override|partial-override/);
+		await expect(control).toContainText(SESSION_DEFAULT_LABEL);
+		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(SRC_SESSION_DEFAULT);
+		await expect(control.locator(LIST_THINKING_SOURCE)).toHaveText(SRC_ROLE_OVERRIDE);
+		await expect(control.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+
+		// The dedicated thinking reset then clears the remaining override → fully inherited.
+		await control.locator(LIST_THINKING_CLEAR).click();
 		await expect.poll(async () => {
 			const c = await storedRole(page, "coder");
 			return [c?.model ?? "", c?.thinkingLevel ?? ""];
 		}).toEqual(["", ""]);
-
-		// Row flips back to inherited display with a default source badge.
 		await expect(control).toHaveAttribute("data-model-state", "inherited");
-		await expect(control).toContainText(SESSION_DEFAULT_LABEL);
-		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(SRC_SESSION_DEFAULT);
-		await expect(control.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
 	});
 
 	test("list view thinking-only override is visible, editable, and clearable without a model override", async ({ page }) => {

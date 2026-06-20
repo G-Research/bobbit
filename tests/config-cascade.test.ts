@@ -187,6 +187,61 @@ describe("ConfigCascade — Role.model and Role.thinkingLevel three-layer resolu
 		assert.equal(plain.thinkingLevel.value, undefined);
 	});
 
+	it("metadata reports the winning higher-precedence role (global-user) over a shadowed server field (finding #4)", () => {
+		// Builtin + server both define `coder` with a model; a global-user user-pack
+		// role also defines `coder` with a DIFFERENT model. The global-user band sits
+		// ABOVE server in PackResolver precedence, so it is the whole-role winner and
+		// its field must be reported — NOT the lower-precedence server model.
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", { model: "anthropic/claude-haiku", thinkingLevel: "low" });
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const serverDir = mkTemp();
+		const serverRoleStore = new RoleStore(serverDir);
+		serverRoleStore.put({
+			name: "coder", label: "Coder", promptTemplate: "p", accessory: "none",
+			model: "anthropic/claude-sonnet", thinkingLevel: "medium",
+			createdAt: 0, updatedAt: 0,
+		});
+
+		// Global-user user pack lives under <home>/.bobbit/config/roles/<name>.yaml.
+		const homeDir = mkTemp();
+		writeRoleYaml(path.join(homeDir, ".bobbit", "config"), "coder", { model: "anthropic/claude-opus-4" });
+
+		const serverStores = {
+			getRoles: () => serverRoleStore.getAllLocal(),
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = { getOrCreate: () => undefined } as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+		cascade.setGlobalUserBase(homeDir);
+
+		// Sanity: the whole-role winner is the global-user pack, shadowing server/builtin.
+		const winner = cascade.resolveRoles().find(r => r.item.name === "coder");
+		assert.ok(winner);
+		assert.equal(winner!.origin, "user");
+		assert.equal(winner!.item.model, "anthropic/claude-opus-4");
+
+		// Metadata must follow that precedence for the model field: the global-user
+		// value wins; it is above the (system-scope) editable server layer, so it is
+		// reported as an inherited-role override, not the shadowed server model.
+		const meta = cascade.resolveRoleModelResolution("coder");
+		assert.equal(meta.model.source, "inherited-role");
+		assert.equal(meta.model.origin, "user");
+		assert.equal(meta.model.value, "anthropic/claude-opus-4");
+		assert.equal(meta.model.editable, true);
+
+		// The global-user role omits thinkingLevel, so the field falls through the
+		// lower layers: server supplies it as the system-scope editable layer.
+		assert.equal(meta.thinkingLevel.source, "role");
+		assert.equal(meta.thinkingLevel.origin, "server");
+		assert.equal(meta.thinkingLevel.value, "medium");
+	});
+
 	it("falls through to builtin when neither server nor project define the role", () => {
 		const builtinsDir = mkTemp();
 		writeRoleYaml(builtinsDir, "tester", {

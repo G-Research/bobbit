@@ -567,6 +567,35 @@ interface RoleFieldDisplay {
 	badge: string;
 	/** Resolved value text (model id / thinking label) for the source line. */
 	effectiveLabel: string;
+	/**
+	 * Raw effective value (model id / thinking level) for the row's interactive
+	 * picker — including inherited-role values that have no top-level
+	 * `role.model` / `role.thinkingLevel`. Empty string when the field falls
+	 * back to a pure default (so the picker renders its "(use default)" label).
+	 */
+	effectiveValue: string;
+}
+
+/**
+ * The model/thinking values that are CURRENT-SCOPE overrides (the layer the
+ * inline list row would write to), as opposed to inherited/default values.
+ *
+ * Used both to derive the row `data-model-state` and to persist inline edits
+ * without accidentally promoting an inherited value into a fresh current-scope
+ * override (e.g. changing only thinking must not bake the inherited model in,
+ * and clearing the model must not wipe a thinking override). Prefers the
+ * server's `modelResolution` (source === "role" ⇒ current editable layer);
+ * falls back to the top-level fields for drafts that carry no metadata.
+ */
+function currentScopeRoleOverrides(role: RoleData): { model: string; thinkingLevel: string } {
+	const meta = role.modelResolution;
+	if (meta) {
+		return {
+			model: meta.model.source === "role" ? (meta.model.value ?? "") : "",
+			thinkingLevel: meta.thinkingLevel.source === "role" ? (meta.thinkingLevel.value ?? "") : "",
+		};
+	}
+	return { model: role.model ?? "", thinkingLevel: role.thinkingLevel ?? "" };
 }
 
 interface RoleModelDisplay {
@@ -631,9 +660,12 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 		const value = m.value ?? "";
 		const effectiveLabel = value ? format(value) : emptyLabel;
 		switch (m.source) {
-			case "role": return { override: true, kind: "role", badge: "Role override", effectiveLabel };
-			case "inherited-role": return { override: true, kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel };
-			default: return { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel };
+			// Inherited-role values have no top-level `role.model`/`role.thinkingLevel`,
+			// so `effectiveValue` is what surfaces the real model/thinking in the picker
+			// instead of a misleading "(use default)".
+			case "role": return { override: true, kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
+			case "inherited-role": return { override: true, kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value };
+			default: return { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "" };
 		}
 	};
 
@@ -642,9 +674,9 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	if (meta) {
 		model = fromMeta(meta.model, (v) => formatModelPref(v), formatModelPref(def.model));
 	} else if (role.model) {
-		model = { override: true, kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model) };
+		model = { override: true, kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model), effectiveValue: role.model };
 	} else {
-		model = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model) };
+		model = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "" };
 	}
 
 	// THINKING
@@ -653,15 +685,18 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	if (meta) {
 		thinking = fromMeta(meta.thinkingLevel, (v) => thinkingLevelLabel(v), defThinkingLabel);
 	} else if (role.thinkingLevel) {
-		thinking = { override: true, kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel) };
+		thinking = { override: true, kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel), effectiveValue: role.thinkingLevel };
 	} else {
-		thinking = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel };
+		thinking = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "" };
 	}
 
+	// State follows the CURRENT-SCOPE override (not the resolved winner): an
+	// inherited-role value must read as "inherited", not "override".
+	const overrides = currentScopeRoleOverrides(role);
 	let state: RoleModelDisplay["state"];
 	if (packReadonly) state = "readonly";
-	else if (role.model) state = "override";
-	else if (role.thinkingLevel) state = "thinking-override";
+	else if (overrides.model) state = "override";
+	else if (overrides.thinkingLevel) state = "thinking-override";
 	else state = "inherited";
 
 	return { packReadonly, packName, model, thinking, state };
@@ -720,9 +755,9 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 				${renderModelRow(
 					"",
 					"",
-					role.model ?? "",
+					display.model.effectiveValue,
 					(v) => control.onModelChange(role, v),
-					role.thinkingLevel ?? "",
+					display.thinking.effectiveValue,
 					(v) => control.onThinkingChange(role, v),
 					"",
 					{ fallbackLabel: "(use default)" },
@@ -838,15 +873,18 @@ function renderListView(): TemplateResult {
 		modelControl: {
 			savedFlashRole: savedModelFlashRole,
 			onModelChange: (role, model) => {
-				// Picking a model keeps any existing thinking override; the model
-				// clear button (X) resets the whole role override (model + thinking).
-				// Thinking can still be reset on its own via role-row-thinking-clear-btn.
-				void persistInlineModel(role, model, model ? (role.thinkingLevel ?? "") : "");
+				// Model and thinking are independent. Setting OR clearing the model
+				// preserves any existing thinking override — clearing the model must
+				// never write thinkingLevel:"" (thinking is reset only by its own
+				// dedicated clear control, role-row-thinking-clear-btn).
+				void persistInlineModel(role, model, currentScopeRoleOverrides(role).thinkingLevel);
 			},
 			onThinkingChange: (role, thinking) => {
-				// Thinking is editable/clearable independently of the model, so even
-				// inherited rows can gain (or drop) a thinking-only override.
-				void persistInlineModel(role, role.model ?? "", thinking);
+				// Thinking is editable/clearable independently of the model. Persist
+				// only the current-scope model OVERRIDE (empty when inherited) so a
+				// thinking-only change never promotes an inherited model into a fresh
+				// current-scope model override.
+				void persistInlineModel(role, currentScopeRoleOverrides(role).model, thinking);
 			},
 		},
 	});
