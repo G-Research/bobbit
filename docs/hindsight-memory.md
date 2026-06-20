@@ -77,7 +77,7 @@ provider reads.
 |---|---|---|---|
 | `mode` | enum `external` \| `managed` \| `managed-external-postgres` | `external` | Deployment mode. `external` is documented here; the two managed modes start a Docker runtime — see [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). Only `external` activates via `externalUrl`; managed modes activate via `activeWhenConfig`. |
 | `externalUrl` | string (optional) | — | Base URL of your running Hindsight **data-plane API** (external mode) — where Bobbit reads and writes memory. **Empty ⇒ dormant** in external mode. This is the single field that switches the external pack on. AJ's local example: `http://localhost:9177`. See [API URL vs UI/dashboard URL](#api-url-vs-uidashboard-url). |
-| `uiUrl` | string (optional) | — | Optional, **non-secret** human-facing Hindsight **dashboard** URL. Display/open-only — it backs the **Open Hindsight UI** action and is **never dialed by the client** and **never** influences activation/dormancy (those stay keyed on `externalUrl`). Never fabricated from `externalUrl` (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data`. Validated as an http(s) URL; `""` clears it. |
+| `uiUrl` | string (optional) | — | Optional, **non-secret** human-facing Hindsight **dashboard** URL. Display-only — it is used for the in-app embedded dashboard and is **never dialed by the client** and **never** influences activation/dormancy (those stay keyed on `externalUrl`). Never fabricated from `externalUrl` (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data`. Validated as an http(s) URL; `""` clears it. |
 | `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). Also forms `ctx.runtime.headers` for the managed API. |
 | `llmApiKey` / `externalDatabaseUrl` / `dataDir` | secret / secret / string | — / — / `~/.hindsight` | **Managed-mode only.** `llmApiKey` → `HINDSIGHT_API_LLM_API_KEY`, `externalDatabaseUrl` → `HINDSIGHT_API_DATABASE_URL` (redacted to `*Set` booleans on the GET surface), `dataDir` is the managed-Postgres bind path. See [managed-runtimes.md — P3](managed-runtimes.md#secrets--config-mapping). |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
@@ -331,16 +331,15 @@ Two entrypoints open this **embedded dashboard tab**, declared under `market-pac
 ### Failure Paths & Safe Fallbacks
 
 The embedded dashboard tab is robust against misconfiguration or environment failures:
-- **Unset `uiUrl`**: If the `uiUrl` setting is empty, the tab does not dead-end. It presents a clear message pointing the user to configure it in the Marketplace, and offers a read-only search input fallback (using the API-only `recall` route) so users can still run queries.
+- **Unset `uiUrl`**: If the `uiUrl` setting is empty, the tab does not dead-end. It displays a helpful Call-to-Action (CTA) pointing the user to configure Hindsight in the Marketplace, alongside any available API-only or external status context.
 - **Blocked or Unreachable iframe**: If a remote or secured Hindsight deployment serves frame protection headers (blocking the iframe) or is network-unreachable, the tab detects this and renders a clear warning.
-- **Secondary Fallback**: The dedicated **"Open Hindsight UI"** action launches the embedded dashboard in-app by default, but a small secondary **"open in external browser ↗"** link is always provided on the tab as a fallback.
+- **Secondary Fallback**: The primary **"Open Hindsight UI"** action opens the embedded in-app dashboard; an external-browser fallback link is provided as a secondary option when `uiUrl` is configured, while an unset `uiUrl` displays helpful Marketplace guidance.
 
 ### Move configuration out of the entry, into the Marketplace
 
 To streamline the user experience, configuration has been completely moved out of the session entry point and consolidated inside the **Marketplace**. The standalone config/status form that the entry used to open is no longer the entry's job, leaving the entry focused entirely on utilizing the embedded dashboard.
 - **Marketplace inline form/wizard**: All settings (deployment mode, URLs, bank, scope, and auto-toggles) and write-only secrets management are performed strictly within the Marketplace row's inline form.
 - **Read-only status card**: Genuine runtime status metrics (such as mode, health, and retry-queue depth) are visible in the Marketplace row itself.
-- **Search & Query Fallback**: The embedded panel still offers a manual search fallback if a user wants to query memory via the `recall` route directly inside the app, complete with loading, empty, dormant, and error states.
 
 The panel uses only Bobbit theme tokens (`--background`, `--foreground`, `--card`, `--border`,
 `--primary`, `--muted-foreground`, the `--chart-*` palette, and the `--positive`/`--negative`/
@@ -406,11 +405,7 @@ Users conflate the two URLs, so the UI distinguishes them everywhere:
 - **API URL** (`externalUrl`) — the Hindsight **data-plane API**, where Bobbit reads and writes
   memory. This is the only URL the client ever dials, and the field that switches external mode on.
   AJ's local example: `http://localhost:9177`.
-- **UI / dashboard URL** (`uiUrl`) — the human **web dashboard** for browsing memory. Bobbit
-  **never** reads through it; it only backs the **Open Hindsight UI** link (opened in a new tab).
-  Optional, non-secret, and **never fabricated** from the API URL (different port/path). AJ's local
-  example: `http://localhost:19177/banks/hermes?view=data` (Tailscale equivalent:
-  `http://<tailscale-host>:19177/banks/hermes?view=data`). When unset, the action is hidden.
+- **UI / dashboard URL** (`uiUrl`) — the human **web dashboard** for browsing memory. Bobbit **never** reads through it. The primary **Open Hindsight UI** action opens the embedded in-app dashboard route (`#/ext/hindsight`). A secondary link to open in an external browser is provided when `uiUrl` is configured. If `uiUrl` is unset, the interface directs the user with helpful Marketplace configuration guidance. It is optional, non-secret, and **never fabricated** from the API URL (different port/path). AJ's local example: `http://localhost:19177/banks/hermes?view=data` (Tailscale equivalent: `http://<tailscale-host>:19177/banks/hermes?view=data`).
 
 ### Actions (state-aware)
 
@@ -421,7 +416,7 @@ read seam above). At most a few buttons render inline.
 |---|---|---|---|
 | **Configure** | always (primary) | Opens the guided setup wizard / inline configuration form inside the Marketplace | opens Marketplace inline configure form / wizard |
 | **Test connection** | when configured | Re-reads the `status` route (pure health probe, no Docker) and shows an inline ok/fail lozenge | sessionless `status` read |
-| **Open Hindsight UI** | when a `uiUrl` is known | Opens the embedded dashboard tab inside Bobbit; includes a secondary link to open externally | in-app navigation (iframe target) |
+| **Open Hindsight UI** | always | Opens the embedded dashboard tab inside Bobbit (displays helpful Marketplace guidance if uiUrl is unset; includes a secondary link to open externally if uiUrl is configured) | in-app navigation (iframe target) |
 | **Start runtime** | managed + stopped | **Explicit** consented Docker start (gated by the consent disclosure) | `POST /api/pack-runtimes/:id/start` |
 | **Stop runtime** | managed + running/starting/unhealthy | Stops containers, keeps data | `POST /api/pack-runtimes/:id/stop` |
 | **View logs** | managed modes | Inline read-only log tail | `GET /api/pack-runtimes/:id/logs?tail=` |
