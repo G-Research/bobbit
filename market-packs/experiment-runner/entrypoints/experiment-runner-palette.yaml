@@ -1,7 +1,11 @@
 id: experiment-runner.palette
-kind: command-palette
+kind: session-menu
 label: New experiment
-# A command-palette LAUNCHER. Its selection IS the user gesture. Opens the
-# experiment panel in the current session at mode-select (A/B default).
+# A session-menu LAUNCHER (the session actions overflow menu). Its selection IS
+# the user gesture. Opens the experiment panel in the current session at
+# mode-select (A/B default). The child-goal fan-out happens server-side later,
+# when the user hits Launch (the `launch`/`iterate` route calls
+# host.agents.spawnGoal per arm). The former `command-palette` kind was removed
+# upstream; `session-menu` is the canonical equivalent launcher surface.
 target:
   panelId: experiment-runner.panel
