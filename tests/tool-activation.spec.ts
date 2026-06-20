@@ -98,12 +98,29 @@ test.describe("computeToolActivationArgs", () => {
 		expect(extPaths.some(p => p.includes("/team/extension.ts"))).toBe(true);
 	});
 
-	test("empty allowedTools array — same as undefined (all tools)", () => {
+	test("empty allowedTools array — explicit empty allowlist registers NO tools (NOT all)", () => {
+		// Contract: `undefined` = unrestricted (all tools); `[]` = explicit empty
+		// allowlist = no tools. A restricted session whose entire allowlist is
+		// removed by `bobbit.disabledTools` resolves to `[]` and must NEVER widen
+		// back to all tools. See tool-activation.ts::computeToolActivationArgs.
 		const tm = mockToolManager(standardProviders());
 		const withUndefined = computeToolActivationArgs(undefined, tm);
 		const withEmpty = computeToolActivationArgs([] as EffectiveTool[], tm);
-		expect(withEmpty.args).toEqual(withUndefined.args);
-		expect(withEmpty.env).toEqual(withUndefined.env);
+
+		// Unrestricted enables all six file builtins + every bobbit extension.
+		expect(withUndefined.env.BOBBIT_BUILTIN_TOOLS).toBe("edit,find,grep,ls,read,write");
+		expect(extensionPaths(withUndefined.args).some(p => p.includes("/web/extension.ts"))).toBe(true);
+
+		// Explicit empty allowlist registers no builtins and no bobbit extensions.
+		expect(withEmpty.env.BOBBIT_BUILTIN_TOOLS).toBe("");
+		const emptyExtPaths = extensionPaths(withEmpty.args);
+		// Only the always-on _builtins extension may appear; no functional tool groups.
+		expect(emptyExtPaths.some(p => p.includes("/web/extension.ts"))).toBe(false);
+		expect(emptyExtPaths.some(p => p.includes("/shell/extension.ts"))).toBe(false);
+		expect(emptyExtPaths.some(p => p.includes("/browser/extension.ts"))).toBe(false);
+
+		// They must therefore NOT be equal — the whole point of the distinction.
+		expect(withEmpty.env.BOBBIT_BUILTIN_TOOLS).not.toEqual(withUndefined.env.BOBBIT_BUILTIN_TOOLS);
 	});
 
 	test("restricted to file builtins only — env lists them, no bobbit-extension paths", () => {

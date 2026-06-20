@@ -56,7 +56,7 @@ import {
 	markProposalDismissed,
 	backToSessions,
 } from "./session-manager.js";
-import { deleteProposalFile } from "./proposal-helpers.js";
+import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
@@ -469,14 +469,18 @@ interface GoalFormConfig {
 	autoStartTeam: boolean;
 	onAutoStartTeamChange: (e: Event) => void;
 
-	// ---- Per-goal worktree setup hook ----
-	/** Current value of the optional per-goal worktree setup command. */
-	worktreeSetupCommand: string;
-	/** Current value of the optional per-goal setup timeout (ms), as a raw
-	 *  string for input round-tripping. Empty = use the default. */
-	worktreeSetupTimeoutMs: string;
-	onWorktreeSetupCommandChange: (e: Event) => void;
-	onWorktreeSetupTimeoutChange: (e: Event) => void;
+	// ---- Per-goal metadata ----
+	/** Ordered [key, value] string rows for the per-goal metadata editor. Values
+	 *  are JSON-parsed at submit when possible, otherwise kept as strings. */
+	metadataRows: Array<[string, string]>;
+	/** Apply an update to the row set. The updater receives the LIVE current rows
+	 *  (not the render-time snapshot) so rapid successive edits — key then value
+	 *  of the same row, or an Add immediately after a fill — compose correctly
+	 *  even though renderApp() is rAF-throttled. A plain replacement array is also
+	 *  accepted for convenience. */
+	onMetadataRowsChange: (
+		update: Array<[string, string]> | ((prev: Array<[string, string]>) => Array<[string, string]>),
+	) => void;
 
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
@@ -573,16 +577,46 @@ interface GoalFormConfig {
 }
 
 /**
- * Parse the per-goal worktree-setup timeout input (a raw string) into a number
- * suitable for createGoal. Returns undefined for blank/invalid values so the
- * goal falls back to the project default / 120s. Only finite positive integers
- * are forwarded.
+ * Render the simple per-goal metadata key/value editor. Rows are arbitrary
+ * namespaced key/value pairs attached to the goal; values are JSON-parsed at
+ * submit when possible (numbers, booleans, arrays, objects), else kept as
+ * strings. An empty editor sends no `metadata` so the goal is unchanged.
  */
-function parseSetupTimeoutMs(raw: string): number | undefined {
-	const t = raw.trim();
-	if (t === "") return undefined;
-	const n = Number(t);
-	return Number.isInteger(n) && n > 0 ? n : undefined;
+function renderGoalMetadataEditor(config: GoalFormConfig): TemplateResult {
+	const rows = config.metadataRows;
+	const inputCls = "flex-1 min-w-0 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
+	return html`
+		<div class="flex flex-col gap-1.5" data-testid="goal-form-metadata">
+			<div class="flex items-center gap-1.5">
+				<label class="text-xs text-muted-foreground font-medium">Metadata</label>
+				<span title="Arbitrary namespaced key/value pairs attached to this goal and inherited by all its sessions and sub-goals (e.g. bobbit.disabledTools, hindsight.memory.enabled). Values are JSON-parsed when possible (numbers, booleans, arrays, objects), otherwise stored as strings. Empty = no override."
+					class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+			</div>
+			<div class="flex flex-col gap-1.5" data-testid="goal-metadata-list">
+				${rows.length === 0
+					? html`<div class="text-[10px] text-muted-foreground opacity-70">No metadata entries.</div>`
+					: rows.map(([k, v], i) => html`
+						<div class="flex items-center gap-1.5" data-testid="goal-metadata-row">
+							<input class=${inputCls} data-testid="goal-metadata-key" placeholder="key" .value=${k}
+								@input=${(e: Event) => {
+									const val = (e.target as HTMLInputElement).value;
+									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [val, p[1]] : p));
+								}} />
+							<input class="${inputCls} font-mono" data-testid="goal-metadata-value" placeholder="value (JSON or text)" .value=${v}
+								@input=${(e: Event) => {
+									const val = (e.target as HTMLInputElement).value;
+									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [p[0], val] : p));
+								}} />
+							<button class="text-muted-foreground hover:text-foreground text-sm px-1.5 shrink-0" title="Remove metadata entry"
+								data-testid="goal-metadata-remove"
+								@click=${() => config.onMetadataRowsChange((prev) => prev.filter((_, j) => j !== i))}>✕</button>
+						</div>
+					`)}
+			</div>
+			<button class="self-start text-[11px] text-primary hover:underline" data-testid="goal-metadata-add"
+				@click=${() => config.onMetadataRowsChange((prev) => [...prev, ["", ""]])}>+ Add metadata</button>
+		</div>
+	`;
 }
 
 /** Compute a goal's depth (1-based) by walking parentGoalId links. */
@@ -1005,31 +1039,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				`;})}
 				${!tabbed ? renderSubgoalsToggle(config) : ""}
 			</div>
-			<div class="flex flex-col gap-1.5" data-testid="goal-form-worktree-setup">
-				<div class="flex items-center gap-1.5">
-					<label class="text-xs text-muted-foreground font-medium">Setup command</label>
-					<span title="Runs once on the HOST during worktree provisioning, after component setup — same trust model as the project worktree setup command. cwd is the goal worktree; env includes SOURCE_REPO, BOBBIT_GOAL_ID, BOBBIT_GOAL_BRANCH, BOBBIT_WORKTREE_PATH. Optional."
-						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-				</div>
-				<textarea
-					data-testid="goal-form-worktree-setup-command"
-					class="min-h-[44px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-					placeholder="Optional host command, e.g. ./scripts/seed.sh"
-					.value=${config.worktreeSetupCommand}
-					@input=${config.onWorktreeSetupCommandChange}
-				></textarea>
-				<p class="text-[10px] text-muted-foreground opacity-70">Runs on the host during provisioning — trusted, same as project worktree setup.</p>
-				<div class="flex items-center gap-2">
-					<label class="text-xs text-muted-foreground font-medium">Timeout (ms)</label>
-					<input type="number" min="1" step="1"
-						data-testid="goal-form-worktree-setup-timeout-ms"
-						class="w-28 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-						placeholder="default"
-						.value=${config.worktreeSetupTimeoutMs}
-						@input=${config.onWorktreeSetupTimeoutChange}
-					/>
-				</div>
-			</div>
+			${renderGoalMetadataEditor(config)}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<div class="flex items-center gap-1">
@@ -1449,8 +1459,7 @@ function goalPreviewPanel() {
 				projectId,
 				enabledOptionalSteps,
 				autoStartTeam,
-				worktreeSetupCommand: state.previewWorktreeSetupCommand.trim() || undefined,
-				worktreeSetupTimeoutMs: parseSetupTimeoutMs(state.previewWorktreeSetupTimeoutMs),
+				metadata: metadataRowsToObject(state.previewMetadataRows),
 			});
 		} catch (err) {
 			const { message, code, stack } = errorDetails(err);
@@ -1481,8 +1490,8 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
-		state.previewWorktreeSetupCommand = "";
-		state.previewWorktreeSetupTimeoutMs = "";
+		state.previewMetadataRows = [];
+		state.previewMetadataEdited = false;
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1578,17 +1587,17 @@ function goalPreviewPanel() {
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
 				autoStartTeam: _goalAutoStartTeam,
 				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-				worktreeSetupCommand: state.previewWorktreeSetupCommand,
-				worktreeSetupTimeoutMs: state.previewWorktreeSetupTimeoutMs,
-				onWorktreeSetupCommandChange: (e: Event) => {
-					state.previewWorktreeSetupCommand = (e.target as HTMLTextAreaElement).value;
+				metadataRows: state.previewMetadataRows,
+				onMetadataRowsChange: (update) => {
+					// Resolve against the LIVE rows so rapid edits compose across the
+					// rAF-throttled render (see the updater contract on GoalFormConfig).
+					state.previewMetadataRows = typeof update === "function" ? update(state.previewMetadataRows) : update;
+					// Mark as user-edited so an authoritative proposal reconcile can't
+					// clobber these rows (mirrors the title/spec/cwd *Edited guards).
+					state.previewMetadataEdited = true;
 					const sid = activeSessionId();
 					if (sid) saveGoalDraft(sid);
-				},
-				onWorktreeSetupTimeoutChange: (e: Event) => {
-					state.previewWorktreeSetupTimeoutMs = (e.target as HTMLInputElement).value;
-					const sid = activeSessionId();
-					if (sid) saveGoalDraft(sid);
+					renderApp();
 				},
 				cwdDropdownOpen: state.cwdDropdownOpen,
 				cwdHighlightIndex: state.cwdHighlightIndex,
@@ -2673,8 +2682,7 @@ let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 // Per-goal worktree setup hook. Initialized from proposal frontmatter in
 // syncProposalFormState; stored as raw strings for input round-tripping.
-let _proposalWorktreeSetupCommand = "";
-let _proposalWorktreeSetupTimeoutMs = "";
+let _proposalMetadataRows: Array<[string, string]> = [];
 let _proposalInitializedFrom: string | null = null;
 // Per-goal subgoal controls. null means "inherit system preference" — only
 // forwarded to createGoal when the user actually touched the control.
@@ -2865,7 +2873,7 @@ function syncProposalFormState(): void {
 		parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
 		subgoalsAllowed?: boolean; maxNestingDepth?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
-		worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number;
+		metadata?: Record<string, unknown>;
 	};
 	if (!proposal) return;
 
@@ -2896,7 +2904,7 @@ function syncProposalFormState(): void {
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.worktreeSetupCommand ?? ""}|${proposal.worktreeSetupTimeoutMs ?? ""}`;
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2927,10 +2935,9 @@ function syncProposalFormState(): void {
 		? proposal.divergencePolicy
 		: null;
 	_proposalMaxConcurrentChildren = typeof proposal.maxConcurrentChildren === "number" ? proposal.maxConcurrentChildren : null;
-	// Per-goal worktree setup hook: seed the dialog controls from frontmatter so
-	// a propose_goal-seeded proposal pre-fills the inputs. Absent => empty.
-	_proposalWorktreeSetupCommand = typeof proposal.worktreeSetupCommand === "string" ? proposal.worktreeSetupCommand : "";
-	_proposalWorktreeSetupTimeoutMs = typeof proposal.worktreeSetupTimeoutMs === "number" ? String(proposal.worktreeSetupTimeoutMs) : "";
+	// Per-goal metadata: seed the editor rows from frontmatter so a propose_goal-
+	// seeded proposal pre-fills the key/value pairs. Absent => empty.
+	_proposalMetadataRows = metadataObjectToRows(proposal.metadata);
 }
 
 function goalProposalPanel() {
@@ -3046,8 +3053,7 @@ function goalProposalPanel() {
 					maxNestingDepth: maxNestingDepthField,
 					divergencePolicy: divergencePolicyField,
 					maxConcurrentChildren: maxConcurrentChildrenField,
-					worktreeSetupCommand: _proposalWorktreeSetupCommand.trim() || undefined,
-					worktreeSetupTimeoutMs: parseSetupTimeoutMs(_proposalWorktreeSetupTimeoutMs),
+					metadata: metadataRowsToObject(_proposalMetadataRows),
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -3072,8 +3078,7 @@ function goalProposalPanel() {
 			_proposalMaxNestingDepth = null;
 			_proposalDivergencePolicy = null;
 			_proposalMaxConcurrentChildren = null;
-			_proposalWorktreeSetupCommand = "";
-			_proposalWorktreeSetupTimeoutMs = "";
+			_proposalMetadataRows = [];
 			resetProposalTabsState();
 			await closeCurrentProposalPanel("goal", proposalSessionId);
 			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "goal");
@@ -3111,8 +3116,7 @@ function goalProposalPanel() {
 		_proposalMaxNestingDepth = null;
 		_proposalDivergencePolicy = null;
 		_proposalMaxConcurrentChildren = null;
-		_proposalWorktreeSetupCommand = "";
-		_proposalWorktreeSetupTimeoutMs = "";
+		_proposalMetadataRows = [];
 		resetProposalTabsState();
 		// Persist dismiss so it survives reconnect
 		const sid = proposalSessionId;
@@ -3163,10 +3167,11 @@ function goalProposalPanel() {
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
 		autoStartTeam: _proposalAutoStartTeam,
 		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-		worktreeSetupCommand: _proposalWorktreeSetupCommand,
-		worktreeSetupTimeoutMs: _proposalWorktreeSetupTimeoutMs,
-		onWorktreeSetupCommandChange: (e: Event) => { _proposalWorktreeSetupCommand = (e.target as HTMLTextAreaElement).value; },
-		onWorktreeSetupTimeoutChange: (e: Event) => { _proposalWorktreeSetupTimeoutMs = (e.target as HTMLInputElement).value; },
+		metadataRows: _proposalMetadataRows,
+		onMetadataRowsChange: (update) => {
+			_proposalMetadataRows = typeof update === "function" ? update(_proposalMetadataRows) : update;
+			renderApp();
+		},
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },

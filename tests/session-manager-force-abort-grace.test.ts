@@ -79,6 +79,88 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.ok(elapsed >= GRACE - 20, `did not force-kill before the grace period (${elapsed}ms)`);
 	});
 
+	/**
+	 * Force-abort respawn must derive its tool allowlist from the session/persisted
+	 * allowedTools, NOT recompute it from the role alone. A restricted child/delegate
+	 * (e.g. one whose allowlist was narrowed/removed by bobbit.disabledTools) would
+	 * otherwise be widened back to the role default on force-abort.
+	 */
+	async function captureForceAbortAllowed(opts: {
+		persistedAllowedTools?: string[];
+		sessionAllowedTools?: string[];
+	}): Promise<{ kind: "args"; allowed: any[] | undefined }> {
+		// Respawn must not spawn a real process; abort the rebuild AFTER activation
+		// is computed (factory runs after buildToolActivationArgs in forceAbort).
+		registerRpcBridgeFactory(() => { throw new Error("no respawn in test"); });
+
+		const manager: any = new SessionManager();
+		const persisted: any = {
+			id: "s-restricted",
+			allowedTools: opts.persistedAllowedTools,
+		};
+		manager._testStore = { update: mock.fn(() => {}), get: mock.fn(() => persisted) };
+
+		// Spy buildToolActivationArgs to capture the allowedTools it is handed.
+		let captured: { allowed: any[] | undefined } | undefined;
+		manager.buildToolActivationArgs = (_id: string, allowedTools: any[] | undefined) => {
+			captured = { allowed: allowedTools };
+			return { args: [], env: {} };
+		};
+		managers.push(manager);
+
+		const session: any = {
+			id: "s-restricted",
+			title: "Restricted",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "streaming",
+			statusVersion: 1,
+			streamingStartedAt: Date.now(),
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set([{ readyState: 1, send: () => {} }]),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			allowedTools: opts.sessionAllowedTools,
+			unsubscribe: () => {},
+			rpcClient: {
+				abort: () => new Promise<void>(() => {}), // never resolves
+				onEvent: () => () => {}, // never emits agent_end
+				getState: async () => ({ success: false }),
+				stop: async () => {},
+			},
+		};
+		manager.sessions.set(session.id, session);
+
+		await manager.forceAbort(session.id, 30);
+		assert.ok(captured, "buildToolActivationArgs was called during force-abort respawn");
+		return { kind: "args", allowed: captured!.allowed };
+	}
+
+	it("respawn preserves a restricted persisted allowlist (no widening to role default)", async () => {
+		const { allowed } = await captureForceAbortAllowed({ persistedAllowedTools: ["read", "grep"] });
+		assert.ok(Array.isArray(allowed), "restricted allowlist stays an explicit list");
+		assert.deepEqual(allowed!.map((e: any) => e.name).sort(), ["grep", "read"]);
+	});
+
+	it("respawn preserves an explicit-empty allowlist as NO tools (never widens to undefined)", async () => {
+		const { allowed } = await captureForceAbortAllowed({ persistedAllowedTools: [] });
+		assert.ok(Array.isArray(allowed), "[] must stay an explicit empty list, not undefined");
+		assert.equal(allowed!.length, 0);
+	});
+
+	it("respawn leaves a genuinely unrestricted session unrestricted (undefined)", async () => {
+		const { allowed } = await captureForceAbortAllowed({});
+		assert.equal(allowed, undefined, "no persisted/session allowlist ⇒ unrestricted default");
+	});
+
+	it("respawn falls back to the live session allowlist when no persisted list exists", async () => {
+		const { allowed } = await captureForceAbortAllowed({ sessionAllowedTools: ["read"] });
+		assert.ok(Array.isArray(allowed));
+		assert.deepEqual(allowed!.map((e: any) => e.name), ["read"]);
+	});
+
 	it("cancels a pending auto-retry timer even when not streaming (S40)", async () => {
 		const manager: any = new SessionManager();
 		manager._testStore = { update: mock.fn(() => {}), get: mock.fn(() => undefined) };

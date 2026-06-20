@@ -80,9 +80,13 @@ export function providersDeclareTurnHooks(
  * per-turn hook (`beforePrompt` / `beforeCompact`). Delegates to the hub so
  * provider activation filtering stays centralized in the registry. When false,
  * session setup must NOT generate or push the bridge extension (zero overhead).
+ *
+ * `goalId` is the session's EFFECTIVE goal (`goalId ?? teamGoalId`): a goal
+ * subtree that disables a provider via `bobbit.disabledProviders` gets no
+ * bridge installed at all — clean disable across the whole tree.
  */
-export function hasProviderBridgeHooks(hub: LifecycleHub, projectId?: string): boolean {
-	return hub.hasProvidersForHooks(projectId, TURN_BRIDGE_HOOKS);
+export function hasProviderBridgeHooks(hub: LifecycleHub, projectId?: string, goalId?: string): boolean {
+	return hub.hasProvidersForHooks(projectId, TURN_BRIDGE_HOOKS, goalId);
 }
 
 /**
