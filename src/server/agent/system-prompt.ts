@@ -341,6 +341,37 @@ export interface PromptParts {
 	skillsCatalogBudget?: number;
 	/** Fresh provider-supplied context blocks appended as the final, lowest-authority prompt section. */
 	dynamicContext?: ContextBlock[];
+	/**
+	 * Optional per-goal prompt section ordering (the `bobbit.promptSectionOrder`
+	 * metadata convention). Labels listed here are emitted first, in the given
+	 * order; any unlisted section keeps its original relative position after
+	 * them. Unknown labels are ignored. Absent ⇒ today's fixed order, byte-
+	 * identical. NOTE: reordering the stable/volatile split can change the
+	 * provider prompt-cache hit rate — a legitimate A/B experiment variable.
+	 */
+	sectionOrder?: string[];
+}
+
+/**
+ * Stable-reorder labeled sections so the labels in `order` come first (in the
+ * given order), and any section whose label is not listed keeps its ORIGINAL
+ * relative position after them. A label appearing more than once in `order`
+ * uses its first occurrence. Returns the input array unchanged when `order` is
+ * empty/undefined (byte-identical default behaviour).
+ */
+export function reorderLabeledSections<T extends { label: string }>(sections: T[], order?: string[]): T[] {
+	if (!order || order.length === 0) return sections;
+	const rank = new Map<string, number>();
+	order.forEach((label, i) => { if (!rank.has(label)) rank.set(label, i); });
+	return sections
+		.map((section, index) => ({ section, index }))
+		.sort((a, b) => {
+			const ra = rank.has(a.section.label) ? rank.get(a.section.label)! : Number.POSITIVE_INFINITY;
+			const rb = rank.has(b.section.label) ? rank.get(b.section.label)! : Number.POSITIVE_INFINITY;
+			if (ra !== rb) return ra - rb;
+			return a.index - b.index; // stable: preserve original relative order within a rank
+		})
+		.map((entry) => entry.section);
 }
 
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -433,13 +464,13 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 }
 
 function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
-	const sections: string[] = [];
+	const sections: { label: string; content: string }[] = [];
 
 	// 1. Global system prompt (resolve @refs relative to its directory)
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
 		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
-		if (base) sections.push(base);
+		if (base) sections.push({ label: "System Prompt", content: base });
 	}
 
 	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
@@ -447,12 +478,12 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	const filesRoot = parts.projectRoot || parts.cwd;
 	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore);
 	if (agentsMd.trim()) {
-		sections.push("# Project AGENTS.md\n\n" + agentsMd.trim());
+		sections.push({ label: "Project AGENTS.md", content: "# Project AGENTS.md\n\n" + agentsMd.trim() });
 	}
 
 	// 2.5. Working directory instructions
 	if (parts.cwd) {
-		sections.push(
+		sections.push({ label: "Working Directory", content:
 			`# Working Directory\n\n` +
 			`Your working directory is: \`${parts.cwd}\`\n\n` +
 			`Stay in this directory for all file operations and git commands. ` +
@@ -461,41 +492,56 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
 			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
 			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`
-		);
+		});
 	}
 
 	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching)
 	if (parts.toolDocs?.trim()) {
-		sections.push(parts.toolDocs.trim());
+		sections.push({ label: "Tools", content: parts.toolDocs.trim() });
 	}
 
 	// 4. Available Skills (autonomous activation catalog — stable across turns)
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
 		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) sections.push(skillsSection);
+		if (skillsSection) sections.push({ label: "Available Skills", content: skillsSection });
 	}
 
-	// 5. Goal spec (merge rolePrompt into goalSpec section for backward compat).
-	// Volatile sections (goal/task/workflow context) follow the stable prefix above
-	// so provider prompt caches reuse the tool docs + skills catalog between turns.
-	{
-		let effectiveGoalSpec = parts.goalSpec || "";
-		if (parts.rolePrompt?.trim()) {
-			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + parts.rolePrompt.trim();
-		}
-		if (effectiveGoalSpec.trim()) {
-			const header = parts.goalTitle
-				? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-				: "# Goal";
-			sections.push(header + "\n\n" + effectiveGoalSpec.trim());
-		}
+	// 5. Goal spec + role as SEPARATE labeled sections so each can be reordered
+	// independently via `bobbit.promptSectionOrder` and the assembled prompt
+	// mirrors the inspector (getPromptSections) which already exposes Goal and
+	// Role distinctly. Joined by the section separator below, the default order
+	// (Goal then Role) is byte-identical to the previous merged `Goal` section.
+	// Volatile sections (goal/role/task/workflow context) follow the stable prefix
+	// above so provider prompt caches reuse the tool docs + skills catalog.
+	if (parts.goalSpec?.trim()) {
+		const header = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		sections.push({ label: "Goal", content: header + "\n\n" + parts.goalSpec.trim() });
+	}
+	if (parts.rolePrompt?.trim()) {
+		// Backward compatibility: historically the role prompt rendered INSIDE the
+		// `# Goal` section. When there is no goal spec AND no explicit
+		// `bobbit.promptSectionOrder`, a role-only session must keep that exact
+		// shape (a `# Goal` header preceding the role prompt) so absent-metadata
+		// output is byte-identical to before. When metadata supplies a section
+		// order, `Role` stays a standalone, independently-reorderable section.
+		const hasOrder = !!parts.sectionOrder && parts.sectionOrder.length > 0;
+		const needsGoalHeader = !parts.goalSpec?.trim() && !hasOrder;
+		const roleHeader = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		const roleContent = needsGoalHeader
+			? roleHeader + "\n\n" + parts.rolePrompt.trim()
+			: parts.rolePrompt.trim();
+		sections.push({ label: "Role", content: roleContent });
 	}
 
 	// 5.5. Goal nesting context — three stanzas for team-lead sessions
 	// describing root/child role + the subgoal/team_spawn/task_create decision rule.
 	if (parts.nestingContext) {
 		const nesting = buildNestingContextSection(parts.nestingContext);
-		if (nesting) sections.push(nesting);
+		if (nesting) sections.push({ label: "Goal Nesting", content: nesting });
 	}
 
 	// 6. Task context
@@ -515,22 +561,23 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 			}
 		}
 
-		sections.push(taskLines.join("\n"));
+		sections.push({ label: "Task", content: taskLines.join("\n") });
 	}
 
 	// 7. Workflow dependency context (accepted upstream gate content)
 	if (parts.workflowContext?.trim()) {
-		sections.push(parts.workflowContext.trim());
+		sections.push({ label: "Workflow Context", content: parts.workflowContext.trim() });
 	}
 
 	// 8. Dynamic Context (provider-supplied, freshest/lowest-authority tail)
 	if (parts.dynamicContext?.length) {
-		sections.push("## Dynamic Context\n\n" + parts.dynamicContext.map(fenceBlock).join("\n\n"));
+		sections.push({ label: "Dynamic Context", content: "## Dynamic Context\n\n" + parts.dynamicContext.map(fenceBlock).join("\n\n") });
 	}
 
 	if (sections.length === 0) return undefined;
 
-	const combined = sections.join("\n\n---\n\n") + "\n";
+	// Apply the optional per-goal section ordering (absent ⇒ byte-identical default).
+	const combined = reorderLabeledSections(sections, parts.sectionOrder).map((s) => s.content).join("\n\n---\n\n") + "\n";
 	bumpCount("assembleSystemPrompt.bytes", combined.length);
 
 	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
@@ -658,7 +705,9 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Dynamic Context", source: "providers", content, tokens: estimateTokens(content) });
 	}
 
-	return sections;
+	// Apply the optional per-goal section ordering so the inspector mirrors the
+	// assembled prompt (absent ⇒ byte-identical default).
+	return reorderLabeledSections(sections, parts.sectionOrder);
 }
 
 /**

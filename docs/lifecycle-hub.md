@@ -62,6 +62,7 @@ A **lifecycle hook** is a named moment in a session's life. The hook set is:
 | `beforeCompact` | Before transcript compaction. | In-process **provider-bridge** extension → `before-compact` endpoint. | G1.4 | **wired** |
 | `afterTurn` | After a turn completes. | Server-side, from the gateway's `agent_end` event. | G1.4 | **wired** |
 | `sessionShutdown` | When a session is torn down. | Server-side, from the session archive path. | G1.4 | **wired** |
+| `goalProvisioned` | Every time a worktree in a goal's subtree is provisioned (goal worktree, team-member / delegate worktree, pooled worktree, sandbox worktree). | Server-side `dispatchGoalProvisioned`; fire-and-forget, returns no `ContextBlock`s. | — | **wired** |
 
 A provider declares which hooks it wants in its YAML `hooks:` list; the Hub only dispatches a
 hook to providers that declared it. The hooks split by **where** they fire:
@@ -73,6 +74,23 @@ hook to providers that declared it. The hooks split by **where** they fire:
   they can observe/amend the turn, so they fire via a Bobbit-generated
   [provider-bridge pi extension](#the-provider-bridge-extension) that calls back into the
   gateway.
+
+- **The filesystem-treatment hook** (`goalProvisioned`) is distinct from the context hooks: it
+  returns no context blocks. It exists to let a provider apply a per-goal filesystem treatment
+  (e.g. build a content-addressed index directory) to **every** worktree in a goal's subtree, so
+  treatments are symmetric across the team lead, members, delegates, and nested sub-goals. It is
+  dispatched with the goal's resolved (ancestry-merged) metadata, must be cheap and **idempotent**
+  (it can fire on overlapping worktrees and re-enter on respawn/restore), and is non-fatal — a
+  provider error is logged and swallowed so it never blocks goal/session start. For sandboxed
+  sessions it is dispatched with **host** worktree coordinates, not the container path. See
+  [Hierarchical goal metadata → Extension goal-lifecycle hook](design/goal-metadata.md#6-extension-goal-lifecycle-hook).
+
+**Per-goal provider filtering.** When a goal sets `bobbit.disabledProviders: ["<id>"]` in its
+metadata, the Hub drops those providers from `dispatch`, `hasProvidersForHooks`, and
+`dispatchGoalProvisioned` for that goal's whole subtree — no bridge install, no per-turn hook
+calls, no network. This is the clean way to disable a provider (e.g. Hindsight) for an experiment
+without mutating project/global config. See
+[Hierarchical goal metadata → Providers / bridge](design/goal-metadata.md#51-providers--bridge-clean-hindsight-disable).
 
 The selector hooks `beforeGoalCreate` / `beforeSessionSpawn` remain a separate, later goal (G8).
 

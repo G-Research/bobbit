@@ -14,16 +14,31 @@ import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
-import { runGoalSetup, resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
+import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
+import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
 
 const pExecFile = promisify(execFileCb);
 
-/** Final worktree paths produced by provisioning, before the per-goal hook + ready flip. */
+/** Final worktree paths produced by provisioning, before the goalProvisioned hook + ready flip. */
 type ProvisionedWorktree = {
 	worktreePath: string;
 	cwd: string;
 	repoWorktrees?: Record<string, string>;
 };
+
+/**
+ * Context passed to the injected `goalProvisioned` dispatcher. The server
+ * wires this to LifecycleHub so the hook can run arbitrary extension code with
+ * the goal's resolved metadata at every worktree provisioning point.
+ */
+export interface GoalProvisionedContext {
+	goalId: string;
+	projectId?: string;
+	worktreePath: string;
+	cwd: string;
+	branch?: string;
+	metadata: GoalMetadata;
+}
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -131,6 +146,51 @@ export class GoalManager {
 
 	setLiveSessionResolver(resolver: () => WorktreeReferenceRecord[]): void {
 		this.liveSessionResolver = resolver;
+	}
+
+	/**
+	 * Injected `goalProvisioned` dispatcher. Wired by the server to route into
+	 * the shared LifecycleHub. Narrow seam so this data-layer module stays free
+	 * of any LifecycleHub/extension-host import. When unset, provisioning is a
+	 * no-op for the hook (current behaviour).
+	 */
+	private goalProvisionedDispatcher?: (ctx: GoalProvisionedContext) => Promise<void>;
+	setGoalProvisionedDispatcher(dispatcher: (ctx: GoalProvisionedContext) => Promise<void>): void {
+		this.goalProvisionedDispatcher = dispatcher;
+	}
+
+	/**
+	 * Resolve a goal's effective metadata by deep-merging its `parentGoalId`
+	 * ancestry (descendant wins). Single source of truth — every consumption
+	 * edge (providers/bridge, tools, prompt order, the goalProvisioned hook)
+	 * reads this so a treatment can never leak across the goal/agent tree.
+	 */
+	getEffectiveGoalMetadata(goalId: string | undefined): GoalMetadata {
+		return resolveGoalMetadata(this.store, goalId);
+	}
+
+	/**
+	 * Dispatch the `goalProvisioned` lifecycle hook with the goal's resolved
+	 * metadata. Runs at EVERY worktree provisioning (cold creation AND pool
+	 * claims — both return through `_provisionGoalWorktree`) so filesystem
+	 * treatments land on every worktree in the subtree, not once per goal.
+	 * Non-fatal: errors are logged and swallowed so a hook failure never blocks
+	 * goal start.
+	 */
+	private async _dispatchGoalProvisioned(goal: PersistedGoal, worktreePath: string, cwd: string): Promise<void> {
+		if (!this.goalProvisionedDispatcher) return;
+		try {
+			await this.goalProvisionedDispatcher({
+				goalId: goal.id,
+				projectId: goal.projectId,
+				worktreePath,
+				cwd,
+				branch: goal.branch,
+				metadata: this.getEffectiveGoalMetadata(goal.id),
+			});
+		} catch (err) {
+			console.warn(`[goal-manager] goalProvisioned dispatch failed for goal "${goal.title}" (non-fatal):`, err);
+		}
 	}
 
 	private getSessionsForWorktreeGuard(): WorktreeReferenceRecord[] {
@@ -250,8 +310,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, worktreeSetupCommand, worktreeSetupTimeoutMs } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown> }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -330,15 +390,11 @@ export class GoalManager {
 			goal.maxNestingDepth = maxNestingDepth;
 		}
 
-		// Per-goal worktree setup hook. Only persist a trimmed non-empty command
-		// and a finite positive integer timeout override; absent fields preserve
-		// today's behaviour (no hook, default timeout resolution).
-		if (typeof worktreeSetupCommand === "string") {
-			const trimmed = worktreeSetupCommand.trim();
-			if (trimmed) goal.worktreeSetupCommand = trimmed;
-		}
-		if (worktreeSetupTimeoutMs !== undefined && Number.isFinite(worktreeSetupTimeoutMs) && worktreeSetupTimeoutMs > 0) {
-			goal.worktreeSetupTimeoutMs = Math.floor(worktreeSetupTimeoutMs);
+		// Per-goal metadata (arbitrary, namespaced keys). Persist only a non-empty
+		// plain object (deep-cloned to freeze it at creation); absent metadata
+		// preserves today's behaviour byte-for-byte at every edge.
+		if (metadata && typeof metadata === "object" && !Array.isArray(metadata) && Object.keys(metadata).length > 0) {
+			goal.metadata = structuredClone(metadata);
 		}
 
 		// Root-only orchestration policy. divergencePolicy and
@@ -465,16 +521,17 @@ export class GoalManager {
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 
 		// Provision the worktree (pool claim, or create + per-component setup).
-		// _provisionGoalWorktree owns the retry loop; the per-goal hook runs ONCE
-		// afterward, outside that loop, so a hook failure never re-creates the
-		// worktree or re-runs the command.
+		// _provisionGoalWorktree owns the retry loop; the goalProvisioned hook runs
+		// ONCE afterward, outside that loop, so a hook failure never re-creates the
+		// worktree.
 		const provisioned = await this._provisionGoalWorktree(goal, preliminaryOffset);
 		if (provisioned === "no-worktree") return;
 
-		// Per-goal setup runs once, after the final worktreePath/cwd are known.
-		// Fatal: on failure it sets setupStatus:"error" and rethrows so the goal
-		// never auto-starts mis-configured.
-		await this.runPerGoalSetupOrFail(goal, provisioned.worktreePath, provisioned.cwd);
+		// Dispatch the goalProvisioned lifecycle hook with resolved metadata. Runs
+		// at every provisioning (incl. pool claims, which return through
+		// _provisionGoalWorktree above) so metadata-driven filesystem treatments
+		// land on every worktree in the subtree. Non-fatal — never blocks start.
+		await this._dispatchGoalProvisioned(goal, provisioned.worktreePath, provisioned.cwd);
 
 		this.store.update(goal.id, {
 			worktreePath: provisioned.worktreePath,
@@ -495,53 +552,19 @@ export class GoalManager {
 		const projectTimeoutMs = goal.projectId && this.worktreeSetupTimeoutResolver
 			? this.worktreeSetupTimeoutResolver(goal.projectId)
 			: undefined;
-		return resolveSetupTimeoutMs({ goalTimeoutMs: goal.worktreeSetupTimeoutMs, projectTimeoutMs });
-	}
-
-	/**
-	 * Run the optional per-goal worktree setup command exactly once. A failure
-	 * is fatal: record setupStatus:"error" with a descriptive setupError and
-	 * rethrow (blocking auto-start). Runs OUTSIDE the provisioning retry loop so
-	 * the command is never re-invoked.
-	 */
-	private async runPerGoalSetupOrFail(goal: PersistedGoal, worktreePath: string, cwd: string): Promise<void> {
-		try {
-			const timeoutMs = this.resolveGoalSetupTimeout(goal);
-			const { execShellCommand } = await import("./shell-util.js");
-			await runGoalSetup({
-				goalId: goal.id,
-				branch: goal.branch!,
-				worktreePath,
-				cwd,
-				primaryWorktreeRoot: goal.repoPath!,
-				command: goal.worktreeSetupCommand,
-				timeoutMs,
-				// Same resolved timeout under the inner shell timeout — a longer
-				// override must NOT be killed early by a hardcoded inner limit.
-				exec: async (cmd, execCwd, env) => {
-					await execShellCommand(cmd, { cwd: execCwd, env, timeout: timeoutMs });
-				},
-			});
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			this.store.update(goal.id, {
-				setupStatus: "error",
-				setupError: `Per-goal worktree setup failed: ${msg}`,
-			});
-			throw err;
-		}
+		return resolveSetupTimeoutMs({ projectTimeoutMs });
 	}
 
 	/**
 	 * Provision the goal's worktree: claim from the pool, or create it (single-
 	 * or multi-repo) running per-component setup, retrying only worktree
 	 * creation. Returns the final paths WITHOUT flipping setupStatus to "ready"
-	 * (the caller does that after the per-goal hook). Returns "no-worktree" when
+	 * (the caller does that after the goalProvisioned hook). Returns "no-worktree" when
 	 * no worktree-able repo remained (already restored to the no-worktree
 	 * state). Throws after recording setupStatus:"error" when all attempts fail.
 	 */
 	private async _provisionGoalWorktree(goal: PersistedGoal, preliminaryOffset: string): Promise<ProvisionedWorktree | "no-worktree"> {
-		// Resolved timeout shared by per-component setup here and the per-goal hook.
+		// Resolved timeout for per-component setup commands run here.
 		const setupTimeoutMs = this.resolveGoalSetupTimeout(goal);
 
 		// Child goals branch off the parent's HEAD so siblings see prior
@@ -562,8 +585,8 @@ export class GoalManager {
 						? Object.fromEntries(claim.worktrees.map(w => [w.repo, w.worktreePath]))
 						: undefined;
 					console.log(`[goal-manager] Worktree claimed from pool for goal "${goal.title}": ${claim.worktreePath} (branch: ${goal.branch}${claim.degraded ? ", degraded" : ""})`);
-					// Pool fill already ran per-component setup; the per-goal hook is
-					// goal-specific and still runs (caller) before setupStatus flips.
+					// Pool fill already ran per-component setup; the goalProvisioned
+					// hook is goal-specific and still runs (caller) before ready flips.
 					return { worktreePath: claim.worktreePath, cwd: offsetCwd, repoWorktrees };
 				}
 			} catch (err) {

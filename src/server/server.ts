@@ -282,7 +282,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -1195,6 +1195,29 @@ export function createGateway(config: GatewayConfig) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+		// Goal-metadata lifecycle wiring: connect this project's GoalManager to the
+		// shared LifecycleHub `goalProvisioned` dispatcher so every worktree
+		// provisioning in the goal subtree fans out to extension providers with the
+		// resolved (hierarchically inherited) metadata. Feature-detected on BOTH
+		// ends — the setter is contributed by the goal-metadata data/provisioning
+		// slice and `dispatchGoalProvisioned` by the lifecycle slice — so this is a
+		// no-op until those land, then activates automatically. The hub is read
+		// lazily (it is constructed after this configurator is registered).
+		const gm = ctx.goalManager as unknown as {
+			setGoalProvisionedDispatcher?: (
+				fn: (dctx: { goalId: string; projectId?: string; worktreePath: string; cwd: string; branch?: string; metadata: Record<string, unknown> }) => Promise<void>,
+			) => void;
+		};
+		if (typeof gm.setGoalProvisionedDispatcher === "function") {
+			gm.setGoalProvisionedDispatcher(async (dctx) => {
+				const hub = sessionManager.lifecycleHub as unknown as {
+					dispatchGoalProvisioned?: (c: typeof dctx) => Promise<void>;
+				} | undefined;
+				if (hub && typeof hub.dispatchGoalProvisioned === "function") {
+					await hub.dispatchGoalProvisioned(dctx);
+				}
+			});
+		}
 	});
 
 	// pack-schema-v1 §6.7: resolve the pack_activation store for a scope+project.
@@ -1257,6 +1280,20 @@ export function createGateway(config: GatewayConfig) {
 		registry: packContributionRegistry,
 		moduleHost,
 		trace: new ContextTraceStore(bobbitStateDir()),
+		// Hierarchical goal-metadata resolver. The hub is shared across projects
+		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
+		// (never the caller-supplied projectId, which may be stale/cross-project).
+		// Resolves to {} for missing/unknown goals so provider/bridge filtering is
+		// a guaranteed no-op when metadata is absent.
+		goalMetadataResolver: (goalId: string | undefined, _projectId?: string): Record<string, unknown> => {
+			if (!goalId) return {};
+			const ctx = projectContextManager.getContextForGoal(goalId);
+			if (!ctx) {
+				console.warn(`[goal-metadata] no project context owns goal ${goalId}; resolving to {}`);
+				return {};
+			}
+			return ctx.goalManager.getEffectiveGoalMetadata(goalId);
+		},
 		// Least-privilege, store-only host for provider hooks (capabilities.store ===
 		// true; session/agents denied) — gives a provider its own pack-scoped durable
 		// store via the same parent-authorized path routes use.
@@ -2016,14 +2053,21 @@ export function createGateway(config: GatewayConfig) {
 				// Auto-build or rebuild image if missing or stale. Images are
 				// shared across projects (Docker image tags) so the first project
 				// to request a sandbox pays the build cost.
-				const imageStatus = await checkDockerAvailability(imageName);
-				if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
-					const buildResult = await buildSandboxImage(imageName, projectDir);
+				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined);
+				if (imageStatus.imageExists === false) {
+					if (!dockerContextRoot) {
+						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
+					}
+					const buildResult = await buildSandboxImage(imageName, dockerContextRoot);
 					if (!buildResult.success) {
-						console.error(`[sandbox] Auto-build failed for project ${projectId}; proceeding will likely error`);
+						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
 					}
 				} else if (imageStatus.imageExists === true) {
-					await ensureImageAgentVersion(imageName, projectDir);
+					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined);
+					if (!imageReady) {
+						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
+					}
 				}
 
 				const isRepo = await isGitRepo(projectDir);
@@ -3038,7 +3082,8 @@ async function handleApiRoute(
 		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
 		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
-		const status = await checkDockerAvailability(configured ? imageName : undefined);
+		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
 		json({ ...status, configured });
 		return;
 	}
@@ -3046,7 +3091,8 @@ async function handleApiRoute(
 	// POST /api/sandbox-image/build
 	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
 		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		if (!fs.existsSync(path.join(config.defaultCwd, "docker", "Dockerfile"))) {
+		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
 			return;
 		}
@@ -3054,7 +3100,7 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, config.defaultCwd);
+		const result = await buildSandboxImage(imageName, dockerContextRoot);
 		if (result.success) {
 			json({ success: true });
 		} else {
@@ -4339,7 +4385,11 @@ async function handleApiRoute(
 			projectId,
 			scope: projectId ? "project" : "global",
 			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
-			goalId: live?.goalId ?? persisted?.goalId,
+			// Effective goal: team members, delegates, and reviewers carry the goal
+			// only in teamGoalId, so fall back to it before persisted state. Without
+			// this, disabled-provider filtering would not apply at the provider hook
+			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
+			goalId: live?.goalId ?? live?.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId,
 			roleName: live?.role ?? persisted?.role,
 		};
 	};
@@ -5095,19 +5145,20 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
-			// Per-goal worktree setup hook (optional). Accept camelCase or snake_case.
-			// Command: trimmed, passed only when non-empty. Timeout: number or numeric
-			// string, passed only when a finite positive integer.
-			let worktreeSetupCommand: string | undefined;
+			// Per-goal metadata (optional, arbitrary namespaced key/value bag, e.g.
+			// `bobbit.disabledTools`, `hindsight.memory.enabled`). Accepted only as a
+			// NON-EMPTY plain object; passed verbatim to createGoal where it is
+			// persisted and resolved hierarchically down the goal tree. Supersedes the
+			// removed per-goal worktree-setup hook (PR #816); legacy
+			// `worktreeSetupCommand`/`worktreeSetupTimeoutMs` body fields are now
+			// ignored (no parse, no persistence). Component-level
+			// `worktree_setup_command` is unaffected.
+			let metadata: Record<string, unknown> | undefined;
 			{
-				const raw = body.worktreeSetupCommand ?? body.worktree_setup_command;
-				if (typeof raw === "string" && raw.trim()) worktreeSetupCommand = raw.trim();
-			}
-			let worktreeSetupTimeoutMs: number | undefined;
-			{
-				const raw = body.worktreeSetupTimeoutMs ?? body.worktree_setup_timeout_ms;
-				const n = typeof raw === "number" ? raw : (typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN);
-				if (Number.isFinite(n) && n > 0) worktreeSetupTimeoutMs = Math.floor(n);
+				const raw = body.metadata;
+				if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw as object).length > 0) {
+					metadata = raw as Record<string, unknown>;
+				}
 			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
@@ -5350,8 +5401,7 @@ async function handleApiRoute(
 				maxNestingDepth: effMaxNestingDepth,
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
-				worktreeSetupCommand,
-				worktreeSetupTimeoutMs,
+				metadata,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

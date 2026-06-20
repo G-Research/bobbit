@@ -57,6 +57,34 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
 	}
 
+	async function expectQuickActionHiddenAndNonInteractive(action: Locator, description: string): Promise<void> {
+		await expect(action, `${description} should be hidden while the hamburger menu is open`).toBeHidden({ timeout: 5_000 });
+		const interactiveTargets = await action.evaluateAll((els) => els.map((el, index) => {
+			const target = el as HTMLElement;
+			let current: HTMLElement | null = target;
+			let hiddenByStyle = false;
+			while (current) {
+				const style = getComputedStyle(current);
+				if (style.display === "none" || style.visibility === "hidden") {
+					hiddenByStyle = true;
+					break;
+				}
+				current = current.parentElement;
+			}
+			const hiddenByAttribute = Boolean(target.closest("[hidden],[aria-hidden='true'],[inert]"));
+			const disabled = (target as HTMLButtonElement).disabled || target.getAttribute("aria-disabled") === "true";
+			const focusBlocked = hiddenByStyle || hiddenByAttribute || disabled || target.getAttribute("tabindex") === "-1" || target.tabIndex < 0;
+			const rect = target.getBoundingClientRect();
+			let pointerBlocked = rect.width <= 0 || rect.height <= 0 || getComputedStyle(target).pointerEvents === "none";
+			if (!pointerBlocked) {
+				const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+				pointerBlocked = !hit || (hit !== target && !target.contains(hit));
+			}
+			return focusBlocked && pointerBlocked ? "" : `target ${index}: focusBlocked=${focusBlocked} pointerBlocked=${pointerBlocked}`;
+		}).filter(Boolean));
+		expect(interactiveTargets, `${description} should not leave clickable or focusable targets`).toEqual([]);
+	}
+
 	async function assertHamburgerAppearsOnHover(row: Locator, kind: "session" | "goal", id: string): Promise<void> {
 		const page = row.page();
 		const trigger = triggerFor(row, kind, id);
@@ -642,7 +670,7 @@ test.describe("Sidebar actions menu", () => {
 		).toHaveCount(0, { timeout: 5_000 });
 	});
 
-	test.skip("fixture-covered: mobile v1 hides hamburger while keeping existing inline quick actions visible", async ({ page }) => {
+	test("mobile sidebar rows keep quick actions and open full hamburger menus without row navigation", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 820 });
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
@@ -652,17 +680,36 @@ test.describe("Sidebar actions menu", () => {
 
 		await openApp(page);
 		const sRow = sessionRow(page, sessionId);
+		const sessionModify = sRow.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]').first();
+		const sessionTerminate = sRow.locator('[data-sidebar-action-id="terminate"][data-sidebar-action-quick="true"]').first();
 		await expect(sRow).toBeVisible({ timeout: 10_000 });
-		await expect(triggerFor(sRow, "session", sessionId)).toHaveCount(0);
-		await expect(sRow.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]')).toBeVisible();
-		await expect(sRow.locator('[data-sidebar-action-id="terminate"][data-sidebar-action-quick="true"]')).toBeVisible();
+		await expect(sessionModify, "mobile session rows should expose quick modify before the hamburger opens").toBeVisible();
+		await expect(sessionTerminate, "mobile session rows should expose quick terminate before the hamburger opens").toBeVisible();
 		await expect(sRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
+		const startingHash = await page.evaluate(() => window.location.hash);
+		await expect(triggerFor(sRow, "session", sessionId), "mobile session rows must expose a hamburger actions trigger").toBeVisible();
+		await triggerFor(sRow, "session", sessionId).click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await expectQuickActionHiddenAndNonInteractive(sessionModify, "mobile sidebar modify quick action");
+		await expectQuickActionHiddenAndNonInteractive(sessionTerminate, "mobile sidebar terminate quick action");
+		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]));
+		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "session hamburger should not select/navigate its row" }).toBe(startingHash);
+		await page.keyboard.press("Escape");
+		await expectNoPopover(page);
+		await expect(sessionModify, "mobile sidebar modify quick action should return after Escape").toBeVisible({ timeout: 5_000 });
+		await expect(sessionTerminate, "mobile sidebar terminate quick action should return after Escape").toBeVisible({ timeout: 5_000 });
 
 		const gRow = await ensureGoalExpanded(page, goal.id as string);
-		await expect(triggerFor(gRow, "goal", goal.id as string)).toHaveCount(0);
-		await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt is popover-only and not an inline quick action").toHaveCount(0);
 		await expect(gRow.locator('[data-sidebar-action-id="archive"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(gRow.locator('[data-sidebar-action-id="dashboard"][data-sidebar-action-quick="true"]')).toBeVisible();
+		await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt remains popover-only, not an inline quick action").toHaveCount(0);
 		await expect(gRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
+		await expect(triggerFor(gRow, "goal", goal.id as string), "mobile goal rows must expose a hamburger actions trigger").toBeVisible();
+		const expandedBefore = await page.evaluate((id) => (window as any).__bobbitExpandedGoals?.has?.(id), goal.id);
+		await triggerFor(gRow, "goal", goal.id as string).click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Re-attempt", "Copy link"]));
+		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "goal hamburger should not navigate its row" }).toBe(startingHash);
+		await expect.poll(() => page.evaluate((id) => (window as any).__bobbitExpandedGoals?.has?.(id), goal.id), { message: "goal hamburger should not toggle expansion" }).toBe(expandedBefore);
 	});
 });

@@ -265,6 +265,7 @@ export class SidebarActionsPopover extends LitElement {
 			case "Enter":
 				ev.preventDefault();
 				ev.stopPropagation();
+				if (this._toggleFromEventTarget(ev.target)) return;
 				this._selectHighlighted(ev);
 				return;
 			case " ":
@@ -273,7 +274,7 @@ export class SidebarActionsPopover extends LitElement {
 				// Space toggles the highlighted row's trailing checkbox when it has
 				// one (or the checkbox control itself when focused) without firing
 				// the row's action or closing the menu. Otherwise it activates.
-				if (this._toggleFromKeyboard()) return;
+				if (this._toggleFromEventTarget(ev.target) || this._toggleFromKeyboard()) return;
 				this._selectHighlighted(ev);
 				return;
 			case "Tab":
@@ -416,6 +417,17 @@ export class SidebarActionsPopover extends LitElement {
 			return;
 		}
 		this._select(item.id, event);
+	}
+
+	private _toggleFromEventTarget(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const toggle = target.closest<HTMLElement>("[data-sidebar-actions-toggle][data-sidebar-action-id]");
+		if (!toggle || !this.contains(toggle)) return false;
+		const actionId = toggle.dataset.sidebarActionId || "";
+		const item = this.items.find((candidate) => String(candidate.id) === actionId);
+		if (!item?.trailingToggle) return false;
+		item.trailingToggle.onToggle();
+		return true;
 	}
 
 	/**
@@ -667,6 +679,7 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-actions-row
 				data-sidebar-actions-index=${index}
 				data-sidebar-action-id=${item.id}
+				data-session-action-id=${item.id}
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
 				tabindex=${rowActive ? "0" : "-1"}
 				title=${item.title || item.label}
@@ -699,6 +712,7 @@ export class SidebarActionsPopover extends LitElement {
 					role="menuitemcheckbox"
 					data-sidebar-actions-toggle
 					data-sidebar-action-id=${item.id}
+					data-session-action-id=${item.id}
 					aria-checked=${toggle.checked ? "true" : "false"}
 					aria-label=${toggle.ariaLabel}
 					title=${toggle.ariaLabel}

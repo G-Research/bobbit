@@ -28,6 +28,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 import { windowsGatewayKillArgs } from "../../src/server/harness-kill.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -168,7 +169,7 @@ test.describe.configure({ mode: "serial" });
 test("bg-process-restart-survival: running re-attaches & keeps streaming; finished-during-downtime reports real exit code", async () => {
 	test.setTimeout(240_000);
 
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	const tmp = manualTmpRoot();
 	const port1 = await freePort();
 	const dir = join(tmp, `.bobbit-bgrestart-${port1}`);
 	cleanDirs(dir);

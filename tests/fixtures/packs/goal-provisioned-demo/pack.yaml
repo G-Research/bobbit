@@ -1,0 +1,19 @@
+name: goal-provisioned-demo
+description: >-
+  Deterministic fixture pack for the hierarchical goal-metadata filesystem E2E.
+  Its single provider declares the `goalProvisioned` lifecycle hook and writes a
+  content-addressed marker file (encoding the resolved, hierarchically-inherited
+  metadata) into every worktree it is dispatched for.
+version: 1.0.0
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: [marker]
+  hooks: []
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []
