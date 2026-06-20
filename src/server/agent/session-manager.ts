@@ -126,6 +126,31 @@ const MAX_CONSECUTIVE_ERROR_TURNS = 3;
  */
 const MAX_RECOVER_DRAIN_RETRIES = 2;
 
+const PROVIDER_AUTH_FAILURE_PATTERNS = [
+	/No API key found for\s+([A-Za-z0-9_.-]+)/i,
+	/Missing API key for\s+([A-Za-z0-9_.-]+)/i,
+	/([A-Za-z0-9_.-]+)\s+API key is missing/i,
+];
+
+function providerFromAuthFailure(message: string | undefined, fallbackProvider?: string): string | undefined {
+	if (!message) return fallbackProvider;
+	for (const pattern of PROVIDER_AUTH_FAILURE_PATTERNS) {
+		const match = message.match(pattern);
+		if (match?.[1]) return match[1].toLowerCase();
+	}
+	return fallbackProvider;
+}
+
+function isProviderAuthFailure(message: string | undefined): boolean {
+	return !!message && PROVIDER_AUTH_FAILURE_PATTERNS.some(pattern => pattern.test(message));
+}
+
+function providerLabel(provider: string | undefined): string {
+	if (!provider) return "provider";
+	if (provider.toLowerCase() === "openrouter") return "OpenRouter";
+	return provider;
+}
+
 /**
  * Returns true only for rpc events that represent genuine new user-visible
  * activity (a message, tool call, or end-of-turn). Lifecycle frames the
@@ -1300,6 +1325,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
@@ -2592,6 +2618,38 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
+	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined): void {
+		if (sandboxed) return;
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore);
+	}
+
+	private surfaceProviderAuthFailure(session: SessionInfo, reason: string, source: string): void {
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		const provider = providerFromAuthFailure(reason, persistedProvider);
+		const label = providerLabel(provider);
+		session.streamingStartedAt = undefined;
+		session.recoverDrainAttempts = 0;
+		this.resolveStoreForSession(session.id).update(session.id, {
+			wasStreaming: false,
+			streamingStartedAt: undefined,
+		});
+		broadcastStatus(session, "idle");
+		emitSessionEvent(session, {
+			type: "provider_auth_required",
+			provider,
+			source,
+			reason: "missing-api-key",
+			error: reason,
+			message: `${label} API key is missing. Add or fix the API key in Settings, switch provider, then retry or abort/respawn the agent.`,
+			actions: [
+				{ type: "open_settings", label: "Fix API key in Settings" },
+				{ type: "retry", label: "Retry after fixing credentials" },
+				{ type: "switch_provider", label: "Switch provider" },
+				{ type: "abort_respawn", label: "Abort/respawn agent" },
+			],
+		});
+	}
+
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -2614,6 +2672,11 @@ export class SessionManager {
 				attachments: r.attachments,
 				isSteered: r.isSteered,
 			});
+		}
+		if (isProviderAuthFailure(reason)) {
+			this.surfaceProviderAuthFailure(session, reason, source);
+			this.broadcastQueue(session);
+			return;
 		}
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
@@ -2846,6 +2909,9 @@ export class SessionManager {
 			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
 			if (errored) {
 				session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+				if (isProviderAuthFailure(session.lastTurnErrorMessage)) {
+					this.surfaceProviderAuthFailure(session, session.lastTurnErrorMessage || "Provider API key is missing", "agent turn");
+				}
 			} else {
 				// Any non-error terminal assistant message resets the cap budget.
 				// Only stopReason:"error" advances the counter.
@@ -4330,6 +4396,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -6005,6 +6072,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
@@ -7316,6 +7384,7 @@ export class SessionManager {
 			}
 			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;
@@ -7455,7 +7524,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
