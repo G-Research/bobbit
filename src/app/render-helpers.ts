@@ -514,7 +514,8 @@ async function openSidebarActionsPopover(input: {
 	renderApp();
 }
 
-function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; mobile: boolean; btnPad: string }): TemplateResult {
+function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; entityId: string; mobile: boolean; btnPad: string }): TemplateResult {
+	if (opts.mobile && opts.kind === "session" && isSidebarActionsPopoverOpen(opts.kind, opts.entityId)) return html``;
 	return html`${actions.filter((action) => action.quick).map((action) => {
 		const danger = action.tone === "danger";
 		const colorClass = opts.mobile
@@ -906,7 +907,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const navId = `session:${session.id}`;
 	// Keyboard nav can have moved the active row away from this session even
@@ -1064,7 +1065,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
 	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -1351,7 +1352,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
 	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
 	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
-	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
+	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", entityId: goal.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">
