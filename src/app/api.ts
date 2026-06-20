@@ -2361,6 +2361,34 @@ export async function enqueueInboxManual(
 // ROLE API
 // ============================================================================
 
+/**
+ * Where a role's `model` / `thinkingLevel` field resolved from in the config
+ * cascade, relative to the currently-editable scope. Emitted by the server on
+ * `/api/roles` + `/api/roles/:name` so the Roles list/detail can render an
+ * accurate source badge and decide inline editability without re-deriving the
+ * cascade order. See `RoleFieldSource` in `src/server/agent/config-cascade.ts`.
+ */
+export type RoleFieldSourceKind = "role" | "inherited-role" | "default";
+
+export interface RoleFieldSource {
+	/** Resolved field value when a role layer supplies it; omitted for `default`. */
+	value?: string;
+	source: RoleFieldSourceKind;
+	/** Cascade layer the value came from (omitted for `default`). */
+	origin?: "builtin" | "server" | "user" | "project";
+	/** Market-pack name when the value comes from a pack-defined role; null otherwise. */
+	originPackName?: string | null;
+	/** False only for pack-managed (read-only) roles; true otherwise. */
+	editable: boolean;
+	/** Short human label for the source ("Project", "Server", "Built-in", pack name…). */
+	sourceLabel: string;
+}
+
+export interface RoleModelResolution {
+	model: RoleFieldSource;
+	thinkingLevel: RoleFieldSource;
+}
+
 export interface RoleData {
 	name: string;
 	label: string;
@@ -2373,6 +2401,12 @@ export interface RoleData {
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
+	/**
+	 * Per-field source hierarchy for model/thinkingLevel (cascade origin +
+	 * editability). Present on cascade-resolved role payloads from `/api/roles`
+	 * and `/api/roles/:name`; absent on locally-constructed role drafts.
+	 */
+	modelResolution?: RoleModelResolution;
 }
 
 // ============================================================================

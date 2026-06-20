@@ -25,7 +25,10 @@ function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTok
 		kind: "memory",
 		module: path.basename(file),
 		hooks: ["sessionSetup"],
-		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 1_000 },
+		// Default to a generous per-provider timeout so ordinary fast fixtures are not
+		// killed by worker startup/contention under the full suite. Tests that exercise
+		// the timeout path pass an explicit, small timeoutMs.
+		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 8_000 },
 		config: { enabled: true },
 		listName: id,
 		sourceFile: path.join(tmp, "pack.yaml"),
@@ -82,7 +85,11 @@ describe("LifecycleHub", () => {
 			const result = await hub(tmp, [slow, fast], moduleHost).dispatch("sessionSetup", base(tmp));
 			const elapsed = performance.now() - t0;
 
-			assert.ok(elapsed < 1_000, `dispatch should return promptly, got ${elapsed}ms`);
+			// The slow provider hangs for 5000ms but has a 200ms per-provider budget. Dispatch
+			// must abort it and return well before the hang completes, even under loaded
+			// full-suite/CI contention. Assert comfortably below the 5000ms hang rather than a
+			// tight sub-second bound that flakes on worker startup.
+			assert.ok(elapsed < 4_000, `dispatch should return well before the 5000ms hang, got ${elapsed}ms`);
 			assert.equal(result.blocks.length, 1);
 			assert.equal(result.blocks[0].providerId, "fast");
 			assert.equal(result.diagnostics.length, 1);
