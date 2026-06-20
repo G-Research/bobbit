@@ -1,4 +1,4 @@
-var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i),ge=["apiKey","externalDatabaseUrl","llmApiKey"];var H=`${encodeURIComponent("hindsight")}:${encodeURIComponent("hindsight")}`,S="http://localhost:9177",R="http://localhost:19177/banks/hermes?view=data";function B(){try{return globalThis.localStorage&&localStorage.getItem("gateway.url")||globalThis.location?.origin||""}catch{return globalThis.location?.origin||""}}function O(){try{return globalThis.localStorage&&localStorage.getItem("gateway.token")||""}catch{return""}}function T(i){let d=c(i,"").trim();if(!d)return!1;try{let w=new URL(d);return w.protocol==="http:"||w.protocol==="https:"}catch{return!1}}var _=globalThis.__bobbitHindsightPanelState||(globalThis.__bobbitHindsightPanelState=new Map);function pe(){return{mountKicked:!1,configState:"loading",configError:null,config:null,configured:!1,draft:null,secretTouched:{apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},touched:{},dirty:!1,saving:!1,saveErrors:[],statusState:"loading",status:null,statusError:null,searchState:"idle",searchResults:[],searchError:null,searchDormant:!1,searchQuery:"",searchScope:"",pollTimer:null,pollTicks:0,logsOpen:!1,logsState:"idle",logs:"",logsError:null,setupOpen:!1,setupProgress:null,setupTesting:!1,managedConsentAck:!1,runtimePhase:"idle",runtimeError:null}}function y(i){let d=i||{};return{mode:c(d.mode,"external"),externalUrl:c(d.externalUrl,""),uiUrl:c(d.uiUrl,""),bank:c(d.bank,"bobbit"),namespace:c(d.namespace,"default"),dataDir:c(d.dataDir,"~/.hindsight"),recallScope:d.recallScope==="project"?"project":"all",autoRecall:d.autoRecall!==!1,autoRetain:d.autoRetain!==!1,recallBudget:c(d.recallBudget,"1200"),timeoutMs:c(d.timeoutMs,"1500"),apiKey:"",externalDatabaseUrl:"",llmApiKey:""}}function he({html:i,nothing:d,renderHeader:w}){let p=e=>{try{e&&e.requestRender&&e.requestRender()}catch{}},u=e=>_.get(e),U=e=>{if(e&&e.pollTimer){try{clearTimeout(e.pollTimer)}catch{}e.pollTimer=null}},v=e=>e==="managed"||e==="managed-external-postgres",C=(e,s)=>{let a=u(s);if(!a||!a.status){a&&U(a);return}let r=a.status,t=v(r.mode),o=a.runtimePhase==="starting"||r.runtimeStatus==="starting"||r.runtimeStatus===void 0&&r.configured&&!r.healthy;if(!(t&&r.configured&&!r.healthy&&o&&a.pollTicks<20)){U(a);return}a.pollTimer||(a.pollTimer=setTimeout(()=>{let l=u(s);l&&(l.pollTimer=null,l.pollTicks+=1,k(e,s,!0))},1500))};function L(e,s){e.config=s&&s.config?s.config:null,e.configured=!!(s&&s.configured),e.dirty?e.draft||(e.draft=y(e.config)):(e.draft=y(e.config),e.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},e.touched={})}async function A(e,s){try{let a=await e.callRoute("config",{method:"GET"}),r=u(s);return r?(L(r,a),r.configState="ready",p(e),!0):!1}catch(a){let r=u(s);return r&&(r.configState="error",r.configError=$(a),p(e)),!1}}async function k(e,s,a=!1){let r=u(s);r&&!a&&(r.statusState=r.status?"ready":"loading");try{let t=await e.callRoute("status",{method:"GET"}),o=u(s);if(!o)return;o.status=t||null,o.statusState="ready",o.statusError=null,o.runtimePhase==="starting"&&t&&(t.healthy||t.runtimeStatus==="running")&&(o.runtimePhase="idle"),C(e,s),p(e)}catch(t){let o=u(s);if(!o)return;o.statusState="error",o.statusError=$(t),p(e)}}let K=(e,s)=>{A(e,s),k(e,s)};function N(e){let s=e.config||{},a=e.draft||{},r=e.touched||{},t={};r.mode&&a.mode!==s.mode&&(t.mode=a.mode);for(let o of["externalUrl","uiUrl","bank","namespace","dataDir"]){if(!r[o])continue;let n=c(a[o],""),l=c(s[o],"");n!==l&&(t[o]=n)}r.recallScope&&a.recallScope!==(s.recallScope==="project"?"project":"all")&&(t.recallScope=a.recallScope);for(let o of["autoRecall","autoRetain"])r[o]&&!!a[o]!=(s[o]!==!1)&&(t[o]=!!a[o]);for(let o of["recallBudget","timeoutMs"]){if(!r[o])continue;let n=Number(a[o]);Number.isFinite(n)&&n>0&&n!==Number(s[o])&&(t[o]=n)}for(let o of ge)e.secretTouched[o]&&(t[o]=c(a[o],""));return t}async function z(e,s){let a=u(s);if(!a||!a.draft||a.saving)return;a.saving=!0,a.saveErrors=[],p(e);let r;try{r=await e.callRoute("config",{method:"GET"})}catch(n){let l=u(s);if(!l)return;l.saving=!1,l.saveErrors=[`Couldn't verify the current configuration before saving: ${$(n)}. Save aborted to avoid overwriting a good config \u2014 try again.`],p(e);return}let t=u(s);if(!t)return;L(t,r);let o=N(t);try{let n=await e.callRoute("config",{method:"POST",body:o}),l=u(s);if(!l)return;if(l.saving=!1,n&&n.ok===!1){l.saveErrors=Array.isArray(n.errors)&&n.errors.length?n.errors:[c(n.error,"Save failed")],p(e);return}l.config=n&&n.config?n.config:l.config,l.configured=!!(n&&n.configured),l.draft=y(l.config),l.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},l.touched={},l.dirty=!1,l.pollTicks=0,k(e,s),p(e)}catch(n){let l=u(s);if(!l)return;l.saving=!1,l.saveErrors=[$(n)],p(e)}}let j=(e,s)=>{let a=u(s);a&&(a.draft=y(a.config),a.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},a.touched={},a.dirty=!1,p(e))};async function E(e,s){let a=u(s);if(a){a.logsState="loading",a.logsError=null,p(e);try{let r=B(),t=await fetch(`${r}/api/pack-runtimes/${H}/logs?tail=200`,{headers:{Authorization:`Bearer ${O()}`}}),o=u(s);if(!o)return;if(!t.ok){o.logsState="error",o.logsError=`HTTP ${t.status}`,p(e);return}let n=await t.json().catch(()=>({}));o.logs=c(n&&n.logs,""),o.logsState="loaded",o.logsError=n&&n.status==="docker-unavailable"?"Docker is not available":null,p(e)}catch(r){let t=u(s);if(!t)return;t.logsState="error",t.logsError=$(r),p(e)}}}let q=(e,s)=>{let a=u(s);a&&(a.logsOpen=!a.logsOpen,p(e),a.logsOpen&&E(e,s))};async function M(e,s,a){let r=u(s);if(r){r.runtimePhase=a==="start"?"starting":"stopping",r.runtimeError=null,a==="start"&&(r.pollTicks=0),p(e);try{let t=B(),o=await fetch(`${t}/api/pack-runtimes/${H}/${a}`,{method:"POST",headers:{Authorization:`Bearer ${O()}`,"Content-Type":"application/json"}}),n=u(s);if(!n)return;if(!o.ok){n.runtimePhase="error",n.runtimeError=`HTTP ${o.status}`,p(e);return}a==="stop"&&(n.runtimePhase="idle"),k(e,s),p(e)}catch(t){let o=u(s);if(!o)return;o.runtimePhase="error",o.runtimeError=$(t),p(e)}}}async function F(e,s){let a=u(s);if(!a)return;let r=c(a.searchQuery,"").trim();if(!r)return;a.searchState="searching",a.searchError=null,p(e);let t=a.searchScope||a.config&&a.config.recallScope||"all";try{let o=await e.callRoute("recall",{method:"POST",body:{query:r,scope:t}}),n=u(s);if(!n)return;if(o&&o.configured===!1)n.searchResults=[],n.searchDormant=!0,n.searchState="empty",n.searchError=null;else if(o&&o.error)n.searchResults=[],n.searchDormant=!1,n.searchState="error",n.searchError=String(o.error);else{let l=o&&Array.isArray(o.memories)?o.memories:[];n.searchResults=l,n.searchDormant=!1,n.searchState=l.length?"results":"empty",n.searchError=null}p(e)}catch(o){let n=u(s);if(!n)return;n.searchState="error",n.searchError=$(o),n.searchResults=[],p(e)}}async function G(e,s){let a=u(s);if(!a||a.setupTesting)return;a.setupTesting=!0,a.setupProgress={connection:"running",recall:"pending"},p(e);try{let t=await e.callRoute("status",{method:"GET"}),o=u(s);if(!o)return;o.status=t||o.status,o.statusState="ready",o.setupProgress={...o.setupProgress,connection:t&&t.healthy?"ok":"fail"},p(e)}catch{let t=u(s);t&&(t.setupProgress={...t.setupProgress,connection:"fail"},p(e))}let r=u(s);if(r){r.setupProgress={...r.setupProgress,recall:"running"},p(e);try{let t=await e.callRoute("recall",{method:"POST",body:{query:"hindsight setup smoke test",scope:"all"}}),o=u(s);if(!o)return;let n=!!t&&t.configured!==!1&&!t.error;o.setupProgress={...o.setupProgress,recall:n?"ok":"fail"},o.setupTesting=!1,p(e)}catch{let t=u(s);t&&(t.setupProgress={...t.setupProgress,recall:"fail"},t.setupTesting=!1,p(e))}}}let b=(e,s,a,r)=>{let t=u(s);!t||!t.draft||(t.draft={...t.draft,[a]:r},t.touched={...t.touched,[a]:!0},t.dirty=!0,p(e))},V=(e,s,a,r)=>{let t=u(s);!t||!t.draft||(t.draft={...t.draft,[a]:r},t.secretTouched={...t.secretTouched,[a]:!0},t.dirty=!0,p(e))},Y=(e,s,a)=>{let r=u(s);if(!r||!r.draft)return;let t={...r.draft},o={...r.touched||{}};a==="external"?(t.mode="external",o.mode=!0):a==="managed"||a==="managed-external-postgres"?(t.mode=a,o.mode=!0):a==="hermes"&&(t.mode="external",t.externalUrl=S,t.bank="hermes",o.mode=!0,o.externalUrl=!0,o.bank=!0,c(t.uiUrl,"").trim()||(t.uiUrl=R,o.uiUrl=!0)),r.draft=t,r.touched=o,r.dirty=!0,p(e)},Q=(e,s)=>{let a=c(e&&e.mode,"external"),r=a==="external"&&c(e&&e.externalUrl,"")===S&&c(e&&e.bank,"")==="hermes";return s==="hermes"?r:s==="external"?a==="external"&&!r:a===s};function X(e){let s=e.status;if(!(s?!!s.configured:!!e.configured))return{state:"dormant",label:"Not configured",hint:"No memory backend configured yet."};let r=s&&s.mode||e.config&&e.config.mode||"external";if(!v(r))return s&&s.healthy?{state:"connected",label:"Connected",hint:"Connected to your Hindsight."}:{state:"unreachable",label:"Unreachable",hint:"Can't reach Hindsight at the configured URL."};let t=s&&s.runtimeStatus;return t==="running"||s&&s.healthy?{state:"running",label:"Running",hint:"Managed runtime is running."}:t==="unhealthy"?{state:"unhealthy",label:"Unhealthy",hint:"Managed runtime is up but not healthy."}:t==="starting"||e.runtimePhase==="starting"?{state:"starting",label:"Starting\u2026",hint:"Managed runtime is starting\u2026"}:{state:"stopped",label:"Stopped",hint:"Managed runtime is stopped."}}let W=e=>{let s=e.config||{},a=s.mode,r=t=>!!s[`${t}Set`];return a==="managed"?r("llmApiKey"):a==="managed-external-postgres"?r("llmApiKey")&&r("externalDatabaseUrl"):!1},x=(e,s,a,r,t={})=>i`
+var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i),pe=["apiKey","externalDatabaseUrl","llmApiKey"];var H=`${encodeURIComponent("hindsight")}:${encodeURIComponent("hindsight")}`,S="http://localhost:9177",R="http://localhost:19177/banks/hermes?view=data";function B(){try{return globalThis.localStorage&&localStorage.getItem("gateway.url")||globalThis.location?.origin||""}catch{return globalThis.location?.origin||""}}function O(){try{return globalThis.localStorage&&localStorage.getItem("gateway.token")||""}catch{return""}}function T(i){let d=c(i,"").trim();if(!d)return!1;try{let w=new URL(d);return w.protocol==="http:"||w.protocol==="https:"}catch{return!1}}var _=globalThis.__bobbitHindsightPanelState||(globalThis.__bobbitHindsightPanelState=new Map);function ge(){return{mountKicked:!1,configState:"loading",configError:null,config:null,configured:!1,draft:null,secretTouched:{apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},touched:{},dirty:!1,saving:!1,saveErrors:[],statusState:"loading",status:null,statusError:null,searchState:"idle",searchResults:[],searchError:null,searchDormant:!1,searchQuery:"",searchScope:"",pollTimer:null,pollTicks:0,logsOpen:!1,logsState:"idle",logs:"",logsError:null,setupOpen:!1,setupProgress:null,setupTesting:!1,managedConsentAck:!1,runtimePhase:"idle",runtimeError:null}}function y(i){let d=i||{};return{mode:c(d.mode,"external"),externalUrl:c(d.externalUrl,""),uiUrl:c(d.uiUrl,""),bank:c(d.bank,"bobbit"),namespace:c(d.namespace,"default"),dataDir:c(d.dataDir,"~/.hindsight"),recallScope:d.recallScope==="all"?"all":"project",autoRecall:d.autoRecall!==!1,autoRetain:d.autoRetain!==!1,recallBudget:c(d.recallBudget,"1200"),timeoutMs:c(d.timeoutMs,"1500"),apiKey:"",externalDatabaseUrl:"",llmApiKey:""}}function he({html:i,nothing:d,renderHeader:w}){let g=e=>{try{e&&e.requestRender&&e.requestRender()}catch{}},u=e=>_.get(e),U=e=>{if(e&&e.pollTimer){try{clearTimeout(e.pollTimer)}catch{}e.pollTimer=null}},v=e=>e==="managed"||e==="managed-external-postgres",C=(e,s)=>{let a=u(s);if(!a||!a.status){a&&U(a);return}let r=a.status,t=v(r.mode),o=a.runtimePhase==="starting"||r.runtimeStatus==="starting"||r.runtimeStatus===void 0&&r.configured&&!r.healthy;if(!(t&&r.configured&&!r.healthy&&o&&a.pollTicks<20)){U(a);return}a.pollTimer||(a.pollTimer=setTimeout(()=>{let l=u(s);l&&(l.pollTimer=null,l.pollTicks+=1,k(e,s,!0))},1500))};function L(e,s){e.config=s&&s.config?s.config:null,e.configured=!!(s&&s.configured),e.dirty?e.draft||(e.draft=y(e.config)):(e.draft=y(e.config),e.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},e.touched={})}async function A(e,s){try{let a=await e.callRoute("config",{method:"GET"}),r=u(s);return r?(L(r,a),r.configState="ready",g(e),!0):!1}catch(a){let r=u(s);return r&&(r.configState="error",r.configError=$(a),g(e)),!1}}async function k(e,s,a=!1){let r=u(s);r&&!a&&(r.statusState=r.status?"ready":"loading");try{let t=await e.callRoute("status",{method:"GET"}),o=u(s);if(!o)return;o.status=t||null,o.statusState="ready",o.statusError=null,o.runtimePhase==="starting"&&t&&(t.healthy||t.runtimeStatus==="running")&&(o.runtimePhase="idle"),C(e,s),g(e)}catch(t){let o=u(s);if(!o)return;o.statusState="error",o.statusError=$(t),g(e)}}let j=(e,s)=>{A(e,s),k(e,s)};function K(e){let s=e.config||{},a=e.draft||{},r=e.touched||{},t={};r.mode&&a.mode!==s.mode&&(t.mode=a.mode);for(let o of["externalUrl","uiUrl","bank","namespace","dataDir"]){if(!r[o])continue;let n=c(a[o],""),l=c(s[o],"");n!==l&&(t[o]=n)}r.recallScope&&a.recallScope!==(s.recallScope==="all"?"all":"project")&&(t.recallScope=a.recallScope);for(let o of["autoRecall","autoRetain"])r[o]&&!!a[o]!=(s[o]!==!1)&&(t[o]=!!a[o]);for(let o of["recallBudget","timeoutMs"]){if(!r[o])continue;let n=Number(a[o]);Number.isFinite(n)&&n>0&&n!==Number(s[o])&&(t[o]=n)}for(let o of pe)e.secretTouched[o]&&(t[o]=c(a[o],""));return t}async function N(e,s){let a=u(s);if(!a||!a.draft||a.saving)return;a.saving=!0,a.saveErrors=[],g(e);let r;try{r=await e.callRoute("config",{method:"GET"})}catch(n){let l=u(s);if(!l)return;l.saving=!1,l.saveErrors=[`Couldn't verify the current configuration before saving: ${$(n)}. Save aborted to avoid overwriting a good config \u2014 try again.`],g(e);return}let t=u(s);if(!t)return;L(t,r);let o=K(t);try{let n=await e.callRoute("config",{method:"POST",body:o}),l=u(s);if(!l)return;if(l.saving=!1,n&&n.ok===!1){l.saveErrors=Array.isArray(n.errors)&&n.errors.length?n.errors:[c(n.error,"Save failed")],g(e);return}l.config=n&&n.config?n.config:l.config,l.configured=!!(n&&n.configured),l.draft=y(l.config),l.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},l.touched={},l.dirty=!1,l.pollTicks=0,k(e,s),g(e)}catch(n){let l=u(s);if(!l)return;l.saving=!1,l.saveErrors=[$(n)],g(e)}}let z=(e,s)=>{let a=u(s);a&&(a.draft=y(a.config),a.secretTouched={apiKey:!1,externalDatabaseUrl:!1,llmApiKey:!1},a.touched={},a.dirty=!1,g(e))};async function E(e,s){let a=u(s);if(a){a.logsState="loading",a.logsError=null,g(e);try{let r=B(),t=await fetch(`${r}/api/pack-runtimes/${H}/logs?tail=200`,{headers:{Authorization:`Bearer ${O()}`}}),o=u(s);if(!o)return;if(!t.ok){o.logsState="error",o.logsError=`HTTP ${t.status}`,g(e);return}let n=await t.json().catch(()=>({}));o.logs=c(n&&n.logs,""),o.logsState="loaded",o.logsError=n&&n.status==="docker-unavailable"?"Docker is not available":null,g(e)}catch(r){let t=u(s);if(!t)return;t.logsState="error",t.logsError=$(r),g(e)}}}let q=(e,s)=>{let a=u(s);a&&(a.logsOpen=!a.logsOpen,g(e),a.logsOpen&&E(e,s))};async function M(e,s,a){let r=u(s);if(r){r.runtimePhase=a==="start"?"starting":"stopping",r.runtimeError=null,a==="start"&&(r.pollTicks=0),g(e);try{let t=B(),o=await fetch(`${t}/api/pack-runtimes/${H}/${a}`,{method:"POST",headers:{Authorization:`Bearer ${O()}`,"Content-Type":"application/json"}}),n=u(s);if(!n)return;if(!o.ok){n.runtimePhase="error",n.runtimeError=`HTTP ${o.status}`,g(e);return}a==="stop"&&(n.runtimePhase="idle"),k(e,s),g(e)}catch(t){let o=u(s);if(!o)return;o.runtimePhase="error",o.runtimeError=$(t),g(e)}}}async function F(e,s){let a=u(s);if(!a)return;let r=c(a.searchQuery,"").trim();if(!r)return;a.searchState="searching",a.searchError=null,g(e);let t=a.searchScope||a.config&&a.config.recallScope||"project";try{let o=await e.callRoute("recall",{method:"POST",body:{query:r,scope:t}}),n=u(s);if(!n)return;if(o&&o.configured===!1)n.searchResults=[],n.searchDormant=!0,n.searchState="empty",n.searchError=null;else if(o&&o.error)n.searchResults=[],n.searchDormant=!1,n.searchState="error",n.searchError=String(o.error);else{let l=o&&Array.isArray(o.memories)?o.memories:[];n.searchResults=l,n.searchDormant=!1,n.searchState=l.length?"results":"empty",n.searchError=null}g(e)}catch(o){let n=u(s);if(!n)return;n.searchState="error",n.searchError=$(o),n.searchResults=[],g(e)}}async function G(e,s){let a=u(s);if(!a||a.setupTesting)return;a.setupTesting=!0,a.setupProgress={connection:"running",recall:"pending"},g(e);try{let t=await e.callRoute("status",{method:"GET"}),o=u(s);if(!o)return;o.status=t||o.status,o.statusState="ready",o.setupProgress={...o.setupProgress,connection:t&&t.healthy?"ok":"fail"},g(e)}catch{let t=u(s);t&&(t.setupProgress={...t.setupProgress,connection:"fail"},g(e))}let r=u(s);if(r){r.setupProgress={...r.setupProgress,recall:"running"},g(e);try{let t=await e.callRoute("recall",{method:"POST",body:{query:"hindsight setup smoke test",scope:"all"}}),o=u(s);if(!o)return;let n=!!t&&t.configured!==!1&&!t.error;o.setupProgress={...o.setupProgress,recall:n?"ok":"fail"},o.setupTesting=!1,g(e)}catch{let t=u(s);t&&(t.setupProgress={...t.setupProgress,recall:"fail"},t.setupTesting=!1,g(e))}}}let b=(e,s,a,r)=>{let t=u(s);!t||!t.draft||(t.draft={...t.draft,[a]:r},t.touched={...t.touched,[a]:!0},t.dirty=!0,g(e))},V=(e,s,a,r)=>{let t=u(s);!t||!t.draft||(t.draft={...t.draft,[a]:r},t.secretTouched={...t.secretTouched,[a]:!0},t.dirty=!0,g(e))},Y=(e,s,a)=>{let r=u(s);if(!r||!r.draft)return;let t={...r.draft},o={...r.touched||{}};a==="external"?(t.mode="external",o.mode=!0):a==="managed"||a==="managed-external-postgres"?(t.mode=a,o.mode=!0):a==="hermes"&&(t.mode="external",t.externalUrl=S,t.bank="hermes",o.mode=!0,o.externalUrl=!0,o.bank=!0,c(t.uiUrl,"").trim()||(t.uiUrl=R,o.uiUrl=!0)),r.draft=t,r.touched=o,r.dirty=!0,g(e)},Q=(e,s)=>{let a=c(e&&e.mode,"external"),r=a==="external"&&c(e&&e.externalUrl,"")===S&&c(e&&e.bank,"")==="hermes";return s==="hermes"?r:s==="external"?a==="external"&&!r:a===s};function X(e){let s=e.status;if(!(s?!!s.configured:!!e.configured))return{state:"dormant",label:"Not configured",hint:"No memory backend configured yet."};let r=s&&s.mode||e.config&&e.config.mode||"external";if(!v(r))return s&&s.healthy?{state:"connected",label:"Connected",hint:"Connected to your Hindsight."}:{state:"unreachable",label:"Unreachable",hint:"Can't reach Hindsight at the configured URL."};let t=s&&s.runtimeStatus;return t==="running"||s&&s.healthy?{state:"running",label:"Running",hint:"Managed runtime is running."}:t==="unhealthy"?{state:"unhealthy",label:"Unhealthy",hint:"Managed runtime is up but not healthy."}:t==="starting"||e.runtimePhase==="starting"?{state:"starting",label:"Starting\u2026",hint:"Managed runtime is starting\u2026"}:{state:"stopped",label:"Stopped",hint:"Managed runtime is stopped."}}let W=e=>{let s=e.config||{},a=s.mode,r=t=>!!s[`${t}Set`];return a==="managed"?r("llmApiKey"):a==="managed-external-postgres"?r("llmApiKey")&&r("externalDatabaseUrl"):!1},x=(e,s,a,r,t={})=>i`
 		<label class="hs-field">
 			<span class="hs-label">${e}</span>
 			<input
@@ -21,20 +21,20 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					autocomplete="off"
 					.value=${c(l[a],"")}
 					placeholder=${f}
-					@input=${g=>V(t,o,a,g.currentTarget.value)}
+					@input=${p=>V(t,o,a,p.currentTarget.value)}
 				/>
 				${n.hint?i`<span class="hs-hint">${n.hint}</span>`:d}
 			</label>`},D=(e,s,a,r)=>i`
 		<label class="hs-toggle">
 			<input type="checkbox" data-testid=${s} .checked=${!!a} @change=${r} />
 			<span>${e}</span>
-		</label>`,J=e=>{let s=e.status||{},a=c(s.mode||e.config&&e.config.mode,"external");return v(a)?"managed runtime (loopback)":c(s.externalUrl||e.config&&e.config.externalUrl,"")||"\u2014"},Z=(e,s,a)=>{let r=X(e),t=e.status||{},o=c(t.mode||e.config&&e.config.mode,"external"),n=Number(t.queueDepth||0),l=c(t.uiUrl||e.config&&e.config.uiUrl,""),h=c(t.timeoutMs!=null?t.timeoutMs:e.config&&e.config.timeoutMs,""),f=c(t.recallBudget!=null?t.recallBudget:e.config&&e.config.recallBudget,""),g=t.lastError,m=g&&typeof g=="object"?c(g.message):c(g,"");return i`
+		</label>`,J=e=>{let s=e.status||{},a=c(s.mode||e.config&&e.config.mode,"external");return v(a)?"managed runtime (loopback)":c(s.externalUrl||e.config&&e.config.externalUrl,"")||"\u2014"},Z=(e,s,a)=>{let r=X(e),t=e.status||{},o=c(t.mode||e.config&&e.config.mode,"external"),n=Number(t.queueDepth||0),l=c(t.uiUrl||e.config&&e.config.uiUrl,""),h=c(t.timeoutMs!=null?t.timeoutMs:e.config&&e.config.timeoutMs,""),f=c(t.recallBudget!=null?t.recallBudget:e.config&&e.config.recallBudget,""),p=t.lastError,m=p&&typeof p=="object"?c(p.message):c(p,"");return i`
 			<section class="hs-card" data-testid="hindsight-status-card">
 				<div class="hs-card-head">
 					<h2 class="hs-card-title">Runtime status</h2>
 					<div class="hs-card-actions">
 						<span class="hs-badge" data-testid="hindsight-status-badge" data-state=${r.state} title=${r.hint||r.label}>${r.label}</span>
-						<button class="hs-btn" data-testid="hindsight-refresh" type="button" ?disabled=${e.statusState==="loading"} @click=${()=>K(s,a)}>Refresh</button>
+						<button class="hs-btn" data-testid="hindsight-refresh" type="button" ?disabled=${e.statusState==="loading"} @click=${()=>j(s,a)}>Refresh</button>
 					</div>
 				</div>
 				${r.hint?i`<p class="hs-muted" data-testid="hindsight-state-hint">${r.hint}</p>`:d}
@@ -45,7 +45,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 							${l?i`<div class="hs-row"><dt>UI URL</dt><dd><a class="hs-open-ui" data-testid="hindsight-open-ui" href=${l} target="_blank" rel="noopener noreferrer">Open Hindsight UI ↗</a></dd></div>`:d}
 							<div class="hs-row"><dt>Bank</dt><dd>${c(t.bank||e.config&&e.config.bank,"bobbit")}</dd></div>
 							<div class="hs-row"><dt>Namespace</dt><dd>${c(t.namespace||e.config&&e.config.namespace,"default")}</dd></div>
-							<div class="hs-row"><dt>Recall scope</dt><dd>${c(t.recallScope||e.config&&e.config.recallScope,"all")}</dd></div>
+							<div class="hs-row"><dt>Recall scope</dt><dd>${c(t.recallScope||e.config&&e.config.recallScope,"project")==="all"?"all (every project)":"project (this project + shared/global)"}</dd></div>
 							<div class="hs-row"><dt>Auto recall / retain</dt><dd>${t.autoRecall===!1?"off":"on"} / ${t.autoRetain===!1?"off":"on"}</dd></div>
 							${h?i`<div class="hs-row"><dt>Timeout</dt><dd data-testid="hindsight-status-timeout">${h} ms</dd></div>`:d}
 							${f?i`<div class="hs-row"><dt>Recall budget</dt><dd>${f} tokens</dd></div>`:d}
@@ -84,7 +84,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 				<div class="hs-row"><dt>Namespace</dt><dd><code>default</code> unless your Hindsight uses namespaces.</dd></div>
 				<div class="hs-row"><dt>Auto-retain</dt><dd>On (async) — memories are saved in the background after each turn; no latency cost.</dd></div>
 				<div class="hs-row"><dt>Auto-recall</dt><dd>On — relevant memories are pulled in automatically.</dd></div>
-				<div class="hs-row"><dt>Recall scope</dt><dd><code>all</code> — search across everything you've done.</dd></div>
+				<div class="hs-row"><dt>Recall scope</dt><dd><code>project</code> — this project + shared/global memories (<code>all</code> = every project in the shared bank).</dd></div>
 				<div class="hs-row"><dt>Timeout</dt><dd><code>1500 ms</code> — conservative; Hindsight calls never stall a turn.</dd></div>
 				<div class="hs-row"><dt>LLM key (managed)</dt><dd>You supply it — Bobbit forwards it to the local runtime only; never hardcodes a provider secret.</dd></div>
 			</dl>
@@ -102,7 +102,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 			<section class="hs-card" data-testid="hindsight-setup">
 				<div class="hs-card-head">
 					<h2 class="hs-card-title">Set up Hindsight</h2>
-					${e.configured?i`<button class="hs-btn" data-testid="hindsight-setup-close" type="button" @click=${()=>{let t=u(a);t&&(t.setupOpen=!1,p(s))}}>Hide guide</button>`:d}
+					${e.configured?i`<button class="hs-btn" data-testid="hindsight-setup-close" type="button" @click=${()=>{let t=u(a);t&&(t.setupOpen=!1,g(s))}}>Hide guide</button>`:d}
 				</div>
 				<p class="hs-muted">Pick how Hindsight runs. Selecting a managed option only sets the mode — nothing starts until you press <strong>Start runtime</strong>.</p>
 				<div class="hs-deploy-grid">
@@ -127,10 +127,10 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					<button class="hs-btn" data-testid="hindsight-setup-test" type="button" ?disabled=${e.setupTesting} @click=${()=>G(s,a)}>${e.setupTesting?"Testing\u2026":"Test connection"}</button>
 				</div>
 				${re(e)}
-			</section>`},ne=e=>{let s=e.status||{},a=s.runtimeStatus,r=e.runtimePhase,t=!!s.healthy,o=(g,m)=>g?"ok":m?"running":"pending",n=r==="starting"||a==="starting"||a==="running"||t,l=a==="running"||a===void 0&&t,h=r==="error",f=(g,m)=>i`
+			</section>`},ne=e=>{let s=e.status||{},a=s.runtimeStatus,r=e.runtimePhase,t=!!s.healthy,o=(p,m)=>p?"ok":m?"running":"pending",n=r==="starting"||a==="starting"||a==="running"||t,l=a==="running"||a===void 0&&t,h=r==="error",f=(p,m)=>i`
 			<li class="hs-progress-row" data-state=${m}>
 				<span class="hs-progress-icon" aria-hidden="true">${m==="ok"?"\u2713":m==="fail"?"\u2717":m==="running"?"\u2026":"\u2022"}</span>
-				<span>${g}</span>
+				<span>${p}</span>
 				<span class="hs-progress-state">${m}</span>
 			</li>`;return r==="idle"&&!n&&!h?d:i`
 			<ul class="hs-progress" data-testid="hindsight-runtime-progress">
@@ -150,7 +150,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					</ul>
 					${e.dirty?i`<p class="hs-hint" data-testid="hindsight-managed-save-first">Save your changes before starting — Start uses the saved configuration, not your unsaved edits.</p>`:d}
 					<label class="hs-toggle">
-						<input type="checkbox" data-testid="hindsight-managed-consent-ack" .checked=${!!e.managedConsentAck} @change=${g=>{let m=u(a);m&&(m.managedConsentAck=g.currentTarget.checked,p(s))}} />
+						<input type="checkbox" data-testid="hindsight-managed-consent-ack" .checked=${!!e.managedConsentAck} @change=${p=>{let m=u(a);m&&(m.managedConsentAck=p.currentTarget.checked,g(s))}} />
 						<span>I understand this starts local Docker containers.</span>
 					</label>
 				</div>
@@ -159,16 +159,16 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					<button class="hs-btn" data-testid="hindsight-stop-runtime" type="button" ?disabled=${!n||e.runtimePhase==="stopping"} @click=${()=>M(s,a,"stop")}>${e.runtimePhase==="stopping"?"Stopping\u2026":"Stop runtime"}</button>
 				</div>
 				${ne(e)}
-			</section>`},de=(e,s,a)=>{let r=e.draft||y(null),t=r.mode,o=g=>b(s,a,"mode",g.currentTarget.value),n=c(r.externalUrl,"").trim(),l=t==="external"&&n?i`<span class="hs-hint" data-testid="hindsight-url-validity" data-valid=${T(n)?"true":"false"}>${T(n)?"\u2713 Looks like a valid URL":"\u2717 Must be an http(s) URL"}</span>`:d,h=c(r.uiUrl,"").trim(),f=h?i`<span class="hs-hint" data-testid="hindsight-ui-url-validity" data-valid=${T(h)?"true":"false"}>${T(h)?"\u2713 Looks like a valid URL":"\u2717 Must be an http(s) URL"}</span>`:d;return i`
+			</section>`},de=(e,s,a)=>{let r=e.draft||y(null),t=r.mode,o=p=>b(s,a,"mode",p.currentTarget.value),n=c(r.externalUrl,"").trim(),l=t==="external"&&n?i`<span class="hs-hint" data-testid="hindsight-url-validity" data-valid=${T(n)?"true":"false"}>${T(n)?"\u2713 Looks like a valid URL":"\u2717 Must be an http(s) URL"}</span>`:d,h=c(r.uiUrl,"").trim(),f=h?i`<span class="hs-hint" data-testid="hindsight-ui-url-validity" data-valid=${T(h)?"true":"false"}>${T(h)?"\u2713 Looks like a valid URL":"\u2717 Must be an http(s) URL"}</span>`:d;return i`
 			<section class="hs-card" data-testid="hindsight-config-card">
 				<div class="hs-card-head">
 					<h2 class="hs-card-title">Configuration</h2>
-					<button class="hs-btn hs-btn-primary" data-testid="hindsight-save" type="button" ?disabled=${e.saving} @click=${()=>z(s,a)}>${e.saving?"Saving\u2026":"Save"}</button>
+					<button class="hs-btn hs-btn-primary" data-testid="hindsight-save" type="button" ?disabled=${e.saving} @click=${()=>N(s,a)}>${e.saving?"Saving\u2026":"Save"}</button>
 				</div>
 
 				${e.dirty?i`<div class="hs-banner" data-testid="hindsight-unsaved">
 							<span>You have unsaved changes. Save persists them; Discard reverts to the stored config.</span>
-							<button class="hs-btn" data-testid="hindsight-discard" type="button" @click=${()=>j(s,a)}>Discard</button>
+							<button class="hs-btn" data-testid="hindsight-discard" type="button" @click=${()=>z(s,a)}>Discard</button>
 						</div>`:d}
 
 				<label class="hs-field">
@@ -180,11 +180,11 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					</select>
 				</label>
 
-				${t==="external"?x("API / data-plane URL","hindsight-external-url",r.externalUrl,g=>b(s,a,"externalUrl",g.currentTarget.value),{placeholder:S,hint:`API / data-plane URL Bobbit calls to recall & retain (e.g. ${S}). Activates external mode; empty keeps it dormant.`,validity:l}):d}
+				${t==="external"?x("API / data-plane URL","hindsight-external-url",r.externalUrl,p=>b(s,a,"externalUrl",p.currentTarget.value),{placeholder:S,hint:`API / data-plane URL Bobbit calls to recall & retain (e.g. ${S}). Activates external mode; empty keeps it dormant.`,validity:l}):d}
 
-				${x("Dashboard UI URL","hindsight-ui-url",r.uiUrl,g=>b(s,a,"uiUrl",g.currentTarget.value),{placeholder:R,hint:`Optional human dashboard opened by "Open Hindsight UI" \u2014 never called by Bobbit (e.g. ${R}).`,validity:f})}
+				${x("Dashboard UI URL","hindsight-ui-url",r.uiUrl,p=>b(s,a,"uiUrl",p.currentTarget.value),{placeholder:R,hint:`Optional human dashboard opened by "Open Hindsight UI" \u2014 never called by Bobbit (e.g. ${R}).`,validity:f})}
 
-				${v(t)?x("Managed data dir","hindsight-data-dir",r.dataDir,g=>b(s,a,"dataDir",g.currentTarget.value),{placeholder:"~/.hindsight",hint:t==="managed"?"Host bind-mount path for managed Postgres data.":""}):d}
+				${v(t)?x("Managed data dir","hindsight-data-dir",r.dataDir,p=>b(s,a,"dataDir",p.currentTarget.value),{placeholder:"~/.hindsight",hint:t==="managed"?"Host bind-mount path for managed Postgres data.":""}):d}
 
 				${t==="managed-external-postgres"?P("External Postgres URL","hindsight-external-db-url","externalDatabaseUrl",e,s,a,{hint:"\u2192 runtime HINDSIGHT_API_DATABASE_URL. Required to start."}):d}
 
@@ -193,29 +193,30 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 				${P("API key","hindsight-api-key","apiKey",e,s,a,{hint:"Optional bearer token for the Hindsight API."})}
 
 				<div class="hs-grid2">
-					${x("Bank","hindsight-bank",r.bank,g=>b(s,a,"bank",g.currentTarget.value),{placeholder:"bobbit"})}
-					${x("Namespace","hindsight-namespace",r.namespace,g=>b(s,a,"namespace",g.currentTarget.value),{placeholder:"default"})}
+					${x("Bank","hindsight-bank",r.bank,p=>b(s,a,"bank",p.currentTarget.value),{placeholder:"bobbit"})}
+					${x("Namespace","hindsight-namespace",r.namespace,p=>b(s,a,"namespace",p.currentTarget.value),{placeholder:"default"})}
 				</div>
 
 				<label class="hs-field">
 					<span class="hs-label">Recall scope</span>
-					<select class="hs-input" data-testid="hindsight-recall-scope" .value=${r.recallScope} @change=${g=>b(s,a,"recallScope",g.currentTarget.value)}>
-						<option value="all" ?selected=${r.recallScope==="all"}>All</option>
+					<select class="hs-input" data-testid="hindsight-recall-scope" .value=${r.recallScope} @change=${p=>b(s,a,"recallScope",p.currentTarget.value)}>
 						<option value="project" ?selected=${r.recallScope==="project"}>This project</option>
+						<option value="all" ?selected=${r.recallScope==="all"}>All</option>
 					</select>
+					<span class="hs-hint">project = this project + shared/global memories; all = every project in the shared bank.</span>
 				</label>
 
 				<div class="hs-toggles">
-					${D("Auto recall","hindsight-auto-recall",r.autoRecall,g=>b(s,a,"autoRecall",g.currentTarget.checked))}
-					${D("Auto retain","hindsight-auto-retain",r.autoRetain,g=>b(s,a,"autoRetain",g.currentTarget.checked))}
+					${D("Auto recall","hindsight-auto-recall",r.autoRecall,p=>b(s,a,"autoRecall",p.currentTarget.checked))}
+					${D("Auto retain","hindsight-auto-retain",r.autoRetain,p=>b(s,a,"autoRetain",p.currentTarget.checked))}
 				</div>
 
 				<div class="hs-grid2">
-					${x("Recall budget (tokens)","hindsight-recall-budget",r.recallBudget,g=>b(s,a,"recallBudget",g.currentTarget.value),{type:"number"})}
-					${x("Timeout (ms)","hindsight-timeout",r.timeoutMs,g=>b(s,a,"timeoutMs",g.currentTarget.value),{type:"number"})}
+					${x("Recall budget (tokens)","hindsight-recall-budget",r.recallBudget,p=>b(s,a,"recallBudget",p.currentTarget.value),{type:"number"})}
+					${x("Timeout (ms)","hindsight-timeout",r.timeoutMs,p=>b(s,a,"timeoutMs",p.currentTarget.value),{type:"number"})}
 				</div>
 
-				${e.saveErrors&&e.saveErrors.length?i`<ul class="hs-errors" data-testid="hindsight-config-error">${e.saveErrors.map(g=>i`<li>${c(g)}</li>`)}</ul>`:d}
+				${e.saveErrors&&e.saveErrors.length?i`<ul class="hs-errors" data-testid="hindsight-config-error">${e.saveErrors.map(p=>i`<li>${c(p)}</li>`)}</ul>`:d}
 			</section>`},le=(e,s)=>{let a=c(e&&e.text,""),r=e&&typeof e.score=="number",t=e&&e.id!=null?String(e.id):"";return i`
 			<li class="hs-memory" data-testid="hindsight-memory-result" data-memory-id=${t}>
 				<div class="hs-memory-text">${a}</div>
@@ -223,7 +224,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 					${r?i`<span class="hs-chip">score ${Number(e.score).toFixed(2)}</span>`:d}
 					${t?i`<span class="hs-memory-id">${t}</span>`:d}
 				</div>
-			</li>`},ce=(e,s,a)=>{let r=o=>{o&&o.preventDefault(),F(s,a)},t=e.searchScope||e.config&&e.config.recallScope||"all";return i`
+			</li>`},ce=(e,s,a)=>{let r=o=>{o&&o.preventDefault(),F(s,a)},t=e.searchScope||e.config&&e.config.recallScope||"project";return i`
 			<section class="hs-card" data-testid="hindsight-search-card">
 				<h2 class="hs-card-title">Search memory</h2>
 				<form class="hs-search-row" @submit=${r}>
@@ -235,9 +236,9 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 						.value=${c(e.searchQuery,"")}
 						@input=${o=>{let n=u(a);n&&(n.searchQuery=o.currentTarget.value)}}
 					/>
-					<select class="hs-input hs-scope" data-testid="hindsight-search-scope" .value=${t} @change=${o=>{let n=u(a);n&&(n.searchScope=o.currentTarget.value,p(s))}}>
-						<option value="all" ?selected=${t==="all"}>All</option>
+					<select class="hs-input hs-scope" data-testid="hindsight-search-scope" .value=${t} @change=${o=>{let n=u(a);n&&(n.searchScope=o.currentTarget.value,g(s))}}>
 						<option value="project" ?selected=${t==="project"}>This project</option>
+						<option value="all" ?selected=${t==="all"}>All</option>
 					</select>
 					<button class="hs-btn hs-btn-primary" data-testid="hindsight-search-submit" type="submit" ?disabled=${e.searchState==="searching"}>${e.searchState==="searching"?"Searching\u2026":"Search"}</button>
 				</form>
@@ -318,7 +319,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 		.hs-memory-meta { display: flex; gap: 8px; align-items: center; }
 		.hs-memory-id { color: var(--muted-foreground); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 		@media (max-width: 520px) { .hs-deploy-grid { grid-template-columns: 1fr; } }
-	</style>`;return{render(e,s){let a=e&&e.__sessionId||"hindsight-default";if(!!!(s&&s.capabilities&&s.capabilities.callRoute&&typeof s.callRoute=="function"))return i`${I}<div class="hs-root" data-testid="hindsight-panel" data-state="unavailable"><p class="hs-muted">Hindsight memory is unavailable on this host.</p></div>`;let t=u(a);t||(t=pe(),_.set(a,t)),t.mountKicked||(t.mountKicked=!0,A(s,a),k(s,a));let o=t.configState==="loading"&&!t.draft,n=t.draft&&t.draft.mode||"external",l=!t.configured||t.setupOpen;return i`
+	</style>`;return{render(e,s){let a=e&&e.__sessionId||"hindsight-default";if(!!!(s&&s.capabilities&&s.capabilities.callRoute&&typeof s.callRoute=="function"))return i`${I}<div class="hs-root" data-testid="hindsight-panel" data-state="unavailable"><p class="hs-muted">Hindsight memory is unavailable on this host.</p></div>`;let t=u(a);t||(t=ge(),_.set(a,t)),t.mountKicked||(t.mountKicked=!0,A(s,a),k(s,a));let o=t.configState==="loading"&&!t.draft,n=t.draft&&t.draft.mode||"external",l=!t.configured||t.setupOpen;return i`
 				${I}
 				<div class="hs-root" data-testid="hindsight-panel" data-config-state=${t.configState} data-status-state=${t.statusState}>
 					${(()=>{let h=c(t.status&&t.status.uiUrl||t.config&&t.config.uiUrl,"");return i`
@@ -326,7 +327,7 @@ var $=i=>i&&i.message?String(i.message):String(i),c=(i,d="")=>i==null?d:String(i
 								<h1>Hindsight Memory</h1>
 								<div class="hs-card-actions">
 									${h?i`<a class="hs-btn hs-open-ui" data-testid="hindsight-header-open-ui" href=${h} target="_blank" rel="noopener noreferrer">Open Hindsight UI ↗</a>`:d}
-									${t.configured&&!t.setupOpen?i`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${()=>{let f=u(a);f&&(f.setupOpen=!0,p(s))}}>Setup guide</button>`:d}
+									${t.configured&&!t.setupOpen?i`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${()=>{let f=u(a);f&&(f.setupOpen=!0,g(s))}}>Setup guide</button>`:d}
 								</div>
 							</div>`})()}
 					${Z(t,s,a)}

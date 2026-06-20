@@ -729,6 +729,23 @@
 	background: color-mix(in oklch, var(--muted) 40%, transparent);
 }
 
+/* Per-project memory override sub-section inside the inline Configure form. A
+ * subtle inset block so it reads as a scoped overlay on top of the global config. */
+.market-hindsight-override {
+	padding: 0.5rem 0.625rem;
+	border-radius: 0.5rem;
+	border: 1px dashed color-mix(in oklch, var(--border) 80%, var(--foreground));
+	background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+}
+
+/* "Project override active" badge on the read-only summary. */
+.market-hindsight-override-badge {
+	gap: 0.25rem;
+	border-color: color-mix(in oklch, var(--chart-1) 40%, transparent);
+	background: color-mix(in oklch, var(--chart-1) 12%, transparent);
+	color: var(--foreground);
+}
+
 .market-field {
 	display: flex;
 	flex-direction: column;

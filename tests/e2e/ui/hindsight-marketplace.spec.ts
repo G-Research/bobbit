@@ -128,6 +128,17 @@ async function reconcile(page: Page): Promise<void> {
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => { /* race */ });
 }
 
+/** Does the `config` route expose the per-project override contract (globalConfig /
+ *  projectOverride) in THIS environment? The route partition that adds it (design
+ *  hindsight-memory-quality) may not have merged when this spec file runs alone, so
+ *  the override UI test guards on this probe rather than failing. */
+async function overrideContractReady(): Promise<boolean> {
+	const res = await apiFetch(`/api/ext/pack-route/${PACK}/config?projectId=__probe__`);
+	if (!res.ok) return false;
+	const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+	return Object.prototype.hasOwnProperty.call(data, "globalConfig") || Object.prototype.hasOwnProperty.call(data, "projectOverride");
+}
+
 /** Open the app, create + select a session (so the marketplace can mint the pack
  *  route surface token for the Hindsight `status` read), and reconcile renderers. */
 async function openWithSession(page: Page): Promise<void> {
@@ -399,6 +410,50 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toBeVisible({ timeout: 20_000 });
 		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
+	});
+
+	// ── Per-project memory override (design hindsight-memory-quality): the inline
+	//    Configure form surfaces a compact override section for the CURRENT project;
+	//    saving a project recall-scope override persists across a full reload and the
+	//    summary shows a "project override active" badge. Guarded on the route exposing
+	//    the override contract so the spec stays green where that partition hasn't
+	//    merged. ──
+	test("per-project override: recall scope override saves and persists across reload", async ({ page }) => {
+		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		test.skip(!(await overrideContractReady()), "config route does not expose the per-project override contract here");
+		// Configure a healthy external deployment so the pack is configured + the row enabled.
+		await putHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
+
+		await openWithSession(page);
+		let row = await openMarketRow(page);
+
+		// Open Configure → the per-project override section appears for the current project.
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const form = row.locator('[data-testid="market-hindsight-config-form"]');
+		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
+		const override = row.locator('[data-testid="market-hindsight-override"]');
+		await expect(override, "the per-project override section is shown").toBeVisible({ timeout: 15_000 });
+
+		// Pin THIS project's recall scope to `all` (override the global default), and save.
+		await override.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("all");
+		await override.locator('[data-testid="market-hindsight-override-save"]').click();
+		await expect(override.locator('[data-testid="market-hindsight-override-result"]'), "the override save reports a result").toContainText("Saved", { timeout: 20_000 });
+
+		// The read-only summary now flags the active project override.
+		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge appears").toBeVisible({ timeout: 20_000 });
+
+		// Reload the whole page — the project override must survive (sessionless read).
+		await page.reload();
+		row = await openMarketRow(page);
+		await expect(row.locator('[data-testid="market-hindsight-override-active"]'), "the override badge persists across reload").toBeVisible({ timeout: 20_000 });
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const override2 = row.locator('[data-testid="market-hindsight-override"]');
+		await expect(override2.locator('[data-testid="market-hindsight-override-recallscope"]'), "the saved override value persists").toHaveValue("all", { timeout: 15_000 });
+
+		// Hygiene: clear the override back to inherit so the project overlay does not leak.
+		await override2.locator('[data-testid="market-hindsight-override-recallscope"]').selectOption("");
+		await override2.locator('[data-testid="market-hindsight-override-save"]').click();
+		await expect(override2.locator('[data-testid="market-hindsight-override-result"]')).toContainText("Saved", { timeout: 20_000 });
 	});
 
 	// ── The route persists `lastError` as an OBJECT ({ message, ts }); the row must
