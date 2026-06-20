@@ -416,11 +416,22 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// deferred `compaction-result` fires. Track the in-progress live card so
 			// we can anchor it to the persisted sidecar card's position instead.
 			let hasInProgressLiveCard = false;
+			// Compaction ids ALREADY established in prior state — persisted
+			// (reload-spliced) sidecar cards from EARLIER compactions in this
+			// session, plus any completed live card that gained a compactionId.
+			// The interim heuristic below must NOT consume these: they belong to
+			// older compactions, not the current pending one. Without this guard a
+			// stale older card would be dropped and its `_order` mis-transferred
+			// to an unrelated in-progress card (verifiable race; see §4.1).
+			const establishedCompactionIds = new Set<string>();
 			for (const m of state.messages) {
 				if (m._origin === "synthetic" && m.id === COMPACTION_ACTIVE_ID) {
 					const cid = compactionSummaryId(m);
 					if (cid) liveCompactionIds.add(cid);
 					else hasInProgressLiveCard = true;
+				} else {
+					const cid = compactionSummaryId(m);
+					if (cid) establishedCompactionIds.add(cid);
 				}
 			}
 			// Stamp the FULL row set FIRST so canonical snapshot `_order`s
@@ -469,11 +480,23 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				// compaction anchor. Drop that card + its paired toolResult and stash
 				// their canonical orders so the surviving in-progress live card sorts
 				// before the preserved tail — exactly one card during the window.
+				//
+				// Verifiable race guard (review of PR #819): only consume a sidecar
+				// card that is NOT already established in prior state. An older
+				// compaction's persisted card (`establishedCompactionIds`) must not
+				// be selected as the anchor for the current pending compaction — if
+				// the new compaction's sidecar row has not been written yet, the
+				// snapshot may carry ONLY the old card, and consuming it would
+				// wrongly drop the old card and transfer its `_order` to the
+				// unrelated in-progress card. When no NEW (unestablished) sidecar
+				// card exists, leave the live card tail-anchored and keep the old
+				// card untouched.
 				let bestCard: OrderedMessage | null = null;
 				for (const m of stampedAll) {
-					if (m.id !== COMPACTION_ACTIVE_ID && compactionSummaryId(m) !== null) {
-						if (bestCard === null || m._order > bestCard._order) bestCard = m;
-					}
+					if (m.id === COMPACTION_ACTIVE_ID) continue;
+					const cid = compactionSummaryId(m);
+					if (cid === null || establishedCompactionIds.has(cid)) continue;
+					if (bestCard === null || m._order > bestCard._order) bestCard = m;
 				}
 				if (bestCard) {
 					const bestCid = compactionSummaryId(bestCard) as string;

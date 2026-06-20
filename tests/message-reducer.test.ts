@@ -837,6 +837,60 @@ describe("message-reducer", () => {
 		);
 	});
 
+	it("(12l) interim with stale older sidecar: keep old card, do not consume it for the new in-progress card", () => {
+		// Verifiable race (review of PR #819): an OLDER compaction's persisted
+		// sidecar card already sits in state (e.g. from a prior reload). A NEW
+		// compaction starts — the live `compact_active` card is in-progress with
+		// NO compactionId. A refresh/snapshot arrives BEFORE the new compaction's
+		// sidecar row (`c_new`) has been written, so it carries ONLY the old card
+		// (`c_old`). The interim heuristic must NOT treat the stale `c_old` card
+		// as the current pending anchor: doing so would drop `c_old` and transfer
+		// its `_order` to the unrelated in-progress card. Expected: keep `c_old`
+		// AND show the new in-progress card separately (tail-anchored).
+		const cOld = "c_old";
+		const s = applyAll([
+			// Prior reload: persisted sidecar card for the OLD compaction is in
+			// state at its canonical (prepended) order, before a kept tail.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+			// A NEW compaction begins; live card in-progress (no compactionId).
+			// The placeholder filter only drops `compact_active`-id rows, so the
+			// reloaded `c_old` card (id = compactionId) survives in state.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot lands BEFORE the new sidecar (`c_new`) exists — it still
+			// carries only the old card.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		// The old persisted card must still be present (not consumed/dropped).
+		const oldCards = s.messages.filter(
+			(m: any) => isCompactionCard(m) && m.id === cOld,
+		);
+		assert.strictEqual(oldCards.length, 1, `old persisted card (${cOld}) must survive, got ${oldCards.length}`);
+		// The new in-progress live card must also be present, separately.
+		const liveCards = s.messages.filter((m: any) => m.id === "compact_active");
+		assert.strictEqual(liveCards.length, 1, "new in-progress live card must be present");
+		// Two distinct compaction cards exist (old + new in-progress); the old
+		// card was NOT merged/transferred into the new one.
+		const cards = s.messages.filter(isCompactionCard);
+		assert.strictEqual(cards.length, 2, `expected the old card AND the new in-progress card, got ${cards.length}`);
+		// The old card keeps its prepended (negative) anchor before the tail; the
+		// new in-progress card is tail-anchored (positive), since no matching
+		// pending sidecar exists yet.
+		const oldOrder = oldCards[0]._order;
+		const liveOrder = liveCards[0]._order;
+		assert.ok(oldOrder < 0, `old card retains its prepended anchor; got ${oldOrder}`);
+		assert.ok(liveOrder > oldOrder, `new in-progress card must not steal the old card's order; got live=${liveOrder} old=${oldOrder}`);
+	});
+
 	it("RE-07-style — preferences snapshot ordering preserved (stable by tick)", () => {
 		// Three rows with identical timestamps — must preserve insertion order.
 		const m1 = { id: "m1", role: "user", content: "1", timestamp: 100 };
