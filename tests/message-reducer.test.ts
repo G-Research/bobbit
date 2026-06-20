@@ -35,6 +35,30 @@ function liveMessageEnd(seq: number, message: any): Action {
 	return { type: "live-event", frame: { type: "message_end", message }, seq, ts: 0 };
 }
 
+/**
+ * Turn-termination settle action. Dispatched by remote-agent.ts from BOTH the
+ * `error` and `agent_end` handlers when a turn ends. It must re-stamp any
+ * unreconciled `_origin:"optimistic"` row's `_order` out of the far-future tail
+ * sentinel into chronological position (it stays visible — the user needs to see
+ * what they sent).
+ *
+ * Cast through `unknown` so this file still transpiles BEFORE the reducer's
+ * `Action` union is extended (tsx does not type-check; `npm run check` only
+ * covers `src/`). The (R*) tests below assert the reducer actually HANDLES the
+ * action — pre-fix `reduce` falls through its switch and returns `undefined`,
+ * which the first `assert.ok(s, …)` after the dispatch catches.
+ */
+function settleOptimistic(): Action {
+	return { type: "settle-optimistic" } as unknown as Action;
+}
+
+/**
+ * Threshold separating a SETTLED optimistic row (re-stamped into chronological
+ * position — a small/normal `_order`) from a PENDING one still pinned at the
+ * far-future tail sentinel (`OPTIMISTIC_ORDER_BASE + tick ≈ MAX_SAFE_INTEGER`).
+ */
+const OPTIMISTIC_SENTINEL_FLOOR = Number.MAX_SAFE_INTEGER - 2_000_000_000;
+
 function applyAll(actions: Action[]): ReducerState {
 	let s = initialState();
 	for (const a of actions) s = reduce(s, a);
@@ -120,19 +144,28 @@ describe("message-reducer", () => {
 		);
 	});
 
-	it("(5) snapshot + optimistic survivor", () => {
+	it("(5) PENDING optimistic (no turn-end) survives a snapshot at the tail sentinel", () => {
+		// Corrected contract: an optimistic row whose server echo has NOT yet
+		// arrived AND whose turn has NOT terminated stays pinned at the far-future
+		// tail sentinel, so the eventual `live-event` echo can reconcile it by
+		// id/text (cases 6/7). This is the LEGITIMATE pending case — it is NOT a
+		// strand. Only turn-termination (`settle-optimistic`, cases R1/R2)
+		// re-stamps an UNRECONCILED optimistic row into chronological position.
 		const opt = userMsg("optimistic_1", "hi");
 		const srv = userMsg("srv1", "hello");
 		const s = applyAll([
 			{ type: "optimistic-prompt", message: opt },
 			{ type: "snapshot", messages: [srv] },
 		]);
-		// Snapshot row first; optimistic row tail-positioned.
+		// Snapshot row first; pending optimistic row stays tail-positioned.
 		assert.strictEqual(s.messages.length, 2);
 		assert.strictEqual(s.messages[0].id, "srv1");
 		assert.strictEqual(s.messages[0]._order, SNAPSHOT_ORDER_FLOOR);
 		assert.strictEqual(s.messages[1].id, "optimistic_1");
-		assert.ok(s.messages[1]._order > Number.MAX_SAFE_INTEGER - 1_000_000_000);
+		assert.ok(
+			s.messages[1]._order > OPTIMISTIC_SENTINEL_FLOOR,
+			"pending optimistic (no turn-end) must remain at the tail sentinel",
+		);
 	});
 
 	it("(6) optimistic → echo (id match)", () => {
@@ -155,6 +188,112 @@ describe("message-reducer", () => {
 		assert.strictEqual(s.messages.length, 1);
 		assert.strictEqual(s.messages[0].id, "srv1");
 		assert.strictEqual(s.messages[0]._order, 1);
+	});
+
+	// --- Stranded-optimistic regression suite (settle-on-turn-end) ---
+	// Repro of the live bug (session 3d8bdbe4…): a prompt sent while idle whose
+	// turn ERRORS before the server echoes it back stays pinned at the optimistic
+	// tail sentinel (≈ MAX_SAFE_INTEGER) forever, so it sorts AFTER every later
+	// server message and renders stranded at the bottom of the transcript. The
+	// fix: a `settle-optimistic` action dispatched on turn termination re-stamps
+	// the unreconciled optimistic row into chronological position. These tests
+	// FAIL before the fix (the reducer returns `undefined` for the unknown
+	// action) and pass after.
+
+	it("(R1) errored turn settles the optimistic prompt so a LATER live event sorts after it", () => {
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_A", "A") });
+		// Sanity: before turn-end it sits at the far-future tail sentinel.
+		const pending = s.messages.find((m) => m.id === "optimistic_A");
+		assert.ok(pending && pending._order > OPTIMISTIC_SENTINEL_FLOOR, "optimistic starts at the tail sentinel");
+		// Turn terminates (immediate model 404) WITHOUT a server user echo.
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// A later, independent server message for this session.
+		s = reduce(s, liveMessageEnd(5, assistantMsg("a-late", "later reply")));
+		const opt = s.messages.find((m) => m.id === "optimistic_A");
+		const late = s.messages.find((m) => m.id === "a-late");
+		assert.ok(opt, "optimistic row must remain visible (not deleted)");
+		assert.ok(late, "later server row present");
+		assert.ok(
+			opt!._order < OPTIMISTIC_SENTINEL_FLOOR,
+			`optimistic must leave the tail sentinel after the turn ends (got ${opt!._order})`,
+		);
+		assert.ok(
+			opt!._order < late!._order,
+			`optimistic must sort BEFORE the later live event (opt=${opt!._order}, late=${late!._order})`,
+		);
+		assert.ok(
+			s.messages.indexOf(opt!) < s.messages.indexOf(late!),
+			"chronological index order: prompt then later reply",
+		);
+	});
+
+	it("(R2) settled optimistic sorts before an independent snapshot's tail (team-session stranding)", () => {
+		// Team-lead sessions receive independent server snapshots (status polls,
+		// task-complete refreshes). A stranded optimistic at the sentinel sits
+		// below the WHOLE snapshot — including content newer than the user's prompt.
+		// After settling, the user's prompt must NOT be dumped at the absolute
+		// bottom: it sorts before the snapshot tail.
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_T", "team prompt") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// Independent snapshot whose rows do NOT match the optimistic by id or text.
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("srv-a", "unrelated head"), assistantMsg("srv-b", "unrelated tail")],
+		});
+		const opt = s.messages.find((m) => m.id === "optimistic_T");
+		const tail = s.messages.find((m) => m.id === "srv-b");
+		assert.ok(opt, "optimistic must survive the independent snapshot (not deleted)");
+		assert.ok(tail, "snapshot tail row present");
+		assert.ok(
+			opt!._order < OPTIMISTIC_SENTINEL_FLOOR,
+			`settled optimistic must not stay at the tail sentinel (got ${opt!._order})`,
+		);
+		assert.ok(
+			opt!._order < tail!._order,
+			`optimistic must sort before the snapshot tail (opt=${opt!._order}, tail=${tail!._order})`,
+		);
+		assert.ok(
+			s.messages.indexOf(opt!) < s.messages.indexOf(tail!),
+			"optimistic appears before the snapshot tail row",
+		);
+		assert.notStrictEqual(
+			s.messages[s.messages.length - 1].id,
+			"optimistic_T",
+			"optimistic must not be stranded at the absolute bottom",
+		);
+	});
+
+	it("(R3) settle after the echo already reconciled is a no-op (happy path unchanged)", () => {
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") });
+		s = reduce(s, liveMessageEnd(1, userMsg("optimistic_1", "hi"))); // id-match reconcile
+		assert.strictEqual(s.messages.length, 1);
+		assert.strictEqual(s.messages[0]._origin, "server");
+		const before = s.messages.map((m) => ({ id: m.id, order: m._order, origin: m._origin }));
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		const after = s.messages.map((m) => ({ id: m.id, order: m._order, origin: m._origin }));
+		assert.deepStrictEqual(after, before, "settle must not disturb an already-reconciled transcript");
+	});
+
+	it("(R4) a late server echo still reconciles a SETTLED optimistic row (no duplicate)", () => {
+		// Settle re-stamps `_order` only — it must preserve `_origin:"optimistic"`
+		// and the `optimistic_` id so a late, against-the-odds server echo can
+		// still reconcile in place instead of stacking a duplicate.
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		s = reduce(s, liveMessageEnd(3, userMsg("srv1", "hi"))); // text-fallback match
+		const optimisticRows = s.messages.filter((m) => m._origin === "optimistic");
+		assert.strictEqual(optimisticRows.length, 0, "settled optimistic reconciled away by the echo");
+		const hi = s.messages.filter((m) => extractText(m) === "hi");
+		assert.strictEqual(hi.length, 1, "no duplicate user row after the late echo");
+		assert.strictEqual(hi[0].id, "srv1");
 	});
 
 	it("(8) proposal burst — two assistant turns + toolResult, all in order", () => {
