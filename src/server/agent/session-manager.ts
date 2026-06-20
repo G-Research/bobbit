@@ -1493,28 +1493,50 @@ export class SessionManager {
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
 		if (opts?.sandboxBranch) {
+			// Capture the HOST-side working directory BEFORE it is remapped into the
+			// container worktree below. The `goalProvisioned` provider runs HOST-side
+			// (LifecycleHub.dispatchGoalProvisioned executes the provider module on
+			// the host with `workingDir: ctx.cwd`), so it must be handed a host
+			// filesystem path it can actually write to. The container worktree
+			// (`/workspace-wt/<branch>`) lives in a Docker volume and is NOT reachable
+			// from the host — passing it made the marker write silently no-op (the
+			// hook is non-fatal), so metadata-driven filesystem treatments never
+			// landed on sandboxed worktrees. For session-setup-provisioned sandbox
+			// sessions this is the session's host worktree cwd; for team members /
+			// delegates it is the goal's host worktree cwd they were created with.
+			const hostWorktreeCwd = bridgeOptions.cwd;
 			try {
 				const worktreePath = await sandbox.createWorktree(
 					opts.sandboxBranch,
 					opts.sandboxBranch,
 					opts.sandboxBaseBranch,
 				);
+				// Agent runtime cwd → the container worktree (offset applied). The
+				// agent boots here; only the host-side provider dispatch below uses
+				// host coordinates.
 				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
-				// Fire the `goalProvisioned` lifecycle hook for the sandbox worktree
-				// just created inside the container. team-manager skips its own
-				// dispatch for sandboxed members (no host worktreeResult), and the
-				// session-setup provisioning dispatch never runs for these container
-				// worktrees — so without this, metadata-driven filesystem treatments
-				// would be missing on every sandboxed team lead / member worktree.
-				// Resolves effective (inherited) metadata via the single resolver, and
-				// uses the actual container worktree path + offset-applied cwd + branch.
-				await this.dispatchGoalProvisionedForWorktree({
-					goalId: opts.goalId,
-					projectId,
-					worktreePath,
-					cwd: bridgeOptions.cwd,
-					branch: opts.sandboxBranch,
-				});
+				// Fire the `goalProvisioned` lifecycle hook for the freshly provisioned
+				// sandbox worktree. team-manager skips its own dispatch for sandboxed
+				// members (no host worktreeResult), and the session-setup provisioning
+				// dispatch never runs for these container worktrees — so without this,
+				// metadata-driven filesystem treatments would be missing on every
+				// sandboxed team lead / member worktree. We dispatch with HOST
+				// coordinates (`hostWorktreeCwd`), NOT the container path, so the
+				// host-side provider can write its marker files. Skipped when there is
+				// no usable host path — restore / respawn paths arrive with
+				// `bridgeOptions.cwd` already pointing at a container-internal path
+				// (`/workspace-wt/...`); the worktree was provisioned on first creation
+				// and providers are idempotent, so a re-dispatch is unnecessary (and
+				// would just no-op host-side).
+				if (hostWorktreeCwd && !isSandboxContainerPath(hostWorktreeCwd)) {
+					await this.dispatchGoalProvisionedForWorktree({
+						goalId: opts.goalId,
+						projectId,
+						worktreePath: hostWorktreeCwd,
+						cwd: hostWorktreeCwd,
+						branch: opts.sandboxBranch,
+					});
+				}
 			} catch (err) {
 				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
 				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);

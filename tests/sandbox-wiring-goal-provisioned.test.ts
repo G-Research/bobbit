@@ -1,27 +1,44 @@
 /**
- * Regression: sandboxed worktree provisioning must dispatch `goalProvisioned`.
+ * Regression: sandboxed worktree provisioning must dispatch `goalProvisioned`
+ * against HOST-side filesystem coordinates — not the container-internal path.
  *
  * `SessionManager.applySandboxWiring()` creates the actual worktree for a
- * sandboxed team lead / member inside the container via
- * `ProjectSandbox.createWorktree(...)`. team-manager deliberately skips its own
+ * sandboxed team lead / member INSIDE the container via
+ * `ProjectSandbox.createWorktree(...)`, which returns a container path
+ * (`/workspace-wt/<branch>`). team-manager deliberately skips its own
  * `dispatchGoalProvisionedForWorktree` for sandboxed members (no host
  * worktreeResult), and the session-setup provisioning dispatch never runs for
- * container worktrees — so without a dispatch HERE, metadata-driven filesystem
- * treatments would be missing on every sandboxed agent worktree.
+ * these container worktrees — so without a dispatch HERE, metadata-driven
+ * filesystem treatments would be missing on every sandboxed agent worktree.
  *
- * This test pins that applySandboxWiring fires `goalProvisioned` for the actual
- * container worktree with the resolved effective metadata, the offset-applied
- * cwd, and the branch. No Docker required — the sandbox + stores are stubbed.
+ * The `goalProvisioned` provider runs HOST-side (LifecycleHub executes the
+ * module on the host with `workingDir: ctx.cwd`). The container worktree lives
+ * in a Docker volume and is unreachable from the host, so passing it made the
+ * marker write silently no-op (the hook is non-fatal). This test pins that:
+ *   1. the dispatch uses the HOST worktree cwd (captured before the container
+ *      remap), not the `/workspace-wt/...` path;
+ *   2. the agent's boot cwd (`bridgeOptions.cwd`) is STILL the container path;
+ *   3. a real provider actually writes its marker file into the host worktree;
+ *   4. restore/respawn (cwd already container-internal) does NOT re-dispatch.
+ * No Docker required — the sandbox + stores are stubbed.
  */
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "../src/server/agent/session-manager.js";
+import { LifecycleHub } from "../src/server/agent/lifecycle-hub.js";
+import { ModuleHost } from "../src/server/extension-host/module-host-worker.js";
+import { ContextTraceStore } from "../src/server/agent/context-trace-store.js";
+import type { ProviderContribution } from "../src/server/agent/pack-contributions.js";
+import type { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.js";
 import { makeTmpDir } from "./helpers/tmp.js";
 
-describe("applySandboxWiring — goalProvisioned dispatch for the container worktree", () => {
-	function setup(): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof mock.fn> } {
+const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
+
+describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates", () => {
+	function setup(opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof mock.fn>; createSpy: ReturnType<typeof mock.fn> } {
 		const stateRoot = makeTmpDir("sandbox-wiring-");
 		const prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
@@ -40,9 +57,10 @@ describe("applySandboxWiring — goalProvisioned dispatch for the container work
 		sm.projectContextManager = null;
 		sm.sandboxTokenStore = null;
 
+		const createSpy = mock.fn(async () => CONTAINER_WORKTREE);
 		const sandbox = {
 			getContainerId: async () => "container-xyz",
-			createWorktree: mock.fn(async () => "/workspace-branches/goal-g1-coder-x"),
+			createWorktree: createSpy,
 		};
 		sm.sandboxManager = {
 			ensureForProject: async () => {},
@@ -59,13 +77,16 @@ describe("applySandboxWiring — goalProvisioned dispatch for the container work
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
 		};
-		return { sm, restoreEnv, dispatchSpy };
+		return { sm, restoreEnv, dispatchSpy, createSpy };
 	}
 
-	it("dispatches goalProvisioned for the created sandbox worktree with offset cwd + branch", async () => {
+	it("dispatches goalProvisioned with the HOST worktree cwd, not the container path", async () => {
 		const { sm, restoreEnv, dispatchSpy } = setup();
 		try {
-			const bridgeOptions: any = { env: {} };
+			// bridgeOptions.cwd starts as the HOST worktree cwd the session was
+			// created with (e.g. the goal's host worktree for a member).
+			const hostCwd = "/host/worktrees/goal-g1-coder-x/packages/app";
+			const bridgeOptions: any = { env: {}, cwd: hostCwd };
 			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-lead", {
 				projectId: "proj-1",
 				goalId: "goal-g1",
@@ -80,12 +101,13 @@ describe("applySandboxWiring — goalProvisioned dispatch for the container work
 			assert.equal(arg.goalId, "goal-g1");
 			assert.equal(arg.projectId, "proj-1");
 			assert.equal(arg.branch, "goal/g1/coder-x");
-			// worktreePath is the raw container worktree path returned by createWorktree.
-			assert.equal(arg.worktreePath, "/workspace-branches/goal-g1-coder-x");
-			// cwd applies the repo-relative offset onto the container worktree path,
-			// matching the cwd the agent will boot with (and bridgeOptions.cwd).
-			assert.equal(arg.cwd, "/workspace-branches/goal-g1-coder-x/packages/app");
-			assert.equal(bridgeOptions.cwd, arg.cwd, "dispatch cwd must match the agent's boot cwd");
+			// HOST coordinates — the provider runs host-side and must be able to
+			// write here. The container path would be unreachable from the host.
+			assert.equal(arg.worktreePath, hostCwd, "worktreePath must be the host path");
+			assert.equal(arg.cwd, hostCwd, "cwd must be the host path");
+			assert.ok(!String(arg.cwd).startsWith("/workspace-wt/"), "must NOT pass the container worktree path");
+			// The AGENT still boots in the container worktree (offset applied).
+			assert.equal(bridgeOptions.cwd, `${CONTAINER_WORKTREE}/packages/app`, "agent runtime cwd stays container-internal");
 		} finally {
 			restoreEnv();
 		}
@@ -104,6 +126,127 @@ describe("applySandboxWiring — goalProvisioned dispatch for the container work
 			assert.equal(dispatchSpy.mock.calls.length, 0, "no worktree ⇒ no goalProvisioned dispatch");
 		} finally {
 			restoreEnv();
+		}
+	});
+
+	it("does NOT re-dispatch on restore/respawn (cwd already container-internal)", async () => {
+		const { sm, restoreEnv, dispatchSpy } = setup();
+		try {
+			// Restore/respawn paths arrive with bridgeOptions.cwd already pointing at
+			// a container-internal path — there is no host path to write to, and the
+			// worktree was provisioned (treatment applied) on first creation.
+			const bridgeOptions: any = { env: {}, cwd: "/workspace-wt/goal-g1-coder-x/packages/app" };
+			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-restore", {
+				projectId: "proj-1",
+				goalId: "goal-g1",
+				sandboxBranch: "goal/g1/coder-x",
+				sandboxCwdOffset: "packages/app",
+			});
+			assert.equal(ok, true);
+			assert.equal(dispatchSpy.mock.calls.length, 0, "container-internal cwd ⇒ no host-side re-dispatch");
+		} finally {
+			restoreEnv();
+		}
+	});
+});
+
+// A marker provider must ACTUALLY write its file into the host worktree — not
+// merely have the dispatcher called. This wires a real LifecycleHub + a fixture
+// provider declaring `goalProvisioned` through the production
+// `dispatchGoalProvisionedForWorktree` path (NOT stubbed) and asserts the file
+// lands in the host worktree dir handed to applySandboxWiring.
+describe("applySandboxWiring — goalProvisioned marker actually writes host-side", () => {
+	const MARKER = ".goal-provisioned-marker.json";
+
+	function fixtureProvider(tmp: string, id: string, body: string): ProviderContribution {
+		const file = path.join(tmp, `${id}.mjs`);
+		fs.writeFileSync(file, body);
+		return {
+			id,
+			kind: "memory",
+			module: path.basename(file),
+			hooks: ["goalProvisioned"],
+			budget: { maxTokens: 400, timeoutMs: 5_000 },
+			config: { enabled: true },
+			listName: id,
+			sourceFile: path.join(tmp, "pack.yaml"),
+			packRoot: tmp,
+		} as ProviderContribution;
+	}
+
+	it("writes the marker file into the HOST worktree, never the container path", async () => {
+		const stateRoot = makeTmpDir("sandbox-wiring-fs-");
+		const prevBobbitDir = process.env.BOBBIT_DIR;
+		process.env.BOBBIT_DIR = stateRoot;
+		const stateDir = path.join(stateRoot, "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
+		fs.writeFileSync(path.join(stateDir, "token"), "admin-token\n");
+
+		// Real host worktree directory the agent's session was created with.
+		const hostWorktree = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-wt-")));
+		const providerTmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "prov-")));
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+
+		try {
+			const sm: any = new SessionManager();
+			sm.projectConfigStore = {
+				get: (key: string) => (key === "sandbox" ? "docker" : undefined),
+				getSandboxTokens: () => [],
+			};
+			sm.preferencesStore = undefined;
+			sm.projectContextManager = null;
+			sm.sandboxTokenStore = null;
+			sm.sandboxManager = {
+				ensureForProject: async () => {},
+				get: () => ({
+					getContainerId: async () => "container-xyz",
+					createWorktree: async () => CONTAINER_WORKTREE,
+				}),
+			};
+
+			// Real provider: writes a marker into ctx.cwd (matches the e2e fixture).
+			const provider = fixtureProvider(
+				providerTmp,
+				"marker",
+				`import fs from "node:fs"; import path from "node:path";
+				 export default { async goalProvisioned(ctx) {
+				   const dir = ctx.cwd || ctx.worktreePath;
+				   fs.writeFileSync(path.join(dir, ${JSON.stringify(MARKER)}), JSON.stringify({ goalId: ctx.goalId, worktreePath: ctx.worktreePath, branch: ctx.branch }), "utf-8");
+				 } };`,
+			);
+			const registry = { listProviders: () => [provider] } as unknown as PackContributionRegistry;
+			sm.lifecycleHub = new LifecycleHub({
+				registry,
+				moduleHost,
+				trace: new ContextTraceStore(path.join(stateRoot, "trace")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "tok" }),
+			});
+
+			const bridgeOptions: any = { env: {}, cwd: hostWorktree };
+			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-fs", {
+				projectId: "proj-1",
+				goalId: "goal-g1",
+				sandboxBranch: "goal/g1/coder-x",
+			});
+			assert.equal(ok, true);
+
+			// The provider wrote the marker into the HOST worktree.
+			const markerPath = path.join(hostWorktree, MARKER);
+			assert.ok(fs.existsSync(markerPath), `marker must be written into the host worktree (${markerPath})`);
+			const parsed = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
+			assert.equal(parsed.goalId, "goal-g1");
+			assert.equal(parsed.worktreePath, hostWorktree, "provider received the host worktree path");
+			assert.equal(parsed.branch, "goal/g1/coder-x");
+			// And nothing was written at a container path on the host.
+			assert.ok(!fs.existsSync(path.join("/workspace-wt/goal-g1-coder-x", MARKER)), "no marker at the container path");
+		} finally {
+			moduleHost.dispose();
+			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = prevBobbitDir;
+			fs.rmSync(hostWorktree, { recursive: true, force: true });
+			fs.rmSync(providerTmp, { recursive: true, force: true });
+			fs.rmSync(stateRoot, { recursive: true, force: true });
 		}
 	});
 });
