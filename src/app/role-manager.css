@@ -267,12 +267,7 @@
 	background: color-mix(in oklch, var(--primary) 8%, var(--background));
 }
 
-/* ----------------------------------------------------------------------------
- * Source caption under the control box (Option A).
- * Flat, INFORMATIONAL text only — no pills, no borders, no hover, no button
- * affordance. Communicates where each field's value comes from. Resets live in
- * the control box (model × + thinking ×), never on this line.
- * -------------------------------------------------------------------------- */
+/* Read-only pack rows: static effective-value summary, no pickers. */
 .role-row-model-sources {
 	display: flex;
 	flex-wrap: wrap;
@@ -290,44 +285,10 @@
 	gap: 4px;
 	min-width: 0;
 }
-/* Descriptive lead-in ("inherits from <source>:") — quiet, non-interactive
- * text so the caption reads as a sentence, never a clickable control. */
-.rrm-src-inherits {
-	opacity: 0.85;
-}
-.rrm-src-key {
-	font-weight: 600;
-	opacity: 0.7;
-}
-/* Resolved effective value — readable in the foreground colour, full text
- * (wraps rather than truncating so key info is never reduced to "…"). */
-.rrm-src-val {
-	color: var(--foreground);
-	min-width: 0;
-	word-break: break-word;
-}
 .rrm-src-from {
 	opacity: 0.85;
 }
-/* "Override" state marker: a quiet accent word + leading dot. Deliberately
- * flat (no border/background) so it reads as a STATE, not a tappable chip. */
-.rrm-src-state {
-	display: inline-flex;
-	align-items: center;
-	gap: 5px;
-	color: var(--primary);
-	font-weight: 600;
-}
-.rrm-src-state::before {
-	content: "";
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--primary);
-	flex-shrink: 0;
-}
 
-/* Read-only pack rows: static effective-value summary, no pickers. */
 .role-row-model-control--readonly {
 	gap: 4px;
 }

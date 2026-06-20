@@ -710,20 +710,20 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	const prefKey = getRoleDefaultModelPrefKey(role.name);
 	const def = getRoleDefaultModel(role.name);
 
-	// The default-tier badge follows the session/review heuristic, downgrading to
+	// The default-tier badge follows the session/reviewer heuristic, downgrading to
 	// "Auto default" only when no default model is configured at all (the tier is
 	// effectively auto-selected). Applied consistently to model + thinking.
 	const autoTier = !def.model;
 	const defaultBadge = autoTier
 		? "Auto default"
-		: (prefKey === "default.reviewModel" ? "Review default" : "Session default");
+		: (prefKey === "default.reviewModel" ? "Reviewer default" : "Session default");
 	const defaultKind: RoleFieldSourceUiKind = autoTier ? "auto" : "default";
-	// Hover copy that spells out what each inherited source means, so the flat
-	// "session/review default" captions are never cryptic. Plain text only.
+	// Hover copy that spells out what each inherited source means, so the inline
+	// "session/reviewer default" labels are never cryptic. Plain text only.
 	const defaultTitle = autoTier
 		? "No default model is configured for this role, so the gateway auto-selects the best available model. Set a default in Settings → Models."
 		: (prefKey === "default.reviewModel"
-			? "Review default — the model and thinking effort used by reviewer / QA-kind roles. Change it in Settings → Models."
+			? "Reviewer default — the model and thinking effort used by reviewer / QA-kind roles. Change it in Settings → Models."
 			: "Session default — the model and thinking effort used by normal agent sessions. Change it in Settings → Models.");
 	const inheritedRoleTitle = "Inherited from a lower-scope role override. Pick a model here to override it for the current scope.";
 
@@ -742,9 +742,9 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 		const value = m.value ?? "";
 		const effectiveLabel = value ? format(value) : emptyLabel;
 		switch (m.source) {
-			// `effectiveValue` only feeds the read-only source-line label; the
-			// editable picker is fed `currentScopeRoleOverrides` so inherited
-			// values are never clamped/auto-saved (finding #1).
+			// `effectiveValue` is metadata only; the editable picker is fed
+			// `currentScopeRoleOverrides` so inherited values are never
+			// clamped/auto-saved (finding #1).
 			case "role": return { kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
 			case "inherited-role": return { kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value, title: inheritedRoleTitle };
 			default: return { kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "", title: defaultTitle };
@@ -788,11 +788,12 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
  * Inline model/thinking control rendered in the middle of a list row.
  *
  * Editable rows reuse the shared `renderModelRow` (model picker + clear/Test +
- * thinking select) as the interactive line, then add a compact source line
- * showing where each field's effective value comes from. Model and thinking are
- * independent: clearing the model leaves any thinking override in place (shown
- * as a thinking-only override), and thinking can be set/cleared on its own.
- * Read-only pack rows render a static effective-value summary plus the reason.
+ * thinking select) as the interactive line. Inherited/default sources render as
+ * fallback text inside the controls, while overrides are communicated by the
+ * filled value plus reset/Test affordances. Model and thinking are independent:
+ * clearing the model leaves any thinking override in place, and thinking can be
+ * set/cleared on its own. Read-only pack rows render a static effective-value
+ * summary plus the reason.
  */
 function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl): TemplateResult {
 	const display = computeRoleModelDisplay(role);
@@ -819,40 +820,19 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 
 	// Only a CURRENT-SCOPE role override (source === "role") gets the picker's
 	// effective value and the clear/reset affordances. Inherited-role and
-	// default fields show their effective value + source in the read-only
-	// source line, but the picker is fed the empty current-scope override (so it
-	// renders "(use default)" and never clamps/auto-saves an inherited value),
-	// and no model-clear / thinking-reset control is exposed for them — clearing
-	// an empty local field would be a confusing no-op (review findings #1, #2).
+	// default fields feed the picker an empty current-scope override so it never
+	// clamps/auto-saves inherited values, but their source + effective value are
+	// now shown inside the picker fallback itself.
 	const overrides = currentScopeRoleOverrides(role);
-
-	// Flat, informational source caption (Option A). NOT a pill/chip/button, and
-	// no clickable-looking marker — the caption reads as a sentence so it is
-	// obviously descriptive rather than actionable:
-	//  - Override field: "<Key> Role override" (quiet accent text + leading dot via
-	//    CSS). The value lives in the editable box; its reset is the in-box ×.
-	//  - Inherited field: "<Key> inherits from <source>: <effective value>" — muted
-	//    text spelling out the hierarchy, with the resolved value readable in the
-	//    foreground colour and never ellipsised to a bare "…". A hover title
-	//    explains what "session/review default" means.
-	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string) => {
-		if (f.kind === "role") {
-			return html`
-			<span class="rrm-src rrm-src--override" data-testid="${testid}"
-				title="This role overrides the ${key.toLowerCase()} default for the current scope. Use the reset (×) in the control to clear it.">
-				<span class="rrm-src-key">${key}</span>
-				<span class="rrm-src-state">Role override</span>
-			</span>`;
-		}
-		// Inherited-role phrases already read as "<scope> role override"; the
-		// session/review/auto default badges are lowercased to flow mid-sentence.
-		const phrase = f.kind === "inherited-role" ? f.badge : f.badge.toLowerCase();
-		return html`
-			<span class="rrm-src rrm-src--inherited" data-testid="${testid}" title="${f.title ?? ""}">
-				<span class="rrm-src-key">${key}</span>
-				<span class="rrm-src-inherits">inherits from ${phrase}:</span>
-				<span class="rrm-src-val">${f.effectiveLabel}</span>
-			</span>`;
+	const inlineFallback = (f: RoleFieldDisplay): string | undefined => {
+		if (f.kind === "role") return undefined;
+		const source = f.kind === "inherited-role" ? f.badge : f.badge.toLowerCase();
+		return `(Uses ${source}: ${f.effectiveLabel})`;
+	};
+	const inlineTitle = (field: "model" | "thinking", f: RoleFieldDisplay): string | undefined => {
+		if (f.kind === "role") return undefined;
+		const source = f.kind === "inherited-role" ? f.badge : f.badge.toLowerCase();
+		return `${field === "model" ? "Model" : "Thinking"} inherits from ${source}: ${f.effectiveLabel}. ${f.title ?? ""}`.trim();
 	};
 
 	return html`
@@ -876,7 +856,8 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					// puts the thinking reset INSIDE the box next to the model reset, so
 					// both fields reset from the same place (no split-brain UX).
 					{
-						fallbackLabel: "(use default)",
+						fallbackLabel: inlineFallback(display.model),
+						thinkingFallbackLabel: inlineFallback(display.thinking),
 						thinkingWidth: "132px",
 						thinkingFitContent: false,
 						onThinkingClear: () => control.onThinkingChange(role, ""),
@@ -885,12 +866,10 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 						// rather than the generic Settings "Reset to auto/default".
 						clearModelTitle: "Reset model override",
 						clearThinkingTitle: "Reset thinking override",
+						modelTitle: inlineTitle("model", display.model),
+						thinkingTitle: inlineTitle("thinking", display.thinking),
 					},
 				)}
-			</div>
-			<div class="role-row-model-sources">
-				${sourceLine("Model", display.model, "role-row-model-source")}
-				${sourceLine("Thinking", display.thinking, "role-row-thinking-source")}
 			</div>
 		</div>
 	`;
