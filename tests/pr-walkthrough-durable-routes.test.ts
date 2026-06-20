@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { routes } from "../market-packs/pr-walkthrough/lib/routes.mjs";
+import { ModuleHost } from "../src/server/extension-host/module-host-worker.ts";
 
 class MemoryStore {
 	data = new Map<string, unknown>();
@@ -28,6 +31,8 @@ const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const jobId = "prw-test";
 const sessionId = "reviewer-1";
+const packRoot = resolve("market-packs/pr-walkthrough");
+const routesModule = resolve(packRoot, "lib/routes.mjs");
 
 function seedCtx() {
 	const store = new MemoryStore();
@@ -61,6 +66,33 @@ async function saveMinimumChunks(ctx: any) {
 	await saveRequiredChunks(ctx);
 	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
 }
+
+test("PR walkthrough routes load under pack-root module confinement", async () => {
+	const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
+	try {
+		const store = new MemoryStore();
+		const result = await moduleHost.invoke({
+			url: pathToFileURL(routesModule).href,
+			packRoot,
+			epoch: 0,
+			exportKind: "routes",
+			member: "publish",
+			ctx: {
+				sessionId,
+				toolUseId: "tu-prw",
+				tool: "pr-walkthrough/publish",
+				workingDir: process.cwd(),
+				host: { capabilities: { store: true }, store },
+			},
+			arg: { body: { op: "submissionStatus", jobId } },
+			workingDir: process.cwd(),
+		});
+		assert.equal((result as any).ok, false, JSON.stringify(result));
+		assert.equal((result as any).code, "PRW_MISSING_BINDING");
+	} finally {
+		moduleHost.dispose();
+	}
+});
 
 test("PR walkthrough run uses scoped review writes and skips legacy binding writes", async () => {
 	const store = new MemoryStore();
@@ -127,10 +159,14 @@ test("submit_pr_walkthrough_yaml rejects before writing document over incrementa
 });
 
 test("audit reviewer_checklist nested array satisfies chunk-or-audit minimum", async () => {
-	const { ctx } = seedCtx();
+	const { ctx, store } = seedCtx();
 	await saveRequiredChunks(ctx);
 	const status = await routes.publish(ctx, { body: { op: "submissionStatus" } });
 	assert.ok(!status.chunkSummary.missing.includes("chunk:<id> or audit.reviewer_checklist"), JSON.stringify(status.chunkSummary));
 	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	assert.match(finalPayload.yaml, /reviewer_checklist:\n\s+- ok/);
+	const auditCard = finalPayload.cards.find((card: any) => card.id.startsWith("audit-checklist"));
+	assert.deepEqual(auditCard.checklist, ["ok"]);
 });
