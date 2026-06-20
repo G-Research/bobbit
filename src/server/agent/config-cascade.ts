@@ -311,34 +311,37 @@ export class ConfigCascade {
 		// when scoped to a project, otherwise the server-level store.
 		const editableRank = projectId ? bandRank("project", false) : bandRank("server", false);
 
-		// The whole-role winner is the highest band that *defines* the role. When
-		// it supplies the field, that value outranks any lower-band field carried
-		// by a server/builtin role with the same name (finding #4) — so a market /
-		// global-user / project role shadows the legacy plain-layer walk below.
+		// The whole-role PackResolver winner is the effective role at this scope.
+		// Whenever it *supplies* the field, that value/source IS the effective
+		// metadata and must outrank the plain server/builtin field walk below —
+		// even for market / global-user / ancestor-project winners that sit BELOW
+		// the current editable band but ABOVE server/builtin. The previous
+		// `winnerRank >= editableRank` guard let those lower-but-still-winning
+		// bands fall through and report a shadowed server/builtin field instead
+		// of the real winner (finding #1).
 		if (entry) {
 			const wv = (entry.item as any)[field];
 			if (typeof wv === "string" && wv.trim().length > 0) {
 				const origin = scopeToOrigin(entry.origin.scope);
 				const winnerRank = bandRank(entry.origin.scope, entry.origin.kind === "market");
-				if (winnerRank >= editableRank) {
-					// At or above the editable band. Equal rank ⇒ the winner IS the
-					// editable layer (a direct, user-editable override). Higher rank
-					// ⇒ an effective value the user cannot edit at this scope.
-					const isEditableLayer = winnerRank === editableRank && entry.origin.kind !== "market";
-					return {
-						value: wv,
-						source: isEditableLayer ? "role" : "inherited-role",
-						origin,
-						originPackName: packName,
-						editable,
-						sourceLabel: packName ?? originSourceLabel(origin),
-					};
-				}
-				// winnerRank < editableRank: the editable layer does not define the
-				// field (else the winner would BE that band). Fall through to the
-				// field-level walk, which finds this value as a lower-band inherited
-				// override (or the pack fallback at the end).
+				// Equal rank with a non-market winner ⇒ the winner IS the directly
+				// editable layer (a user-authored override at this scope). Anything
+				// else (higher, lower, or a market pack at the same rank) is an
+				// effective value inherited from another band the user cannot edit
+				// in place at this scope.
+				const isEditableLayer = winnerRank === editableRank && entry.origin.kind !== "market";
+				return {
+					value: wv,
+					source: isEditableLayer ? "role" : "inherited-role",
+					origin,
+					originPackName: packName,
+					editable,
+					sourceLabel: packName ?? originSourceLabel(origin),
+				};
 			}
+			// Winner role does not define the field ⇒ the runtime field-merge
+			// (resolveRoleField) pulls it from a lower plain layer. Fall through to
+			// the field-level walk below, which mirrors that field-merge order.
 		}
 
 		if (projectId) {
@@ -374,23 +377,6 @@ export class ConfigCascade {
 			const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
 			if (bv !== undefined) {
 				return { value: bv, source: "inherited-role", origin: "builtin", editable, sourceLabel: "Built-in" };
-			}
-		}
-		// Pack / winner fallback: covers fields that only exist on a role defined
-		// by a lower-precedence market pack (server-market / builtin-pack) which
-		// the plain-layer walk above does not read.
-		if (entry) {
-			const wv = (entry.item as any)[field];
-			if (typeof wv === "string" && wv.trim().length > 0) {
-				const origin = scopeToOrigin(entry.origin.scope);
-				return {
-					value: wv,
-					source: "inherited-role",
-					origin,
-					originPackName: packName,
-					editable,
-					sourceLabel: packName ?? originSourceLabel(origin),
-				};
 			}
 		}
 		// No role layer supplies the field — the client renders the session/review
