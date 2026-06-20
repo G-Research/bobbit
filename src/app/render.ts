@@ -766,6 +766,7 @@ async function openHeaderSessionActionsPopover(input: {
 		event.stopPropagation();
 		const current = _openHeaderSessionActionsPopover;
 		const action = current?.actions.find((item) => String(item.id) === event.detail.actionId);
+		closeHeaderSessionActionsPopover(false);
 		void action?.run(event);
 	}) as EventListener);
 	element.addEventListener("close", () => {

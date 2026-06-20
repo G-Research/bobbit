@@ -125,6 +125,7 @@ async function openSurface(surface: "sidebar" | "header"): Promise<void> {
 	popover.addEventListener("sidebar-action-select", ((ev: Event) => {
 		const detail = (ev as CustomEvent<{ actionId: string }>).detail;
 		const action = lastActions.find((candidate) => String(candidate.id) === detail.actionId);
+		dismissMenuSync();
 		if (action) void action.run(ev);
 	}) as EventListener);
 	document.body.appendChild(popover);
@@ -132,13 +133,19 @@ async function openSurface(surface: "sidebar" | "header"): Promise<void> {
 	await flush();
 }
 
-async function closeMenu(): Promise<void> {
+function dismissMenuSync(): void {
 	if (!activePopover) return;
-	(activePopover as any).open = false;
-	await flush();
-	activePopover.remove();
+	const popover = activePopover;
 	activePopover = null;
 	currentSurface = null;
+	(popover as any).open = false;
+	popover.remove();
+}
+
+async function closeMenu(): Promise<void> {
+	if (!activePopover) return;
+	dismissMenuSync();
+	await flush();
 }
 
 function menuOpen(): boolean {
@@ -237,8 +244,8 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 (window as any).__gitHasPaletteOpener = () => !!document.querySelector("#git-status-dropdown [data-testid='git-widget-open-command-palette']");
 (window as any).__gitDropdownText = () => normalizeLabel(document.querySelector("#git-status-dropdown")?.textContent);
 (window as any).__flush = flush;
-(window as any).__reset = async () => {
-	await closeMenu();
+(window as any).__reset = () => {
+	dismissMenuSync();
 	document.querySelectorAll("git-status-widget, #git-status-dropdown").forEach((el) => el.remove());
 	feedbackText = "";
 	callRouteCalls.length = 0;
