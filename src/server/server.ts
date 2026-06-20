@@ -481,6 +481,21 @@ function getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStor
  *  "never touched"), so the marker disambiguates it from the default-disabled
  *  baseline and makes the enable survive reboots. */
 const PACK_FORCE_ENABLED_KEY = "pack_force_enabled";
+/** Order-insensitive equality for two DisabledRefs (kinds present with non-empty
+ *  arrays must match as SETS). Used to detect when an activation PUT matches the
+ *  pack's current default so we persist a deviation only. */
+function disabledRefsEqual(a: DisabledRefs, b: DisabledRefs): boolean {
+	const kindsOf = (r: DisabledRefs): string[] =>
+		Object.keys(r).filter((k) => Array.isArray((r as Record<string, string[]>)[k]) && (r as Record<string, string[]>)[k].length > 0).sort();
+	const ka = kindsOf(a); const kb = kindsOf(b);
+	if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+	for (const k of ka) {
+		const sa = [...(a as Record<string, string[]>)[k]].sort();
+		const sb = [...(b as Record<string, string[]>)[k]].sort();
+		if (sa.length !== sb.length || sa.some((v, i) => v !== sb[i])) return false;
+	}
+	return true;
+}
 function readForceEnabledPacks(store: ProjectConfigStore): Set<string> {
 	try {
 		const raw = store.get(PACK_FORCE_ENABLED_KEY);
@@ -8071,23 +8086,41 @@ async function handleApiRoute(
 				return;
 			}
 
-			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
-			// Default-disabled built-in packs (e.g. Hindsight): maintain the explicit
-			// force-enabled marker so an explicit ENABLE persists. Enabling clears all
-			// disabled refs (an empty record — indistinguishable from "never touched",
-			// which the default-disabled overlay would otherwise re-disable), so we record
-			// the pack name in a marker that the overlay honours. Disabling-all (or any
-			// partial disable) drops the marker; the persisted record then wins verbatim.
-			// Only server-scope built-in packs are default-disabled, so this is inert for
-			// everything else.
-			if (scope === "server" && getDefaultDisabledInfo(packName, cfgStore) !== null) {
-				const nowAllEnabled = Object.keys(normalized).every(
-					(k) => (normalized as Record<string, string[]>)[k].length === 0,
-				);
+			// Default-disabled built-in packs (e.g. Hindsight) persist only DEVIATIONS
+			// from the pack's current default, keeping the dormancy invariant byte-clean
+			// and giving a deterministic way to return to the default (no stored record,
+			// no marker). The default itself depends on whether the pack is "already
+			// configured" (live-setup rule): configured ⇒ enabled ({}), else ⇒ all-disabled.
+			//   • request == default              → clear the stored record + drop the marker
+			//   • request all-enabled, NOT default → explicit ENABLE: drop the record, SET the
+			//                                         force-enable marker (an empty record is
+			//                                         indistinguishable from "never touched", so
+			//                                         the marker is what makes the enable stick)
+			//   • anything else                    → persist the record verbatim (explicit
+			//                                         per-entity / disable choice wins), drop marker
+			const ddInfo = scope === "server" ? getDefaultDisabledInfo(packName, cfgStore) : null;
+			if (ddInfo) {
+				let configured = false;
+				for (const pid of ddInfo.providerIds) {
+					if (isProviderConfigConfigured(getPackStore().getSync<Record<string, unknown>>(ddInfo.packId, providerConfigStoreKey(pid)))) { configured = true; break; }
+				}
+				const defaultDisabled: DisabledRefs = configured ? {} : ddInfo.allDisabled;
+				const nowAllEnabled = Object.keys(normalized).every((k) => (normalized as Record<string, string[]>)[k].length === 0);
 				const marker = readForceEnabledPacks(cfgStore);
-				if (nowAllEnabled) marker.add(packName);
-				else marker.delete(packName);
+				if (disabledRefsEqual(normalized, defaultDisabled)) {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.delete(packName);
+				} else if (nowAllEnabled) {
+					// all-enabled but the default is disabled (pack not configured) → explicit enable.
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.add(packName);
+				} else {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+					marker.delete(packName);
+				}
 				writeForceEnabledPacks(cfgStore, marker);
+			} else {
+				cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
 			}
 			invalidateResolverCaches();
 

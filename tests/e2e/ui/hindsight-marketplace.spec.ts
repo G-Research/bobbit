@@ -97,6 +97,33 @@ async function putHindsightConfig(overrides: Record<string, unknown>): Promise<v
 	await getPackStore().put(PACK, CONFIG_KEY, overrides);
 }
 
+/** Return the built-in DEFAULT-DISABLED Hindsight pack to its baseline (no stored
+ *  activation record, no force-enable marker) so this spec is robust to a leaked
+ *  enabled state from a sibling spec file (e.g. hindsight-pack) sharing the worker's
+ *  in-process gateway + server-scope activation store. PUT every catalogue entity
+ *  disabled WHILE UNCONFIGURED equals the pack's default ⇒ the server clears the
+ *  record + drops the marker. Call AFTER clearing config so the pack is unconfigured. */
+async function resetHindsightActivation(): Promise<void> {
+	try {
+		const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
+		if (!res.ok) return;
+		const cat = ((await res.json()).catalogue ?? {}) as Record<string, unknown>;
+		const arr = (k: string): string[] =>
+			Array.isArray(cat[k])
+				? (cat[k] as Array<{ listName?: string } | string>).map((e) => (typeof e === "string" ? e : e.listName ?? "")).filter(Boolean)
+				: [];
+		const disabled = {
+			roles: arr("roles"), tools: arr("tools"), skills: arr("skills"), entrypoints: arr("entrypoints"),
+			providers: arr("providers"), hooks: arr("hooks"), mcp: arr("mcp"), piExtensions: arr("piExtensions"),
+			runtimes: arr("runtimes"), workflows: arr("workflows"),
+		};
+		await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT",
+			body: JSON.stringify({ scope: "server", packName: PACK, disabled }),
+		});
+	} catch { /* best-effort */ }
+}
+
 async function reconcile(page: Page): Promise<void> {
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => { /* race */ });
 }
@@ -179,11 +206,19 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		const mod = await import("../../../dist/server/server.js");
 		mod.registerPackRuntimeSupervisorFactory(null);
 		await putHindsightConfig({});
+		await resetHindsightActivation();
 		if (stub) await stub.close().catch(() => { /* ignore */ });
 	});
 
 	test.beforeEach(async () => {
+		// Clean slate, ORDER-INDEPENDENT of sibling spec files sharing this worker's
+		// gateway: clear config, then reset the built-in pack to its DEFAULT-DISABLED
+		// baseline (drops any leaked force-enable marker / stored record). The first
+		// test then sees the true "disabled" state; connected/managed tests re-enable
+		// the pack via putHindsightConfig (the configured-rule). Reset BEFORE clearing
+		// supCalls so a runtime stop fired by the reset PUT does not pollute assertions.
 		await putHindsightConfig({});
+		await resetHindsightActivation();
 		supCalls.length = 0;
 		managedRuntimeStatus = "stopped";
 		stub.setHealthy(true);
