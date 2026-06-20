@@ -103,6 +103,90 @@ describe("ConfigCascade — Role.model and Role.thinkingLevel three-layer resolu
 		assert.equal(projCoder!.item.thinkingLevel, "high");
 	});
 
+	it("resolveRoleModelResolution reports source hierarchy + editability per field", () => {
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", {
+			model: "anthropic/claude-haiku",
+			thinkingLevel: "low",
+		});
+		// Role with no field overrides anywhere → both fall back to default.
+		writeRoleYaml(builtinsDir, "plain", {});
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const serverDir = mkTemp();
+		const serverRoleStore = new RoleStore(serverDir);
+		// Server overrides only the model for coder; thinkingLevel still inherited.
+		serverRoleStore.put({
+			name: "coder",
+			label: "Coder",
+			promptTemplate: "p",
+			accessory: "none",
+			model: "anthropic/claude-sonnet",
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const projectDir = mkTemp();
+		const projectRoleStore = new RoleStore(projectDir);
+		// Project overrides only thinkingLevel (thinking-only override); model
+		// stays inherited from the server layer.
+		projectRoleStore.put({
+			name: "coder",
+			label: "Coder",
+			promptTemplate: "p",
+			accessory: "none",
+			thinkingLevel: "high",
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const serverStores = {
+			getRoles: () => serverRoleStore.getAllLocal(),
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = {
+			getOrCreate: (id: string) => id === "proj1" ? { roleStore: projectRoleStore } : undefined,
+		} as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+
+		// System scope (no project): server is the editable layer.
+		const sys = cascade.resolveRoleModelResolution("coder");
+		assert.equal(sys.model.source, "role");
+		assert.equal(sys.model.origin, "server");
+		assert.equal(sys.model.value, "anthropic/claude-sonnet");
+		assert.equal(sys.model.editable, true);
+		assert.equal(sys.model.sourceLabel, "Server");
+		// thinkingLevel only exists in builtin → inherited at system scope.
+		assert.equal(sys.thinkingLevel.source, "inherited-role");
+		assert.equal(sys.thinkingLevel.origin, "builtin");
+		assert.equal(sys.thinkingLevel.value, "low");
+
+		// Project scope: project is the editable layer.
+		const proj = cascade.resolveRoleModelResolution("coder", "proj1");
+		// model not overridden in project → inherited from server.
+		assert.equal(proj.model.source, "inherited-role");
+		assert.equal(proj.model.origin, "server");
+		assert.equal(proj.model.value, "anthropic/claude-sonnet");
+		assert.equal(proj.model.editable, true);
+		// thinking-only override at the project layer.
+		assert.equal(proj.thinkingLevel.source, "role");
+		assert.equal(proj.thinkingLevel.origin, "project");
+		assert.equal(proj.thinkingLevel.value, "high");
+		assert.equal(proj.thinkingLevel.sourceLabel, "Project");
+
+		// Role with no field anywhere → default fallback (no value).
+		const plain = cascade.resolveRoleModelResolution("plain", "proj1");
+		assert.equal(plain.model.source, "default");
+		assert.equal(plain.model.value, undefined);
+		assert.equal(plain.model.editable, true);
+		assert.equal(plain.thinkingLevel.source, "default");
+		assert.equal(plain.thinkingLevel.value, undefined);
+	});
+
 	it("falls through to builtin when neither server nor project define the role", () => {
 		const builtinsDir = mkTemp();
 		writeRoleYaml(builtinsDir, "tester", {

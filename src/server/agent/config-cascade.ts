@@ -79,6 +79,53 @@ export interface ResolvedPolicy {
 }
 
 /**
+ * Where a single role field (`model` / `thinkingLevel`) resolved from, relative
+ * to the currently-editable scope, plus enough metadata for the Roles UI to
+ * render an accurate source badge and decide whether the field can be edited
+ * inline.
+ *
+ * - `role` — the value comes from the current editable role layer (the project
+ *   layer when a `projectId` is supplied, otherwise the server layer); the user
+ *   can edit/clear it directly.
+ * - `inherited-role` — the value comes from a lower/ancestor role layer (an
+ *   ancestor project, the server layer, a built-in role, or a market pack). The
+ *   row can still be customized-then-edited unless `editable` is false.
+ * - `default` — no role layer supplies the field; the effective value falls back
+ *   to the global session/review model + thinking defaults (the client formats
+ *   the default label and may further distinguish `auto`).
+ */
+export type RoleFieldSourceKind = "role" | "inherited-role" | "default";
+
+export interface RoleFieldSource {
+	/** Resolved field value when a role layer supplies it; omitted for `default`. */
+	value?: string;
+	source: RoleFieldSourceKind;
+	/** Cascade layer the value came from (omitted for `default`). */
+	origin?: ConfigOrigin;
+	/** Market-pack name when the value comes from a pack-defined role; null otherwise. */
+	originPackName?: string | null;
+	/** False only for pack-managed (read-only) roles; true otherwise. */
+	editable: boolean;
+	/** Short human label for the source ("Project", "Server", "Built-in", pack name…). */
+	sourceLabel: string;
+}
+
+export interface RoleModelResolution {
+	model: RoleFieldSource;
+	thinkingLevel: RoleFieldSource;
+}
+
+/** Short human label for a cascade origin (used in role source badges). */
+function originSourceLabel(o: ConfigOrigin): string {
+	switch (o) {
+		case "builtin": return "Built-in";
+		case "server": return "Server";
+		case "user": return "User";
+		case "project": return "Project";
+	}
+}
+
+/**
  * Explicit server-level store accessors.
  *
  * These wire the cascade's server layer to the standalone server stores
@@ -217,6 +264,94 @@ export class ConfigCascade {
 
 	resolveRolePromptTemplate(roleName: string, projectId?: string): string | undefined {
 		return this.resolveRoleField(roleName, "promptTemplate", projectId);
+	}
+
+	/**
+	 * Resolve the source hierarchy for a role's `model` and `thinkingLevel`
+	 * fields so the Roles UI can render accurate source badges and decide inline
+	 * editability without re-deriving the cascade order itself.
+	 *
+	 * The per-field walk follows the same layers as {@link resolveRoleField}
+	 * (current project local → ancestor projects → server → builtin), then falls
+	 * back to the resolved whole-role winner for values that only exist in a
+	 * market pack. Editability is gated solely by pack-managed status (market
+	 * packs are read-only), matching the whole-role customize/revert rules.
+	 */
+	resolveRoleModelResolution(roleName: string, projectId?: string): RoleModelResolution {
+		const entry = this.resolveRolesEntries(projectId).find(e => e.name === roleName);
+		const packName = entry && entry.origin.kind === "market"
+			? (entry.origin.manifest?.name ?? null)
+			: null;
+		const packManaged = packName != null;
+		return {
+			model: this.resolveRoleFieldSource(roleName, "model", projectId, entry, packManaged, packName),
+			thinkingLevel: this.resolveRoleFieldSource(roleName, "thinkingLevel", projectId, entry, packManaged, packName),
+		};
+	}
+
+	private resolveRoleFieldSource(
+		roleName: string,
+		field: "model" | "thinkingLevel",
+		projectId: string | undefined,
+		entry: ResolvedEntity<Role> | undefined,
+		packManaged: boolean,
+		packName: string | null,
+	): RoleFieldSource {
+		const editable = !packManaged;
+		if (projectId) {
+			// Current editable layer: the project's own local override.
+			const local = this.localRoleField(projectId, roleName, field);
+			if (local !== undefined) {
+				return { value: local, source: "role", origin: "project", editable, sourceLabel: "Project" };
+			}
+			// Inherited from an ancestor project layer.
+			if (this.projectRegistry) {
+				for (const anc of this.projectRegistry.getAncestors(projectId)) {
+					const av = this.localRoleField(anc.id, roleName, field);
+					if (av !== undefined) {
+						return { value: av, source: "inherited-role", origin: "project", editable, sourceLabel: "Inherited project" };
+					}
+				}
+			}
+			// Inherited from the server / builtin role layers.
+			const sv = this.readRoleField(this.serverStores.getRoles(), roleName, field);
+			if (sv !== undefined) {
+				return { value: sv, source: "inherited-role", origin: "server", editable, sourceLabel: "Server" };
+			}
+			const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
+			if (bv !== undefined) {
+				return { value: bv, source: "inherited-role", origin: "builtin", editable, sourceLabel: "Built-in" };
+			}
+		} else {
+			// Current editable layer: the server-level role store.
+			const sv = this.readRoleField(this.serverStores.getRoles(), roleName, field);
+			if (sv !== undefined) {
+				return { value: sv, source: "role", origin: "server", editable, sourceLabel: "Server" };
+			}
+			const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
+			if (bv !== undefined) {
+				return { value: bv, source: "inherited-role", origin: "builtin", editable, sourceLabel: "Built-in" };
+			}
+		}
+		// Pack / winner fallback: covers fields that only exist on a role defined
+		// by a market pack (which the plain-layer walk above does not read).
+		if (entry) {
+			const wv = (entry.item as any)[field];
+			if (typeof wv === "string" && wv.trim().length > 0) {
+				const origin = scopeToOrigin(entry.origin.scope);
+				return {
+					value: wv,
+					source: "inherited-role",
+					origin,
+					originPackName: packName,
+					editable,
+					sourceLabel: packName ?? originSourceLabel(origin),
+				};
+			}
+		}
+		// No role layer supplies the field — the client renders the session/review
+		// (or auto) default for this label.
+		return { source: "default", editable, sourceLabel: "Default" };
 	}
 
 	// ── Roles ────────────────────────────────────────────────────
