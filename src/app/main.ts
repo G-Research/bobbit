@@ -139,9 +139,9 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 	await reconcileRenderersForActiveSession();
 };
 
-// E2E test hook: run a pack composer-slash/git-widget/command-palette launcher
-// entrypoint by id — the SAME `runLauncherEntrypoint` the MessageEditor slash menu
-// calls on a user click (Slice C1). Lets the pr-walkthrough-pack browser E2E
+// E2E test hook: run a pack composer-slash/session-menu launcher entrypoint by
+// id — the SAME `runLauncherEntrypoint` the MessageEditor slash menu and session
+// action menus call on a user click. Lets the pr-walkthrough-pack browser E2E
 // trigger "entrypoint launches the panel" deterministically. Faithful: it
 // exercises the real launcher→navigate→openPanel chain.
 (window as any).__bobbitRunPackLauncher = async (id: string): Promise<void> => {

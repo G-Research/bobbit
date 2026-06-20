@@ -513,10 +513,10 @@ enabled** (the #734 default — absent kind ⇒ all enabled).
 Disabling uses the #734 override system directly: `PUT
 /api/marketplace/pack-activation { scope: "server", packName, disabled }` writes
 `DisabledRefs` (`roles`/`tools`/`skills`/`entrypoints`). For `pr-walkthrough` the
-toggleable surface is its **entrypoints** (the four `contents.entrypoints[]`
+toggleable surface is its **entrypoints** (the three `contents.entrypoints[]`
 basenames). Disabling them:
 
-- removes the launchers (composer-slash, git-widget-button, command-palette) and
+- removes the launchers (composer-slash and session-menu) and
   the `kind:"route"` deep-link (`routeId: "pr-walkthrough"`) from the
   pack-contribution registry (one toggle per `listName` disables both the launcher
   id AND the derived `routeId`, per `DisabledRefs.entrypoints` semantics);
@@ -610,7 +610,7 @@ contributions + the durable Host API:
 | Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels/pr-walkthrough-panel.yaml` → `lib/panel.js` |
 | Changeset/diff bundle | `src/server/pr-walkthrough/routes.ts` viewer-feed routes | `routes: bundle` (`lib/routes.mjs`, LIVE git in the confined worker) |
 | Persisted VIEWER cards | bespoke viewer feed reading `walkthrough-store.ts` | `routes: publish` → `host.store.*` (pack-namespaced), written by the panel's read→publish seam (§8.4). The agent-side `walkthrough-store.ts` stays as the submit pipeline's own store (§8.3/§8.5), never read by the viewer. |
-| Launcher + deep-link | composer/git-widget launch + the `"walkthrough"` RouteView | `entrypoints:` (3 launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `#/ext/pr-walkthrough` |
+| Launcher + deep-link | legacy composer/git-widget launch + the `"walkthrough"` RouteView | `entrypoints:` (composer-slash + session-menu launchers, plus `kind:"route"` `routeId:"pr-walkthrough"`) → `#/ext/pr-walkthrough` |
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
 
 **Deletion is gated on the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`)
@@ -890,7 +890,7 @@ Findings from `tests/fixtures/market-sources/`:
 - **`tests/e2e/ui/pr-walkthrough-pack.spec.ts`** (the deletion plan's mandated
   E2E, updated):
   - The walkthrough works **end-to-end served entirely by the first-party pack**,
-    with **NO manual install step** (it is resolved by the §5 band): git-widget
+    with **NO manual install step** (it is resolved by the §5 band): session-menu
     launcher → panel → `bundle` recomputes the REAL changeset LIVE → diff renders →
     `publish` persists cards → reload re-reads the same persisted cards. The
     injected `submit_pr_walkthrough_yaml` tool call carries the **REAL production

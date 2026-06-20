@@ -655,6 +655,12 @@ function headerToast() {
 	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
 }
 
+window.addEventListener("bobbit-launcher-feedback", (event: Event) => {
+	const detail = (event as CustomEvent<{ kind?: string; message?: string }>).detail;
+	if (!detail || (detail.kind !== "pending" && detail.kind !== "error") || !detail.message) return;
+	showHeaderToast(detail.message);
+});
+
 interface OpenHeaderSessionActionsPopover {
 	sessionId: string;
 	element: SidebarActionsPopover;
@@ -760,6 +766,7 @@ async function openHeaderSessionActionsPopover(input: {
 		event.stopPropagation();
 		const current = _openHeaderSessionActionsPopover;
 		const action = current?.actions.find((item) => String(item.id) === event.detail.actionId);
+		closeHeaderSessionActionsPopover(false);
 		void action?.run(event);
 	}) as EventListener);
 	element.addEventListener("close", () => {

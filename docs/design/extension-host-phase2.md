@@ -747,20 +747,26 @@ One-line responsibility: register pack-contributed launchers AND deep-linkable c
 routes, and resolve structured navigation targets onto the SPA router.
 
 ```ts
-// Launcher kinds (click → openPanel/navigate) PLUS a routable kind that declares a
+// Launcher kinds (click → structured dispatch) PLUS a routable kind that declares a
 // deep-linkable CLIENT route. "route" entrypoints have NO label/click surface — they
 // register a routeId→panel mapping consumed by navigate + reload restoration.
-export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-palette" | "route";
-export interface LauncherEntrypoint { id: string; tool: string; kind: "composer-slash" | "git-widget-button" | "command-palette"; label: string; target: RouteTarget | PanelTarget; }
+export type EntrypointKind = "composer-slash" | "session-menu" | "route";
+export interface SpawnLaunchTarget { action: "spawn"; route: string; panelId: string; }
+export interface LauncherEntrypoint { id: string; packId: string; kind: "composer-slash" | "session-menu"; label: string; target: RouteTarget | PanelTarget | SpawnLaunchTarget; }
 /** A deep-linkable client route: maps a routeId → the panel it opens + the param names
  *  carried in the URL. `routeId` is the deep-link route name; `target` is the panel to
  *  open; `paramKeys` are the param names serialized into / parsed from the hash. */
-export interface RouteEntrypoint { id: string; tool: string; kind: "route"; routeId: string; target: PanelTarget; paramKeys: string[]; }
+export interface RouteEntrypoint { id: string; packId: string; kind: "route"; routeId: string; target: PanelTarget; paramKeys: string[]; }
 export type EntrypointInfo = LauncherEntrypoint | RouteEntrypoint;
+export interface LauncherDispatchResult { ok: boolean; error?: string; code?: string; }
+export interface LauncherDispatchOptions { body?: Record<string, unknown>; sessionId?: string; }
 export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, projectId?: string): void;
 export function reconcilePackEntrypointsForProject(projectId: string | undefined): Promise<void>;
+/** Dispatch a launcher target from a user gesture. Panel targets open panels, route targets call navigateToTarget,
+ *  and spawn targets call the pack route, then open the returned child session's panel. */
+export function runLauncherEntrypoint(keyOrId: string, onResult?: (r: LauncherDispatchResult) => void, options?: LauncherDispatchOptions): void;
 /** Map a structured RouteTarget → the router's hash scheme (packs never build URLs). */
-export function navigateToTarget(target: RouteTarget): void;
+export function navigateToTarget(target: RouteTarget, options?: { sessionId?: string }): LauncherDispatchResult;
 ```
 
 ### C1.1a Client pack route registry (generation-guarded, project-scoped)
@@ -772,12 +778,12 @@ capture generation before any await, drop superseded applies, reconcile-on-unins
 project-scoped, reload-safe). The registry is keyed by `routeId`:
 
 ```ts
-interface PackRouteEntry { routeId: string; targetPanelId: string; paramKeys: string[]; tool: string; projectId?: string; }
+interface PackRouteEntry { routeId: string; targetPanelId: string; paramKeys: string[]; packId: string; projectId?: string; }
 //  routeId → PackRouteEntry   (at most ONE pack owns a routeId — see conflict handling)
 export function lookupPackRoute(routeId: string): PackRouteEntry | undefined;
 ```
 
-- **Ownership:** entries are owned by the contributing pack (carrying `tool`/`projectId`),
+- **Ownership:** entries are owned by the contributing pack (carrying `packId`/`projectId`),
   so reconcile can drop a pack's routes precisely.
 - **Registration:** `registerPackEntrypoints` is idempotent + reconciling, re-driven from
   `/api/tools` metadata (byte-for-byte the `registerPackRenderers`/`registerPackPanels`
@@ -800,8 +806,9 @@ constructs a `#/...` string (v1 §3 structured addressing). Concrete scheme:
   helper to serialize **`#/ext/<routeId>?<url-encoded params>`** (e.g.
   `#/ext/artifacts?artifactId=abc123`). `routeId` and each `paramKey`/value are
   `encodeURIComponent`-escaped; only declared `paramKeys` are emitted.
-- If `route` is not in the registry, `navigate` is a no-op (the pack named an unknown
-  route — no crash, no raw URL).
+- If `route` is not in the registry, `navigate` returns `{ ok:false, code:"ROUTE_NOT_FOUND" }`
+  for the launcher surface to render visibly (the pack named an unknown route — no crash,
+  no raw URL, no view switch).
 
 ### C1.2a Reload restoration (`#/ext/<routeId>` → panel rehydrated from store)
 
@@ -823,8 +830,11 @@ lookup → `openPackPanel` → `store.get`) is the canonical deep-link path D1/D
 ### C1.3 Entrypoint surfaces
 
 - **composer-slash:** register a slash-command into the composer's command list.
-- **git-widget-button / command-palette:** register a button/launcher; on click →
-  `openPanel` or `navigate` (NO auto-invoke on mount — invocation is the user gesture).
+- **session-menu:** register a shared session-actions menu launcher; on click it calls
+  `runLauncherEntrypoint` inside the user gesture. Panel targets call `openPanel`, route
+  targets call `navigateToTarget`, and spawn targets call the pack route, open the
+  returned child session's panel, and report `NO_PR`/failure visibly without switching or
+  leaving the menu open (NO auto-invoke on mount — invocation is the user gesture).
 - **route:** registers a deep-linkable route only (no clickable surface); consumed by
   `navigate` + reload restoration (C1.2/C1.2a).
 
@@ -1310,8 +1320,9 @@ the store and surviving reload:
   deep-link no longer resolves.
 
 This makes artifact deep-link an opener-independent, store-rehydrated path identical in
-shape to D2's `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`
-entrypoint (§11), proving the `navigate`→route→panel→store chain on the simpler litmus pack.
+shape to D2's `kind:"route"` PR-walkthrough deep-link (§11), proving the
+`navigate`→route→panel→store chain on the simpler litmus pack. PR-walkthrough's clickable
+launchers are separate spawn targets, not navigate targets.
 
 ### D1.3 Test adaptation + deletion
 
@@ -1351,14 +1362,17 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 - `stores:` — re-express `walkthrough-store.ts`
   (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) onto `host.store.*`,
   pack-scoped.
-- `entrypoints:` — TWO contributions: (1) a `kind:"route"` route entrypoint
-  `{ routeId: "pr-walkthrough", target: { panelId: "pr-walkthrough.panel" }, paramKeys: ["jobId"] }`
-  registering the deep-linkable route in the client pack route registry (§7.1a); (2) a
-  git-widget button / command-palette launcher whose click calls
-  `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`, which serializes to
-  `#/ext/pr-walkthrough?jobId=…` and resolves through the registry to open the panel
-  rehydrated from `host.store.*` (§7.2/§7.2a). (This replaces the bespoke SPA
-  `"walkthrough"` route — `routing.ts:5`/`:47` — with the generic `ext` route surface.)
+- `entrypoints:` — THREE contributions: (1) a `kind:"route"` route entrypoint
+  `{ routeId: "pr-walkthrough", target: { panelId: "pr-walkthrough.panel" }, paramKeys: ["jobId", "baseSha", "headSha"] }`
+  registering the deep-linkable route in the client pack route registry (§7.1a); (2–3)
+  composer-slash and session-menu launchers whose clicks use the spawn target
+  `{ action: "spawn", route: "run", panelId: "pr-walkthrough.panel" }`. The launcher
+  dispatch calls the pack `run` route on the launching session, opens the returned
+  reviewer child's panel, and switches to that child. `NO_PR`/route failures are surfaced
+  as visible launcher feedback and do not spawn, switch, or mount an owner-session panel.
+  The separate `kind:"route"` entrypoint still resolves `#/ext/pr-walkthrough?...`
+  through the registry for child-session reload/restoration. (This replaces the bespoke
+  SPA `"walkthrough"` route in `routing.ts` with the generic `ext` route surface.)
 - `host.session.readToolCall` — read the `submit_pr_walkthrough_yaml` tool call's
   input/output (B2 implements the body; usable here only once C2 flips the `session` flag)
   instead of bespoke transcript access. The panel-originated read is authorized via
@@ -1432,8 +1446,8 @@ So D2's `bundle` route is a LIVE git/diff computer for the diff + a STORE reader
 LLM cards — never an in-worker LLM caller. The D2 E2E
 (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) seeds a realistic persisted bundle through the
 pack's own `publish` route (proving the READ/render path) AND drives a live recompute over a
-real git working dir (proving the disclosed-`git` worker path), plus the maximal launcher
-surface (`git-widget-button`) and the `kind:"route"` deep-link.
+real git working dir (proving the disclosed-`git` worker path), plus the session-menu launcher
+surface and the `kind:"route"` deep-link.
 
 ---
 
@@ -1537,9 +1551,9 @@ are the acceptance proofs.
    PR gated on parity. **Deep-link parity is covered for BOTH:** D1 via
    `host.ui.navigate({ route: "artifacts", params: { artifactId } })` → `artifacts.viewer`
    panel rehydrated from `host.store.get(artifactId)` (§10 D1.2; §13 D1 E2E deep-link
-   assertion), D2 via `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`
-   (§11; §13 D2 E2E deep-link). Both deep-links are store-rehydrated and survive reload, and
-   depend on C1 (`navigate`).
+   assertion), D2 via the PR-walkthrough `kind:"route"` deep-link (§11; §13 D2 E2E
+   deep-link). Both deep-links are store-rehydrated and survive reload, and depend on C1
+   (`navigate`). PR-walkthrough's clickable launchers use the spawn target path instead.
 2. **Every reserved key live; every frozen Host API method implemented to v1 signature;
    `host.capabilities` all true; `HOST_API_VERSION` still 1 (v1 type compiles unchanged).**
    → `stores` (B1), `routes` (B3), `panels` (B4), `entrypoints` (C1); `store.*` (B1),

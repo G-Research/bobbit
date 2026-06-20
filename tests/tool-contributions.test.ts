@@ -133,7 +133,7 @@ describe("parseContributions — fully malformed input degrades", () => {
 });
 
 describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rejects)", () => {
-	it("parses launcher kinds with a label + structured target", () => {
+	it("parses supported launcher kinds with a label + structured target", () => {
 		assert.deepEqual(
 			parseEntrypoints(
 				[{ id: "slash", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } }],
@@ -142,28 +142,38 @@ describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rej
 			[{ id: "slash", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } }],
 		);
 		assert.deepEqual(
-			parseEntrypoints([{ id: "go", kind: "command-palette", label: "Go", target: { route: "demo.route" } }], FP),
-			[{ id: "go", kind: "command-palette", label: "Go", target: { route: "demo.route" } }],
+			parseEntrypoints([{ id: "go", kind: "session-menu", label: "Go", target: { route: "demo.route" } }], FP),
+			[{ id: "go", kind: "session-menu", label: "Go", target: { route: "demo.route" } }],
 		);
 	});
 
-	it("parses a spawn launcher carrying { action, route, panelId } (all three preserved)", () => {
+	it("parses a session-menu spawn launcher carrying { action, route, panelId } (all three preserved)", () => {
 		assert.deepEqual(
 			parseEntrypoints(
-				[{ id: "spawn", kind: "git-widget-button", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
+				[{ id: "spawn", kind: "session-menu", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
 				FP,
 			),
-			[{ id: "spawn", kind: "git-widget-button", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
+			[{ id: "spawn", kind: "session-menu", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
+		);
+	});
+
+	it("drops removed command-palette and git-widget-button entrypoint kinds", () => {
+		assert.deepEqual(
+			parseEntrypoints([
+				{ id: "go", kind: "command-palette", label: "Go", target: { route: "demo.route" } },
+				{ id: "git", kind: "git-widget-button", label: "Git", target: { panelId: "demo.viewer" } },
+			], FP),
+			[],
 		);
 	});
 
 	it("drops a spawn launcher missing route or panelId — never rejects", () => {
 		assert.deepEqual(
-			parseEntrypoints([{ id: "spawn", kind: "git-widget-button", label: "X", target: { action: "spawn", route: "run" } }], FP),
+			parseEntrypoints([{ id: "spawn", kind: "session-menu", label: "X", target: { action: "spawn", route: "run" } }], FP),
 			[],
 		); // no panelId
 		assert.deepEqual(
-			parseEntrypoints([{ id: "spawn", kind: "git-widget-button", label: "X", target: { action: "spawn", panelId: "p" } }], FP),
+			parseEntrypoints([{ id: "spawn", kind: "session-menu", label: "X", target: { action: "spawn", panelId: "p" } }], FP),
 			[],
 		); // no route
 	});

@@ -79,7 +79,7 @@ export interface PanelContribution {
 /** A pack-scoped entrypoint (entrypoints/<file>.yaml). */
 export interface EntrypointContribution {
 	id: string; // unique within the pack
-	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	kind: "composer-slash" | "session-menu" | "route";
 	label?: string; // required for launcher kinds
 	routeId?: string; // required for kind:"route"; host-global
 	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };

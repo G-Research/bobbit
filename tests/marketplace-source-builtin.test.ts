@@ -98,12 +98,6 @@ describe("built-in source guards (§11.1)", () => {
 
 	it("disabling a built-in pack's entrypoints SURVIVES a simulated restart and the registry still filters them (§11.1)", () => {
 		const PACK = "pr-walkthrough";
-		const ENTRYPOINT_LIST_NAMES = [
-			"pr-walkthrough-git-widget",
-			"pr-walkthrough-open",
-			"pr-walkthrough-palette",
-			"pr-walkthrough-route",
-		];
 		const cfgDir = fs.mkdtempSync(path.join(TMP, "cfg-restart-"));
 
 		// The built-in band resolves the shipped pr-walkthrough pack in place. Enumerate
@@ -111,22 +105,30 @@ describe("built-in source guards (§11.1)", () => {
 		const enumerate = () => builtinFirstPartyPackEntries(REPO_MARKET_PACKS).filter((e) => e.manifest?.name === PACK);
 		assert.ok(enumerate().length === 1, "the built-in pr-walkthrough pack must resolve");
 
-		// Baseline: with NO activation override, all four entrypoints register.
+		// Baseline: with NO activation override, supported entrypoints register.
 		const baseStore = new ProjectConfigStore(cfgDir);
 		const baseRegistry = new PackContributionRegistry(
 			enumerate,
 			(scope, projectId, packName) => baseStore.getPackActivation(scope, packName).entrypoints ?? [],
 		);
-		assert.equal(baseRegistry.getPack(undefined, PACK)?.entrypoints.length, 4, "all entrypoints enabled by default");
+		const baseEntrypoints = baseRegistry.getPack(undefined, PACK)?.entrypoints ?? [];
+		const entrypointListNames = baseEntrypoints
+			.map((e) => e.listName)
+			.filter((name): name is string => typeof name === "string" && name.length > 0);
+		assert.ok(baseEntrypoints.some((e) => (e as any).kind === "session-menu"), "session-menu entrypoint enabled by default");
+		assert.ok(entrypointListNames.includes("pr-walkthrough-open"), "slash entrypoint enabled by default");
+		assert.ok(entrypointListNames.includes("pr-walkthrough-route"), "route entrypoint enabled by default");
+		assert.ok(!entrypointListNames.includes("pr-walkthrough-git-widget"), "old git-widget entrypoint absent");
+		assert.ok(!entrypointListNames.includes("pr-walkthrough-palette"), "old palette entrypoint absent");
 
-		// Disable all four entrypoints at server scope (the #734 activation override).
-		baseStore.setPackActivation("server", PACK, { entrypoints: ENTRYPOINT_LIST_NAMES });
+		// Disable all supported entrypoints at server scope (the #734 activation override).
+		baseStore.setPackActivation("server", PACK, { entrypoints: entrypointListNames });
 
 		// ── Simulated gateway RESTART: re-instantiate the config store FROM DISK. ──
 		const restarted = new ProjectConfigStore(cfgDir);
 		assert.deepEqual(
 			(restarted.getPackActivation("server", PACK).entrypoints ?? []).slice().sort(),
-			ENTRYPOINT_LIST_NAMES.slice().sort(),
+			entrypointListNames.slice().sort(),
 			"disabled entrypoint refs must persist across restart",
 		);
 

@@ -147,8 +147,16 @@ function uniqueInOrder(ids: string[]): string[] {
 	return ids.filter((id, index) => ids.indexOf(id) === index);
 }
 
+function canonicalSessionActionIds(ids: readonly string[], expected = CANONICAL_SESSION_ACTION_IDS): string[] {
+	return ids.filter((id) => (expected as readonly string[]).includes(id));
+}
+
 function expectCanonicalOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
-	expect(ids).toEqual(expected.filter((id) => ids.includes(id)));
+	expect(canonicalSessionActionIds(ids, expected)).toEqual(expected.filter((id) => ids.includes(id)));
+}
+
+function expectCanonicalActionsPresentInPriorityOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
+	expect(canonicalSessionActionIds(ids, expected)).toEqual([...expected]);
 }
 
 async function actionLabel(page: Page, actionId: string): Promise<string> {
@@ -226,7 +234,7 @@ test.describe("unified session actions", () => {
 		for (const goalId of goalsToDelete) await deleteGoal(goalId).catch(() => {});
 	});
 
-	test("sidebar and header expose the same canonical action ids in priority order", async ({ page }) => {
+	test("sidebar and header expose the same action ids with canonical priority order", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 900 });
 		const sessionId = await createSession();
 		sessionsToDelete.add(sessionId);
@@ -239,9 +247,8 @@ test.describe("unified session actions", () => {
 		await closePopover(page);
 
 		const headerIds = await headerActionIds(page);
-		expect(sidebarIds).toEqual(CANONICAL_SESSION_ACTION_IDS);
 		expect(headerIds).toEqual(sidebarIds);
-		expectCanonicalOrder(headerIds);
+		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
 	});
 
 	test("staff and team-lead sessions keep canonical labels and visibility", async ({ page }) => {
@@ -301,7 +308,7 @@ test.describe("unified session actions", () => {
 		await openHeaderActions(page);
 		const overflowIds = await popoverActionIds(page);
 		const combinedIds = uniqueInOrder([...directIds, ...overflowIds]);
-		expect(combinedIds).toEqual(CANONICAL_SESSION_ACTION_IDS);
+		expectCanonicalActionsPresentInPriorityOrder(combinedIds);
 		expect(overflowIds, "overflow should contain actions that were not direct buttons").toEqual(
 			expect.arrayContaining(CANONICAL_SESSION_ACTION_IDS.filter((id) => !directIds.includes(id))),
 		);
@@ -369,7 +376,7 @@ test.describe("unified session actions", () => {
 
 		await openHeaderActions(page);
 		const overflowIds = await popoverActionIds(page);
-		expect(overflowIds).toEqual(CANONICAL_SESSION_ACTION_IDS);
+		expectCanonicalActionsPresentInPriorityOrder(overflowIds);
 		await expectQuickActionHiddenAndNonInteractive(quickButtons.modify, "mobile header modify quick action");
 		await expectQuickActionHiddenAndNonInteractive(quickButtons.terminate, "mobile header terminate quick action");
 		const sourceIds = await page.locator("sidebar-actions-popover").first().evaluate((el) => ((el as any).sourceRects || []).map((rect: { actionId: string }) => rect.actionId));
