@@ -151,8 +151,8 @@ During the audit, a related async race was discovered and fixed in `<agent-inter
 4. Finally, the slow IndexedDB read resolves. It sees that the session ID is unchanged, and `this._attachments` is currently empty.
 5. It applies the loaded array, **resurrecting** the sent attachments inside the composer.
 
-### 4.2 The Monotonic Generation Guard Fix
-We introduced a monotonic generation token `_attachmentDraftGen` (type `number`) as a private field in `AgentInterface.ts`. 
+### 4.2 The In-Flight Generation Guard Fix
+We introduced an in-memory monotonic generation token `_attachmentDraftGen` (type `number`) as a private field in `AgentInterface.ts`. It is an in-flight async-load guard only — it is **not** persisted, and IndexedDB attachment records carry no generation field.
 
 - Every load, set, or clear operation on the attachment draft increments this counter:
   ```ts
@@ -178,7 +178,7 @@ The following table summarizes the auditing of user-input surfaces across Bobbit
 | Surface | State | Verdict / Exception Rationale |
 |---|---|---|
 | **Message Composer Text** | Server draft + sessionStorage mirror | Already durable. Serves as the reference implementation for the server draft tier. |
-| **Composer Attachments** | IndexedDB via `PromptDraftAttachmentsStore` | Already durable. Protected against async race resurrection via monotonic generation guards. |
+| **Composer Attachments** | IndexedDB via `PromptDraftAttachmentsStore` | Already durable. IndexedDB records carry no persistent gen; protected against async race resurrection by the in-flight async-load generation guard (`_attachmentDraftGen`) in `AgentInterface`. |
 | **Proposal Forms** | Server draft table | Already durable. Forms automatically persist draft state under `/api/sessions/:id/draft` with debounced sync. |
 | **Sidebar Filters** | `localStorage` | Already durable. Persists lightweight filter options globally across tabs and browser restarts. |
 | **`AnnotationPopover`** (Review-pane comment textarea) | Transient component `@state` | **Intentional Exception**. The committed comment is durable; the comment-in-progress is a transient hover-popover whose closure implies discard. Discarding is standard behavior. |
