@@ -63,6 +63,32 @@ describe("buildDockerRunArgs", () => {
 		);
 	});
 
+	it("mounts the google-code-assist state subdir so sandboxed agents can load the provider extension", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-gca-"));
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test",
+				stateDir,
+			});
+			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			assert.ok(
+				mounts.some((m) => m.endsWith(":/bobbit-state/google-code-assist")),
+				`expected a /bobbit-state/google-code-assist mount, got: ${JSON.stringify(mounts)}`,
+			);
+			// The mount must be a subdir (never the full state dir) and created on disk.
+			assert.ok(
+				fs.existsSync(path.join(stateDir, "google-code-assist")),
+				"google-code-assist subdir should be created before mounting",
+			);
+			assert.ok(
+				!mounts.some((m) => m.endsWith(":/bobbit-state")),
+				"must never mount the full state dir",
+			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {
 		const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-pack-mounts-"));

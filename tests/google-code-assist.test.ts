@@ -20,25 +20,66 @@ import {
 	hasGoogleCodeAssistCredential,
 	isSessionSelectableProvider,
 	isSessionSelectableModelString,
+	convertContextToCodeAssist,
+	parseCodeAssistStreamChunk,
+	mapFinishReason,
+	extractUsageMetadata,
+	codeAssistStream,
+	CodeAssistError,
+	isReauthStatus,
+	envProjectOverride,
 	GOOGLE_GEMINI_CLI_PROVIDER,
 	type FetchLike,
+	type StreamFetchLike,
 } from "../src/server/agent/google-code-assist.js";
 import { getGoogleCodeAssistModels } from "../src/server/agent/google-code-assist-models.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+const prevProject = process.env.GOOGLE_CLOUD_PROJECT;
+const prevProjectId = process.env.GOOGLE_CLOUD_PROJECT_ID;
 let dir: string;
 
 beforeEach(() => {
 	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-"));
 	process.env.BOBBIT_AGENT_DIR = dir;
+	// Project env override must not leak across tests (it short-circuits onboarding).
+	delete process.env.GOOGLE_CLOUD_PROJECT;
+	delete process.env.GOOGLE_CLOUD_PROJECT_ID;
 	resetCodeAssistProjectCache();
 });
 
 afterEach(() => {
 	if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 	else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+	if (prevProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+	else process.env.GOOGLE_CLOUD_PROJECT = prevProject;
+	if (prevProjectId === undefined) delete process.env.GOOGLE_CLOUD_PROJECT_ID;
+	else process.env.GOOGLE_CLOUD_PROJECT_ID = prevProjectId;
 	rmSync(dir, { recursive: true, force: true });
 });
+
+/** Build a streaming `fetchFn` whose body yields the given SSE string chunks. */
+function sseFetch(chunks: string[], status = 200): StreamFetchLike {
+	return async () => ({
+		ok: status >= 200 && status < 300,
+		status,
+		text: async () => chunks.join(""),
+		body: (async function* () {
+			for (const c of chunks) yield c;
+		})(),
+	});
+}
+
+/** Encode a single SSE `data:` event for a wrapped Code Assist chunk. */
+function sseEvent(obj: unknown): string {
+	return `data: ${JSON.stringify(obj)}\n\n`;
+}
+
+async function collect(gen: AsyncGenerator<any>): Promise<any[]> {
+	const out: any[] = [];
+	for await (const d of gen) out.push(d);
+	return out;
+}
 
 function writeAuth(cred: Record<string, unknown>): void {
 	writeFileSync(path.join(dir, "auth.json"), JSON.stringify(cred), "utf-8");
@@ -203,12 +244,14 @@ describe("codeAssistComplete", () => {
 	});
 });
 
-describe("session-selectability guard", () => {
-	it("flags google-gemini-cli as not session-selectable, others as selectable", () => {
-		assert.equal(isSessionSelectableProvider(GOOGLE_GEMINI_CLI_PROVIDER), false);
+describe("session-selectability guard (Code Assist runtime now registered)", () => {
+	it("google-gemini-cli is now session-selectable like other providers", () => {
+		// The generated extension registers a `google-code-assist` provider in the
+		// agent runtime, so the provider-level binding gate is lifted.
+		assert.equal(isSessionSelectableProvider(GOOGLE_GEMINI_CLI_PROVIDER), true);
 		assert.equal(isSessionSelectableProvider("anthropic"), true);
 		assert.equal(isSessionSelectableProvider("google"), true);
-		assert.equal(isSessionSelectableModelString("google-gemini-cli/gemini-2.5-pro"), false);
+		assert.equal(isSessionSelectableModelString("google-gemini-cli/gemini-2.5-pro"), true);
 		assert.equal(isSessionSelectableModelString("anthropic/claude-sonnet-4-5"), true);
 		assert.equal(isSessionSelectableModelString("google/gemini-2.5-pro"), true);
 	});
@@ -217,14 +260,332 @@ describe("session-selectability guard", () => {
 		assert.equal(isSessionSelectableModelString("no-slash"), true);
 	});
 
-	it("every emitted Code Assist model is sessionSelectable:false AND fails the guard (no drift)", () => {
+	it("emits Code Assist models as session-selectable and passing the binding guard", () => {
+		// Runtime support now exists (generated provider extension), so account models
+		// are emitted without a sessionSelectable:false gate or unavailable reason.
 		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
 		const models = getGoogleCodeAssistModels();
 		assert.ok(models.length > 0, "expected at least one Code Assist model");
 		for (const m of models) {
-			assert.equal(m.sessionSelectable, false, `${m.id} should be sessionSelectable:false`);
-			assert.equal(isSessionSelectableProvider(m.provider), false, `${m.provider} must fail the binding guard`);
-			assert.equal(isSessionSelectableModelString(`${m.provider}/${m.id}`), false, `${m.provider}/${m.id} must fail the binding guard`);
+			assert.equal(isSessionSelectableProvider(m.provider), true, `${m.provider} must pass the binding guard`);
+			assert.equal(
+				isSessionSelectableModelString(`${m.provider}/${m.id}`),
+				true,
+				`${m.provider}/${m.id} must pass the binding guard`,
+			);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
+			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
+	});
+});
+
+describe("convertContextToCodeAssist", () => {
+	it("maps multi-turn user/assistant/tool messages to Gemini roles + parts", () => {
+		const body = convertContextToCodeAssist(
+			{
+				model: "gemini-2.5-pro",
+				systemPrompt: "be brief",
+				messages: [
+					{ role: "user", text: "weather?" },
+					{ role: "assistant", text: "checking", toolCalls: [{ name: "getWeather", args: { city: "SF" }, thoughtSignature: "sig-1" }] },
+					{ role: "tool", toolResults: [{ name: "getWeather", response: { tempC: 18 } }] },
+				],
+				tools: [{ name: "getWeather", description: "lookup", parameters: { type: "object", properties: { city: { type: "string" } } } }],
+				toolChoice: "auto",
+				maxTokens: 100,
+			},
+			"proj-1",
+		) as any;
+
+		assert.equal(body.model, "gemini-2.5-pro");
+		assert.equal(body.project, "proj-1");
+		assert.deepEqual(body.request.systemInstruction, { role: "user", parts: [{ text: "be brief" }] });
+		assert.deepEqual(body.request.contents[0], { role: "user", parts: [{ text: "weather?" }] });
+		// assistant → role "model", with a functionCall part carrying thoughtSignature.
+		assert.equal(body.request.contents[1].role, "model");
+		assert.deepEqual(body.request.contents[1].parts[0], { text: "checking" });
+		assert.deepEqual(body.request.contents[1].parts[1], {
+			functionCall: { name: "getWeather", args: { city: "SF" } },
+			thoughtSignature: "sig-1",
+		});
+		// tool result → role "user" with a functionResponse part.
+		assert.deepEqual(body.request.contents[2], {
+			role: "user",
+			parts: [{ functionResponse: { name: "getWeather", response: { tempC: 18 } } }],
+		});
+		// function declarations emitted as parametersJsonSchema; toolConfig from choice.
+		assert.equal(body.request.tools[0].functionDeclarations[0].name, "getWeather");
+		assert.deepEqual(body.request.tools[0].functionDeclarations[0].parametersJsonSchema, {
+			type: "object",
+			properties: { city: { type: "string" } },
+		});
+		assert.equal(body.request.toolConfig.functionCallingConfig.mode, "AUTO");
+		assert.equal(body.request.generationConfig.maxOutputTokens, 100);
+	});
+
+	it("maps user images to inlineData parts and wraps scalar tool responses", () => {
+		const body = convertContextToCodeAssist({
+			model: "m",
+			messages: [
+				{ role: "user", text: "look", images: [{ mimeType: "image/png", data: "AAAA" }] },
+				{ role: "tool", toolResults: [{ name: "calc", response: 42 }] },
+			],
+		}) as any;
+		assert.deepEqual(body.request.contents[0].parts[1], { inlineData: { mimeType: "image/png", data: "AAAA" } });
+		assert.deepEqual(body.request.contents[1].parts[0], { functionResponse: { name: "calc", response: { result: 42 } } });
+		assert.equal(body.project, undefined);
+	});
+
+	it("omits tools/toolConfig when no declarations are given", () => {
+		const body = convertContextToCodeAssist({ model: "m", messages: [{ role: "user", text: "hi" }] }) as any;
+		assert.equal(body.request.tools, undefined);
+		assert.equal(body.request.toolConfig, undefined);
+	});
+});
+
+describe("mapFinishReason / extractUsageMetadata", () => {
+	it("maps Gemini finish reasons to pi stop reasons, tool calls win", () => {
+		assert.equal(mapFinishReason("STOP", false), "stop");
+		assert.equal(mapFinishReason("MAX_TOKENS", false), "length");
+		assert.equal(mapFinishReason("SAFETY", false), "error");
+		assert.equal(mapFinishReason("STOP", true), "toolUse");
+		assert.equal(mapFinishReason(undefined, false), undefined);
+	});
+
+	it("normalizes usageMetadata token counts", () => {
+		const usage = extractUsageMetadata({
+			promptTokenCount: 10,
+			candidatesTokenCount: 5,
+			thoughtsTokenCount: 3,
+			cachedContentTokenCount: 2,
+			totalTokenCount: 20,
+		});
+		assert.deepEqual(usage, { input: 10, output: 5, thinking: 3, cached: 2, total: 20 });
+		assert.equal(extractUsageMetadata(null), undefined);
+		assert.equal(extractUsageMetadata({}), undefined);
+	});
+});
+
+describe("parseCodeAssistStreamChunk", () => {
+	it("extracts text deltas from a wrapped chunk", () => {
+		const d = parseCodeAssistStreamChunk({ response: { candidates: [{ content: { parts: [{ text: "hi" }] } }] } });
+		assert.equal(d.textDelta, "hi");
+		assert.equal(d.thinkingDelta, undefined);
+		assert.equal(d.toolCall, undefined);
+	});
+
+	it("separates thinking parts from visible text", () => {
+		const d = parseCodeAssistStreamChunk({
+			response: { candidates: [{ content: { parts: [{ text: "ponder", thought: true }, { text: "answer" }] } }] },
+		});
+		assert.equal(d.thinkingDelta, "ponder");
+		assert.equal(d.textDelta, "answer");
+	});
+
+	it("extracts a function call + thoughtSignature and reports toolUse finish", () => {
+		const d = parseCodeAssistStreamChunk({
+			response: {
+				candidates: [
+					{
+						finishReason: "STOP",
+						content: { parts: [{ functionCall: { name: "f", args: { a: 1 } }, thoughtSignature: "sig" }] },
+					},
+				],
+			},
+		});
+		assert.deepEqual(d.toolCall, { name: "f", args: { a: 1 }, thoughtSignature: "sig" });
+		assert.equal(d.finishReason, "toolUse");
+	});
+
+	it("maps usage and finish reason on the final chunk", () => {
+		const d = parseCodeAssistStreamChunk({
+			response: {
+				candidates: [{ finishReason: "STOP", content: { parts: [{ text: "" }] } }],
+				usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2, totalTokenCount: 6 },
+			},
+		});
+		assert.equal(d.finishReason, "stop");
+		assert.deepEqual(d.usage, { input: 4, output: 2, total: 6 });
+	});
+});
+
+describe("codeAssistStream", () => {
+	it("streams text deltas, then a final usage + stop chunk", async () => {
+		const fetchFn = sseFetch([
+			sseEvent({ response: { candidates: [{ content: { parts: [{ text: "Hel" }] } }] } }),
+			sseEvent({ response: { candidates: [{ content: { parts: [{ text: "lo" }] } }] } }),
+			sseEvent({
+				response: {
+					candidates: [{ finishReason: "STOP", content: { parts: [{ text: "" }] } }],
+					usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5 },
+				},
+			}),
+		]);
+		const deltas = await collect(
+			codeAssistStream(
+				{ model: "gemini-2.5-pro", messages: [{ role: "user", text: "hi" }] },
+				{ getToken: async () => "tok", getProject: async () => "p", fetchFn },
+			),
+		);
+		const text = deltas.map((d) => d.textDelta ?? "").join("");
+		assert.equal(text, "Hello");
+		const final = deltas[deltas.length - 1];
+		assert.equal(final.finishReason, "stop");
+		assert.deepEqual(final.usage, { input: 3, output: 2, total: 5 });
+	});
+
+	it("handles chunks split across SSE byte boundaries", async () => {
+		const event = sseEvent({ response: { candidates: [{ content: { parts: [{ text: "spanned" }] } }] } });
+		const mid = Math.floor(event.length / 2);
+		const fetchFn = sseFetch([event.slice(0, mid), event.slice(mid)]);
+		const deltas = await collect(
+			codeAssistStream({ model: "m", messages: [{ role: "user", text: "x" }] }, { getToken: async () => "t", getProject: async () => "p", fetchFn }),
+		);
+		assert.equal(deltas.map((d) => d.textDelta ?? "").join(""), "spanned");
+	});
+
+	it("emits a tool-call delta from the stream", async () => {
+		const fetchFn = sseFetch([
+			sseEvent({ response: { candidates: [{ content: { parts: [{ functionCall: { name: "search", args: { q: "x" } } }] } }] } }),
+		]);
+		const deltas = await collect(
+			codeAssistStream(
+				{ model: "m", messages: [{ role: "user", text: "find" }], tools: [{ name: "search" }] },
+				{ getToken: async () => "t", getProject: async () => "p", fetchFn },
+			),
+		);
+		assert.deepEqual(deltas[0].toolCall, { name: "search", args: { q: "x" } });
+		assert.equal(deltas[0].finishReason, "toolUse");
+	});
+
+	it("throws a reauth CodeAssistError when no credential is available", async () => {
+		await assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }] }, { getToken: async () => null })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).reauth, true);
+				assert.equal((err as CodeAssistError).status, 401);
+				return true;
+			},
+		);
+	});
+
+	it("marks 401 HTTP responses as reauth and redacts the body", async () => {
+		const secret = "ya29." + "a".repeat(40) + "." + "b".repeat(40);
+		const fetchFn: StreamFetchLike = async () => ({ ok: false, status: 401, text: async () => `denied ${secret}`, body: null });
+		await assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }] }, { getToken: async () => "t", getProject: async () => "p", fetchFn })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).status, 401);
+				assert.equal((err as CodeAssistError).reauth, true);
+				assert.equal((err as Error).message.includes(secret), false);
+				return true;
+			},
+		);
+	});
+
+	it("surfaces an inline SSE error object as a CodeAssistError", async () => {
+		const fetchFn = sseFetch([sseEvent({ error: { code: 429, message: "rate limited" } })]);
+		await assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }] }, { getToken: async () => "t", getProject: async () => "p", fetchFn })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).status, 429);
+				assert.equal((err as CodeAssistError).reauth, false);
+				return true;
+			},
+		);
+	});
+
+	it("aborts and rejects when the body hangs past timeoutMs", async () => {
+		let sawSignal = false;
+		const fetchFn: StreamFetchLike = async (_url, init) => {
+			if (init.signal) sawSignal = true;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				body: (async function* () {
+					await new Promise<void>((_resolve, reject) => {
+						init.signal?.addEventListener("abort", () => {
+							const e = new Error("aborted");
+							e.name = "AbortError";
+							reject(e);
+						});
+					});
+				})(),
+			};
+		};
+		const started = Date.now();
+		await assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }], timeoutMs: 50 }, { getToken: async () => "t", getProject: async () => "p", fetchFn })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).aborted, true);
+				assert.match((err as Error).message, /timed out after 50ms/);
+				return true;
+			},
+		);
+		assert.ok(Date.now() - started < 5000, "should reject promptly via the timeout");
+		assert.ok(sawSignal, "an AbortSignal should be threaded to the streaming fetch");
+	});
+
+	it("maps an external AbortSignal to an aborted CodeAssistError", async () => {
+		const controller = new AbortController();
+		const fetchFn: StreamFetchLike = async (_url, init) => ({
+			ok: true,
+			status: 200,
+			text: async () => "",
+			body: (async function* () {
+				await new Promise<void>((_resolve, reject) => {
+					init.signal?.addEventListener("abort", () => {
+						const e = new Error("aborted");
+						e.name = "AbortError";
+						reject(e);
+					});
+				});
+			})(),
+		});
+		const p = assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }], signal: controller.signal }, { getToken: async () => "t", getProject: async () => "p", fetchFn })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).aborted, true);
+				return true;
+			},
+		);
+		controller.abort();
+		await p;
+	});
+});
+
+describe("isReauthStatus / envProjectOverride", () => {
+	it("treats 401/403 as reauth statuses", () => {
+		assert.equal(isReauthStatus(401), true);
+		assert.equal(isReauthStatus(403), true);
+		assert.equal(isReauthStatus(429), false);
+		assert.equal(isReauthStatus(200), false);
+	});
+
+	it("reads GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_PROJECT_ID", () => {
+		assert.equal(envProjectOverride(), undefined);
+		process.env.GOOGLE_CLOUD_PROJECT = "  proj-env  ";
+		assert.equal(envProjectOverride(), "proj-env");
+		delete process.env.GOOGLE_CLOUD_PROJECT;
+		process.env.GOOGLE_CLOUD_PROJECT_ID = "proj-id";
+		assert.equal(envProjectOverride(), "proj-id");
+	});
+
+	it("an env project override short-circuits ensureCodeAssistProject (no network)", async () => {
+		process.env.GOOGLE_CLOUD_PROJECT = "proj-env";
+		let called = false;
+		const fetchFn: FetchLike = async () => {
+			called = true;
+			return { ok: true, status: 200, text: async () => "{}" };
+		};
+		const project = await ensureCodeAssistProject("tok", fetchFn);
+		assert.equal(project, "proj-env");
+		assert.equal(called, false, "no Code Assist call when an env project override is set");
 	});
 });

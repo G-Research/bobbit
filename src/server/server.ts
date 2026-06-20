@@ -307,6 +307,7 @@ import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
+import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
@@ -11664,6 +11665,68 @@ async function handleApiRoute(
 		} catch {
 			json({ error: "File not found" }, 404);
 		}
+		return;
+	}
+
+	// GET /api/sessions/:id/google-code-assist/token — short-lived runtime material
+	// for the agent-side Code Assist provider extension. Returns a fresh Google
+	// account Bearer access token and the Code Assist project id. This is the only
+	// way the spawned pi-coding-agent runtime obtains credentials for
+	// google-gemini-cli session models, so it can refresh per request instead of
+	// relying on a stale env-only token. Never returns the OAuth refresh token.
+	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/google-code-assist/token')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		// Provider isolation: this endpoint is exclusively the Google account
+		// (OAuth / Code Assist) path. It must never touch the API-key-only `google`
+		// provider. A 401 here means "re-auth your Google account", not "add an API key".
+		if (!hasGoogleCodeAssistCredential()) {
+			json(
+				{
+					error: "No Google account is signed in. Re-authenticate via Settings \u2192 Account \u2192 Google (Gemini).",
+					code: "GOOGLE_CODE_ASSIST_REAUTH",
+				},
+				401,
+			);
+			return;
+		}
+		let accessToken: string | null;
+		try {
+			accessToken = await getGoogleAccessToken();
+		} catch (err) {
+			jsonError(401, err, { code: "GOOGLE_CODE_ASSIST_REAUTH" });
+			return;
+		}
+		if (!accessToken) {
+			json(
+				{
+					error: "Google account token could not be refreshed. Sign in again via Settings \u2192 Account \u2192 Google (Gemini).",
+					code: "GOOGLE_CODE_ASSIST_REAUTH",
+				},
+				401,
+			);
+			return;
+		}
+		// Project selection: an explicit GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_PROJECT_ID
+		// (paid Code Assist / GCP-billed subscriptions) wins; otherwise resolve/onboard
+		// the free-tier project via the Code Assist API.
+		let projectId: string | undefined =
+			(process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID || "").trim() || undefined;
+		if (!projectId) {
+			try {
+				projectId = await ensureCodeAssistProject(accessToken);
+			} catch (err) {
+				// Token is valid but project onboarding failed — surface as a non-auth
+				// error so the runtime doesn't misreport it as a re-auth requirement.
+				jsonError(502, err, { code: "GOOGLE_CODE_ASSIST_PROJECT" });
+				return;
+			}
+		}
+		json({ accessToken, projectId: projectId ?? null });
 		return;
 	}
 
