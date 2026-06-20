@@ -507,7 +507,7 @@ describe("R3 readPackEntityDescriptions (roles/tools/skills/entrypoints)", () =>
 		w(path.join(dir, "skills", "sk", "SKILL.md"), "---\ndescription: skill one-liner\n---\n# sk\nbody\n");
 		// entrypoint with a description
 		w(path.join(dir, "entrypoints", "ep.yaml"),
-			"id: ep-id\nkind: command-palette\nlabel: EP Label\ndescription: entry point desc\ntarget:\n  panelId: some-panel\n");
+			"id: ep-id\nkind: session-menu\nlabel: EP Label\ndescription: entry point desc\ntarget:\n  panelId: some-panel\n");
 
 		const manifest = readManifest(dir)!;
 		const d = readPackEntityDescriptions(dir, manifest);

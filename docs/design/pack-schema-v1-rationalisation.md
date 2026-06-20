@@ -199,7 +199,7 @@ target:
 paramKeys: [artifactId]
 ```
 
-**Launcher kinds** (`composer-slash` / `git-widget-button` / `command-palette`):
+**Launcher kinds** (`composer-slash` / `session-menu`):
 
 ```yaml
 # entrypoints/pr-walkthrough-open.yaml
@@ -212,10 +212,10 @@ target:
     jobId: job-litmus-1
 ```
 
-Field validity is identical to the existing `parseEntrypoints` (`tool-contributions.ts:289`): `route`
-kind needs `routeId` + `target.panelId` + optional `paramKeys`; launcher kinds need `label` + a
-structured `target` (`{panelId}` or `{route}`). The only change is **one entry per file** instead of an
-array embedded in a tool YAML.
+Field validity is identical to the existing `parseEntrypoints`: `route` kind needs
+`routeId` + `target.panelId` + optional `paramKeys`; launcher kinds need `label` + a
+structured `target` (`{panelId}`, `{route}`, or `{ action: "spawn", route, panelId }`).
+The only change is **one entry per file** instead of an array embedded in a tool YAML.
 
 ---
 
@@ -482,10 +482,10 @@ export interface PanelContribution {
 /** A pack-scoped entrypoint (entrypoints/<file>.yaml). */
 export interface EntrypointContribution {
   id: string;                 // unique within the pack
-  kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+  kind: "composer-slash" | "session-menu" | "route";
   label?: string;             // required for launcher kinds
   routeId?: string;           // required for kind:"route"; host-global
-  target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+  target?: { action?: "spawn"; panelId?: string; route?: string; params?: Record<string, unknown> };
   paramKeys?: string[];
   /** The contents.entrypoints[] basename that lists this file — the SINGLE activation
    *  toggle key. Carried so filtering maps one toggle onto BOTH the launcher id AND

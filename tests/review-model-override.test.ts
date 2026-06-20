@@ -144,18 +144,13 @@ describe("applyModelString skipSetModel — spawn-pinned read-back", () => {
 	});
 });
 
-describe("applyModelString — session-selectability guard", () => {
-	it("rejects a not-session-selectable provider before calling setModel", async () => {
-		const rpc = makeRpc({
-			async setModel() { throw new Error("setModel must NOT be called for an unrunnable model"); },
-		});
-
-		await assert.rejects(
-			applyModelString(rpc, "google-gemini-cli/gemini-2.5-pro", { contextLabel: "default.sessionModel" }),
-			/not session-selectable/i,
-			"models the agent runtime can't run must be rejected at the binding choke point",
-		);
-		assert.equal(rpc.setModelCalls.length, 0, "setModel must not run for a not-session-selectable model");
+describe("applyModelString — google account models are now bindable", () => {
+	it("binds a google-gemini-cli (Code Assist) model now that runtime support exists", async () => {
+		// Previously rejected as not-session-selectable; the generated provider
+		// extension now runs these in-session, so binding must succeed.
+		const rpc = makeRpc();
+		await applyModelString(rpc, "google-gemini-cli/gemini-2.5-pro", { contextLabel: "default.sessionModel" });
+		assert.deepEqual(rpc.setModelCalls, [["google-gemini-cli", "gemini-2.5-pro"]]);
 	});
 
 	it("still binds a normal session-selectable model", async () => {

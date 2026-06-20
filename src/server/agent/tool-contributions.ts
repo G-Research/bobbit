@@ -50,16 +50,16 @@ export interface ToolActionsContribution {
  * because the field-validation parser {@link parseEntrypoints} is REUSED by the
  * pack-level loader (`pack-contributions.ts`), which augments it with
  * `listName` / `sourceFile` / `packRoot`. Launcher kinds
- * (`composer-slash`/`git-widget-button`/`command-palette`) carry a `label` + a
- * structured `target` (panel or route); the `route` kind declares a
+ * (`composer-slash`/`session-menu`) carry a `label` + a structured `target`
+ * (panel or route); the `route` kind declares a
  * deep-linkable client route (`routeId` + `target.panelId` + `paramKeys`).
  */
 export interface EntrypointContribution {
 	id: string;
-	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
 	routeId?: string;
-	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 }
 
@@ -200,7 +200,7 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 		console.warn(`[tool-contributions] 'entrypoints' is not an array in ${filePath}; ignoring`);
 		return [];
 	}
-	const LAUNCHER_KINDS = new Set(["composer-slash", "git-widget-button", "command-palette"]);
+	const LAUNCHER_KINDS = new Set(["composer-slash", "session-menu"]);
 	const seen = new Set<string>();
 	const out: EntrypointContribution[] = [];
 	for (const entry of raw) {

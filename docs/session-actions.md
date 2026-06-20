@@ -20,7 +20,7 @@ The descriptor is intentionally small and renderer-agnostic:
 - `run(event)` — action handler.
 - `trailingToggle` — optional control rendered at the row edge, currently used by Fork.
 
-`SessionActionId` covers the built-ins, but descriptors allow string ids so a future extension-contributed session action can flow through the same builder/adapter path. Keep this model separate from git-widget and command-palette launchers; extension work should converge on this session-action entry point rather than adding surface-specific buttons.
+`SessionActionId` covers the built-ins, but descriptors allow string ids so a future extension-contributed session action can flow through the same builder/adapter path. Session-menu launchers also flow through this shared model, so extension launch actions render consistently in the sidebar row menu and chat header menu instead of adding surface-specific buttons.
 
 ## Built-in order
 

@@ -9,16 +9,17 @@
  * `hasGoogleCodeAssistCredential`), so the selector is not cluttered with
  * non-functional account models for users who never log in with Google.
  *
- * IMPORTANT: these models are NOT yet runnable inside an agent/session. The Code
- * Assist adapter is only wired into server-side `completeModelText` — the
- * pi-coding-agent runtime has no `google-gemini-cli` provider / `google-code-assist`
- * api, so `setModel("google-gemini-cli", …)` fails and a session silently falls
- * back to a different model. Until agent-side Code Assist exists we emit them with
- * `sessionSelectable: false` so the ModelSelector shows them as authenticated but
- * visibly unavailable-for-sessions and refuses to bind them. The API-key `google`
- * (Gemini Developer API) provider is unaffected and stays fully selectable.
+ * These models ARE runnable in agent sessions: the generated Code Assist provider
+ * extension registers a `google-code-assist` api inside the pi-coding-agent runtime
+ * and streams to `cloudcode-pa.googleapis.com`, fetching a fresh Bearer token +
+ * project id from the gateway per request. They are therefore emitted as
+ * session-selectable. The API-key `google` (Gemini Developer API) provider is a
+ * distinct wire protocol and is unaffected.
  *
- * Design: docs/design/google-oauth-model-auth.md §4.5.
+ * Caution: Google account (Code Assist / Gemini CLI) usage is subject to the
+ * account's Code Assist quota/tier and is not the official AI Studio API path.
+ *
+ * Design: docs/design/google-session-models.md; docs/design/google-oauth-model-auth.md §4.5.
  */
 
 import { getModels } from "@earendil-works/pi-ai";
@@ -31,26 +32,47 @@ import {
 } from "./google-code-assist.js";
 
 /**
- * Gemini ids the Code Assist API serves. Restricted to first-party `gemini-*`
- * models (Gemma and Vertex-only variants are excluded). A model is included only
- * when pi-ai's `google` catalog also carries it, so we never emit a stale id.
+ * Curated allowlist of Gemini ids the Code Assist (cloudcode-pa) endpoint actually
+ * serves over the OAuth/account path. This is intentionally an explicit allowlist
+ * rather than a `gemini-*` heuristic: pi-ai's `google` catalog carries Developer
+ * API (AI Studio) models that Code Assist 404s on ("Requested entity not found"),
+ * e.g. `gemini-2.0-*`, `gemini-3.5-flash`, and the `*-latest` aliases. Emitting
+ * those made them selectable and produced live HTTP 404 session failures.
+ *
+ * Membership was confirmed against live Code Assist probes (see
+ * docs/google-oauth-models.md). Only emit an id when it is BOTH on this allowlist
+ * AND present in pi-ai's `google` catalog, so we never emit a stale id and metadata
+ * (context window / cost) stays in sync.
  */
+const CODE_ASSIST_ALLOWLIST: ReadonlySet<string> = new Set([
+	"gemini-2.5-flash",
+	"gemini-2.5-flash-lite",
+	"gemini-2.5-pro",
+	"gemini-3-pro-preview",
+	"gemini-3.1-pro-preview",
+	"gemini-3-flash-preview",
+	"gemini-3.1-flash-lite",
+	"gemini-3.1-flash-lite-preview",
+]);
+
 function isCodeAssistEligible(id: string): boolean {
-	const s = id.toLowerCase();
-	return s.startsWith("gemini-") && !s.includes("customtools");
+	return CODE_ASSIST_ALLOWLIST.has(id.toLowerCase());
 }
 
 /**
- * Why a logged-in Google account model can't be picked for a session yet. Shown
- * as the ModelSelector tooltip/copy. Exported so tests can pin it in lockstep.
+ * Account-backed Gemini model list.
+ *
+ * @param opts.ignoreCredential - when true, emit the model list even with no
+ *   Google account credential present. The selector/registry path leaves this
+ *   false so the picker is only populated post-auth, but the agent-side provider
+ *   extension passes true: the `google-code-assist` provider must be REGISTERED
+ *   inside every spawned agent regardless of credential, so a session spawned
+ *   before Google sign-in can still bind a `google-gemini-cli/*` model after the
+ *   user authenticates (the Bearer token is fetched per request from the gateway,
+ *   not at spawn time). See google-code-assist-provider-extension.ts.
  */
-export const GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON =
-	"Signed in, but Google account (Code Assist) models can't run in agent sessions yet — " +
-	"the agent runtime has no Code Assist provider. For Gemini in sessions, add a Google AI " +
-	"Studio API key (provider \u201Cgoogle\u201D) under Settings \u2192 Models.";
-
-export function getGoogleCodeAssistModels(): ApiModel[] {
-	if (!hasGoogleCodeAssistCredential()) return [];
+export function getGoogleCodeAssistModels(opts?: { ignoreCredential?: boolean }): ApiModel[] {
+	if (!opts?.ignoreCredential && !hasGoogleCodeAssistCredential()) return [];
 
 	let base: Array<Record<string, any>> = [];
 	try {
@@ -76,10 +98,8 @@ export function getGoogleCodeAssistModels(): ApiModel[] {
 			cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			// `authenticated` is set by the registry via detectProviderAuth.
 			authenticated: false,
-			// Account-backed Code Assist models are authenticated but not yet runnable
-			// in an agent session (no agent-side Code Assist provider). Gate selection.
-			sessionSelectable: false,
-			sessionUnavailableReason: GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON,
+			// Account-backed Code Assist models run in sessions via the generated
+			// provider extension, so they are session-selectable (no gate).
 		});
 	}
 	return models;

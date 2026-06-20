@@ -1353,8 +1353,7 @@ export function activationEntityEnabledCount(activation: PackActivationResponse)
 function entrypointKindLabel(kind: PackActivationResponse["catalogue"]["entrypoints"][number]["kind"]): string {
 	switch (kind) {
 		case "composer-slash": return "Slash";
-		case "git-widget-button": return "Git widget";
-		case "command-palette": return "Command palette";
+		case "session-menu": return "Session menu";
 		case "route": return "Route";
 		default: return "Entry point";
 	}

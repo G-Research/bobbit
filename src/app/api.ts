@@ -1639,6 +1639,42 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 	}
 }
 
+/**
+ * Update an existing goal's per-goal sub-goal policy via
+ * `PATCH /api/goals/:id/policy`. Used by the existing-goal Sub-goals settings
+ * control on the goal dashboard so a user can turn on sub-goals for a parent
+ * that was created with the toggle off. Backend authz is split server-side
+ * (see nested-goal-routes.ts /policy handler): a body carrying ONLY the
+ * sub-goal opt-in fields (`subgoalsAllowed` / `maxNestingDepth`) is
+ * OPERATOR-class, so a verified human cookie is accepted (else team-lead
+ * match); only bodies that touch orchestration fields
+ * (`divergencePolicy` / `maxConcurrentChildren`) stay team-lead-only. This
+ * helper only ever sends the two sub-goal fields, so it rides the operator
+ * path. It just forwards the request with the session credentials. Returns
+ * true on success.
+ */
+export async function patchGoalSubgoalPolicy(
+	id: string,
+	updates: { subgoalsAllowed?: boolean; maxNestingDepth?: number },
+): Promise<boolean> {
+	try {
+		const body: Record<string, unknown> = {};
+		if (updates.subgoalsAllowed !== undefined) body.subgoalsAllowed = updates.subgoalsAllowed;
+		if (updates.maxNestingDepth !== undefined) body.maxNestingDepth = updates.maxNestingDepth;
+		const res = await gatewayFetch(`/api/goals/${id}/policy`, {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to update sub-goal settings: ${res.status}`);
+		await refreshSessions();
+		return true;
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update sub-goal settings", message, { code, stack });
+		return false;
+	}
+}
+
 export async function deleteGoal(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;
@@ -2476,7 +2512,7 @@ export interface PackPanelWire {
  *  and (for `kind:"route"`) the deep-link routeId. */
 export interface PackEntrypointWire {
 	id: string;
-	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
 	routeId?: string;
 	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };

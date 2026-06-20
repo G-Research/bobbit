@@ -149,7 +149,7 @@ describe("LifecycleHub", () => {
 				let sessionDenied = false;
 				try { await ctx.host.session.readTranscript(); } catch { sessionDenied = true; }
 				return { blocks: [{ id: "store", title: "store", authority: "memory", priority: 1, reason: "r", content: JSON.stringify({ okStore, sessionFlag, agentsFlag, got, sessionDenied }) }] };
-			} };`);
+			} };`, { timeoutMs: 4_000 });
 
 			const lifecycleHub = new LifecycleHub({
 				registry: registry([provider]),

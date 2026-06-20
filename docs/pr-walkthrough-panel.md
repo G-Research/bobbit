@@ -35,18 +35,17 @@ The current end-to-end flow:
 - **Route.** The viewer opens at the generic extension route **`#/ext/pr-walkthrough`**
   (via the pack's `host.ui.navigate` / `openPanel`). There is no `#/walkthrough`
   SPA route and no standalone `/walkthrough?...` pathname route.
-- **Launch (spawn-on-click).** A pack **entrypoint** — a git-widget button, a
-  composer-slash launcher, a command-palette launcher, and a `kind:"route"`
-  deep-link — drives the feature. The launchers spawn a fresh read-only reviewer
+- **Launch (spawn-on-click).** The pack exposes a composer-slash launcher, a
+  session-menu launcher, and a `kind:"route"` deep-link. The launchers spawn a fresh read-only reviewer
   sub-agent and auto-switch the user's view to it. **No panel or tab is ever
   mounted in the current (owner) session** — there is no owner-session
   walkthrough surface at all. The launchers carry **no** hard-coded `jobId`.
-  Selecting `/pr-walkthrough` from composer autocomplete/menu, using the
-  git-widget button, or using the command-palette launcher calls `run` with an
-  empty body and resolves the current branch's open PR. Typed composer forms can
+  Selecting `/pr-walkthrough` from composer autocomplete/menu or choosing
+  **PR Walkthrough** from the session actions menu calls `run` with an empty body
+  and resolves the current branch's open PR. Typed composer forms can
   pass an explicit PR target: `/pr-walkthrough <github-pr-url>` or
-  `/pr-walkthrough <pr-number>`. A no-PR / spawn failure surfaces as an inline
-  error in the git-status-widget dropdown and spawns nothing (no session, no view
+  `/pr-walkthrough <pr-number>`. A no-PR / spawn failure surfaces through visible
+  launcher feedback from the session menu and spawns nothing (no session, no view
   switch). Every click is a **fresh** reviewer (there is no target dedup), so
   multiple reviewers per PR are allowed. See
   [Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child).
@@ -170,8 +169,8 @@ walkthrough pane.
 
 ### Spawn-on-click from every launch surface
 
-All three launchers — the **git-widget button**, the **composer-slash** launcher,
-and the **command-palette** launcher — carry the same declarative target
+Both launchers — the **composer-slash** launcher and the **session-menu**
+launcher — carry the same declarative target
 `{ action: "spawn", route: "run", panelId: "pr-walkthrough.panel" }`
 (`entrypoints/pr-walkthrough-*.yaml`). The platform launcher dispatch
 (`src/app/pack-entrypoints.ts`) calls the pack's **`run`** route (POST) through
@@ -191,8 +190,8 @@ provide an explicit target to `run`:
 These forms only change target resolution; they still spawn a fresh isolated
 reviewer child and switch the view to that child on success. Selecting
 `/pr-walkthrough` from the composer autocomplete/menu, typing `/pr-walkthrough`
-without an argument, clicking the git-widget launcher, and using the
-command-palette launcher all keep the empty-body behavior (`{}`), so `run`
+without an argument, and choosing **PR Walkthrough** from the session actions
+menu keep the empty-body behavior (`{}`), so `run`
 resolves the current branch's open GitHub PR.
 
 **Why spawn-on-click and not navigate-then-autorun?** The previous model navigated
@@ -203,11 +202,11 @@ owner session with a walkthrough tab the user never asked for and made the
 which **is** the user gesture — keeps the owner session untouched and makes the
 child session the single home of the walkthrough.
 
-**No-PR / spawn failure → inline error, nothing spawned.** When the current branch
+**No-PR / spawn failure → visible feedback, nothing spawned.** When the current branch
 has no open GitHub PR (or the spawn otherwise fails), `run` returns `{ ok: false }`
-(e.g. `code: "NO_PR"`); the launcher dispatch surfaces the message **inline in the
-git-status-widget dropdown** (`data-testid="git-widget-launcher-error"`), keeps the
-dropdown open, and spawns **no** session and performs **no** view switch.
+(e.g. `code: "NO_PR"`); the launcher dispatch surfaces the message through visible
+session-menu launcher feedback, does not leave the menu wedged, and spawns
+**no** session and performs **no** view switch.
 
 **Always fresh — no dedup.** Every deliberate click creates a **new** reviewer,
 even for the same PR (the old server-side `reviewerKey` idempotency is gone).
@@ -391,7 +390,7 @@ retired.
 ### Target resolution — GitHub PRs only
 
 When a launcher invokes `run` with an empty body (composer autocomplete/menu,
-git-widget, command palette, or typed `/pr-walkthrough` without an argument), the
+session-menu selection, or typed `/pr-walkthrough` without an argument), the
 `run` route resolves **the current branch's open GitHub PR** from the
 server-derived session worktree via `gh`/`git`. An explicit target in the body
 (typed composer URL/number, a deep-link, or test) always wins.
@@ -400,8 +399,8 @@ The walkthrough is **GitHub-PR-only**. The route rejects two cases before any
 spawn:
 
 - **No PR for the branch** → `{ code: "NO_PR" }`; the launcher dispatch surfaces
-  this as an **inline error in the git-status-widget dropdown** — no reviewer is
-  spawned and the view does not switch (there is no owner-session panel).
+  this through **visible launcher feedback from the session menu** — no reviewer
+  is spawned and the view does not switch (there is no owner-session panel).
 - **A local-only target** (`baseSha`/`headSha` with no GitHub PR) →
   `{ code: "LOCAL_UNSUPPORTED" }`. A local target would spawn a reviewer that can
   never submit (the production YAML schema requires `pr.provider: github`), so it
@@ -537,8 +536,8 @@ The pack-served viewer is covered end-to-end by
 `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install-free built-in-band resolution
 → launcher → live `bundle` recompute → render → `publish` → reload persistence →
 entrypoint and concrete-tool activation toggles). The launch-UX correction is pinned in the same spec: clicking the
-git-widget launcher on a branch with no PR shows the inline
-`git-widget-launcher-error` and spawns **no** session / performs **no** view switch
+session-menu launcher on a branch with no PR shows visible launcher feedback
+and spawns **no** session / performs **no** view switch
 (the browser harness has no real PR, so a click resolves `NO_PR`); the child pane
 auto-shows the pending `PR Walkthrough: In Progress` + spinner with **no** Run/Load
 buttons; and on submit the child pane flips to rendered cards and **re-renders
@@ -808,7 +807,7 @@ Common warning/error categories:
 - **Renamed/deleted/copied files** — status and old paths are preserved so reviewers can understand the file movement and export can map valid line anchors.
 - **Empty diffs** — resolve to an orientation-only walkthrough with zero changed files.
 - **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs (see [Trusted GitHub hosts](#trusted-github-hosts)).
-- **No PR for the current branch** (`NO_PR`) — the `run` route found no open GitHub PR for the session's branch; the launcher dispatch shows an inline error in the git-status-widget dropdown and spawns nothing (no session, no view switch).
+- **No PR for the current branch** (`NO_PR`) — the `run` route found no open GitHub PR for the session's branch; the launcher dispatch shows visible launcher feedback from the session menu and spawns nothing (no session, no view switch).
 - **Local-only target** (`LOCAL_UNSUPPORTED`) — a base/head SHA pair with no GitHub PR is rejected before any reviewer is spawned (the run path is GitHub-PR-only — a local target could never submit the production YAML).
 
 Warnings are shown at the top of the panel and again in export preview when they
@@ -1024,7 +1023,7 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - binding-routed submit/bundle authorization by `X-Bobbit-Session-Secret` (no submit proof anywhere in the tree), and submit/validation behavior;
 - the agent-side resolve/export routes;
 - the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the three walkthrough tools and its system prompt carries the YAML schema, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + schema across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after submit the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
-- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR inline `git-widget-launcher-error` (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
+- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
 - pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.

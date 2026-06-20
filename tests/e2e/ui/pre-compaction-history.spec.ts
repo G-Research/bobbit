@@ -273,6 +273,46 @@ test.describe("Pre-compaction history affordance", () => {
 		// assertion is the primary repro signal.
 		await expect(cards).toHaveCount(1, { timeout: 8_000 });
 
+		// DOM-ORDER regression (docs/design/fix-compaction-ordering.md §3.2):
+		// in the SAME live session the compaction card + pre-compaction-history
+		// affordance must render BEFORE the preserved recent tail message. The
+		// mock keeps a single active-branch tail ("Resuming work after the
+		// summary."). Pre-fix the live `compact_active` card retains a positive
+		// reducer `_order` while the preserved-tail snapshot row gets a negative
+		// order, so the card sorts AFTER the tail (the reported bug); only a
+		// reload/navigate-away fixes it. We compare DOM document order (robust to
+		// scroll/layout) rather than y-coordinates.
+		const domOrder = await page.evaluate(() => {
+			const card = document.querySelector("[data-testid='compaction-summary-card']");
+			const widget = document.querySelector("[data-testid='pre-compaction-history']");
+			const tail = Array.from(document.querySelectorAll("assistant-message"))
+				.find((el) => (el.textContent || "").includes("Resuming work after the summary")) || null;
+			const before = (a: Element | null, b: Element | null): boolean | null => {
+				if (!a || !b) return null;
+				// DOCUMENT_POSITION_FOLLOWING (4) set => b follows a in document order.
+				return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+			};
+			return {
+				hasCard: !!card,
+				hasWidget: !!widget,
+				hasTail: !!tail,
+				cardBeforeTail: before(card, tail),
+				widgetBeforeTail: before(widget, tail),
+			};
+		});
+		expect(
+			domOrder.hasCard && domOrder.hasWidget && domOrder.hasTail,
+			`card/affordance/tail must all be present in DOM: ${JSON.stringify(domOrder)}`,
+		).toBe(true);
+		expect(
+			domOrder.cardBeforeTail,
+			"compaction summary card must appear BEFORE the preserved recent message in DOM order",
+		).toBe(true);
+		expect(
+			domOrder.widgetBeforeTail,
+			"pre-compaction-history affordance must appear BEFORE the preserved recent message in DOM order",
+		).toBe(true);
+
 		// Expanding reveals the 3 orphaned pre-compaction rows.
 		await page.locator("[data-testid='pre-compaction-toggle']").click();
 		await expect(widget).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });

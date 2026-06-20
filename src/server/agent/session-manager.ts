@@ -29,6 +29,7 @@ import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
 	mergeCompactionSidecarIntoMessages,
+	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
@@ -47,6 +48,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -1950,6 +1952,16 @@ export class SessionManager {
 			}
 		}
 
+		// Google account (Code Assist) provider extension. Mirrors
+		// session-setup.ts::resolveToolActivation so respawn/restore paths keep the
+		// provider registered and `google-gemini-cli/*` models stay runnable after a
+		// gateway restart. Written unconditionally (not credential-gated) so a
+		// session spawned before Google sign-in can bind such a model after auth.
+		const codeAssistPath = writeGoogleCodeAssistProviderExtension(sessionId);
+		if (codeAssistPath) {
+			args.push("--extension", codeAssistPath);
+		}
+
 		return { args, env: activation.env };
 	}
 
@@ -2501,6 +2513,11 @@ export class SessionManager {
 					session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
 				}
 				this.broadcastQueue(session, { includeInFlightSteers: true });
+				// A steer rejection can race with abort settlement: agent_end may have
+				// already broadcast idle and run its one drain before this catch puts the
+				// row back. Redrain immediately in that settled-idle case so the recovered
+				// steer is not parked until the next user prompt.
+				if (session.status === "idle" && !session.lastTurnErrored) this.drainQueue(session);
 			} else {
 				this.persistInFlightSteerLedger(session);
 				console.warn(`[session-manager] _dispatchSteer failed for ${session.id} after in-flight ledger was already reconciled; not re-enqueueing duplicate steer`);
@@ -3020,13 +3037,52 @@ export class SessionManager {
 				// a failed compaction has no orphan boundary to recover.
 				if (success) (event as any).compactionId = pending.compactionId;
 			}
-			// Manual path: ws/handler.ts owns the sidecar append but stashes the
-			// shared compactionId on the session synchronously before the RPC, so
-			// the agent-emitted manual compaction_end can carry it to the client.
+			// Manual path: ws/handler.ts stashes the shared compactionId on the
+			// session synchronously before the RPC. The agent emits this manual
+			// `compaction_end` BEFORE the RPC promise resolves in ws/handler.ts,
+			// and we call refreshAfterCompaction() below. If we waited for the
+			// ws-handler's post-RPC append, that snapshot would lack the persisted
+			// sidecar anchor and the live card would stay positive-ordered (sorts
+			// after the preserved tail). So write the SUCCESS sidecar row HERE,
+			// synchronously, before refreshAfterCompaction — using the stashed
+			// compactionId and this event's result payload. ws/handler.ts still
+			// owns the FAILURE append (when the RPC rejects without ever emitting a
+			// successful compaction_end), and skips its own success append via the
+			// `_manualSidecarWritten` marker so we don't double-write.
 			if (reason === "manual") {
 				const manualId = (session as any)._manualCompactionId as string | undefined;
 				const manualAborted = !!(event as any).aborted;
+				const manualError = (event as any).errorMessage as string | undefined;
+				const manualResult = (event as any).result as
+					| { tokensBefore?: number; firstKeptEntryId?: string }
+					| undefined;
+				const manualSuccess = !!manualId && !manualAborted && !manualError && !!manualResult;
 				if (manualId && !manualAborted) (event as any).compactionId = manualId;
+				if (manualId && manualSuccess) {
+					const endedAtMs = Date.now();
+					const startedAtMs = parseCompactionStartMs(manualId) ?? endedAtMs;
+					try {
+						const wrote = appendCompactionSidecarEntry(session.id, {
+							schemaVersion: 1,
+							id: manualId,
+							trigger: "manual",
+							tokensBefore: manualResult?.tokensBefore ?? null,
+							tokensAfter: null,
+							durationMs: Math.max(0, endedAtMs - startedAtMs),
+							startedAt: new Date(startedAtMs).toISOString(),
+							endedAt: new Date(endedAtMs).toISOString(),
+							success: true,
+							firstKeptEntryId: manualResult?.firstKeptEntryId ?? null,
+						});
+						// Tell ws/handler.ts not to append a duplicate success row — but
+						// ONLY if our append actually succeeded. On failure leave the
+						// marker unset so the ws/handler.ts fallback can append the row
+						// when the RPC resolves (otherwise the sidecar boundary is lost).
+						if (wrote) (session as any)._manualSidecarWritten = manualId;
+					} catch (err) {
+						console.warn(`[session-manager] Failed to append manual compaction sidecar for ${session.id}:`, err);
+					}
+				}
 				(session as any)._manualCompactionId = undefined;
 			}
 			(session as any)._pendingCompactionStart = undefined;

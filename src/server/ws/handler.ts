@@ -15,7 +15,6 @@ import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
-import { isSessionSelectableProvider } from "../agent/google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
@@ -665,14 +664,6 @@ export function handleWebSocketConnection(
 					});
 					break;
 				case "set_model":
-					// Defence-in-depth: reject models the agent runtime can't run (e.g.
-					// google-gemini-cli Code Assist, emitted with sessionSelectable:false)
-					// without mutating session state. The picker already hides these, so
-					// this only fires for stale clients or direct API writes.
-					if (!isSessionSelectableProvider(msg.provider)) {
-						send(ws, { type: "error", message: `Model provider "${msg.provider}" can't run in agent sessions yet.`, code: "MODEL_NOT_SESSION_SELECTABLE" });
-						break;
-					}
 					try {
 						await session.rpcClient.setModel(msg.provider, msg.modelId);
 						sessionManager.updateModelNameFile(session.id, msg.modelId);
@@ -759,25 +750,43 @@ export function handleWebSocketConnection(
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
 							const endedAtMs = Date.now();
 							session.isCompacting = false;
-							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
-							const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
-							// Persist the sidecar row so the card survives reload.
-							appendCompactionSidecarEntry(sessionId, {
-								schemaVersion: 1,
-								id: compactionId,
-								trigger: "manual",
-								tokensBefore,
-								tokensAfter: null,
-								durationMs: endedAtMs - startedAtMs,
-								startedAt: new Date(startedAtMs).toISOString(),
-								endedAt: new Date(endedAtMs).toISOString(),
-								success: true,
-								firstKeptEntryId,
-							});
+							// session-manager's manual `compaction_end` branch writes
+							// the SUCCESS sidecar row synchronously BEFORE its
+							// refreshAfterCompaction() so the post-compaction snapshot
+							// carries the orphan-boundary anchor (otherwise the live
+							// card stays positive-ordered and sorts after the preserved
+							// tail). The agent emits that event before this RPC promise
+							// resolves, so by here the row is already persisted. Skip our
+							// own success append to avoid a duplicate sidecar line. We
+							// only write here as a fallback when session-manager did NOT
+							// (e.g. the agent emitted no successful manual compaction_end
+							// with a result payload).
+							const alreadyWritten = (session as any)._manualSidecarWritten === compactionId;
+							(session as any)._manualSidecarWritten = undefined;
+							if (!alreadyWritten) {
+								const tokensBefore = compactResult?.data?.tokensBefore ?? null;
+								const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
+								// Persist the sidecar row so the card survives reload.
+								appendCompactionSidecarEntry(sessionId, {
+									schemaVersion: 1,
+									id: compactionId,
+									trigger: "manual",
+									tokensBefore,
+									tokensAfter: null,
+									durationMs: endedAtMs - startedAtMs,
+									startedAt: new Date(startedAtMs).toISOString(),
+									endedAt: new Date(endedAtMs).toISOString(),
+									success: true,
+									firstKeptEntryId,
+								});
+							}
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							const endedAtMs = Date.now();
 							session.isCompacting = false;
+							// RPC rejected: own the failure append. session-manager only
+							// writes the success row, so clear the dedup marker defensively.
+							(session as any)._manualSidecarWritten = undefined;
 							appendCompactionSidecarEntry(sessionId, {
 								schemaVersion: 1,
 								id: compactionId,
