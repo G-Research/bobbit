@@ -210,6 +210,101 @@ describe("createPackStore — concurrent put does NOT exceed quota (per-pack mut
 	});
 });
 
+describe("createPackStore — delete/stats and scoped review quotas", () => {
+	it("delete removes a key and frees its counted bytes", async () => {
+		const store = createPackStore({ rootDir });
+		const pack = "pack-delete";
+		await store.put(pack, "reviews/a/final/payload", "x".repeat(40));
+		await store.put(pack, "reviews/a/draft/chunks/one", "y".repeat(20));
+		const before = await store.stats(pack, "reviews/a/");
+		assert.equal(before.keys, 2);
+		assert.ok(before.bytes > 0);
+		assert.equal(await store.delete("pack-delete-other", "reviews/a/final/payload"), false);
+		assert.equal(await store.get(pack, "reviews/a/final/payload"), "x".repeat(40));
+		assert.equal(await store.delete(pack, "reviews/a/final/payload"), true);
+		assert.equal(await store.delete(pack, "reviews/a/final/payload"), false);
+		const after = await store.stats(pack, "reviews/a/");
+		assert.equal(after.keys, 1);
+		assert.ok(after.bytes < before.bytes);
+		assert.equal(await store.get(pack, "reviews/a/final/payload"), null);
+	});
+
+	it("deletePrefix deletes only decoded keys matching the caller pack and prefix", async () => {
+		const store = createPackStore({ rootDir });
+		await store.put("pack-gc-a", "reviews/a/final/payload", 1);
+		await store.put("pack-gc-a", "reviews/a/draft/chunks/one", 2);
+		await store.put("pack-gc-a", "reviews/ab/final/payload", 3);
+		await store.put("pack-gc-b", "reviews/a/final/payload", 4);
+		assert.equal(await store.deletePrefix("pack-gc-a", "reviews/a/"), 2);
+		assert.deepEqual(await store.list("pack-gc-a"), ["reviews/ab/final/payload"]);
+		assert.deepEqual(await store.list("pack-gc-b"), ["reviews/a/final/payload"]);
+	});
+
+	it("scoped review quotas are per prefix, not the legacy per-pack total", async () => {
+		const store = createPackStore({
+			rootDir,
+			quota: {
+				maxValueBytes: 1024,
+				maxTotalBytes: 100,
+				maxTotalBytesEmergency: 1024,
+				profiles: { "review-final": { maxTotalBytes: 120 } },
+			},
+		});
+		const value = "x".repeat(70);
+		await store.put("pack-scoped", "reviews/a/final/payload", value, { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } });
+		await store.put("pack-scoped", "reviews/b/final/payload", value, { quotaScope: { prefix: "reviews/b/final/", profile: "review-final" } });
+		const stats = await store.stats("pack-scoped");
+		assert.equal(stats.keys, 2);
+		assert.ok(stats.bytes > 100, "combined scoped writes exceed the legacy unscoped pack cap");
+		await store.put("pack-scoped-unscoped", "a", value);
+		await assert.rejects(() => store.put("pack-scoped-unscoped", "b", value), /store full/);
+	});
+
+	it("rejects invalid quota scopes and unknown profiles with structured codes", async () => {
+		const store = createPackStore({ rootDir, quota: { maxValueBytes: 1024 } });
+		await assert.rejects(
+			() => store.put("pack-scope-invalid", "reviews/a/final/payload", "x", { quotaScope: { prefix: "reviews/b/final/", profile: "review-final" } }),
+			(e) => e instanceof PackStoreQuotaError && e.code === "STORE_QUOTA_SCOPE_INVALID",
+		);
+		await assert.rejects(
+			() => store.put("pack-scope-invalid", "reviews/a/final/payload", "x", { quotaScope: { prefix: "reviews/a/final/", profile: "bogus" as never } }),
+			(e) => e instanceof PackStoreQuotaError && e.code === "STORE_QUOTA_PROFILE_INVALID",
+		);
+		assert.deepEqual(await store.list("pack-scope-invalid"), []);
+	});
+
+	it("emergency per-pack ceiling prevents unlimited scoped sharding", async () => {
+		const store = createPackStore({
+			rootDir,
+			quota: {
+				maxValueBytes: 1024,
+				maxTotalBytes: 80,
+				maxTotalBytesEmergency: 170,
+				profiles: { "review-final": { maxTotalBytes: 120 } },
+			},
+		});
+		const value = "e".repeat(60);
+		await store.put("pack-emergency", "reviews/a/final/payload", value, { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } });
+		await store.put("pack-emergency", "reviews/b/final/payload", value, { quotaScope: { prefix: "reviews/b/final/", profile: "review-final" } });
+		await assert.rejects(
+			() => store.put("pack-emergency", "reviews/c/final/payload", value, { quotaScope: { prefix: "reviews/c/final/", profile: "review-final" } }),
+			/emergency limit/,
+		);
+	});
+
+	it("oversized scoped writes are rejected before corrupting an existing key", async () => {
+		const store = createPackStore({
+			rootDir,
+			quota: { maxValueBytes: 1024, profiles: { "review-draft": { maxTotalBytes: 90 } } },
+		});
+		const key = "reviews/a/draft/chunks/context";
+		const opts = { quotaScope: { prefix: "reviews/a/draft/", profile: "review-draft" as const } };
+		await store.put("pack-scope-overwrite", key, "ok", opts);
+		await assert.rejects(() => store.put("pack-scope-overwrite", key, "z".repeat(100), opts), /quota scope full/);
+		assert.equal(await store.get("pack-scope-overwrite", key), "ok");
+	});
+});
+
 describe("createPackStore — atomic writes + corrupt-file quarantine", () => {
 	it("leaves no temp files behind and keeps the value intact across overwrite", async () => {
 		const store = createPackStore({ rootDir });
@@ -273,6 +368,9 @@ describe("createPackStore — non-pack / invalid identity is rejected", () => {
 		await assert.rejects(() => store.get("", "k"), /pack identity/);
 		await assert.rejects(() => store.put("", "k", 1), /pack identity/);
 		await assert.rejects(() => store.list(""), /pack identity/);
+		await assert.rejects(() => store.delete("", "k"), /pack identity/);
+		await assert.rejects(() => store.deletePrefix("", "k"), /pack identity/);
+		await assert.rejects(() => store.stats(""), /pack identity/);
 	});
 
 	it("a packId carrying path separators or .. is rejected", async () => {
@@ -286,5 +384,6 @@ describe("createPackStore — non-pack / invalid identity is rejected", () => {
 		const store = createPackStore({ rootDir });
 		await assert.rejects(() => store.put("pack-a", "", 1), /non-empty/);
 		await assert.rejects(() => store.get("pack-a", ""), /non-empty/);
+		await assert.rejects(() => store.delete("pack-a", ""), /non-empty/);
 	});
 });

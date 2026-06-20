@@ -83,6 +83,12 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(caps.hasGatewayMember).toBe(false);
 	});
 
+	test("host.store exposes scoped persistence methods", async ({ page }) => {
+		await gotoAndWait(page);
+		const methods = await page.evaluate(() => (window as any).__storeMethods());
+		expect(methods).toEqual(["get:function", "put:function", "list:function", "delete:function", "deletePrefix:function", "stats:function"]);
+	});
+
 	test("no Phase-2 member is a frozen 'reserved for Phase 2' stub anymore", async ({ page }) => {
 		await gotoAndWait(page);
 		// Slices B1/B2/B3/B4/C1 implemented store.* / session.read* / callRoute / ui.*
