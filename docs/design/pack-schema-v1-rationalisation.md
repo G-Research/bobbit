@@ -212,10 +212,10 @@ target:
     jobId: job-litmus-1
 ```
 
-Field validity is identical to the existing `parseEntrypoints` (`tool-contributions.ts:289`): `route`
-kind needs `routeId` + `target.panelId` + optional `paramKeys`; launcher kinds need `label` + a
-structured `target` (`{panelId}`, `{route}`, or `{ action: "spawn", route, panelId }`). The only change is **one entry per file** instead of an
-array embedded in a tool YAML.
+Field validity is identical to the existing `parseEntrypoints`: `route` kind needs
+`routeId` + `target.panelId` + optional `paramKeys`; launcher kinds need `label` + a
+structured `target` (`{panelId}`, `{route}`, or `{ action: "spawn", route, panelId }`).
+The only change is **one entry per file** instead of an array embedded in a tool YAML.
 
 ---
 
