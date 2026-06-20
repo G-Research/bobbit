@@ -13,7 +13,7 @@ import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
-import { renderModelRow, formatModelPref, formatRoleDefaultModelLabel, ensureModelDefaultsLoaded } from "./settings-page.js";
+import { renderModelRow, formatModelPref, getRoleDefaultModel, getRoleDefaultModelPrefKey, ensureModelDefaultsLoaded } from "./settings-page.js";
 
 // ============================================================================
 // HELPERS
@@ -280,6 +280,19 @@ async function handleSave(): Promise<void> {
  * has already surfaced the error via `showConnectionError`; we just rerender.
  */
 async function persistInlineModel(role: RoleData, model: string, thinkingLevel: string): Promise<void> {
+	const projectId = getConfigProjectId();
+	// Project scope: an inherited role has no project-layer override yet, so the
+	// PUT /api/roles/:name?projectId= path 404s ("Role not found in project").
+	// Copy the resolved role into the project layer first so every editable list
+	// row can be saved inline. System-scope builtins are auto-promoted to a
+	// server override by the PUT handler, so no explicit customize is needed there.
+	if (projectId && isInherited((role as any).origin as ConfigOrigin | undefined)) {
+		const customized = await customizeItem("roles", role.name, "project", projectId);
+		if (!customized) {
+			renderApp();
+			return;
+		}
+	}
 	const ok = await updateRole(role.name, {
 		label: role.label,
 		promptTemplate: role.promptTemplate,
@@ -287,7 +300,7 @@ async function persistInlineModel(role: RoleData, model: string, thinkingLevel: 
 		toolPolicies: role.toolPolicies ?? {},
 		model,
 		thinkingLevel,
-	}, getConfigProjectId() || undefined);
+	}, projectId || undefined);
 	if (!ok) {
 		renderApp();
 		return;
@@ -531,39 +544,199 @@ interface RoleRowOptions {
 	modelControl?: RoleRowModelControl;
 }
 
+// ----------------------------------------------------------------------------
+// Inline list-row model/thinking source resolution
+//
+// Each list row shows two independent fields (model + thinking) with a compact
+// source badge. When the server attaches field-level `modelResolution`
+// metadata we use it; otherwise we degrade using `origin` / `isInherited` plus
+// the default-pref display heuristic so the row always shows meaningful info.
+// ----------------------------------------------------------------------------
+
+const THINKING_LEVEL_LABELS: Record<string, string> = {
+	off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high",
+};
+
+/** Optional backwards-compatible field-level source metadata from /api/roles.
+ *  Attached by the server on `role.modelResolution`; absent on older API data. */
+interface RoleFieldResolution {
+	value?: string;
+	source?: "role" | "inherited-role" | "default" | "auto";
+	origin?: ConfigOrigin;
+	originPackName?: string | null;
+	editable?: boolean;
+}
+interface RoleModelResolution {
+	model?: RoleFieldResolution;
+	thinkingLevel?: RoleFieldResolution;
+}
+
+type RoleFieldSourceKind = "role" | "inherited-role" | "default" | "auto";
+
+interface RoleFieldDisplay {
+	/** True when the value comes from a role-level override (current or inherited role). */
+	override: boolean;
+	kind: RoleFieldSourceKind;
+	/** Compact source badge text, e.g. "Role override", "Session default". */
+	badge: string;
+	/** Resolved value text (model id / thinking label) for the source line. */
+	effectiveLabel: string;
+}
+
+interface RoleModelDisplay {
+	/** Pack-managed roles are read-only inline (manage via the Marketplace). */
+	packReadonly: boolean;
+	packName?: string | null;
+	model: RoleFieldDisplay;
+	thinking: RoleFieldDisplay;
+	state: "override" | "thinking-override" | "inherited" | "readonly";
+}
+
+function roleOriginDetailLabel(origin?: ConfigOrigin, packName?: string | null): string {
+	if (packName) return `pack ${packName}`;
+	switch (origin) {
+		case "project": return "Project";
+		case "server": return "Server";
+		case "builtin": return "Built-in";
+		case "user": return "User";
+		default: return "";
+	}
+}
+
+function thinkingLevelLabel(value: string): string {
+	return THINKING_LEVEL_LABELS[value] ?? value;
+}
+
 /**
- * Inline model/thinking control rendered in the middle of a list row. Reuses
- * the shared `renderModelRow`. Inherited rows (no `role.model`) show the
- * resolved default label and dim the thinking selector; override rows show the
- * actual model with clear/Test from `renderModelRow`.
+ * Resolve the model + thinking display (effective value + source badge) for a
+ * list row. Prefers server `modelResolution` metadata when present; otherwise
+ * degrades using `origin` / `isInherited` plus the default-pref heuristic.
+ */
+function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
+	const origin = (role as any).origin as ConfigOrigin | undefined;
+	const packName = (role as any).originPackName as string | null | undefined;
+	const packId = (role as any).originPackId as string | null | undefined;
+	const meta = (role as any).modelResolution as RoleModelResolution | undefined;
+	const packReadonly = !!(packName || packId);
+	const inheritedRole = isInherited(origin);
+	const prefKey = getRoleDefaultModelPrefKey(role.name);
+	const def = getRoleDefaultModel(role.name);
+	const defaultBadge = prefKey === "default.reviewModel" ? "Review default" : "Session default";
+
+	const inheritedBadge = (m: { origin?: ConfigOrigin; originPackName?: string | null }): string => {
+		const detail = roleOriginDetailLabel(m.origin ?? origin, m.originPackName ?? packName);
+		return detail ? `Inherited role override · ${detail}` : "Inherited role override";
+	};
+
+	const fromMeta = (m: RoleFieldResolution, format: (v: string) => string, emptyLabel: string): RoleFieldDisplay => {
+		const value = m.value ?? "";
+		const effectiveLabel = value ? format(value) : emptyLabel;
+		switch (m.source) {
+			case "role": return { override: true, kind: "role", badge: "Role override", effectiveLabel };
+			case "inherited-role": return { override: true, kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel };
+			case "auto": return { override: false, kind: "auto", badge: "Auto default", effectiveLabel };
+			default: return { override: false, kind: "default", badge: defaultBadge, effectiveLabel };
+		}
+	};
+
+	const overrideField = (value: string, format: (v: string) => string): RoleFieldDisplay =>
+		inheritedRole
+			? { override: true, kind: "inherited-role", badge: inheritedBadge({}), effectiveLabel: format(value) }
+			: { override: true, kind: "role", badge: "Role override", effectiveLabel: format(value) };
+
+	// MODEL
+	let model: RoleFieldDisplay;
+	if (meta?.model?.source) {
+		model = fromMeta(meta.model, (v) => formatModelPref(v), formatModelPref(def.model));
+	} else if (role.model) {
+		model = overrideField(role.model, (v) => formatModelPref(v));
+	} else {
+		model = def.model
+			? { override: false, kind: "default", badge: defaultBadge, effectiveLabel: formatModelPref(def.model) }
+			: { override: false, kind: "auto", badge: "Auto default", effectiveLabel: formatModelPref("") };
+	}
+
+	// THINKING
+	const defThinkingLabel = def.thinking ? thinkingLevelLabel(def.thinking) : "Default";
+	let thinking: RoleFieldDisplay;
+	if (meta?.thinkingLevel?.source) {
+		thinking = fromMeta(meta.thinkingLevel, (v) => thinkingLevelLabel(v), defThinkingLabel);
+	} else if (role.thinkingLevel) {
+		thinking = overrideField(role.thinkingLevel, (v) => thinkingLevelLabel(v));
+	} else {
+		thinking = def.thinking
+			? { override: false, kind: "default", badge: defaultBadge, effectiveLabel: defThinkingLabel }
+			: { override: false, kind: "auto", badge: "Auto default", effectiveLabel: "Default" };
+	}
+
+	let state: RoleModelDisplay["state"];
+	if (packReadonly) state = "readonly";
+	else if (role.model) state = "override";
+	else if (role.thinkingLevel) state = "thinking-override";
+	else state = "inherited";
+
+	return { packReadonly, packName, model, thinking, state };
+}
+
+/**
+ * Inline model/thinking control rendered in the middle of a list row.
+ *
+ * Editable rows reuse the shared `renderModelRow` (model picker + clear/Test +
+ * thinking select) as the interactive line, then add a compact source line
+ * showing where each field's effective value comes from. Model and thinking are
+ * independent: clearing the model leaves any thinking override in place (shown
+ * as a thinking-only override), and thinking can be set/cleared on its own.
+ * Read-only pack rows render a static effective-value summary plus the reason.
  */
 function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl): TemplateResult {
-	const overridden = !!(role.model && role.model.length > 0);
-	const stateClass = overridden ? "role-row-model-control--override" : "role-row-model-control--inherited";
+	const display = computeRoleModelDisplay(role);
 	const stopRow = (e: Event) => e.stopPropagation();
+
+	if (display.packReadonly) {
+		return html`
+			<div class="role-row-model-control role-row-model-control--readonly"
+				data-testid="role-row-model-control" data-model-state="readonly"
+				@click=${stopRow} @keydown=${stopRow}>
+				<div class="role-row-model-readonly">
+					<div class="rrm-ro-row"><span class="rrm-ro-key">Model</span><span class="rrm-ro-val" title="${display.model.effectiveLabel}">${display.model.effectiveLabel}</span></div>
+					<div class="rrm-ro-row"><span class="rrm-ro-key">Thinking</span><span class="rrm-ro-val">${display.thinking.effectiveLabel}</span></div>
+				</div>
+				<span class="rrm-badge rrm-badge--pack" data-testid="role-row-model-source"
+					title="Installed from pack '${display.packName}'. Manage it in the Marketplace.">Managed by pack ${display.packName}</span>
+			</div>
+		`;
+	}
+
+	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string) => html`
+		<span class="rrm-src" data-testid="${testid}">
+			<span class="rrm-src-key">${key}</span>
+			${f.override ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
+			<span class="rrm-badge rrm-badge--${f.kind}">${f.badge}</span>
+		</span>
+	`;
+
 	return html`
-		<div class="role-row-model-control ${stateClass}"
+		<div class="role-row-model-control role-row-model-control--${display.state}"
 			data-testid="role-row-model-control"
-			data-model-state="${overridden ? "override" : "inherited"}"
+			data-model-state="${display.state}"
 			@click=${stopRow}
 			@keydown=${stopRow}>
-			${renderModelRow(
-				"",
-				"",
-				overridden ? (role.model ?? "") : "",
-				(v) => control.onModelChange(role, v),
-				overridden ? (role.thinkingLevel ?? "") : "",
-				(v) => {
-					// Inherited rows must never auto-save a thinking-only override
-					// while no model override exists. renderModelRow's reactive
-					// clamp also fires onThinkingChange via queueMicrotask — ignore
-					// it here so an inherited row stays inherited.
-					if (!overridden) return;
-					control.onThinkingChange(role, v);
-				},
-				"",
-				{ fallbackLabel: overridden ? "(use default)" : formatRoleDefaultModelLabel(role.name) },
-			)}
+			<div class="role-row-model-control-main">
+				${renderModelRow(
+					"",
+					"",
+					role.model ?? "",
+					(v) => control.onModelChange(role, v),
+					role.thinkingLevel ?? "",
+					(v) => control.onThinkingChange(role, v),
+					"",
+					{ fallbackLabel: "(use default)" },
+				)}
+			</div>
+			<div class="role-row-model-sources">
+				${sourceLine("Model", display.model, "role-row-model-source")}
+				${sourceLine("Thinking", display.thinking, "role-row-thinking-source")}
+			</div>
 		</div>
 	`;
 }
@@ -670,12 +843,14 @@ function renderListView(): TemplateResult {
 		modelControl: {
 			savedFlashRole: savedModelFlashRole,
 			onModelChange: (role, model) => {
-				// Inherited -> override: preserve existing thinking if present.
-				// Clear -> fully revert to inherited/default display.
-				void persistInlineModel(role, model, model ? (role.thinkingLevel ?? "") : "");
+				// Model and thinking are independent overrides. Setting/clearing the
+				// model preserves any existing thinking override — clearing the model
+				// alone yields a thinking-only override (shown clearly in the row).
+				void persistInlineModel(role, model, role.thinkingLevel ?? "");
 			},
 			onThinkingChange: (role, thinking) => {
-				// Only fired for override rows (guarded in the inline control).
+				// Thinking is editable/clearable independently of the model, so even
+				// inherited rows can gain (or drop) a thinking-only override.
 				void persistInlineModel(role, role.model ?? "", thinking);
 			},
 		},
@@ -900,7 +1075,7 @@ export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
 		const thinkingDisplay = thinkingLevel || "(default)";
 		return html`
 			<p class="roles-tools-note" data-testid="roles-model-tab">
-				Overrides the global default for sessions running as this role. Leave blank to inherit.
+				Role override — empty inherits the role/default hierarchy (inherited role override, then session/review default).
 			</p>
 			<div class="flex flex-col gap-1" data-testid="roles-model-readonly">
 				<div class="flex items-center gap-2">
@@ -916,7 +1091,7 @@ export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
 	}
 	return html`
 		<p class="roles-tools-note" data-testid="roles-model-tab">
-			Overrides the global default for sessions running as this role. Leave blank to inherit.
+			Role override — empty inherits the role/default hierarchy (inherited role override, then session/review default).
 		</p>
 		${renderModelRow(
 			"Model",
