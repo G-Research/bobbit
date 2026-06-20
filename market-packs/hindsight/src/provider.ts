@@ -33,6 +33,7 @@ import {
 	truncate,
 	type EffectiveConfig,
 	type PendingBuffer,
+	type QueueEntry,
 	type RuntimeContext,
 	type StoreLike,
 	type Tags,
@@ -164,16 +165,32 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	}
 }
 
+/** Replay ONE queued entry into the bank/namespace it was ORIGINALLY routed to
+ *  (captured at enqueue) — never the current hook's (possibly per-project-
+ *  overridden) `cfg.bank`, so a failed retain can never cross banks/projects.
+ *  Entries queued before the `bank`/`namespace` fields existed fall back to the
+ *  current cfg. Throws on failure so callers can decide whether to requeue. */
+async function retainQueueEntry(store: StoreLike, cfg: EffectiveConfig, runtime: RuntimeContext | undefined, entry: QueueEntry): Promise<void> {
+	const bank = entry.bank ?? cfg.bank;
+	const namespace = entry.namespace ?? cfg.namespace;
+	// Effective cfg pinned to the entry's target so ensureBank + mission + retain all
+	// agree on the ORIGINAL bank/namespace (deployment fields are server-global and
+	// unchanged by the per-project overlay, so reusing cfg's baseUrl/auth is correct).
+	const targetCfg: EffectiveConfig = { ...cfg, bank, namespace };
+	const cc = clientConfig(cfg, runtime);
+	const client = await makeClient(cc.namespace === namespace ? cc : { ...cc, namespace });
+	await client.ensureBank(bank);
+	await applyBankMission(store, client, targetCfg);
+	await client.retain(bank, entry.content, { tags: entry.tags, sync: false });
+}
+
 /** Retry the queue HEAD (one entry) before the turn's own retain. */
 async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
 	const head = q[0];
 	try {
-		const client = await makeClient(clientConfig(cfg, runtime));
-		await client.ensureBank(cfg.bank);
-		await applyBankMission(store, client, cfg);
-		await client.retain(cfg.bank, head.content, { tags: head.tags, sync: false });
+		await retainQueueEntry(store, cfg, runtime, head);
 		q.shift();
 		await saveQueue(store, q);
 	} catch (e) {
@@ -181,22 +198,16 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: 
 	}
 }
 
-/** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). */
+/** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). Each entry is
+ *  replayed into its OWN captured bank/namespace (a queue may mix banks across
+ *  per-project overrides), so a failed entry never lands in another project's bank. */
 async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
-	let client;
-	try {
-		client = await makeClient(clientConfig(cfg, runtime));
-	} catch {
-		return;
-	}
-	const remaining = [];
-	await applyBankMission(store, client, cfg);
+	const remaining: QueueEntry[] = [];
 	for (const entry of q) {
 		try {
-			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, entry.content, { tags: entry.tags, sync: false });
+			await retainQueueEntry(store, cfg, runtime, entry);
 		} catch {
 			remaining.push(entry);
 		}
@@ -215,7 +226,7 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 		if (store) await clearError(store);
 	} catch (e) {
 		if (store) {
-			await enqueueRetain(store, { content: summary, tags, ts: Date.now() });
+			await enqueueRetain(store, { content: summary, tags, ts: Date.now(), bank: cfg.bank, namespace: cfg.namespace });
 			await recordError(store, e);
 		}
 	}
@@ -239,7 +250,7 @@ async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: Store
 		await client.retain(cfg.bank, content, { tags, sync });
 		await clearError(store);
 	} catch (e) {
-		await enqueueRetain(store, { content, tags, ts: Date.now() });
+		await enqueueRetain(store, { content, tags, ts: Date.now(), bank: cfg.bank, namespace: cfg.namespace });
 		await recordError(store, e);
 	}
 	// Advance the buffer regardless of success (failures are durably queued): carry

@@ -396,6 +396,79 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 	}
 });
 
+test("retry queue: a failed retain replays into its ORIGINAL bank, not the next hook's per-project bank", async () => {
+	// Per-project bank overrides mean two projects share ONE pack-store retry queue but
+	// route to DIFFERENT banks. A failed retain from project A must replay into A's
+	// bank even when the draining hook belongs to project B (B's cfg.bank differs).
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// Project overlays: projA → bankA, projB → bankB (overlay can set `bank`).
+		await store.put(projectConfigKey("projA"), { bank: "bankA" });
+		await store.put(projectConfigKey("projB"), { bank: "bankB" });
+
+		// Project A's retain FAILS ⇒ durably queued, captured against bankA/default.
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sA", projectId: "projA", prompt: "from A" });
+		let q = (await store.get(QUEUE_KEY)) as { content: string; bank?: string; namespace?: string }[];
+		assert.equal(q.length, 1, "project A's failed retain is queued");
+		assert.equal(q[0].bank, "bankA", "queue entry captures the ORIGINAL target bank");
+		assert.equal(q[0].namespace, "default", "queue entry captures the ORIGINAL namespace");
+
+		// Project B's next (succeeding) turn drains the queue HEAD before its own retain.
+		// The replay MUST land in bankA — never project B's bankB.
+		state.failRetain = false;
+		calls.retain.length = 0;
+		calls.ensureBank.length = 0;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sB", projectId: "projB", prompt: "from B" });
+		const replay = calls.retain.find((r) => /from A/.test(r.content));
+		assert.ok(replay, "the queued project-A entry was replayed");
+		assert.equal(replay!.bank, "bankA", "replay lands in the ORIGINAL bank (bankA), not project B's bankB");
+		// The replay ensured bankA (not bankB) before retaining.
+		assert.ok(calls.ensureBank.includes("bankA"), "ensureBank targets the original bankA on replay");
+		// Project B's OWN retain still goes to its own bankB.
+		const own = calls.retain.find((r) => /from B/.test(r.content));
+		assert.ok(own, "project B's own turn retained");
+		assert.equal(own!.bank, "bankB", "project B's own retain uses bankB");
+		// Queue fully drained.
+		q = (await store.get(QUEUE_KEY)) as unknown[];
+		assert.equal(q.length, 0, "head drained");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("sessionShutdown drain replays each entry into its OWN captured bank (mixed-bank queue)", async () => {
+	// A single shutdown drain must route each queued entry to the bank it was enqueued
+	// against — a mixed-bank queue (projA→bankA, projB→bankB) must not collapse onto
+	// the draining hook's cfg.bank.
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+		await store.put(projectConfigKey("projA"), { bank: "bankA" });
+		await store.put(projectConfigKey("projB"), { bank: "bankB" });
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sA", projectId: "projA", prompt: "alpha" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "sB", projectId: "projB", prompt: "beta" });
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 2);
+
+		state.failRetain = false;
+		calls.retain.length = 0;
+		// Drain from a NEUTRAL hook (no project overlay ⇒ cfg.bank = bobbit).
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "sC" });
+		const a = calls.retain.find((r) => /alpha/.test(r.content));
+		const b = calls.retain.find((r) => /beta/.test(r.content));
+		assert.equal(a?.bank, "bankA", "alpha replays into bankA");
+		assert.equal(b?.bank, "bankB", "beta replays into bankB");
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 0, "queue drained");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("routes: dormant store ⇒ clean configured:false signals, no client constructed", async () => {
 	let factoryCalls = 0;
 	__setClientFactory(() => {
@@ -828,11 +901,20 @@ test("config defaults: project scope + tags_match any + cadence 5 + observation-
 	assert.ok(CONFIG_DEFAULTS.reflectMission.length > 0);
 });
 
-test("recallTagFilter: tagsMatch + extraTags variants", () => {
+test("recallTagFilter: tagsMatch + extraTags variants (extra tags NARROW, never broaden)", () => {
 	// any_strict (hard-isolation) opt-in for project scope.
 	assert.deepEqual(recallTagFilter("project", "p", "any_strict"), { tags: { project: "p" }, tagsMatch: "any_strict" });
-	// Extra tags merge into a project filter.
-	assert.deepEqual(recallTagFilter("project", "p", "any", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "any" });
+	// Extra tags NARROW a project recall: require project AND every extra tag and
+	// EXCLUDE untagged/global + other projects (all_strict) — never the old `any`-merge
+	// that broadened recall to untagged/global AND other-project goal:g memories.
+	assert.deepEqual(recallTagFilter("project", "p", "any", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// Even with `any_strict` config, extra tags still narrow via all_strict.
+	assert.deepEqual(recallTagFilter("project", "p", "any_strict", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// tags.project can NEVER override the route-derived project tag (it is dropped).
+	assert.deepEqual(recallTagFilter("project", "p", "any", { project: "other", goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "all_strict" });
+	// An extra map that is ONLY `project` is fully stripped ⇒ plain project scope (no
+	// spurious narrowing, and still cannot override the real project).
+	assert.deepEqual(recallTagFilter("project", "p", "any", { project: "other" }), { tags: { project: "p" }, tagsMatch: "any" });
 	// scope all + extra tags ⇒ additive filter (no fabricated project tag), tags_match any.
 	assert.deepEqual(recallTagFilter("all", "p", "any", { project: "other" }), { tags: { project: "other" }, tagsMatch: "any" });
 	// scope all without extra tags ⇒ no filter (whole bank).
@@ -1211,20 +1293,29 @@ test("routes config: projectOverride write/read with precedence (requires a proj
 	}
 });
 
-test("routes recall/reflect: optional tags param is an additive targeted filter", async () => {
+test("routes recall/reflect: optional tags NARROW a project recall (all_strict, no broadening)", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
 	try {
 		state.memories = [{ text: "m" }];
 		const store = makeStore();
 		await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "project" });
+		// project scope + { goal } NARROWS: project AND goal, all_strict (no untagged/
+		// global, no other-project goal:g leakage).
 		await routes.recall({ host: { store }, projectId: "p1" } as never, { body: { query: "q", tags: { goal: "g9" } } } as never);
 		const ro = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
 		assert.deepEqual(ro.tags, { project: "p1", goal: "g9" });
-		assert.equal(ro.tagsMatch, "any");
+		assert.equal(ro.tagsMatch, "all_strict");
+
+		// A caller-supplied tags.project can NOT override the route-derived project.
+		await routes.recall({ host: { store }, projectId: "p1" } as never, { body: { query: "q", tags: { project: "evil", goal: "g9" } } } as never);
+		const ro2 = calls.recall[1].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(ro2.tags, { project: "p1", goal: "g9" });
+		assert.equal(ro2.tagsMatch, "all_strict");
 
 		await routes.reflect({ host: { store }, projectId: "p1" } as never, { body: { prompt: "x", scope: "project", tags: { topic: "auth" } } } as never);
 		assert.deepEqual(calls.reflect[0].opts?.tags, { project: "p1", topic: "auth" });
+		assert.equal(calls.reflect[0].opts?.tagsMatch, "all_strict");
 	} finally {
 		__setClientFactory(null);
 	}

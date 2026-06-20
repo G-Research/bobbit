@@ -224,6 +224,30 @@ describe("hindsight-client — round-trips against the stub", () => {
 		);
 	});
 
+	it("project recall narrowed by an extra tag (all_strict) excludes untagged/global AND other projects", async () => {
+		// This is the wire-level proof that an optional `tags` filter NARROWS a project
+		// recall instead of broadening it: recallTagFilter(project, pid, _, {goal}) maps
+		// to { project:pid, goal:g } + tags_match all_strict, which must return ONLY the
+		// current project's memory carrying that extra tag.
+		const client = createClient({ baseUrl: stub.url });
+		stub.seedMemories("narrow", [
+			{ text: "mine+goal", id: "a", tags: ["project:proj-1", "goal:g"] },
+			{ text: "mine-no-goal", id: "b", tags: ["project:proj-1"] },
+			{ text: "other+goal", id: "c", tags: ["project:proj-2", "goal:g"] },
+			{ text: "global+goal", id: "d", tags: ["goal:g"] },
+			{ text: "global-untagged", id: "e" },
+		]);
+		const out = await client.recall("narrow", "q", {
+			tags: { project: "proj-1", goal: "g" },
+			tagsMatch: "all_strict",
+		});
+		assert.deepEqual(
+			out.memories.map((m) => m.id).sort(),
+			["a"],
+			"only the current project's memory with the extra tag; other-project, global-tagged, and untagged all excluded",
+		);
+	});
+
 	it("tags_match=any_strict excludes untagged/global (the variant we deliberately avoid)", async () => {
 		const client = createClient({ baseUrl: stub.url });
 		stub.seedMemories("strict", [
