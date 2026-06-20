@@ -1,4 +1,5 @@
 name: pr-walkthrough
+schema: 2
 description: >-
   Reviews pull requests in a dedicated walkthrough panel with a pack-scoped
   reviewer role and PR walkthrough analysis tools.
@@ -11,6 +12,7 @@ contents:
   roles: [pr-reviewer]
   tools: [pr-walkthrough]
   skills: []
+  providers: [pr-walkthrough-durable]
   entrypoints:
     - pr-walkthrough-open
     - pr-walkthrough-session-menu
