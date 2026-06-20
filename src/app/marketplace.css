@@ -871,7 +871,15 @@
 	border: 1px solid var(--border);
 	background: var(--background);
 	cursor: pointer;
+	pointer-events: auto;
 	transition: border-color 0.15s, background 0.15s;
+}
+
+/* The card is the click target; its text/icon children must never swallow the
+ * pointer event (otherwise a click that lands on a child could miss the button
+ * in some layouts). Keeps all three mode options reliably selectable. */
+.market-wizard-mode-card > * {
+	pointer-events: none;
 }
 
 .market-wizard-mode-card:hover {
