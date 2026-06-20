@@ -19,6 +19,7 @@ import {
 	clientConfig,
 	enqueueRetain,
 	isActive,
+	isQueryTooLongError,
 	loadPending,
 	loadQueue,
 	makeClient,
@@ -160,6 +161,15 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 			},
 		];
 	} catch (e) {
+		// The data plane's 500-token "Query too long" 400 is a SOFT skip: recall
+		// returns empty for this turn and we DO NOT record a sticky lastError (and
+		// clear any prior one), so the marketplace/panel banner can never reappear
+		// from this cause. The token-safe clamp should prevent it ever firing; this
+		// is defence in depth. Genuine errors still surface as before.
+		if (isQueryTooLongError(e)) {
+			if (store) await clearError(store);
+			return [];
+		}
 		if (store) await recordError(store, e);
 		return [];
 	}

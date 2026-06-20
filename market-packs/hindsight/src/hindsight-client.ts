@@ -160,11 +160,32 @@ export function createClient(cfg: HindsightClientConfig): HindsightClient {
 		}
 	}
 
+	/** Best-effort extract the upstream error `detail` (or raw body) so the typed
+	 *  HindsightError message carries it — e.g. recall's 400 "Query too long: <N>
+	 *  tokens exceeds maximum of 500", which the provider/route soft-skips. Never
+	 *  throws; returns "" when the body is empty/unreadable. */
+	async function errorDetail(res: Response): Promise<string> {
+		try {
+			const text = await res.text();
+			if (!text) return "";
+			try {
+				const parsed = JSON.parse(text) as { detail?: unknown };
+				return typeof parsed?.detail === "string" ? parsed.detail : text;
+			} catch {
+				return text;
+			}
+		} catch {
+			return "";
+		}
+	}
+
 	/** Fetch + 2xx assertion; returns the Response for the caller to parse. */
 	async function request(method: string, url: string, body?: unknown): Promise<Response> {
 		const res = await rawFetch(method, url, body);
 		if (!res.ok) {
-			throw new HindsightError("http", `Hindsight HTTP ${res.status} for ${method} ${url}`, res.status);
+			const detail = await errorDetail(res);
+			const suffix = detail ? `: ${detail}` : "";
+			throw new HindsightError("http", `Hindsight HTTP ${res.status} for ${method} ${url}${suffix}`, res.status);
 		}
 		return res;
 	}

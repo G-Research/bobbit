@@ -326,13 +326,62 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	};
 }
 
-/** Clamp a recall QUERY to at most `maxChars` characters (the core fix for the
- *  data plane's 500-token "Query too long" 400). Trims first; `maxChars <= 0`
- *  disables clamping and returns the trimmed full string. Pure; never throws. */
+// ── Token-safe recall-query clamp ─────────────────────────────────────────────
+//
+// Hindsight caps the recall QUERY at 500 tokens and returns
+// `HTTP 400 {"detail":"Query too long: <N> tokens exceeds maximum of 500..."}`.
+// The configured `recallMaxInputChars` (default 3000) is a CHAR limit, but ~3000
+// dense chars ≈ 1400+ tokens ⇒ still 400. The char clamp is the wrong unit, so we
+// ALWAYS enforce a hard token-safe CHARACTER ceiling derived from the token cap —
+// regardless of the configured char value (even when char-clamping is "disabled").
+//
+// Ratio rationale: real recall queries are natural-language turn text, which runs
+// ~4–6 chars/token (a live 9200-char query measured ~5.75 chars/token against the
+// data plane). We deliberately use a CONSERVATIVE 3.5 chars/token — below realistic
+// prose — and target ~450 tokens (headroom below the 500 hard cap). 450 tokens ×
+// 3.5 chars/token ≈ 1575 ⇒ a 1600-char ceiling sits comfortably under 500 tokens
+// (1600 ÷ 3.5 ≈ 457 tokens) even for denser-than-estimated text.
+/** Hindsight's hard recall-query token cap (HTTP 400 "Query too long" above it). */
+export const RECALL_QUERY_TOKEN_CAP = 500;
+/** Conservative chars/token estimate (below realistic ~4–6 prose) used to convert
+ *  the token cap into a character ceiling. */
+export const RECALL_QUERY_CHARS_PER_TOKEN = 3.5;
+/** Hard token-safe CHARACTER ceiling for the recall query, ALWAYS enforced
+ *  regardless of `recallMaxInputChars`. 1600 chars ÷ 3.5 ≈ 457 tokens — under the
+ *  500-token cap with headroom (see the block comment above for the derivation). */
+export const RECALL_QUERY_SAFE_CHAR_CEILING = 1600;
+
+/** Clamp a recall QUERY so it can NEVER trip the data plane's 500-token "Query too
+ *  long" 400. Trims first, then slices to the SMALLER of the configured `maxChars`
+ *  char clamp (when `maxChars > 0`) and the hard {@link RECALL_QUERY_SAFE_CHAR_CEILING}
+ *  token-safe ceiling. The token-safe ceiling is enforced even when char-clamping is
+ *  disabled (`maxChars <= 0` / non-finite) — the query stays under the token cap
+ *  regardless of the configured value. Pure; never throws. */
 export function clampRecallQuery(query: string, maxChars: number): string {
 	const trimmed = (query ?? "").trim();
-	if (!Number.isFinite(maxChars) || maxChars <= 0) return trimmed;
-	return trimmed.length <= maxChars ? trimmed : trimmed.slice(0, maxChars);
+	const charClamp = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
+	const effective = Math.min(charClamp, RECALL_QUERY_SAFE_CHAR_CEILING);
+	return trimmed.length <= effective ? trimmed : trimmed.slice(0, effective);
+}
+
+/** Classify a recall failure as the data plane's 500-token "Query too long" 400 —
+ *  a SOFT skip, not a real error. Hindsight returns
+ *  `HTTP 400 {"detail":"Query too long: <N> tokens exceeds maximum of 500..."}`.
+ *  Even with {@link clampRecallQuery} this is defence in depth: if it ever fires,
+ *  recall returns empty for the turn and the provider/route does NOT record it as a
+ *  sticky `lastError` (it clears any prior one), so the marketplace/panel banner can
+ *  never reappear from this cause. Genuine failures (network/5xx/timeout, and other
+ *  4xx such as auth) are unaffected and still surface.
+ *
+ *  Detected STRUCTURALLY (no static dependency on the client's `HindsightError`):
+ *  `kind:"http"` + `status:400` + a "too long"/"query" message (the client surfaces
+ *  the upstream `detail` body in the error message). */
+export function isQueryTooLongError(e: unknown): boolean {
+	if (!e || typeof e !== "object") return false;
+	const err = e as { kind?: unknown; status?: unknown; message?: unknown };
+	if (err.kind !== "http" || err.status !== 400) return false;
+	const msg = typeof err.message === "string" ? err.message.toLowerCase() : "";
+	return msg.includes("too long") || msg.includes("query");
 }
 
 /** The dormancy gate (the central invariant): the provider runs a hook's work

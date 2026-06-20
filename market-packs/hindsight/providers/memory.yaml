@@ -69,9 +69,11 @@ config:
   observationsMission: { type: string, optional: true }
   reflectMission: { type: string, optional: true }
   # Max characters of the recall QUERY sent to the data plane. The Hindsight recall
-  # API caps queries at 500 tokens and returns HTTP 400 ("Query too long") for
-  # longer queries; clamping keeps non-trivial turns working. Mirrors Hermes'
-  # recall_max_input_chars. <= 0 disables clamping.
+  # API caps queries at 500 TOKENS and returns HTTP 400 ("Query too long") above it.
+  # This char value is an UPPER bound only: clampRecallQuery ALWAYS additionally
+  # enforces a hard token-safe ceiling (~1600 chars ≈ 457 tokens at a conservative
+  # 3.5 chars/token) so the query can never trip the 500-token cap regardless of
+  # this value (even <= 0). Mirrors Hermes' recall_max_input_chars.
   recallMaxInputChars: { type: number, default: 3000 }
   timeoutMs: { type: number, default: 1500 }
 activation:
