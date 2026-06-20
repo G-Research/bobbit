@@ -19,6 +19,27 @@ const IMAGE_SELECTOR_SRC = path.resolve("src/ui/dialogs/ImageModelSelector.ts");
 const TEST_MODEL = "anthropic/claude-opus-4-1";
 const TEST_THINKING = "high";
 
+// Distinct session/review default model prefs so the Roles list inherited-display
+// heuristic (REVIEW_DEFAULT_ROLE_NAMES → default.reviewModel; others →
+// default.sessionModel) is observable per-row. `coder` is a normal role (session
+// default); `reviewer` is in the review-default allowlist (review default).
+const SESSION_DEFAULT_MODEL = "openai/gpt-4o";
+const SESSION_DEFAULT_LABEL = "gpt-4o";
+const REVIEW_DEFAULT_MODEL = "anthropic/claude-sonnet";
+const REVIEW_DEFAULT_LABEL = "claude-sonnet";
+
+// Shared selectors for the relocated model controls (agreed design hooks).
+const LIST_MODEL_CONTROL = "[data-testid='role-row-model-control']";
+const DETAIL_MODEL_SECTION = "[data-testid='roles-model-section']";
+
+function roleRow(page: Page, name: string) {
+	return page.locator(`.role-row[data-role-name='${name}']`);
+}
+
+async function storedRole(page: Page, name: string): Promise<any> {
+	return await page.evaluate((n) => (window as any).__getSettingsAdminRoles().find((r: any) => r.name === n), name);
+}
+
 test.beforeAll(() => {
 	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
 	buildBundle({
@@ -260,12 +281,16 @@ test.describe("Settings/admin UI fixture", () => {
 		expect(await tab.locator("button").filter({ hasText: /^System$/ }).count()).toBe(0);
 	});
 
-	test("role manager model tab renders persisted overrides and saves clear", async ({ page }) => {
+	test("role manager Model section renders persisted overrides and saves clear", async ({ page }) => {
 		await loadRoles(page, "#/roles/coder");
+		// Tab bar is now Prompt + Tool Access only — Model is its own section.
 		await expect(page.locator(".roles-tab").filter({ hasText: "Prompt" })).toBeVisible();
-		await page.locator("[data-testid='roles-tab-model']").click();
-		await expect(page.locator("[data-testid='roles-model-tab']")).toBeVisible();
-		await expect(page.locator("[data-testid='model-row']")).toBeVisible();
+		await expect(page.locator("[data-testid='roles-tab-model']")).toHaveCount(0);
+		const section = page.locator(DETAIL_MODEL_SECTION);
+		await expect(section).toBeVisible();
+		// The explanatory note text is preserved inside the section.
+		await expect(section.locator("[data-testid='roles-model-tab']")).toBeVisible();
+		await expect(section.locator("[data-testid='model-row']")).toBeVisible();
 
 		await page.evaluate(({ model, thinking }) => {
 			(window as any).__putSettingsAdminRole("coder", { model, thinkingLevel: thinking });
@@ -273,13 +298,9 @@ test.describe("Settings/admin UI fixture", () => {
 
 		await reloadFixture(page);
 		await loadRoles(page, "#/roles/coder");
-		await page.locator("[data-testid='roles-tab-model']").click();
-		const modelRow = page.locator("[data-testid='model-row']");
+		const modelRow = page.locator(`${DETAIL_MODEL_SECTION} [data-testid='model-row']`);
 		await expect(modelRow.locator("button").filter({ hasText: "claude-opus-4-1" })).toBeVisible();
-		await expect.poll(async () => {
-			const roles = await page.evaluate(() => (window as any).__getSettingsAdminRoles());
-			return roles.find((r: any) => r.name === "coder")?.thinkingLevel;
-		}).toBe(TEST_THINKING);
+		await expect.poll(async () => (await storedRole(page, "coder"))?.thinkingLevel).toBe(TEST_THINKING);
 
 		const clearBtn = modelRow.locator("[data-testid='model-clear-btn']");
 		await clearBtn.click();
@@ -287,16 +308,240 @@ test.describe("Settings/admin UI fixture", () => {
 		const saveBtn = page.locator("[data-testid='role-save-btn'] button").first();
 		await expect(saveBtn).toBeEnabled();
 		await saveBtn.click();
-		await expect.poll(async () => {
-			const roles = await page.evaluate(() => (window as any).__getSettingsAdminRoles());
-			return roles.find((r: any) => r.name === "coder")?.model ?? "";
-		}).toBe("");
+		await expect.poll(async () => (await storedRole(page, "coder"))?.model ?? "").toBe("");
 
 		await page.evaluate(() => (window as any).__putSettingsAdminRole("coder", { thinkingLevel: "" }));
 		await expect.poll(async () => {
-			const roles = await page.evaluate(() => (window as any).__getSettingsAdminRoles());
-			const coder = roles.find((r: any) => r.name === "coder");
+			const coder = await storedRole(page, "coder");
 			return [coder?.model ?? "", coder?.thinkingLevel ?? ""];
 		}).toEqual(["", ""]);
+	});
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Roles model reshuffle — list view inline model + thinking control
+	// (agreed hooks: role-row-model-control, data-model-state). These run the
+	// real `renderRoleManagerPage()` against the fixture's role + preference
+	// store, so they pin the production render path, not a mock.
+	// ────────────────────────────────────────────────────────────────────────
+
+	test("list view inherited rows show resolved default model + thinking heuristic", async ({ page }) => {
+		// Open Roles directly (no Settings visit first) with distinct defaults.
+		await resetFixture(page, {
+			prefs: {
+				"default.sessionModel": SESSION_DEFAULT_MODEL,
+				"default.reviewModel": REVIEW_DEFAULT_MODEL,
+			},
+		});
+		await loadRoles(page, "#/roles");
+
+		const coderControl = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		const reviewerControl = roleRow(page, "reviewer").locator(LIST_MODEL_CONTROL);
+		await expect(coderControl).toBeVisible();
+		await expect(reviewerControl).toBeVisible();
+
+		// Both rows are inherited (no per-role override).
+		await expect(coderControl).toHaveAttribute("data-model-state", "inherited");
+		await expect(reviewerControl).toHaveAttribute("data-model-state", "inherited");
+
+		// Heuristic: coder (normal) → session default; reviewer (review allowlist) →
+		// review default. Each shown as "<model> · default".
+		await expect(coderControl).toContainText(SESSION_DEFAULT_LABEL);
+		await expect(coderControl).toContainText(/·\s*default/);
+		await expect(reviewerControl).toContainText(REVIEW_DEFAULT_LABEL);
+		await expect(reviewerControl).toContainText(/·\s*default/);
+
+		// Inherited rows expose neither clear nor Test (modelValue is empty).
+		await expect(coderControl.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+		await expect(coderControl.locator("[data-testid='model-test-btn']")).toHaveCount(0);
+		await expect(reviewerControl.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+	});
+
+	test("list view inherited rows fall back to default label when prefs unset", async ({ page }) => {
+		// No session/review default prefs configured → still suffixed as a default.
+		await resetFixture(page, { prefs: {} });
+		await loadRoles(page, "#/roles");
+		const coderControl = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(coderControl).toHaveAttribute("data-model-state", "inherited");
+		await expect(coderControl).toContainText(/·\s*default/);
+		await expect(coderControl.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+	});
+
+	test("list view inline model pick + thinking auto-saves and persists across reload", async ({ page }) => {
+		await resetFixture(page, { prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL } });
+		await loadRoles(page, "#/roles");
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+
+		// Pick a model inline. Interacting with the control must NOT navigate to the
+		// editor (design requires stopPropagation on the inline container).
+		await control.locator("[data-testid='model-row'] button[title='Choose model']").click();
+		await page.locator(`agent-model-selector [data-model-id="claude-opus-4-1"]`).dispatchEvent("click");
+
+		// Auto-saved: stored role gains the model, no Save button needed.
+		await expect.poll(async () => (await storedRole(page, "coder"))?.model ?? "").toBe(TEST_MODEL);
+		// Stayed on the list (no navigation to #/roles/coder).
+		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/roles");
+
+		// Override hooks now present: state flips and clear/Test appear.
+		await expect(control).toHaveAttribute("data-model-state", "override");
+		await expect(control.locator("[data-testid='model-clear-btn']")).toBeVisible();
+		await expect(control.locator("[data-testid='model-test-btn']")).toBeVisible();
+
+		// Change thinking now that an override is active → auto-saves.
+		await control.locator("[data-testid='model-row'] button[role='combobox']").click();
+		await page.getByRole("option", { name: "High", exact: true }).click();
+		await expect.poll(async () => (await storedRole(page, "coder"))?.thinkingLevel ?? "").toBe(TEST_THINKING);
+
+		// Persist across reload.
+		await reloadFixture(page);
+		await loadRoles(page, "#/roles");
+		const control2 = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control2).toHaveAttribute("data-model-state", "override");
+		await expect(control2.locator("[data-testid='model-row']")).toContainText("claude-opus-4-1");
+		const after = await storedRole(page, "coder");
+		expect([after?.model ?? "", after?.thinkingLevel ?? ""]).toEqual([TEST_MODEL, TEST_THINKING]);
+	});
+
+	test("list view clearing an override reverts model + thinking to inherited", async ({ page }) => {
+		await resetFixture(page, {
+			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
+			roles: [
+				{
+					name: "coder", label: "Coder", promptTemplate: "You write code.",
+					accessory: "none", toolPolicies: {}, model: TEST_MODEL, thinkingLevel: TEST_THINKING,
+					createdAt: 1, updatedAt: 1, origin: "builtin",
+				} as any,
+			],
+		});
+		await loadRoles(page, "#/roles");
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toHaveAttribute("data-model-state", "override");
+		const clearBtn = control.locator("[data-testid='model-clear-btn']");
+		await expect(clearBtn).toBeVisible();
+
+		await clearBtn.click();
+
+		// Both model and thinking revert to empty so the row inherits/defaults.
+		await expect.poll(async () => {
+			const c = await storedRole(page, "coder");
+			return [c?.model ?? "", c?.thinkingLevel ?? ""];
+		}).toEqual(["", ""]);
+
+		// Row flips back to inherited display.
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+		await expect(control).toContainText(SESSION_DEFAULT_LABEL);
+		await expect(control).toContainText(/·\s*default/);
+		await expect(control.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+	});
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Roles model reshuffle — detail editor layout
+	// ────────────────────────────────────────────────────────────────────────
+
+	test("detail editor renders Model as a section between Accessory and the tabs", async ({ page }) => {
+		await loadRoles(page, "#/roles/coder");
+
+		const section = page.locator(DETAIL_MODEL_SECTION);
+		await expect(section).toBeVisible();
+		// No Model tab; tab bar is exactly Prompt + Tool Access.
+		await expect(page.locator("[data-testid='roles-tab-model']")).toHaveCount(0);
+		const tabs = page.locator(".roles-tab-bar .roles-tab");
+		await expect(tabs).toHaveCount(2);
+		await expect(tabs.nth(0)).toHaveText("Prompt");
+		await expect(tabs.nth(1)).toHaveText("Tool Access");
+
+		// Vertical order: Accessory section → Model section → tab bar.
+		const order = await page.evaluate(() => {
+			const top = (el: Element | null | undefined) => (el ? el.getBoundingClientRect().top : null);
+			const accessory = Array.from(document.querySelectorAll(".roles-section-title"))
+				.find((e) => e.textContent?.trim() === "Accessory");
+			return {
+				accessory: top(accessory),
+				model: top(document.querySelector("[data-testid='roles-model-section']")),
+				tabBar: top(document.querySelector(".roles-tab-bar")),
+			};
+		});
+		expect(order.accessory).not.toBeNull();
+		expect(order.model).not.toBeNull();
+		expect(order.tabBar).not.toBeNull();
+		expect(order.accessory!).toBeLessThan(order.model!);
+		expect(order.model!).toBeLessThan(order.tabBar!);
+	});
+
+	test("detail editor model edit is draft-based and persists via Save", async ({ page }) => {
+		await loadRoles(page, "#/roles/coder");
+		const section = page.locator(DETAIL_MODEL_SECTION);
+		await expect(section).toBeVisible();
+
+		// Pick a model in the section.
+		await section.locator("[data-testid='model-row'] button[title='Choose model']").click();
+		await page.locator(`agent-model-selector [data-model-id="claude-opus-4-1"]`).dispatchEvent("click");
+
+		// Detail = Save button, NOT auto-save: the stored role is unchanged until Save.
+		await expect(section.locator("[data-testid='model-row']")).toContainText("claude-opus-4-1");
+		expect((await storedRole(page, "coder"))?.model ?? "").toBe("");
+
+		const saveBtn = page.locator("[data-testid='role-save-btn'] button").first();
+		await expect(saveBtn).toBeEnabled();
+		await saveBtn.click();
+		await expect.poll(async () => (await storedRole(page, "coder"))?.model ?? "").toBe(TEST_MODEL);
+
+		// Persists across reload, still shown in the Model section.
+		await reloadFixture(page);
+		await loadRoles(page, "#/roles/coder");
+		await expect(page.locator(`${DETAIL_MODEL_SECTION} [data-testid='model-row']`)).toContainText("claude-opus-4-1");
+	});
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Roles model reshuffle — Save hang regression
+	//
+	// Reproduces the race where handleSave's success path calls setHashRoute to a
+	// hash that is already current (no-op → no hashchange → no rerender), leaving
+	// the Save button stuck on "Saving…". Fails against the pre-fix code; passes
+	// once handleSave calls renderApp() in the success path.
+	// ────────────────────────────────────────────────────────────────────────
+
+	test("Save button returns from Saving… to idle after a successful save without navigating", async ({ page }) => {
+		await loadRoles(page, "#/roles/coder");
+		const hashBefore = await page.evaluate(() => window.location.hash);
+
+		// Edit the Label field (first text input in the editor) to enable Save.
+		const labelInput = page.locator("[data-testid='role-editor'] input").first();
+		await labelInput.fill("Coder Edited");
+
+		const saveBtn = page.locator("[data-testid='role-save-btn'] button").first();
+		await expect(saveBtn).toBeEnabled();
+		await expect(saveBtn).toHaveText("Save");
+
+		await saveBtn.click();
+
+		// Gate on the success path running fully: the PUT, then the post-save role
+		// refetch (GET /api/roles). Both happen in the buggy and fixed builds, so by
+		// this point `saving` has been left true (buggy) or reset to false (fixed).
+		// `renderApp` coalesces through requestAnimationFrame, so the PUT logs before
+		// the "Saving…" paint — gating on the PUT alone would race the pre-render
+		// idle "Save" and falsely pass.
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getSettingsAdminFetchLog());
+			const putIdx = log.findIndex((e: any) => e.method === "PUT" && e.url.includes("/api/roles/coder"));
+			return putIdx >= 0 && log.slice(putIdx + 1).some((e: any) => e.method === "GET" && e.url.split("?")[0] === "/api/roles");
+		}).toBe(true);
+
+		// Deterministically flush any pending rAF render (no wall-clock sleep).
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+
+		// Stable end state: fixed build re-renders to a disabled "Save"; the pre-fix
+		// build leaves the button stuck on "Saving…" (no renderApp() in the
+		// hash-unchanged success path), so this assertion times out → red.
+		await expect(saveBtn).toHaveText("Save", { timeout: 3_000 });
+		await expect(saveBtn).toBeDisabled();
+
+		// No navigation away from the edit page.
+		await expect(page.locator("[data-testid='role-editor']")).toBeVisible();
+		expect(await page.evaluate(() => window.location.hash)).toBe(hashBefore);
+		// The edit actually persisted.
+		expect((await storedRole(page, "coder"))?.label).toBe("Coder Edited");
 	});
 });
