@@ -238,6 +238,47 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		await expect(row.locator('[data-testid="market-hindsight-action-result"]')).toContainText("Connected");
 	});
 
+	test("inline Configure form saves config sessionlessly and persists across reload", async ({ page }) => {
+		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		// Start dormant (no config). The inline form is the #/market setup path — there
+		// is no active chat session to mount the native panel against, so Configure must
+		// write config over the SESSIONLESS built-in pack-route config-write seam.
+		await openWithSession(page);
+		let row = await openMarketRow(page);
+		await expect(stateBadge(row), "an unconfigured row starts Dormant").toHaveAttribute("data-state", "dormant", { timeout: 20_000 });
+
+		// Configure toggles the inline form (NOT the native panel) on #/market.
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const form = row.locator('[data-testid="market-hindsight-config-form"]');
+		await expect(form, "Configure opens the inline config form").toBeVisible({ timeout: 15_000 });
+		// The form hydrates from the config route; the mode select appears once loaded.
+		await expect(form.locator('[data-testid="market-hindsight-form-mode"]')).toBeVisible({ timeout: 15_000 });
+
+		// Set the API/data-plane URL (dialed), bank, and the DISTINCT Dashboard UI URL.
+		await form.locator('[data-testid="market-hindsight-form-externalurl"]').fill(stub.url);
+		await form.locator('[data-testid="market-hindsight-form-bank"]').fill("hermes");
+		await form.locator('[data-testid="market-hindsight-form-uiurl"]').fill(EX_UI_URL);
+		expect(EX_UI_URL).not.toBe(stub.url);
+
+		// Save writes via the sessionless config-write seam and reports a result lozenge.
+		await form.locator('[data-testid="market-hindsight-config-save"]').click();
+		await expect(form.locator('[data-testid="market-hindsight-config-result"]'), "save reports a result").toContainText("Saved", { timeout: 20_000 });
+
+		// Reload the page entirely — the persisted config must survive (sessionless read).
+		await page.reload();
+		row = await openMarketRow(page);
+
+		// The row reflects the saved deployment after reload (persistence).
+		const summary = row.locator('[data-testid="market-hindsight-config"]');
+		await expect(summary, "the saved config surfaces after reload").toBeVisible({ timeout: 20_000 });
+		await expect(summary).toContainText("hermes");
+
+		// Open Hindsight UI links to the saved (distinct) UI URL verbatim.
+		const openUi = row.locator('[data-testid="market-hindsight-open-ui"]');
+		await expect(openUi, "Open Hindsight UI surfaces the saved UI URL").toBeVisible({ timeout: 15_000 });
+		await expect(openUi).toHaveAttribute("href", EX_UI_URL);
+	});
+
 	test("managed: the row tracks mocked runtime status (stopped→starting→running) and loading never starts Docker", async ({ page }) => {
 		test.skip(!ready, "Hindsight pack contribution not served in this environment");
 		// Configure a MANAGED deployment out-of-band; the runtime starts STOPPED.

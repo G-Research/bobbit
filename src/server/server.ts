@@ -7015,25 +7015,56 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin read of a
-	// BUILT-IN pack's read-only route (Hindsight UX polish). The Marketplace must
-	// read built-in Hindsight config/status as a PURE read, but after `#/market`
-	// navigation there is no active chat session, so the surface-token path
+	// GET/POST /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin access to a
+	// BUILT-IN pack's route (Hindsight UX polish). The Marketplace must read built-in
+	// Hindsight config/status, AND write Hindsight config, after `#/market` navigation
+	// when there is no active chat session, so the surface-token path
 	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
 	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
 	// so it cannot widen the extension threat model:
 	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
-	//   • GET only — the route's own mutation paths (e.g. `config` write) need a
-	//     POST + body, so this can never persist; it is a pure read.
 	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
-	//     this sessionless seam to read another pack's route output.
-	// `ctx.runtime` is resolved WITHOUT starting Docker (mirrors `/api/ext/route`),
-	// preserving the no-Docker-auto-start invariant.
+	//     this sessionless seam to read or write another pack's route output.
+	//   • GET → any route (pure read). POST → ALLOWLISTED to the `config` route name
+	//     ONLY (the built-in config write); any other routeName under POST is rejected
+	//     403, so this is NOT a general write seam — it is purely the GET seam's
+	//     config-write sibling. The `config` route validates + persists to the pack
+	//     store (CONFIG_INVALID for bad input) and returns the redacted effective
+	//     config.
+	// CRITICAL: this path NEVER starts Docker and works with NO session — POST only
+	// persists config to the pack store. `ctx.runtime` is resolved WITHOUT starting
+	// Docker (mirrors `/api/ext/route`), preserving the no-Docker-auto-start invariant.
 	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
-	if (packRouteMatch && req.method === "GET") {
+	if (packRouteMatch && (req.method === "GET" || req.method === "POST")) {
 		const reqPackId = decodeURIComponent(packRouteMatch[1]);
 		const routeName = decodeURIComponent(packRouteMatch[2]);
+		const isWrite = req.method === "POST";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		// POST is allowlisted to the `config` route ONLY — never a general write seam.
+		if (isWrite && routeName !== "config") {
+			json({ error: "sessionless pack-route writes are available only for the 'config' route" }, 403);
+			return;
+		}
+		// Parse the JSON body for the config write. An empty body is rejected for POST
+		// (a config write must carry overrides); malformed JSON is a 400 client error.
+		let writeBody: Record<string, unknown> = {};
+		if (isWrite) {
+			const bodyText = await readBodyText(req);
+			if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+			const trimmed = bodyText.trim();
+			if (trimmed.length === 0) { json({ error: "config write requires a JSON body" }, 400); return; }
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					json({ error: "config write body must be a JSON object" }, 400);
+					return;
+				}
+				writeBody = parsed as Record<string, unknown>;
+			} catch {
+				json({ error: "config write body must be valid JSON" }, 400);
+				return;
+			}
+		}
 		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
 		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
 		const builtinPackIds = new Set(
@@ -7042,7 +7073,7 @@ async function handleApiRoute(
 				.map((e) => packIdFromRoot(e.path)),
 		);
 		if (!builtinPackIds.has(reqPackId)) {
-			json({ error: "sessionless pack-route reads are available only to built-in packs" }, 403);
+			json({ error: "sessionless pack-route access is available only to built-in packs" }, 403);
 			return;
 		}
 		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
@@ -7083,9 +7114,9 @@ async function handleApiRoute(
 				resolved.packRoot,
 				routeName,
 				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
-				{ method: "GET" },
+				isWrite ? { method: "POST", body: writeBody } : { method: "GET" },
 			);
-			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=ok durationMs=${Date.now() - start}`);
+			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} method=${isWrite ? "POST" : "GET"} sessionless outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;

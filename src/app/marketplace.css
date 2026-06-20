@@ -720,3 +720,30 @@
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* Inline Configure form on the built-in Hindsight row. */
+.market-hindsight-config-form {
+	padding: 0.625rem;
+	border-radius: 0.5rem;
+	border: 1px solid var(--border);
+	background: color-mix(in oklch, var(--muted) 40%, transparent);
+}
+
+.market-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	min-width: 0;
+}
+
+.market-field-label {
+	font-size: 0.6875rem;
+	font-weight: 500;
+	color: var(--foreground);
+}
+
+.market-field-help {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+	line-height: 1.4;
+}

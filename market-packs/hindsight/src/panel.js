@@ -1148,12 +1148,25 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			return html`
 				${STYLE}
 				<div class="hs-root" data-testid="hindsight-panel" data-config-state=${entry.configState} data-status-state=${entry.statusState}>
-					<div class="hs-head">
-						<h1>Hindsight Memory</h1>
-						${entry.configured && !entry.setupOpen
-							? html`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${() => { const e = get(key); if (e) { e.setupOpen = true; repaint(host); } }}>Setup guide</button>`
-							: nothing}
-					</div>
+					${(() => {
+						// Prominent header link to the human-facing Hindsight dashboard when a
+						// uiUrl is configured (status echoes it; config carries it before status
+						// loads). This is the "reach the actual Hindsight UI" affordance — it
+						// opens uiUrl in a new tab and is NEVER dialed by Bobbit.
+						const headerUiUrl = asText((entry.status && entry.status.uiUrl) || (entry.config && entry.config.uiUrl), "");
+						return html`
+							<div class="hs-head">
+								<h1>Hindsight Memory</h1>
+								<div class="hs-card-actions">
+									${headerUiUrl
+										? html`<a class="hs-btn hs-open-ui" data-testid="hindsight-header-open-ui" href=${headerUiUrl} target="_blank" rel="noopener noreferrer">Open Hindsight UI ↗</a>`
+										: nothing}
+									${entry.configured && !entry.setupOpen
+										? html`<button class="hs-btn" data-testid="hindsight-setup-toggle" type="button" @click=${() => { const e = get(key); if (e) { e.setupOpen = true; repaint(host); } }}>Setup guide</button>`
+										: nothing}
+								</div>
+							</div>`;
+					})()}
 					${renderStatusCard(entry, host, key)}
 					${entry.configState === "error"
 						? html`<section class="hs-card"><p class="hs-error" data-testid="hindsight-config-load-error">${asText(entry.configError, "Config unavailable")}</p></section>`

@@ -3288,3 +3288,20 @@ export function readBuiltinPackRoute<T = unknown>(opts: { packId: string; routeN
 	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
 	return marketFetch<T>(`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`);
 }
+
+/** POST a BUILT-IN pack's `config` route as a PURE, SESSIONLESS write
+ *  (`POST /api/ext/pack-route/:packId/config`), mirroring {@link readBuiltinPackRoute}
+ *  but carrying a JSON body. The Marketplace uses this to SAVE built-in Hindsight
+ *  config inline after `#/market` navigation has cleared the active chat session (the
+ *  surface-token path would 403 there). Admin-bearer + POST + built-in-pack-only on
+ *  the server, ALLOWLISTED to the `config` route name only; it persists config to the
+ *  pack store and NEVER starts Docker. The `config` route validates the body and
+ *  returns the redacted effective config (or a `CONFIG_INVALID` structured error).
+ *  `routeName` is "config" (the only writable route). */
+export function writeBuiltinPackRoute<T = unknown>(opts: { packId: string; routeName: string; body: unknown; projectId?: string }): Promise<MarketResult<T>> {
+	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
+	return marketFetch<T>(
+		`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`,
+		jsonInit("POST", opts.body),
+	);
+}

@@ -54,6 +54,7 @@ import {
 	getPackRuntimeLogs,
 	listPackRuntimes,
 	readBuiltinPackRoute,
+	writeBuiltinPackRoute,
 	startPackRuntime,
 	stopPackRuntime,
 	type BrowsePackWire,
@@ -143,6 +144,39 @@ interface HindsightStatusWire {
 	recallBudget?: number;
 }
 
+/** The redacted `config` route GET response shape the inline form hydrates from.
+ *  Secrets are surfaced as `<field>Set` booleans, never raw values. `externalUrl`/
+ *  `uiUrl` are present only when set (resolveConfig omits empty strings). */
+interface HindsightConfigWire {
+	mode?: string;
+	externalUrl?: string;
+	uiUrl?: string;
+	bank?: string;
+	namespace?: string;
+	recallScope?: string;
+	autoRecall?: boolean;
+	autoRetain?: boolean;
+	timeoutMs?: number;
+	recallBudget?: number;
+	dataDir?: string;
+	apiKeySet?: boolean;
+}
+
+/** Editable values for the inline Configure form (strings for input binding). */
+interface HindsightConfigFormValues {
+	mode: string;
+	externalUrl: string;
+	uiUrl: string;
+	bank: string;
+	namespace: string;
+	recallScope: string;
+	autoRecall: boolean;
+	autoRetain: boolean;
+	timeoutMs: string;
+	recallBudget: string;
+	apiKey: string;
+}
+
 let hindsightStatus: HindsightStatusWire | null = null;
 let hindsightStatusLoaded = false;
 let hindsightRuntimes: PackRuntimeStatus[] = [];
@@ -153,6 +187,19 @@ let hindsightActionResult: { kind: "test" | "start" | "stop"; ok: boolean; messa
 let hindsightStartConsentOpen = false;
 /** Inline runtime logs (View logs), fetched best-effort; null = not loaded. */
 let hindsightLogs: string | null = null;
+
+/** Whether the inline Configure form is expanded (Configure click toggles it). */
+let hindsightConfigFormOpen = false;
+/** The editable form values, hydrated from the `config` route on open. */
+let hindsightConfigForm: HindsightConfigFormValues | null = null;
+/** The values as loaded from the route (apiKey loaded blank) — the touched-field
+ *  baseline so the save only POSTs fields the user actually changed (an untouched
+ *  blank secret input never clobbers a stored secret). */
+let hindsightConfigLoaded: HindsightConfigFormValues | null = null;
+/** Whether a stored apiKey exists (drives the "set/blank" hint on the secret field). */
+let hindsightConfigApiKeySet = false;
+/** Transient save-result lozenge for the inline config form. */
+let hindsightConfigResult: { ok: boolean; message: string } | null = null;
 
 let newSourceUrl = "";
 let newSourceRef = "";
@@ -202,6 +249,11 @@ export function clearMarketplaceState(): void {
 	hindsightActionResult = null;
 	hindsightStartConsentOpen = false;
 	hindsightLogs = null;
+	hindsightConfigFormOpen = false;
+	hindsightConfigForm = null;
+	hindsightConfigLoaded = null;
+	hindsightConfigApiKeySet = false;
+	hindsightConfigResult = null;
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
@@ -1658,6 +1710,7 @@ function renderHindsightStatusStrip(pack: InstalledPackWire): TemplateResult {
 			<div class="text-[11px] text-muted-foreground mt-1" data-testid="market-hindsight-blurb">${meta.blurb}</div>
 			${renderHindsightConfigSummary()}
 			${renderHindsightActions(pack, state, managed, isManagedMode)}
+			${hindsightConfigFormOpen ? renderHindsightConfigForm(pack) : ""}
 			${hindsightStartConsentOpen && state === "managed-stopped"
 				? html`<div class="mt-2" data-testid="market-hindsight-start-consent">
 						${renderRuntimeConsentCard(pack, HINDSIGHT_RUNTIME)}
@@ -1730,7 +1783,7 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 	const canStop = state === "managed-running" || state === "managed-unhealthy" || state === "managed-starting";
 	return html`
 		<div class="market-hindsight-actions flex items-center gap-1.5 flex-wrap mt-2" data-testid="market-hindsight-actions">
-			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" @click=${() => openHindsightPanel()}>${icon(Settings, "xs")} Configure</button>
+			<button class="market-btn market-btn--primary" data-testid="market-hindsight-configure" aria-expanded=${hindsightConfigFormOpen ? "true" : "false"} @click=${() => toggleHindsightConfigForm(pack)}>${icon(Settings, "xs")} Configure</button>
 			<button class="market-btn" data-testid="market-hindsight-test" ?disabled=${testing || !configured} @click=${() => handleHindsightTest()}>${icon(Plug, "xs", testing ? "animate-spin" : "")} Test connection</button>
 			${s?.uiUrl
 				? html`<a class="market-btn" data-testid="market-hindsight-open-ui" href=${s.uiUrl} target="_blank" rel="noopener noreferrer">${icon(ExternalLink, "xs")} Open Hindsight UI</a>`
@@ -1748,9 +1801,230 @@ function renderHindsightActions(pack: InstalledPackWire, state: HindsightUiState
 	`;
 }
 
-/** Open the native Hindsight config/status panel — the primary setup path. */
+/** Open the native Hindsight config/status panel — the in-session setup path, still
+ *  reachable from the command palette / git-widget panel entrypoints. The Marketplace
+ *  Configure button uses the inline form ({@link toggleHindsightConfigForm}) instead,
+ *  because `#/market` has no active chat session to mount a pack side-panel against. */
 function openHindsightPanel(): void {
 	void import("./pack-panels.js").then((m) => m.openPackPanel({ panelId: HINDSIGHT_PANEL_ID }, HINDSIGHT_PACK));
+}
+void openHindsightPanel; // retained: the in-session panel path is unchanged.
+
+/** Default the inline form values (used when the config read hasn't populated a field). */
+function defaultHindsightForm(): HindsightConfigFormValues {
+	return {
+		mode: "external",
+		externalUrl: "",
+		uiUrl: "",
+		bank: "bobbit",
+		namespace: "default",
+		recallScope: "all",
+		autoRecall: true,
+		autoRetain: true,
+		timeoutMs: "1500",
+		recallBudget: "1200",
+		apiKey: "",
+	};
+}
+
+/** Toggle the inline Configure form. Opening hydrates it from the `config` route over
+ *  the SESSIONLESS built-in seam (pure read, no Docker). */
+function toggleHindsightConfigForm(pack: InstalledPackWire): void {
+	if (hindsightConfigFormOpen) {
+		hindsightConfigFormOpen = false;
+		renderApp();
+		return;
+	}
+	hindsightConfigFormOpen = true;
+	hindsightConfigResult = null;
+	renderApp();
+	void loadHindsightConfigForm(pack);
+}
+
+/** Hydrate the inline form + the touched-field baseline from the `config` route GET.
+ *  The apiKey input ALWAYS loads blank (the secret is never echoed); leaving it blank
+ *  keeps the stored secret on save. */
+async function loadHindsightConfigForm(pack: InstalledPackWire): Promise<void> {
+	const res = await readBuiltinPackRoute<{ config?: HindsightConfigWire }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+	});
+	const base = defaultHindsightForm();
+	if (res.ok && res.data?.config) {
+		const c = res.data.config;
+		const form: HindsightConfigFormValues = {
+			mode: c.mode ?? base.mode,
+			externalUrl: c.externalUrl ?? "",
+			uiUrl: c.uiUrl ?? "",
+			bank: c.bank ?? base.bank,
+			namespace: c.namespace ?? base.namespace,
+			recallScope: c.recallScope ?? base.recallScope,
+			autoRecall: typeof c.autoRecall === "boolean" ? c.autoRecall : base.autoRecall,
+			autoRetain: typeof c.autoRetain === "boolean" ? c.autoRetain : base.autoRetain,
+			timeoutMs: typeof c.timeoutMs === "number" ? String(c.timeoutMs) : base.timeoutMs,
+			recallBudget: typeof c.recallBudget === "number" ? String(c.recallBudget) : base.recallBudget,
+			apiKey: "",
+		};
+		hindsightConfigApiKeySet = !!c.apiKeySet;
+		hindsightConfigForm = form;
+		hindsightConfigLoaded = { ...form };
+	} else {
+		hindsightConfigApiKeySet = false;
+		hindsightConfigForm = base;
+		hindsightConfigLoaded = { ...base };
+	}
+	renderApp();
+}
+
+/** Mutate one inline-form field (string/boolean) and repaint. */
+function setHindsightFormField<K extends keyof HindsightConfigFormValues>(key: K, value: HindsightConfigFormValues[K]): void {
+	if (!hindsightConfigForm) hindsightConfigForm = defaultHindsightForm();
+	hindsightConfigForm = { ...hindsightConfigForm, [key]: value };
+	renderApp();
+}
+
+/** Build the POST body with TOUCHED-FIELD semantics: include a field ONLY when its
+ *  current input differs from the loaded baseline. The apiKey baseline is "" — an
+ *  untouched blank input is therefore never sent, so it cannot clobber a stored
+ *  secret; an explicitly cleared field that previously held a non-empty loaded value
+ *  is sent as "" to clear it. */
+function buildHindsightConfigDiff(form: HindsightConfigFormValues, loaded: HindsightConfigFormValues): Record<string, unknown> {
+	const body: Record<string, unknown> = {};
+	if (form.mode !== loaded.mode) body.mode = form.mode;
+	if (form.externalUrl !== loaded.externalUrl) body.externalUrl = form.externalUrl;
+	if (form.uiUrl !== loaded.uiUrl) body.uiUrl = form.uiUrl;
+	if (form.bank !== loaded.bank) body.bank = form.bank;
+	if (form.namespace !== loaded.namespace) body.namespace = form.namespace;
+	if (form.recallScope !== loaded.recallScope) body.recallScope = form.recallScope;
+	if (form.autoRecall !== loaded.autoRecall) body.autoRecall = form.autoRecall;
+	if (form.autoRetain !== loaded.autoRetain) body.autoRetain = form.autoRetain;
+	if (form.timeoutMs !== loaded.timeoutMs) {
+		const n = Number(form.timeoutMs);
+		if (Number.isFinite(n) && n > 0) body.timeoutMs = n;
+	}
+	if (form.recallBudget !== loaded.recallBudget) {
+		const n = Number(form.recallBudget);
+		if (Number.isFinite(n) && n > 0) body.recallBudget = n;
+	}
+	// apiKey baseline is always "" — only sent when the user typed something.
+	if (form.apiKey !== loaded.apiKey) body.apiKey = form.apiKey;
+	return body;
+}
+
+/** Save the inline form via the SESSIONLESS config-write seam, then re-read status +
+ *  config so the row + form reflect the persisted values. Shows an ok/error lozenge. */
+async function handleHindsightConfigSave(pack: InstalledPackWire): Promise<void> {
+	if (!hindsightConfigForm || !hindsightConfigLoaded) return;
+	const body = buildHindsightConfigDiff(hindsightConfigForm, hindsightConfigLoaded);
+	if (Object.keys(body).length === 0) {
+		hindsightConfigResult = { ok: true, message: "No changes" };
+		renderApp();
+		return;
+	}
+	busy.add("hindsight:config");
+	hindsightConfigResult = null;
+	renderApp();
+	const res = await writeBuiltinPackRoute<{ ok?: boolean; error?: string; errors?: string[] }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		body,
+		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+	});
+	busy.delete("hindsight:config");
+	if (res.ok && res.data?.ok !== false) {
+		hindsightConfigResult = { ok: true, message: "Saved" };
+		// Re-hydrate the form baseline + the status/config row from the persisted state.
+		await loadHindsightConfigForm(pack);
+		await loadHindsightState();
+	} else {
+		const errs = res.ok ? (res.data?.errors ?? []).join("; ") : res.error;
+		hindsightConfigResult = { ok: false, message: errs || "Save failed" };
+	}
+	renderApp();
+}
+
+/** The inline Configure form rendered in the Hindsight row. Mirrors the panel fields
+ *  and distinguishes the API/data-plane URL (dialed by Bobbit) from the Dashboard UI
+ *  URL (opened by humans, never dialed). */
+function renderHindsightConfigForm(pack: InstalledPackWire): TemplateResult {
+	const f = hindsightConfigForm;
+	const saving = busy.has("hindsight:config");
+	if (!f) {
+		return html`<div class="market-hindsight-config-form mt-2" data-testid="market-hindsight-config-form"><div class="text-[11px] text-muted-foreground">Loading configuration…</div></div>`;
+	}
+	return html`
+		<div class="market-hindsight-config-form mt-2 flex flex-col gap-2" data-testid="market-hindsight-config-form">
+			<label class="market-field">
+				<span class="market-field-label">Deployment mode</span>
+				<select class="market-input" data-testid="market-hindsight-form-mode" .value=${f.mode} @change=${(e: Event) => setHindsightFormField("mode", (e.target as HTMLSelectElement).value)}>
+					<option value="external" ?selected=${f.mode === "external"}>External (point at existing Hindsight)</option>
+					<option value="managed" ?selected=${f.mode === "managed"}>Managed (Bobbit runs Hindsight + Postgres)</option>
+					<option value="managed-external-postgres" ?selected=${f.mode === "managed-external-postgres"}>Managed + external Postgres</option>
+				</select>
+			</label>
+			<label class="market-field">
+				<span class="market-field-label">API / data-plane URL</span>
+				<input class="market-input" type="text" data-testid="market-hindsight-form-externalurl" placeholder="http://localhost:9177" .value=${f.externalUrl} @input=${(e: Event) => setHindsightFormField("externalUrl", (e.target as HTMLInputElement).value)} />
+				<span class="market-field-help">The data-plane URL Bobbit dials for recall/retain. Required for external mode.</span>
+			</label>
+			<label class="market-field">
+				<span class="market-field-label">Dashboard UI URL</span>
+				<input class="market-input" type="text" data-testid="market-hindsight-form-uiurl" placeholder="http://localhost:19177/banks/bobbit?view=data" .value=${f.uiUrl} @input=${(e: Event) => setHindsightFormField("uiUrl", (e.target as HTMLInputElement).value)} />
+				<span class="market-field-help">The human-facing dashboard opened by "Open Hindsight UI". Never dialed by Bobbit.</span>
+			</label>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Bank</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-form-bank" .value=${f.bank} @input=${(e: Event) => setHindsightFormField("bank", (e.target as HTMLInputElement).value)} />
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Namespace</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-form-namespace" .value=${f.namespace} @input=${(e: Event) => setHindsightFormField("namespace", (e.target as HTMLInputElement).value)} />
+				</label>
+			</div>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall scope</span>
+					<select class="market-input" data-testid="market-hindsight-form-recallscope" .value=${f.recallScope} @change=${(e: Event) => setHindsightFormField("recallScope", (e.target as HTMLSelectElement).value)}>
+						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
+						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
+					</select>
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Timeout (ms)</span>
+					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-timeoutms" .value=${f.timeoutMs} @input=${(e: Event) => setHindsightFormField("timeoutMs", (e.target as HTMLInputElement).value)} />
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall budget</span>
+					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-recallbudget" .value=${f.recallBudget} @input=${(e: Event) => setHindsightFormField("recallBudget", (e.target as HTMLInputElement).value)} />
+				</label>
+			</div>
+			<div class="flex gap-3 flex-wrap items-center">
+				<label class="flex items-center gap-1.5 text-[12px]">
+					<input type="checkbox" data-testid="market-hindsight-form-autorecall" .checked=${f.autoRecall} @change=${(e: Event) => setHindsightFormField("autoRecall", (e.target as HTMLInputElement).checked)} /> Auto recall
+				</label>
+				<label class="flex items-center gap-1.5 text-[12px]">
+					<input type="checkbox" data-testid="market-hindsight-form-autoretain" .checked=${f.autoRetain} @change=${(e: Event) => setHindsightFormField("autoRetain", (e.target as HTMLInputElement).checked)} /> Auto retain
+				</label>
+			</div>
+			<label class="market-field">
+				<span class="market-field-label">API key ${hindsightConfigApiKeySet ? html`<span class="text-muted-foreground">(set — leave blank to keep)</span>` : html`<span class="text-muted-foreground">(blank)</span>`}</span>
+				<input class="market-input" type="password" autocomplete="off" data-testid="market-hindsight-form-apikey" placeholder=${hindsightConfigApiKeySet ? "••••••••" : "optional"} .value=${f.apiKey} @input=${(e: Event) => setHindsightFormField("apiKey", (e.target as HTMLInputElement).value)} />
+			</label>
+			<div class="flex items-center gap-2 flex-wrap">
+				<button class="market-btn market-btn--primary" data-testid="market-hindsight-config-save" ?disabled=${saving} @click=${() => handleHindsightConfigSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save configuration</button>
+				<button class="market-btn" data-testid="market-hindsight-config-cancel" @click=${() => { hindsightConfigFormOpen = false; renderApp(); }}>Close</button>
+				${hindsightConfigResult
+					? html`<span
+							class="market-lozenge ${hindsightConfigResult.ok ? "" : "market-lozenge--warning"}"
+							data-testid="market-hindsight-config-result"
+							style=${hindsightConfigResult.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+						>${icon(hindsightConfigResult.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightConfigResult.message}</span>`
+					: ""}
+			</div>
+		</div>
+	`;
 }
 
 /** Test connection == re-read the pack `status` route (pure, no Docker). Updates the
