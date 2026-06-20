@@ -438,6 +438,57 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		expect(retained[retained.length - 1].tags).toContain(`project:${projectId}`);
 	});
 
+	test("recall: an optional tags filter NARROWS a project recall (all_strict, no broadening)", async () => {
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const mark = stub.calls.length;
+		const res = await invokeTool(id, RECALL, "recall", { query: "q", scope: "project", tags: { goal: "g9" } });
+		expect(res.status).toBe(200);
+		const calls = recallCalls(stub, mark);
+		expect(calls.length).toBe(1);
+		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`goal:g9`, `project:${projectId}`].sort());
+		// all_strict ⇒ require project AND goal, exclude untagged/global + other projects
+		// (the optional tag NARROWS recall instead of broadening it via `any`).
+		expect(calls[0].body?.tags_match).toBe("all_strict");
+	});
+
+	test("recall: an optional tags.project can NOT override the route-derived project", async () => {
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const mark = stub.calls.length;
+		const res = await invokeTool(id, RECALL, "recall", { query: "q", scope: "project", tags: { project: "evil", goal: "g9" } });
+		expect(res.status).toBe(200);
+		const calls = recallCalls(stub, mark);
+		expect(calls.length).toBe(1);
+		// The caller's project:evil is dropped; the session's real project tag wins.
+		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`goal:g9`, `project:${projectId}`].sort());
+		expect(calls[0].body?.tags_match).toBe("all_strict");
+	});
+
+	test("reflect: an optional tags filter NARROWS a project reflect (all_strict, no broadening)", async () => {
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const mark = stub.calls.length;
+		const res = await invokeTool(id, REFLECT, "reflect", { prompt: "p", scope: "project", tags: { topic: "auth" } });
+		expect(res.status).toBe(200);
+		const calls = reflectCalls(stub, mark);
+		expect(calls.length).toBe(1);
+		expect((calls[0].body?.tags as string[]).slice().sort()).toEqual([`project:${projectId}`, "topic:auth"].sort());
+		expect(calls[0].body?.tags_match).toBe("all_strict");
+	});
+
+	test("recall/reflect descriptors expose a simple `tags` param but NOT a tag_groups param", () => {
+		const recallYaml = fs.readFileSync(path.join(TOOLS_DIR, "hindsight_recall.yaml"), "utf-8");
+		const reflectYaml = fs.readFileSync(path.join(TOOLS_DIR, "hindsight_reflect.yaml"), "utf-8");
+		for (const y of [recallYaml, reflectYaml]) {
+			const paramsLine = y.split("\n").find((l) => l.startsWith("params:")) ?? "";
+			// The agent surface offers a flat `tags` filter; compound `tag_groups` is a
+			// direct data-plane escape hatch (mentioned in prose, never a tool param).
+			expect(paramsLine).toMatch(/tags\?/);
+			expect(paramsLine).not.toMatch(/tag_groups/);
+		}
+	});
+
 	test("the three tools resolve for a project session and mint tool-bound surface tokens", async () => {
 		seedConfig(bobbitDir, externalConfig(stub.url));
 		const id = await newSession();

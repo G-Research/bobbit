@@ -90,14 +90,44 @@ provider reads.
 | `llmApiKey` / `externalDatabaseUrl` / `dataDir` | secret / secret / string | — / — / `~/.hindsight` | **Managed-mode only.** `llmApiKey` → `HINDSIGHT_API_LLM_API_KEY`, `externalDatabaseUrl` → `HINDSIGHT_API_DATABASE_URL` (redacted to `*Set` booleans on the GET surface), `dataDir` is the managed-Postgres bind path. See [managed-runtimes.md — P3](managed-runtimes.md#secrets--config-mapping). |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
 | `namespace` | string | `default` | Hindsight namespace path segment. |
-| `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank (cross-project); `project` adds a `project:<id>` tag filter. |
+| `recallScope` | enum `project` \| `all` | `project` | Default recall scope. `project` adds a `project:<id>` tag filter with `tagsMatch` (project + global memories); `all` recalls across the whole bank (cross-project). |
+| `tagsMatch` | enum `any` \| `any_strict` | `any` | Scope filter strategy for `project` scope. `any` includes both project-specific AND global/shared memories. `any_strict` excludes global memories, enforcing hard project-only isolation. |
 | `autoRecall` | boolean | `true` | When false, the recall hooks contribute no blocks. |
 | `autoRetain` | boolean | `true` | When false, the retain hooks store nothing. |
+| `retainEveryNTurns` | number | `5` | Cadence for background memory extraction. Bobbit runs an expensive LLM extraction once every N turns to optimize cost. |
+| `retainMaxDelayMs` | number | `1800000` | Hook-observed timeout in milliseconds (30m) to flush buffered turns, preventing memories from staling in long-running or inactive sessions. `0` disables time-based flush. |
+| `retainOverlapTurns` | number | `2` | Number of previous turn summaries to carry forward as bounded context/overlap into the next batch. |
 | `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
+| `recallTypes` | array of `observation` \| `world` \| `experience` | `["observation", "world", "experience"]` | Filters memory recall to bias toward consolidated/stable knowledge over Turn chatter. |
+| `retainMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's extraction logic on what durable knowledge to keep and what noise to ignore. |
+| `observationsMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight on how to consolidate observations. |
+| `reflectMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's synthesis/reflection logic. |
+| `recallMaxInputChars` | number | `3000` | Truncates recall query text to prevent Hindsight backend 400 "Query too long" errors (max 500 tokens). |
 | `timeoutMs` | number | `1500` | Per-request abort budget for the REST client. |
 
 The `config` route validates overrides against this schema before persisting; an empty string
 clears an optional string (`externalUrl`/`apiKey`), and numeric keys must be positive.
+
+#### Per-Project Config Overrides & Precedence
+
+To balance unified global knowledge with project-specific control, Bobbit supports cascading configuration. Overrides resolve with the following precedence (highest to lowest):
+
+1. **Per-Project Config Overlay** (persisted in the pack store under a per-project key)
+2. **Server-Global Config** (configured globally via panel / store)
+3. **Defaults** (`CONFIG_DEFAULTS` / YAML definition)
+
+Only safe, **memory-quality** keys are overrideable per-project:
+- `recallScope`
+- `bank`
+- `tagsMatch`
+- `recallBudget`
+- `recallTypes`
+
+**Hard Server-Global Lock:** A project overlay can *never* override system-level or infrastructure config keys. The deployment `mode`, `externalUrl`, `uiUrl`, and secrets (`apiKey`, `llmApiKey`, `externalDatabaseUrl`, `dataDir`) are strictly locked to the server-global config to prevent security and configuration drift.
+
+**Inherit & Clear Behavior:** Any overridden key set to an empty value (`null` or `""`) is omitted from the project overlay, causing it to transparently inherit from the server-global config.
+
+**Marketplace Config Hydration:** The Marketplace global config form hydrates strictly from `globalConfig` (the un-overlaid, server-global settings). This ensures that any active per-project override does not masquerade as a global setting, preventing it from being accidentally written back globally during save. The effective, overlaid configuration is reserved exclusively for the runtime status/summary rendering and session execution.
 
 ## Bank & tag taxonomy
 
@@ -125,23 +155,53 @@ context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>
 
 **Recall scope.**
 
-- `all` (default) — recall across the whole `bobbit` bank with **no project filter**. This is the
-  cross-project value: a query like "how did we configure X?" can surface a memory from any
-  project.
-- `project` — add a `project:<projectId>` tag filter with `tags_match: "any"`. **`"any"` means
-  "OR, *includes* untagged"**: the recall returns memories tagged for this project **plus**
-  untagged / org-wide memories, while **excluding** memories tagged for *other* projects. (The
-  stricter `"any_strict"` — "OR, *excludes* untagged" — is deliberately **not** used, so a project
-  scope never hides global knowledge.) The filter is applied **only when configured** and only when
-  the session has a real project id; the default `all` never narrows.
+- `project` (default) — add a `project:<projectId>` tag filter. Under default project scope with no extra tags, the query continues to use the configured `tagsMatch` (which defaults to `"any"`).
+  - Under `"any"`, the query fetches project-tagged **plus** untagged/global memories, excluding only memories tagged for other projects.
+  - Under `"any_strict"`, untagged/global memories are excluded, enforcing hard project isolation.
+  The filter is applied only when the session is associated with a real project ID; a global/server-scope session continues to recall globally.
+- `all` — recall across the entire bank with no project filter. This allows cross-project semantic queries like "how did we set up the database in project X?" to surface knowledge across the entire installation.
 
 Recall, `reflect`, and the agent tools all route this scope→tag decision through one shared
-`recallTagFilter(scope, projectId)` helper (`market-packs/hindsight/src/shared.ts`, exporting
-`PROJECT_RECALL_TAGS_MATCH = "any"`), so every read path resolves project scope identically.
+`recallTagFilter(scope, projectId, tagsMatch, extraTags)` helper (`market-packs/hindsight/src/shared.ts`),
+so every read path resolves project scope identically.
+
+**Extra tags and narrowing semantics:**
+When optional flat `extraTags` are supplied to the helper (e.g., via the agent tools under project scope), they **narrow** results rather than broadening them. The helper overrides `tagsMatch` to `"all_strict"` (requiring all specified tags). Thus, the query matches the current project tag **plus** every extra tag, while strictly excluding untagged/global memories and other-project memories that happen to share that extra tag.
+Furthermore, the route-derived project ID is authoritative: any caller-supplied `project` key inside the `extraTags` is completely ignored and dropped under project scope to prevent callers from overriding the active project scope.
 
 The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
 correctness never depends on once-per-session in-memory state (provider workers are per-hook and
 stateless).
+
+## Retain Hygiene & Cost Levers
+
+Memory extraction is highly valuable but historically expensive, as running LLM-based fact-extraction on every turn drives up token consumption and host load. Bobbit implements several robust levers to keep memory high-signal and extremely cost-efficient:
+
+### 1. Bank Missions (Durable Knowledge Steering)
+Hindsight uses explicit prompts to guide memory extraction, observation consolidation, and reflection. Bobbit configures these to actively filter out transient developer noise and steer the engine toward lasting, reusable engineering knowledge:
+- **`retainMission`**: Directs extraction to capture user and team preferences, architecture choices, standards, conventions, and stable project decisions. It explicitly discards ephemeral chatter, greetings, timestamps, PIDs, stack traces, and failed CLI runs.
+- **`observationsMission`**: Tells Hindsight to consolidate recurring facts into general, stable, reusable statements rather than maintaining a noisy timeline of turn histories.
+- **`reflectMission`**: Directs the reflection synthesizer to ground its answers in consolidated observations and documented decisions, ignoring short-term conversational noise.
+
+These are applied idempotently to the Hindsight bank config API. A signature of the current missions is cached in the pack store, avoiding redundant PATCH calls on every turn.
+
+### 2. Batched Retain Cadence
+- **Durable Per-Session Pending Buffer**: Instead of running an expensive LLM extraction request on *every* turn, Bobbit holds turn summaries in a durable `PendingBuffer` JSON structure inside the pack-scoped store. Because provider workers terminate after every hook invocation, this state is saved to disk per session, ensuring that all conversations are processed linearly without memory loss (never randomly sampled).
+- **`retainEveryNTurns` (default: 5)**: A full LLM extraction is run only once every `N` primary turns. At the default of $N=5$, this yields an immediate **80% reduction in routine extraction LLM calls** and associated token costs.
+- **`retainMaxDelayMs` (default: 1,800,000 ms / 30 minutes)**: To prevent memories from staling in long-running or inactive sessions, this threshold acts as a max delay timeout to trigger an aggregate flush.
+  - *Hook-Observed evaluation*: This timer is **not** an exact system-level idle sweeper or background thread interval. Instead, it is evaluated defensively per session on the invocation of provider hooks (such as `afterTurn`), by checking whether the oldest pending turn in the buffer has aged past `retainMaxDelayMs` relative to the current timestamp.
+- **Aggregate Flush Semantics**:
+  - *Triggering*: An aggregate flush occurs when the count of pending primary turns reaches `retainEveryNTurns` OR the age of the oldest pending turn exceeds `retainMaxDelayMs`.
+  - *Content Composition*: The aggregate content joins any carried-forward overlap context from the previous flush (`Earlier context (overlap):` followed by the summaries) with the pending primary turns, separated by the aggregate separator.
+  - *Durable Queueing on Failure*: If the aggregate retain request fails (e.g. network timeout or backend unavailability), the entire built aggregate is enqueued to the durable retry queue so it is never dropped, and a non-fatal error is logged.
+  - *Buffer Advancement*: In both success and failure cases, the buffer is immediately advanced: the primary turns are cleared (so the turn count resets and advances), and the last `retainOverlapTurns` summaries of the primary turns are carried forward as a bounded `overlap` context for the next batch. Carrying forward only the primary summaries prevents previous overlaps from accumulating indefinitely.
+- **`retainOverlapTurns` (default: 2)**: Preserves overlapping turn context at batch boundaries, carrying forward the last `K` summaries of the primary turns as bounded context to maintain thread continuity.
+- **Compaction Safety (`beforeCompact`)**: Before the gateway compacts a session's history and discards the oldest context, the provider intercepts this event via `beforeCompact` to guarantee zero context loss:
+  - *Synchronous Flush*: It first performs a **synchronous flush/retain** (`sync: true`) of any pending turns currently held in the session buffer to ensure they land in Hindsight before context is pruned.
+  - *Synchronous Retain*: It then performs a **synchronous, batch-exempt retain** (`sync: true`, "compaction" kind) of the compaction summary itself, ensuring the about-to-be-lost history span is durably written to Hindsight.
+- **Session Shutdown**: On `sessionShutdown`, Bobbit performs a best-effort best-practice:
+  - First, it flushes any remaining buffered turns (`flushPending`, `sync: false`) to Hindsight.
+  - Then, it triggers a **one-pass full drain** (`drainQueueAll`) of the durable retry queue to flush any remaining unsaved items.
 
 ## Provider lifecycle behaviour
 
@@ -154,9 +214,9 @@ a slow or unhealthy backend never blocks or fails a session — recalls skip and
 |---|---|
 | `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`). On error/timeout ⇒ no block + a diagnostic. |
 | `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On failure, enqueue for retry. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. Failure ⇒ enqueue. |
-| `sessionShutdown` | Best-effort **one-pass** drain of the retry queue. Never throws. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars), append to the pending buffer, and trigger a batched flush as an async aggregate retain if the turn count or max delay limits are exceeded. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
+| `beforeCompact` | If `autoRetain`: synchronously flush any pending buffered turns. Then, build and synchronously retain a compaction summary of the about-to-be-lost span (batch-exempt) so all memory lands in Hindsight before context is pruned. Failure ⇒ enqueue. |
+| `sessionShutdown` | If `autoRetain`: flush any remaining buffered turns, then perform a best-effort **one-pass** drain of the retry queue. Never throws. |
 
 The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
 (see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Each block is titled "Relevant memory",
@@ -166,9 +226,10 @@ empty recall produces no block.
 ### Retry queue & diagnostics
 
 A retain that fails (network/timeout/HTTP) is **not lost**. The provider appends
-`{ content, tags, ts }` to a durable queue in the pack store (key `retain-queue`):
+`{ content, tags, ts, bank, namespace }` to a durable queue in the pack store (key `retain-queue`):
 
 - **Cap 100** — appending past 100 entries drops the oldest (FIFO eviction).
+- **Target Routing** — queue entries include the original target `bank` and `namespace` at the time of the failure, ensuring that retry attempts are routed back to their correct destination even if the current session config has since changed. Legacy queue entries that lack these fields transparently fall back to using the active, currently-configured bank and namespace.
 - **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
   turn's own retain; success removes it, failure leaves it.
 - **Drain on `sessionShutdown`** — one best-effort full pass.
@@ -192,9 +253,9 @@ list) rather than erroring.
 |---|---|
 | `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides to the pack store, return the new effective config. |
 | `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, externalUrl, uiUrl, timeoutMs, recallBudget, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueDepth` is the retry-queue length. The trailing `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are **additive** (UX-polish) so the panel and Marketplace can render the [active configured values](#active-configured-values-surfaced) without a second round-trip; both URLs are **non-secret** and secrets are still never echoed. `lastError` is persisted as a `{ message, ts }` object, so consumers must read `.message` (rendering the object raw yields `[object Object]`). |
-| `recall` | `{ query, scope? }` → resolves bank + tags (via `recallTagFilter`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
+| `recall` | `{ query, scope?, tags? }` → resolves bank + tags (via `recallTagFilter(scope, projectId, tagsMatch, tags)`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
 | `retain` | `{ content, tags?, sync?, scope? }` → `ensureBank` + `client.retain` with merged auto-tags; `scope: project` (with a real project id) adds a `project:<id>` tag. The `kind:manual` marker is spread **last** so user/scope tags can't override it. Returns `{ ok }`. |
-| `reflect` | `{ prompt, scope? }` → `client.reflect` with the same `recallTagFilter` scope mapping as `recall`; returns `{ text }`. |
+| `reflect` | `{ prompt, scope?, tags? }` → `client.reflect` with the same `recallTagFilter(scope, projectId, tagsMatch, tags)` scope mapping as `recall`; returns `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
 ## Agent tools
@@ -207,9 +268,9 @@ for a synthesized answer.
 
 | Tool | Purpose | Parameters | Output |
 |---|---|---|---|
-| `hindsight_recall` | Fetch durable memories matching a query before acting. | `query` (required), `scope?` (`project`\|`all`) | A numbered list of memory texts, plus the structured route result (`memories`, `count`, `configured`) under `details`. Empty recall ⇒ "No relevant memories found." |
+| `hindsight_recall` | Fetch durable memories matching a query before acting. | `query` (required), `scope?` (`project`\|`all`), `tags?` (simple map) | A numbered list of memory texts, plus the structured route result (`memories`, `count`, `configured`) under `details`. Empty recall ⇒ "No relevant memories found." |
 | `hindsight_retain` | Durably record a decision, preference, or fact. | `content` (required), `scope?`, `tags?` (extra key/value, additive), `sync?` (wait for durability; default `false`) | "Memory retained." on success; an error result otherwise. The route auto-applies a `kind:manual` tag. |
-| `hindsight_reflect` | Get a synthesized answer drawing on accumulated memory, not a raw list. | `prompt` (required), `scope?` | The synthesized text. Empty reflection ⇒ "(no reflection produced)". |
+| `hindsight_reflect` | Get a synthesized answer drawing on accumulated memory, not a raw list. | `prompt` (required), `scope?`, `tags?` (simple map) | The synthesized text. Empty reflection ⇒ "(no reflection produced)". |
 
 These tools live in `market-packs/hindsight/tools/hindsight/` (`extension.ts` plus one descriptor
 YAML per tool); each descriptor declares `provider: { type: bobbit-extension, extension: extension.ts }`.
@@ -239,29 +300,20 @@ behaviour, so the agent tools, the panel's manual search, and the provider all r
 same way. A dormant (unconfigured) Hindsight yields a clean signal — recall/reflect return empty,
 retain returns a not-configured error — never a crash.
 
-### `scope` → tags on the shared bank
+### `scope` & `tags` → tags on the shared bank
 
-All three tools accept `scope: project | all`. **Scope is a tag filter on the single shared bank
-(`config.bank`, default `bobbit`) — never a different bank.** When `scope` is omitted, the pack's
-configured [`recallScope`](#configuration-keys) applies.
+All three tools accept `scope: project | all` (defaulting to the configured `recallScope`, which is now `project`) and an optional flat `tags` map parameter (e.g., `{goal: "implement-auth"}`).
 
-- `recall` — `project` adds a `project:<id>` tag filter with `tags_match: "any"` (project-tagged
-  **plus** untagged/global, excluding other projects — see
-  [Recall scope](#bank--tag-taxonomy)); `all` adds no project filter. The project tag is only added
-  when the session has a **real project id** — a global/server-scope session fabricates no
-  placeholder tag.
-- `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the
-  auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags`
-  are additive and never change the bank. The `kind:manual` provenance marker is spread **last**, so
-  a user-supplied `tags: { kind: "..." }` can never override it.
-- `reflect` — `scope` maps to the **same** `recallTagFilter` as `recall`: `project` (with a real
-  project id) reflects over project-tagged plus untagged/global memories; `all` (or no project id)
-  reflects over the whole shared bank. It still creates no extra banks.
+**Scope is a tag filter on the single shared bank (`config.bank`, default `bobbit`) — never a different bank.**
 
-A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the
-scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's
-[bank & tag taxonomy](#bank--tag-taxonomy): scope is *always* expressed as tags on one bank, never
-as bank fan-out.
+- `recall` / `reflect` — under `project` scope with no extra tags, this adds a `project:<id>` tag filter and resolves using the configured `tagsMatch` (default `"any"`, fetching project-tagged **plus** untagged/global memories, excluding other projects — see [Recall scope](#bank--tag-taxonomy)). When optional extra `tags` are supplied under `project` scope, they **narrow** results with strict `all_strict` semantics (matching the current project tag AND every extra tag, while excluding untagged/global and other-project memories sharing that extra tag). Any caller-supplied `tags.project` value is completely ignored and dropped; the route-derived current project ID is authoritative and cannot be overridden. Under `all` scope, no project tag filter is added, but optional extra `tags` are still applied additively (matching via `"any"`).
+- `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags` are additive and never change the bank. The `kind:manual` provenance marker is spread **last**, so a user-supplied `tags: { kind: "..." }` can never override it.
+
+A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's [bank & tag taxonomy](#bank--tag-taxonomy): scope is *always* expressed as tags on one bank, never as bank fan-out.
+
+**No `tag_groups` DSL in Tools:** To keep the tool descriptions compact, budget-compliant, and simple for agents to use reliably, the complex `tag_groups` Boolean tree (AND/OR query tree) is **never** exposed to agent tools.
+
+**Power-User Escape Hatch (Direct API):** For complex, compound Boolean filters (e.g. searching memories matching `(project:A OR project:B) AND kind:decision`), clients should bypass the agent tools and call the direct Hindsight data-plane API (`POST /v1/{namespace}/banks/{bank}/memories/recall` with the full `tag_groups` body).
 
 API E2E coverage lives in `tests/e2e/hindsight-agent-tools.spec.ts` (reusing the shared
 `tests/e2e/hindsight-stub.mjs`): it drives the real surface-token + route round-trip for each tool,
@@ -459,7 +511,7 @@ The walkthrough surfaces an opinionated, safe defaults explainer (rationale show
 | Namespace | `default` | Leave as `default` unless your Hindsight uses namespaces. |
 | Auto-retain | on (async) | Memories are saved in the background after each turn — no latency cost. |
 | Auto-recall | on | Relevant memories are pulled in automatically at session start and each turn. |
-| Recall scope | `all` | Search across everything — "have we solved this before, anywhere?" |
+| Recall scope | `project` | This project + shared/global memories — "have we solved this before in this project, or globally?" |
 | Timeout | `1500 ms` | Conservative: a slow Hindsight never stalls a turn; recall skips and retains queue. |
 | LLM key (managed) | none (user-supplied) | Hindsight uses your LLM key for extraction. Bobbit forwards it to the local runtime only; it never hardcodes a provider secret. |
 
@@ -564,6 +616,18 @@ confined-worker Node ESM under `lib/*.mjs` by `scripts/build-market-packs.mjs` (
 entry in `PACKS`, `platform: "node"`), and `scripts/copy-builtin-packs.mjs` lists `"hindsight"` in
 `FIRST_PARTY_PACKS` so it ships in the built-in band. The shared `src/shared.ts` is inlined into
 both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
+
+## Cost & Signal Model (Before vs. After)
+
+By tuning the default scoping and retention cadence, Bobbit substantially lowers LLM and token overhead while increasing the signal-to-noise ratio:
+
+| Dimension | Before (Legacy) | After (Optimized) | Impact / Benefit |
+|---|---|---|---|
+| **Routine Retain Cost** | LLM extraction run on **every turn** (100% cost overhead). | Batched LLM extraction runs **every 5 turns** by default. | **80% reduction** in routine extraction LLM calls and associated API charges. |
+| **Context Protection** | No special compaction handling. | **Compaction-exempt sync flush** (`beforeCompact`) always runs. | 100% of context is preserved before pruning; zero loss of crucial architectural decisions. |
+| **Recall Signal** | Scope defaulted to `all` (cross-project noise and other-project clutter). | Scope defaulted to `project` (this project + shared/global memories). | Eliminates cross-project pollution, keeping the prompt focused only on relevant context. |
+| **Recall Efficiency** | Raw turn summaries returned. | Configured `recallTypes` biased toward consolidated `observation` facts. | Prompts are injected with high-density consolidated facts instead of redundant chat logs. |
+| **Token Budgeting** | Default budget was high and loose. | Modest `recallBudget` (default 1200 tokens) with `recallMaxInputChars` (3000 chars) clamping. | Controls total token count per prompt and eliminates Hindsight's 500-token query limit errors. |
 
 ## Non-goals
 

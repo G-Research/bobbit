@@ -54,6 +54,17 @@ export interface RecallOptions {
 	maxTokens?: number;
 	tags?: Record<string, string>;
 	tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	/** Hindsight `types` filter (fact types to recall): biases recall toward
+	 *  consolidated `observation`s plus `world`/`experience`. Omitted ⇒ upstream
+	 *  default (world + experience). */
+	types?: Array<"observation" | "world" | "experience">;
+}
+
+/** Bank-config mission updates (PATCH …/banks/{bank}/config body `{ updates }`). */
+export interface BankConfigUpdates {
+	retain_mission?: string;
+	observations_mission?: string;
+	reflect_mission?: string;
 }
 
 export interface RetainOptions {
@@ -77,6 +88,8 @@ export interface HindsightClient {
 	retain(bank: string, content: string, opts?: RetainOptions): Promise<void>;
 	reflect(bank: string, prompt: string, opts?: ReflectOptions): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
+	/** Idempotent bank-config mission update. PATCH …/banks/{bank}/config. */
+	updateBankConfig(bank: string, updates: BankConfigUpdates): Promise<void>;
 }
 
 export interface HindsightClientConfig {
@@ -182,6 +195,7 @@ export function createClient(cfg: HindsightClientConfig): HindsightClient {
 			const tags = flattenTags(opts?.tags);
 			const body: Record<string, unknown> = { query };
 			if (opts?.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
+			if (opts?.types && opts.types.length > 0) body.types = [...opts.types];
 			if (tags.length > 0) {
 				body.tags = tags;
 				body.tags_match = opts?.tagsMatch ?? "any";
@@ -227,6 +241,11 @@ export function createClient(cfg: HindsightClientConfig): HindsightClient {
 				`${baseUrl}/v1/${nsSeg}/banks`,
 			);
 			return { banks: (data.banks ?? []).map((b) => b.bank_id) };
+		},
+
+		async updateBankConfig(bank: string, updates: BankConfigUpdates): Promise<void> {
+			// BankConfigUpdate: { updates: { retain_mission, observations_mission, … } }.
+			await request("PATCH", `${bankBase(bank)}/config`, { updates });
 		},
 	};
 }

@@ -163,6 +163,29 @@ interface HindsightConfigWire {
 	apiKeySet?: boolean;
 }
 
+/** The per-project override metadata the `config` GET route exposes when a
+ *  `projectId` is supplied (design hindsight-memory-quality §"Per-project override").
+ *  Only the safe memory-quality keys are surfaced; absent fields inherit the global
+ *  config. Optional everywhere — when the route partition that adds this hasn't
+ *  merged, the response simply omits these and the override UI stays dormant. */
+interface HindsightProjectOverrideWire {
+	recallScope?: string;
+	bank?: string;
+	tagsMatch?: string;
+	recallBudget?: number;
+	recallTypes?: string[];
+}
+
+/** The full `config` GET response. `config` is the EFFECTIVE (overlay-resolved)
+ *  config; `globalConfig`/`projectOverride` are present only when the route was
+ *  asked for a specific project AND supports per-project overlays. */
+interface HindsightConfigGetWire {
+	config?: HindsightConfigWire;
+	globalConfig?: HindsightConfigWire;
+	projectOverride?: HindsightProjectOverrideWire | null;
+	projectId?: string;
+}
+
 /** Editable values for the inline Configure form (strings for input binding). */
 interface HindsightConfigFormValues {
 	mode: string;
@@ -201,6 +224,26 @@ let hindsightConfigLoaded: HindsightConfigFormValues | null = null;
 let hindsightConfigApiKeySet = false;
 /** Transient save-result lozenge for the inline config form. */
 let hindsightConfigResult: { ok: boolean; message: string } | null = null;
+
+// ── Per-project memory override (design hindsight-memory-quality §"Per-project
+// override"). The built-in Hindsight pack is server-scoped, but its memory config
+// supports a small project overlay (recallScope + optional bank) layered over the
+// global config. The marketplace passes the CURRENT projectId for the built-in row
+// so the config route can surface + persist that overlay. All state degrades to a
+// dormant section when the route partition exposing it hasn't merged. ──
+/** The projectId the override section addresses (current project), if any. */
+let hindsightOverrideProjectId: string | undefined;
+/** Whether the config route exposed the per-project overlay contract (globalConfig /
+ *  projectOverride present). False ⇒ the override section is hidden entirely. */
+let hindsightOverrideSupported = false;
+/** The server/global base config (used to label "inherit (<global>)" affordances). */
+let hindsightGlobalConfig: HindsightConfigWire | null = null;
+/** The stored project overlay (null/empty ⇒ no override; inherits global). */
+let hindsightProjectOverride: HindsightProjectOverrideWire | null = null;
+/** Editable override form values. "" recallScope ⇒ inherit; "" bank ⇒ inherit. */
+let hindsightOverrideForm: { recallScope: string; bank: string } | null = null;
+/** Transient save-result lozenge for the per-project override save. */
+let hindsightOverrideResult: { ok: boolean; message: string } | null = null;
 
 // ── Hindsight guided setup WIZARD (design extension-platform §11 + G3.3) ──────
 // Clicking Enable on a DISABLED built-in Hindsight row launches a guided wizard
@@ -302,6 +345,12 @@ export function clearMarketplaceState(): void {
 	hindsightConfigLoaded = null;
 	hindsightConfigApiKeySet = false;
 	hindsightConfigResult = null;
+	hindsightOverrideProjectId = undefined;
+	hindsightOverrideSupported = false;
+	hindsightGlobalConfig = null;
+	hindsightProjectOverride = null;
+	hindsightOverrideForm = null;
+	hindsightOverrideResult = null;
 	hindsightWizardOpen = false;
 	hindsightWizardPackKey = null;
 	hindsightWizardStep = "mode";
@@ -461,16 +510,55 @@ async function loadHindsightState(): Promise<void> {
 	const projectId = currentProjectId();
 	const runtimesRes = await listPackRuntimes(projectId);
 	if (runtimesRes.ok) hindsightRuntimes = runtimesRes.data.runtimes || [];
+	// Pass the CURRENT projectId for the built-in row too (not just project-scope
+	// packs): the config route overlays the per-project memory override + reports the
+	// EFFECTIVE recall scope for it. A route partition that ignores projectId simply
+	// returns the global view (override section stays dormant).
 	const statusRes = await readBuiltinPackRoute<HindsightStatusWire>({
 		packId: runtimeRestPackId(pack),
 		routeName: "status",
-		projectId: pack.scope === "project" ? projectId : undefined,
+		projectId,
 	});
 	if (statusRes.ok) {
 		hindsightStatus = statusRes.data ?? null;
 		hindsightStatusLoaded = true;
 	}
+	// Read config (project-scoped) to surface the per-project override badge on the
+	// summary WITHOUT opening Configure. Pure read; populates META only (never the
+	// editable override form, which Configure seeds on open).
+	const cfgRes = await readBuiltinPackRoute<HindsightConfigGetWire>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		projectId,
+	});
+	if (cfgRes.ok && cfgRes.data) applyHindsightOverrideMeta(cfgRes.data, projectId);
 	renderApp();
+}
+
+/** Populate the per-project override METADATA (support flag, global base, stored
+ *  overlay) from a `config` GET response. Does NOT touch the editable override form.
+ *  The route exposes the overlay contract only when it returns `globalConfig` or a
+ *  `projectOverride` field; absent ⇒ the section stays hidden. */
+function applyHindsightOverrideMeta(data: HindsightConfigGetWire, projectId: string | undefined): void {
+	hindsightOverrideProjectId = projectId;
+	const supported = !!projectId && (Object.prototype.hasOwnProperty.call(data, "globalConfig") || Object.prototype.hasOwnProperty.call(data, "projectOverride"));
+	hindsightOverrideSupported = supported;
+	hindsightGlobalConfig = data.globalConfig ?? null;
+	hindsightProjectOverride = data.projectOverride ?? null;
+}
+
+/** True when a non-empty per-project overlay is stored (drives the summary badge). */
+function hasHindsightProjectOverride(): boolean {
+	const o = hindsightProjectOverride;
+	if (!o) return false;
+	return !!(o.recallScope || (o.bank && o.bank.trim()) || o.tagsMatch || o.recallBudget != null || (o.recallTypes && o.recallTypes.length));
+}
+
+/** Resolve the current project's display name for override copy. */
+function hindsightProjectName(): string {
+	const pid = hindsightOverrideProjectId;
+	if (!pid) return "this project";
+	return state.projects.find((p) => p.id === pid)?.name || "this project";
 }
 
 /** Fetch the UNFILTERED activation catalogue + disabled overrides for every
@@ -1829,7 +1917,7 @@ function renderHindsightConfigSummary(): TemplateResult {
 	if (s.externalUrl) rows.push(["API URL", s.externalUrl]);
 	if (s.bank) rows.push(["Bank", s.bank]);
 	if (s.namespace) rows.push(["Namespace", s.namespace]);
-	if (s.recallScope) rows.push(["Recall scope", s.recallScope]);
+	if (s.recallScope) rows.push(["Recall scope", s.recallScope === "project" ? "project (this project + shared/global)" : "all (every project)"]);
 	rows.push(["Auto recall", s.autoRecall ? "on" : "off"]);
 	rows.push(["Auto retain", s.autoRetain ? "on" : "off"]);
 	if (typeof s.timeoutMs === "number") rows.push(["Timeout", `${s.timeoutMs}ms`]);
@@ -1840,6 +1928,9 @@ function renderHindsightConfigSummary(): TemplateResult {
 		<dl class="market-hindsight-config" data-testid="market-hindsight-config">
 			${rows.map(([k, v]) => html`<div class="market-hindsight-config-row"><dt>${k}</dt><dd>${v}</dd></div>`)}
 		</dl>
+		${hasHindsightProjectOverride()
+			? html`<span class="market-lozenge market-hindsight-override-badge mt-1" data-testid="market-hindsight-override-active" title=${`Per-project memory override active for ${hindsightProjectName()}`}>${icon(Settings, "xs")} Project override active</span>`
+			: ""}
 		${(() => {
 			const le = hindsightLastErrorText(s.lastError);
 			return le ? html`<div class="market-error mt-1" data-testid="market-hindsight-last-error">${le}</div>` : "";
@@ -1906,7 +1997,7 @@ function defaultHindsightForm(): HindsightConfigFormValues {
 		uiUrl: "",
 		bank: "bobbit",
 		namespace: "default",
-		recallScope: "all",
+		recallScope: "project",
 		autoRecall: true,
 		autoRetain: true,
 		timeoutMs: "1500",
@@ -1933,14 +2024,31 @@ function toggleHindsightConfigForm(pack: InstalledPackWire): void {
  *  The apiKey input ALWAYS loads blank (the secret is never echoed); leaving it blank
  *  keeps the stored secret on save. */
 async function loadHindsightConfigForm(pack: InstalledPackWire): Promise<void> {
-	const res = await readBuiltinPackRoute<{ config?: HindsightConfigWire }>({
+	// Always pass the current projectId for the built-in row so the route can return
+	// the EFFECTIVE config + the per-project override metadata (when supported).
+	const projectId = currentProjectId();
+	const res = await readBuiltinPackRoute<HindsightConfigGetWire>({
 		packId: runtimeRestPackId(pack),
 		routeName: "config",
-		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+		projectId,
 	});
 	const base = defaultHindsightForm();
-	if (res.ok && res.data?.config) {
-		const c = res.data.config;
+	if (res.ok && res.data) applyHindsightOverrideMeta(res.data, projectId);
+	// Seed the editable per-project override form from the stored overlay ("" =
+	// inherit global). Done here (Configure open) rather than in the background load.
+	const ov = hindsightProjectOverride;
+	hindsightOverrideForm = { recallScope: ov?.recallScope ?? "", bank: ov?.bank ?? "" };
+	hindsightOverrideResult = null;
+	// Hydrate the GLOBAL inline Configure fields (Bank, Recall scope, …) from
+	// `globalConfig` when the route exposes it — NOT from `config`, which is the
+	// overlay-resolved EFFECTIVE config. If a per-project override is active, `config`
+	// reflects the override, so seeding the global form from it would show project
+	// values as global and risk silently writing them back as global. `config` is for
+	// the effective summary/status row only. Fall back to `config` when the route
+	// predates the overlay contract (no `globalConfig`).
+	const globalCfg = res.ok ? (res.data?.globalConfig ?? res.data?.config) : undefined;
+	if (res.ok && globalCfg) {
+		const c = globalCfg;
 		const form: HindsightConfigFormValues = {
 			mode: c.mode ?? base.mode,
 			externalUrl: c.externalUrl ?? "",
@@ -2017,7 +2125,7 @@ async function handleHindsightConfigSave(pack: InstalledPackWire): Promise<void>
 		packId: runtimeRestPackId(pack),
 		routeName: "config",
 		body,
-		projectId: pack.scope === "project" ? currentProjectId() : undefined,
+		projectId: currentProjectId(),
 	});
 	busy.delete("hindsight:config");
 	if (res.ok && res.data?.ok !== false) {
@@ -2030,6 +2138,96 @@ async function handleHindsightConfigSave(pack: InstalledPackWire): Promise<void>
 		hindsightConfigResult = { ok: false, message: errs || "Save failed" };
 	}
 	renderApp();
+}
+
+/** Mutate one per-project override field and repaint. */
+function setHindsightOverrideField(key: "recallScope" | "bank", value: string): void {
+	if (!hindsightOverrideForm) hindsightOverrideForm = { recallScope: "", bank: "" };
+	hindsightOverrideForm = { ...hindsightOverrideForm, [key]: value };
+	renderApp();
+}
+
+/** Save the per-project memory override via the config route's `projectOverride`
+ *  payload (design hindsight-memory-quality). "" recallScope / "" bank CLEAR that key
+ *  back to the global value. The global config write path is untouched — this only
+ *  ever sends the `projectOverride` envelope, scoped to the current projectId. */
+async function handleHindsightOverrideSave(pack: InstalledPackWire): Promise<void> {
+	if (!hindsightOverrideForm) return;
+	const projectId = currentProjectId();
+	if (!projectId) {
+		hindsightOverrideResult = { ok: false, message: "No active project" };
+		renderApp();
+		return;
+	}
+	const f = hindsightOverrideForm;
+	// Empty ⇒ null (clear → inherit global). Non-empty ⇒ the override value.
+	const projectOverride: Record<string, unknown> = {
+		recallScope: f.recallScope ? f.recallScope : null,
+		bank: f.bank.trim() ? f.bank.trim() : null,
+	};
+	busy.add("hindsight:override");
+	hindsightOverrideResult = null;
+	renderApp();
+	const res = await writeBuiltinPackRoute<{ ok?: boolean; error?: string; errors?: string[] }>({
+		packId: runtimeRestPackId(pack),
+		routeName: "config",
+		body: { projectOverride },
+		projectId,
+	});
+	busy.delete("hindsight:override");
+	if (res.ok && res.data?.ok !== false) {
+		// loadHindsightConfigForm resets hindsightOverrideResult to null, so set the
+		// success lozenge AFTER re-hydrating the form to keep it visible.
+		await loadHindsightConfigForm(pack);
+		await loadHindsightState();
+		hindsightOverrideResult = { ok: true, message: "Saved" };
+	} else {
+		const errs = res.ok ? (res.data?.errors ?? []).join("; ") : res.error;
+		hindsightOverrideResult = { ok: false, message: errs || "Save failed" };
+	}
+	renderApp();
+}
+
+/** The compact per-project memory-override section in the inline Configure form.
+ *  Hidden entirely unless the route exposed the overlay contract for a real project.
+ *  Recall scope can inherit (global) or pin project/all; bank blank ⇒ inherit global. */
+function renderHindsightOverrideSection(pack: InstalledPackWire): TemplateResult | string {
+	if (!hindsightOverrideSupported || !hindsightOverrideProjectId) return "";
+	const f = hindsightOverrideForm ?? { recallScope: "", bank: "" };
+	const saving = busy.has("hindsight:override");
+	const globalScope = hindsightGlobalConfig?.recallScope || "project";
+	const globalBank = hindsightGlobalConfig?.bank || "bobbit";
+	return html`
+		<div class="market-hindsight-override mt-1 flex flex-col gap-2" data-testid="market-hindsight-override">
+			<div class="market-field-label" style="font-weight:600;">Per-project override — ${hindsightProjectName()}</div>
+			<div class="market-field-help">Overrides the global memory config for this project only. Recall scope: <code>project</code> = this project + shared/global memories; <code>all</code> = every project in the shared bank.</div>
+			<div class="flex gap-2 flex-wrap">
+				<label class="market-field flex-1">
+					<span class="market-field-label">Recall scope (this project)</span>
+					<select class="market-input" data-testid="market-hindsight-override-recallscope" .value=${f.recallScope} @change=${(e: Event) => setHindsightOverrideField("recallScope", (e.target as HTMLSelectElement).value)}>
+						<option value="" ?selected=${f.recallScope === ""}>Inherit global (${globalScope})</option>
+						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
+						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
+					</select>
+				</label>
+				<label class="market-field flex-1">
+					<span class="market-field-label">Bank (this project)</span>
+					<input class="market-input" type="text" data-testid="market-hindsight-override-bank" placeholder=${`inherit (${globalBank})`} .value=${f.bank} @input=${(e: Event) => setHindsightOverrideField("bank", (e.target as HTMLInputElement).value)} />
+					<span class="market-field-help">Blank inherits the global bank.</span>
+				</label>
+			</div>
+			<div class="flex items-center gap-2 flex-wrap">
+				<button class="market-btn" data-testid="market-hindsight-override-save" ?disabled=${saving} @click=${() => handleHindsightOverrideSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save project override</button>
+				${hindsightOverrideResult
+					? html`<span
+							class="market-lozenge ${hindsightOverrideResult.ok ? "" : "market-lozenge--warning"}"
+							data-testid="market-hindsight-override-result"
+							style=${hindsightOverrideResult.ok ? "border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive);" : ""}
+						>${icon(hindsightOverrideResult.ok ? CheckCircle2 : XCircle, "xs")} ${hindsightOverrideResult.message}</span>`
+					: ""}
+			</div>
+		</div>
+	`;
 }
 
 /** The inline Configure form rendered in the Hindsight row. Mirrors the panel fields
@@ -2078,6 +2276,7 @@ function renderHindsightConfigForm(pack: InstalledPackWire): TemplateResult {
 						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
 						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
 					</select>
+					<span class="market-field-help">project = this project + shared/global memories; all = every project in the shared bank.</span>
 				</label>
 				<label class="market-field flex-1">
 					<span class="market-field-label">Timeout (ms)</span>
@@ -2100,6 +2299,7 @@ function renderHindsightConfigForm(pack: InstalledPackWire): TemplateResult {
 				<span class="market-field-label">API key ${hindsightConfigApiKeySet ? html`<span class="text-muted-foreground">(set — leave blank to keep)</span>` : html`<span class="text-muted-foreground">(blank)</span>`}</span>
 				<input class="market-input" type="password" autocomplete="off" data-testid="market-hindsight-form-apikey" placeholder=${hindsightConfigApiKeySet ? "••••••••" : "optional"} .value=${f.apiKey} @input=${(e: Event) => setHindsightFormField("apiKey", (e.target as HTMLInputElement).value)} />
 			</label>
+			${renderHindsightOverrideSection(pack)}
 			<div class="flex items-center gap-2 flex-wrap">
 				<button class="market-btn market-btn--primary" data-testid="market-hindsight-config-save" ?disabled=${saving} @click=${() => handleHindsightConfigSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save configuration</button>
 				<button class="market-btn" data-testid="market-hindsight-config-cancel" @click=${() => { hindsightConfigFormOpen = false; renderApp(); }}>Close</button>
@@ -2210,7 +2410,7 @@ function defaultWizardForm(): HindsightWizardForm {
 		dataDir: "~/.hindsight",
 		bank: "bobbit",
 		namespace: "default",
-		recallScope: "all",
+		recallScope: "project",
 		autoRecall: true,
 		autoRetain: true,
 		timeoutMs: "1500",
@@ -2567,7 +2767,7 @@ function renderWizardConfigureStep(f: HindsightWizardForm): TemplateResult {
 						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
 						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
 					</select>
-					<span class="market-field-help">Which memories agents recall by default.</span>
+					<span class="market-field-help">What agents recall by default: project = this project + shared/global memories; all = every project in the shared bank.</span>
 				</label>
 				<label class="market-field flex-1"><span class="market-field-label">Timeout (ms)</span>${text("timeoutMs", "market-hindsight-wizard-timeoutms", "1500", "number")}<span class="market-field-help">Max time Bobbit waits on a recall/retain call.</span></label>
 				<label class="market-field flex-1"><span class="market-field-label">Recall max input chars</span>${text("recallMaxInputChars", "market-hindsight-wizard-recallmaxinputchars", "3000", "number")}<span class="market-field-help">Clamps the recall query so Hindsight's 500-token cap isn't hit. Default 3000.</span></label>

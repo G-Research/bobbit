@@ -28,17 +28,21 @@
 // there). See docs/design/hindsight-pack-external.md §6/§8 + the P3 runtime modes.
 
 import {
+	applyBankMission,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
 	isActive,
 	isConfigured,
 	loadEffectiveConfig,
+	loadProjectOverride,
 	loadQueue,
 	makeClient,
+	projectConfigKey,
 	recallTagFilter,
 	redactConfig,
 	validateConfigOverrides,
+	validateProjectOverride,
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	type EffectiveConfig,
@@ -98,21 +102,47 @@ function manualTags(extra: Tags | undefined): Tags {
 	return { ...(extra ?? {}), kind: "manual" };
 }
 
+/** Per-project config metadata for the GET/SET config surface. Returns the global
+ *  (no-overlay) effective config and the raw stored project overlay (or null) when
+ *  a project context is present; otherwise an empty object. */
+async function configMeta(store: StoreLike, projectId?: string): Promise<Record<string, unknown>> {
+	if (!projectId) return {};
+	const globalCfg = await loadEffectiveConfig(store);
+	const projectOverride = await loadProjectOverride(store, projectId);
+	return { globalConfig: redactConfig(globalCfg), projectOverride: projectOverride ?? null };
+}
+
 export const routes = {
 	// GET → merged effective config (secrets redacted). SET (body present) →
 	// validate against the schema + persist overrides to the pack store + return
 	// the new effective config.
 	config: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
+		const projectId = strOf(ctx.projectId);
 		const method = (req?.method ?? "GET").toUpperCase();
 		const hasBody = isObj(req?.body) && Object.keys(req!.body as object).length > 0;
 
 		if (method === "GET" || !hasBody) {
-			const cfg = await loadEffectiveConfig(store);
-			return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg) };
+			const cfg = await loadEffectiveConfig(store, projectId);
+			return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg), ...(await configMeta(store, projectId)) };
 		}
 
-		const validation = validateConfigOverrides(req!.body);
+		const body = req!.body as Record<string, unknown>;
+
+		// Per-project overlay write (safe memory-quality keys only). A full-replace:
+		// the validated overlay REPLACES the stored one (omitted/cleared keys are
+		// dropped ⇒ inherit global). Requires a project context.
+		if ("projectOverride" in body) {
+			if (!projectId) return { ok: false, error: "NO_PROJECT", errors: ["projectOverride requires a project context"] };
+			const validation = validateProjectOverride(body.projectOverride);
+			if (!validation.ok) return { ok: false, error: "CONFIG_INVALID", errors: validation.errors ?? [] };
+			await store.put(projectConfigKey(projectId), validation.value ?? {});
+			const cfg = await loadEffectiveConfig(store, projectId);
+			return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg), ...(await configMeta(store, projectId)) };
+		}
+
+		// Global write (server-scope), merged over the stored global config.
+		const validation = validateConfigOverrides(body);
 		if (!validation.ok) {
 			return { ok: false, error: "CONFIG_INVALID", errors: validation.errors ?? [] };
 		}
@@ -125,8 +155,8 @@ export const routes = {
 		}
 		const merged = { ...prev, ...(validation.value ?? {}) };
 		await store.put(CONFIG_KEY, merged);
-		const cfg = await loadEffectiveConfig(store);
-		return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg) };
+		const cfg = await loadEffectiveConfig(store, projectId);
+		return { ok: true, configured: isConfigured(cfg), config: redactConfig(cfg), ...(await configMeta(store, projectId)) };
 	},
 
 	// Health + queue + effective-config snapshot. `healthy` is a fresh probe when the
@@ -134,7 +164,9 @@ export const routes = {
 	// runtime via ctx.runtime; short client timeout), else false.
 	status: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
-		const cfg = await loadEffectiveConfig(store);
+		const projectId = strOf(ctx.projectId);
+		const cfg = await loadEffectiveConfig(store, projectId);
+		const projectOverride = projectId ? await loadProjectOverride(store, projectId) : undefined;
 		const depth = await queueDepth(store);
 		const err = await lastError(store);
 		const base = {
@@ -143,8 +175,14 @@ export const routes = {
 			bank: cfg.bank,
 			namespace: cfg.namespace,
 			recallScope: cfg.recallScope,
+			tagsMatch: cfg.tagsMatch,
 			autoRecall: cfg.autoRecall,
 			autoRetain: cfg.autoRetain,
+			retainEveryNTurns: cfg.retainEveryNTurns,
+			retainMaxDelayMs: cfg.retainMaxDelayMs,
+			retainOverlapTurns: cfg.retainOverlapTurns,
+			// Per-project override indicator for the panel/marketplace status row.
+			projectOverrideActive: !!projectOverride,
 			queueDepth: depth,
 			// Additive (UX surfacing — existing keys unchanged): the active configured
 			// values both the panel and marketplace render without a second round-trip.
@@ -173,7 +211,7 @@ export const routes = {
 	// { query, scope? } → resolve bank + tags and recall. Dormant ⇒ empty.
 	recall: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
-		const cfg = await loadEffectiveConfig(store);
+		const cfg = await loadEffectiveConfig(store, strOf(ctx.projectId));
 		// Recall needs a reachable data plane. Not active (unconfigured, or a managed
 		// mode with no running runtime) ⇒ a deterministic empty result that still
 		// reports whether a deployment is configured, with NO empty-base client call.
@@ -183,17 +221,18 @@ export const routes = {
 		if (!query) return { configured: true, memories: [] };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
 		// Scope a `project` recall to the REAL project id from the host route ctx via
-		// the shared recallTagFilter: project-tagged PLUS untagged/global memories on
-		// the shared bank (PROJECT_RECALL_TAGS_MATCH). When the ctx carries no project
-		// (global/server-scope session) or scope is `all`, NO tag filter is applied
-		// (recall the whole bank) rather than a fabricated placeholder tag.
-		const filter = recallTagFilter(scope, ctx.projectId);
+		// the shared recallTagFilter: project-tagged PLUS (tagsMatch `any`) untagged/
+		// global memories on the shared bank. `all`/no-project ⇒ no fabricated project
+		// tag. An optional `tags` map is a simple additive targeted filter (no DSL).
+		const extraTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
+		const filter = recallTagFilter(scope, ctx.projectId, cfg.tagsMatch, extraTags);
 		// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
 		const clampedQuery = clampRecallQuery(query, cfg.recallMaxInputChars);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.recall(cfg.bank, clampedQuery, {
 				maxTokens: cfg.recallBudget,
+				types: cfg.recallTypes,
 				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 			});
 			await clearError(store);
@@ -210,7 +249,8 @@ export const routes = {
 	// User-supplied `tags` stay additive and never change the bank (cfg.bank).
 	retain: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
-		const cfg = await loadEffectiveConfig(store);
+		const projectId = strOf(ctx.projectId);
+		const cfg = await loadEffectiveConfig(store, projectId);
 		// A manual retain needs a reachable data plane; not active ⇒ report the
 		// configured surface without dialing an empty base URL.
 		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
@@ -218,7 +258,6 @@ export const routes = {
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectId = strOf(ctx.projectId);
 		const projectTag: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		const userTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
 		const tags = manualTags({ ...(userTags ?? {}), ...(projectTag ?? {}) });
@@ -226,6 +265,7 @@ export const routes = {
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			await client.ensureBank(cfg.bank);
+			await applyBankMission(store, client, cfg);
 			await client.retain(cfg.bank, content, { tags, sync });
 			await clearError(store);
 			return { ok: true, configured: true };
@@ -241,15 +281,17 @@ export const routes = {
 	// Dormant ⇒ empty text.
 	reflect: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
-		const cfg = await loadEffectiveConfig(store);
+		const cfg = await loadEffectiveConfig(store, strOf(ctx.projectId));
 		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), text: "" };
 		const body = isObj(req?.body) ? req!.body : {};
 		const prompt = strOf(body.prompt);
 		if (!prompt) return { configured: true, text: "" };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
 		// Same shared tag-scoped filter as recall: project scope ⇒ project-tagged plus
-		// untagged/global; `all`/no-project ⇒ reflect over the whole bank.
-		const filter = recallTagFilter(scope, ctx.projectId);
+		// (tagsMatch `any`) untagged/global; `all`/no-project ⇒ reflect over the whole
+		// bank. An optional `tags` map is a simple additive targeted filter (no DSL).
+		const extraTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
+		const filter = recallTagFilter(scope, ctx.projectId, cfg.tagsMatch, extraTags);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.reflect(cfg.bank, prompt, filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : undefined);
@@ -262,7 +304,7 @@ export const routes = {
 	// Diagnostic: list banks. Dormant ⇒ empty list.
 	banks: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
-		const cfg: EffectiveConfig = await loadEffectiveConfig(store);
+		const cfg: EffectiveConfig = await loadEffectiveConfig(store, strOf(ctx.projectId));
 		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), banks: [] };
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));

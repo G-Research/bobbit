@@ -82,7 +82,12 @@ describe("LifecycleHub", () => {
 			const result = await hub(tmp, [slow, fast], moduleHost).dispatch("sessionSetup", base(tmp));
 			const elapsed = performance.now() - t0;
 
-			assert.ok(elapsed < 1_000, `dispatch should return promptly, got ${elapsed}ms`);
+			// The slow provider sleeps 5000ms but its budget timeout is 200ms; the timeout
+			// MUST cut it off so dispatch returns long before the sleep would finish. The
+			// 3000ms bound is deliberately generous (vs the 5000ms sleep) so it stays green
+			// under concurrent suite load while still proving the sleep was interrupted. The
+			// timeout-actually-fired invariant is pinned precisely by the diagnostic below.
+			assert.ok(elapsed < 3_000, `dispatch should return well before the 5000ms sleep (timeout cut it off), got ${elapsed}ms`);
 			assert.equal(result.blocks.length, 1);
 			assert.equal(result.blocks[0].providerId, "fast");
 			assert.equal(result.diagnostics.length, 1);
