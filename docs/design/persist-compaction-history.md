@@ -134,6 +134,19 @@ terminate).
 
 #### 3.3.1 Manual path — `src/server/ws/handler.ts`
 
+> **Implementation update (Fix Compaction Ordering).** The manual success row
+> is now written in `src/server/agent/session-manager.ts`'s manual
+> `compaction_end` branch, **synchronously before `refreshAfterCompaction`**,
+> reusing a shared `compactionId` that `ws/handler.ts` stashes on the session
+> (`_manualCompactionId`) before awaiting the compact RPC. This guarantees the
+> post-compaction snapshot already carries the orphan boundary so the live
+> `compact_active` card mounts the affordance in the same session and sorts
+> before the preserved tail. The `ws/handler.ts` block below became the
+> **fallback** success append (writes only when `_manualSidecarWritten` is
+> unset) and still owns the **failure** append. The dedup marker keeps exactly
+> one sidecar line per manual compaction. See
+> `docs/design/fix-compaction-ordering.md` §8.4.
+
 Around the existing `compaction_end` broadcast (lines 553–573). Capture
 `startedAt` at the broadcast of `compaction_start` (line 554); compute
 `durationMs` at `compaction_end` (line 566). The RPC return
