@@ -750,8 +750,8 @@ routes, and resolve structured navigation targets onto the SPA router.
 // Launcher kinds (click → openPanel/navigate) PLUS a routable kind that declares a
 // deep-linkable CLIENT route. "route" entrypoints have NO label/click surface — they
 // register a routeId→panel mapping consumed by navigate + reload restoration.
-export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-palette" | "route";
-export interface LauncherEntrypoint { id: string; tool: string; kind: "composer-slash" | "git-widget-button" | "command-palette"; label: string; target: RouteTarget | PanelTarget; }
+export type EntrypointKind = "composer-slash" | "session-menu" | "route";
+export interface LauncherEntrypoint { id: string; tool: string; kind: "composer-slash" | "session-menu"; label: string; target: RouteTarget | PanelTarget; }
 /** A deep-linkable client route: maps a routeId → the panel it opens + the param names
  *  carried in the URL. `routeId` is the deep-link route name; `target` is the panel to
  *  open; `paramKeys` are the param names serialized into / parsed from the hash. */
@@ -823,7 +823,7 @@ lookup → `openPackPanel` → `store.get`) is the canonical deep-link path D1/D
 ### C1.3 Entrypoint surfaces
 
 - **composer-slash:** register a slash-command into the composer's command list.
-- **git-widget-button / command-palette:** register a button/launcher; on click →
+- **session-menu:** register a shared session-actions menu launcher; on click →
   `openPanel` or `navigate` (NO auto-invoke on mount — invocation is the user gesture).
 - **route:** registers a deep-linkable route only (no clickable surface); consumed by
   `navigate` + reload restoration (C1.2/C1.2a).
@@ -1354,7 +1354,7 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 - `entrypoints:` — TWO contributions: (1) a `kind:"route"` route entrypoint
   `{ routeId: "pr-walkthrough", target: { panelId: "pr-walkthrough.panel" }, paramKeys: ["jobId"] }`
   registering the deep-linkable route in the client pack route registry (§7.1a); (2) a
-  git-widget button / command-palette launcher whose click calls
+  session-menu launcher whose click calls
   `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`, which serializes to
   `#/ext/pr-walkthrough?jobId=…` and resolves through the registry to open the panel
   rehydrated from `host.store.*` (§7.2/§7.2a). (This replaces the bespoke SPA
@@ -1432,8 +1432,8 @@ So D2's `bundle` route is a LIVE git/diff computer for the diff + a STORE reader
 LLM cards — never an in-worker LLM caller. The D2 E2E
 (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) seeds a realistic persisted bundle through the
 pack's own `publish` route (proving the READ/render path) AND drives a live recompute over a
-real git working dir (proving the disclosed-`git` worker path), plus the maximal launcher
-surface (`git-widget-button`) and the `kind:"route"` deep-link.
+real git working dir (proving the disclosed-`git` worker path), plus the session-menu launcher
+surface and the `kind:"route"` deep-link.
 
 ---
 
