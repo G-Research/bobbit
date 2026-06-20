@@ -2168,9 +2168,11 @@ async function handleHindsightOverrideSave(pack: InstalledPackWire): Promise<voi
 	});
 	busy.delete("hindsight:override");
 	if (res.ok && res.data?.ok !== false) {
-		hindsightOverrideResult = { ok: true, message: "Saved" };
+		// loadHindsightConfigForm resets hindsightOverrideResult to null, so set the
+		// success lozenge AFTER re-hydrating the form to keep it visible.
 		await loadHindsightConfigForm(pack);
 		await loadHindsightState();
+		hindsightOverrideResult = { ok: true, message: "Saved" };
 	} else {
 		const errs = res.ok ? (res.data?.errors ?? []).join("; ") : res.error;
 		hindsightOverrideResult = { ok: false, message: errs || "Save failed" };
