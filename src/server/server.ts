@@ -1354,6 +1354,29 @@ export function createGateway(config: GatewayConfig) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+		// Goal-metadata lifecycle wiring: connect this project's GoalManager to the
+		// shared LifecycleHub `goalProvisioned` dispatcher so every worktree
+		// provisioning in the goal subtree fans out to extension providers with the
+		// resolved (hierarchically inherited) metadata. Feature-detected on BOTH
+		// ends — the setter is contributed by the goal-metadata data/provisioning
+		// slice and `dispatchGoalProvisioned` by the lifecycle slice — so this is a
+		// no-op until those land, then activates automatically. The hub is read
+		// lazily (it is constructed after this configurator is registered).
+		const gm = ctx.goalManager as unknown as {
+			setGoalProvisionedDispatcher?: (
+				fn: (dctx: { goalId: string; projectId?: string; worktreePath: string; cwd: string; branch?: string; metadata: Record<string, unknown> }) => Promise<void>,
+			) => void;
+		};
+		if (typeof gm.setGoalProvisionedDispatcher === "function") {
+			gm.setGoalProvisionedDispatcher(async (dctx) => {
+				const hub = sessionManager.lifecycleHub as unknown as {
+					dispatchGoalProvisioned?: (c: typeof dctx) => Promise<void>;
+				} | undefined;
+				if (hub && typeof hub.dispatchGoalProvisioned === "function") {
+					await hub.dispatchGoalProvisioned(dctx);
+				}
+			});
+		}
 	});
 
 	// pack-schema-v1 §6.7: resolve the pack_activation store for a scope+project.
@@ -1433,6 +1456,20 @@ export function createGateway(config: GatewayConfig) {
 		registry: packContributionRegistry,
 		moduleHost,
 		trace: new ContextTraceStore(bobbitStateDir()),
+		// Hierarchical goal-metadata resolver. The hub is shared across projects
+		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
+		// (never the caller-supplied projectId, which may be stale/cross-project).
+		// Resolves to {} for missing/unknown goals so provider/bridge filtering is
+		// a guaranteed no-op when metadata is absent.
+		goalMetadataResolver: (goalId: string | undefined, _projectId?: string): Record<string, unknown> => {
+			if (!goalId) return {};
+			const ctx = projectContextManager.getContextForGoal(goalId);
+			if (!ctx) {
+				console.warn(`[goal-metadata] no project context owns goal ${goalId}; resolving to {}`);
+				return {};
+			}
+			return ctx.goalManager.getEffectiveGoalMetadata(goalId);
+		},
 		// Least-privilege, store-only host for provider hooks (capabilities.store ===
 		// true; session/agents denied) — gives a provider its own pack-scoped durable
 		// store via the same parent-authorized path routes use.
@@ -4575,7 +4612,11 @@ async function handleApiRoute(
 			projectId,
 			scope: projectId ? "project" : "global",
 			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
-			goalId: live?.goalId ?? persisted?.goalId,
+			// Effective goal: team members, delegates, and reviewers carry the goal
+			// only in teamGoalId, so fall back to it before persisted state. Without
+			// this, disabled-provider filtering would not apply at the provider hook
+			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
+			goalId: live?.goalId ?? live?.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId,
 			roleName: live?.role ?? persisted?.role,
 		};
 	};
@@ -5331,19 +5372,20 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
-			// Per-goal worktree setup hook (optional). Accept camelCase or snake_case.
-			// Command: trimmed, passed only when non-empty. Timeout: number or numeric
-			// string, passed only when a finite positive integer.
-			let worktreeSetupCommand: string | undefined;
+			// Per-goal metadata (optional, arbitrary namespaced key/value bag, e.g.
+			// `bobbit.disabledTools`, `hindsight.memory.enabled`). Accepted only as a
+			// NON-EMPTY plain object; passed verbatim to createGoal where it is
+			// persisted and resolved hierarchically down the goal tree. Supersedes the
+			// removed per-goal worktree-setup hook (PR #816); legacy
+			// `worktreeSetupCommand`/`worktreeSetupTimeoutMs` body fields are now
+			// ignored (no parse, no persistence). Component-level
+			// `worktree_setup_command` is unaffected.
+			let metadata: Record<string, unknown> | undefined;
 			{
-				const raw = body.worktreeSetupCommand ?? body.worktree_setup_command;
-				if (typeof raw === "string" && raw.trim()) worktreeSetupCommand = raw.trim();
-			}
-			let worktreeSetupTimeoutMs: number | undefined;
-			{
-				const raw = body.worktreeSetupTimeoutMs ?? body.worktree_setup_timeout_ms;
-				const n = typeof raw === "number" ? raw : (typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN);
-				if (Number.isFinite(n) && n > 0) worktreeSetupTimeoutMs = Math.floor(n);
+				const raw = body.metadata;
+				if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw as object).length > 0) {
+					metadata = raw as Record<string, unknown>;
+				}
 			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
@@ -5575,8 +5617,7 @@ async function handleApiRoute(
 				maxNestingDepth: effMaxNestingDepth,
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
-				worktreeSetupCommand,
-				worktreeSetupTimeoutMs,
+				metadata,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -6969,6 +7010,87 @@ async function handleApiRoute(
 			const status = err instanceof ActionError ? err.status : 500;
 			const message = err instanceof Error ? err.message : String(err);
 			console.warn(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, status);
+		}
+		return;
+	}
+
+	// GET /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin read of a
+	// BUILT-IN pack's read-only route (Hindsight UX polish). The Marketplace must
+	// read built-in Hindsight config/status as a PURE read, but after `#/market`
+	// navigation there is no active chat session, so the surface-token path
+	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
+	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
+	// so it cannot widen the extension threat model:
+	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
+	//   • GET only — the route's own mutation paths (e.g. `config` write) need a
+	//     POST + body, so this can never persist; it is a pure read.
+	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
+	//     this sessionless seam to read another pack's route output.
+	// `ctx.runtime` is resolved WITHOUT starting Docker (mirrors `/api/ext/route`),
+	// preserving the no-Docker-auto-start invariant.
+	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
+	if (packRouteMatch && req.method === "GET") {
+		const reqPackId = decodeURIComponent(packRouteMatch[1]);
+		const routeName = decodeURIComponent(packRouteMatch[2]);
+		const projectId = url.searchParams.get("projectId") || undefined;
+		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
+		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
+		const builtinPackIds = new Set(
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir())
+				.filter((e) => e.manifest)
+				.map((e) => packIdFromRoot(e.path)),
+		);
+		if (!builtinPackIds.has(reqPackId)) {
+			json({ error: "sessionless pack-route reads are available only to built-in packs" }, 403);
+			return;
+		}
+		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
+		if (!resolved) {
+			json({ error: `pack "${reqPackId}" declares no route "${routeName}"` }, 404);
+			return;
+		}
+		const host = createServerHostApi({
+			sessionId: "",
+			toolUseId: undefined,
+			packId: reqPackId,
+			contributionId: "",
+			packStore: getPackStore(),
+			orchestrationCore,
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			onStoreWrite: notePackStoreWrite,
+		});
+		// Managed-runtime context injection (NO Docker start) — mirror `/api/ext/route`.
+		let packRouteRuntime: RuntimeContext | undefined;
+		try {
+			const pack = packContributionRegistry.getPack(projectId, reqPackId);
+			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
+			if (runtimeProvider?.runtime) {
+				packRouteRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
+					packId: reqPackId,
+					runtimeId: runtimeProvider.runtime,
+					projectId,
+					config: runtimeProvider.config ?? {},
+				});
+			}
+		} catch {
+			packRouteRuntime = undefined; // non-fatal — the route runs without ctx.runtime
+		}
+		const start = Date.now();
+		try {
+			const result = await routeDispatcher.dispatch(
+				resolved.modulePath,
+				resolved.packRoot,
+				routeName,
+				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
+				{ method: "GET" },
+			);
+			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const status = err instanceof ActionError ? err.status : 500;
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
 		return;

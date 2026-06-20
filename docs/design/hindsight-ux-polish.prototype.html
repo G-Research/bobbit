@@ -1,0 +1,288 @@
+<!doctype html>
+<!--
+  Hindsight UX Polish — interactive prototype / visual spec.
+  Companion to docs/design/hindsight-ux-polish.md. Self-contained, no deps.
+  Theme: references Bobbit theme tokens via CSS custom properties with safe,
+  mode-correct fallbacks (this file also opens standalone, so each token has a
+  light-default fallback that the Bobbit bridge overrides when embedded).
+  NOTE: this is a STATIC DESIGN ARTIFACT — mock data, simulated interactions.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hindsight UX Polish — prototype</title>
+<style>
+  :root {
+    /* Fallbacks ONLY for standalone open; the Bobbit bridge overrides these. */
+    --background: #ffffff; --foreground: #1a1d24; --card: #f7f8fa;
+    --muted-foreground: #6b7280; --border: #e2e5ea; --primary: #4f46e5;
+    --positive: #15803d; --negative: #b91c1c; --warning: #b45309; --info: #1d4ed8;
+    --chart-1: #4f46e5; --chart-2: #0891b2; --chart-3: #c026d3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--background); color: var(--foreground);
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 24px; max-width: 920px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .sub { color: var(--muted-foreground); margin: 0 0 8px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
+  /* ── Marketplace card ───────────────────────────────────────────── */
+  .card { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 14px; margin-bottom: 12px; }
+  .card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pack-name { font-weight: 600; font-size: 14px; }
+  .pill { font-size: 10px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted-foreground); background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); }
+  .ver { font-size: 11px; color: var(--muted-foreground); }
+  .desc { color: var(--muted-foreground); font-size: 12px; margin: 4px 0 10px; }
+  .master { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-foreground); }
+  .switch { width: 34px; height: 20px; border-radius: 999px; background: var(--primary); position: relative; display: inline-block; }
+  .switch.off { background: color-mix(in oklch, var(--muted-foreground) 40%, transparent); }
+  .switch::after { content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 2px; left: 16px; transition: left .15s; }
+  .switch.off::after { left: 2px; }
+
+  .strip { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); color: var(--muted-foreground); background: color-mix(in oklch, var(--muted-foreground) 12%, transparent); }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+  .badge[data-s="connected"], .badge[data-s="running"] { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 45%, transparent); background: color-mix(in oklch, var(--positive) 14%, transparent); }
+  .badge[data-s="unreachable"], .badge[data-s="unhealthy"] { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 45%, transparent); background: color-mix(in oklch, var(--negative) 14%, transparent); }
+  .badge[data-s="starting"] { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 45%, transparent); background: color-mix(in oklch, var(--warning) 14%, transparent); }
+  .badge .spin { width: 9px; height: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: sp .7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .strip-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .ident { font-size: 12px; }
+  .ident code { color: var(--foreground); }
+  .cfgsum { color: var(--muted-foreground); font-size: 11.5px; margin-top: 6px; }
+  .chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); background: color-mix(in oklch, var(--chart-1) 10%, transparent); color: var(--foreground); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .btn { font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--border); background: var(--background); color: var(--foreground); cursor: pointer; }
+  .btn:hover { border-color: var(--primary); }
+  .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn.danger:hover { border-color: var(--negative); color: var(--negative); }
+  .hint { color: var(--muted-foreground); font-size: 11.5px; font-style: italic; }
+
+  .legend { display: grid; grid-template-columns: 1fr; gap: 6px; }
+
+  /* ── Wizard ─────────────────────────────────────────────────────── */
+  .wiz { border: 1px solid var(--border); border-radius: 12px; background: var(--card); overflow: hidden; }
+  .wiz-head { padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .wiz-body { padding: 16px; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .mode { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--background); cursor: pointer; }
+  .mode.sel { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+  .mode .t { font-weight: 600; margin-bottom: 4px; }
+  .mode .who { font-size: 11.5px; color: var(--muted-foreground); margin: 6px 0; }
+  .mode .consent { font-size: 11px; color: var(--warning); }
+  .mode .nodock { font-size: 11px; color: var(--info); }
+  .rec { font-size: 10px; color: var(--positive); border: 1px solid color-mix(in oklch, var(--positive) 45%, transparent); background: color-mix(in oklch, var(--positive) 14%, transparent); padding: 1px 6px; border-radius: 999px; margin-left: 6px; }
+
+  .field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px; }
+  .field label { font-size: 12px; color: var(--muted-foreground); }
+  .field input { background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; font: inherit; }
+  .field .help { font-size: 11px; color: var(--muted-foreground); }
+  .field .eg { font-size: 11px; color: var(--info); }
+  .vstate { font-size: 11px; }
+  .vstate.ok { color: var(--positive); } .vstate.bad { color: var(--negative); }
+
+  /* progress timeline */
+  .timeline { display: flex; flex-direction: column; gap: 4px; }
+  .tstep { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; }
+  .tstep .ic { width: 16px; height: 16px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
+  .tstep.done .ic { background: color-mix(in oklch, var(--positive) 20%, transparent); color: var(--positive); }
+  .tstep.active { background: color-mix(in oklch, var(--warning) 10%, transparent); }
+  .tstep.active .ic { color: var(--warning); }
+  .tstep.pending { color: var(--muted-foreground); }
+  .tstep.fail .ic { background: color-mix(in oklch, var(--negative) 20%, transparent); color: var(--negative); }
+  .deftable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .deftable td { border-top: 1px solid var(--border); padding: 6px 8px; vertical-align: top; }
+  .deftable td:first-child { color: var(--muted-foreground); white-space: nowrap; }
+  .deftable td:nth-child(2) { font-weight: 600; white-space: nowrap; }
+  .banner { border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent); background: color-mix(in oklch, var(--warning) 12%, transparent); color: var(--foreground); border-radius: 8px; padding: 9px 11px; font-size: 12px; margin: 10px 0; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .note { font-size: 11.5px; color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+  <h1>Hindsight UX Polish</h1>
+  <p class="sub">Interactive visual spec — Marketplace row states, actions, guided setup, and the stale-form fix. Mock data; simulated interactions. See <code>hindsight-ux-polish.md</code>.</p>
+
+  <h2>1 · Marketplace installed row — state gallery</h2>
+  <p class="sub">The built-in <code>hindsight</code> row gains a status strip (badge → identity → config summary → state-aware actions). One row per state below.</p>
+  <div id="gallery"></div>
+
+  <h2>2 · Guided setup — choose a deployment</h2>
+  <div class="wiz">
+    <div class="wiz-head">⚙︎ Set up Hindsight memory</div>
+    <div class="wiz-body">
+      <div class="modes" id="modes"></div>
+      <p class="note" id="modeNote" style="margin-top:10px"></p>
+    </div>
+  </div>
+
+  <h2>3 · External branch — API URL vs UI URL</h2>
+  <div class="wiz">
+    <div class="wiz-head">Connect existing Hindsight · step 1–2</div>
+    <div class="wiz-body">
+      <div class="field">
+        <label>Data-plane API URL</label>
+        <input value="http://localhost:9177" id="apiUrl" />
+        <span class="help">Where Bobbit reads & writes memory. Usually port 9177 locally.</span>
+        <span class="eg">AJ example: http://localhost:9177</span>
+        <span class="vstate ok" id="apiv">✓ Reachable — /health 200</span>
+      </div>
+      <div class="field">
+        <label>Dashboard / UI URL <span class="note">(optional)</span></label>
+        <input value="http://localhost:19177/banks/hermes?view=data" id="uiUrl" />
+        <span class="help">The Hindsight web UI for browsing memory. Used only for the "Open Hindsight UI" link — Bobbit never reads data through it.</span>
+        <span class="eg">AJ examples: http://localhost:19177/banks/hermes?view=data · http://&lt;tailscale-host&gt;:19177/banks/hermes?view=data</span>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Bank</label><input value="hermes" /><span class="help">Shared tag-scoped bank. <code>bobbit</code> by default; <code>hermes</code> to connect to an existing one.</span></div>
+        <div class="field"><label>Namespace</label><input value="default" /><span class="help">Leave <code>default</code> unless your Hindsight uses namespaces.</span></div>
+      </div>
+      <div class="actions"><button class="btn">Back</button><button class="btn primary">Test &amp; finish →</button></div>
+    </div>
+  </div>
+
+  <h2>4 · Managed branch — consent &amp; no-auto-start</h2>
+  <div class="wiz">
+    <div class="wiz-head">Bobbit-managed · consent &amp; start</div>
+    <div class="wiz-body">
+      <div class="banner">
+        <strong>Nothing starts yet.</strong> Selecting managed only saves your config. Bobbit starts Docker containers <em>only</em> when you press <strong>Start runtime</strong> below. First start pulls an image and may take ~1–2 min.
+      </div>
+      <table class="deftable" style="margin-bottom:12px">
+        <tr><td>Services</td><td>api, db</td><td class="note">Hindsight API + managed Postgres</td></tr>
+        <tr><td>Ports</td><td>127.0.0.1 (allocated on enable)</td><td class="note">loopback only</td></tr>
+        <tr><td>Data</td><td><code>~/.hindsight</code></td><td class="note">bind-mounted volume</td></tr>
+      </table>
+      <div class="field"><label>LLM API key <span class="note">(required to start)</span></label><input type="password" value="••••••••" /><span class="help">→ runtime <code>HINDSIGHT_API_LLM_API_KEY</code>. Forwarded to the local runtime only; never hardcoded.</span></div>
+      <h3 style="margin-top:14px">Start progress</h3>
+      <div class="timeline" id="timeline"></div>
+      <div class="actions" style="margin-top:12px"><button class="btn">Back</button><button class="btn primary" id="startBtn">Start runtime (starts Docker)</button></div>
+      <p class="note" id="startNote"></p>
+    </div>
+  </div>
+
+  <h2>5 · Recommended defaults explainer</h2>
+  <table class="deftable">
+    <tr><td>Data locality</td><td>local / private</td><td class="note">Memory stays on your machine unless you point at a shared deployment.</td></tr>
+    <tr><td>Bank</td><td>bobbit (shared)</td><td class="note">One shared, tag-scoped bank. Use an existing bank like <code>hermes</code> only when connecting to one.</td></tr>
+    <tr><td>Auto-retain</td><td>on (async)</td><td class="note">Saved in the background after each turn — no latency cost.</td></tr>
+    <tr><td>Auto-recall</td><td>on</td><td class="note">Relevant memories pulled in at session start and each turn.</td></tr>
+    <tr><td>Recall scope</td><td>all</td><td class="note">"Have we solved this before, anywhere?"</td></tr>
+    <tr><td>Timeout</td><td>1500 ms</td><td class="note">Conservative — calls never stall a turn; on timeout recall skips, retains queue.</td></tr>
+  </table>
+
+  <h2>6 · Stale-form fix — dirty-aware reconcile</h2>
+  <div class="card" style="background:var(--card)">
+    <h3>Clean draft → Refresh re-hydrates form</h3>
+    <p class="note">Form fields below reflect persisted config after Refresh (not stale defaults). Click Refresh to simulate an out-of-band config change being pulled in.</p>
+    <div class="row2">
+      <div class="field"><label>External URL</label><input id="sfUrl" value="" readonly /></div>
+      <div class="field"><label>Bank</label><input id="sfBank" value="bobbit" readonly /></div>
+    </div>
+    <div class="actions"><button class="btn" id="sfRefresh">Refresh</button></div>
+    <div id="sfDirty" style="display:none">
+      <div class="banner">Configuration changed on the server since you started editing. <button class="btn" style="margin-left:6px">Reload (discard edits)</button> <button class="btn">Keep editing</button></div>
+    </div>
+  </div>
+
+<script>
+/* ── State gallery data (mirrors §2 of the design doc) ── */
+const STATES = [
+  { s:"disabled",    badge:"Disabled",     icon:"⏻", ident:'—', cfg:'', actions:['enableHint'], master:false, line:"Hindsight memory is turned off." },
+  { s:"dormant",     badge:"Not configured", icon:"◌", ident:'No backend configured', cfg:'', actions:['Configure'], master:true, line:"No memory backend configured yet." },
+  { s:"connected",   badge:"Connected",    icon:"●", ident:'External · <code>http://localhost:9177</code>', cfg:'Bank hermes · ns default · recall all · auto-recall on · auto-retain on', actions:['Configure','Test connection','Open Hindsight UI ↗'], master:true, line:"" },
+  { s:"unreachable", badge:"Unreachable",  icon:"▲", ident:'External · <code>http://localhost:9177</code>', cfg:'Bank hermes · ns default · key set', actions:['Configure','Test connection','Retry'], master:true, line:"Can't reach Hindsight at this URL." },
+  { s:"stopped",     badge:"Stopped",      icon:"■", ident:'Managed · <code>~/.hindsight</code>', cfg:'Bank bobbit · ns default · LLM key set', actions:['Start runtime','Configure','View logs'], master:true, line:"Managed runtime is stopped." },
+  { s:"starting",    badge:"Starting…",    icon:"spin", ident:'Managed · 127.0.0.1:54122', cfg:'Bank bobbit · ns default', actions:['Stop runtime','View logs'], master:true, line:"Managed runtime is starting…" },
+  { s:"running",     badge:"Running",      icon:"●", ident:'Managed · <code>127.0.0.1:54122</code>', cfg:'Bank bobbit · ns default · auto-recall on · auto-retain on', actions:['Open Hindsight UI ↗','Stop runtime','View logs'], master:true, line:"Managed runtime is running." },
+  { s:"unhealthy",   badge:"Unhealthy",    icon:"▲", ident:'Managed · <code>127.0.0.1:54122</code>', cfg:'Bank bobbit · ns default', actions:['Restart runtime','View logs','Stop runtime'], master:true, line:"Up but health probe failing." },
+];
+function badgeInner(st){ return st.icon==="spin" ? '<span class="spin"></span>' : '<span class="dot"></span>'; }
+function actionBtn(a){
+  if(a==='enableHint') return '<span class="hint">Enable to configure</span>';
+  const primary = (a==='Configure'||a==='Start runtime') ? ' primary' : '';
+  const danger = (a==='Stop runtime') ? ' danger' : '';
+  return `<button class="btn${primary}${danger}">${a}</button>`;
+}
+document.getElementById('gallery').innerHTML = STATES.map(st => `
+  <div class="card">
+    <div class="card-head">
+      <span class="pack-name">hindsight</span>
+      <span class="pill">Built-in</span>
+      <span class="ver">v1.0.0</span>
+      <span class="master">${st.master?'Enabled':'Disabled'} <span class="switch ${st.master?'':'off'}"></span></span>
+    </div>
+    <div class="desc">Persistent agent memory backed by Hindsight (recall/retain over a shared bank).</div>
+    <div class="strip">
+      <div class="strip-line">
+        <span class="badge" data-s="${st.s}">${badgeInner(st)} ${st.badge}</span>
+        <span class="ident">${st.ident}</span>
+      </div>
+      ${st.cfg?`<div class="cfgsum">${st.cfg}</div>`:''}
+      ${st.line && (st.s==='disabled'||st.s==='dormant'||st.s==='stopped')?`<div class="hint">${st.line}</div>`:''}
+      <div class="actions">${st.actions.map(actionBtn).join('')}</div>
+    </div>
+  </div>`).join('');
+
+/* ── Deployment mode cards (§6.1) ── */
+const MODES = [
+  { id:'managed', t:'Bobbit-managed', rec:true, bobbit:'Docker: Hindsight API + Postgres', you:'An LLM API key; a data dir', consent:'Starts local Docker containers when you press Start.' },
+  { id:'managed-ext', t:'Bobbit-managed + your Postgres', bobbit:'Docker: Hindsight API', you:'Postgres URL; LLM key', consent:'Starts a Docker container when you press Start.' },
+  { id:'external', t:'Connect existing Hindsight', bobbit:'Nothing (client only)', you:'The whole Hindsight deployment', nodock:'No Docker — Bobbit only talks to a URL you provide.' },
+  { id:'hermes', t:'Hermes-local / embedded', bobbit:'Nothing', you:'Hermes runs Hindsight for you', nodock:'No Docker — preset http://localhost:9177, bank hermes.' },
+];
+let selMode = 'managed';
+function renderModes(){
+  document.getElementById('modes').innerHTML = MODES.map(m=>`
+    <div class="mode ${m.id===selMode?'sel':''}" data-id="${m.id}">
+      <div class="t">${m.t}${m.rec?'<span class="rec">recommended</span>':''}</div>
+      <div class="who"><strong>Bobbit:</strong> ${m.bobbit}<br><strong>You:</strong> ${m.you}</div>
+      ${m.consent?`<div class="consent">⚠ ${m.consent}</div>`:''}
+      ${m.nodock?`<div class="nodock">○ ${m.nodock}</div>`:''}
+    </div>`).join('');
+  document.querySelectorAll('.mode').forEach(el=>el.onclick=()=>{ selMode=el.dataset.id; renderModes();
+    document.getElementById('modeNote').textContent = (selMode==='managed'||selMode==='managed-ext')
+      ? 'Selecting this only saves config. Docker starts only on an explicit Start (no auto-start).'
+      : 'External mode runs no Docker — Bobbit just talks to your URL.';
+  });
+  document.getElementById('modeNote').textContent='Selecting this only saves config. Docker starts only on an explicit Start (no auto-start).';
+}
+renderModes();
+
+/* ── Managed start progress timeline (simulated) ── */
+const TSTEPS = ['Pull image','Create containers','Start','Health check','First recall/retain smoke test'];
+function renderTimeline(active, failed){
+  document.getElementById('timeline').innerHTML = TSTEPS.map((t,i)=>{
+    let cls='pending', ic='○';
+    if(failed!=null && i===failed){ cls='fail'; ic='✗'; }
+    else if(i<active){ cls='done'; ic='✓'; }
+    else if(i===active){ cls='active'; ic='<span class="spin" style="border-color:currentColor;border-right-color:transparent;width:9px;height:9px"></span>'; }
+    return `<div class="tstep ${cls}"><span class="ic">${ic}</span><span>${t}</span></div>`;
+  }).join('');
+}
+renderTimeline(-1);
+let started=false;
+document.getElementById('startBtn').onclick=function(){
+  if(started) return; started=true;
+  document.getElementById('startNote').textContent='Started — one start call issued. Watching runtime status (mocked events)…';
+  let a=0; renderTimeline(a);
+  const iv=setInterval(()=>{ a++; if(a>=TSTEPS.length){ clearInterval(iv); renderTimeline(TSTEPS.length); document.getElementById('startNote').textContent='Running & healthy. Smoke test passed.'; } else renderTimeline(a); }, 900);
+};
+
+/* ── Stale-form fix demo ── */
+document.getElementById('sfRefresh').onclick=function(){
+  // Simulate Refresh re-hydrating BOTH config + status from the server.
+  document.getElementById('sfUrl').value='http://localhost:9177';
+  document.getElementById('sfBank').value='hermes';
+  this.textContent='Refreshed ✓ (form re-hydrated from persisted config)';
+};
+</script>
+</body>
+</html>

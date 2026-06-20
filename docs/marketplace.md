@@ -448,7 +448,11 @@ section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated prov
 extension and `afterTurn` / `sessionShutdown` fire server-side. The first built-in
 production provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped in the
 built-in band but **dormant until a Hindsight URL is configured**, so a fresh install still
-contributes nothing until you opt in.
+contributes nothing until you opt in. Its installed row is the **primary setup path**: a
+Hindsight-specific status strip renders the [eight-state badge model, active config, and
+state-aware actions](hindsight-memory.md#setup-ux--marketplace-front-door-state-model--guided-setup)
+(Configure, Test connection, Open Hindsight UI, Start/Stop runtime, View logs) off a generic seam,
+not a change to every pack's row.
 
 #### Why providers are pack-scoped, *not* name-merged
 

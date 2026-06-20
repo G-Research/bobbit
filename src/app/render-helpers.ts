@@ -514,7 +514,8 @@ async function openSidebarActionsPopover(input: {
 	renderApp();
 }
 
-function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; mobile: boolean; btnPad: string }): TemplateResult {
+function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; entityId: string; mobile: boolean; btnPad: string }): TemplateResult {
+	if (opts.mobile && opts.kind === "session" && isSidebarActionsPopoverOpen(opts.kind, opts.entityId)) return html``;
 	return html`${actions.filter((action) => action.quick).map((action) => {
 		const danger = action.tone === "danger";
 		const colorClass = opts.mobile
@@ -671,7 +672,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		const url = prBadge.url;
 		actions.push({
 			id: "open-github",
-			label: "Open on GitHub",
+			label: prBadge.number != null ? `Open #${prBadge.number} on GitHub` : "Open on GitHub",
 			title: "Open this goal's pull request on GitHub",
 			icon: goalPrIconSvg(prBadge.color, "1.2em"),
 			quick: false,
@@ -906,7 +907,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const navId = `session:${session.id}`;
 	// Keyboard nav can have moved the active row away from this session even
@@ -1064,7 +1065,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
 	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -1202,6 +1203,7 @@ interface GoalPrBadge {
 	color: string;
 	url: string | null;
 	label: string;
+	number: number | null;
 	hasConflicts: boolean;
 }
 
@@ -1216,7 +1218,7 @@ interface GoalPrBadge {
  * preserve the PR badge fallback.
  */
 function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
-	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", hasConflicts: false };
+	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", number: null, hasConflicts: false };
 	const gs = state.gateStatusCache.get(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
 	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
@@ -1235,7 +1237,7 @@ function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
 		: "";
 	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
 	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-	return { show: true, color, url: pr.url ?? null, label, hasConflicts };
+	return { show: true, color, url: pr.url ?? null, label, number: pr.number ?? null, hasConflicts };
 }
 
 /** The goal-row pull-request SVG, in the state-derived stroke color. */
@@ -1351,7 +1353,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
 	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
 	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
-	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
+	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", entityId: goal.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">

@@ -1,0 +1,6 @@
+id: marker
+kind: generic
+module: ../lib/provider.mjs
+hooks: [goalProvisioned]
+budget: { maxTokens: 256, timeoutMs: 2000 }
+defaultEnabled: true

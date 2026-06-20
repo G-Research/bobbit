@@ -1581,8 +1581,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, worktreeSetupCommand, worktreeSetupTimeoutMs } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -1600,15 +1600,11 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (divergencePolicy !== undefined) body.divergencePolicy = divergencePolicy;
 		if (maxConcurrentChildren !== undefined) body.maxConcurrentChildren = maxConcurrentChildren;
 		if (parentGoalId) body.parentGoalId = parentGoalId;
-		// Per-goal worktree setup hook: forward only when meaningful. An empty
-		// command and a non-positive/non-finite timeout are dropped so the goal
-		// resolves to default (no hook; 120s timeout) — matching the server's
-		// own parse-and-skip semantics.
-		if (typeof worktreeSetupCommand === "string" && worktreeSetupCommand.trim() !== "") {
-			body.worktreeSetupCommand = worktreeSetupCommand.trim();
-		}
-		if (typeof worktreeSetupTimeoutMs === "number" && Number.isInteger(worktreeSetupTimeoutMs) && worktreeSetupTimeoutMs > 0) {
-			body.worktreeSetupTimeoutMs = worktreeSetupTimeoutMs;
+		// Hierarchical per-goal metadata: forward only when it is a non-empty
+		// plain object. Absent/empty metadata is dropped entirely so the goal
+		// resolves to no override — byte-identical to current behaviour.
+		if (metadata && typeof metadata === "object" && !Array.isArray(metadata) && Object.keys(metadata).length > 0) {
+			body.metadata = metadata;
 		}
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
@@ -3202,4 +3198,93 @@ export function downPackRuntime(opts: { packId: string; runtimeId: string; proje
  *  (removes Docker volumes and supervisor-owned state). Destructive. */
 export function purgePackRuntime(opts: { scope: MarketScope; packName: string; runtimeId: string; projectId?: string }): Promise<MarketResult<{ status?: string }>> {
 	return marketFetch("/api/marketplace/purge-runtime", jsonInit("POST", opts));
+}
+
+// ── Live runtime status + explicit start/stop (Hindsight UX polish, design §5.1) ──
+// These mirror the server `PackRuntimeStatus` shape served by `GET /api/pack-runtimes`
+// (runtimes/pack-runtime-supervisor.ts) — do NOT invent fields. Reading status is a
+// PURE read (the supervisor `list`/`status` never starts Docker); the ONLY Docker
+// start path is the explicit {@link startPackRuntime} call wired to a user click.
+
+/** One compose service's reported state in a {@link PackRuntimeStatus}. Mirrors the
+ *  server `PackRuntimeServiceStatus`. */
+export interface PackRuntimeServiceStatus {
+	name: string;
+	state?: string;
+	health?: string;
+}
+
+/** Live status of a managed pack runtime, mirroring the server `PackRuntimeStatus`
+ *  (runtimes/pack-runtime-supervisor.ts). `status` is the supervisor's literal state;
+ *  `docker-unavailable` means Docker is not installed/running (the runtime is
+ *  effectively stopped). `id` is the URL-safe `encodePackRuntimeId(packId,runtimeId)`. */
+export interface PackRuntimeStatus {
+	id: string;
+	packId: string;
+	packName?: string;
+	runtimeId: string;
+	title?: string;
+	description?: string;
+	status: "docker-unavailable" | "stopped" | "starting" | "running" | "unhealthy";
+	mode?: string;
+	composeProject?: string;
+	services?: PackRuntimeServiceStatus[];
+	message?: string;
+}
+
+/** GET the live status of every managed pack runtime. PURE read — never starts
+ *  Docker (the supervisor `list` only inspects). Best-effort MarketResult so the
+ *  marketplace degrades gracefully (no status strip) when the supervisor is
+ *  unavailable (503) or Docker is absent. */
+export function listPackRuntimes(projectId?: string): Promise<MarketResult<{ runtimes: PackRuntimeStatus[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/pack-runtimes${qs}`);
+}
+
+/** POST an EXPLICIT start for a managed pack runtime (`/api/pack-runtimes/:id/start`).
+ *  This is the ONLY Docker-starting path from the marketplace — it must be wired to a
+ *  user click behind the consent disclosure, never to a status/capability read or page
+ *  load. An external (non-managed) deployment answers 409 (no Docker to start) →
+ *  surfaced as `ok:false`. `mode` overrides the deployment-derived runtime mode. */
+export function startPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	const body: Record<string, unknown> = {};
+	if (opts.mode) body.mode = opts.mode;
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/start${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
+}
+
+/** POST stop for a managed pack runtime (`/api/pack-runtimes/:id/stop`). Brings the
+ *  Docker containers down (preserving data); never destructive. */
+export function stopPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/stop${qs ? `?${qs}` : ""}`, jsonInit("POST", {}));
+}
+
+/** GET recent logs for a managed pack runtime (`/api/pack-runtimes/:id/logs`). PURE
+ *  read — never starts Docker. `tail` bounds the line count. A missing-Docker install
+ *  answers 200 with `{ logs:"", status:"docker-unavailable" }`. */
+export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; projectId?: string; tail?: number }): Promise<MarketResult<{ logs: string; status?: string; message?: string }>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	if (typeof opts.tail === "number") params.set("tail", String(opts.tail));
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
+}
+
+/** GET a BUILT-IN pack's read-only route output as a PURE, SESSIONLESS read
+ *  (`GET /api/ext/pack-route/:packId/:routeName`). The Marketplace uses this to read
+ *  built-in Hindsight `status`/`config` after `#/market` navigation has cleared the
+ *  active chat session — the surface-token path (`getLauncherHost` → `host.callRoute`)
+ *  would 403 there because minting a surface token requires an active session.
+ *  Admin-bearer + GET-only + built-in-pack-only on the server; it NEVER mutates and
+ *  NEVER starts Docker (status/capability reads only; the only Docker start path stays
+ *  the explicit {@link startPackRuntime} click). `packId` is the pack's STRUCTURAL id
+ *  (use the installed row's `packId`, which equals `packName` for first-party packs). */
+export function readBuiltinPackRoute<T = unknown>(opts: { packId: string; routeName: string; projectId?: string }): Promise<MarketResult<T>> {
+	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
+	return marketFetch<T>(`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`);
 }

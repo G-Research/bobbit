@@ -1,0 +1,108 @@
+/**
+ * Regression: restored sessions must apply the `bobbit.promptSectionOrder`
+ * goal-metadata convention.
+ *
+ * The bug: restoreSession()'s prompt rebuilds (assistant, delegate, and normal
+ * branches) called assemblePrompt WITHOUT deriving effective goal metadata or
+ * passing `sectionOrder`. Initial setup (session-setup.ts::_resolvePrompt) does
+ * this correctly. After a gateway restart, a goal carrying a custom
+ * `bobbit.promptSectionOrder` silently reverted to the default prompt order on
+ * every restored session.
+ *
+ * Two concerns are pinned:
+ *
+ *  1. FUNCTIONAL — `promptSectionOrderForGoal` resolves the order from the
+ *     session's EFFECTIVE goal through the single ancestry-walking resolver
+ *     (mirrors disabledToolsForGoal). A member/delegate-style session whose
+ *     effective goal id is a sub-goal inherits its lead's order. Absent ⇒
+ *     undefined (byte-identical default).
+ *
+ *  2. SOURCE GUARD — restoreSession() derives the effective goal id
+ *     (`goalId ?? teamGoalId`) and threads `sectionOrder` into all three prompt
+ *     assemblies. If a future refactor drops any, these fail loudly.
+ */
+import { afterEach, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-prompt-order-test-"));
+process.env.BOBBIT_DIR = tmpRoot;
+
+const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+
+const managers: any[] = [];
+
+function makeManager(): any {
+	const manager: any = new SessionManager();
+	managers.push(manager);
+	return manager;
+}
+
+afterEach(() => {
+	for (const m of managers.splice(0)) {
+		m.sessions?.clear?.();
+	}
+});
+
+function seedGoal(manager: any, goal: Record<string, unknown>) {
+	const store = manager._testGoalManager.getGoalStore();
+	store.put({
+		cwd: tmpRoot, state: "in-progress", spec: "", title: "g",
+		createdAt: Date.now(), updatedAt: Date.now(), ...goal,
+	});
+}
+
+describe("promptSectionOrderForGoal — effective-goal resolution (restore/respawn)", () => {
+	it("returns the order from bobbit.promptSectionOrder", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-order", metadata: { "bobbit.promptSectionOrder": ["Goal", "Tools", "System Prompt"] } });
+		assert.deepEqual(manager.promptSectionOrderForGoal("g-order"), ["Goal", "Tools", "System Prompt"]);
+	});
+
+	it("inherits a parent's order via the ancestry walk (member/delegate-style effective goal)", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-lead", metadata: { "bobbit.promptSectionOrder": ["Role", "Goal"] } });
+		seedGoal(manager, { id: "g-sub", parentGoalId: "g-lead", metadata: { other: 1 } });
+		// A member/delegate's effective goal id is its teamGoalId; resolving the
+		// sub-goal walks ancestry and inherits the lead's order — so a restored
+		// delegate keeps the lead's custom order rather than reverting to default.
+		assert.deepEqual(manager.promptSectionOrderForGoal("g-sub"), ["Role", "Goal"]);
+	});
+
+	it("filters non-string / empty entries; empty list ⇒ undefined", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-mixed", metadata: { "bobbit.promptSectionOrder": ["Goal", "", 5, null, "Tools"] } });
+		assert.deepEqual(manager.promptSectionOrderForGoal("g-mixed"), ["Goal", "Tools"]);
+		seedGoal(manager, { id: "g-empty", metadata: { "bobbit.promptSectionOrder": [] } });
+		assert.equal(manager.promptSectionOrderForGoal("g-empty"), undefined);
+	});
+
+	it("returns undefined with no order set (byte-identical default)", () => {
+		const manager = makeManager();
+		seedGoal(manager, { id: "g-none", metadata: { other: 1 } });
+		assert.equal(manager.promptSectionOrderForGoal("g-none"), undefined);
+		assert.equal(manager.promptSectionOrderForGoal(undefined), undefined);
+	});
+});
+
+describe("restoreSession — source guard: prompt assemblies honor metadata section order", () => {
+	const src = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+		"utf-8",
+	);
+	const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
+	const window = src.slice(idx, idx + 30_000);
+
+	it("derives the effective goal id (goalId ?? teamGoalId) and resolves the order once", () => {
+		assert.ok(idx > 0, "restoreSession declaration not found");
+		assert.match(window, /const restoreEffectiveGoalId = ps\.goalId \?\? ps\.teamGoalId;/);
+		assert.match(window, /const restoreSectionOrder = this\.promptSectionOrderForGoal\(restoreEffectiveGoalId, ps\.projectId\);/);
+	});
+
+	it("passes sectionOrder to all three restore prompt assemblies (assistant, delegate, normal)", () => {
+		const matches = window.match(/sectionOrder: restoreSectionOrder,/g) ?? [];
+		assert.equal(matches.length, 3, `expected sectionOrder threaded into 3 restore prompt assemblies, found ${matches.length}`);
+	});
+});

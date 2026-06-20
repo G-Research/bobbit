@@ -142,8 +142,7 @@ export default function (pi: ExtensionAPI) {
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
 			}, { description: "Inline workflow snapshot frozen on the goal; may reference inlineRoles." })),
-			worktreeSetupCommand: Type.Optional(Type.String({ description: "Host setup command run once after component setup." })),
-			worktreeSetupTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Per-goal setup timeout override in ms." })),
+			metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary namespaced per-goal metadata; inherited by sub-goals." })),
 		}),
 		async execute(_id, args) {
 			// `workflow` (string id) and `inlineWorkflow` (full Workflow object)

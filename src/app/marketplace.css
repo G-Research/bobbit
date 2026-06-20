@@ -654,3 +654,69 @@
 .market-entity-desc-text::before {
 	content: "— ";
 }
+
+/* ── Hindsight built-in row: derived state badge + action bar (hindsight-ux-polish §5)
+ * Theme-token based; the state badge colour is set inline from the semantic token but
+ * pairs with an icon + blurb so colour is never the only signal. */
+.market-hindsight-strip {
+	margin-top: 0.625rem;
+	padding-top: 0.625rem;
+	border-top: 1px solid var(--border);
+}
+
+.market-hindsight-config {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 0.875rem;
+	margin-top: 0.5rem;
+	font-size: 0.6875rem;
+}
+
+.market-hindsight-config-row {
+	display: flex;
+	align-items: baseline;
+	gap: 0.3125rem;
+	min-width: 0;
+}
+
+.market-hindsight-config-row dt {
+	color: var(--muted-foreground);
+}
+
+.market-hindsight-config-row dd {
+	margin: 0;
+	font-weight: 500;
+	color: var(--foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 18rem;
+}
+
+.market-hindsight-logs {
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-hindsight-logs > summary {
+	cursor: pointer;
+	font-weight: 500;
+	user-select: none;
+	width: fit-content;
+}
+
+.market-hindsight-logs-pre {
+	margin-top: 0.375rem;
+	padding: 0.5rem;
+	max-height: 16rem;
+	overflow: auto;
+	border-radius: 0.375rem;
+	border: 1px solid var(--border);
+	background: var(--muted);
+	color: var(--foreground);
+	font-family: var(--font-mono, ui-monospace, monospace);
+	font-size: 0.6875rem;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
