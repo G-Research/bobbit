@@ -233,13 +233,62 @@ describe("ConfigCascade — Role.model and Role.thinkingLevel three-layer resolu
 		assert.equal(meta.model.source, "inherited-role");
 		assert.equal(meta.model.origin, "user");
 		assert.equal(meta.model.value, "anthropic/claude-opus-4");
-		assert.equal(meta.model.editable, true);
+		// The global-user winner sits ABOVE the system-scope editable server layer.
+		// `PUT /api/roles/:name` writes the server layer, which cannot override that
+		// higher-precedence value, so the model field must be reported read-only —
+		// presenting it as editable would make the inline control a no-op (finding #3).
+		assert.equal(meta.model.editable, false);
 
 		// The global-user role omits thinkingLevel, so the field falls through the
-		// lower layers: server supplies it as the system-scope editable layer.
+		// lower layers: server supplies it as the system-scope editable layer, so it
+		// IS a directly-editable role override (the write target owns it).
 		assert.equal(meta.thinkingLevel.source, "role");
 		assert.equal(meta.thinkingLevel.origin, "server");
 		assert.equal(meta.thinkingLevel.value, "medium");
+		assert.equal(meta.thinkingLevel.editable, true);
+	});
+
+	it("marks an above-current-scope winner (global-user at system scope) read-only, but a below-scope winner (builtin) editable (finding #3)", () => {
+		// `coder` is defined at builtin (model haiku) and global-user (model opus).
+		// At SYSTEM scope the editable write target is the server layer (rank 2).
+		//  - global-user (rank 4) > server: a server-layer PUT cannot override it →
+		//    model must be read-only (editable:false), else the inline control no-ops.
+		//  - builtin    (rank 0) < server: a server-layer PUT DOES shadow it, so a
+		//    builtin-sourced field stays editable (customize-then-edit is valid).
+		const builtinsDir = mkTemp();
+		writeRoleYaml(builtinsDir, "coder", { model: "anthropic/claude-haiku", thinkingLevel: "low" });
+		// `solo` is defined ONLY at builtin (no higher layer shadows it).
+		writeRoleYaml(builtinsDir, "solo", { model: "anthropic/claude-haiku" });
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		const homeDir = mkTemp();
+		writeRoleYaml(path.join(homeDir, ".bobbit", "config"), "coder", { model: "anthropic/claude-opus-4" });
+
+		const serverStores = {
+			getRoles: () => [], // server defines neither role
+			getPersonalities: () => [],
+			getWorkflows: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		};
+		const fakePcm = { getOrCreate: () => undefined } as any;
+
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+		cascade.setGlobalUserBase(homeDir);
+
+		// global-user winner above the server write target → read-only model field.
+		const coder = cascade.resolveRoleModelResolution("coder");
+		assert.equal(coder.model.source, "inherited-role");
+		assert.equal(coder.model.origin, "user");
+		assert.equal(coder.model.value, "anthropic/claude-opus-4");
+		assert.equal(coder.model.editable, false);
+
+		// builtin winner below the server write target → still editable.
+		const solo = cascade.resolveRoleModelResolution("solo");
+		assert.equal(solo.model.source, "inherited-role");
+		assert.equal(solo.model.origin, "builtin");
+		assert.equal(solo.model.value, "anthropic/claude-haiku");
+		assert.equal(solo.model.editable, true);
 	});
 
 	it("metadata reports a server-market winner over a shadowed builtin field at system scope (finding #1)", () => {
