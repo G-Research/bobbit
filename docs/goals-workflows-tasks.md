@@ -382,12 +382,12 @@ Step `status` is explicit:
 |---|---|
 | `passed` | Step completed successfully. |
 | `failed` | Step completed unsuccessfully. |
-| `skipped` | Step was intentionally skipped, such as a disabled optional step. |
+| `skipped` | Step was intentionally skipped, such as a disabled optional step or a later phase skipped after an earlier phase failed. |
 | `running` | Step is executing now; duration is elapsed time so far. |
 | `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
-| `blocked` | Step did not run because an earlier phase failed. |
+| `blocked` | Active-snapshot derived state for a not-yet-run step blocked by an earlier phase failure; terminal persisted rows use `skipped`. |
 
-For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. `passed` is only meaningful on final `passed`, `failed`, or `skipped` steps.
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
 
 Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
 
@@ -461,7 +461,7 @@ Do not use bare forms such as `git push origin {{branch}}` in verification. Bare
 
 Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, steps run concurrently by default, including `type: command` steps. If two command checks must not overlap, put them in different phases instead of relying on step type for ordering.
 
-If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with `skipped: true` on `GateSignalStep` and output `"Skipped — earlier phase failed"`. The `skipped` flag persists to disk so the UI can distinguish skipped steps from passed/failed ones after page reload.
+If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped downstream steps are persisted as `status: "skipped"`, `skipped: true`, and their original `phase`, with output `"Skipped — earlier phase failed"`. `computeAllPassed()` ignores skipped rows when aggregating the gate result, so skipped downstream steps do not become additional failures; the phase's real failed step is what fails the gate.
 
 This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while keeping the `phase` field as the sole source of verification ordering. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
 
@@ -497,6 +497,8 @@ interface GateSignalStep {
   name: string;
   type: string;
   passed: boolean;
+  status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+  phase?: number;            // Workflow phase used for grouping and execution order
   skipped?: boolean;         // true when step was skipped (optional not enabled, or earlier phase failed)
   output: string;            // Short summary
   duration_ms: number;
@@ -526,7 +528,7 @@ Verify steps can be marked `optional: true` with a human-readable `optionalLabel
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
 - At goal creation, the UI shows a checkbox for each optional step in the selected workflow. The goal assistant can pre-toggle steps via the `options` parameter (comma-separated step names) in its `propose_goal` tool call.
-- During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `{ passed: true, skipped: true, output: "Skipped — not enabled for this goal" }`.
+- During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `status: "skipped"`, `skipped: true`, its workflow `phase`, and output `"Skipped — not enabled for this goal"`.
 - Skipped optional steps do not block the gate and do not affect phase pass/fail logic.
 
 **Example in workflow YAML:**
