@@ -57,6 +57,50 @@ const DIFF_CONTEXT_EXPAND_LINES = 20;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const msgOf = (e) => (e && e.message ? String(e.message) : String(e));
+const objectOf = (value) => value && typeof value === "object" ? value : undefined;
+const textOf = (value) => value == null ? "" : String(value);
+const codeOf = (value) => {
+	const obj = objectOf(value);
+	const body = objectOf(obj && obj.body);
+	return textOf((obj && obj.code) || (body && body.code)).trim();
+};
+const routeErrorOf = (value) => {
+	const obj = objectOf(value);
+	const body = objectOf(obj && obj.body);
+	return textOf((obj && (obj.error || obj.routeError)) || (body && body.error)).trim();
+};
+const detailsOf = (value) => {
+	const obj = objectOf(value);
+	const body = objectOf(obj && obj.body);
+	return (obj && (obj.details || obj.summary)) || (body && (body.details || body.summary));
+};
+const compactDetails = (details) => {
+	if (details == null) return "";
+	if (typeof details === "string") return details;
+	if (Array.isArray(details)) return details.slice(0, 3).map(compactDetails).filter(Boolean).join("; ");
+	if (typeof details === "object") {
+		if (Array.isArray(details.errors)) return compactDetails(details.errors);
+		const path = textOf(details.path).trim();
+		const message = textOf(details.message).trim();
+		if (path || message) return [path, message].filter(Boolean).join(": ");
+	}
+	try { return JSON.stringify(details).slice(0, 240); } catch { return ""; }
+};
+const structuredRouteMessage = (value, fallback = "The PR walkthrough could not be loaded.") => {
+	const code = codeOf(value);
+	const routeError = routeErrorOf(value);
+	const detail = compactDetails(detailsOf(value));
+	if (code === "PRW_REVIEW_MISSING") return routeError || "Walkthrough data expired or was cleaned up. Start a new walkthrough.";
+	if (code === "PRW_REVIEW_DRAFT") return routeError || "Walkthrough analysis is saved but not finalized yet. The reviewer can resume from the saved chunks.";
+	if (code === "STORE_QUOTA_EXCEEDED" || code === "PRW_REVIEW_TOO_LARGE" || /quota|too large|oversized/i.test(routeError || detail)) {
+		return ["This walkthrough is too large to save; split or shorten the analysis.", detail].filter(Boolean).join(" ");
+	}
+	if (code === "PRW_SCHEMA_INVALID") return ["PR walkthrough YAML failed validation.", detail || routeError].filter(Boolean).join(" ");
+	if (code === "PRW_FINALIZE_INCOMPLETE") return routeError || "Walkthrough analysis is not finalized yet.";
+	if (routeError) return [routeError, detail].filter(Boolean).join(" ");
+	const message = msgOf(value);
+	return message && message !== "[object Object]" ? message : fallback;
+};
 
 // Phase ordering + labels mirror the deleted PrWalkthroughPanel PHASES so the nav
 // rail groups the synthesized cards exactly as the built-in walkthrough did.
@@ -117,8 +161,8 @@ function deriveJobRef(yamlText, fallback) {
 
 // paramKey → { status, bundle?, toolCall?, error?, activeCardId?, jobId?,
 //              polling?, mountKicked?, slow?, diffMode?, reviewStatus?,
-//              sectionIndex?, cardCommentOpen? }.
-// status ∈ idle | running | publishing | rendered | error | empty.
+//              sectionIndex?, cardCommentOpen?, chunkSummary? }.
+// status ∈ idle | running | draft | publishing | rendered | missing | error | empty.
 //   running    → pending: a reviewer child is producing the walkthrough; the pane
 //                self-polls `status` (the spinner + "PR Walkthrough: In Progress").
 //   publishing → transient: the reviewer submitted; running publish → bundle.
@@ -1138,10 +1182,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					if (effHeadSha) publishBody.headSha = effHeadSha;
 					const result = await host.callRoute("publish", { method: "POST", body: publishBody });
 					if (result && result.ok === false) {
-						const detail = result.summary && Array.isArray(result.summary.errors) && result.summary.errors[0]
-							? `${result.summary.errors[0].path}: ${result.summary.errors[0].message}`
-							: (result.error || "validation failed");
-						storeEntry(targetKey, { status: "error", error: `Walkthrough YAML invalid — ${detail}`, jobId, mountKicked: true });
+						storeEntry(targetKey, { status: "error", error: structuredRouteMessage(result, "PR walkthrough publish failed."), code: result.code, jobId, mountKicked: true });
 						return;
 					}
 				}
@@ -1149,6 +1190,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (effBaseSha) query.baseSha = effBaseSha;
 				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
+				if (bundle && bundle.found === false) {
+					storeEntry(targetKey, { status: "missing", error: structuredRouteMessage(bundle, "Walkthrough data expired or was cleaned up. Start a new walkthrough."), code: bundle.code || "PRW_REVIEW_MISSING", jobId, mountKicked: true });
+					return;
+				}
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
 				const cur = byJob.get(targetKey) || {};
 				const persisted = (await readHostPersistedState(host, targetKey, jobId)) || readLocalPersistedState(targetKey, jobId);
@@ -1168,7 +1213,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				const startedAt = Date.now();
 				while (Date.now() - startedAt < HARD_CAP_MS) {
 					const cur = byJob.get(key);
-					if (!cur || cur.status !== "running") return; // abandoned / already resolved
+					if (!cur || (cur.status !== "running" && cur.status !== "draft")) return; // abandoned / already resolved
 					let st;
 					try {
 						st = await host.callRoute("status", { method: "POST", body: { childSessionId, jobId } });
@@ -1179,13 +1224,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						try {
 							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha, st.headSha, key);
 						} catch (e) {
-							storeEntry(key, { status: "error", error: msgOf(e), jobId, mountKicked: true });
+							storeEntry(key, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId, mountKicked: true });
 						}
 						if (host.requestRender) host.requestRender();
 						return;
 					}
-					if (st && st.phase === "error") {
-						storeEntry(key, { status: "error", error: st.error || "The reviewer failed — terminate the session and run again.", jobId, mountKicked: true });
+					if (st && st.phase === "draft") {
+						storeEntry(key, { status: "draft", jobId: st.jobId || jobId, chunkSummary: st.chunkSummary, polling: true, mountKicked: true });
+						if (host.requestRender) host.requestRender();
+					} else if (st && st.phase === "error") {
+						storeEntry(key, { status: "error", error: structuredRouteMessage(st, "The reviewer failed — terminate the session and run again."), code: st.code, jobId, mountKicked: true });
 						if (host.requestRender) host.requestRender();
 						return;
 					}
@@ -1194,7 +1242,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					// is alive) so we never re-arm a second loop.
 					if (Date.now() - startedAt > SLOW_HINT_MS) {
 						const c = byJob.get(key);
-						if (c && c.status === "running" && !c.slow) storeEntry(key, { ...c, slow: true });
+						if (c && (c.status === "running" || c.status === "draft") && !c.slow) storeEntry(key, { ...c, slow: true });
 					}
 					await sleep(POLL_INTERVAL_MS);
 				}
@@ -1217,8 +1265,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				const cur = byJob.get(paramKey) || {};
 				if (cur.bundle || cur.status === "rendered") return; // already rendered
 				if (!binding || typeof binding !== "object") {
-					// Not a reviewer child (the panel should essentially never mount here).
-					storeEntry(paramKey, { ...cur, status: "empty" });
+					// Not a reviewer child, unless a job-scoped deep link points at data that has been cleaned up.
+					storeEntry(paramKey, paramJobId
+						? { ...cur, status: "missing", jobId: paramJobId, error: "Walkthrough data expired or was cleaned up. Start a new walkthrough.", code: "PRW_REVIEW_MISSING" }
+						: { ...cur, status: "empty" });
 					if (host.requestRender) host.requestRender();
 					return;
 				}
@@ -1236,8 +1286,19 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					try {
 						await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha, paramKey);
 					} catch (e) {
-						storeEntry(paramKey, { status: "error", error: msgOf(e), jobId, mountKicked: true });
+						storeEntry(paramKey, { status: "error", error: structuredRouteMessage(e, "PR walkthrough publish failed."), code: codeOf(e), jobId, mountKicked: true });
 					}
+					if (host.requestRender) host.requestRender();
+					return;
+				}
+				if (recovered && recovered.phase === "draft") {
+					storeEntry(paramKey, { status: "draft", jobId: recovered.jobId || jobId, chunkSummary: recovered.chunkSummary, polling: true, mountKicked: true });
+					if (host.requestRender) host.requestRender();
+					queueMicrotask(() => { void pollChild(paramKey, boundSessionId, recovered.jobId || jobId); });
+					return;
+				}
+				if (recovered && recovered.code === "PRW_REVIEW_MISSING" && recovered.error && binding.status === "submitted") {
+					storeEntry(paramKey, { status: "missing", error: structuredRouteMessage(recovered), code: recovered.code, jobId, mountKicked: true });
 					if (host.requestRender) host.requestRender();
 					return;
 				}
@@ -1263,17 +1324,25 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
 			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
-			const renderStateShell = (kind, testId, title, body) => html`<section class=${`shell state-shell ${kind}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)}>
+			const progressLabel = (kind) => kind === "pending" ? "Generating review cards" : kind === "draft" ? "Saved draft" : "Walkthrough unavailable";
+			const stateLabel = (kind) => kind === "error" ? "Error" : kind === "neutral" ? "No walkthrough" : kind === "draft" ? "Draft saved" : kind === "missing" ? "Missing" : "Pending";
+			const renderChunkSummary = (summary) => {
+				const chunks = Array.isArray(summary && summary.chunks) ? summary.chunks : [];
+				if (!chunks.length) return nothing;
+				return html`<div class="state-detail" data-testid="prw-draft-chunks"><strong>Saved chunks</strong><ul>${chunks.slice(0, 8).map((chunk) => html`<li>${chunk.id || chunk.kind || "chunk"}</li>`)}</ul>${chunks.length > 8 ? html`<p>${chunks.length - 8} more saved chunks…</p>` : nothing}</div>`;
+			};
+			const renderStateShell = (kind, testId, title, body, detail = nothing) => html`<section class=${`shell state-shell ${kind}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)}>
 				<header class="header state-header">
 					<div class="title-group">
 						<span class="pr-pill">${kind === "pending" ? spinner : "PR"}</span>
 						<div class="title-stack"><h1>${title}</h1><div class="header-meta"><span>Reviewer child session</span><span>${displayJob}</span></div></div>
 					</div>
-					<div class="progress-wrap"><span>${kind === "pending" ? "Generating review cards" : "Walkthrough unavailable"}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "pending" ? "35" : "0"}><div class=${`progress-fill ${kind === "pending" ? "prw-progress-indeterminate" : ""}`} style=${kind === "pending" ? "width:42%" : "width:0%"}></div></div></div>
+					<div class="progress-wrap"><span>${progressLabel(kind)}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "pending" ? "35" : kind === "draft" ? "60" : "0"}><div class=${`progress-fill ${kind === "pending" ? "prw-progress-indeterminate" : ""}`} style=${kind === "pending" ? "width:42%" : kind === "draft" ? "width:60%" : "width:0%"}></div></div></div>
 				</header>
-				<main class="content state-content"><article class="state-card"><div class="phase-label">${kind === "error" ? "Error" : kind === "neutral" ? "No walkthrough" : "Pending"}</div><h2>${title}</h2><p>${body}</p>${kind === "pending" ? html`<div class="state-skeleton"><span></span><span></span><span></span></div>` : nothing}</article></main>
+				<main class="content state-content"><article class="state-card"><div class="phase-label">${stateLabel(kind)}</div><h2>${title}</h2><p>${body}</p>${detail}${kind === "pending" ? html`<div class="state-skeleton"><span></span><span></span><span></span></div>` : nothing}</article></main>
 			</section>`;
 			const renderPendingShell = () => renderStateShell("pending", "prw-pending", "PR Walkthrough: In Progress", "Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.");
+			const renderDraftShell = () => renderStateShell("draft", "prw-draft", "PR Walkthrough: Draft Saved", "The reviewer has saved analysis chunks, but the walkthrough has not been finalized yet. This pane will keep checking for the finalized review.", renderChunkSummary(entry.chunkSummary));
 
 			return html`
 				<style>
@@ -1634,6 +1703,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
 					.prw-root .state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
 					.prw-root .state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
+					.prw-root .state-detail { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: color-mix(in oklch, var(--background) 74%, var(--card)); color: var(--muted-foreground); }
+					.prw-root .state-detail strong { display: block; color: var(--foreground); margin-bottom: 6px; }
+					.prw-root .state-detail ul { margin: 0; padding-left: 18px; }
+					.prw-root .state-detail li { margin: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 					.prw-root .state-skeleton { display: grid; gap: 8px; margin-top: 14px; }
 					.prw-root .state-skeleton span { display: block; height: 10px; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
 					.prw-root .state-skeleton span:nth-child(2) { width: 74%; } .prw-root .state-skeleton span:nth-child(3) { width: 56%; }
@@ -1648,11 +1721,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>
 					${entry.bundle
 						? renderBundle(entry, host, paramKey, displayJob)
-						: status === "error" && entry.error
-							? renderStateShell("error", "prw-error", "PR Walkthrough error", entry.error)
-							: isPending
-								? renderPendingShell()
-								: renderStateShell("neutral", "prw-neutral", "No PR walkthrough is available in this session.", "This pane is not bound to a reviewer child with a submitted walkthrough.")}
+						: status === "draft"
+							? renderDraftShell()
+							: status === "missing"
+								? renderStateShell("missing", "prw-missing", "PR Walkthrough unavailable", entry.error || "Walkthrough data expired or was cleaned up. Start a new walkthrough.")
+								: status === "error" && entry.error
+									? renderStateShell("error", "prw-error", "PR Walkthrough error", entry.error)
+									: isPending
+										? renderPendingShell()
+										: renderStateShell("neutral", "prw-neutral", "No PR walkthrough is available in this session.", "This pane is not bound to a reviewer child with a submitted walkthrough.")}
 				</div>
 			`;
 		},

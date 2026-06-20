@@ -190,13 +190,26 @@ function scheduleRender() {
   });
 }
 
+function jobForMode(mode) {
+  if (mode === "ready") return "job-ready";
+  if (mode === "draft") return "job-draft";
+  if (mode === "publish-error") return "job-publish-error";
+  return "job-pending";
+}
+
+const DRAFT_SUMMARY = { chunks: [
+  { id: "metadata", kind: "metadata", bytes: 42 },
+  { id: "context", kind: "context", bytes: 84 },
+  { id: "chunk:auth-flow", kind: "review_chunk", bytes: 128 },
+] };
+
 function makeHost(mode) {
   return {
     store: {
       async get(key) {
         if (hostStoreData.has(key)) return hostStoreData.get(key);
         if (!key.startsWith("binding/")) return undefined;
-        return { jobId: mode === "ready" ? "job-ready" : "job-pending", baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
+        return { jobId: jobForMode(mode), baseSha: "abcdef1234567890", headSha: "fedcba0987654321", status: mode === "publish-error" ? "submitted" : "running" };
       },
       async put(key, value) {
         hostStoreData.set(key, value);
@@ -206,6 +219,14 @@ function makeHost(mode) {
       if (mode === "pending") {
         if (route === "recover") return { found: false };
         if (route === "status") return { phase: "running" };
+      }
+      if (mode === "draft") {
+        if (route === "recover") return { found: false, phase: "draft", code: "PRW_REVIEW_DRAFT", error: "Walkthrough analysis is saved but not finalized yet.", jobId: "job-draft", chunkSummary: DRAFT_SUMMARY };
+        if (route === "status") return { phase: "draft", code: "PRW_REVIEW_DRAFT", jobId: "job-draft", chunkSummary: DRAFT_SUMMARY };
+      }
+      if (mode === "publish-error") {
+        if (route === "recover") return { found: true, yaml: READY_YAML, baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
+        if (route === "publish") return { ok: false, code: "STORE_QUOTA_EXCEEDED", error: "Review payload is too large to save.", details: { errors: [{ path: "reviews/job/final/payload", message: "maxTotalBytes exceeded" }] } };
       }
       if (route === "recover") return { found: true, yaml: READY_YAML, baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
       if (route === "publish") return { ok: true };
@@ -224,6 +245,9 @@ function renderPanel(params, host) {
 }
 
 window.__renderPrwPending = () => renderPanel({ __sessionId: "child-pending", jobId: "job-pending" }, makeHost("pending"));
+window.__renderPrwDraft = () => renderPanel({ __sessionId: "child-draft", jobId: "job-draft" }, makeHost("draft"));
+window.__renderPrwPublishError = () => renderPanel({ __sessionId: "child-publish-error", jobId: "job-publish-error" }, makeHost("publish-error"));
+window.__renderPrwMissing = () => renderPanel({ __sessionId: "child-missing", jobId: "job-missing" }, { store: { async get() { return undefined; }, async put() {} }, requestRender: scheduleRender });
 window.__renderPrwReady = () => renderPanel({ __sessionId: "child-ready", jobId: "job-ready" }, makeHost("ready"));
 window.__clearPrwMemory = () => {
   window.__bobbitPrWalkthroughPanelState?.clear?.();
@@ -310,6 +334,34 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(page.locator('[data-testid="prw-panel-root"]')).toBeVisible();
 		await expect(page.locator('[data-testid="prw-pending"]')).toContainText("PR Walkthrough: In Progress");
 		await expect(page.locator("body")).not.toContainText(/Run walkthrough|Load walkthrough/i);
+	});
+
+	test("renders saved draft chunks as a bounded resumable state", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwDraft());
+
+		await expect(page.locator('[data-testid="prw-draft"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-draft"]')).toContainText("Draft Saved");
+		await expect(page.locator('[data-testid="prw-draft-chunks"]')).toContainText("metadata");
+		await expect(page.locator('[data-testid="prw-draft-chunks"]')).toContainText("chunk:auth-flow");
+	});
+
+	test("renders structured publish failures without bare callRoute HTTP errors", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwPublishError());
+
+		await expect(page.locator('[data-testid="prw-error"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-error"]')).toContainText("too large to save");
+		await expect(page.locator('[data-testid="prw-error"]')).toContainText("reviews/job/final/payload: maxTotalBytes exceeded");
+		await expect(page.locator('[data-testid="prw-error"]')).not.toContainText("callRoute publish HTTP 500");
+	});
+
+	test("renders cleaned-up walkthroughs as a bounded missing state", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwMissing());
+
+		await expect(page.locator('[data-testid="prw-missing"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-missing"]')).toContainText("expired or was cleaned up");
 	});
 
 	test("pr-walkthrough shell parity: compact historical header toolbar is restored", async ({ page }) => {
