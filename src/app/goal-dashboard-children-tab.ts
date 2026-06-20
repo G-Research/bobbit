@@ -34,7 +34,19 @@ async function saveSubgoalPolicy(goalId: string, updates: { subgoalsAllowed?: bo
 	_savingSubgoalPolicy = true;
 	renderApp();
 	try {
-		await patchGoalSubgoalPolicy(goalId, updates);
+		const ok = await patchGoalSubgoalPolicy(goalId, updates);
+		// `patchGoalSubgoalPolicy` refreshes `state.goals`, but the open dashboard
+		// renders this control from the separate `currentGoal` record loaded by
+		// `loadDashboardData()`. Without re-syncing it the checkbox/depth control
+		// would keep showing the stale pre-PATCH state (and the server may have
+		// clamped `maxNestingDepth`) until a full reload. Re-fetch the dashboard
+		// goal so the visible control matches the persisted setting immediately.
+		// Dynamic import breaks the static cycle with goal-dashboard.ts (which
+		// imports renderChildrenTab from here) — same pattern as remote-agent.ts.
+		if (ok) {
+			const m = await import("./goal-dashboard.js");
+			await m.refreshDashboardGoal?.();
+		}
 	} finally {
 		_savingSubgoalPolicy = false;
 		renderApp();
