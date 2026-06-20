@@ -299,7 +299,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |

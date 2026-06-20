@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -182,7 +183,7 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 	// turn succeeding — not how many seconds the real model took.
 	test.setTimeout(600_000);
 
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	const tmp = manualTmpRoot();
 	const port = await freePort();
 	const dir = join(tmp, `.bobbit-compact-${port}`);
 	const agentDir = join(tmp, `.bobbit-compact-${port}-agent`);

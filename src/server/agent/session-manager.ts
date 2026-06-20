@@ -1323,6 +1323,11 @@ export class SessionManager {
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
 			prStatusStore: this.prStatusStore!,
+			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
+			// The pipeline (tool activation, prompt order, bridge-install) resolves the
+			// effective (inherited) metadata for a session's goal through this single
+			// closure — no other site walks the goal ancestry. Absent metadata ⇒ {}.
+			resolveGoalMetadata: (goalId: string | undefined) => resolvedGoalManager.getEffectiveGoalMetadata(goalId),
 		};
 	}
 
@@ -1489,13 +1494,50 @@ export class SessionManager {
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
 		if (opts?.sandboxBranch) {
+			// Capture the HOST-side working directory BEFORE it is remapped into the
+			// container worktree below. The `goalProvisioned` provider runs HOST-side
+			// (LifecycleHub.dispatchGoalProvisioned executes the provider module on
+			// the host with `workingDir: ctx.cwd`), so it must be handed a host
+			// filesystem path it can actually write to. The container worktree
+			// (`/workspace-wt/<branch>`) lives in a Docker volume and is NOT reachable
+			// from the host — passing it made the marker write silently no-op (the
+			// hook is non-fatal), so metadata-driven filesystem treatments never
+			// landed on sandboxed worktrees. For session-setup-provisioned sandbox
+			// sessions this is the session's host worktree cwd; for team members /
+			// delegates it is the goal's host worktree cwd they were created with.
+			const hostWorktreeCwd = bridgeOptions.cwd;
 			try {
 				const worktreePath = await sandbox.createWorktree(
 					opts.sandboxBranch,
 					opts.sandboxBranch,
 					opts.sandboxBaseBranch,
 				);
+				// Agent runtime cwd → the container worktree (offset applied). The
+				// agent boots here; only the host-side provider dispatch below uses
+				// host coordinates.
 				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+				// Fire the `goalProvisioned` lifecycle hook for the freshly provisioned
+				// sandbox worktree. team-manager skips its own dispatch for sandboxed
+				// members (no host worktreeResult), and the session-setup provisioning
+				// dispatch never runs for these container worktrees — so without this,
+				// metadata-driven filesystem treatments would be missing on every
+				// sandboxed team lead / member worktree. We dispatch with HOST
+				// coordinates (`hostWorktreeCwd`), NOT the container path, so the
+				// host-side provider can write its marker files. Skipped when there is
+				// no usable host path — restore / respawn paths arrive with
+				// `bridgeOptions.cwd` already pointing at a container-internal path
+				// (`/workspace-wt/...`); the worktree was provisioned on first creation
+				// and providers are idempotent, so a re-dispatch is unnecessary (and
+				// would just no-op host-side).
+				if (hostWorktreeCwd && !isSandboxContainerPath(hostWorktreeCwd)) {
+					await this.dispatchGoalProvisionedForWorktree({
+						goalId: opts.goalId,
+						projectId,
+						worktreePath: hostWorktreeCwd,
+						cwd: hostWorktreeCwd,
+						branch: opts.sandboxBranch,
+					});
+				}
 			} catch (err) {
 				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
 				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);
@@ -1764,22 +1806,117 @@ export class SessionManager {
 		return merged.length > 0 ? merged : undefined;
 	}
 
+	/**
+	 * Resolve a session's effective (ancestry-merged) goal metadata for the
+	 * restore / respawn / force-abort tool-activation paths. Routes by goal id
+	 * (mirrors the lifecycle-hub's getContextForGoal routing), falling back to
+	 * the project's GoalManager, then the in-process test GoalManager. Returns
+	 * `{}` (a guarded no-op) when there is no goal or no manager. Never throws —
+	 * metadata is best-effort and must not break a respawn.
+	 */
+	private resolveEffectiveGoalMetadataForSession(goalId: string | undefined, projectId?: string): Record<string, unknown> {
+		if (!goalId) return {};
+		try {
+			if (this.projectContextManager) {
+				const ctx = this.projectContextManager.getContextForGoal(goalId)
+					?? (projectId ? this.projectContextManager.getOrCreate(projectId) : undefined);
+				if (ctx) return ctx.goalManager.getEffectiveGoalMetadata(goalId) ?? {};
+			}
+			if (this._testGoalManager) return this._testGoalManager.getEffectiveGoalMetadata(goalId) ?? {};
+		} catch (err) {
+			console.warn(`[session-manager] resolveEffectiveGoalMetadata failed for goal ${goalId} (non-fatal):`, err);
+		}
+		return {};
+	}
+
+	/**
+	 * Dispatch the `goalProvisioned` lifecycle hook for a worktree provisioned
+	 * OUTSIDE the GoalManager / session-setup provisioning paths — specifically
+	 * the team-manager member worktrees, which `createWorktree()`s directly and
+	 * hands a pre-built cwd to `createSession` (so session-setup's provisioning
+	 * dispatch never fires for them). Resolves the member's EFFECTIVE goal
+	 * metadata through the single resolver (no ad-hoc ancestry walk) so
+	 * metadata-driven filesystem treatments land on every normal member worktree,
+	 * symmetric with the goal/cold-create/pool paths. Non-fatal — never blocks
+	 * a spawn. No-op when no lifecycle hub, no goal, or no worktree.
+	 */
+	async dispatchGoalProvisionedForWorktree(opts: {
+		goalId: string | undefined;
+		projectId?: string;
+		worktreePath: string;
+		cwd: string;
+		branch?: string;
+	}): Promise<void> {
+		if (!this.lifecycleHub) return;
+		if (!opts.goalId || !opts.worktreePath) return;
+		try {
+			const metadata = this.resolveEffectiveGoalMetadataForSession(opts.goalId, opts.projectId);
+			await this.lifecycleHub.dispatchGoalProvisioned({
+				goalId: opts.goalId,
+				projectId: opts.projectId,
+				worktreePath: opts.worktreePath,
+				cwd: opts.cwd,
+				branch: opts.branch,
+				metadata,
+			});
+		} catch (err) {
+			console.warn(`[session-manager] goalProvisioned dispatch for member worktree ${opts.worktreePath} (goal ${opts.goalId}) failed (non-fatal):`, err);
+		}
+	}
+
+	/**
+	 * Lower-cased set of tool names disabled via the `bobbit.disabledTools`
+	 * metadata convention for a session's effective goal; undefined when none.
+	 * Mirrors session-setup.ts::disabledToolsFromMetadata so the restore /
+	 * respawn / force-abort paths apply the same disablement as initial setup.
+	 */
+	private disabledToolsForGoal(goalId: string | undefined, projectId?: string): ReadonlySet<string> | undefined {
+		const raw = this.resolveEffectiveGoalMetadataForSession(goalId, projectId)["bobbit.disabledTools"];
+		if (!Array.isArray(raw)) return undefined;
+		const names = raw.filter((v): v is string => typeof v === "string" && v.length > 0).map(s => s.toLowerCase());
+		return names.length > 0 ? new Set(names) : undefined;
+	}
+
+	/**
+	 * Prompt section order from the `bobbit.promptSectionOrder` metadata
+	 * convention for a session's effective goal; undefined when none. Mirrors
+	 * session-setup.ts::promptSectionOrderFromMetadata so the restore / respawn
+	 * paths reorder prompt sections the same way initial setup does — without
+	 * this a restored session under a goal with a custom order silently reverts
+	 * to the default prompt order after a gateway restart.
+	 */
+	private promptSectionOrderForGoal(goalId: string | undefined, projectId?: string): string[] | undefined {
+		const raw = this.resolveEffectiveGoalMetadataForSession(goalId, projectId)["bobbit.promptSectionOrder"];
+		if (!Array.isArray(raw)) return undefined;
+		const order = raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+		return order.length > 0 ? order : undefined;
+	}
+
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 		projectId?: string,
+		effectiveGoalId?: string,
 	): { args: string[]; env: Record<string, string> } {
-		const flatNames = allowedTools?.map(e => e.name);
+		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
+		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
+		// so restart/respawn/force-abort keep the same disablement initial setup
+		// applied — without this a restored session re-acquires disabled tools.
+		const disabledTools = this.disabledToolsForGoal(effectiveGoalId, projectId);
+		const filteredAllowed = disabledTools && allowedTools
+			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
+			: allowedTools;
+		const flatNames = filteredAllowed?.map(e => e.name);
 
 		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore)
+			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
 
 		const args = [...activation.args];
 
@@ -1792,7 +1929,7 @@ export class SessionManager {
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants)
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -1803,9 +1940,11 @@ export class SessionManager {
 		// (restore, role reassignment, force-abort respawn) keep the bridge that
 		// initial setup added. Without this, provider-enabled sessions lose the
 		// bridge after a gateway restart/respawn and per-turn hooks stop firing.
+		// The effective goal id filters disabled providers (bobbit.disabledProviders)
+		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId)) {
+		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
 			const bridgePath = writeProviderBridgeExtension(sessionId);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
@@ -1883,9 +2022,13 @@ export class SessionManager {
 		projectConfigStore?: { get(key: string): string | undefined },
 		projectId?: string,
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
-		// allowedTools=undefined or empty => no restrictions; include catalog.
-		// allowedTools restricted => require activate_skill in the list.
-		if (allowedTools && allowedTools.length > 0) {
+		// allowedTools=undefined => unrestricted; include the catalog.
+		// allowedTools=[] (EXPLICIT no tools, e.g. a recursion-stripped delegate or
+		// a session emptied by bobbit.disabledTools) => no activate_skill, so emit
+		// NO Available Skills affordance. A non-empty allowlist must contain
+		// activate_skill for the catalog to appear. `[].some(...)` is false, so an
+		// empty allowlist correctly returns undefined here.
+		if (allowedTools) {
 			const hasActivate = allowedTools.some(t => t.toLowerCase() === "activate_skill");
 			if (!hasActivate) return undefined;
 		}
@@ -2782,7 +2925,9 @@ export class SessionManager {
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
 					cwd: session.cwd,
-					goalId: session.goalId,
+					// Effective goal: members/delegates/reviewers carry teamGoalId, not
+					// goalId — resolve both so disabled-provider filtering applies.
+					goalId: session.goalId ?? session.teamGoalId,
 					roleName: session.role,
 					prompt: session.latestTurnUserText,
 					userText: session.latestTurnUserText,
@@ -3329,14 +3474,17 @@ export class SessionManager {
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
-		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0
-			? ps.allowedTools
-			: undefined;
+		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
+		// from absent (`undefined` = fall back to role/cascade). Only a missing /
+		// non-array value falls back; an emptied allowlist (recursion-stripped
+		// delegate, bobbit.disabledTools) must NOT silently re-acquire role defaults
+		// on respawn/restart.
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
 		const sessionGrants = this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools);
 
 		// Persisted allow-lists are true session-scoped constraints (delegate/read-only
-		// children, explicit createSession overrides). Preserve them exactly, with any
-		// live grants layered on top.
+		// children, explicit createSession overrides, incl. an explicit empty `[]`).
+		// Preserve them exactly, with any live grants layered on top.
 		if (persistedAllowedTools) {
 			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
 		}
@@ -3989,16 +4137,44 @@ export class SessionManager {
 		// Restore tool activation. Roleless normal sessions still use the general
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
-		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0 ? ps.allowedTools : undefined;
+		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
+		// from absent (`undefined` = fall back to role defaults). Only a missing /
+		// non-array value falls back; `[]` must survive restore so a restricted
+		// session (e.g. allowlist emptied by bobbit.disabledTools) does not silently
+		// re-acquire role-default tools on restart.
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
+		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
 			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
 			: persistedAllowedTools
 				? persistedAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
 				: this.resolveEffectiveAllowedTools(restoredRole);
-		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
+		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
+		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
+		// consistent with what buildToolActivationArgs actually activates.
+		const restoreEffectiveGoalId = ps.goalId ?? ps.teamGoalId;
+		const restoreDisabled = this.disabledToolsForGoal(restoreEffectiveGoalId, ps.projectId);
+		// Per-goal prompt section ordering (bobbit.promptSectionOrder) for the
+		// session's EFFECTIVE goal — mirrors session-setup's initial-setup path so
+		// a restored session keeps its goal's custom order instead of reverting to
+		// the default after a gateway restart. Undefined ⇒ byte-identical default.
+		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
+		const restoredFiltered = restoreDisabled
+			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
+			: effectiveAllowed;
+		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+		// distinction. A genuinely unrestricted session (role-less / no
+		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
+		// to `[]` and must map to `undefined` (all tools). But when there WAS an
+		// explicit allowlist source — a persisted/override `[]`, or an allowlist
+		// `bobbit.disabledTools` removed entirely — `restoredFiltered` is `[]` and
+		// must stay `[]` (NO tools); never collapse it to `undefined`, which would
+		// re-grant every tool on restart.
+		const restoredAllowedTools: EffectiveTool[] | undefined =
+			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
@@ -4035,6 +4211,7 @@ export class SessionManager {
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else if (ps.delegateOf && !ps.goalId) {
@@ -4061,6 +4238,7 @@ export class SessionManager {
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -4089,6 +4267,7 @@ export class SessionManager {
 				roleName,
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
@@ -4607,6 +4786,19 @@ export class SessionManager {
 		// Inherit tool access from parent session, unless the caller passes an
 		// explicit allowedTools override (OrchestrationCore strips spawn verbs).
 		const parentSession = this.sessions.get(parentSessionId);
+
+		// ── Goal-metadata inheritance (anti-asymmetry invariant) ──
+		// A `team_delegate` sub-agent natively carries only `delegateOf`; it has no
+		// `goalId`/`teamGoalId`, so every per-session goal-metadata edge (disabled
+		// tools, disabled providers, prompt order) would resolve to {} and the child
+		// could re-acquire a tool/provider the goal disabled — a treatment leak.
+		// Stamp the PARENT's effective goal as the delegate's `teamGoalId` (NOT
+		// `goalId`, so it is treated as a member, not a lead) so the resolver walks
+		// the same ancestry and the delegate inherits the same metadata. Prefer the
+		// live parent session, then its persisted record (restart/respawn).
+		const parentEffectiveGoalId =
+			parentSession?.goalId ?? parentSession?.teamGoalId
+			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
 			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4628,6 +4820,10 @@ export class SessionManager {
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
+			// Effective-goal stamp (see above): makes the inherited goal metadata
+			// available DURING the delegate's own setup pipeline (tool activation /
+			// bridge-install / prompt order), not just after the fact.
+			teamGoalId: parentEffectiveGoalId,
 			// Persist the source discriminator + read-only marker (orchestration-core
 			// §3/§2.2) so a delegate-style child (e.g. host-agents) is rebuilt with
 			// the correct kind on restart and is enumerable by source-filtered verbs.
@@ -4654,6 +4850,14 @@ export class SessionManager {
 
 		const session = await executePlan(plan, ctx);
 		if (parentProjectId) session.projectId = parentProjectId;
+		// Persist the effective-goal stamp on BOTH the live session and the store
+		// record so it survives restart/respawn (the initial structural put happens
+		// inside executePlan; this guarantees the field regardless of plan
+		// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
+		if (parentEffectiveGoalId) {
+			session.teamGoalId = parentEffectiveGoalId;
+			this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
+		}
 
 		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
@@ -5669,7 +5873,23 @@ export class SessionManager {
 		const goalSpec = goal?.spec;
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
+		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
+		// session's effective goal so the reassembled prompt, the activation args,
+		// and the persisted allowedTools all agree after a role reassignment.
+		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
+		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
+		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
+		const effectiveAllowed = respawnDisabled
+			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
+			: effectiveAllowedRaw;
+		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
+		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
+		// role HAD an allowlist that `bobbit.disabledTools` removed entirely,
+		// `effectiveAllowed` is `[]` and must stay `[]` (NO tools) — never
+		// collapse it to `undefined`, which would re-grant every tool on respawn.
+		const respawnAllowed: EffectiveTool[] | undefined =
+			effectiveAllowedRaw.length > 0 ? effectiveAllowed : undefined;
 		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
 		// Resolve the role prompt through the shared helper so placeholder
@@ -5723,7 +5943,9 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd, session.projectId);
+		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
+		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
@@ -6062,7 +6284,9 @@ export class SessionManager {
 						projectId: src.projectId,
 						scope: src.projectId ? "project" : "global",
 						cwd: src.cwd,
-						goalId: src.goalId,
+						// Effective goal (goalId ?? teamGoalId) so disabled-provider
+						// filtering applies to members/delegates/reviewers too.
+						goalId: src.goalId ?? src.teamGoalId,
 						roleName: src.role,
 					});
 				} catch (err) {
@@ -6191,7 +6415,9 @@ export class SessionManager {
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
 					cwd: session.cwd,
-					goalId: session.goalId,
+					// Effective goal (goalId ?? teamGoalId) so disabled-provider
+					// filtering applies to members/delegates/reviewers too.
+					goalId: session.goalId ?? session.teamGoalId,
 					roleName: session.role,
 				});
 			} catch (err) {
@@ -7010,8 +7236,27 @@ export class SessionManager {
 
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
-			const effective = this.resolveEffectiveAllowedTools(role);
-			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd, session.projectId);
+			// Derive the effective allowlist from the session/persisted allowlist when
+			// present — NOT from the role alone. A restricted child/delegate (or any
+			// session whose allowlist was narrowed/removed by bobbit.disabledTools)
+			// persists a constrained allowedTools; recomputing from
+			// `resolveEffectiveAllowedTools(role)` would widen it back to the role
+			// default (minus disabled names) on force-abort respawn. Mirrors the
+			// restore path's persisted-allowlist handling.
+			const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
+			const forceAbortAllowedNames = forceAbortPersisted?.allowedTools ?? session.allowedTools;
+			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
+				? forceAbortAllowedNames.map(n => tagAllowedTool(n, this.toolManager))
+				: this.resolveEffectiveAllowedTools(role);
+			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
+			// collapse it to `undefined`, which would re-grant every tool. Only a
+			// genuinely unrestricted resolution (role-less ⇒ resolves to `[]`)
+			// collapses to `undefined` (all tools), preserving today's behaviour.
+			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
+				? effective
+				: (effective.length > 0 ? effective : undefined);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 

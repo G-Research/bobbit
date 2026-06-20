@@ -19,6 +19,7 @@ import {
 	cpSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -146,7 +147,7 @@ test.describe.configure({ mode: "serial" });
 test("restart-minimal: plain + worktree session both survive a restart", async ({ page }) => {
 	test.setTimeout(240_000);
 
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	const tmp = manualTmpRoot();
 	const port1 = await freePort();
 	const dir = join(tmp, `.bobbit-restart-min-${port1}`);
 	cleanDirs(dir);

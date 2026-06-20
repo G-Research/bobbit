@@ -39,6 +39,7 @@ import {
 	cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { manualTmpRoot } from "./manual-test-paths.ts";
 import { fileURLToPath } from "node:url";
 import { setupMultiRepoFixture } from "../fixtures/multi-repo/setup-fixture.mjs";
 
@@ -154,7 +155,7 @@ function stageFixture(): string {
 	setupMultiRepoFixture();
 
 	// 2. Copy it to a tmp staging directory we own outright.
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	const tmp = manualTmpRoot();
 	const stage = join(tmp, `bobbit-mr-fixture-${Date.now()}-${process.pid}`);
 	rmSync(stage, { recursive: true, force: true });
 	mkdirSync(stage, { recursive: true });
@@ -230,7 +231,7 @@ test.describe("Multi-repo & components — integration", () => {
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(180_000);
 		port = await freePort();
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		const tmp = manualTmpRoot();
 		gwDir = join(tmp, `.bobbit-mr-${port}`);
 		rmSync(gwDir, { recursive: true, force: true });
 		mkdirSync(join(gwDir, ".bobbit", "state"), { recursive: true });

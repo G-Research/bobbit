@@ -11,6 +11,31 @@ import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
+/** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
+export type GoalMetadata = Record<string, unknown>;
+
+/**
+ * Resolve the EFFECTIVE (ancestry-merged) metadata for a goal. Injected by the
+ * server so the shared, cross-project hub routes by `goalId` to the owning
+ * project context — `projectId` is diagnostics-only. Returns `{}` when no goal
+ * or no owning context. The hub treats absent resolver as "no metadata", so
+ * provider filtering is a no-op and behaviour is byte-identical to today.
+ */
+export type GoalMetadataResolver = (goalId: string | undefined, projectId?: string) => GoalMetadata;
+
+/** Metadata key holding the list of provider ids disabled for a goal subtree. */
+const DISABLED_PROVIDERS_KEY = "bobbit.disabledProviders";
+
+/** Context handed to a `goalProvisioned` provider hook (fire-and-forget). */
+export interface GoalProvisionedCtx {
+	goalId: string;
+	projectId?: string;
+	worktreePath: string;
+	cwd: string;
+	branch?: string;
+	metadata: GoalMetadata;
+}
+
 export interface HookCtx {
 	sessionId: string;
 	projectId?: string;
@@ -70,6 +95,9 @@ interface ProviderTraceState {
 
 const AUTHORITIES: ReadonlySet<ContextBlockAuthority> = new Set(["memory", "skill", "tool", "workflow", "role", "generic"]);
 
+/** Shared empty set returned by the disabled-providers fast paths (no allocation). */
+const EMPTY_SET: ReadonlySet<string> = new Set<string>();
+
 export class LifecycleHub {
 	private readonly registry: PackContributionRegistry;
 	private readonly moduleHost: ModuleHost;
@@ -78,6 +106,7 @@ export class LifecycleHub {
 	private readonly globalMaxTokens: number;
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly runtimeResolver?: RuntimeContextResolver;
+	private readonly goalMetadataResolver?: GoalMetadataResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -85,6 +114,10 @@ export class LifecycleHub {
 		trace: ContextTraceStore;
 		gatewayInfo: () => { baseUrl: string; token: string };
 		globalMaxTokens?: number;
+		/** Resolve effective (ancestry-merged) per-goal metadata, routed by goalId.
+		 *  Omitted ⇒ no provider is ever filtered by goal metadata (today's
+		 *  behaviour). See {@link GoalMetadataResolver}. */
+		goalMetadataResolver?: GoalMetadataResolver;
 		/** Factory for a LEAST-PRIVILEGE, provider-scoped server Host API (store-only:
 		 *  `capabilities.store === true`, `session`/`agents` false/unavailable). Built
 		 *  per provider invocation so a hook reaches its own pack's durable store
@@ -103,6 +136,28 @@ export class LifecycleHub {
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 		this.providerHostApi = deps.providerHostApi;
 		this.runtimeResolver = deps.runtimeResolver;
+		this.goalMetadataResolver = deps.goalMetadataResolver;
+	}
+
+	/**
+	 * The set of provider ids disabled for the goal subtree via the
+	 * `bobbit.disabledProviders` metadata convention. Empty when no resolver is
+	 * injected or the goal sets no such key — so filtering is a no-op and
+	 * behaviour is byte-identical to today.
+	 */
+	private disabledProviders(goalId: string | undefined, projectId: string | undefined): ReadonlySet<string> {
+		if (!this.goalMetadataResolver) return EMPTY_SET;
+		let meta: GoalMetadata;
+		try {
+			meta = this.goalMetadataResolver(goalId, projectId) ?? {};
+		} catch (err) {
+			console.warn(`[lifecycle-hub] goalMetadataResolver threw for goal ${goalId ?? "<none>"}: ${String(err)}`);
+			return EMPTY_SET;
+		}
+		const raw = meta[DISABLED_PROVIDERS_KEY];
+		if (!Array.isArray(raw)) return EMPTY_SET;
+		const ids = raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+		return ids.length > 0 ? new Set(ids) : EMPTY_SET;
 	}
 
 	/**
@@ -110,17 +165,67 @@ export class LifecycleHub {
 	 * project declares one of the given hooks. Used by session setup to decide
 	 * whether the per-turn provider-bridge extension is warranted; keeps provider
 	 * activation filtering centralized in the registry.
+	 *
+	 * `goalId` (effective goal for the session) lets metadata-disabled providers
+	 * be excluded — a goal subtree that disables Hindsight gets NO bridge.
 	 */
-	hasProvidersForHooks(projectId: string | undefined, hooks: readonly LifecycleHook[]): boolean {
+	hasProvidersForHooks(projectId: string | undefined, hooks: readonly LifecycleHook[], goalId?: string): boolean {
 		const wanted = new Set<string>(hooks);
-		return this.registry.listProviders(projectId).some((p) => p.hooks.some((h) => wanted.has(h)));
+		const disabled = this.disabledProviders(goalId, projectId);
+		return this.registry.listProviders(projectId).some((p) => !disabled.has(p.id) && p.hooks.some((h) => wanted.has(h)));
+	}
+
+	/**
+	 * Fire the `goalProvisioned` lifecycle hook for every enabled provider that
+	 * declares it. Dispatched at EVERY worktree provisioning in a goal's subtree
+	 * (team lead, members, sub-agents, nested sub-goals, pool claims) so
+	 * filesystem treatments land uniformly. Non-fatal: a provider error/timeout
+	 * is logged and swallowed, return value ignored. Providers must be cheap and
+	 * idempotent (content-addressed marker/cache).
+	 */
+	async dispatchGoalProvisioned(ctx: GoalProvisionedCtx): Promise<void> {
+		const disabled = this.disabledProviders(ctx.goalId, ctx.projectId);
+		const providers = this.registry.listProviders(ctx.projectId).filter(
+			(p) => !disabled.has(p.id) && p.hooks.includes("goalProvisioned"),
+		);
+		for (const provider of providers) {
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId: packIdFromRoot(provider.packRoot) });
+			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
+			try {
+				await this.moduleHost.invoke({
+					url,
+					packRoot: provider.packRoot,
+					epoch: 0,
+					exportKind: "providers",
+					member: "goalProvisioned",
+					ctx: {
+						goalId: ctx.goalId,
+						projectId: ctx.projectId,
+						worktreePath: ctx.worktreePath,
+						cwd: ctx.cwd,
+						workingDir: ctx.cwd,
+						branch: ctx.branch,
+						metadata: ctx.metadata,
+						config: provider.config ?? {},
+						gateway: this.gatewayInfo(),
+						host: providerHost,
+					} as unknown as InvokeRequest["ctx"],
+					arg: undefined,
+					workingDir: ctx.cwd,
+				}, provider.budget.timeoutMs);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} failed (non-fatal): ${message}`);
+			}
+		}
 	}
 
 	async dispatch(
 		hook: LifecycleHook,
 		base: Omit<HookCtx, "budget" | "config" | "gateway">,
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
-		const providers = this.registry.listProviders(base.projectId).filter((p) => p.hooks.includes(hook));
+		const disabled = this.disabledProviders(base.goalId, base.projectId);
+		const providers = this.registry.listProviders(base.projectId).filter((p) => !disabled.has(p.id) && p.hooks.includes(hook));
 		const diagnostics: HubDiagnostic[] = [];
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();

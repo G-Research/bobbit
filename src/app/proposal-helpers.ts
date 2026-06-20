@@ -256,6 +256,70 @@ export function deleteProposalDraft(sessionId: string, type: ProposalType): void
 	});
 }
 
+// ---- Per-goal metadata editor helpers ----
+//
+// The goal creation/proposal form exposes a simple key/value metadata editor.
+// Internally it stores ordered `[key, value]` string rows for direct
+// <input> round-tripping; at submit they collapse into a `Record<string,
+// unknown>` (blank keys dropped, values JSON-parsed when possible, else kept
+// as raw strings). Shared by proposal-panels.ts (editor + submit) and
+// session-manager.ts (proposal-mirror seeding) so both convert identically.
+
+export type MetadataRow = [string, string];
+
+/** Parse a single metadata value string: JSON when it parses (numbers,
+ *  booleans, arrays, objects, quoted strings), otherwise the raw string. A
+ *  blank/whitespace value is kept as its raw string. */
+function parseMetadataValue(raw: string): unknown {
+	const trimmed = raw.trim();
+	if (trimmed === "") return raw;
+	try {
+		return JSON.parse(trimmed) as unknown;
+	} catch {
+		return raw;
+	}
+}
+
+/** Render a single metadata value into its editor-row string so that feeding
+ *  the result back through `parseMetadataValue` reproduces the original value
+ *  exactly (type included). Plain strings are shown verbatim when they already
+ *  round-trip; strings that would be reparsed as JSON (e.g. `"false"`, `"42"`,
+ *  `'["x"]'`, or a whitespace-padded number) are JSON-quoted so they survive
+ *  as strings. Non-strings are JSON-stringified. */
+function renderMetadataValue(v: unknown): string {
+	if (typeof v !== "string") return JSON.stringify(v);
+	// A verbatim string is safe only when re-parsing yields the identical
+	// string; otherwise quote it so submit keeps it a string.
+	const reparsed = parseMetadataValue(v);
+	return reparsed === v ? v : JSON.stringify(v);
+}
+
+/** Convert a metadata object into ordered editor rows. Values are rendered so
+ *  that the editor round-trips losslessly back through `metadataRowsToObject`
+ *  (string values that look like JSON literals stay strings). Non-object input
+ *  yields no rows. */
+export function metadataObjectToRows(meta: unknown): MetadataRow[] {
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return [];
+	return Object.entries(meta as Record<string, unknown>).map(
+		([k, v]): MetadataRow => [k, renderMetadataValue(v)],
+	);
+}
+
+/** Build a metadata object from editor rows. Blank keys are dropped; values are
+ *  JSON-parsed when possible, otherwise kept as the raw string. Returns
+ *  `undefined` when no usable rows remain so callers send no `metadata`. */
+export function metadataRowsToObject(
+	rows: ReadonlyArray<MetadataRow>,
+): Record<string, unknown> | undefined {
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of rows) {
+		const key = k.trim();
+		if (key === "") continue;
+		out[key] = parseMetadataValue(v);
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Test-only helper. Cancels every pending debounced save without flushing. */
 export function _cancelAllPendingProposalDraftSaves(): void {
 	for (const k of Object.keys(debounceTimers) as ProposalType[]) {

@@ -103,6 +103,10 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			sessions.delete(id);
 			return true;
 		}),
+		// Goal-metadata: team-manager dispatches the goalProvisioned lifecycle hook
+		// for each member worktree it creates directly (finding 1). Mocked here so
+		// the spawn path can invoke it and tests can assert it was called.
+		dispatchGoalProvisionedForWorktree: mock.fn(async () => {}),
 		_sessions: sessions, // for test assertions
 	};
 }
@@ -1358,6 +1362,33 @@ describe("TeamManager", () => {
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "session should exist");
 			assert.equal(session.rpcClient.prompt.mock.callCount(), 1);
+		});
+
+		it("dispatches the goalProvisioned hook for the member worktree (finding 1)", async () => {
+			// team-manager creates member worktrees directly via createWorktree() and
+			// hands a pre-built cwd to createSession, so session-setup's provisioning
+			// dispatch never fires for them. Without an explicit dispatch here, a
+			// metadata-driven filesystem treatment would be missing on normal member
+			// worktrees. Assert the dispatch runs with the member worktree path/branch.
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ repoPath, cwd: repoPath, worktreePath: repoPath });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent, "agent record should exist");
+
+			const calls = sm.dispatchGoalProvisionedForWorktree.mock.calls;
+			assert.ok(calls.length >= 1, "goalProvisioned must be dispatched for the member worktree");
+			const arg = calls[calls.length - 1].arguments[0];
+			assert.equal(arg.goalId, "goal-1", "dispatch must carry the effective goal id");
+			assert.equal(arg.worktreePath, result.worktreePath, "dispatch must target the member worktree path");
+			assert.equal(arg.branch, agent!.branch, "dispatch must carry the member branch");
+			assert.equal(typeof arg.cwd, "string");
+			assert.ok(arg.cwd.length > 0, "dispatch must carry the agent cwd");
 		});
 
 		it("should set correct emoji title for each role", async () => {

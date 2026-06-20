@@ -827,8 +827,12 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 - `module` resolves relative to the provider YAML and is containment-checked against the pack
   root — the same guard as routes/entrypoints.
 - `hooks` must be a subset of `sessionSetup` / `beforePrompt` / `afterTurn` / `beforeCompact` /
-  `sessionShutdown`; an unknown hook drops *that* provider (warn) and the rest of the pack
-  still loads.
+  `sessionShutdown` / `goalProvisioned`; an unknown hook drops *that* provider (warn) and the rest
+  of the pack still loads. `goalProvisioned` is a fire-and-forget **filesystem-treatment** hook
+  (returns no context blocks) dispatched at every worktree provisioning in a goal's subtree with
+  the goal's resolved metadata; it must be cheap and idempotent. See
+  [Hierarchical goal metadata](design/goal-metadata.md#6-extension-goal-lifecycle-hook) and
+  [lifecycle-hub.md](lifecycle-hub.md).
 - `budget` (`{ maxTokens, timeoutMs }`) bounds dispatch: `maxTokens` is clamped to `[64, 8192]`
   (default 1600) and `timeoutMs` to `[100, 10000]` (default 1500). When the Hub dispatches, the
   per-provider token max feeds the budget algorithm and the timeout bounds the worker call.
