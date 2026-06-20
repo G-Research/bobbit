@@ -48,6 +48,7 @@ import {
 	hasProposalDismissalRecord,
 	clearProposalDismissed as clearProposalDismissedTyped,
 	deleteProposalFile,
+	metadataObjectToRows,
 } from "./proposal-helpers.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { shouldApplyProposalUpdate } from "./proposal-update-policy.js";
@@ -413,10 +414,10 @@ const goalDraft = createDraftManager({
 		previewTitleEdited: state.previewTitleEdited,
 		previewSpecEdited: state.previewSpecEdited,
 		previewCwdEdited: state.previewCwdEdited,
+		previewMetadataEdited: state.previewMetadataEdited,
 		hasReceivedProposal: state.assistantHasProposal,
 		goalAssistantTab: state.assistantTab,
-		previewWorktreeSetupCommand: state.previewWorktreeSetupCommand,
-		previewWorktreeSetupTimeoutMs: state.previewWorktreeSetupTimeoutMs,
+		previewMetadataRows: state.previewMetadataRows,
 	}),
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
@@ -470,9 +471,9 @@ const goalDraft = createDraftManager({
 			state.previewTitleEdited = false;
 			state.previewSpecEdited = false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.previewMetadataEdited = false;
 			state.assistantHasProposal = false;
-			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
-			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
+			state.previewMetadataRows = sanitizeMetadataRows(draft.previewMetadataRows);
 		} else {
 			state.previewTitle = draft.previewTitle ?? "";
 			state.previewSpec = draft.previewSpec ?? "";
@@ -481,9 +482,9 @@ const goalDraft = createDraftManager({
 			state.previewTitleEdited = draft.previewTitleEdited ?? false;
 			state.previewSpecEdited = draft.previewSpecEdited ?? false;
 			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.previewMetadataEdited = draft.previewMetadataEdited ?? false;
 			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
-			state.previewWorktreeSetupCommand = draft.previewWorktreeSetupCommand ?? "";
-			state.previewWorktreeSetupTimeoutMs = draft.previewWorktreeSetupTimeoutMs ?? "";
+			state.previewMetadataRows = sanitizeMetadataRows(draft.previewMetadataRows);
 		}
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
 	},
@@ -507,34 +508,61 @@ export function deleteGoalDraft(sessionId: string): void { goalDraft.delete(sess
  * next fast-path restore is correct. Returns true if a slot for this session was
  * reconciled.
  */
+/** Coerce a persisted/draft `previewMetadataRows` value back into well-formed
+ *  `[string, string]` rows, dropping anything malformed. */
+function sanitizeMetadataRows(raw: unknown): Array<[string, string]> {
+	if (!Array.isArray(raw)) return [];
+	const rows: Array<[string, string]> = [];
+	for (const row of raw) {
+		if (Array.isArray(row) && row.length === 2 && typeof row[0] === "string" && typeof row[1] === "string") {
+			rows.push([row[0], row[1]]);
+		}
+	}
+	return rows;
+}
+
 /**
- * Mirror the optional per-goal worktree-setup fields from a proposal/slot into
- * the legacy form-mirror state (stored as strings for direct <input>/<textarea>
- * round-tripping). Shared by all goal-proposal mirror paths so a propose_goal-
- * seeded assistant proposal carries `worktreeSetupCommand` /
- * `worktreeSetupTimeoutMs` through acceptance, not just title/spec/cwd/workflow.
+ * Mirror the optional per-goal `metadata` object from a proposal/slot into the
+ * form-mirror metadata rows the goal-assistant panel renders from. Shared by all
+ * goal-proposal mirror paths so a propose_goal-seeded assistant proposal carries
+ * its `metadata` through acceptance, not just title/spec/cwd/workflow.
+ *
+ * A present metadata object (including an authoritative empty `{}`) is mirrored
+ * exactly, so an empty object clears any stale rows. When `metadata` is absent
+ * (the field is not carried by this source), the rows are cleared only for an
+ * AUTHORITATIVE source (the merged/slot proposal fields, which represent the
+ * full current proposal) — that way a previous proposal's metadata can never be
+ * submitted by accident. Non-authoritative raw streaming tool-use partials, which
+ * may simply not have streamed the `metadata` field yet, leave the rows untouched.
+ *
+ * Once the user has manually edited the rows (`previewMetadataEdited`), the mirror
+ * is a no-op regardless of source — their entries win, exactly like the
+ * title/spec/cwd `*Edited` guards — so an authoritative reconcile with no metadata
+ * can never wipe in-progress user input.
  */
-function mirrorGoalSetupFields(src: { worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown }): void {
-	if (typeof src.worktreeSetupCommand === "string") {
-		state.previewWorktreeSetupCommand = src.worktreeSetupCommand;
+function mirrorGoalSetupFields(src: { metadata?: unknown }, opts?: { authoritative?: boolean }): void {
+	if (state.previewMetadataEdited) return;
+	const m = src.metadata;
+	if (m !== null && typeof m === "object" && !Array.isArray(m)) {
+		// Present (incl. empty {}) — mirror exactly. metadataObjectToRows({}) ⇒ [].
+		state.previewMetadataRows = metadataObjectToRows(m);
+		return;
 	}
-	const t = src.worktreeSetupTimeoutMs;
-	if (typeof t === "number" && Number.isFinite(t)) {
-		state.previewWorktreeSetupTimeoutMs = String(t);
-	} else if (typeof t === "string" && t.trim() !== "") {
-		state.previewWorktreeSetupTimeoutMs = t.trim();
-	}
+	// Absent / non-object: clear stale rows only for an authoritative source.
+	if (opts?.authoritative) state.previewMetadataRows = [];
 }
 
 function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
 	const goalSlot = state.activeProposals.goal;
 	if (!goalSlot || goalSlot.sessionId !== sessionId) return false;
-	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown };
+	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; metadata?: unknown };
 	if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 	if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 	if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 	if (g.workflow) setSelectedWorkflowId(g.workflow);
-	mirrorGoalSetupFields(g);
+	// Slot fields are the authoritative current proposal — clear stale rows when
+	// they carry no metadata.
+	mirrorGoalSetupFields(g, { authoritative: true });
 	state.assistantHasProposal = true;
 	if (state.assistantTab === "chat" && !isDesktop()) state.assistantTab = "preview";
 	saveGoalDraft(sessionId);
@@ -1135,8 +1163,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
-		state.previewWorktreeSetupCommand = "";
-		state.previewWorktreeSetupTimeoutMs = "";
+		state.previewMetadataRows = [];
 		// Restore previewProjectId from the session record on fast-path switch-back.
 		// The draft-restore on the slow path has a matching fallback at ~line 1488;
 		// without this, clicking "Create Goal" in the proposal form after switching
@@ -1145,6 +1172,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitleEdited = false;
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
+		state.previewMetadataEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
@@ -1821,12 +1849,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// callback so in-progress user edits are never clobbered. Runs on every
 			// non-dismissed goal proposal (first-emit, revision, edit, rehydrate).
 			if (type === "goal" && state.assistantType === "goal") {
-				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string; worktreeSetupCommand?: unknown; worktreeSetupTimeoutMs?: unknown };
+				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string; metadata?: unknown };
 				if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 				if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 				if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
 				if (g.workflow) setSelectedWorkflowId(g.workflow);
-				mirrorGoalSetupFields(g);
+				// `merged` is the authoritative post-merge proposal — clear stale rows
+				// when it carries no metadata.
+				mirrorGoalSetupFields(g, { authoritative: true });
 				saveGoalDraft(sessionId);
 			}
 			renderApp();
@@ -2218,11 +2248,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewTitle = "";
 					state.previewCwd = "";
 					state.previewSpec = "";
-					state.previewWorktreeSetupCommand = "";
-					state.previewWorktreeSetupTimeoutMs = "";
+					state.previewMetadataRows = [];
 					state.previewTitleEdited = false;
 					state.previewCwdEdited = false;
 					state.previewSpecEdited = false;
+					state.previewMetadataEdited = false;
 					state.assistantHasProposal = false;
 					// Keep previewProjectId if set by showGoalDialog (pre-filled from project button)
 					// Only clear if not already set

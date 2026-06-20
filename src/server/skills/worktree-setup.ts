@@ -68,23 +68,6 @@ export interface RunComponentSetupsOpts {
 	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
 }
 
-export interface RunGoalSetupOpts {
-	goalId: string;
-	branch: string;
-	/** The goal's worktree root (branch container). */
-	worktreePath: string;
-	/** The resolved goal cwd (worktree root + project subdirectory offset). */
-	cwd: string;
-	/** The project's primary checkout root — used to compute `SOURCE_REPO`. */
-	primaryWorktreeRoot: string;
-	/** The per-goal setup command. Blank/absent → no-op. */
-	command?: string;
-	/** Resolved timeout (ms). Defaults to {@link DEFAULT_WORKTREE_SETUP_TIMEOUT_MS}. */
-	timeoutMs?: number;
-	/** Caller-supplied exec — host or in-container. */
-	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
-}
-
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -144,41 +127,4 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 	} finally {
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:run", performance.now() - diagStart, counters);
 	}
-}
-
-/**
- * Run the optional per-goal worktree setup command exactly once, after any
- * per-component setup hooks. Unlike per-component setup (best-effort,
- * non-fatal), failures here PROPAGATE — the caller marks the goal
- * `setupStatus: "error"` so it never auto-starts mis-configured.
- *
- * Blank/absent command returns without invoking `exec`. The command runs
- * in the goal's resolved `cwd` (offset-applied), with the inherited process
- * env plus `SOURCE_REPO` and the `BOBBIT_*` goal-context vars.
- */
-export async function runGoalSetup(opts: RunGoalSetupOpts): Promise<void> {
-	const command = opts.command?.trim();
-	if (!command) return; // no per-goal hook
-
-	const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKTREE_SETUP_TIMEOUT_MS;
-	const env: NodeJS.ProcessEnv = {
-		...process.env,
-		SOURCE_REPO: opts.primaryWorktreeRoot,
-		BOBBIT_GOAL_ID: opts.goalId,
-		BOBBIT_GOAL_BRANCH: opts.branch,
-		BOBBIT_WORKTREE_PATH: opts.worktreePath,
-	};
-
-	// Test hook: mirror runComponentSetups' BOBBIT_TEST_RECORD_SETUP audit,
-	// with a distinguishable per-goal line prefix.
-	const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
-	if (recordPath) {
-		try {
-			fs.mkdirSync(path.dirname(recordPath), { recursive: true });
-			fs.appendFileSync(recordPath, `goal\t${opts.goalId}\t${opts.cwd}\t${opts.primaryWorktreeRoot}\t${command}\n`);
-		} catch { /* test-only — don't fail the worktree on audit IO errors */ }
-	}
-
-	await withTimeout(opts.exec(command, opts.cwd, env), timeoutMs, `[worktree-setup] goal ${opts.goalId}`);
-	console.log(`[worktree-setup] goal ${opts.goalId}: ok`);
 }
