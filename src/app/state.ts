@@ -101,11 +101,9 @@ export interface Goal {
 	workflowId?: string;
 	setupStatus?: "ready" | "preparing" | "error";
 	setupError?: string;
-	/** Optional host command run once after component setup during this goal's
-	 *  worktree provisioning. */
-	worktreeSetupCommand?: string;
-	/** Optional per-goal worktree-setup timeout override in milliseconds. */
-	worktreeSetupTimeoutMs?: number;
+	/** Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys).
+	 *  Drives extension goal-lifecycle hooks and core activation edges. */
+	metadata?: Record<string, unknown>;
 	archived?: boolean;
 	archivedAt?: number;
 	/** If this goal is a re-attempt of another goal, the original goal's ID */
@@ -118,6 +116,13 @@ export interface Goal {
 	mergeTarget?: "master" | "parent";
 	divergencePolicy?: "strict" | "balanced" | "autonomous";
 	maxConcurrentChildren?: number;
+	/** Per-goal subgoals-allowed override. `false` disables even when the
+	 *  system flag is ON. Surfaced by the parent picker (host eligibility) and
+	 *  the existing-goal Sub-goals settings control. See subgoal-eligibility.ts. */
+	subgoalsAllowed?: boolean;
+	/** Per-goal max nesting depth override (root=1, +1 per hop). Cannot exceed
+	 *  the system pref ceiling. */
+	maxNestingDepth?: number;
 	acceptanceCriteria?: string[];
 	spawnedFromPlanId?: string;
 	/** Sibling planIds this child depends on (Phase 5 — explicit DAG). */
@@ -398,12 +403,16 @@ export const state = {
 	previewTitleEdited: false,
 	previewCwdEdited: false,
 	previewSpecEdited: false,
+	// Set once the user manually edits the metadata key/value rows so an
+	// authoritative proposal reconcile can't clobber their entries (mirrors
+	// previewTitleEdited/previewSpecEdited/previewCwdEdited).
+	previewMetadataEdited: false,
 	hasReceivedProposal: false,
 	previewProjectId: "" as string,
-	// Per-goal worktree setup hook (assistant goal-draft flow). Stored as strings
-	// for direct <input>/<textarea> round-tripping; parsed/validated at submit.
-	previewWorktreeSetupCommand: "",
-	previewWorktreeSetupTimeoutMs: "",
+	// Per-goal metadata editor (assistant goal-draft flow). Ordered [key, value]
+	// string rows for direct <input> round-tripping; collapsed into a metadata
+	// object (JSON-parsed values, blank keys dropped) at submit.
+	previewMetadataRows: [] as Array<[string, string]>,
 	previewSpecEditMode: false,
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,

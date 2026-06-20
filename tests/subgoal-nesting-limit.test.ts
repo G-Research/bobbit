@@ -185,6 +185,22 @@ describe("effectiveSubgoalsAllowed / effectiveMaxNestingDepth", () => {
 		const goal = { maxNestingDepth: 2 } as Partial<PersistedGoal> as PersistedGoal;
 		assert.equal(effectiveMaxNestingDepth(goal, sysOnDefault), 2);
 	});
+
+	it("with a lookup, a tightened ANCESTOR caps a looser descendant (retroactive tightening)", async () => {
+		// Root capped to 2 retroactively; child still carries a stale own=3.
+		// The child's effective cap must reflect the ancestor's 2, not its own 3.
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, {
+			workflowId: "parent", subgoalsAllowed: true, maxNestingDepth: 2,
+		});
+		const child = await gm.createGoal("Child", tmpRoot, {
+			workflowId: "parent", parentGoalId: root.id, subgoalsAllowed: true, maxNestingDepth: 3,
+		});
+		// Without the lookup, only the child's own override is seen → 3.
+		assert.equal(effectiveMaxNestingDepth(child, sysOnDefault), 3);
+		// With the lookup, the ancestor chain tightens it to 2.
+		assert.equal(effectiveMaxNestingDepth(child, sysOnDefault, (id) => store.get(id)), 2);
+	});
 });
 
 describe("checkCanSpawnChild", () => {
@@ -199,12 +215,14 @@ describe("checkCanSpawnChild", () => {
 		assert.equal((r as any).code, "SUBGOALS_DISABLED");
 	});
 
-	it("per-goal subgoalsAllowed=false blocks even when system ON", async () => {
+	it("per-goal subgoalsAllowed=false blocks even when system ON → PARENT_SUBGOALS_DISABLED", async () => {
 		const { gm, store } = makeManager();
 		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "parent", subgoalsAllowed: false });
 		const r = checkCanSpawnChild(root, prefsOn3, (id) => store.get(id));
 		assert.equal(r.ok, false);
-		assert.equal((r as any).code, "SUBGOALS_DISABLED");
+		// System pref is ON, so the block is parent-scoped and MUST be distinct
+		// from the system-off SUBGOALS_DISABLED code.
+		assert.equal((r as any).code, "PARENT_SUBGOALS_DISABLED");
 	});
 
 	it("accepts when child depth would equal maxDepth", async () => {
@@ -236,6 +254,34 @@ describe("checkCanSpawnChild", () => {
 		const r = checkCanSpawnChild(root, prefsOn3, (id) => store.get(id));
 		assert.equal(r.ok, false);
 		assert.equal((r as any).code, "NESTING_DEPTH_EXCEEDED");
+	});
+
+	it("retroactively tightening a root caps an already-created descendant (regression #2)", async () => {
+		// root + child both created with the wide system cap (3). The child has
+		// a STALE own=3. Then the root is tightened to own=2 after the fact.
+		// A grandchild under the child (depth 3) must now be refused, because
+		// the child's effective cap is recomputed against the ancestor (2).
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, {
+			workflowId: "parent", subgoalsAllowed: true, maxNestingDepth: 3,
+		});
+		const child = await gm.createGoal("Child", tmpRoot, {
+			workflowId: "parent", parentGoalId: root.id, subgoalsAllowed: true, maxNestingDepth: 3,
+		});
+		// Pre-tightening: grandchild under child (depth 3) is allowed under cap 3.
+		const before = checkCanSpawnChild(child, prefsOn3, (id) => store.get(id));
+		assert.equal(before.ok, true);
+		// Retroactively tighten the ROOT to a 2-level tree.
+		await gm.updateGoal(root.id, { maxNestingDepth: 2 });
+		// The child's stored own is still the stale 3 …
+		assert.equal(store.get(child.id)?.maxNestingDepth, 3);
+		// … but the ancestor-aware check now refuses the grandchild.
+		const after = checkCanSpawnChild(child, prefsOn3, (id) => store.get(id));
+		assert.equal(after.ok, false);
+		const fail = after as Exclude<typeof after, { ok: true }>;
+		assert.equal(fail.code, "NESTING_DEPTH_EXCEEDED");
+		assert.equal((fail as any).currentDepth, 2);
+		assert.equal((fail as any).maxDepth, 2);
 	});
 });
 

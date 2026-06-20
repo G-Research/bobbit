@@ -1581,8 +1581,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; worktreeSetupCommand?: string; worktreeSetupTimeoutMs?: number }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, worktreeSetupCommand, worktreeSetupTimeoutMs } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -1600,15 +1600,11 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (divergencePolicy !== undefined) body.divergencePolicy = divergencePolicy;
 		if (maxConcurrentChildren !== undefined) body.maxConcurrentChildren = maxConcurrentChildren;
 		if (parentGoalId) body.parentGoalId = parentGoalId;
-		// Per-goal worktree setup hook: forward only when meaningful. An empty
-		// command and a non-positive/non-finite timeout are dropped so the goal
-		// resolves to default (no hook; 120s timeout) — matching the server's
-		// own parse-and-skip semantics.
-		if (typeof worktreeSetupCommand === "string" && worktreeSetupCommand.trim() !== "") {
-			body.worktreeSetupCommand = worktreeSetupCommand.trim();
-		}
-		if (typeof worktreeSetupTimeoutMs === "number" && Number.isInteger(worktreeSetupTimeoutMs) && worktreeSetupTimeoutMs > 0) {
-			body.worktreeSetupTimeoutMs = worktreeSetupTimeoutMs;
+		// Hierarchical per-goal metadata: forward only when it is a non-empty
+		// plain object. Absent/empty metadata is dropped entirely so the goal
+		// resolves to no override — byte-identical to current behaviour.
+		if (metadata && typeof metadata === "object" && !Array.isArray(metadata) && Object.keys(metadata).length > 0) {
+			body.metadata = metadata;
 		}
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
@@ -1639,6 +1635,42 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to update goal", message, { code, stack });
+		return false;
+	}
+}
+
+/**
+ * Update an existing goal's per-goal sub-goal policy via
+ * `PATCH /api/goals/:id/policy`. Used by the existing-goal Sub-goals settings
+ * control on the goal dashboard so a user can turn on sub-goals for a parent
+ * that was created with the toggle off. Backend authz is split server-side
+ * (see nested-goal-routes.ts /policy handler): a body carrying ONLY the
+ * sub-goal opt-in fields (`subgoalsAllowed` / `maxNestingDepth`) is
+ * OPERATOR-class, so a verified human cookie is accepted (else team-lead
+ * match); only bodies that touch orchestration fields
+ * (`divergencePolicy` / `maxConcurrentChildren`) stay team-lead-only. This
+ * helper only ever sends the two sub-goal fields, so it rides the operator
+ * path. It just forwards the request with the session credentials. Returns
+ * true on success.
+ */
+export async function patchGoalSubgoalPolicy(
+	id: string,
+	updates: { subgoalsAllowed?: boolean; maxNestingDepth?: number },
+): Promise<boolean> {
+	try {
+		const body: Record<string, unknown> = {};
+		if (updates.subgoalsAllowed !== undefined) body.subgoalsAllowed = updates.subgoalsAllowed;
+		if (updates.maxNestingDepth !== undefined) body.maxNestingDepth = updates.maxNestingDepth;
+		const res = await gatewayFetch(`/api/goals/${id}/policy`, {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to update sub-goal settings: ${res.status}`);
+		await refreshSessions();
+		return true;
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update sub-goal settings", message, { code, stack });
 		return false;
 	}
 }

@@ -173,6 +173,54 @@ describe("assembleSystemPrompt — stable prefix ordering", () => {
 		assert.ok(content.indexOf("## Available Skills") < content.indexOf("# Goal"));
 		assert.ok(!content.includes("# Tools"));
 	});
+
+	// Role is a SEPARATE labeled section in the assembled prompt (matching the
+	// inspector's getPromptSections), not merged into Goal. This keeps Role
+	// independently reorderable via bobbit.promptSectionOrder.
+	it("Goal then Role: default order is byte-identical to the old merged section", () => {
+		const p = assembleSystemPrompt("order-goal-role", fullParts());
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		const goalIdx = content.indexOf("# Goal");
+		const roleIdx = content.indexOf("You are a Test Engineer.");
+		assert.ok(goalIdx >= 0 && roleIdx >= 0);
+		assert.ok(goalIdx < roleIdx, "Goal should precede Role in default order");
+		// The Goal spec and the role prompt are joined by the standard `---` rule,
+		// exactly as the previous merged `Goal` section produced.
+		assert.ok(content.includes("Build the thing.\n\n---\n\nYou are a Test Engineer."));
+	});
+
+	it("Role section can be reordered ahead of Goal via sectionOrder", () => {
+		const p = assembleSystemPrompt("order-role-first", fullParts({ sectionOrder: ["Role", "Goal"] }));
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		const roleIdx = content.indexOf("You are a Test Engineer.");
+		const goalIdx = content.indexOf("# Goal");
+		assert.ok(roleIdx >= 0 && goalIdx >= 0);
+		assert.ok(roleIdx < goalIdx, "Role must precede Goal when sectionOrder lists Role first");
+	});
+
+	it("role-only with NO order keeps the historical `# Goal`-wrapped shape", () => {
+		// Backward compatibility: historically the role prompt rendered inside the
+		// `# Goal` section. With no goalSpec and no explicit sectionOrder, a
+		// role-only session must keep that exact shape (absent-metadata output is
+		// byte-identical to before the metadata split).
+		const p = assembleSystemPrompt("order-role-only", fullParts({ goalSpec: undefined, goalTitle: undefined }));
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		assert.ok(content.includes("# Goal\n\nYou are a Test Engineer."),
+			"role-only default must wrap the role prompt in a `# Goal` section");
+	});
+
+	it("role-only WITH an explicit order emits a standalone Role section (no `# Goal` header)", () => {
+		// When metadata supplies a section order, Role is an independently
+		// reorderable section and is not wrapped in `# Goal`.
+		const p = assembleSystemPrompt("order-role-only-ordered", fullParts({ goalSpec: undefined, goalTitle: undefined, sectionOrder: ["Role"] }));
+		assert.ok(p);
+		const content = fs.readFileSync(p, "utf-8");
+		assert.ok(content.includes("You are a Test Engineer."));
+		assert.ok(!content.includes("# Goal"), "no Goal header for a standalone Role section under an explicit order");
+	});
 });
 
 describe("getPromptSections — inspector label ordering", () => {

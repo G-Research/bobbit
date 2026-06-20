@@ -1738,6 +1738,26 @@ export class TeamManager {
 			agentCwd = goal.cwd;
 		}
 
+		// Fire the `goalProvisioned` lifecycle hook for this freshly created member
+		// worktree. team-manager creates member worktrees directly via
+		// `createWorktree()` and hands the pre-built cwd to `createSession`, so the
+		// session-setup provisioning dispatch never runs for them — without this,
+		// metadata-driven filesystem treatments would be missing on normal member
+		// worktrees. Resolves the member's effective (inherited) goal metadata via
+		// the single SessionManager resolver — no ad-hoc ancestry walk. Skipped for
+		// sandboxed members here because their worktree lives inside the container
+		// and is created later by applySandboxWiring, which fires the hook itself
+		// (with the actual container worktree path). Non-fatal.
+		if (worktreeResult) {
+			await this.sessionManager.dispatchGoalProvisionedForWorktree({
+				goalId,
+				projectId: goal.projectId,
+				worktreePath: worktreeResult.worktreePath,
+				cwd: agentCwd,
+				branch: branchName,
+			});
+		}
+
 		try {
 			const agentId = `${role}-${shortId}`;
 			const rolePromptTemplate = storedRoleDef.promptTemplate;
