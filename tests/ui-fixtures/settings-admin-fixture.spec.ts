@@ -49,11 +49,13 @@ const LIST_MODEL_SOURCE = "[data-testid='role-row-model-source']";
 const LIST_THINKING_SOURCE = "[data-testid='role-row-thinking-source']";
 const LIST_THINKING_CLEAR = "[data-testid='model-thinking-clear-btn']";
 
-// Design-doc source-label language (recommended badges).
+// Source-caption language. Inherited captions read as a self-explanatory
+// sentence ("Model inherits from session default: …" / "… <scope> role
+// override: …"), so these match the source phrase case-insensitively.
 const SRC_ROLE_OVERRIDE = /Role override/;
-const SRC_INHERITED_ROLE = /Inherited role override/;
-const SRC_SESSION_DEFAULT = /Session default/;
-const SRC_REVIEW_DEFAULT = /Review default/;
+const SRC_INHERITED_ROLE = /role override/i;
+const SRC_SESSION_DEFAULT = /session default/i;
+const SRC_REVIEW_DEFAULT = /review default/i;
 const SRC_ANY_DEFAULT = /default/i;
 
 function roleRow(page: Page, name: string) {
