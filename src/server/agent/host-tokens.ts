@@ -281,6 +281,42 @@ export interface DetectedHostToken {
 	available: boolean;
 }
 
+const HOST_AGENT_PROVIDER_ENV: { provider: string; envVar: string }[] = [
+	{ provider: "anthropic", envVar: "ANTHROPIC_API_KEY" },
+	{ provider: "openai", envVar: "OPENAI_API_KEY" },
+	{ provider: "google", envVar: "GEMINI_API_KEY" },
+	{ provider: "xai", envVar: "XAI_API_KEY" },
+	{ provider: "groq", envVar: "GROQ_API_KEY" },
+	{ provider: "mistral", envVar: "MISTRAL_API_KEY" },
+	{ provider: "openrouter", envVar: "OPENROUTER_API_KEY" },
+];
+
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Resolve Settings-saved provider API keys into env vars for direct host agents.
+ * Values stay in-memory only: callers must merge this into RpcBridgeOptions.env,
+ * never persist or log it. Sandbox agents intentionally do NOT use this helper;
+ * their credential forwarding remains governed by sandbox_tokens.
+ */
+export function resolveHostAgentProviderEnv(prefs?: PreferencesStore | null): Record<string, string> {
+	if (!prefs) return {};
+	const result: Record<string, string> = {};
+	for (const { provider, envVar } of HOST_AGENT_PROVIDER_ENV) {
+		const storedKey = nonEmptyString(prefs.get(`providerKey.${provider}`));
+		if (storedKey) result[envVar] = storedKey;
+	}
+	return result;
+}
+
+export function mergeHostAgentProviderEnv(existing: Record<string, string> | undefined, prefs?: PreferencesStore | null): Record<string, string> | undefined {
+	const providerEnv = resolveHostAgentProviderEnv(prefs);
+	if (Object.keys(providerEnv).length === 0) return existing;
+	return { ...providerEnv, ...(existing || {}) };
+}
+
 /**
  * Scan the host for available tokens. Returns env var names + labels + availability.
  * Never returns actual token values.
