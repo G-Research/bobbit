@@ -693,6 +693,40 @@ function formatGatewayResponse(data: unknown): string {
 	return JSON.stringify(data, null, 2);
 }
 
+async function parseJsonResponse(response: any): Promise<unknown> {
+	const text = await response.text();
+	let data: unknown = text;
+	try { data = JSON.parse(text); } catch { /* keep text */ }
+	if (!response.ok) {
+		const message = data && typeof data === "object" && typeof (data as any).error === "string"
+			? (data as any).error
+			: `HTTP ${response.status}`;
+		throw Object.assign(new Error(message), { data, status: response.status });
+	}
+	return data;
+}
+
+async function callPrWalkthroughRoute(toolName: string, routeBody: Record<string, unknown>, sessionId: string): Promise<unknown> {
+	const baseUrl = getGatewayUrl();
+	const token = getGatewayToken();
+	const commonHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Session-Id": sessionId };
+	const surface = await fetch(`${baseUrl}/api/ext/surface-token`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify({ sessionId, tool: toolName }),
+	}).then(parseJsonResponse) as { token?: string };
+	if (!surface?.token) throw new Error("surface-token: empty response");
+	return await fetch(`${baseUrl}/api/ext/route/publish`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify({ sessionId, surfaceToken: surface.token, init: { method: "POST", body: routeBody } }),
+	}).then(parseJsonResponse);
+}
+
+function routeToolError(name: string, err: any) {
+	return toolText(`${name} failed: ${err?.message || err}\n\n${formatGatewayResponse(err?.data ?? { error: err?.message || String(err), status: err?.status })}`, true, err?.data);
+}
+
 const extension: ExtensionFactory = (pi) => {
 	// host.agents reviewer migration (design Decision C): the boundary is now the
 	// pr-reviewer role policy + the default-deny `PR Walkthrough` tool group — NOT an
@@ -868,35 +902,68 @@ const extension: ExtensionFactory = (pi) => {
 	});
 
 	pi.registerTool({
-		name: "submit_pr_walkthrough_yaml",
-		label: "Submit PR Walkthrough YAML",
-		description: "Submit the completed PR walkthrough YAML document for validation and panel publishing.",
-		promptSnippet: "Submit exactly one completed PR walkthrough YAML document. If validation fails, fix the YAML and call this tool again.",
-		parameters: Type.Object({ yaml: Type.String({ description: "The complete YAML document matching the PR walkthrough schema." }) }),
-		async execute(_toolCallId, { yaml }) {
-			let baseUrl: string;
-			let token: string;
+		name: "submit_pr_walkthrough_chunk",
+		label: "Submit PR Walkthrough Chunk",
+		description: "Persist one idempotent PR walkthrough YAML chunk under a stable section id.",
+		promptSnippet: "Save each completed walkthrough section immediately. Re-sending the same section_id overwrites that chunk safely.",
+		parameters: Type.Object({
+			section_id: Type.String({ description: "metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, or chunk:<id>." }),
+			yaml: Type.String({ description: "YAML value for this section." }),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, { section_id, yaml }) {
 			try {
-				baseUrl = getGatewayUrl();
-				token = getGatewayToken();
-			} catch {
-				return toolText("submit_pr_walkthrough_yaml failed: missing Bobbit gateway credentials.", true);
-			}
-
-			try {
-				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/submit-yaml`, {
-					method: "POST",
-					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Session-Secret": sessionSecret ?? "" },
-					// No jobId — the server resolves it from the binding by the verified session.
-					body: JSON.stringify({ yaml }),
-				});
-				const text = await response.text();
-				let data: unknown = text;
-				try { data = JSON.parse(text); } catch { /* keep text */ }
-				if (!response.ok) return toolText(formatGatewayResponse(data), true, data);
+				const data = await callPrWalkthroughRoute("submit_pr_walkthrough_chunk", { op: "submitChunk", section_id, yaml }, sessionId);
 				return toolText(formatGatewayResponse(data), false, data);
 			} catch (err: any) {
-				return toolText(`submit_pr_walkthrough_yaml failed: ${err?.message || err}`, true);
+				return routeToolError("submit_pr_walkthrough_chunk", err);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "read_pr_walkthrough_submission_status",
+		label: "Read PR Walkthrough Submission Status",
+		description: "Read saved PR walkthrough chunk ids and finalization status for this reviewer.",
+		promptSnippet: "Call after compaction/retry or before continuing to see which chunks are already saved and what remains.",
+		parameters: Type.Object({}, { additionalProperties: false }),
+		async execute() {
+			try {
+				const data = await callPrWalkthroughRoute("read_pr_walkthrough_submission_status", { op: "submissionStatus" }, sessionId);
+				return toolText(formatGatewayResponse(data), false, data);
+			} catch (err: any) {
+				return routeToolError("read_pr_walkthrough_submission_status", err);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "finalize_pr_walkthrough_submission",
+		label: "Finalize PR Walkthrough Submission",
+		description: "Assemble saved chunks, validate the canonical walkthrough document, synthesize cards, and publish the final payload atomically.",
+		promptSnippet: "Call once all required chunks are saved. If validation fails, fix or overwrite the relevant chunks and finalize again.",
+		parameters: Type.Object({}, { additionalProperties: false }),
+		async execute() {
+			try {
+				const data = await callPrWalkthroughRoute("finalize_pr_walkthrough_submission", { op: "finalizeSubmission" }, sessionId);
+				return toolText(formatGatewayResponse(data), false, data);
+			} catch (err: any) {
+				return routeToolError("finalize_pr_walkthrough_submission", err);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "submit_pr_walkthrough_yaml",
+		label: "Submit PR Walkthrough YAML",
+		description: "Compatibility wrapper that stores a complete PR walkthrough YAML document chunk and finalizes it.",
+		promptSnippet: "Prefer chunked submission. For migration only, submit one complete YAML document and the tool will save it as the document chunk and finalize.",
+		parameters: Type.Object({ yaml: Type.String({ description: "The complete YAML document matching the PR walkthrough schema." }) }),
+		async execute(_toolCallId, { yaml }) {
+			try {
+				const data = await callPrWalkthroughRoute("submit_pr_walkthrough_yaml", { op: "submitYaml", yaml }, sessionId);
+				return toolText(formatGatewayResponse(data), false, data);
+			} catch (err: any) {
+				return routeToolError("submit_pr_walkthrough_yaml", err);
 			}
 		},
 	});
