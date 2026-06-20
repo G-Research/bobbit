@@ -704,10 +704,13 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	}
 
 	// Register the Google account (Code Assist) provider INSIDE the agent process
-	// so `google-gemini-cli/*` models can run as session models. Emitted only when
-	// a Google OAuth credential is present (zero overhead otherwise). Without this
-	// the agent's pi-ai has no `google-code-assist` api and binding such a model
-	// would throw "No API provider registered for api: google-code-assist".
+	// so `google-gemini-cli/*` models can run as session models. Written
+	// UNCONDITIONALLY (not credential-gated): a session spawned BEFORE Google
+	// sign-in must still be able to bind such a model after the user authenticates,
+	// since the agent's pi-ai otherwise has no `google-code-assist` api and binding
+	// would throw "No API provider registered for api: google-code-assist". The
+	// runtime Bearer token is fetched per request from the gateway, so registering
+	// without a credential is safe and selecting the model post-auth just works.
 	const codeAssistPath = writeGoogleCodeAssistProviderExtension(plan.id);
 	if (codeAssistPath) {
 		plan.bridgeOptions.args.push("--extension", codeAssistPath);

@@ -59,8 +59,20 @@ function isCodeAssistEligible(id: string): boolean {
 	return CODE_ASSIST_ALLOWLIST.has(id.toLowerCase());
 }
 
-export function getGoogleCodeAssistModels(): ApiModel[] {
-	if (!hasGoogleCodeAssistCredential()) return [];
+/**
+ * Account-backed Gemini model list.
+ *
+ * @param opts.ignoreCredential - when true, emit the model list even with no
+ *   Google account credential present. The selector/registry path leaves this
+ *   false so the picker is only populated post-auth, but the agent-side provider
+ *   extension passes true: the `google-code-assist` provider must be REGISTERED
+ *   inside every spawned agent regardless of credential, so a session spawned
+ *   before Google sign-in can still bind a `google-gemini-cli/*` model after the
+ *   user authenticates (the Bearer token is fetched per request from the gateway,
+ *   not at spawn time). See google-code-assist-provider-extension.ts.
+ */
+export function getGoogleCodeAssistModels(opts?: { ignoreCredential?: boolean }): ApiModel[] {
+	if (!opts?.ignoreCredential && !hasGoogleCodeAssistCredential()) return [];
 
 	let base: Array<Record<string, any>> = [];
 	try {

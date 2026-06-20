@@ -1815,7 +1815,8 @@ export class SessionManager {
 		// Google account (Code Assist) provider extension. Mirrors
 		// session-setup.ts::resolveToolActivation so respawn/restore paths keep the
 		// provider registered and `google-gemini-cli/*` models stay runnable after a
-		// gateway restart. Zero overhead when no Google credential is present.
+		// gateway restart. Written unconditionally (not credential-gated) so a
+		// session spawned before Google sign-in can bind such a model after auth.
 		const codeAssistPath = writeGoogleCodeAssistProviderExtension(sessionId);
 		if (codeAssistPath) {
 			args.push("--extension", codeAssistPath);

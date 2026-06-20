@@ -12,8 +12,10 @@
  *   2. The generated source parses, transpiles with no errors, and default-exports
  *      a function (the extension factory).
  *   3. No process-wide TLS downgrade (security invariant shared with the bridge).
- *   4. The credential gate: nothing is written when no Google account credential
- *      is present (zero overhead for non-Google users).
+ *   4. Unconditional registration: the extension is written even with NO Google
+ *      account credential present, so a session spawned BEFORE Google sign-in can
+ *      still bind a `google-gemini-cli/*` model after the user authenticates (the
+ *      Bearer token is fetched per request from the gateway, not at spawn time).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -158,10 +160,17 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 	});
 });
 
-describe("writeGoogleCodeAssistProviderExtension credential gate", () => {
+describe("writeGoogleCodeAssistProviderExtension unconditional registration", () => {
 	const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 	const prevBobbitDir = process.env.BOBBIT_DIR;
 	let dir: string;
+
+	const writeAuth = () =>
+		fs.writeFileSync(
+			path.join(dir, "auth.json"),
+			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "ya29.fake", refresh: "r", expires: Date.now() + 600_000 } }),
+			"utf-8",
+		);
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "gca-gate-"));
@@ -178,24 +187,52 @@ describe("writeGoogleCodeAssistProviderExtension credential gate", () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("returns undefined (writes nothing) when no Google account credential is present", () => {
-		assert.equal(writeGoogleCodeAssistProviderExtension("sess-1"), undefined);
-		assert.ok(!fs.existsSync(path.join(dir, "state", "google-code-assist")), "must not create the extension dir");
+	it("writes the extension even when NO Google account credential is present", () => {
+		// Regression: PR #826 review #1 — a session spawned before Google sign-in
+		// must still register the provider so the model is bindable after auth.
+		const p = writeGoogleCodeAssistProviderExtension("sess-no-cred");
+		// Only asserts when pi-ai's google catalog is available; we still write
+		// nothing if no descriptors can be derived (catalog unreadable).
+		if (p) {
+			assert.ok(fs.existsSync(p), "expected the extension file to be written without a credential");
+			assert.ok(p.includes(path.join("state", "google-code-assist")), "expected content-addressed path");
+			const src = fs.readFileSync(p, "utf-8");
+			assert.ok(src.includes("pi.registerProvider("), "expected the provider registration");
+			assert.ok(src.includes("/google-code-assist/token"), "expected the per-request gateway token fetch");
+		}
 	});
 
 	it("writes a content-addressed extension when a Google credential exists", () => {
-		fs.writeFileSync(
-			path.join(dir, "auth.json"),
-			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "ya29.fake", refresh: "r", expires: Date.now() + 600_000 } }),
-			"utf-8",
-		);
+		writeAuth();
 		const p = writeGoogleCodeAssistProviderExtension("sess-2");
-		// Only asserts when the underlying pi-ai catalog is available; getGoogleCodeAssistModels
-		// returns [] (and we write nothing) if pi-ai's google catalog can't be read.
 		if (p) {
 			assert.ok(fs.existsSync(p), "expected the extension file to be written");
 			assert.ok(p.includes(path.join("state", "google-code-assist")), "expected content-addressed path");
 			assert.ok(fs.readFileSync(p, "utf-8").includes("pi.registerProvider("), "expected generated source");
 		}
+	});
+
+	it("no-credential spawn then later auth: extension stays valid and gateway-driven for the token", () => {
+		// Spawn BEFORE auth: extension is written and registers the provider.
+		const before = writeGoogleCodeAssistProviderExtension("sess-late-auth");
+		if (!before) return; // pi-ai catalog unavailable in this env — skip
+		const srcBefore = fs.readFileSync(before, "utf-8");
+		assert.ok(srcBefore.includes("pi.registerProvider("), "provider registered pre-auth");
+		// The runtime token is NOT baked in at spawn — it is fetched per request
+		// from the gateway, so signing in later makes the already-registered model
+		// runnable with no respawn. Assert the source contains no spawn-time token.
+		assert.ok(!srcBefore.includes("ya29."), "must not bake any access token into the source");
+		assert.ok(srcBefore.includes("/google-code-assist/token"), "fetches the Bearer per request from the gateway");
+
+		// Auth arrives afterward; a respawn (e.g. gateway restart) re-derives the
+		// extension. It must remain valid and still gateway-driven for the token.
+		resetGoogleCodeAssistExtensionCache();
+		writeAuth();
+		const after = writeGoogleCodeAssistProviderExtension("sess-late-auth");
+		assert.ok(after, "expected an extension after auth too");
+		const srcAfter = fs.readFileSync(after!, "utf-8");
+		assert.ok(srcAfter.includes("pi.registerProvider("), "provider still registered post-auth");
+		assert.ok(srcAfter.includes("/google-code-assist/token"), "still gateway-driven for the token post-auth");
+		assert.ok(!srcAfter.includes("ya29."), "still bakes no access token into the source post-auth");
 	});
 });

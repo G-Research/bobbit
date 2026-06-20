@@ -35,7 +35,6 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import {
 	GOOGLE_CODE_ASSIST_API,
 	GOOGLE_GEMINI_CLI_PROVIDER,
-	hasGoogleCodeAssistCredential,
 } from "./google-code-assist.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 
@@ -63,7 +62,10 @@ export interface CodeAssistModelDescriptor {
  * what the gateway emits — no separate hand-maintained descriptor list to drift.
  */
 export function codeAssistModelDescriptors(): CodeAssistModelDescriptor[] {
-	return getGoogleCodeAssistModels().map((m) => ({
+	// `ignoreCredential: true` — the provider is registered in EVERY spawned agent
+	// (see writeGoogleCodeAssistProviderExtension), not only when a credential is
+	// present at spawn time, so the descriptor list must not be credential-gated.
+	return getGoogleCodeAssistModels({ ignoreCredential: true }).map((m) => ({
 		id: m.id,
 		// Account models carry a "(Google account)" suffix already; the provider
 		// `name` distinguishes them in pi UIs.
@@ -499,15 +501,24 @@ const extFileCache = new Map<string, string>();
 
 /**
  * Write the Code Assist provider extension to disk and return its file path, or
- * `undefined` when no Google account credential is present (zero overhead for
- * non-Google users) or no account models are emitted.
+ * `undefined` only when no account models can be derived (e.g. pi-ai's `google`
+ * catalog is unreadable).
+ *
+ * The extension is written UNCONDITIONALLY — even with no Google account
+ * credential present — so the `google-code-assist` provider is registered inside
+ * every spawned agent. This closes a gap where a session spawned BEFORE Google
+ * sign-in had no provider registered, so selecting a `google-gemini-cli/*` model
+ * in that already-running session failed with "No API provider registered for
+ * api: google-code-assist". Registering always is safe: the runtime Bearer token
+ * is fetched per request from the gateway (which returns a clear re-auth error
+ * when no account is authenticated), nothing account-scoped is baked in at spawn
+ * time, the gateway-side model selector still only surfaces these models once
+ * authenticated, and the generated source contains no secrets.
  *
  * Content-addressed under `.bobbit/state/google-code-assist/<hash>/provider.ts`
  * for dedup, mirroring `writeProviderBridgeExtension`.
  */
 export function writeGoogleCodeAssistProviderExtension(sessionId: string): string | undefined {
-	if (!hasGoogleCodeAssistCredential()) return undefined;
-
 	let code = extCodeCache.get(sessionId);
 	if (!code) {
 		const models = codeAssistModelDescriptors();
