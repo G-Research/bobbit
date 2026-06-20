@@ -203,28 +203,39 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	//   - clean draft → reseed from the freshly-loaded persisted config (fixes B1).
 	//   - dirty draft → keep the user's edits but still update the diff base so a
 	//     later Save diffs against the LIVE config, never a stale snapshot (fixes B2).
+	// Dirty-aware hydration shared by loadConfig and the pre-save freshness refresh:
+	// always refresh `entry.config` (the diff base) but only re-seed the editable
+	// draft when the user has no unsaved edits. Pure state mutation (no repaint).
+	function applyLoadedConfig(entry, res) {
+		entry.config = res && res.config ? res.config : null;
+		entry.configured = !!(res && res.configured);
+		if (!entry.dirty) {
+			entry.draft = draftFromConfig(entry.config);
+			entry.secretTouched = { apiKey: false, externalDatabaseUrl: false, llmApiKey: false };
+		} else if (!entry.draft) {
+			// Defensive: never leave the form without a draft to render.
+			entry.draft = draftFromConfig(entry.config);
+		}
+	}
+
+	// Returns true on a successful load, false on failure, so callers (Save) can
+	// fail-fast instead of proceeding from a stale snapshot.
 	async function loadConfig(host, key) {
 		try {
 			const res = await host.callRoute("config", { method: "GET" });
 			const entry = get(key);
-			if (!entry) return;
-			entry.config = res && res.config ? res.config : null;
-			entry.configured = !!(res && res.configured);
-			if (!entry.dirty) {
-				entry.draft = draftFromConfig(entry.config);
-				entry.secretTouched = { apiKey: false, externalDatabaseUrl: false, llmApiKey: false };
-			} else if (!entry.draft) {
-				// Defensive: never leave the form without a draft to render.
-				entry.draft = draftFromConfig(entry.config);
-			}
+			if (!entry) return false;
+			applyLoadedConfig(entry, res);
 			entry.configState = "ready";
 			repaint(host);
+			return true;
 		} catch (e) {
 			const entry = get(key);
-			if (!entry) return;
+			if (!entry) return false;
 			entry.configState = "error";
 			entry.configError = msgOf(e);
 			repaint(host);
+			return false;
 		}
 	}
 
@@ -295,11 +306,23 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		entry.saveErrors = [];
 		repaint(host);
 		// Refresh the diff base from the server BEFORE building the body so a stale
-		// snapshot can never send keys that overwrite a good config (B2). loadConfig
-		// is dirty-aware: it updates `entry.config` but preserves the user's draft.
-		await loadConfig(host, key);
+		// snapshot can never send keys that overwrite a good config (B2). This MUST be
+		// fail-fast: if the GET fails we abort with a visible save error rather than
+		// posting a body diffed against a stale `entry.config`.
+		let fresh;
+		try {
+			fresh = await host.callRoute("config", { method: "GET" });
+		} catch (err) {
+			const eErr = get(key);
+			if (!eErr) return;
+			eErr.saving = false;
+			eErr.saveErrors = [`Couldn't verify the current configuration before saving: ${msgOf(err)}. Save aborted to avoid overwriting a good config — try again.`];
+			repaint(host);
+			return;
+		}
 		const e1 = get(key);
 		if (!e1) return;
+		applyLoadedConfig(e1, fresh); // dirty-aware: updates diff base, keeps draft.
 		const body = buildSaveBody(e1);
 		try {
 			const res = await host.callRoute("config", { method: "POST", body });
@@ -561,15 +584,18 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return { state: "stopped", label: "Stopped", hint: "Managed runtime is stopped." };
 	}
 
-	/** Required-inputs check for the managed Start gate. Reads either the redacted
-	 *  `*Set` flag (persisted secret) or a freshly-typed-but-unsaved secret. */
+	/** Required-inputs check for the managed Start gate. Reads ONLY the PERSISTED,
+	 *  redacted config (`*Set` flags + persisted `mode`) — NEVER the unsaved draft.
+	 *  Start launches Docker from the server's STORED config, so a freshly-typed but
+	 *  unsaved LLM key / Postgres URL (or an unsaved mode switch) must NOT satisfy the
+	 *  gate; the user has to Save first. The dirty-draft guard lives in
+	 *  `startDisabled`, which additionally blocks Start whenever there are edits. */
 	const requiredInputsPresent = (entry) => {
-		const d = entry.draft || {};
-		const has = (field) =>
-			!!(entry.config && entry.config[`${field}Set`]) ||
-			(!!entry.secretTouched[field] && asText(d[field], "").trim().length > 0);
-		if (d.mode === "managed") return has("llmApiKey");
-		if (d.mode === "managed-external-postgres") return has("llmApiKey") && has("externalDatabaseUrl");
+		const c = entry.config || {};
+		const mode = c.mode;
+		const has = (field) => !!c[`${field}Set`];
+		if (mode === "managed") return has("llmApiKey");
+		if (mode === "managed-external-postgres") return has("llmApiKey") && has("externalDatabaseUrl");
 		return false;
 	};
 
@@ -808,7 +834,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const rs = s.runtimeStatus;
 		const running = rs === "running" || rs === "unhealthy" || rs === "starting" || s.healthy || entry.runtimePhase === "starting";
 		const reqOk = requiredInputsPresent(entry);
-		const startDisabled = !entry.configured || !reqOk || !entry.managedConsentAck || entry.runtimePhase === "starting";
+		// Start launches Docker from the PERSISTED config, so it must be blocked while
+		// the form has unsaved edits (e.g. an external→managed switch + an unsaved LLM
+		// key): an enabled Start there would dial stale persisted server config.
+		const startDisabled = !entry.configured || entry.dirty || !reqOk || !entry.managedConsentAck || entry.runtimePhase === "starting";
 		const pgRow = d.mode === "managed-external-postgres";
 		return html`
 			<section class="hs-card" data-testid="hindsight-managed-card">
@@ -817,9 +846,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					<span class="hs-label">Before you start</span>
 					<p class="hs-muted">Pressing <strong>Start runtime</strong> launches local <strong>Docker</strong> containers — the Hindsight API${pgRow ? "" : " + a Postgres database"} on loopback ports. The first start may pull an image and take ~1–2 min. Nothing runs until you press Start; Stop keeps your data.</p>
 					<ul class="hs-checklist">
-						<li data-ok=${reqOk ? "true" : "false"}>${reqOk ? "✓" : "•"} Required inputs: LLM API key${pgRow ? " + external Postgres URL" : ""} ${reqOk ? "present" : "missing — set them in Configuration and Save"}</li>
-						<li data-ok=${entry.configured ? "true" : "false"}>${entry.configured ? "✓" : "•"} Configuration saved ${entry.configured ? "" : "— Save first"}</li>
+						<li data-ok=${reqOk ? "true" : "false"}>${reqOk ? "✓" : "•"} Required inputs: LLM API key${pgRow ? " + external Postgres URL" : ""} ${reqOk ? "present (saved)" : "missing — set them in Configuration and Save"}</li>
+						<li data-ok=${entry.configured && !entry.dirty ? "true" : "false"}>${entry.configured && !entry.dirty ? "✓" : "•"} Configuration saved ${!entry.configured ? "— Save first" : entry.dirty ? "— unsaved changes; Save before starting" : ""}</li>
 					</ul>
+					${entry.dirty ? html`<p class="hs-hint" data-testid="hindsight-managed-save-first">Save your changes before starting — Start uses the saved configuration, not your unsaved edits.</p>` : nothing}
 					<label class="hs-toggle">
 						<input type="checkbox" data-testid="hindsight-managed-consent-ack" .checked=${!!entry.managedConsentAck} @change=${(e) => { const en = get(key); if (en) { en.managedConsentAck = e.currentTarget.checked; repaint(host); } }} />
 						<span>I understand this starts local Docker containers.</span>

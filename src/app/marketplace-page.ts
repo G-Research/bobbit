@@ -132,7 +132,11 @@ interface HindsightStatusWire {
 	autoRetain?: boolean;
 	queueDepth?: number;
 	healthy?: boolean;
-	lastError?: string;
+	// The route persists the last error as a `{ message, ts }` diagnostic object
+	// (market-packs/hindsight/src/shared.ts), but legacy/string shapes are tolerated.
+	// Render via `hindsightLastErrorText` so an object never stringifies to
+	// `[object Object]`.
+	lastError?: string | { message?: string; ts?: number } | null;
 	externalUrl?: string;
 	uiUrl?: string;
 	timeoutMs?: number;
@@ -1695,8 +1699,24 @@ function renderHindsightConfigSummary(): TemplateResult {
 		<dl class="market-hindsight-config" data-testid="market-hindsight-config">
 			${rows.map(([k, v]) => html`<div class="market-hindsight-config-row"><dt>${k}</dt><dd>${v}</dd></div>`)}
 		</dl>
-		${s.lastError ? html`<div class="market-error mt-1" data-testid="market-hindsight-last-error">${s.lastError}</div>` : ""}
+		${(() => {
+			const le = hindsightLastErrorText(s.lastError);
+			return le ? html`<div class="market-error mt-1" data-testid="market-hindsight-last-error">${le}</div>` : "";
+		})()}
 	`;
+}
+
+/** Normalise the `status.lastError` field, which the route persists as a
+ *  `{ message, ts }` diagnostic object, to a human string. Returns "" when there is
+ *  no usable message so the row renders nothing rather than `[object Object]`. */
+function hindsightLastErrorText(le: HindsightStatusWire["lastError"]): string {
+	if (le == null) return "";
+	if (typeof le === "string") return le.trim();
+	if (typeof le === "object") {
+		const msg = (le as { message?: unknown }).message;
+		if (typeof msg === "string" && msg.trim()) return msg.trim();
+	}
+	return "";
 }
 
 /** State-aware action bar. Every action is an explicit click; Start stays gated behind

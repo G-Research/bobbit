@@ -319,4 +319,27 @@ describe("Hindsight pack — Marketplace state + actions (UX polish)", () => {
 		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
 	});
+
+	// ── The route persists `lastError` as an OBJECT ({ message, ts }); the row must
+	//    render its `message`, never `[object Object]`. ──
+	test("a stored object lastError renders its message (never [object Object])", async ({ page }) => {
+		test.skip(!ready, "Hindsight pack contribution not served in this environment");
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		try {
+			// Configure an external Hindsight + seed the route's object-shaped diagnostic.
+			await putHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
+			await getPackStore().put(PACK, "last-error", { message: "Hindsight HTTP 503 for POST /recall", ts: Date.now() });
+
+			await openWithSession(page);
+			const row = await openMarketRow(page);
+
+			const lastErr = row.locator('[data-testid="market-hindsight-last-error"]');
+			await expect(lastErr, "the object lastError renders its message").toBeVisible({ timeout: 20_000 });
+			await expect(lastErr).toContainText("Hindsight HTTP 503 for POST /recall");
+			await expect(lastErr, "an object lastError must never stringify to [object Object]").not.toContainText("[object Object]");
+		} finally {
+			// Clear the seeded diagnostic so it cannot leak into later (serial) tests.
+			await getPackStore().put(PACK, "last-error", null);
+		}
+	});
 });

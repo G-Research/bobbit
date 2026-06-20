@@ -601,4 +601,81 @@ describe("Hindsight pack — UX polish (panel)", () => {
 		expect(startRequests, "exactly one explicit /start request").toHaveLength(1);
 		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start fired exactly once").toHaveLength(1);
 	});
+
+	// ── Managed Start must use the PERSISTED config, never the unsaved draft. A user
+	//    who switches external→managed and types an LLM key but has NOT saved must see
+	//    Start disabled (with a Save-first hint) — an enabled Start there would dial the
+	//    stale persisted (external) server config. ──
+	test("managed Start stays disabled (Save-first) while the draft has unsaved edits", async ({ page }) => {
+		await mountHindsightPanel(page);
+
+		// Start from a configured, connected EXTERNAL deployment.
+		await seedHindsightConfig({ externalUrl: stub.url, bank: "bobbit" });
+		await page.locator('[data-testid="hindsight-refresh"]').click();
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "connected", { timeout: 20_000 });
+
+		// Record any runtime /start the page issues — there must be NONE while disabled.
+		const startRequests: string[] = [];
+		page.on("request", (r) => {
+			if (/\/api\/pack-runtimes\/[^/]+\/start(\?|$)/.test(r.url())) startRequests.push(r.url());
+		});
+
+		// Switch to managed + type an LLM key, but DON'T Save. Acknowledge consent so the
+		// ONLY thing gating Start is the unsaved-edits guard.
+		await page.locator('[data-testid="hindsight-mode"]').selectOption("managed");
+		await page.locator('[data-testid="hindsight-llm-api-key"]').fill("sk-unsaved-managed");
+		await expect(page.locator('[data-testid="hindsight-managed-card"]')).toBeVisible({ timeout: 15_000 });
+		await page.locator('[data-testid="hindsight-managed-consent-ack"]').check();
+
+		// Start MUST be disabled (persisted config is still external — no llmApiKeySet)
+		// and a Save-first hint is shown instead.
+		const startBtn = page.locator('[data-testid="hindsight-start-runtime"]');
+		await expect(startBtn, "unsaved edits ⇒ Start disabled (would otherwise dial stale persisted config)").toBeDisabled();
+		await expect(page.locator('[data-testid="hindsight-managed-save-first"]'), "a Save-first hint is shown while dirty").toBeVisible();
+
+		// Saving persists the managed config (mode + llmApiKey); Start then enables
+		// because the gate now reads a real persisted managed config — not the draft.
+		await page.locator('[data-testid="hindsight-save"]').click();
+		await expect(page.locator('[data-testid="hindsight-unsaved"]'), "Save clears the dirty banner").toHaveCount(0, { timeout: 15_000 });
+		await expect(startBtn, "once saved + consent acked, Start enables").toBeEnabled({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="hindsight-managed-save-first"]'), "the Save-first hint clears once saved").toHaveCount(0);
+		expect(startRequests, "no /start was ever issued while the gate was disabled").toHaveLength(0);
+		expect(supCalls.filter((c) => c.op === "start"), "the supervisor.start was never called by the unsaved gate").toHaveLength(0);
+	});
+
+	// ── Save fail-fast: if the pre-save freshness GET fails, the Save must abort with a
+	//    visible error and NEVER POST a body diffed against a stale snapshot. ──
+	test("Save aborts with a visible error when the pre-save config refresh fails (no stale POST)", async ({ page }) => {
+		await mountHindsightPanel(page);
+		await expect(statusBadge(page)).toHaveAttribute("data-state", "dormant", { timeout: 15_000 });
+
+		// Make a dirty edit so there is something to (attempt to) save.
+		await f.bank(page).fill("attempted-bank");
+		await expect(page.locator('[data-testid="hindsight-unsaved"]')).toBeVisible();
+
+		// Fail ONLY the pre-save config GET; record any config POST (there must be none).
+		const configPosts: string[] = [];
+		await page.route("**/api/ext/route/config", async (route) => {
+			let method = "";
+			try { method = JSON.parse(route.request().postData() || "{}")?.init?.method || ""; } catch { /* ignore */ }
+			if (String(method).toUpperCase() === "GET") {
+				await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) });
+				return;
+			}
+			configPosts.push(route.request().url());
+			await route.continue();
+		});
+
+		await page.locator('[data-testid="hindsight-save"]').click();
+
+		// A visible save error appears and the save was aborted BEFORE any POST.
+		const err = page.locator('[data-testid="hindsight-config-error"]');
+		await expect(err, "a failed pre-save refresh surfaces a visible save error").toBeVisible({ timeout: 15_000 });
+		await expect(err).toContainText(/verify the current configuration/i);
+		expect(configPosts, "no config POST is sent when the freshness refresh fails").toHaveLength(0);
+
+		// The dirty edit is preserved so the user can retry once connectivity returns.
+		await expect(f.bank(page), "the unsaved edit is preserved after the aborted save").toHaveValue("attempted-bank");
+		await page.unroute("**/api/ext/route/config");
+	});
 });
