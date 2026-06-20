@@ -991,8 +991,22 @@ function _restorePromptDraft(sessionId: string): void {
 			_draftGen = Math.max(_draftGen, loadedGen, _draftSendGen);
 
 			// User typed since binding — never clobber fresh local input with the
-			// server draft (closes the first-paint hydration window).
-			if (_draftTouchedSinceBind) return;
+			// server draft (closes the first-paint hydration window). BUT the
+			// local edit's 100ms debounced save may have raced ahead of this
+			// delayed server GET and been rejected by the server staleness guard
+			// for carrying a lower gen than the server's already-stored draft
+			// (fresh tab: no sessionStorage gen mirror, so _draftGen started at 0).
+			// We just reseeded _draftGen above to outrank the server, but the
+			// rejected local text was never retried — so a subsequent navigate/
+			// reload would lose it. Re-flush the local mirror now, at the corrected
+			// gen, so the typed text reliably converges to the server (PR #830).
+			// Tombstone-on-send is preserved: send removes the local mirror, so
+			// after a send localMirror is null/empty and we skip the re-flush.
+			if (_draftTouchedSinceBind) {
+				const touchedMirror = sessionStorage.getItem(`bobbit_draft_${sessionId}`);
+				if (touchedMirror && touchedMirror.trim()) _flushDraft(touchedMirror);
+				return;
+			}
 
 			// Freshness guard (Bug 2 step 4): the synchronous sessionStorage mirror
 			// is always at least as fresh as the debounced server draft within this
