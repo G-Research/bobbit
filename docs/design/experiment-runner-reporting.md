@@ -2,7 +2,7 @@
 
 **Status:** draft (design-doc gate input for the *Experiment runner extension* goal).
 **Scope owner:** reporting/dashboards sub-stream.
-**Branch:** `goal/bf9e404c/coder-3a0d` (stacked off `goal/hierarchical-g-f6c39aa2` / PR #822).
+**Branch:** `goal/experiment-run-bf9e404c` (stacked off `goal/hierarchical-g-f6c39aa2` / PR #822).
 
 This document specifies the **shared reporting library** that is the *single
 source of truth* for every experiment report and dashboard the experiment-runner
@@ -134,40 +134,82 @@ exp/<experimentId>/dashboard       → DashboardSpec   (editable view-spec; §7)
 exp/<experimentId>/metrics         → MetricSelection[] (editable metric selection; §5)
 ```
 
-`ExperimentDef` (the parts reporting reads):
+> **Canonical shared types — `src/shared/experiment-report/types.ts`.** This file
+> is the *single* TS source for `ExperimentDef`, `VariantDef`, `RunRecord`,
+> `RunStatus`, `CompletionBar`, `MetricSelection`, `DashboardSpec`, `WidgetSpec`,
+> and `ReportModel`. Both the reporting lib (reader) and the pack engine (writer,
+> [experiment-runner-pack-backend.md](experiment-runner-pack-backend.md)) import
+> these exact types; the pack's `lib/store-keys.mjs` JSDoc *mirrors* them. No doc
+> re-declares a divergent shell — reporting reads exactly these fields and the
+> backend writes exactly these fields. A schema-parity pinning test (§9.4) asserts
+> an engine-written record satisfies the reporting lib's `RunRecord` type.
+
+`ExperimentDef` (the canonical definition — reporting reads the marked subset):
 
 ```ts
 interface ExperimentDef {
-  id: string;
-  mode: "ab" | "autoresearch";
-  variants?: VariantDef[];          // A/B: arms; each = { id, label, metadata, inlineRoles?, workflow? }
+  experimentId: string;
+  title: string;
+  mode: 'ab' | 'autoresearch';
+  parentGoalId: string;
+  workflowId?: string;
+  runnable: RunnableSpec;
+  variants?: VariantDef[];          // A/B: arms
   repeats?: number;                 // A/B: N per arm
-  metrics: MetricSelection[];       // which metrics, aggregation, direction (§5)
-  objective?: { metricId: string; direction: "max" | "min" };  // autoresearch
-  dashboard?: DashboardSpec;        // optional override of the default view (§7)
+  objective?: ObjectiveSpec;        // autoresearch: { metricId, direction: 'max'|'min' }
+  caps?: AutoresearchCaps;          // autoresearch hard caps
+  stop?: StopSpec;                  // autoresearch plateau/target
+  maxConcurrency?: number;          // clamped to the per-root cap
+}
+
+interface VariantDef {
+  armId: string;
+  label: string;
+  metadata: Record<string, unknown>;    // arm treatment → child goal metadata
+  inlineRoles?: Record<string, Role>;   // per-arm ephemeral roles
 }
 ```
+
+> The editable `MetricSelection[]` and `DashboardSpec` are **not** fields on
+> `ExperimentDef`; they live at their own store keys (`exp/<id>/metrics`,
+> `exp/<id>/dashboard`) so they can be edited and re-rendered without rewriting the
+> definition. `resolveDashboard` (§7.3) falls back to `def`-less defaults per mode.
 
 `RunRecord` (the unit reporting aggregates) — written by orchestration after each
 child goal completes and verifies:
 
 ```ts
+type RunStatus = 'pending' | 'spawned' | 'running' | 'settled' | 'collected'
+               | 'failed' | 'cancelled';
+type CompletionBar = 'passed' | 'failed' | 'incomplete';
+
 interface RunRecord {
-  runId: string;
   experimentId: string;
-  armId?: string;          // A/B: which variant; autoresearch: candidate id
-  repeatIndex?: number;    // A/B: 0..repeats-1
-  iteration?: number;      // autoresearch: 0..n
-  childGoalId: string;     // the spawned child goal (spawnGoal result)
-  status: "pending" | "complete" | "failed";
-  verified: boolean;       // correctness gate result (autoresearch reject if false)
-  completionBar: string;   // a tag for same-completion-bar filtering (e.g. "all-gates-passed")
-  metrics: Record<string, number | null>;   // extracted metric values, keyed by metricId
-  rawOutcome?: RawOutcome; // underlying outcome data, retained for re-extraction (§4.2)
-  startedAt?: number;
-  completedAt?: number;
+  runId: string;
+  armId: string;            // A/B: which variant; autoresearch: candidate id
+  repeat?: number;          // A/B: 0..repeats-1
+  iteration?: number;       // autoresearch: 0..n
+  childGoalId?: string;     // the spawned child goal (spawnGoal result)
+  runKey: string;           // idempotency key under the parent goal
+  status: RunStatus;        // see the run state machine (pack-backend §5.1)
+  rawOutcome?: RawOutcome;  // underlying outcome data, retained for re-extraction (§4.2)
+  metrics: Record<string, MetricValue>;   // extracted metric values, keyed by metricId
+  completionBar?: CompletionBar;           // same-completion-bar filtering enum
+  verified?: boolean;       // correctness gate result (autoresearch reject if false)
+  cost?: CostSummary;       // cost rollup for the arm child goal
+  spawnedAt?: number;
+  settledAt?: number;
+  collectedAt?: number;
+  error?: string;
 }
 ```
+
+> **`completionBar` is the canonical `CompletionBar` enum, not a free string.**
+> Same-completion-bar filtering and the default report comparison use
+> `completionBar === 'passed'` unless the user selects another bar — one filtering
+> semantics shared by writer and reader (no "modal tag" interpretation). A unified
+> autoresearch+A/B `armId` (not separate `variantId`/`candidate`) means
+> `buildReportModel` aggregates both modes by the same key.
 
 **Key invariant:** `RunRecord.metrics` is the *already-extracted* numeric outcome,
 and it lives on the `RunRecord` **alongside** `rawOutcome` (one record, both fields
@@ -209,7 +251,7 @@ buildReportModel(input: {
   def: ExperimentDef;
   runs: RunRecord[];
   ledger?: LedgerEntry[];
-  dashboard?: DashboardSpec;   // resolved spec (def.dashboard ?? store ?? default)
+  dashboard?: DashboardSpec;   // resolved spec (stored exp/<id>/dashboard ?? default per mode)
 }): ReportModel;
 ```
 
@@ -221,13 +263,26 @@ and get the same model.
 
 ## 5. Aggregation reuse
 
-All aggregation lives in `src/shared/experiment-report/aggregate.ts` and is the
-only place medians/spreads/filters are computed.
+All median/spread/same-bar aggregation lives in
+`src/shared/experiment-report/aggregate.ts` (bundled to `lib/experiment-report.mjs`)
+and is the **only** place medians/spreads/filters are computed. Best-so-far, the
+objective curve, `isPlateau`, `hitTarget`, and the budget/stop predicates live in
+`src/shared/experiment-report/series.ts` and are used by **both** the autoresearch
+loop and the dashboard/report.
+
+> **Pack-side files are thin adapters, never a second implementation.** The pack's
+> `lib/aggregate.mjs` and `lib/autoresearch.mjs` are allowed only as thin
+> adapter/re-export wrappers that import and call the bundled shared functions
+> (`experiment-report.mjs`) and add orchestration/store plumbing. They must **not**
+> define local median/percentile/accept-stop logic. The no-fork pinning test (§9.4)
+> fails CI on any local `median(`/`percentile(`/accept-stop definition outside the
+> shared lib.
 
 - **A/B aggregation** — for each `(armId, metricId)`, collect the metric value
-  across that arm's repeats, apply **same-completion-bar filtering** (drop repeats
-  whose `completionBar` differs from the arm's modal bar, so a half-finished run
-  doesn't skew the arm), then reduce per the metric's declared `aggregation`
+  across that arm's repeats, apply **same-completion-bar filtering** — by default
+  keep only `completionBar === 'passed'` runs (the canonical `CompletionBar` enum;
+  failed/incomplete runs are surfaced separately, never averaged in) unless the
+  user selects another bar — then reduce per the metric's declared `aggregation`
   (`median` default, plus `mean`, `min`, `max`, `p90`, `count`). Spread is reported
   as median + IQR (or min..max) so the comparison shows variance, not just a point.
   Output: `ArmAggregate[]` (one per arm × metric) with `{ armId, metricId, value,
@@ -259,6 +314,13 @@ Rendering lives in `src/shared/experiment-report/widgets/`. The renderer is
 **spec-driven**: a `DashboardSpec` is a list of widget specs, each naming a
 registered widget type plus its metric bindings. Adding a chart type is a
 **registration, not a refactor**.
+
+> **The widget registry lives ONLY in `src/shared/experiment-report/widgets/*`**
+> (bundled into `lib/experiment-report.mjs`). The pack's `lib/widgets.mjs` is a
+> thin adapter that exposes `listWidgets` metadata and optional pack-contributed
+> registrations *through* the shared registry — it is **not** a second registry.
+> The dashboard spec binds widgets by `type` string, so a single registry is the
+> only way the panel, the report route, and the tests resolve the same renderer.
 
 ### 6.1 Widget contract
 
@@ -372,8 +434,10 @@ demands.
 
 ### 7.3 Default dashboard resolution
 
-`resolveDashboard(def, stored)` (shared lib) is the single rule:
-`def.dashboard ?? stored ?? defaultDashboardFor(def.mode)`. `defaultDashboardFor`
+`resolveDashboard(stored, mode)` (shared lib) is the single rule:
+`stored ?? defaultDashboardFor(mode)` — the editable spec lives only at the
+`exp/<id>/dashboard` store key (it is **not** a field on the canonical `ExperimentDef`).
+`defaultDashboardFor`
 returns a sensible core layout per mode (A/B → summary-cards + comparison-table +
 score-bars; autoresearch → summary-cards + objective-curve + ledger-table). One
 function, used by route and panel, so both agree on what "no custom dashboard"
@@ -445,12 +509,21 @@ plus one structural guard.
 - **Bundle parity**: assert the committed `market-packs/experiment-runner/lib/
   experiment-report.mjs` is regenerable from `src/shared/experiment-report/` (same
   approach the PR-walkthrough bundle uses) so the pack copy can't silently diverge.
+- **Schema parity**: assert a `RunRecord` written by the engine (an
+  `exp/<id>/run/<id>` value as the pack-backend `collect`/`launch`/`iterate` routes
+  produce it) satisfies the shared `RunRecord` type in
+  `src/shared/experiment-report/types.ts` (and likewise for `ExperimentDef` /
+  `VariantDef`). This makes the canonical-types contract §4.1 an enforced
+  invariant, not prose — the writer and reader cannot drift on field names,
+  `RunStatus`, or `CompletionBar`.
 - **Structural fork guard**: `rg` across `market-packs/experiment-runner/` and any
   `*ab-report*` / report-producing skill script for tell-tale local
-  reimplementations (a local `median(`/`percentile(` definition, or inline chart
-  HTML assembly) **outside** the shared lib. Any hit fails the test with a message
-  pointing back to this section. When `graphify-ab` is consolidated, this is what
-  forces it to be a wrapper.
+  reimplementations (a local `median(`/`percentile(` definition, accept-stop logic,
+  or inline chart HTML assembly) **outside** the shared lib — the pack-side
+  `lib/aggregate.mjs` / `lib/autoresearch.mjs` / `lib/widgets.mjs` must be thin
+  re-export adapters, not local implementations. Any hit fails the test with a
+  message pointing back to this section. When `graphify-ab` is consolidated, this
+  is what forces it to be a wrapper.
 
 ### 9.5 Route/panel parity (E2E, in the orchestration stream's suites)
 - The API E2E that runs a 2×2 A/B (goal spec Testing item (a)) asserts the

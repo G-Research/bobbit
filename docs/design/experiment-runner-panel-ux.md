@@ -283,9 +283,13 @@ Each selectable metric row:
 | Direction | select: `higher-better` · `lower-better` · `neutral` (drives colour + sort) |
 | Primary | radio (A/B: the comparison key; Autoresearch: pre-fills the objective) |
 
-Built-in core set (ships with the pack — small on purpose; the point is the seam):
-`cost.usd`, `wall.seconds`, `tokens.total`, `verification.passed` (bool → pass rate),
-`tasks.completed`, `gate.<id>.passed`. The **pluggable user-metric channel** lets a runnable unit
+Built-in core set (ships with the pack — small on purpose; the point is the seam; the
+**canonical metric ids** are owned by [experiment-runner-pack-backend.md](experiment-runner-pack-backend.md)
+§7.1): `cost.totalUsd`, `cost.tokensTotal`, `cost.cacheHitRate`, `gates.passRate`,
+`gates.firstPassClean`, `tasks.completionRate`, `time.wallClockMs`, `objective.value`,
+`command.metric`. (Earlier-draft ids `cost.usd`, `wall.seconds`, `tokens.total`,
+`verification.passed`, `tasks.completed`, `gate.<id>.passed` are **rejected aliases**,
+not used by v1.) The **pluggable user-metric channel** lets a runnable unit
 emit `{ "metric": "<name>", "value": <n> }` on stdout (or a declared file); those names appear in
 the table flagged `user-channel` once a first run reports them, so an agent/user can collect a
 novel metric with no code.
@@ -313,7 +317,7 @@ so far vs. the cap, and a kebab menu (Edit definition · Duplicate · Export rep
 - A **comparison widget**: grouped bars per variant for the primary metric, median with a
   spread whisker (IQR), variant series coloured `--chart-1..6`. The winning variant by
   direction gets a `--positive` ✓ chip; ties show "no significant difference".
-- A **secondary-metrics small-multiples** row (one mini-bar per collected metric).
+- A **secondary-metrics** row of `score-bars` (one mini-bar per collected metric).
 - A **runs table**: variant · repeat · status · each metric · cost · link to the child goal.
   Runs filtered out by the same-completion-bar guard are shown greyed with a "excluded:
   didn't reach completion bar" tag (transparency over hiding).
@@ -342,8 +346,12 @@ so far vs. the cap, and a kebab menu (Edit definition · Duplicate · Export rep
 The dashboard is rendered from a stored **view-spec** (`exp/<id>/dashboard`): an ordered list of
 widget descriptors, each `{ type, title, metric(s), options }`, bound to collected metrics.
 Widget types come from the **widget-renderer registry** (`host.callRoute("listWidgets")` →
-built-in types + pack-contributed types). Built-in widget types (small core set):
-`bar-compare`, `line-progress`, `small-multiples`, `runs-table`, `ledger`, `stat`.
+built-in types + pack-contributed types; the registry lives only in the shared reporting
+lib, [experiment-runner-reporting.md](experiment-runner-reporting.md) §6, and
+`listWidgets` surfaces it). The **canonical built-in widget `type` ids** are
+`comparison-table`, `score-bars`, `objective-curve`, `ledger-table`, `summary-cards`,
+`raw-drilldown`. (Earlier-draft ids `bar-compare`, `line-progress`, `small-multiples`,
+`runs-table`, `ledger`, `stat` are **rejected/legacy aliases**, not used by v1 defaults.)
 
 "**Edit dashboard**" opens an inline editor over View 4:
 - Re-order widgets (drag handles, keyboard-accessible move up/down).
@@ -495,36 +503,40 @@ This panel consumes a subset of the canonical 15 routes (full catalogue + contra
 
 | Route | Method | Request → Response | Used by |
 |---|---|---|---|
-| `projectCost` | POST | `{ expId }` or inline def → `CostProjection` | define form projection strip + confirm |
+| `projectCost` | POST | `{ experimentId }` or inline def → `CostProjection` | define form projection strip + confirm |
 | `listMetrics` | GET | `{}` → `{ builtins, custom, userChannel }` | metrics editor |
 | `listWidgets` | GET | `{}` → `{ types: [{id,label,bindsMetrics}] }` | dashboard-spec editor |
-| `defineExperiment` | POST | `{ definition }` → `{ expId, projection }` | save definition + draft autosave |
-| `saveMetrics` | POST | `{ expId, metrics }` → `{ ok }` | metrics edits (re-extract, no re-run) |
-| `saveDashboard` | POST | `{ expId, dashboard }` → `{ ok }` | dashboard-spec edits (re-render, no re-run) |
-| `launch` | POST | `{ expId }` → `{ experimentId, spawned: [goalId...] }` | View 3 confirm → fan-out via `spawnGoal` |
-| `iterate` | POST | `{ expId }` → `{ iteration, decision?, stopped? }` | autoresearch loop step |
-| `poll` | POST | `{ expId }` → `{ runs: RunRecord[], allSettled }` | dashboard live updates |
-| `collect` | POST | `{ expId, runId? }` → `{ runs: RunRecord[] }` | finalize settled runs |
-| `getExperiment` | GET | `{ expId }` → `{ def, state, runs, ledger }` | dashboard hydration |
-| `report` | POST | `{ expId }` → `{ model, html }` (via `experiment-report.mjs`) | dashboard render + Export |
-| `cancel` | POST | `{ expId }` → `{ cancelled }` | Stop experiment |
+| `defineExperiment` | POST | `{ definition }` → `{ experimentId, projection }` | save definition + draft autosave |
+| `saveMetrics` | POST | `{ experimentId, metrics }` → `{ ok }` | metrics edits (re-extract, no re-run) |
+| `saveDashboard` | POST | `{ experimentId, dashboard }` → `{ ok }` | dashboard-spec edits (re-render, no re-run) |
+| `launch` | POST | `{ experimentId }` → `{ experimentId, spawned: [goalId...] }` | View 3 confirm → fan-out via `spawnGoal` |
+| `iterate` | POST | `{ experimentId }` → `{ iteration, decision?, stopped? }` | autoresearch loop step |
+| `poll` | POST | `{ experimentId }` → `{ runs: RunRecord[], allSettled }` | dashboard live updates |
+| `collect` | POST | `{ experimentId, runId? }` → `{ runs: RunRecord[] }` | finalize settled runs |
+| `getExperiment` | GET | `{ experimentId }` → `{ def, state, runs, ledger }` | dashboard hydration |
+| `report` | POST | `{ experimentId }` → `{ model, html }` (via `experiment-report.mjs`) | dashboard render + Export |
+| `cancel` | POST | `{ experimentId }` → `{ cancelled }` | Stop experiment |
 
 `launch` is where the **server-side** fan-out lives: for each `variant × repeat` (A/B), it
 deep-merges the experiment goal's effective metadata with the arm's treatment and calls
 `host.agents.spawnGoal({ title, spec, runKey, metadata, inlineRoles, workflowId, parentGoalId })`
 (one per arm, `runKey` for idempotency; `parentGoalId` is an assertion only). For Autoresearch,
-the loop (propose → spawn → eval → deterministic accept/reject via `autoresearch.mjs` →
-deterministic stop) is driven across successive `iterate`/`poll` calls (routes run in a fresh
-worker per call, so all loop state is in the store — the `RunRecord`s + `exp/<id>/ledger`, with
-best-so-far **recomputed** on read — never a module singleton; this is the documented
-route-worker caveat).
+the loop (propose → spawn → eval → deterministic accept/reject → deterministic stop) is driven
+across successive `iterate`/`poll` calls. The accept/reject + stop maths is the bundled shared
+`series.ts` (called through the thin `lib/autoresearch.mjs` adapter — not a pack-local
+implementation); routes run in a fresh worker per call, so all loop state is in the store — the
+`RunRecord`s + `exp/<id>/ledger`, with best-so-far **recomputed** on read — never a module
+singleton; this is the documented route-worker caveat.
 
-The deterministic **accept/reject + stop** decisions live in `autoresearch.mjs` and the
-**aggregation** (median/spread, same-completion-bar filtering) in `aggregate.mjs` — both
-node-safe, both unit-tested (the framework decides keep/stop; the LLM only proposes). The shared
-reporting lib `experiment-report.mjs` is the single source of truth. **Note:** `graphify-ab` /
-`ab-report.mjs` is **absent in this branch**; the shared lib is authored fresh as the canonical
-engine, and any future `graphify-ab` must become a thin wrapper over it.
+The deterministic **accept/reject + stop** decisions and the **aggregation** (median/spread,
+same-completion-bar filtering on the canonical `completionBar === 'passed'` enum) are the bundled
+shared `src/shared/experiment-report/{series,aggregate}.ts` — the single source of truth
+(`experiment-report.mjs`). The pack's `lib/autoresearch.mjs` and `lib/aggregate.mjs` are **thin
+adapters** that call the shared functions and add store plumbing (no pack-local median/percentile
+or accept-stop maths; the no-fork test pins this). The framework decides keep/stop; the LLM only
+proposes. **Note:** `graphify-ab` / `ab-report.mjs` is **absent in this branch**; the shared lib
+is authored fresh as the canonical engine, and any future `graphify-ab` must become a thin
+wrapper over it.
 
 ---
 
@@ -658,7 +670,7 @@ mocked `poll`): the best-objective-vs-iteration chart advances, the ledger grows
 `stopped: plateau` banner after K non-improving iterations.
 
 **E2E-6 — Edit dashboard spec re-renders without re-run.**
-On a completed experiment's dashboard, open "Edit dashboard" → add a `small-multiples` widget
+On a completed experiment's dashboard, open "Edit dashboard" → add a `score-bars` widget
 bound to a secondary metric, re-order it above the table, save → the new widget renders from the
 already-stored outcomes (no `launch`/`poll` re-fired) → a `custom`/newly-registered widget type
 appears in the "Add widget" type list and can be added.
@@ -679,11 +691,23 @@ A running A/B experiment's "Stop experiment" cancels pending child goals and the
 `stopped`; deleting an experiment from the kebab removes it from the store and the deep-link then
 no-ops (uninstall-style drop), pinning clean teardown.
 
-Companion **unit** specs (node, `lib/`): `aggregate.mjs` (median/spread + same-completion-bar
-filtering), `autoresearch.mjs` (accept/reject + plateau/budget/target on synthetic series),
-`engine.mjs` (outcome parsing from mocked REST payloads), guardrail enforcement (a definition
-with no cap is rejected by `defineExperiment`), and the extensibility seams (a custom metric
-extractor + a custom widget spec render).
+**E2E-10 — Clean install / uninstall of the market pack** (Requirement 1 / acceptance
+"installable pack"). Install the `experiment-runner` pack and assert the installed pack exposes
+its **panel** (opens at mode-select), **routes** (a `listMetrics`/`projectCost` call responds),
+and **entrypoints** (composer-slash + command-palette + deep-link route register). Then
+**uninstall** and assert the panel, entrypoints, and routes are **removed**, the pack store is
+left **ignored/tombstoned**, and a stale `#/ext/experiment-runner?…` deep-link **no-ops** with no
+broken pane or dangling registry rows. (Paired with the API-side install/uninstall assertion in
+[experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §12.)
+
+Companion **unit** specs: the median/spread + same-completion-bar filtering and the accept/reject
++ plateau/budget/target stop maths live in the **shared lib** and are pinned by the reporting
+suite ([experiment-runner-reporting.md](experiment-runner-reporting.md) §9.1/§9.2). Pack-side
+node specs (`lib/`) then cover: `lib/aggregate.mjs` / `lib/autoresearch.mjs` are thin
+adapter pass-throughs (no local maths — the no-fork guard, reporting §9.4); `engine.mjs` outcome
+parsing from mocked REST payloads + per-run budget enforcement; guardrail enforcement (a
+definition with no cap is rejected by `defineExperiment`); and the extensibility seams (a custom
+metric extractor + a custom widget spec render).
 
 ---
 
@@ -698,9 +722,16 @@ extractor + a custom widget spec render).
    reduce-server-cpu work (see `docs/design/reduce-server-cpu-experiment-dashboard-polling.md`)
    so a long overnight Autoresearch run doesn't hammer the gateway. Suggest a backoff (1.5s while
    actively spawning → 10s steady-state).
-3. **Cost source of truth** — `perRunBudget` as a hard cap requires the child goal to actually be
-   budget-capped. Confirm whether `spawnGoal`/`createGoal` accepts a per-goal cost cap or whether
-   the loop must enforce it by terminating an over-budget child.
+3. **Per-run / per-iteration budget — RESOLVED.** `spawnGoal` does **not** gain a per-goal
+   cost-cap opt (it stays the only core change). `perRunBudget` is enforced in **framework
+   space**: the route monitors goal-id-keyed cost during `poll`/`collect` and marks a child that
+   exceeds the budget `failed`/`over_budget`, excluding its metrics from winning/acceptance
+   (autoresearch discards it even if the objective improved); `cancel` makes a best-effort stop if
+   a cancellation helper exists, else the run is just marked invalid. The overall `maxCostUsd`
+   stays a hard launch/iteration cap (the loop refuses to spawn the next candidate past it).
+   Per-run cost may overshoot by one poll interval, so comparisons use the same fixed budget
+   threshold and mark overshoots invalid. See
+   [experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §8.1a.
 4. **Autoresearch candidate proposal** — the loop proposes a mutated candidate. Is the proposer
    an LLM call inside the `poll` route, or a separate spawned "proposer" child goal? This doc
    stays agnostic (the framework decides keep/stop deterministically regardless), but it affects

@@ -144,16 +144,32 @@ market-packs/experiment-runner/
   lib/
     routes.mjs                            # pack-level routes (the orchestration brain)
     engine.mjs                            # mode-agnostic: run-config mapping, fan-out, outcome collection
-    store-keys.mjs                        # registry key schema (pure; SINGLE source of store keys)
-    aggregate.mjs                         # median/spread, same-bar filtering (pure)
-    autoresearch.mjs                      # deterministic accept/reject + stop rules (pure)
+    store-keys.mjs                        # registry key schema (pure; SINGLE source of store keys);
+                                          #   JSDoc MIRRORS src/shared/experiment-report/types.ts (§3)
+    aggregate.mjs                         # THIN ADAPTER: re-exports/calls bundled shared aggregate
+                                          #   functions + store plumbing (NO local median/percentile)
+    autoresearch.mjs                      # THIN ADAPTER: re-exports/calls bundled shared series
+                                          #   accept-stop predicates + store plumbing (NO local logic)
     metrics.mjs                           # metric-extractor contract + registry + built-ins
-    widgets.mjs                           # widget-renderer contract + registry + built-in specs
+    widgets.mjs                           # THIN ADAPTER: exposes listWidgets metadata + optional
+                                          #   pack registrations via the shared registry (NOT a 2nd registry)
     experiment-report.mjs                 # SHARED reporting lib (build:packs bundle of
                                           #   src/shared/experiment-report/; single source — see §10)
-  src/                                    # TS sources for the panel (built to lib/*.js by build:packs)
-    panel.ts
+  src/                                    # authored JS sources for the panel (built to lib/panel.js by build:packs)
+    panel.js
 ```
+
+> **Single source for aggregation / accept-stop.** All median/spread/same-bar
+> aggregation lives in `src/shared/experiment-report/aggregate.ts` (bundled to
+> `lib/experiment-report.mjs`); best-so-far, the objective curve, `isPlateau`,
+> `hitTarget`, and budget/stop predicates live in
+> `src/shared/experiment-report/series.ts` and are used by **both** the
+> autoresearch loop and the dashboard/report. The pack's `lib/aggregate.mjs` and
+> `lib/autoresearch.mjs` are **thin adapter/re-export wrappers** that call the
+> bundled shared functions and add orchestration/store plumbing — they must not
+> define local median/percentile/accept-stop logic (the reporting doc's no-fork
+> test, [experiment-runner-reporting.md](experiment-runner-reporting.md) §9.4,
+> fails CI on a local definition).
 
 > The shared reporting source lives at `src/shared/experiment-report/` and is
 > bundled by `build:packs` into `market-packs/experiment-runner/lib/experiment-report.mjs`
@@ -206,7 +222,7 @@ string). The canonical key schema:
 | `exp/<experimentId>/ledger` | `LedgerEntry[]` | `iterate` | Autoresearch ledger (append-only, fed forward to the proposer). |
 | `exp/<experimentId>/dashboard` | `DashboardSpec` | `saveDashboard` | Editable view-spec (§10). |
 | `exp/<experimentId>/metrics` | `MetricSelection[]` | `saveMetrics` | Declarative metric selection (§7). |
-| `index/experiments` | experiment index | define/cancel | expIds for `listExperiments` (last-write-wins reconcile). |
+| `index/experiments` | experiment index | define/cancel | `experimentId`s for `listExperiments` (last-write-wins reconcile). |
 
 > **Rejected / replaced keys (do not use):** the bare `index`, and the
 > earlier-draft `run/<expId>/...`, `outcome/<expId>/<runId>`, `agg/<expId>`,
@@ -214,49 +230,86 @@ string). The canonical key schema:
 > metrics now live together inside the `RunRecord` (under
 > `exp/<experimentId>/run/<runId>`), so there is no separate `outcome/*` blob.
 > Aggregation and best-so-far are **computed on read** from the `RunRecord`s +
-> ledger by `aggregate.mjs` — not persisted to an `agg/*` or `best` key (a single
-> source of truth; recompute, never cache a divergent copy).
+> ledger by the bundled shared lib (via the `lib/aggregate.mjs` adapter) — not
+> persisted to an `agg/*` or `best` key (a single source of truth; recompute,
+> never cache a divergent copy).
 
 > **Worker statelessness:** `host.callRoute` spins a **fresh worker per call** — module
 > singletons do not persist. All cross-call state lives in the store; routes are written
 > last-write-wins + reconcile (never assume an in-memory map survives). Concurrency
 > uses the per-root scheduler cap (§1.4), not in-worker locks.
 
-### Key data types (`store-keys.mjs` / `engine.mjs` JSDoc; mirrored as TS in panels)
+### Key data types — canonical in `src/shared/experiment-report/types.ts`
+
+> **`src/shared/experiment-report/types.ts` is the single TS source** for
+> `ExperimentDef`, `VariantDef`, `RunRecord`, `RunStatus`, `CompletionBar`,
+> `MetricSelection`, `DashboardSpec`, `WidgetSpec`, and `ReportModel`. This pack's
+> `lib/store-keys.mjs` JSDoc **mirrors** those types; the doc does **not** re-declare
+> a divergent shell. The backend (writer) writes exactly these fields and the
+> reporting lib (reader) reads exactly these fields — the schema-parity pinning test
+> ([experiment-runner-reporting.md](experiment-runner-reporting.md) §9.4) asserts
+> an engine-written `RunRecord` satisfies the shared type. The canonical shapes
+> (reproduced verbatim from `types.ts`):
 
 ```ts
-type Mode = "ab" | "autoresearch";
-
 interface ExperimentDef {
-  expId: string;
+  experimentId: string;
   title: string;
-  mode: Mode;                       // DEFAULT "ab" — set by the define route, not a buried toggle
-  createdAt: number;
+  mode: 'ab' | 'autoresearch';      // DEFAULT 'ab' — set by the define route, not a buried toggle
   parentGoalId: string;            // the experiment goal under which arms are spawned
   workflowId?: string;             // comparable verification bar applied to every arm
   runnable: RunnableSpec;          // what each arm runs (agent spec or generic command — §9)
-  // The live editable metric selection + view-spec live at their OWN store keys
-  // (exp/<id>/metrics, exp/<id>/dashboard), written by saveMetrics / saveDashboard
-  // and seeded from these initial values at define time:
-  metrics: MetricSelection[];      // declarative: which metrics to collect (§7)
-  dashboard: DashboardSpec;        // declarative view-spec (§10)
-  // A/B only:
-  variants?: VariantDef[];         // each = an arm treatment bundle
-  repeats?: number;                // N repeats per variant (≥1)
-  // Autoresearch only (ALL required to start; refuses uncapped):
-  objective?: ObjectiveSpec;       // { metricId, direction: "max"|"min" }
-  caps?: AutoresearchCaps;         // hard caps — see §8
-  stop?: StopSpec;                 // plateau/target — see §8
+  variants?: VariantDef[];         // A/B: each = an arm treatment bundle
+  repeats?: number;                // A/B: N repeats per variant (≥1)
+  objective?: ObjectiveSpec;       // autoresearch: { metricId, direction: 'max'|'min' }
+  caps?: AutoresearchCaps;         // autoresearch hard caps — see §8
+  stop?: StopSpec;                 // autoresearch plateau/target — see §8
   maxConcurrency?: number;         // clamped to the per-root cap
 }
 
 interface VariantDef {
-  variantId: string;
+  armId: string;
   label: string;
   metadata: Record<string, unknown>;   // arm treatment → child goal metadata
   inlineRoles?: Record<string, Role>;  // per-arm ephemeral roles
 }
 
+type RunStatus = 'pending' | 'spawned' | 'running' | 'settled' | 'collected'
+               | 'failed' | 'cancelled';
+type CompletionBar = 'passed' | 'failed' | 'incomplete';
+
+interface RunRecord {
+  experimentId: string;
+  runId: string;
+  armId: string;            // A/B: which variant; autoresearch: candidate id
+  repeat?: number;          // A/B (0..repeats-1)
+  iteration?: number;       // autoresearch
+  childGoalId?: string;     // the spawned child goal (spawnGoal result)
+  runKey: string;           // idempotency key under the parent goal
+  status: RunStatus;        // see §5 state machine
+  rawOutcome?: RawOutcome;  // underlying source data, retained for re-extraction
+  metrics: Record<string /*metricId*/, MetricValue>;  // extracted selected metrics
+  completionBar?: CompletionBar;   // from the arm's workflow gates (canonical enum)
+  verified?: boolean;       // correctness-gate result (AR rejects if false)
+  cost?: CostSummary;       // cost rollup for the arm child goal
+  spawnedAt?: number;
+  settledAt?: number;
+  collectedAt?: number;
+  error?: string;
+}
+```
+
+> **No `expId` / `variantId` / `candidate` / `state` / `startedAt`/`completedAt`,
+> and no free-string `completionBar`.** Those earlier-draft names are *rejected* —
+> the canonical fields are `experimentId`, `armId` (unified A/B + autoresearch), the
+> `RunStatus` enum on `status`, `spawnedAt`/`settledAt`/`collectedAt` timestamps,
+> and the `CompletionBar` enum. The autoresearch candidate *treatment* is carried in
+> the arm's `metadata` and recorded in the `LedgerEntry` (§8.2), not in a
+> `RunRecord.candidate` field.
+
+Pack-defined helper shapes referenced above (not part of the shared `RunRecord`):
+
+```ts
 interface RunnableSpec {
   kind: "agent" | "command";
   spec?: string;                   // agent: the goal spec text for the arm child goal
@@ -264,27 +317,8 @@ interface RunnableSpec {
   metricChannel?: string;          // command: how the metric is reported (stdout JSON | file path)
 }
 
-interface RunRecord {
-  runId: string; expId: string;
-  variantId?: string;              // A/B
-  repeatIndex?: number;            // A/B (0..repeats-1)
-  iteration?: number;              // autoresearch
-  candidate?: Record<string, unknown>;  // autoresearch proposed treatment
-  childGoalId: string;             // the spawned child goal (spawnGoal result)
-  state: RunState;                 // see §5 state machine
-  spawnedAt: number; settledAt?: number; collectedAt?: number;
-  error?: string;
-
-  // ── filled at collect time, kept ON the RunRecord (NO separate outcome blob) ──
-  completionBar?: "passed" | "failed" | "incomplete";  // from the arm's workflow gates
-  verified?: boolean;              // correctness-gate result (AR rejects if false)
-  cost?: { costUsd?: number; tokensIn?: number; tokensOut?: number };
-  metrics?: Record<string /*metricId*/, number | null>;  // extracted selected metrics
-  rawOutcome?: RawOutcome;         // underlying source data, retained for re-extraction
-}
-
-type RunState = "pending" | "spawned" | "running" | "settled" | "collected"
-              | "failed" | "cancelled";
+type MetricValue = number | null;
+interface CostSummary { costUsd?: number; tokensIn?: number; tokensOut?: number; }
 
 interface RawOutcome {
   costUsd?: number; tokensIn?: number; tokensOut?: number;
@@ -293,6 +327,11 @@ interface RawOutcome {
   userMetrics?: Record<string, number>;   // §7 user channel
 }
 ```
+
+> The mutable `createdAt`/progress cursor lives on `exp/<id>/state`
+> (`ExperimentState`), and the editable `MetricSelection[]` / `DashboardSpec` live
+> at `exp/<id>/metrics` and `exp/<id>/dashboard` — seeded at define time but stored
+> separately so they edit and re-render without rewriting the definition.
 
 **`RunRecord` carries `rawOutcome` and `metrics` together.** `collect` extracts the
 selected metrics into `RunRecord.metrics` at collect time, but keeps `rawOutcome`
@@ -309,21 +348,21 @@ only its own pack store + `ctx.host.agents`. Mutating routes are POST.
 
 | Route | Method | Input | Returns | Purpose / state effect |
 |---|---|---|---|---|
-| `defineExperiment` | POST | `ExperimentDef` (sans server fields) | `{ expId, projection }` | Validate (mode default `ab`; AR refuses uncapped — §8). Persist `exp/<id>` + `index/experiments`. Returns a **bounded cost projection** (§6.1). No spawns. |
-| `projectCost` | POST | `{ expId }` or inline def | `CostProjection` | Pure projection without persisting; drives the pre-launch confirmation. |
-| `launch` | POST | `{ expId }` | `{ launched: RunRecord[] }` | **A/B only.** Fan out `variant × repeat` child goals via `spawnGoal` (§6). Writes `exp/<id>/run/*`, sets state `running`. |
-| `iterate` | POST | `{ expId }` | `{ iteration, action, candidateRun?, decision?, stopped? }` | **Autoresearch only.** One loop step (§8): seed candidate from ledger → spawn one eval child goal → (on a later call) decide + stop-check. |
-| `poll` | POST | `{ expId }` | `{ runs: RunRecord[], allSettled }` | Advance run states from `host.agents.status` / child-goal gate status. Idempotent. |
-| `collect` | POST | `{ expId, runId? }` | `{ runs: RunRecord[] }` | For settled runs, read costs/gates/tasks by `childGoalId` (§5.2), run metric extractors, and write `rawOutcome` + extracted `metrics` + `completionBar` + `verified` + `cost` **onto the `RunRecord`**; flip `collected`. |
-| `aggregate` | POST | `{ expId }` | `Aggregation` | A/B: median+spread per variant over same-bar runs. AR: best-so-far. **Computed on read** from the `RunRecord`s + ledger — not persisted to an `agg/*` key. |
-| `getExperiment` | GET | `{ expId }` | `{ def, state, runs, ledger }` | Dashboard hydration (single fetch); `runs` are the `RunRecord`s (raw outcome + metrics inline). |
+| `defineExperiment` | POST | `ExperimentDef` (sans server fields) | `{ experimentId, projection }` | Validate (mode default `ab`; AR refuses uncapped — §8). Persist `exp/<id>` + `index/experiments`. Returns a **bounded cost projection** (§6.1). No spawns. |
+| `projectCost` | POST | `{ experimentId }` or inline def | `CostProjection` | Pure projection without persisting; drives the pre-launch confirmation. |
+| `launch` | POST | `{ experimentId }` | `{ launched: RunRecord[] }` | **A/B only.** Fan out `variant × repeat` child goals via `spawnGoal` (§6). Writes `exp/<id>/run/*`, sets status `running`. |
+| `iterate` | POST | `{ experimentId }` | `{ iteration, action, candidateRun?, decision?, stopped? }` | **Autoresearch only.** One loop step (§8): seed candidate from ledger → spawn one eval child goal → (on a later call) decide + stop-check. |
+| `poll` | POST | `{ experimentId }` | `{ runs: RunRecord[], allSettled }` | Advance run `status` from `host.agents.status` / child-goal gate status. Idempotent. |
+| `collect` | POST | `{ experimentId, runId? }` | `{ runs: RunRecord[] }` | For settled runs, read costs/gates/tasks by `childGoalId` (§5.2), run metric extractors, and write `rawOutcome` + extracted `metrics` + `completionBar` + `verified` + `cost` **onto the `RunRecord`**; flip `collected`. |
+| `aggregate` | POST | `{ experimentId }` | `Aggregation` | A/B: median+spread per arm over same-bar (`completionBar === 'passed'`) runs. AR: best-so-far. **Computed on read** via the shared lib from the `RunRecord`s + ledger — not persisted to an `agg/*` key. |
+| `getExperiment` | GET | `{ experimentId }` | `{ def, state, runs, ledger }` | Dashboard hydration (single fetch); `runs` are the `RunRecord`s (raw outcome + metrics inline). |
 | `listExperiments` | GET | — | `ExperimentDef[]` | Index. |
-| `saveMetrics` | POST | `{ expId, metrics: MetricSelection[] }` | `{ ok }` | Edit the metric selection; re-extracts from stored `rawOutcome`, **no re-run**. |
-| `saveDashboard` | POST | `{ expId, dashboard: DashboardSpec }` | `{ ok }` | Edit the view-spec; re-renders from stored runs, **no re-run**. |
-| `report` | POST | `{ expId }` | `{ model, html }` | Generate a report via the **shared reporting lib** (§10). |
+| `saveMetrics` | POST | `{ experimentId, metrics: MetricSelection[] }` | `{ ok }` | Edit the metric selection; re-extracts from stored `rawOutcome`, **no re-run**. |
+| `saveDashboard` | POST | `{ experimentId, dashboard: DashboardSpec }` | `{ ok }` | Edit the view-spec; re-renders from stored runs, **no re-run**. |
+| `report` | POST | `{ experimentId }` | `{ model, html }` | Generate a report via the **shared reporting lib** (§10). |
 | `listMetrics` | GET | — | `MetricDescriptor[]` | Registry introspection for the define form (§7). |
 | `listWidgets` | GET | — | `WidgetDescriptor[]` | Registry introspection for the dashboard editor (§10). |
-| `cancel` | POST | `{ expId }` | `{ cancelled }` | Dismiss in-flight arm child goals (`host.agents`), flip runs `cancelled`, stop AR loop. |
+| `cancel` | POST | `{ experimentId }` | `{ cancelled }` | Dismiss in-flight arm child goals (`host.agents`), flip runs `cancelled`, stop AR loop. |
 
 The launcher entrypoints are **plain panel-opening** launchers (not spawn launchers):
 clicking opens `experiment-runner.panel` at its mode-select view; the panel calls
@@ -409,11 +448,11 @@ hard, knowable bound (Requirement 3, Acceptance: bounded).
 
 ```js
 const { goalId } = await ctx.host.agents.spawnGoal({
-  title: `${exp.title} — ${variant.label} #${repeatIndex}`,
+  title: `${exp.title} — ${variant.label} #${repeat}`,
   spec: runnableSpecToGoalSpec(exp.runnable, variant),
-  runKey: `${expId}:${variant.variantId}:${repeatIndex}`,  // idempotency key under the parent
+  runKey: `${experimentId}:${variant.armId}:${repeat}`,  // idempotency key under the parent
   metadata: deepMerge(
-    { experiment: { expId, variantId: variant.variantId, repeatIndex } },
+    { experiment: { experimentId, armId: variant.armId, repeat } },
     variant.metadata),                  // arm treatment
   inlineRoles: variant.inlineRoles,
   workflowId: exp.workflowId,           // same comparable bar for every arm
@@ -429,14 +468,21 @@ The per-root concurrency cap throttles fan-out transparently (the return is just
 `{ goalId }`); `poll` re-invokes `launch` with the same `runKey` for any arm not yet
 started — idempotent, so a parked arm is never double-spawned.
 
-### 6.3 Aggregation (`aggregate.mjs`, pure)
+### 6.3 Aggregation (shared lib via the `aggregate.mjs` adapter)
 
-- **Same-completion-bar filtering:** only `completionBar === "passed"` runs feed the
-  central tendency (failed/incomplete arms are surfaced separately, never averaged in).
-- Per `(variantId, metricId)`: **median** + **spread** (IQR or MAD) over repeats, plus
+All median/spread/same-bar maths is the bundled shared `aggregate.ts`
+(`experiment-report.mjs`); `lib/aggregate.mjs` is only a thin adapter that calls it
+over the store's `RunRecord`s (no local median/percentile — §2, reporting §9.4).
+
+- **Same-completion-bar filtering:** by default only `completionBar === 'passed'`
+  runs (the canonical `CompletionBar` enum) feed the central tendency
+  (failed/incomplete arms are surfaced separately, never averaged in) unless the
+  user selects another bar.
+- Per `(armId, metricId)`: **median** + **spread** (IQR or MAD) over repeats, plus
   `n`, `nPassed`, direction-aware best/worst.
-- Output `Aggregation.variants[variantId].metrics[metricId] = { median, spread, n, … }`,
-  with a cross-variant ranking per metric honouring each metric's `direction`.
+- Output keyed by `armId` (`Aggregation.arms[armId].metrics[metricId] = { median,
+  spread, n, … }`), with a cross-arm ranking per metric honouring each metric's
+  `direction`.
 
 ---
 
@@ -462,14 +508,25 @@ set (deliberately small — the point is the seam):
 - `cost.totalUsd` (min), `cost.tokensTotal` (min), `cost.cacheHitRate` (max)
 - `gates.passRate` (max), `gates.firstPassClean` (max)
 - `tasks.completionRate` (max), `time.wallClockMs` (min)
+- `objective.value` (autoresearch objective passthrough), `command.metric` (the
+  generic command-runnable metric — §9)
+
+> **Canonical built-in metric ids.** The set above is authoritative (a documented
+> stable extension point). Earlier-draft ids — `cost.usd`, `wall.seconds`,
+> `tokens.total`, `verification.passed`, `tasks.completed`, `gate.<id>.passed` — are
+> **rejected aliases**, not used by v1; `objective.metricId` / `MetricSelection.metricId`
+> reference the canonical ids only.
 
 ### 7.2 Declarative selection (agent/user-facing, no code)
 
-`ExperimentDef.metrics: MetricSelection[]` where
+The metric selection `MetricSelection[]` is stored at `exp/<id>/metrics` (written by
+`saveMetrics`, seeded at define time — it is **not** a field on the canonical
+`ExperimentDef`), where
 `MetricSelection = { metricId, aggregation?: "median"|"mean"|"p90", directionOverride? }`.
-Agents/users pick which built-ins to collect and how to aggregate by **editing the def**
-— no code, no redeploy. For autoresearch, `objective.metricId` must reference a selected
-metric.
+Agents/users pick which built-ins to collect and how to aggregate by **editing that
+selection** — no code, no redeploy. For autoresearch, `objective.metricId` must
+reference a selected metric. The metric ids are the canonical built-in set in §7.1;
+reporting consumes the extracted `RunRecord.metrics` only and never runs extractors.
 
 ### 7.3 Pluggable user-metric channel
 
@@ -507,20 +564,45 @@ stop condition, else `defineExperiment` returns `{ error: "AR_UNCAPPED" }` and p
 nothing. A **cost projection per iteration** (`fixedPerIterationBudget`) is shown and an
 explicit confirm gesture is required before the panel calls `iterate`.
 
+### 8.1a Per-run / per-iteration budget semantics (framework-enforced, no extra core change)
+
+`spawnGoal` does **not** gain cost-cap opts in v1 (this keeps `spawnGoal` the *only*
+core change — see [experiment-runner-spawn-goal.md](experiment-runner-spawn-goal.md)).
+Instead:
+
+- `perRunBudget` is a **required comparable budget contract** for autoresearch (the
+  fixed per-iteration budget) and an **A/B projection input**. It is tagged on the
+  arm as `metadata.experiment.budget` for transparency, but it is **enforced in
+  framework space**: the route monitors the goal-id-keyed cost during `poll`/`collect`
+  and, when a child exceeds `perRunBudget`, marks it `failed` / `over_budget`. Its
+  metrics are then **excluded from winning/acceptance**, and autoresearch **discards**
+  it even if the objective improved.
+- If existing goal cancellation/termination helpers are available, `cancel` attempts a
+  **best-effort stop** of the over-budget child; otherwise **no new host verb** is
+  introduced (the run is simply marked invalid and left to terminate).
+- The overall `maxCostUsd` remains a **hard launch/iteration cap**: the loop refuses to
+  spawn the next candidate when projected/cumulative cost would exceed the cap.
+- Because cost reporting lags by up to one poll interval / provider latency, a per-run
+  cost may **overshoot** by one interval; comparisons use the **same fixed budget
+  threshold** and mark overshoots invalid, so the comparison stays fair.
+
 ### 8.2 The loop (deterministic accept/reject; the LLM proposes, the framework decides)
 
 `iterate` is **one step** (the worker can't long-block); the panel calls it repeatedly
 (or a poll drives it). Each step:
 
 1. **Stop-check first** (deterministic, from the registry): if any cap is hit or any
-   stop condition is met → write `state.stopped = { reason }`, return `{ stopped }`.
-2. **Generate:** seed a candidate from the **ledger** (`ledger/<expId>`, append-only,
-   fed forward). v1 proposer is **simple** (greedy / best-of-batch around best-so-far —
-   no Bayesian/evolutionary). The proposal itself may be produced by an arm agent, but
-   the candidate treatment is recorded deterministically.
-3. **Evaluate:** spawn one candidate child goal via `spawnGoal` under a **fixed
-   per-iteration budget** (`metadata.experiment.budget`), with the same `workflowId`
-   correctness bar. Record a `RunRecord` (`iteration`, `candidate`).
+   stop condition is met → write `state.stopped = { reason }` (on `exp/<id>/state`),
+   return `{ stopped }`.
+2. **Generate:** seed a candidate from the **ledger** (`exp/<experimentId>/ledger`,
+   append-only, fed forward). v1 proposer is **simple** (greedy / best-of-batch around
+   best-so-far — no Bayesian/evolutionary). The proposal itself may be produced by an
+   arm agent, but the candidate treatment is recorded deterministically.
+3. **Evaluate:** spawn one candidate child goal via `spawnGoal` under the **fixed
+   per-iteration budget** (tagged `metadata.experiment.budget`, enforced in framework
+   space per §8.1a), with the same `workflowId` correctness bar. Record a `RunRecord`
+   (`iteration`; the candidate treatment is the arm's `metadata`, also captured in the
+   `LedgerEntry` — there is no `RunRecord.candidate` field).
 4. **Decide (on a later `iterate`/`poll`, once the candidate settles + is collected):**
    compute the candidate's objective from `RunRecord.metrics[objective.metricId]`.
    **Accept iff** it improves on best-so-far (direction-aware, by > `plateauEps`)
@@ -545,8 +627,10 @@ interface LedgerEntry {
 - **Plateau:** no accepted improvement > `plateauEps` over the last `plateauK` iterations.
 - **Target:** best objective crosses `target` (direction-aware).
 
-All three are pure functions of the ledger + caps (`autoresearch.mjs`), so accept/stop
-are **testable on synthetic series** with no real compute.
+All three are pure functions of the ledger + caps — the bundled shared `series.ts`
+predicates (`isPlateau`/`hitTarget`/budget checks), called through the thin
+`lib/autoresearch.mjs` adapter — so accept/stop are **testable on synthetic series**
+with no real compute, and the loop and the dashboard curve share one implementation.
 
 ---
 
@@ -584,27 +668,26 @@ there is nothing to port. The shared lib is authored fresh as the engine, and *i
 statistics, no chart HTML of its own). The reporting sub-stream owns the full
 contract — see [experiment-runner-reporting.md](experiment-runner-reporting.md).
 
-### 10.2 Widget-renderer registry (`widgets.mjs`, stable extension point)
+### 10.2 Widget-renderer registry (shared lib; `widgets.mjs` is a thin adapter)
 
-```ts
-interface WidgetRenderer {
-  type: string;                    // "bar", "line", "table", "scoreBars", "statusGrid", …
-  /** Pure: spec + bound data → a serializable view model (or HTML for the report). */
-  render(spec: WidgetSpec, data: WidgetData): WidgetViewModel;
-}
-interface WidgetSpec {
-  type: string;
-  title?: string;
-  bind: { metricIds?: string[]; groupBy?: "variant" | "iteration"; aggregation?: string };
-}
-interface DashboardSpec { widgets: WidgetSpec[]; version: number; }
-```
+The widget registry lives **only** in `src/shared/experiment-report/widgets/*`
+(bundled into `lib/experiment-report.mjs`). The pack's `lib/widgets.mjs` is **not** a
+second registry — it is a thin adapter that exposes `listWidgets` metadata and any
+optional pack-contributed registrations *through* the shared registry. The
+`WidgetRenderer` / `registerWidget` / `WidgetSpec` / `DashboardSpec` contracts are
+owned and defined by the reporting sub-stream
+([experiment-runner-reporting.md](experiment-runner-reporting.md) §6).
 
-Built-in widget types (small core): `bar` (per-variant median+spread), `line`
-(best-objective-vs-iteration for AR), `table` (variant × metric), `scoreBars`,
-`statusGrid` (completion bars). A pack can `registerWidget(renderer)` to contribute a
-custom visualization — a **registration, not a refactor**. `listWidgets` feeds the
-dashboard editor.
+**Canonical built-in widget `type` ids** (the dashboard spec binds widgets by these
+strings, so they are stable): `comparison-table`, `score-bars`, `objective-curve`,
+`ledger-table`, `summary-cards`, `raw-drilldown`.
+
+> **Rejected / legacy aliases (not used by v1 defaults):** `bar`, `line`, `table`,
+> `scoreBars`, `statusGrid`, `bar-compare`, `line-progress`, `small-multiples`,
+> `runs-table`, `ledger`, `stat`. A `DashboardSpec` references only the canonical ids
+> above. A pack can `registerWidget(renderer)` (through the shared registry) to
+> contribute a custom visualization — a **registration, not a refactor**;
+> `listWidgets` feeds the dashboard editor.
 
 ### 10.3 Editable view-spec, re-render without re-run
 
@@ -625,7 +708,8 @@ extensibility proof. The dashboard panel and the `report` route both render from
 | `host.agents.spawnGoal` | core/host | Rides `capabilities.agents`; feature-detect via `typeof ctx.host.agents.spawnGoal === "function"`; additive opts only. |
 | `MetricExtractor` + `registerMetric` | `lib/metrics.mjs` | Pure `extract(rawOutcome, ctx)`; new metric = registration. |
 | User-metric channel | `metadata.experiment.userMetrics` / command metric channel | No-code novel metrics. |
-| `WidgetRenderer` + `registerWidget` | `lib/experiment-report.mjs` (shared lib) | Pure `render(spec, data)`; new chart = registration. |
+| `WidgetRenderer` + `registerWidget` | `src/shared/experiment-report/widgets/*` (bundled `lib/experiment-report.mjs`; `lib/widgets.mjs` is a thin adapter, not a 2nd registry) | Pure `render(spec, data)`; new chart = registration. |
+| Aggregation / accept-stop | `src/shared/experiment-report/{aggregate,series}.ts` (bundled; `lib/aggregate.mjs` + `lib/autoresearch.mjs` are thin adapters) | Single source for median/spread/same-bar + best-so-far/plateau/target; no pack-local maths. |
 | `DashboardSpec` | store `exp/<id>/dashboard` | Declarative, editable, versioned. |
 | `RunnableSpec` | store `exp/<id>.runnable` | `agent` | `command` discriminant; generic path. |
 | Results registry keys | `lib/store-keys.mjs` | Single source of keys; append/last-write-wins; null-tombstone deletes. |
@@ -636,17 +720,26 @@ extensibility proof. The dashboard panel and the `report` route both render from
 
 ### Unit (pack lib, `file://` / node — no server)
 
-- `aggregate.mjs`: median/spread, same-completion-bar filtering, direction-aware
-  ranking; degenerate cases (all-failed, n=1).
-- `autoresearch.mjs`: accept/reject on **synthetic series** (improving, regressing,
-  noisy-within-eps, correctness-gate-fail-but-objective-improved → rejected); stop rules
-  (plateau over K, target crossed, each cap) on synthetic ledgers.
-- `metrics.mjs`: built-in extractors over synthetic `raw`; **custom metric**
-  registration is listed + selectable + extracted; user-metric channel.
-- `widgets.mjs` + `experiment-report.mjs`: built-in widget render from a spec + data;
-  **newly-registered widget type is used** by a dashboard spec; report HTML golden.
-- `engine.mjs`: run-config mapping (variant×repeat → spawnGoal args incl. `runKey`;
-  candidate → spawnGoal args); outcome parsing from mocked REST payloads.
+- **Shared lib (median/spread/same-bar + accept/stop):** these live in
+  `src/shared/experiment-report/{aggregate,series}.ts` and are pinned by the reporting
+  doc's unit suite ([experiment-runner-reporting.md](experiment-runner-reporting.md)
+  §9.1/§9.2) — median/spread, same-completion-bar filtering (`completionBar ===
+  'passed'`), direction-aware ranking, accept/reject on synthetic series
+  (improving/regressing/noisy-within-eps/correctness-gate-fail-but-objective-improved
+  → rejected), and stop rules (plateau over K, target, each cap).
+- `lib/aggregate.mjs` / `lib/autoresearch.mjs` **adapter pass-through:** assert they
+  re-export/call the bundled shared functions and contain **no** local
+  `median(`/`percentile(`/accept-stop definition (the no-fork structural guard,
+  reporting §9.4).
+- `metrics.mjs`: built-in extractors (the canonical ids, §7.1) over synthetic `raw`;
+  **custom metric** registration is listed + selectable + extracted; user-metric channel.
+- `widgets.mjs` (adapter) over the shared registry: built-in widget render from a spec
+  + data; **newly-registered widget type is used** by a dashboard spec; report HTML
+  golden (canonical widget ids, §10.2).
+- `engine.mjs`: run-config mapping (variant×repeat → spawnGoal args incl. `runKey`,
+  `armId`, `repeat`; candidate → spawnGoal args); outcome parsing from mocked REST
+  payloads; **per-run budget enforcement** (a child whose monitored cost exceeds
+  `perRunBudget` is marked `failed`/`over_budget` and excluded from acceptance, §8.1a).
 - **Guardrail enforcement:** `defineExperiment` validation refuses AR uncapped /
   no-objective / no-stop; A/B requires repeats ≥ 1.
 
@@ -675,6 +768,13 @@ Mirror `tests/e2e/host-agents.spec.ts` (build a live `ServerHostApi` with the
   re-renders** without re-run; **persists across reload** (rehydrate from
   `getExperiment`/store).
 - Deep-link route reopens the dashboard rehydrated from the store.
+- **Clean install / uninstall (Requirement 1 / acceptance "installable pack").** An
+  API + browser E2E that installs the `experiment-runner` market pack and asserts the
+  installed pack exposes its **panel, routes, and entrypoints** (panel opens; a route
+  responds; the composer-slash + palette + deep-link entrypoints register), then
+  **uninstalls** it and asserts the panel, entrypoints, and routes are **removed**,
+  the pack store is left **ignored/tombstoned**, and a stale deep-link **no-ops**
+  (no broken pane / no dangling registry rows).
 
 ### Gates
 
@@ -689,9 +789,12 @@ spawn/host (`spawnGoal`), also `npm run test:manual`.
   team-lead that drives the arm child goal to a terminal/verified state without manual
   intervention (the runner relies on arms self-completing). If a workflow requires a
   human gate, AR/A/B must treat it as `incomplete`, not block the loop.
-- **Cost attribution latency:** `GET /api/goals/:id/cost` may lag the arm's final turn;
-  `collect` should only finalize an outcome once the arm goal is terminal (gates
-  resolved), not merely idle.
+- **Cost attribution latency (per-run budget) — RESOLVED in §8.1a.** `GET
+  /api/goals/:id/cost` may lag the arm's final turn, so a per-run cost can overshoot
+  `perRunBudget` by one poll interval. `collect` finalizes an outcome only once the arm
+  goal is terminal (gates resolved), and budget enforcement lives in framework space
+  (monitor goal-id-keyed cost; mark `failed`/`over_budget`; exclude from acceptance) —
+  `spawnGoal` gains **no** cost-cap opt, so it stays the only core change.
 - **Concurrency vs. comparability:** running arms concurrently under the per-root cap is
   fine for cost/gates metrics but may bias `time.wallClockMs` (contention). Note this in
   the metric descriptor; prefer per-arm CPU/turn metrics for fair timing.

@@ -123,6 +123,16 @@ Design choices:
   goal.
 - **No `projectId`, `sandboxed`, `cwd` parameters.** All inherited from the
   parent goal (§9) — a pack cannot widen scope.
+- **No cost-cap / per-run budget opt in v1.** `spawnGoal` deliberately gains **no**
+  per-goal cost-cap parameter — adding one would be a *second* core change, defeating
+  "the only core/host change." The experiment runner's `perRunBudget` (the fixed
+  comparable budget for autoresearch and the A/B projection input) is enforced in
+  **framework space** by the pack route: it monitors goal-id-keyed cost during
+  `poll`/`collect`, marks an over-budget child `failed`/`over_budget`, and excludes it
+  from winning/acceptance; the overall `maxCostUsd` is the loop's hard launch cap. If a
+  goal cancellation/termination helper exists, `cancel` makes a best-effort stop;
+  otherwise no new host verb is introduced. See
+  [experiment-runner-pack-backend.md](experiment-runner-pack-backend.md) §8.1a.
 - **`runKey` (idempotency).** A/B fan-out and autoresearch retries both re-call;
   mirrors `spawn-child`'s `planId` → `spawnedFromPlanId` idempotency.
 
