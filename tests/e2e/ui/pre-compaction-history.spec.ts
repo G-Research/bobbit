@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, waitForSessionStatus, readE2EToken } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -230,5 +230,215 @@ test.describe("Pre-compaction history affordance", () => {
 		await expect(
 			page.locator("[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)"),
 		).toHaveCount(3, { timeout: 15_000 });
+	});
+
+	// Live-session repro (no reload): drives a real mock-agent auto compaction
+	// via the AUTO_COMPACT trigger and asserts the pre-compaction affordance is
+	// present — with exactly ONE compaction summary card — in the same session,
+	// before any reload. Pre-fix this fails: the in-flight `compact_active` card
+	// carries no compactionId (so it never mounts the affordance), and the
+	// server splices a SECOND persisted sidecar card into the post-compaction
+	// snapshot — leaving two stacked cards (issue-analysis findings #1, #3).
+	test("@live-compaction-affordance live compaction surfaces the affordance with exactly one card (no reload)", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		// Drive a live auto/threshold compaction with 3 pre-compaction messages.
+		await sendMessage(page, "AUTO_COMPACT:3");
+
+		// The compaction card lifecycle begins; wait for at least one card.
+		const cards = page.locator("[data-testid='compaction-summary-card']");
+		await expect(cards.first()).toBeVisible({ timeout: 20_000 });
+
+		// The affordance must surface in the live session. Proactively kick the
+		// count fetch (headless IntersectionObserver can be flaky) and wait for
+		// the resolved collapsed state with the correct count. Reaching this
+		// state proves the post-compaction snapshot + sidecar have landed.
+		const widget = page.locator("[data-testid='pre-compaction-history']");
+		await expect(widget).toHaveCount(1, { timeout: 20_000 });
+		await page.evaluate(() => {
+			const el = document.querySelector("bobbit-pre-compaction-history") as any;
+			el?.refreshCount?.();
+		});
+		await expect(widget).toHaveAttribute("data-state", "collapsed", { timeout: 20_000 });
+		await expect(page.locator("[data-testid='pre-compaction-toggle']"))
+			.toContainText(/Show 3 messages before compaction/, { timeout: 15_000 });
+
+		// Single-card invariant: exactly one compaction summary card. Pre-fix
+		// there are two (live `compact_active` + spliced sidecar card). This
+		// assertion is the primary repro signal.
+		await expect(cards).toHaveCount(1, { timeout: 8_000 });
+
+		// Expanding reveals the 3 orphaned pre-compaction rows.
+		await page.locator("[data-testid='pre-compaction-toggle']").click();
+		await expect(widget).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
+		const rows = page.locator(
+			"[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)",
+		);
+		await expect(rows).toHaveCount(3, { timeout: 15_000 });
+		await expect(rows.first()).toContainText("pre-msg-0");
+		await expect(rows.last()).toContainText("pre-msg-2");
+	});
+
+	// Manual-compaction late-sidecar RACE regression (no reload).
+	//
+	// On a live (esp. manual `/compact`) compaction the affordance widget mounts
+	// on the `compaction_end` event a beat BEFORE the server finishes appending
+	// the sidecar row (ws/handler.ts appends only after awaiting compact()). The
+	// widget's count probe therefore races the sidecar write and can transiently
+	// 404 (`compaction_not_found`). The pre-fix component cached that 404 as
+	// `_total = 0` permanently — the affordance silently rendered empty even
+	// though the orphans were on disk, and only a reload recovered it.
+	//
+	// The fix (PreCompactionHistory: retry transient 404 / network failures with
+	// bounded backoff, never caching empty) is exercised here deterministically:
+	// we intercept the `limit=1` count probe and return 404 for the first two
+	// calls, then let it through. The affordance must still appear with the
+	// correct count IN THE SAME SESSION (no reload). Pre-fix this fails: the
+	// first 404 freezes `_total = 0` and the toggle never renders.
+	test("@live-compaction-affordance count probe recovers from transient 404 without caching empty (no reload)", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		const compactionId = "c_precomp_race";
+		// Seed the sidecar eagerly so the snapshot splice renders the card.
+		const sidecarDir = path.join(gateway.bobbitDir, "state", "compaction-sidecar");
+		fs.mkdirSync(sidecarDir, { recursive: true });
+		const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+		const now = new Date().toISOString();
+		fs.writeFileSync(path.join(sidecarDir, `${safe}.jsonl`), JSON.stringify({
+			schemaVersion: 1,
+			id: compactionId,
+			trigger: "manual",
+			tokensBefore: 50_000,
+			tokensAfter: null,
+			durationMs: 1000,
+			startedAt: now,
+			endedAt: now,
+			success: true,
+			firstKeptEntryId: "kept-1",
+		}) + "\n", "utf-8");
+
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		const card = page.locator("[data-testid='compaction-summary-card']");
+		await expect(card).toHaveCount(1, { timeout: 15_000 });
+
+		// Point the orphan reader at a dedicated jsonl we control, then seed it
+		// with 3 orphans + the kept boundary (mirrors the happy-path test above).
+		let ps: any;
+		await expect.poll(
+			() => {
+				ps = (gateway.sessionManager as any).getPersistedSession(sessionId);
+				return !!ps?.agentSessionFile;
+			},
+			{ timeout: 15_000, intervals: [250] },
+		).toBe(true);
+		const dedicatedJsonl = path.join(
+			gateway.bobbitDir,
+			"state",
+			`pre-compaction-race-${sessionId}.jsonl`,
+		);
+		const store = (gateway.sessionManager as any).getSessionStore(ps.projectId);
+		store.update(sessionId, { agentSessionFile: dedicatedJsonl });
+		await seedSidecarAndJsonl({
+			bobbitDir: gateway.bobbitDir,
+			sessionId,
+			agentSessionFile: dedicatedJsonl,
+			compactionId,
+			preCount: 3,
+		});
+
+		// Confirm the fixture is genuinely recoverable BEFORE we inject failures
+		// (this direct fetch happens before the route is installed).
+		const probeResp = await page.evaluate(async ({ url, token }) => {
+			const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+			return { status: r.status, body: await r.text() };
+		}, {
+			url: `${gateway.baseURL}/api/sessions/${sessionId}/transcript/before-compaction?compactionId=${compactionId}&limit=1`,
+			token: readE2EToken(),
+		});
+		expect(probeResp.status, `probe body: ${probeResp.body}`).toBe(200);
+		expect(JSON.parse(probeResp.body).total).toBe(3);
+
+		// Wait for the widget's mount-time count probe to settle before we install
+		// the route and call refreshCount(). Otherwise this test-only refresh can
+		// race an already in-flight mount probe and return early via the component's
+		// in-flight guard instead of exercising the retry path below.
+		const widget = page.locator("[data-testid='pre-compaction-history']");
+		await expect(widget).toHaveCount(1, { timeout: 15_000 });
+		await expect(widget).toHaveAttribute("data-state", /collapsed|empty/, { timeout: 15_000 });
+
+		// Inject the transient-404 race: fail the FIRST TWO count probes
+		// (limit=1, non-verbose), then let everything through. Mirrors the
+		// sidecar-not-yet-written window on a live compaction. The expand fetch
+		// (verbose=1) is never intercepted.
+		await page.evaluate(() => {
+			(window as any).__preCompactionCount404s = 0;
+			const originalFetch = window.fetch.bind(window);
+			(window as any).__preCompactionOriginalFetch = originalFetch;
+			window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				const isBeforeCompaction = url.includes("/transcript/before-compaction");
+				const isCountProbe = isBeforeCompaction
+					&& /[?&]limit=1(&|$)/.test(url)
+					&& !/[?&]verbose=1/.test(url);
+				if (isCountProbe && (window as any).__preCompactionCount404s < 2) {
+					(window as any).__preCompactionCount404s++;
+					return Promise.resolve(new Response(
+						JSON.stringify({ error: "compaction_not_found" }),
+						{ status: 404, headers: { "Content-Type": "application/json" } },
+					));
+				}
+				if (isCountProbe) {
+					return Promise.resolve(new Response(
+						JSON.stringify({ total: 3, returned: 1, nextCursor: null, messages: [] }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					));
+				}
+				if (isBeforeCompaction && /[?&]verbose=1/.test(url)) {
+					return Promise.resolve(new Response(JSON.stringify({
+						total: 3,
+						returned: 3,
+						nextCursor: null,
+						messages: [
+							{ index: 0, role: "user", ts: null, content: "pre-msg-0" },
+							{ index: 1, role: "assistant", ts: null, content: "pre-msg-1" },
+							{ index: 2, role: "user", ts: null, content: "pre-msg-2" },
+						],
+					}), { status: 200, headers: { "Content-Type": "application/json" } }));
+				}
+				return originalFetch(input as any, init);
+			}) as typeof window.fetch;
+		});
+
+		// Drive the count fetch. The first two probes 404; the bounded-backoff
+		// retry then lands a 200 and resolves the count — all without a reload.
+		await page.evaluate(async () => {
+			const el = document.querySelector("bobbit-pre-compaction-history") as any;
+			if (!el || typeof el.refreshCount !== "function") {
+				throw new Error("pre-compaction-history refreshCount hook missing");
+			}
+			await el.refreshCount();
+		});
+
+		// The affordance must surface with the correct count despite the 404s —
+		// proving the retry recovered instead of caching empty.
+		await expect(widget).toHaveAttribute("data-state", "collapsed", { timeout: 15_000 });
+		await expect(page.locator("[data-testid='pre-compaction-toggle']"))
+			.toContainText(/Show 3 messages before compaction/, { timeout: 15_000 });
+		// Sanity: the failures we injected were actually consumed (the test would
+		// be vacuous if the route never matched the count probe).
+		const count404s = await page.evaluate(() => (window as any).__preCompactionCount404s);
+		expect(count404s, "expected the injected count-probe 404s to be consumed").toBe(2);
+
+		// Expansion/rendering of orphan rows is covered by the happy-path test above;
+		// this regression focuses on the manual-race count probe not caching empty.
 	});
 });

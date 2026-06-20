@@ -174,16 +174,28 @@ navigate-away and full page reload — the reducer just sees the same
 rich row it would have seen live.
 
 The live in-flight card (id `compact_active`) and the persisted sidecar
-card (id `c_<startedAtMs>_<rand6>`) dedup against each other:
+card (id `c_<startedAtMs>_<rand6>`) are two synthetics for the same
+compaction. The server mints one `compactionId` at `compaction_start`
+and shares it across the sidecar entry, the broadcast `compaction_end`
+event, and — via `remote-agent.ts` — the live card's payload. Because
+both cards now carry the same `compactionId`, they dedup cleanly and the
+pre-compaction-history affordance appears in either case:
 
-- **Live path.** While `compact_active` is on screen, the splice drops
-  the most-recent sidecar row — it represents the same compaction
-  surfaced live.
+- **Live path.** The live `compact_active` card carries `compactionId`,
+  so the renderer mounts the pre-compaction history affordance
+  immediately — no reload needed. The reducer drops the server's spliced
+  sidecar synthetic (and its paired `toolResult`) for the same
+  `compactionId`, so the live card wins and a single card stays on
+  screen. (On the `get_messages` snapshot path the server-side splice
+  also drops the most-recent sidecar row when the snapshot already
+  contains the live card.)
 - **Reload path.** No `compact_active` exists; the splice prepends the
-  sidecar's rich rows directly. The renderer reads `payload.compactionId`
-  and mounts the pre-compaction history affordance.
+  sidecar's rich rows directly, the reducer dedup set is empty, and the
+  renderer reads `payload.compactionId` to mount the affordance.
 
-Full mechanics, schema, and the REST endpoint that surfaces the
+Full mechanics — the shared-`compactionId` flow, the reducer dedup, and
+the count-probe retry that covers the manual `/compact` sidecar-write
+race — plus schema and the REST endpoint that surfaces the
 pre-compaction transcript live in
 [docs/compaction-history.md](compaction-history.md).
 
@@ -257,12 +269,14 @@ npm run test:manual
 | Server-side persistence + snapshot splice | `src/server/agent/compaction-sidecar.ts` — see [compaction-history.md](compaction-history.md) |
 | Live emission (manual / auto / overflow) | `src/app/remote-agent.ts` — `compaction_start` / `compaction_end` handlers, `_triggerFromEvent`, `_lastKnownContextTokens` |
 | Server-side manual broadcast | `src/server/ws/handler.ts` — emits `reason: "manual"` on the manual `/compact` path |
-| Reducer (in-progress, result, snapshot dedup, reload upgrade) | `src/app/message-reducer.ts` — `compaction-placeholder`, `compaction-result`, and `snapshot` cases |
+| Reducer (in-progress, result, snapshot dedup, reload upgrade, live-vs-persisted `compactionId` dedup) | `src/app/message-reducer.ts` — `compaction-placeholder`, `compaction-result`, and `snapshot` cases |
+| Live card carries server `compactionId`; pre-compaction affordance + count-probe retry | `src/app/remote-agent.ts`, `src/ui/components/PreCompactionHistory.ts` |
 | Renderer (three states + adjacent layout + overflow pill) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Renderer registration | `src/ui/tools/index.ts` — `__compaction_summary` |
 | Helper unit tests | `tests/compaction-types.test.ts` — `parseOverflowTokenCount`, in-progress builder, stable id |
 | Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c, 12d, 12e |
 | Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
+| Browser E2E (`@live-compaction-affordance` live-session affordance + transient count-probe retry) | `tests/e2e/ui/pre-compaction-history.spec.ts` |
 | Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
 | Real-LLM `/compact` (manual) | `tests/manual-integration/compaction.spec.ts` |
 | Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |

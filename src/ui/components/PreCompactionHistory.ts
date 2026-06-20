@@ -58,7 +58,27 @@ export class PreCompactionHistory extends LitElement {
 	@state() private _firstLoadedIndex: number = 0;
 
 	private _observer: IntersectionObserver | null = null;
+	/** True once the count fetch has reached a TERMINAL outcome (a resolved
+	 *  total, a non-retryable error, or an exhausted retry budget). While
+	 *  retries are pending this stays false so the safety-net timer / IO can
+	 *  still re-drive, but `_inFlight` / `_retryTimer` prevent overlap. */
 	private _countLoaded = false;
+	/** Guards against overlapping in-flight count fetches (IO hit + safety-net
+	 *  timer + retry timer can all fire). */
+	private _inFlight = false;
+	/** Pending retry timer handle (transient-404 backoff). */
+	private _retryTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Number of transient-404 retries attempted so far. */
+	private _countRetries = 0;
+	/** Bounded retry budget for a freshly-minted compactionId whose sidecar
+	 *  is written a beat AFTER the client mounts this widget (the live manual
+	 *  `/compact` race: the card mounts on the `compaction_end` event, which
+	 *  fires just before the server finishes appending the sidecar row). The
+	 *  backoff schedule (≈400ms→2s, capped) tops out around 12s — comfortably
+	 *  longer than the RPC-response propagation gap, but still bounded so a
+	 *  genuinely-missing (legacy/purged) id collapses to no-affordance rather
+	 *  than spinning forever. */
+	private static readonly MAX_COUNT_RETRIES = 8;
 
 	protected override createRenderRoot() {
 		return this; // no shadow DOM so theme tokens cascade
@@ -85,8 +105,11 @@ export class PreCompactionHistory extends LitElement {
 				if (this._observer) this._observer.observe(this);
 			});
 			// Safety-net eager fetch after 500ms in case IO never fires
-			// (zero-height parent, animated reveal, headless quirks).
-			setTimeout(() => { if (!this._countLoaded) this._loadCount(); }, 500);
+			// (zero-height parent, animated reveal, headless quirks). Skip when a
+			// retry is already pending so we don't short-circuit the backoff.
+			setTimeout(() => {
+				if (!this._countLoaded && !this._inFlight && !this._retryTimer) this._loadCount();
+			}, 500);
 		} else {
 			// No IO support \u2014 fetch eagerly.
 			this._loadCount();
@@ -97,6 +120,10 @@ export class PreCompactionHistory extends LitElement {
 		super.disconnectedCallback();
 		this._observer?.disconnect();
 		this._observer = null;
+		if (this._retryTimer) {
+			clearTimeout(this._retryTimer);
+			this._retryTimer = null;
+		}
 	}
 
 	/** Public test/refresh hook: re-runs the count fetch from scratch.
@@ -104,32 +131,66 @@ export class PreCompactionHistory extends LitElement {
 	 *  handle initial load); browser E2E uses it to refetch after seeding
 	 *  fixture data post-mount. */
 	async refreshCount(): Promise<void> {
+		if (this._retryTimer) {
+			clearTimeout(this._retryTimer);
+			this._retryTimer = null;
+		}
 		this._countLoaded = false;
+		this._countRetries = 0;
 		this._total = null;
 		await this._loadCount();
 	}
 
+	/** Schedule a bounded backoff retry of the count fetch for a transient
+	 *  404 (sidecar not persisted yet). Keeps `_total === null` so the widget
+	 *  stays in its no-render "loading" state — no flash of the affordance,
+	 *  and crucially no permanently-cached "empty". Returns true if a retry
+	 *  was scheduled, false if the budget is exhausted. */
+	private _scheduleCountRetry(): boolean {
+		if (this._countRetries >= PreCompactionHistory.MAX_COUNT_RETRIES) return false;
+		this._countRetries++;
+		const delay = Math.min(2000, 400 * this._countRetries);
+		this._retryTimer = setTimeout(() => {
+			this._retryTimer = null;
+			this._loadCount();
+		}, delay);
+		return true;
+	}
+
 	private async _loadCount(): Promise<void> {
-		if (this._countLoaded || !this.sessionId || !this.compactionId) return;
-		this._countLoaded = true;
+		if (this._countLoaded || this._inFlight || !this.sessionId || !this.compactionId) return;
+		this._inFlight = true;
 		try {
 			const res = await gatewayFetch(
 				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&limit=1`,
 			);
 			if (!res.ok) {
-				// 404 compaction_not_found / transcript_unavailable \u2014 silent
-				// (collapse to no affordance). Other errors logged.
+				// 404 compaction_not_found / transcript_unavailable is transient
+				// right after a live (esp. manual) compaction: the widget mounts on
+				// the `compaction_end` event a beat before the server appends the
+				// sidecar row. Retry with bounded backoff before giving up so we
+				// never permanently cache "empty" while the sidecar is still being
+				// written. A genuinely-missing (legacy/purged) id exhausts the
+				// budget and collapses to no-affordance.
+				if (res.status === 404 && this._scheduleCountRetry()) return;
 				if (res.status !== 404) {
 					console.warn(`[pre-compaction-history] count fetch HTTP ${res.status}`);
 				}
+				this._countLoaded = true;
 				this._total = 0;
 				return;
 			}
 			const env = (await res.json()) as OrphanEnvelope;
+			this._countLoaded = true;
 			this._total = typeof env.total === "number" ? env.total : 0;
 		} catch (err) {
+			// Network/transport error — retry within budget too, then give up.
+			if (this._scheduleCountRetry()) return;
 			console.warn(`[pre-compaction-history] count fetch failed:`, err);
+			this._countLoaded = true;
 			this._total = 0;
+		} finally {
+			this._inFlight = false;
 		}
 	}
 
