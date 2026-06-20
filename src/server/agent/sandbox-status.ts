@@ -23,11 +23,57 @@ export function isBuildingImage(): boolean {
 	return _building;
 }
 
-export async function buildSandboxImage(imageName: string, projectDir: string): Promise<{ success: boolean; error?: string }> {
+function hasSandboxDockerfile(root: string): boolean {
+	return fs.existsSync(path.join(root, "docker", "Dockerfile"));
+}
+
+function ancestors(start: string): string[] {
+	const out: string[] = [];
+	let current = path.resolve(start);
+	while (true) {
+		out.push(current);
+		const parent = path.dirname(current);
+		if (parent === current) return out;
+		current = parent;
+	}
+}
+
+/**
+ * Locate Bobbit's bundled Docker sandbox context.
+ *
+ * Sandbox images are a Bobbit runtime artifact, not a user-project artifact.
+ * Manual integration tests often register temp git repos that do not contain
+ * `docker/Dockerfile`; rebuilding from those repos leaves a stale image in use.
+ */
+export function resolveSandboxDockerContext(preferredRoot?: string): string | null {
+	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		...ancestors(moduleDir),
+		...ancestors(process.cwd()),
+		...(preferredRoot ? ancestors(preferredRoot) : []),
+	];
+	const seen = new Set<string>();
+	for (const candidate of candidates) {
+		const root = path.resolve(candidate);
+		if (seen.has(root)) continue;
+		seen.add(root);
+		if (hasSandboxDockerfile(root)) return root;
+	}
+	return null;
+}
+
+export async function buildSandboxImage(imageName: string, dockerContextRoot?: string): Promise<{ success: boolean; error?: string }> {
+	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
+	if (!contextRoot) {
+		const error = "Dockerfile not found at docker/Dockerfile";
+		console.error(`[sandbox] Failed to build Docker image "${imageName}": ${error}`);
+		return { success: false, error };
+	}
+
 	_building = true;
 	try {
-		console.log(`[sandbox] Building Docker image "${imageName}" from docker/Dockerfile...`);
-		await execFileAsync("docker", ["build", "-t", imageName, "docker/"], { cwd: projectDir, timeout: 300_000 });
+		console.log(`[sandbox] Building Docker image "${imageName}" from ${path.join(contextRoot, "docker", "Dockerfile")}...`);
+		await execFileAsync("docker", ["build", "-t", imageName, path.join(contextRoot, "docker")], { cwd: contextRoot, timeout: 300_000 });
 		console.log(`[sandbox] Docker image "${imageName}" built successfully`);
 		return { success: true };
 	} catch (err: any) {
@@ -87,7 +133,7 @@ export function getHostAgentVersion(): string | null {
  * Rebuilds automatically if the version is stale or missing.
  * Returns true if the image is ready.
  */
-export async function ensureImageAgentVersion(imageName: string, projectDir: string): Promise<boolean> {
+export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string): Promise<boolean> {
 	const hostVersion = getHostAgentVersion();
 	if (!hostVersion) {
 		console.warn("[sandbox] Cannot determine host pi-coding-agent version, skipping image version check");
@@ -108,12 +154,18 @@ export async function ensureImageAgentVersion(imageName: string, projectDir: str
 		: `image missing version label, host has v${hostVersion}`;
 	console.log(`[sandbox] Rebuilding image "${imageName}": ${reason}`);
 
+	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
+	if (!contextRoot) {
+		console.error(`[sandbox] Failed to rebuild image "${imageName}": Dockerfile not found at docker/Dockerfile`);
+		return false;
+	}
+
 	_building = true;
 	try {
 		await execFileAsync(
 			"docker",
-			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, "docker/"],
-			{ cwd: projectDir, timeout: 180_000 },
+			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, path.join(contextRoot, "docker")],
+			{ cwd: contextRoot, timeout: 300_000 },
 		);
 		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion} and Bedrock headers patch ${PI_AI_BEDROCK_HEADERS_PATCH_LABEL}`);
 		return true;
@@ -126,7 +178,7 @@ export async function ensureImageAgentVersion(imageName: string, projectDir: str
 	}
 }
 
-export async function checkDockerAvailability(imageName?: string): Promise<SandboxStatus> {
+export async function checkDockerAvailability(imageName?: string, dockerContextRoot?: string): Promise<SandboxStatus> {
 	try {
 		const { stdout } = await execFileAsync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
 		const status: SandboxStatus = { available: true, dockerVersion: stdout.trim() };
@@ -136,11 +188,11 @@ export async function checkDockerAvailability(imageName?: string): Promise<Sandb
 				status.imageExists = true;
 			} catch {
 				status.imageExists = false;
-				// Check if Dockerfile exists so UI can show build instructions
-				if (fs.existsSync(path.join(process.cwd(), "docker", "Dockerfile"))) {
-					status.dockerfileExists = true;
-					status.buildCommand = `docker build -t ${imageName} docker/`;
-				}
+			}
+			const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
+			if (contextRoot) {
+				status.dockerfileExists = true;
+				status.buildCommand = `docker build -t ${imageName} ${path.join(contextRoot, "docker")}`;
 			}
 		}
 		return status;
