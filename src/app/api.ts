@@ -3203,3 +3203,78 @@ export function downPackRuntime(opts: { packId: string; runtimeId: string; proje
 export function purgePackRuntime(opts: { scope: MarketScope; packName: string; runtimeId: string; projectId?: string }): Promise<MarketResult<{ status?: string }>> {
 	return marketFetch("/api/marketplace/purge-runtime", jsonInit("POST", opts));
 }
+
+// ── Live runtime status + explicit start/stop (Hindsight UX polish, design §5.1) ──
+// These mirror the server `PackRuntimeStatus` shape served by `GET /api/pack-runtimes`
+// (runtimes/pack-runtime-supervisor.ts) — do NOT invent fields. Reading status is a
+// PURE read (the supervisor `list`/`status` never starts Docker); the ONLY Docker
+// start path is the explicit {@link startPackRuntime} call wired to a user click.
+
+/** One compose service's reported state in a {@link PackRuntimeStatus}. Mirrors the
+ *  server `PackRuntimeServiceStatus`. */
+export interface PackRuntimeServiceStatus {
+	name: string;
+	state?: string;
+	health?: string;
+}
+
+/** Live status of a managed pack runtime, mirroring the server `PackRuntimeStatus`
+ *  (runtimes/pack-runtime-supervisor.ts). `status` is the supervisor's literal state;
+ *  `docker-unavailable` means Docker is not installed/running (the runtime is
+ *  effectively stopped). `id` is the URL-safe `encodePackRuntimeId(packId,runtimeId)`. */
+export interface PackRuntimeStatus {
+	id: string;
+	packId: string;
+	packName?: string;
+	runtimeId: string;
+	title?: string;
+	description?: string;
+	status: "docker-unavailable" | "stopped" | "starting" | "running" | "unhealthy";
+	mode?: string;
+	composeProject?: string;
+	services?: PackRuntimeServiceStatus[];
+	message?: string;
+}
+
+/** GET the live status of every managed pack runtime. PURE read — never starts
+ *  Docker (the supervisor `list` only inspects). Best-effort MarketResult so the
+ *  marketplace degrades gracefully (no status strip) when the supervisor is
+ *  unavailable (503) or Docker is absent. */
+export function listPackRuntimes(projectId?: string): Promise<MarketResult<{ runtimes: PackRuntimeStatus[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/pack-runtimes${qs}`);
+}
+
+/** POST an EXPLICIT start for a managed pack runtime (`/api/pack-runtimes/:id/start`).
+ *  This is the ONLY Docker-starting path from the marketplace — it must be wired to a
+ *  user click behind the consent disclosure, never to a status/capability read or page
+ *  load. An external (non-managed) deployment answers 409 (no Docker to start) →
+ *  surfaced as `ok:false`. `mode` overrides the deployment-derived runtime mode. */
+export function startPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	const body: Record<string, unknown> = {};
+	if (opts.mode) body.mode = opts.mode;
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/start${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
+}
+
+/** POST stop for a managed pack runtime (`/api/pack-runtimes/:id/stop`). Brings the
+ *  Docker containers down (preserving data); never destructive. */
+export function stopPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/stop${qs ? `?${qs}` : ""}`, jsonInit("POST", {}));
+}
+
+/** GET recent logs for a managed pack runtime (`/api/pack-runtimes/:id/logs`). PURE
+ *  read — never starts Docker. `tail` bounds the line count. A missing-Docker install
+ *  answers 200 with `{ logs:"", status:"docker-unavailable" }`. */
+export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; projectId?: string; tail?: number }): Promise<MarketResult<{ logs: string; status?: string; message?: string }>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	if (typeof opts.tail === "number") params.set("tail", String(opts.tail));
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
+}
