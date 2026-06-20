@@ -229,12 +229,15 @@ describe("message-reducer", () => {
 		);
 	});
 
-	it("(R2) settled optimistic sorts before an independent snapshot's tail (team-session stranding)", () => {
+	it("(R2) settled optimistic survives an independent snapshot and keeps its chronological position", () => {
 		// Team-lead sessions receive independent server snapshots (status polls,
-		// task-complete refreshes). A stranded optimistic at the sentinel sits
-		// below the WHOLE snapshot — including content newer than the user's prompt.
-		// After settling, the user's prompt must NOT be dumped at the absolute
-		// bottom: it sorts before the snapshot tail.
+		// task-complete refreshes). A snapshot is a point-in-time read of the
+		// PERSISTED transcript — all its rows live in the negative SNAPSHOT_ORDER_FLOOR
+		// range and are therefore OLDER than a prompt the user just sent. The settled
+		// optimistic (re-stamped to `highestSeq + epsilon`, a small positive value)
+		// must remain VISIBLE and sort AFTER the snapshot transcript — the prompt was
+		// sent after that history (reviewer issue 2: the old `serverMaxOrder - epsilon`
+		// re-stamp wrongly forced it before the snapshot tail / into older history).
 		let s = initialState();
 		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_T", "team prompt") });
 		s = reduce(s, settleOptimistic());
@@ -253,17 +256,77 @@ describe("message-reducer", () => {
 			`settled optimistic must not stay at the tail sentinel (got ${opt!._order})`,
 		);
 		assert.ok(
-			opt!._order < tail!._order,
-			`optimistic must sort before the snapshot tail (opt=${opt!._order}, tail=${tail!._order})`,
+			opt!._order > tail!._order,
+			`optimistic must sort after the snapshot transcript (opt=${opt!._order}, tail=${tail!._order})`,
 		);
 		assert.ok(
-			s.messages.indexOf(opt!) < s.messages.indexOf(tail!),
-			"optimistic appears before the snapshot tail row",
+			s.messages.indexOf(opt!) > s.messages.indexOf(tail!),
+			"optimistic appears after the snapshot transcript (sent after that history)",
 		);
-		assert.notStrictEqual(
+	});
+
+	it("(R5) settled optimistic with the SAME text as a snapshot row stays visible (reviewer issue 1)", () => {
+		// Same-text snapshot dedup (Step 4a multiset budget) is for PENDING optimistic
+		// rows awaiting echo reconciliation. A SETTLED row must NOT consume that budget:
+		// an existing snapshot already has user "hi"; the user sends ANOTHER "hi" whose
+		// turn errors and settles; a later snapshot still carries only the OLD "hi".
+		// Pre-fix the settled "hi" was dropped by the same-text budget, violating the
+		// stays-visible contract. After the fix both "hi" rows are present.
+		let s = initialState();
+		s = reduce(s, { type: "snapshot", messages: [userMsg("srv-hi", "hi")] });
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_hi", "hi") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// A later snapshot that STILL only contains the old "hi" (the failed prompt was
+		// never persisted, so the server never echoes it).
+		s = reduce(s, { type: "snapshot", messages: [userMsg("srv-hi", "hi")] });
+		const hiRows = s.messages.filter((m) => extractText(m) === "hi");
+		assert.strictEqual(hiRows.length, 2, "both the snapshot 'hi' and the settled 'hi' must remain");
+		const opt = s.messages.find((m) => m.id === "optimistic_hi");
+		const srv = s.messages.find((m) => m.id === "srv-hi");
+		assert.ok(opt, "settled optimistic 'hi' must stay visible (not deduped by same-text budget)");
+		assert.ok(srv, "snapshot 'hi' present");
+		assert.ok(
+			opt!._order > srv!._order,
+			`settled 'hi' must sort after the snapshot 'hi' (opt=${opt!._order}, srv=${srv!._order})`,
+		);
+	});
+
+	it("(R6) failed prompt after an existing transcript stays AFTER it, not inserted into history (reviewer issue 2)", () => {
+		// Existing persisted transcript: [old user, old assistant]. The user sends a
+		// prompt that fails (no echo) and settles. A subsequent ordinary snapshot
+		// returns the SAME old transcript. The failed prompt must sort AFTER the whole
+		// transcript (it was sent after both rows) — pre-fix the `serverMaxOrder - 0.5`
+		// re-stamp inserted it BETWEEN old user and old assistant.
+		let s = initialState();
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("old-u", "old user"), assistantMsg("old-a", "old assistant")],
+		});
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_F", "failed prompt") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// Next ordinary snapshot — same old transcript, prompt still not persisted.
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("old-u", "old user"), assistantMsg("old-a", "old assistant")],
+		});
+		const opt = s.messages.find((m) => m.id === "optimistic_F");
+		const oldU = s.messages.find((m) => m.id === "old-u");
+		const oldA = s.messages.find((m) => m.id === "old-a");
+		assert.ok(opt && oldU && oldA, "all three rows must be present");
+		assert.ok(
+			s.messages.indexOf(opt!) > s.messages.indexOf(oldA!),
+			"failed prompt must sort after the old assistant (after the whole transcript)",
+		);
+		assert.ok(
+			opt!._order > oldU!._order && opt!._order > oldA!._order,
+			`failed prompt _order must exceed both transcript rows (opt=${opt!._order}, oldU=${oldU!._order}, oldA=${oldA!._order})`,
+		);
+		assert.strictEqual(
 			s.messages[s.messages.length - 1].id,
-			"optimistic_T",
-			"optimistic must not be stranded at the absolute bottom",
+			"optimistic_F",
+			"the failed prompt is the most recent action — it belongs at the bottom",
 		);
 	});
 

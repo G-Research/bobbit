@@ -265,31 +265,53 @@ A **pending** optimistic row (echo not yet arrived *and* turn not yet ended)
 is deliberately left at the sentinel. That is the legitimate in-flight case
 (§11 race row), not a strand, and the eventual echo will reconcile it.
 
-**Snapshot behaviour (why `_settled` must be durable).** A single
-`highestSeq + 0.5` settle order is not enough on its own. Independent snapshots
-— routine in team-lead sessions — land their rows in the negative
-`SNAPSHOT_ORDER_FLOOR` (`-1e9 + i`) range, so a settled row at a small positive
-order would again sort *after the entire snapshot*, re-stranding the prompt
-below content newer than it. The `snapshot` survivor pass therefore re-stamps a
-`_settled` optimistic survivor to just below the snapshot's max `_order`
-whenever it currently sorts after it — keeping the user's prompt above the
-snapshot tail rather than at the absolute bottom. This re-stamp is gated on
-`_settled === true`: **pending** (un-`_settled`) optimistic rows are left at the
-sentinel so the legitimate pending case (test (5)) is preserved. The `_settled`
-flag survives across reduces precisely so this pass can keep re-anchoring the
-row against each new snapshot.
+**Snapshot behaviour (why `_settled` must be durable).** A snapshot is a
+point-in-time read of the *persisted* transcript: every snapshot row lands in
+the negative `SNAPSHOT_ORDER_FLOOR` (`-1e9 + i`) range and is therefore older
+than a prompt the user just sent. A settled row's `highestSeq + 0.5` order is a
+small positive value, so it already sorts *after the entire snapshot* — which is
+**exactly right**: a failed prompt was sent after the persisted history, so it
+belongs after it (it is the most recent action and lands at the bottom). The
+`snapshot` survivor pass therefore leaves a `_settled` optimistic row's `_order`
+**untouched** and simply keeps it visible.
+
+> **Corrected contract (PR #827 review).** An earlier revision re-stamped the
+> settled survivor to `serverMaxOrder - 0.5` ("keep it just below the snapshot
+> tail"). That was wrong twice over: (1) for a snapshot whose rows are an
+> ordinary old transcript `[old user, old assistant]`, `serverMaxOrder - 0.5`
+> inserts the failed prompt *between* the two old rows — into older history;
+> (2) the survivor pass ran the same-text dedup budget *before* the `_settled`
+> branch, so a settled prompt sharing text with an old snapshot row was silently
+> dropped, breaking the stays-visible contract. The fix removes the re-stamp and
+> excludes `_settled` rows from the same-text dedup (that budget exists only to
+> reconcile a **pending** optimistic row against a snapshot that beat its echo).
+
+The `_settled` flag is gated against two things in the survivor pass: it skips
+the same-text multiset dedup (settled rows must stay visible, never be consumed
+by a budget meant for pending-echo reconciliation) and it is never re-stamped
+into older history. **Pending** (un-`_settled`) optimistic rows are still left at
+the sentinel so the legitimate pending case (test (5)) is preserved, and still
+participate in the same-text dedup so a snapshot that beats the echo collapses
+the duplicate. The `_settled` flag survives across reduces precisely so the pass
+can keep distinguishing a settled survivor from a pending one.
 
 **Tests.**
 
-- `tests/message-reducer.test.ts` — pure-reducer suite **R1–R4**:
+- `tests/message-reducer.test.ts` — pure-reducer suite **R1–R6**:
   - **R1** errored turn settles the prompt so a *later* live event sorts after
     it (and the row is not deleted);
-  - **R2** team-session strand — a settled row sorts before an *independent*
-    snapshot's tail (no id/text match), not below the whole snapshot;
+  - **R2** a settled row survives an *independent* snapshot (no id/text match)
+    and keeps its chronological position — it sorts *after* the negative-order
+    snapshot transcript (the prompt was sent after that persisted history);
   - **R3** settle after the echo already reconciled is a no-op (happy path
     unchanged);
   - **R4** a late server echo still reconciles a *settled* row with no
     duplicate.
+  - **R5** (PR #827 review issue 1) a settled row sharing text with a snapshot
+    row stays visible — it is not consumed by the same-text dedup budget.
+  - **R6** (PR #827 review issue 2) a failed prompt sent after an existing
+    `[old user, old assistant]` transcript stays *after* the whole transcript
+    on a subsequent same-transcript snapshot, never inserted into older history.
   - Corrected **case (5)** now asserts the *pending* contract: an optimistic
     row with no echo **and no turn-end** stays at the sentinel after a snapshot
     (previously this case enshrined the buggy permanent-tail ordering as if it
