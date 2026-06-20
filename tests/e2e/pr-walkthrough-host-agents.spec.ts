@@ -49,7 +49,7 @@ const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const PACK_ROOT = resolve(PROJECT_ROOT, "market-packs", "pr-walkthrough");
 const ROUTES_MODULE = resolve(PACK_ROOT, "lib", "routes.mjs");
 const PACK_ID = "pr-walkthrough";
-const REVIEWER_TOOLS = ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_yaml"];
+const REVIEWER_TOOLS = ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_chunk", "read_pr_walkthrough_submission_status", "finalize_pr_walkthrough_submission", "submit_pr_walkthrough_yaml"];
 
 // The canonical GitHub target the run route is launched against; matches the
 // submitted YAML's `pr` identity so submit-yaml validation passes.
