@@ -46,4 +46,36 @@ test.describe("GateSignalRenderer", () => {
 		expect(result.initialSteps.map((step: any) => step.status)).toEqual(["running", "waiting"]);
 		expect(result.finalStatus).toBeUndefined();
 	});
+
+	for (const finalStatus of ["passed", "failed"] as const) {
+		test(`passes terminal verification.steps as initialSteps for completed ${finalStatus} signals`, async ({ page }) => {
+			const terminalSteps = [
+				{ name: "Build", type: "command", status: "passed", phase: 0, passed: true },
+				{ name: "Optional deploy", type: "command", status: "skipped", phase: 1, passed: true, skipped: true },
+			];
+
+			const result = await page.evaluate(({ status, steps }) => (window as any).__renderGateSignal(
+				{ gate_id: "implementation" },
+				{
+					signal: {
+						id: `signal-${status}`,
+						goalId: "goal-terminal",
+						gateId: "implementation",
+						status,
+						verification: {
+							status,
+							steps,
+						},
+					},
+				},
+			), { status: finalStatus, steps: terminalSteps });
+
+			expect(result.hasLive).toBe(true);
+			expect(result.goalId).toBe("goal-terminal");
+			expect(result.gateId).toBe("implementation");
+			expect(result.signalId).toBe(`signal-${finalStatus}`);
+			expect(result.finalStatus).toBe(finalStatus);
+			expect(result.initialSteps).toEqual(terminalSteps);
+		});
+	}
 });

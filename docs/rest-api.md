@@ -73,6 +73,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ tail, blocks }` — `tail` is the delimited, fenced dynamic-context region appended to the system-prompt tail (or `""`), `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. `404` for unknown session; `{ tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
+| `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
 
 ### Archived session list and query search
 
@@ -1059,7 +1060,7 @@ Returns the latest signal only. Content body is replaced with `hasContent` + `co
 }
 ```
 
-Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps. Completed signals keep their persisted final results.
+Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Completed signals keep their persisted final results, including each step's explicit terminal `status`, `phase`, and `skipped` flag. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps.
 
 **`GET /api/goals/:id/tasks?view=summary`**
 
@@ -1080,6 +1081,39 @@ Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`,
   }]
 }
 ```
+
+### Gate signal endpoint
+
+**`POST /api/goals/:id/gates/:gateId/signal`** records a new gate signal and starts verification asynchronously. The response includes the signal id, gate id, goal id, current verification status, and the initialized step snapshot.
+
+Verification step rows preserve the same durable fields used by gate inspection and history:
+
+- `phase` — copied from the workflow step so clients can group and order phases;
+- `status` — explicit lifecycle or terminal status (`waiting`, `running`, `passed`, `failed`, or `skipped`);
+- `skipped` — `true` when a step was intentionally skipped, including disabled optional steps and downstream phase skips.
+
+Fresh responses return the initialized rows from the verification harness. Cached same-commit responses return the persisted terminal `verification.steps[]` from the prior signal rather than rebuilding from workflow definitions, so cached cards retain skipped and phase metadata.
+
+```json
+{
+  "id": "sig-22",
+  "gateId": "implementation",
+  "goalId": "goal-1",
+  "status": "running",
+  "steps": [
+    { "name": "Type check", "type": "command", "phase": 0, "status": "running", "passed": false },
+    { "name": "Unit tests", "type": "command", "phase": 1, "status": "waiting", "passed": false }
+  ]
+}
+```
+
+A completed or cached signal may include terminal rows such as:
+
+```json
+{ "name": "Later review", "type": "llm-review", "phase": 1, "status": "skipped", "skipped": true, "passed": false }
+```
+
+Skipped rows are intentional non-runs and are ignored by aggregate pass calculation; consumers should render them distinctly instead of inferring pass/fail from `passed` alone.
 
 ### Sign-off endpoint
 
@@ -1305,7 +1339,7 @@ Pass `step=<name>` to scope the snapshot to a single verification step. When set
 }
 ```
 
-Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` means it will not run because an earlier phase failed. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
+Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` is an active-snapshot derived state for a step blocked by an earlier phase failure; terminal persisted rows use `status: "skipped"` with `skipped: true` and their original `phase`. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
 
 Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
 

@@ -208,6 +208,34 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 1);
 	});
 
+	it("redrains a rejected steer when abort already settled idle", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const steer = mock.fn(() => pending.promise);
+		const prompt = mock.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt, steer },
+		});
+
+		const steerPromise = manager.deliverLiveSteer(session.id, "redrain rejected steer");
+
+		assert.equal(steer.mock.callCount(), 1);
+		assert.equal(session.promptQueue.length, 0);
+		assert.deepEqual(session.inFlightSteerTexts, ["redrain rejected steer"]);
+
+		// Model the race where abort's agent_end has already returned the session to
+		// idle and run its drain before the in-flight steer RPC rejects.
+		session.status = "idle";
+		session.lastTurnErrored = false;
+		pending.resolve({ success: false, error: "steer rejected after idle" });
+		await assert.rejects(steerPromise, /steer rejected after idle/);
+
+		assert.equal(prompt.mock.callCount(), 1, "recovered steer should redrain without a fresh user prompt");
+		assert.equal(prompt.mock.calls[0].arguments[0], "redrain rejected steer");
+		assert.equal(session.promptQueue.length, 0);
+	});
+
 	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

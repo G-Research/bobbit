@@ -52,23 +52,40 @@ a stepper clamped to `1..10` that sets the **system ceiling** for nesting depth
 
 ### 2. Per-goal proposal controls
 
-In the goal proposal modal's toggle row (beside Sandbox / Auto-start team /
-Enable QA Testing):
+These controls live in a dedicated **Sub-goals** tab
+(`data-testid="goal-proposal-tab-subgoals"`), split into two clearly separated
+sections so the operator never confuses "where does this goal live" with "can
+this goal have children of its own":
+
+**Section 1 — Attach to an existing goal** (`data-testid="goal-form-attach-section"`).
+The **Parent Goal** picker (`data-testid="goal-form-parent-picker"`) chooses
+where the *new* goal lives: nested beneath an existing goal, or left as `None`
+for a top-level goal. This is the surface the human operator uses to manually
+attach a child — it does **not** change the parent's own settings. The picker
+also surfaces **host-eligibility before submit** (see below) so a dead-end
+parent is visible up front rather than only as a server reject.
+
+**Section 2 — Allow this new goal to host sub-goals**
+(`data-testid="goal-form-host-section"`). These govern the goal *being created*,
+not the parent selected above:
 
 - **Allow subgoals** (`data-testid="goal-form-subgoals-toggle"`) — lets this
-  goal's team-lead spawn children.
-- **Max depth** (`data-testid="goal-form-max-depth"`) — shown only when
-  Allow-subgoals is ON; defaults to the system ceiling and is clamped to
-  `[1, systemCeiling]`.
+  new goal's team-lead spawn children later. An inline help line
+  (`data-testid="goal-form-subgoals-toggle-help"`) reminds the operator this is
+  about the new goal, and that an *existing* parent is enabled from its
+  dashboard → Children tab instead.
+- **Max nesting depth** (`data-testid="goal-form-max-depth"`) — shown only when
+  Allow-subgoals is ON. See [Max-depth semantics](#max-depth-semantics) — it is
+  the absolute deepest level allowed in the tree, defaulting to the inherited
+  ceiling.
 
-Both render **only while the system Subgoals preference is ON**.
+Both sections render **only while the system Subgoals preference is ON**.
 
-These controls (and the parent-goal picker) live in a dedicated **Sub-goals**
-tab (`data-testid="goal-proposal-tab-subgoals"`). The tab's visibility — and the
-equivalent non-tabbed parent-picker row — is a **pure function of the system
-Subgoals preference**: present when the flag is ON (for both top-level proposals
-and child proposals that already carry a `parentGoalId`) and absent when it is
-OFF, regardless of `parentGoalId`. Team-lead `propose_goal` calls only auto-fill
+The tab's visibility — and the equivalent non-tabbed parent-picker row — is a
+**pure function of the system Subgoals preference**: present when the flag is ON
+(for both top-level proposals and child proposals that already carry a
+`parentGoalId`) and absent when it is OFF, regardless of `parentGoalId`.
+Team-lead `propose_goal` calls only auto-fill
 `parentGoalId` when the current goal can spawn children under the current system
 and per-goal subgoal policy; otherwise an omitted `parentGoalId` stays omitted
 and accepting the proposal creates a top-level goal. Earlier the visibility also
@@ -81,6 +98,62 @@ The proposal modal also exposes **Workflow** and **Roles** tabs
 (`goal-proposal-tab-workflow` / `goal-proposal-tab-roles`) for authoring a
 goal-scoped inline workflow snapshot and per-goal role overrides (see
 [Custom workflows & roles](#custom-per-goal-workflows--roles)).
+
+### Parent-picker host-eligibility
+
+A goal can be created with **Allow subgoals OFF** (the default per PR #497). Such
+a goal can never host children — so picking it as a Parent Goal would fail at
+submit with a confusing error. To make the dead-end visible *before* submit, the
+parent picker pre-computes each candidate's host-eligibility client-side
+(`src/app/subgoal-eligibility.ts`, a mirror of the server's
+`subgoal-nesting-limit.ts`) and:
+
+- **Suffixes ineligible options** in the dropdown — `(sub-goals off)` for a goal
+  with `subgoalsAllowed: false`, or `(at nesting cap)` for one with no room left
+  below it.
+- **Shows an inline warning** (`data-testid="goal-form-parent-ineligible-warning"`)
+  when an ineligible parent is selected, naming the remediation (open the
+  parent's dashboard → Children tab and turn on "Allow sub-goals", or pick a
+  shallower parent).
+
+This is **UX pre-communication only** — it mirrors but never relaxes the
+server gate. The server still authoritatively re-checks on submit.
+
+### Enabling sub-goals on an existing goal
+
+A goal created with Allow-subgoals OFF is **not** permanently barred from
+hosting children. The goal dashboard's **Children** tab renders a **Sub-goal
+settings** card (`data-testid="goal-subgoal-settings"`, only when the system
+Subgoals flag is ON) that lets a human:
+
+- **Toggle "Allow sub-goals"** (`data-testid="goal-subgoal-settings-allow-toggle"`)
+  to turn child-hosting on (or off) after creation. This is the fix for the
+  "Parent goal doesn't allow sub-goals" dead-end: flip it on here, then the goal
+  becomes a valid Parent Goal.
+- **Adjust Max nesting depth** (`data-testid="goal-subgoal-settings-depth"`,
+  with `-`/`+` steppers) within the same inherited band the proposal form
+  enforces.
+
+If the goal already sits at the inherited nesting cap, the card shows an
+at-cap notice (`data-testid="goal-subgoal-settings-at-cap"`) instead — there is
+no room below it for children regardless of the toggle.
+
+These persist via `PATCH /api/goals/:id/policy` (the goal feed echoes the new
+values so they survive a reload).
+
+**Enabling sub-goals co-persists a valid depth.** Turning the toggle ON does
+not always PATCH `{ subgoalsAllowed: true }` alone: if the goal's stored
+`maxNestingDepth` is missing, stale, or outside the currently valid
+`[minDepth, maxDepth]` band, the toggle also sends the clamped `depthValue`
+(`{ subgoalsAllowed: true, maxNestingDepth: depthValue }`). Without this the
+goal could be flagged sub-goals-allowed while keeping a too-low cap that still
+refuses children — the toggle would appear to work but the dead-end would
+persist, and the UI's clamped display would silently disagree with the stored
+value. When the stored depth is already valid the toggle leaves it untouched. The two sub-goal fields
+(`subgoalsAllowed` / `maxNestingDepth`) are **operator-class** authz — a
+verified human cookie is accepted — so the human-driven UI can flip them, while
+the orchestration fields on the same endpoint stay team-lead-only (see
+[Security model](#security-model)).
 
 ### Children tools granted to the team-lead
 
@@ -121,9 +194,61 @@ spawn path.
   never create a subgoals-allowed child that would itself violate the limit.
 
 Enforcement funnels through one pure helper (`checkCanSpawnChild` in
-`subgoal-nesting-limit.ts`) used by both spawn paths. Refusals are
-`403 SUBGOALS_DISABLED` or `403 NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}`.
+`subgoal-nesting-limit.ts`) used by both spawn paths. Refusals carry one of
+three distinct codes (`403` on the spawn routes, `422` on `POST /api/goals`):
+
+- **`SUBGOALS_DISABLED`** — the **system** preference is OFF. This is the
+  master gate and always wins, even when the parent also disallows sub-goals.
+- **`PARENT_SUBGOALS_DISABLED`** — the system pref is ON but **this specific
+  parent** carries `subgoalsAllowed: false`. The message names the parent
+  (`Parent goal "<title>" doesn't allow sub-goals`) so the UI can offer to flip
+  its policy. Kept distinct from `SUBGOALS_DISABLED` precisely because reusing
+  the system-off string made a per-goal opt-out look like a broken system
+  setting. The wording is aligned across all three blocking sites
+  (`server.ts`, `nested-goal-routes.ts`, `verification-harness.ts`).
+- **`NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}`** — depth cap reached.
+
 UI controls are UX only; the server is the authority.
+
+### Max-depth semantics
+
+"Max nesting depth" (both the proposal control and the existing-goal settings
+card) is the **absolute deepest nesting level allowed in this tree** — it equals
+the server's stored `maxNestingDepth`, *not* a count of levels relative to the
+goal. The relationship the help text spells out:
+
+```
+levels of sub-goals allowed below this goal = maxNestingDepth − (this goal's depth)
+```
+
+- A **top-level goal** (depth 1) defaults to the full **system cap** (e.g. 3),
+  so it can host up to 2 levels below it.
+- The control's range is `[thisDepth + 1, inheritedCap]` — it must leave at
+  least one level for children, and can never exceed the inherited cap.
+- The **inherited cap** is the system ceiling for a root goal, but for a child
+  it is the **parent's effective cap** (`system ∩ parent.own ∩ … up the tree`).
+  A descendant can only **tighten**, never widen past an ancestor — so a parent
+  capped at 2 will never let a child be configured at 3.
+- When only one value fits (`thisDepth + 1 == inheritedCap`), the stepper is
+  **locked** and the help text explains why ("only one value fits, so it's
+  fixed"). Whenever a valid range exists, the `-`/`+` buttons step through it.
+- **The displayed value is the value submitted.** Both controls derive their
+  number from `resolveDepthControl` (`src/app/subgoal-eligibility.ts`), whose
+  `depthValue` is the configured override **clamped into `[minDepth, maxDepth]`**
+  (or the full cap when untouched). The stepper renders this same `depthValue`
+  and every change PATCHes it, so what the user sees can never diverge from what
+  is persisted — even when the stored override is stale or out of range, the
+  control shows the clamped value and submits *that*. The server re-clamps on
+  write regardless (see below), so the UI is a faithful mirror, never the
+  authority.
+
+Because the effective cap is recomputed dynamically against the live ancestor
+chain, **tightening an ancestor's cap retroactively bites already-created
+descendants**: a child whose stored `maxNestingDepth` is stale (e.g. 3) is still
+re-clamped against the now-lowered ancestor (e.g. 2) at spawn time. The proposal
+form, the settings card, and the server clamp all share this rule via the
+`effectiveMaxNestingDepth` helpers (server) / `effectiveMaxNestingDepthOf`
+(client).
 
 ## Sidebar hierarchy
 
@@ -334,12 +459,22 @@ The mutating Children endpoints are guarded server-side by
 `authorizeChildrenMutation` (`children-mutation-authz.ts`), split into two
 authorization classes to shrink the blast radius:
 
-- **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`,
-  `policy`. The autonomous team-lead verbs; the web UI never issues them. These
-  are **team-lead-only** and the human cookie does **not** bypass.
-- **`operator`** — `pause`, `resume`, mutation `decision`, `archive-child`. The
-  human-in-the-loop verbs the UI drives. A verified `bobbit_session` cookie is
-  accepted (human/UI), otherwise the same team-lead match applies.
+- **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`, and
+  `policy` bodies carrying `divergencePolicy` / `maxConcurrentChildren`. The
+  autonomous team-lead verbs; the web UI never issues them. These are
+  **team-lead-only** and the human cookie does **not** bypass.
+- **`operator`** — `pause`, `resume`, mutation `decision`, `archive-child`, and
+  `policy` bodies carrying **exclusively** the per-goal sub-goal opt-in fields
+  (`subgoalsAllowed` / `maxNestingDepth` — the goal dashboard's Sub-goal
+  settings card). The human-in-the-loop verbs the UI drives. A verified
+  `bobbit_session` cookie is accepted (human/UI), otherwise the same team-lead
+  match applies.
+
+`PATCH /api/goals/:id/policy` is classified **per request body**: a body that
+mixes in *any* orchestration field is treated as orchestration (the stricter
+class wins), so the cookie path can never piggyback an orchestration change
+behind a sub-goal toggle. A body with no recognized field is rejected
+`400 NO_POLICY_FIELDS`.
 
 ### Per-session capability secret
 
@@ -398,6 +533,8 @@ per-session containers.
 | Persisted goal fields | `src/server/agent/goal-store.ts` |
 | Children tool definitions | `defaults/tools/children/*`, policy in `defaults/tool-group-policies.yaml` |
 | Proposal subgoal controls + Workflow/Roles tabs | `src/app/proposal-panels.ts` |
+| Client-side parent host-eligibility mirror | `src/app/subgoal-eligibility.ts` |
+| Existing-goal Sub-goal settings card + policy PATCH helper | `src/app/goal-dashboard-children-tab.ts`, `api.ts` (`patchGoalSubgoalPolicy`) |
 | System pref toggle + max-depth stepper | `src/app/settings-page.ts`, gate helper `subgoals-flag.ts` |
 | Sidebar nesting + descendant badge | `src/app/sidebar-nesting.ts`, `sidebar-spawned-children.ts`, `render-helpers.ts` |
 | Plan tab (DAG, per-node state) | `src/app/goal-dashboard-plan-tab.ts`, `plan-synthesis.ts`, `plan-node-state.ts` |

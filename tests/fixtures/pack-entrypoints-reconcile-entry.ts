@@ -14,7 +14,8 @@
 //      openPackPanel serves the pack-addressed bearer-only /panels/ endpoint.
 //   5. uninstall reconcile drops the route + launchers (a later navigate no-ops).
 //   6. duplicate routeId across packs is rejected (lookupPackRoute undefined).
-//   7. NO auto-invoke on mount: reconcile alone hits no /panels/ endpoint + no hash.
+//   7. legacy command-palette/git-widget launchers are ignored.
+//   8. NO auto-invoke on mount: reconcile alone hits no /panels/ endpoint + no hash.
 import {
 	registerPackEntrypoints,
 	reconcilePackEntrypointsForProject,
@@ -30,7 +31,7 @@ import { registerPackPanels, setLauncherHostFactory } from "../../src/app/pack-p
 
 type EntrypointWire = {
 	id: string;
-	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	kind: "composer-slash" | "session-menu" | "route" | "command-palette" | "git-widget-button";
 	label?: string;
 	routeId?: string;
 	target?: { panelId?: string; route?: string; params?: Record<string, unknown>; action?: string };
@@ -41,8 +42,9 @@ type PackWire = { packId: string; packName: string; panels: Array<{ id: string; 
 
 const fetchCalls: string[] = [];
 
-// THIRD-PARTY pack (not artifacts / pr-walkthrough): a deep-link route + a panel
-// launcher + a route launcher. Proves the surface is generic.
+// THIRD-PARTY pack (not artifacts / pr-walkthrough): a deep-link route + a
+// composer-slash launcher + session-menu route/panel/spawn launchers. Proves the
+// surface is generic.
 const THIRDPARTY_PACKS: PackWire[] = [
 	{
 		packId: "thirdparty_pack",
@@ -52,13 +54,16 @@ const THIRDPARTY_PACKS: PackWire[] = [
 		entrypoints: [
 			{ id: "tp.route", kind: "route", routeId: "thirdparty.route", target: { panelId: "thirdparty.viewer" }, paramKeys: ["itemId"], listName: "tp-route" },
 			{ id: "tp.slash", kind: "composer-slash", label: "Open Third-Party", target: { panelId: "thirdparty.viewer" }, listName: "tp-slash" },
-			{ id: "tp.navlaunch", kind: "command-palette", label: "Deep-link TP", target: { route: "thirdparty.route" }, listName: "tp-navlaunch" },
-			{ id: "tp.gitbtn", kind: "git-widget-button", label: "TP Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-gitbtn" },
+			{ id: "tp.navlaunch", kind: "session-menu", label: "Deep-link TP", target: { route: "thirdparty.route" }, listName: "tp-navlaunch" },
+			{ id: "tp.menubtn", kind: "session-menu", label: "TP Menu Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-menubtn" },
+			// Legacy launcher kinds must be ignored after the breaking schema change.
+			{ id: "tp.palette-old", kind: "command-palette", label: "Old Palette", target: { route: "thirdparty.route" }, listName: "tp-palette-old" },
+			{ id: "tp.git-old", kind: "git-widget-button", label: "Old Git Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-git-old" },
 			// A SPAWN launcher (design pr-walkthrough-launch-ux.md §3.1): click → call the
 			// pack `run` route, then open `panelId` in the returned childSessionId. It also
 			// carries a `panelId`, so the registry's `action`-first detection must keep it
 			// off the openPackPanel path (T-10/R3).
-			{ id: "tp.spawn", kind: "git-widget-button", label: "TP Spawn", target: { action: "spawn", route: "run", panelId: "thirdparty.viewer" }, listName: "tp-spawn" },
+			{ id: "tp.spawn", kind: "session-menu", label: "TP Spawn", target: { action: "spawn", route: "run", panelId: "thirdparty.viewer" }, listName: "tp-spawn" },
 		],
 	},
 ];

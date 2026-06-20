@@ -35,6 +35,30 @@ function liveMessageEnd(seq: number, message: any): Action {
 	return { type: "live-event", frame: { type: "message_end", message }, seq, ts: 0 };
 }
 
+/**
+ * Turn-termination settle action. Dispatched by remote-agent.ts from BOTH the
+ * `error` and `agent_end` handlers when a turn ends. It must re-stamp any
+ * unreconciled `_origin:"optimistic"` row's `_order` out of the far-future tail
+ * sentinel into chronological position (it stays visible — the user needs to see
+ * what they sent).
+ *
+ * Cast through `unknown` so this file still transpiles BEFORE the reducer's
+ * `Action` union is extended (tsx does not type-check; `npm run check` only
+ * covers `src/`). The (R*) tests below assert the reducer actually HANDLES the
+ * action — pre-fix `reduce` falls through its switch and returns `undefined`,
+ * which the first `assert.ok(s, …)` after the dispatch catches.
+ */
+function settleOptimistic(): Action {
+	return { type: "settle-optimistic" } as unknown as Action;
+}
+
+/**
+ * Threshold separating a SETTLED optimistic row (re-stamped into chronological
+ * position — a small/normal `_order`) from a PENDING one still pinned at the
+ * far-future tail sentinel (`OPTIMISTIC_ORDER_BASE + tick ≈ MAX_SAFE_INTEGER`).
+ */
+const OPTIMISTIC_SENTINEL_FLOOR = Number.MAX_SAFE_INTEGER - 2_000_000_000;
+
 function applyAll(actions: Action[]): ReducerState {
 	let s = initialState();
 	for (const a of actions) s = reduce(s, a);
@@ -65,6 +89,92 @@ const toolResultMsg = (id: string, callId: string, text: string) => ({
 	content: [{ type: "text", text }],
 	timestamp: 0,
 });
+
+// --- Compaction ordering helpers (failing-first repro for the live-vs-reload
+// ordering divergence; see docs/design/fix-compaction-ordering.md §2–§3). ---
+const COMPACTION_TOOL = "__compaction_summary";
+const compactionArgs = (state: string, compactionId?: string) => ({
+	schemaVersion: 1,
+	trigger: "manual",
+	state,
+	success: true,
+	timestamp: "2026-05-12T00:00:01Z",
+	tokensBefore: 50_000,
+	tokensAfter: 5_000,
+	reductionPct: 90,
+	...(compactionId ? { compactionId } : {}),
+});
+// Live in-progress card (stable id `compact_active`, NO compactionId yet —
+// mirrors remote-agent's buildInProgressCompactionPayload).
+const liveInProgressCard = () => ({
+	id: "compact_active",
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: "compaction-summary:compact_active",
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("in-progress"),
+	}],
+});
+// Live terminal card (keeps id `compact_active` for DOM continuity, gains
+// `compactionId` only on the deferred transition).
+const liveTerminalCard = (compactionId: string) => ({
+	id: "compact_active",
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: "compaction-summary:compact_active",
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("complete", compactionId),
+	}],
+});
+const liveTerminalToolResult = () => ({
+	role: "toolResult",
+	toolCallId: "compaction-summary:compact_active",
+	toolName: COMPACTION_TOOL,
+	isError: false,
+	content: [{ type: "text", text: "ok" }],
+	timestamp: 0,
+});
+// Persisted sidecar card + paired toolResult as spliced (PREPENDED) into the
+// post-compaction snapshot by mergeCompactionSidecarIntoMessages. id = sidecar
+// compactionId (NOT `compact_active`); no explicit `_order`, so the reducer
+// stamps SNAPSHOT_ORDER_FLOOR+i (negative → before the preserved tail).
+const persistedSidecarCard = (compactionId: string) => ({
+	id: compactionId,
+	role: "assistant",
+	timestamp: 0,
+	content: [{
+		type: "toolCall",
+		id: `compaction-summary:${compactionId}`,
+		name: COMPACTION_TOOL,
+		arguments: compactionArgs("complete", compactionId),
+	}],
+});
+const persistedSidecarToolResult = (compactionId: string) => ({
+	role: "toolResult",
+	toolCallId: `compaction-summary:${compactionId}`,
+	toolName: COMPACTION_TOOL,
+	isError: false,
+	content: [{ type: "text", text: "ok" }],
+	timestamp: 0,
+});
+const isCompactionCard = (m: any): boolean =>
+	m?.role === "assistant"
+	&& Array.isArray(m.content)
+	&& m.content.some((c: any) => c?.type === "toolCall" && c?.name === COMPACTION_TOOL);
+const isCompactionToolResult = (m: any): boolean =>
+	m?.role === "toolResult" && m?.toolName === COMPACTION_TOOL;
+// Normalised position key: collapses the live (`compact_active`) vs persisted
+// (sidecar id) card identities to a single token so live and reload sequences
+// compare equal regardless of which surface survived.
+const orderKey = (m: any): string => {
+	if (isCompactionCard(m)) return "compaction-card";
+	if (isCompactionToolResult(m)) return "compaction-toolResult";
+	return String(m.id);
+};
 
 describe("message-reducer", () => {
 	it("(1) in-order live events", () => {
@@ -120,19 +230,28 @@ describe("message-reducer", () => {
 		);
 	});
 
-	it("(5) snapshot + optimistic survivor", () => {
+	it("(5) PENDING optimistic (no turn-end) survives a snapshot at the tail sentinel", () => {
+		// Corrected contract: an optimistic row whose server echo has NOT yet
+		// arrived AND whose turn has NOT terminated stays pinned at the far-future
+		// tail sentinel, so the eventual `live-event` echo can reconcile it by
+		// id/text (cases 6/7). This is the LEGITIMATE pending case — it is NOT a
+		// strand. Only turn-termination (`settle-optimistic`, cases R1/R2)
+		// re-stamps an UNRECONCILED optimistic row into chronological position.
 		const opt = userMsg("optimistic_1", "hi");
 		const srv = userMsg("srv1", "hello");
 		const s = applyAll([
 			{ type: "optimistic-prompt", message: opt },
 			{ type: "snapshot", messages: [srv] },
 		]);
-		// Snapshot row first; optimistic row tail-positioned.
+		// Snapshot row first; pending optimistic row stays tail-positioned.
 		assert.strictEqual(s.messages.length, 2);
 		assert.strictEqual(s.messages[0].id, "srv1");
 		assert.strictEqual(s.messages[0]._order, SNAPSHOT_ORDER_FLOOR);
 		assert.strictEqual(s.messages[1].id, "optimistic_1");
-		assert.ok(s.messages[1]._order > Number.MAX_SAFE_INTEGER - 1_000_000_000);
+		assert.ok(
+			s.messages[1]._order > OPTIMISTIC_SENTINEL_FLOOR,
+			"pending optimistic (no turn-end) must remain at the tail sentinel",
+		);
 	});
 
 	it("(6) optimistic → echo (id match)", () => {
@@ -155,6 +274,175 @@ describe("message-reducer", () => {
 		assert.strictEqual(s.messages.length, 1);
 		assert.strictEqual(s.messages[0].id, "srv1");
 		assert.strictEqual(s.messages[0]._order, 1);
+	});
+
+	// --- Stranded-optimistic regression suite (settle-on-turn-end) ---
+	// Repro of the live bug (session 3d8bdbe4…): a prompt sent while idle whose
+	// turn ERRORS before the server echoes it back stays pinned at the optimistic
+	// tail sentinel (≈ MAX_SAFE_INTEGER) forever, so it sorts AFTER every later
+	// server message and renders stranded at the bottom of the transcript. The
+	// fix: a `settle-optimistic` action dispatched on turn termination re-stamps
+	// the unreconciled optimistic row into chronological position. These tests
+	// FAIL before the fix (the reducer returns `undefined` for the unknown
+	// action) and pass after.
+
+	it("(R1) errored turn settles the optimistic prompt so a LATER live event sorts after it", () => {
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_A", "A") });
+		// Sanity: before turn-end it sits at the far-future tail sentinel.
+		const pending = s.messages.find((m) => m.id === "optimistic_A");
+		assert.ok(pending && pending._order > OPTIMISTIC_SENTINEL_FLOOR, "optimistic starts at the tail sentinel");
+		// Turn terminates (immediate model 404) WITHOUT a server user echo.
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// A later, independent server message for this session.
+		s = reduce(s, liveMessageEnd(5, assistantMsg("a-late", "later reply")));
+		const opt = s.messages.find((m) => m.id === "optimistic_A");
+		const late = s.messages.find((m) => m.id === "a-late");
+		assert.ok(opt, "optimistic row must remain visible (not deleted)");
+		assert.ok(late, "later server row present");
+		assert.ok(
+			opt!._order < OPTIMISTIC_SENTINEL_FLOOR,
+			`optimistic must leave the tail sentinel after the turn ends (got ${opt!._order})`,
+		);
+		assert.ok(
+			opt!._order < late!._order,
+			`optimistic must sort BEFORE the later live event (opt=${opt!._order}, late=${late!._order})`,
+		);
+		assert.ok(
+			s.messages.indexOf(opt!) < s.messages.indexOf(late!),
+			"chronological index order: prompt then later reply",
+		);
+	});
+
+	it("(R2) settled optimistic survives an independent snapshot and keeps its chronological position", () => {
+		// Team-lead sessions receive independent server snapshots (status polls,
+		// task-complete refreshes). A snapshot is a point-in-time read of the
+		// PERSISTED transcript — all its rows live in the negative SNAPSHOT_ORDER_FLOOR
+		// range and are therefore OLDER than a prompt the user just sent. The settled
+		// optimistic (re-stamped to `highestSeq + epsilon`, a small positive value)
+		// must remain VISIBLE and sort AFTER the snapshot transcript — the prompt was
+		// sent after that history (reviewer issue 2: the old `serverMaxOrder - epsilon`
+		// re-stamp wrongly forced it before the snapshot tail / into older history).
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_T", "team prompt") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// Independent snapshot whose rows do NOT match the optimistic by id or text.
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("srv-a", "unrelated head"), assistantMsg("srv-b", "unrelated tail")],
+		});
+		const opt = s.messages.find((m) => m.id === "optimistic_T");
+		const tail = s.messages.find((m) => m.id === "srv-b");
+		assert.ok(opt, "optimistic must survive the independent snapshot (not deleted)");
+		assert.ok(tail, "snapshot tail row present");
+		assert.ok(
+			opt!._order < OPTIMISTIC_SENTINEL_FLOOR,
+			`settled optimistic must not stay at the tail sentinel (got ${opt!._order})`,
+		);
+		assert.ok(
+			opt!._order > tail!._order,
+			`optimistic must sort after the snapshot transcript (opt=${opt!._order}, tail=${tail!._order})`,
+		);
+		assert.ok(
+			s.messages.indexOf(opt!) > s.messages.indexOf(tail!),
+			"optimistic appears after the snapshot transcript (sent after that history)",
+		);
+	});
+
+	it("(R5) settled optimistic with the SAME text as a snapshot row stays visible (reviewer issue 1)", () => {
+		// Same-text snapshot dedup (Step 4a multiset budget) is for PENDING optimistic
+		// rows awaiting echo reconciliation. A SETTLED row must NOT consume that budget:
+		// an existing snapshot already has user "hi"; the user sends ANOTHER "hi" whose
+		// turn errors and settles; a later snapshot still carries only the OLD "hi".
+		// Pre-fix the settled "hi" was dropped by the same-text budget, violating the
+		// stays-visible contract. After the fix both "hi" rows are present.
+		let s = initialState();
+		s = reduce(s, { type: "snapshot", messages: [userMsg("srv-hi", "hi")] });
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_hi", "hi") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// A later snapshot that STILL only contains the old "hi" (the failed prompt was
+		// never persisted, so the server never echoes it).
+		s = reduce(s, { type: "snapshot", messages: [userMsg("srv-hi", "hi")] });
+		const hiRows = s.messages.filter((m) => extractText(m) === "hi");
+		assert.strictEqual(hiRows.length, 2, "both the snapshot 'hi' and the settled 'hi' must remain");
+		const opt = s.messages.find((m) => m.id === "optimistic_hi");
+		const srv = s.messages.find((m) => m.id === "srv-hi");
+		assert.ok(opt, "settled optimistic 'hi' must stay visible (not deduped by same-text budget)");
+		assert.ok(srv, "snapshot 'hi' present");
+		assert.ok(
+			opt!._order > srv!._order,
+			`settled 'hi' must sort after the snapshot 'hi' (opt=${opt!._order}, srv=${srv!._order})`,
+		);
+	});
+
+	it("(R6) failed prompt after an existing transcript stays AFTER it, not inserted into history (reviewer issue 2)", () => {
+		// Existing persisted transcript: [old user, old assistant]. The user sends a
+		// prompt that fails (no echo) and settles. A subsequent ordinary snapshot
+		// returns the SAME old transcript. The failed prompt must sort AFTER the whole
+		// transcript (it was sent after both rows) — pre-fix the `serverMaxOrder - 0.5`
+		// re-stamp inserted it BETWEEN old user and old assistant.
+		let s = initialState();
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("old-u", "old user"), assistantMsg("old-a", "old assistant")],
+		});
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_F", "failed prompt") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		// Next ordinary snapshot — same old transcript, prompt still not persisted.
+		s = reduce(s, {
+			type: "snapshot",
+			messages: [userMsg("old-u", "old user"), assistantMsg("old-a", "old assistant")],
+		});
+		const opt = s.messages.find((m) => m.id === "optimistic_F");
+		const oldU = s.messages.find((m) => m.id === "old-u");
+		const oldA = s.messages.find((m) => m.id === "old-a");
+		assert.ok(opt && oldU && oldA, "all three rows must be present");
+		assert.ok(
+			s.messages.indexOf(opt!) > s.messages.indexOf(oldA!),
+			"failed prompt must sort after the old assistant (after the whole transcript)",
+		);
+		assert.ok(
+			opt!._order > oldU!._order && opt!._order > oldA!._order,
+			`failed prompt _order must exceed both transcript rows (opt=${opt!._order}, oldU=${oldU!._order}, oldA=${oldA!._order})`,
+		);
+		assert.strictEqual(
+			s.messages[s.messages.length - 1].id,
+			"optimistic_F",
+			"the failed prompt is the most recent action — it belongs at the bottom",
+		);
+	});
+
+	it("(R3) settle after the echo already reconciled is a no-op (happy path unchanged)", () => {
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") });
+		s = reduce(s, liveMessageEnd(1, userMsg("optimistic_1", "hi"))); // id-match reconcile
+		assert.strictEqual(s.messages.length, 1);
+		assert.strictEqual(s.messages[0]._origin, "server");
+		const before = s.messages.map((m) => ({ id: m.id, order: m._order, origin: m._origin }));
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		const after = s.messages.map((m) => ({ id: m.id, order: m._order, origin: m._origin }));
+		assert.deepStrictEqual(after, before, "settle must not disturb an already-reconciled transcript");
+	});
+
+	it("(R4) a late server echo still reconciles a SETTLED optimistic row (no duplicate)", () => {
+		// Settle re-stamps `_order` only — it must preserve `_origin:"optimistic"`
+		// and the `optimistic_` id so a late, against-the-odds server echo can
+		// still reconcile in place instead of stacking a duplicate.
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") });
+		s = reduce(s, settleOptimistic());
+		assert.ok(s, "settle-optimistic must be a handled reducer action (returned state)");
+		s = reduce(s, liveMessageEnd(3, userMsg("srv1", "hi"))); // text-fallback match
+		const optimisticRows = s.messages.filter((m) => m._origin === "optimistic");
+		assert.strictEqual(optimisticRows.length, 0, "settled optimistic reconciled away by the echo");
+		const hi = s.messages.filter((m) => extractText(m) === "hi");
+		assert.strictEqual(hi.length, 1, "no duplicate user row after the late echo");
+		assert.strictEqual(hi[0].id, "srv1");
 	});
 
 	it("(8) proposal burst — two assistant turns + toolResult, all in order", () => {
@@ -541,6 +829,268 @@ describe("message-reducer", () => {
 		);
 		assert.ok(tr, "paired toolResult must survive snapshot");
 		assert.equal((tr as any).details?.compactionId, sidecarId);
+	});
+
+	// ---------------------------------------------------------------------
+	// Compaction ORDERING regression family (live-vs-reload divergence).
+	// See docs/design/fix-compaction-ordering.md. These are failing-first:
+	// pre-fix the live `compact_active` card retains a positive `_order`
+	// (`highestSeq + 0.5`) while the preserved tail snapshot rows get
+	// negative `SNAPSHOT_ORDER_FLOOR + i`, so the card sorts AFTER the tail.
+	// Reload works because the persisted sidecar card is prepended and gets
+	// the most-negative snapshot order. The invariant pinned here: a live row
+	// retained in place of a snapshot-equivalent row inherits the snapshot
+	// row's `_order`, so live order == reload order.
+	// (Letter suffixes continue the (12x) family; (12e) is the overflow test.)
+	// ---------------------------------------------------------------------
+
+	it("(12f) terminal-before-snapshot: compaction card sorts before preserved tail", () => {
+		// Sub-case 1 (design §2.1): the deferred terminal `compaction-result`
+		// transition fires BEFORE the post-compaction snapshot lands. The
+		// snapshot's `liveCompactionIds` branch drops the persisted card+TR
+		// (live card already hosts the affordance), leaving the live card at
+		// `highestSeq + 0.5` (positive) above the negative-ordered tail.
+		const cid = "c_terminal_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			// Server post-compaction snapshot: persisted sidecar card + paired
+			// toolResult PREPENDED (server splice), then the preserved tail.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`compaction card+affordance must precede the preserved tail; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12g) snapshot-before-terminal: deferred transition still anchors card before tail", () => {
+		// Sub-case 2 (design §2.1): the post-compaction snapshot lands BEFORE
+		// the deferred terminal transition (card transition runs behind the
+		// COMPACT_CARD_MIN_DURATION timer). The persisted card initially
+		// survives with canonical negative order, but `compaction-result` then
+		// drops it by compactionId and re-pushes the live card at
+		// `highestSeq + 0.5` (positive) → card lands after the tail again.
+		const cid = "c_snapshot_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot arrives BEFORE the terminal transition.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+			// Deferred terminal transition fires last.
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+		]);
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`deferred terminal transition must inherit the persisted card's position; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12h) live ordering equals reload ordering (normalised card identity)", () => {
+		// The two states are built from the SAME logical post-compaction
+		// transcript. Live uses the `compact_active` card surface; reload uses
+		// the persisted sidecar card. After normalising that identity the
+		// ordered sequences must be identical — reload is the canonical order.
+		const cid = "c_live_reload";
+		const tail = [
+			userMsg("kept-user", "still relevant"),
+			assistantMsg("kept-asst", "carry forward"),
+		];
+		const live = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			{ type: "snapshot", messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail] },
+		]);
+		// RELOAD: a single snapshot with the prepended persisted card + tail,
+		// no live `compact_active` in state.
+		const reload = applyAll([
+			{ type: "snapshot", messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail] },
+		]);
+		const liveSeq = live.messages.map(orderKey);
+		const reloadSeq = reload.messages.map(orderKey);
+		assert.deepStrictEqual(
+			reloadSeq,
+			["compaction-card", "compaction-toolResult", "kept-user", "kept-asst"],
+			`reload ordering sanity (card must lead); got: ${JSON.stringify(reloadSeq)}`,
+		);
+		assert.deepStrictEqual(
+			liveSeq,
+			reloadSeq,
+			`live order must equal reload order; live=${JSON.stringify(liveSeq)} reload=${JSON.stringify(reloadSeq)}`,
+		);
+	});
+
+	it("(12i) exactly one compaction card + adjacent toolResult after each timing path", () => {
+		// No-duplicate / adjacency invariant (preserves PR #817). Must stay
+		// green pre- AND post-fix across both timing sub-cases, guarding the
+		// ordering fix against re-introducing a stacked or detached card.
+		const cid = "c_dedupe";
+		const tail = [userMsg("kept-user", "x"), assistantMsg("kept-asst", "y")];
+		const snapshot: Action = {
+			type: "snapshot",
+			messages: [persistedSidecarCard(cid), persistedSidecarToolResult(cid), ...tail],
+		};
+		const terminalFirst = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "x")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "y")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+			snapshot,
+		]);
+		const snapshotFirst = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "x")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "y")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			snapshot,
+			{ type: "compaction-result", message: liveTerminalCard(cid), toolResult: liveTerminalToolResult(), success: true },
+		]);
+		for (const [label, st] of [["terminal-first", terminalFirst], ["snapshot-first", snapshotFirst]] as const) {
+			const cards = st.messages.filter(isCompactionCard);
+			const trs = st.messages.filter(isCompactionToolResult);
+			assert.strictEqual(cards.length, 1, `${label}: exactly one compaction summary card, got ${cards.length}`);
+			assert.strictEqual(trs.length, 1, `${label}: exactly one paired compaction toolResult, got ${trs.length}`);
+			const cardIdx = st.messages.findIndex(isCompactionCard);
+			const trIdx = st.messages.findIndex(isCompactionToolResult);
+			assert.strictEqual(trIdx, cardIdx + 1, `${label}: toolResult must be immediately adjacent to its card`);
+		}
+	});
+
+	it("(12j) new compaction placeholder removes prior compact_active card AND its paired toolResult", () => {
+		// Regression: `compaction-placeholder` filtered the prior `compact_active`
+		// assistant card by id but left its paired synthetic toolResult
+		// (`toolCallId === "compaction-summary:compact_active"`) behind. When a
+		// SECOND compaction starts in the same session, that orphaned toolResult
+		// lingers — a stale, detached row. The placeholder filter must drop it
+		// too, mirroring the `compaction-result` filter. Pinned here.
+		const cid1 = "c_first";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("u1", "hi")),
+			// First compaction completes → live card + paired toolResult.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			{ type: "compaction-result", message: liveTerminalCard(cid1), toolResult: liveTerminalToolResult(), success: true },
+			// A SECOND compaction begins.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+		]);
+		const orphanToolResults = s.messages.filter(
+			(m: any) => m.toolCallId === "compaction-summary:compact_active" && m.role === "toolResult",
+		);
+		assert.strictEqual(
+			orphanToolResults.length,
+			0,
+			`stale compact_active toolResult must be removed when a new placeholder starts; got ${orphanToolResults.length}`,
+		);
+		// Exactly one in-progress card survives (the new placeholder).
+		const activeCards = s.messages.filter((m: any) => m.id === "compact_active");
+		assert.strictEqual(activeCards.length, 1, "exactly one compact_active card after new placeholder");
+	});
+
+	it("(12k) interim snapshot-before-terminal: exactly one (live) card before tail", () => {
+		// HIGH finding (docs/design/fix-compaction-ordering.md §4.1): the window
+		// AFTER the post-compaction snapshot lands but BEFORE the deferred
+		// `compaction-result` fires. The live `compact_active` card is still
+		// in-progress (NO compactionId), so the cid-keyed snapshot dedup can't
+		// match it. Pre-fix the reducer kept BOTH the persisted sidecar card and
+		// the in-progress live card. The fix drops the persisted card, transfers
+		// its canonical (negative) order to the live card, and leaves exactly one
+		// card — the live `compact_active` — positioned before the preserved tail.
+		const cid = "c_interim";
+		const s = applyAll([
+			liveMessageEnd(1, userMsg("kept-user", "still relevant")),
+			liveMessageEnd(2, assistantMsg("kept-asst", "carry forward")),
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot lands while the card is still in-progress (no compactionId),
+			// BEFORE the deferred terminal transition.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cid),
+				persistedSidecarToolResult(cid),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		// Exactly one compaction card, and it is the live `compact_active` surface.
+		const cards = s.messages.filter(isCompactionCard);
+		assert.strictEqual(cards.length, 1, `interim must show exactly one compaction card, got ${cards.length}`);
+		assert.strictEqual(cards[0].id, "compact_active", "the surviving interim card is the live compact_active card");
+		// Card precedes the preserved tail.
+		const seq = s.messages.map(orderKey);
+		assert.deepStrictEqual(
+			seq,
+			["compaction-card", "kept-user", "kept-asst"],
+			`interim live card must precede the preserved tail; got: ${JSON.stringify(seq)}`,
+		);
+	});
+
+	it("(12l) interim with stale older sidecar: keep old card, do not consume it for the new in-progress card", () => {
+		// Verifiable race (review of PR #819): an OLDER compaction's persisted
+		// sidecar card already sits in state (e.g. from a prior reload). A NEW
+		// compaction starts — the live `compact_active` card is in-progress with
+		// NO compactionId. A refresh/snapshot arrives BEFORE the new compaction's
+		// sidecar row (`c_new`) has been written, so it carries ONLY the old card
+		// (`c_old`). The interim heuristic must NOT treat the stale `c_old` card
+		// as the current pending anchor: doing so would drop `c_old` and transfer
+		// its `_order` to the unrelated in-progress card. Expected: keep `c_old`
+		// AND show the new in-progress card separately (tail-anchored).
+		const cOld = "c_old";
+		const s = applyAll([
+			// Prior reload: persisted sidecar card for the OLD compaction is in
+			// state at its canonical (prepended) order, before a kept tail.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+			// A NEW compaction begins; live card in-progress (no compactionId).
+			// The placeholder filter only drops `compact_active`-id rows, so the
+			// reloaded `c_old` card (id = compactionId) survives in state.
+			{ type: "compaction-placeholder", message: liveInProgressCard() },
+			// Snapshot lands BEFORE the new sidecar (`c_new`) exists — it still
+			// carries only the old card.
+			{ type: "snapshot", messages: [
+				persistedSidecarCard(cOld),
+				persistedSidecarToolResult(cOld),
+				userMsg("kept-user", "still relevant"),
+				assistantMsg("kept-asst", "carry forward"),
+			] },
+		]);
+		// The old persisted card must still be present (not consumed/dropped).
+		const oldCards = s.messages.filter(
+			(m: any) => isCompactionCard(m) && m.id === cOld,
+		);
+		assert.strictEqual(oldCards.length, 1, `old persisted card (${cOld}) must survive, got ${oldCards.length}`);
+		// The new in-progress live card must also be present, separately.
+		const liveCards = s.messages.filter((m: any) => m.id === "compact_active");
+		assert.strictEqual(liveCards.length, 1, "new in-progress live card must be present");
+		// Two distinct compaction cards exist (old + new in-progress); the old
+		// card was NOT merged/transferred into the new one.
+		const cards = s.messages.filter(isCompactionCard);
+		assert.strictEqual(cards.length, 2, `expected the old card AND the new in-progress card, got ${cards.length}`);
+		// The old card keeps its prepended (negative) anchor before the tail; the
+		// new in-progress card is tail-anchored (positive), since no matching
+		// pending sidecar exists yet.
+		const oldOrder = oldCards[0]._order;
+		const liveOrder = liveCards[0]._order;
+		assert.ok(oldOrder < 0, `old card retains its prepended anchor; got ${oldOrder}`);
+		assert.ok(liveOrder > oldOrder, `new in-progress card must not steal the old card's order; got live=${liveOrder} old=${oldOrder}`);
 	});
 
 	it("RE-07-style — preferences snapshot ordering preserved (stable by tick)", () => {

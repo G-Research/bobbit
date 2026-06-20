@@ -58,6 +58,12 @@ import {
 } from "./session-manager.js";
 import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
+import {
+	parentHostEligibility,
+	effectiveMaxNestingDepthOf,
+	nestingDepthOf,
+	resolveDepthControl,
+} from "./subgoal-eligibility.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
@@ -619,18 +625,41 @@ function renderGoalMetadataEditor(config: GoalFormConfig): TemplateResult {
 	`;
 }
 
-/** Compute a goal's depth (1-based) by walking parentGoalId links. */
-function computeGoalDepth(goalId: string, goals: ReadonlyArray<{ id: string; parentGoalId?: string }>): number {
-	let depth = 1;
-	let cur: { id: string; parentGoalId?: string } | undefined = goals.find(g => g.id === goalId);
-	const seen = new Set<string>();
-	while (cur?.parentGoalId && !seen.has(cur.id)) {
-		seen.add(cur.id);
-		cur = goals.find(g => g.id === cur!.parentGoalId);
-		depth++;
-		if (depth >= 20) break;
+/**
+ * Resolve the per-goal sub-goal submission fields (allow + max-depth) from the
+ * proposal form state, mirroring EXACTLY what `renderSubgoalsToggle` displays
+ * via the shared `resolveDepthControl`. This is the chokepoint that fixes the
+ * stale-payload bug: the stepper clamps the displayed value into the parent's
+ * valid band, so the payload must carry that same clamped value — never the raw
+ * `_proposalMaxNestingDepth` the user last typed before switching parents.
+ *
+ * - `maxNestingDepth` is forwarded only when the user touched the control
+ *   (configuredValue !== null) and the goal can actually host children; an
+ *   untouched control stays unset so the server default stands.
+ * - When the goal sits at the inherited cap (no room below), sub-goals are
+ *   forced off — matching the disabled toggle in the UI.
+ */
+function proposalSubgoalSubmission(opts: {
+	subgoalsEnabled: boolean;
+	parentGoalId: string | undefined;
+	systemCap: number;
+	allowedValue: boolean | null;
+	configuredValue: number | null;
+}): { subgoalsAllowed: boolean | undefined; maxNestingDepth: number | undefined; allowsChildren: boolean } {
+	if (!opts.subgoalsEnabled) {
+		return { subgoalsAllowed: undefined, maxNestingDepth: undefined, allowsChildren: false };
 	}
-	return depth;
+	const parent = opts.parentGoalId ? state.goals.find(g => g.id === opts.parentGoalId) : undefined;
+	const proposedDepth = parent ? nestingDepthOf(parent.id, state.goals) + 1 : 1;
+	const inheritedCap = parent
+		? effectiveMaxNestingDepthOf(parent as any, state.goals as any)
+		: opts.systemCap;
+	const ctl = resolveDepthControl(proposedDepth, inheritedCap, opts.configuredValue);
+	const subgoalsAllowed = ctl.atGlobalCap ? false : (opts.allowedValue ?? false);
+	const maxNestingDepth = !ctl.atGlobalCap && opts.configuredValue !== null
+		? ctl.depthValue
+		: undefined;
+	return { subgoalsAllowed, maxNestingDepth, allowsChildren: subgoalsAllowed === true };
 }
 
 // ── Shared sub-goal UI fragments ────────────────────────────────────────────
@@ -639,23 +668,41 @@ function computeGoalDepth(goalId: string, goals: ReadonlyArray<{ id: string; par
 
 /** Parent-goal picker row. */
 function renderParentPickerRow(config: GoalFormConfig, lblCls: string): TemplateResult {
+	const candidates = state.goals.filter(g => !g.archived && (!config.linkedProjectId || g.projectId === config.linkedProjectId));
+	// Pre-compute host-eligibility so an ineligible parent is marked BEFORE
+	// submit (the dead-end used to only surface as a server reject).
+	const selected = config.parentGoalId ? state.goals.find(g => g.id === config.parentGoalId) : undefined;
+	const selectedElig = selected ? parentHostEligibility(selected, state.goals) : undefined;
 	return html`
-		<div class="flex items-center gap-2" data-testid="goal-form-parent-row">
-			<label class="${lblCls} w-20 md:w-16">Parent Goal</label>
-			<select
-				class="flex-1 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
-				.value=${config.parentGoalId || ""}
-				@change=${(e: Event) => {
-					const v = (e.target as HTMLSelectElement).value;
-					config.onParentGoalChange?.(v || undefined);
-				}}
-				data-testid="goal-form-parent-picker"
-			>
-				<option value="">None (Default)</option>
-				${state.goals.filter(g => !g.archived && (!config.linkedProjectId || g.projectId === config.linkedProjectId)).map(g => html`
-					<option value=${g.id} ?selected=${config.parentGoalId === g.id}>${g.title}</option>
-				`)}
-			</select>
+		<div class="flex flex-col gap-1.5" data-testid="goal-form-parent-row">
+			<div class="flex items-center gap-2">
+				<label class="${lblCls} w-20 md:w-16">Parent Goal</label>
+				<select
+					class="flex-1 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+					.value=${config.parentGoalId || ""}
+					@change=${(e: Event) => {
+						const v = (e.target as HTMLSelectElement).value;
+						config.onParentGoalChange?.(v || undefined);
+					}}
+					data-testid="goal-form-parent-picker"
+				>
+					<option value="">None (Default)</option>
+					${candidates.map(g => {
+						const elig = parentHostEligibility(g, state.goals);
+						const label = elig.eligible ? g.title : `${g.title} ${elig.suffix}`;
+						return html`
+							<option value=${g.id} ?selected=${config.parentGoalId === g.id}>${label}</option>
+						`;
+					})}
+				</select>
+			</div>
+			${selectedElig && !selectedElig.eligible ? html`
+				<div class="rounded-md border px-3 py-2 text-[11px] leading-snug"
+					style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); background: color-mix(in oklch, var(--warning) 10%, transparent); color: var(--foreground);"
+					data-testid="goal-form-parent-ineligible-warning">
+					${selectedElig.hint}
+				</div>
+			` : ""}
 		</div>
 	`;
 }
@@ -689,17 +736,24 @@ function renderSubgoalBreadcrumb(config: GoalFormConfig): TemplateResult | strin
 /** Allow-subgoals toggle + max-depth control. */
 function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 	if (!(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange)) return "";
-	const systemCap = config.maxNestingDepth ?? 3;
 	// Depth of the goal being proposed (top-level = 1; a child of a depth-N
-	// goal is depth N+1). The most sub-goal levels this goal can itself allow
-	// is the global cap minus its own depth.
-	const proposedDepth = config.parentGoalId ? computeGoalDepth(config.parentGoalId, state.goals) + 1 : 1;
-	const rawCap = systemCap - proposedDepth;       // headroom below this goal
-	const atGlobalCap = rawCap <= 0;                // no room for any sub-goals
-	const depthFixed = rawCap === 1;                // exactly one level possible
-	const effectiveCap = Math.max(1, rawCap);
+	// goal is depth N+1). "Max depth" is the ABSOLUTE deepest nesting level
+	// allowed in this tree (matching the server's `maxNestingDepth`).
+	//
+	// The inherited absolute cap: a child goal can never widen past its parent's
+	// EFFECTIVE cap (system ∩ parent.own ∩ … up the tree) — only a top-level
+	// goal gets the full system cap. Mirrors the server clamp in
+	// nested-goal-routes.ts. `resolveDepthControl` is the SINGLE source of truth
+	// for this math, shared with `proposalMaxNestingDepthSubmission` so the value
+	// shown and the value submitted can never diverge (the stale-payload bug).
+	const proposedDepth = config.parentGoalId ? nestingDepthOf(config.parentGoalId, state.goals) + 1 : 1;
+	const selectedParent = config.parentGoalId ? state.goals.find(g => g.id === config.parentGoalId) : undefined;
+	const inheritedCap = selectedParent
+		? effectiveMaxNestingDepthOf(selectedParent as any, state.goals as any)
+		: (config.maxNestingDepth ?? 3);
+	const { minDepth, maxDepth, atGlobalCap, depthFixed, depthValue, levelsBelow } =
+		resolveDepthControl(proposedDepth, inheritedCap, config.maxNestingDepthValue);
 	const allowed = !atGlobalCap && (config.subgoalsAllowedValue ?? false);
-	const depthValue = Math.min(config.maxNestingDepthValue ?? effectiveCap, effectiveCap);
 	const infoPanel = (text: string, testid: string) => html`
 		<div class="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] leading-snug text-muted-foreground" data-testid=${testid}>${text}</div>
 	`;
@@ -713,27 +767,30 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 				@change=${(e: Event) => {
 					config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
 				}} />
-			<span class="text-xs text-muted-foreground font-medium">Allow team lead to create sub-goals</span>
-			<span title="Allow this goal to spawn child subgoals. When off, the team-lead cannot use goal_spawn_child / goal_plan_propose."
+			<span class="text-xs text-muted-foreground font-medium">Allow sub-goals on this goal</span>
+			<span title="Whether THIS goal (the one being created) may host child sub-goals — it does not change the selected parent. When off, the team-lead cannot use goal_spawn_child / goal_plan_propose."
 				class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 		</label>
+		<p class="text-[10px] text-muted-foreground/80 leading-snug" data-testid="goal-form-subgoals-toggle-help">
+			Controls the goal you're creating — not the selected parent. To let an existing parent host children, open its dashboard → Children tab.
+		</p>
 		${atGlobalCap
-			? infoPanel(`This goal sits at depth ${proposedDepth}, the global nesting cap of ${systemCap}. It cannot create sub-goals — pick a shallower parent to allow nesting.`, "goal-form-subgoals-at-cap")
+			? infoPanel(`This goal sits at depth ${proposedDepth}, at the inherited nesting cap of ${maxDepth}. It cannot host sub-goals — pick a shallower parent to allow nesting.`, "goal-form-subgoals-at-cap")
 			: allowed ? html`
 			<label class="flex items-center gap-1.5 text-xs ${depthFixed ? "opacity-60" : "text-muted-foreground"}">
-				<span>Max depth</span>
+				<span>Max nesting depth</span>
 				<span class="inline-flex items-center rounded-md border border-border bg-background overflow-hidden">
 					<button
 						type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
 						title="Decrease"
-						?disabled=${depthFixed || depthValue <= 1}
-						@click=${() => config.onMaxNestingDepthChange?.(Math.max(1, depthValue - 1))}
+						?disabled=${depthFixed || depthValue <= minDepth}
+						@click=${() => config.onMaxNestingDepthChange?.(Math.max(minDepth, depthValue - 1))}
 					>${icon(Minus, "xs")}</button>
 					<input
 						type="number"
-						min="1"
-						max=${String(effectiveCap)}
+						min=${String(minDepth)}
+						max=${String(maxDepth)}
 						step="1"
 						.value=${String(depthValue)}
 						?disabled=${depthFixed}
@@ -742,7 +799,7 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						@change=${(e: Event) => {
 							const raw = parseInt((e.target as HTMLInputElement).value, 10);
 							if (Number.isFinite(raw)) {
-								config.onMaxNestingDepthChange?.(Math.min(effectiveCap, Math.max(1, raw)));
+								config.onMaxNestingDepthChange?.(Math.min(maxDepth, Math.max(minDepth, raw)));
 							} else {
 								config.onMaxNestingDepthChange?.(null);
 							}
@@ -751,14 +808,16 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
 						title="Increase"
-						?disabled=${depthFixed || depthValue >= effectiveCap}
-						@click=${() => config.onMaxNestingDepthChange?.(Math.min(effectiveCap, depthValue + 1))}
+						?disabled=${depthFixed || depthValue >= maxDepth}
+						@click=${() => config.onMaxNestingDepthChange?.(Math.min(maxDepth, depthValue + 1))}
 					>${icon(Plus, "xs")}</button>
 				</span>
-				<span title=${`Global cap is ${systemCap}; this goal sits at depth ${proposedDepth}, so it can allow at most ${effectiveCap} more sub-goal level${effectiveCap === 1 ? "" : "s"}.`}
+				<span title=${`The deepest nesting level allowed in this tree. The inherited cap is ${maxDepth}; this goal sits at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`}
 					class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 			</label>
-			${depthFixed ? infoPanel(`Only one more nesting level fits below the global cap of ${systemCap}, so max depth is fixed at 1.`, "goal-form-max-depth-fixed") : ""}
+			${depthFixed
+				? infoPanel(`The inherited cap is ${maxDepth} and this goal sits at depth ${proposedDepth}, so only one nesting level fits below it — max depth is fixed at ${maxDepth}.`, "goal-form-max-depth-fixed")
+				: infoPanel(`Deepest nesting level allowed in this tree (inherited cap ${maxDepth}). This goal is at depth ${proposedDepth}, so it allows ${levelsBelow} level${levelsBelow === 1 ? "" : "s"} of sub-goals below it.`, "goal-form-max-depth-help")}
 		` : ""}
 		</div>
 	`;
@@ -1369,22 +1428,45 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 // ============================================================================
 function renderProposalSubgoalsTab(config: GoalFormConfig): TemplateResult {
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
+	const sectionHeading = (title: string, desc: string, testid: string) => html`
+		<div class="flex flex-col gap-0.5" data-testid=${testid}>
+			<h3 class="text-xs font-semibold text-foreground">${title}</h3>
+			<p class="text-[11px] text-muted-foreground leading-snug">${desc}</p>
+		</div>
+	`;
+	const hostControls = config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange;
 	return html`
-		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-4"
+		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-5"
 			role="tabpanel"
 			id="goal-proposal-panel-subgoals"
 			aria-labelledby="goal-proposal-tab-subgoals"
 			data-testid="goal-proposal-panel-subgoals">
-			<div class="flex flex-col gap-2.5">
+
+			<!-- Section 1: where this NEW goal lives — attach it under an existing goal. -->
+			<section class="flex flex-col gap-2.5" data-testid="goal-form-attach-section">
+				${sectionHeading(
+					"Attach to an existing goal",
+					"Choose where this new goal lives. Pick an existing goal to nest this one beneath it, or leave None to create it at the top level.",
+					"goal-form-attach-heading",
+				)}
 				${renderParentPickerRow(config, lblCls)}
 				${renderSubgoalBreadcrumb(config)}
-				${config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange ? html`
+			</section>
+
+			<!-- Section 2: whether the NEW goal may host its OWN future children. -->
+			${hostControls ? html`
+				<section class="flex flex-col gap-2.5 border-t border-border/60 pt-4" data-testid="goal-form-host-section">
+					${sectionHeading(
+						"Allow this new goal to host sub-goals",
+						"Whether the goal you're creating may spawn its own child sub-goals later. This is about the new goal — it does not change the parent selected above.",
+						"goal-form-host-heading",
+					)}
 					<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-0.5">
 						${renderSubgoalsToggle(config)}
 					</div>
-				` : ""}
-				${renderSubgoalOrchestration(config)}
-			</div>
+					${renderSubgoalOrchestration(config)}
+				</section>
+			` : ""}
 		</div>
 	`;
 }
@@ -3003,25 +3085,30 @@ function goalProposalPanel() {
 		let goal;
 		try {
 			try {
-				// Per-goal sub-goals default to OFF: an untouched (null) value is
-				// submitted as false so the team-lead cannot nest unless the user
-				// explicitly opts in.
-				const subgoalsAllowedField = subgoalsEnabled
-					? (_proposalSubgoalsAllowed ?? false)
-					: undefined;
-				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
-					? _proposalMaxNestingDepth
-					: undefined;
 				// Parent goal is meaningful only while the system Subgoals feature is
 				// enabled. A stale/auto-filled parentGoalId from a team-lead proposal
 				// must not be submitted while the Sub-goals tab is hidden/off; accepting
 				// that proposal should create a top-level goal.
 				const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
+				// Per-goal sub-goals default to OFF. The submitted allow + max-depth
+				// MUST mirror the displayed stepper exactly (shared resolveDepthControl),
+				// so a value clamped up by the selected parent's cap is the value sent —
+				// never the raw `_proposalMaxNestingDepth` the user typed before
+				// switching parents (the stale-payload bug).
+				const subgoalSubmission = proposalSubgoalSubmission({
+					subgoalsEnabled,
+					parentGoalId: parentGoalIdField,
+					systemCap: maxNestingDepth,
+					allowedValue: _proposalSubgoalsAllowed,
+					configuredValue: _proposalMaxNestingDepth,
+				});
+				const subgoalsAllowedField = subgoalSubmission.subgoalsAllowed;
+				const maxNestingDepthField = subgoalSubmission.maxNestingDepth;
 				// Root-only orchestration. Only forwarded for a top-level goal
 				// (no parent) that allows subgoals, and only when the user
 				// actually picked a value (null = inherit server default).
 				const isRootProposal = !parentGoalIdField;
-				const allowsChildren = subgoalsEnabled && (_proposalSubgoalsAllowed ?? false);
+				const allowsChildren = subgoalSubmission.allowsChildren;
 				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
 					? _proposalDivergencePolicy
 					: undefined;
@@ -3183,7 +3270,7 @@ function goalProposalPanel() {
 			if (!_proposalTitle.trim() || _proposalSaving) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
 			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
-				const pDepth = computeGoalDepth(_proposalParentGoalId, state.goals);
+				const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
 				if (pDepth + 1 > maxNestingDepth) return true;
 			}
 			return false;

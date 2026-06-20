@@ -32,6 +32,8 @@ import { parseAcceptanceCriteria } from "../../shared/parse-acceptance-criteria.
 import {
 	checkCanSpawnChild,
 	inheritedChildOverrides,
+	clampMaxDepth,
+	effectiveMaxNestingDepth,
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
@@ -525,6 +527,13 @@ export async function tryHandleNestedGoalRoute(
 				json({ error: "Subgoals are disabled for this goal tree", code: "SUBGOALS_DISABLED" }, 403);
 				return true;
 			}
+			if (nestingCheck.code === "PARENT_SUBGOALS_DISABLED") {
+				json({
+					error: `Parent goal "${parent.title}" doesn't allow sub-goals`,
+					code: "PARENT_SUBGOALS_DISABLED",
+				}, 403);
+				return true;
+			}
 			json({
 				error: `Subgoal spawn blocked: nesting depth limit reached (${nestingCheck.currentDepth}/${nestingCheck.maxDepth})`,
 				code: "NESTING_DEPTH_EXCEEDED",
@@ -635,7 +644,7 @@ export async function tryHandleNestedGoalRoute(
 
 			// Propagate the parent's EFFECTIVE nesting limits onto the child so
 			// descendants cannot loosen what an ancestor has tightened.
-			const childOverrides = inheritedChildOverrides(parent, nestingPrefs);
+			const childOverrides = inheritedChildOverrides(parent, nestingPrefs, getGoalAcrossProjects);
 			const child = await goalManager.createGoal(title, childCwd, {
 				spec,
 				workflowId,
@@ -1324,26 +1333,83 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
-	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren.
+	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren
+	// (orchestration, team-lead-only) and/or subgoalsAllowed / maxNestingDepth
+	// (operator — verified human cookie OR team-lead; see split authz below).
 	const policyMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/policy$/);
 	if (policyMatch && req.method === "PATCH") {
 		if (!requireSubgoalsEnabled()) return true;
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: policy is an ORCHESTRATION verb — team-lead-only, the cookie does
-		// NOT bypass.
-		if (!authorizeTeamLeadOrReject(id, "orchestration")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
+		// S1 (split authz): the per-goal sub-goal opt-in fields
+		// (`subgoalsAllowed` / `maxNestingDepth`) are HUMAN-OPERATOR settings the
+		// goal dashboard drives — they only relax/tighten this goal's own
+		// child-hosting eligibility and can never spawn, plan, integrate, or
+		// resize live concurrency. They are therefore OPERATOR-class: a verified
+		// human cookie is accepted (else team-lead match). The orchestration
+		// fields (`divergencePolicy` / `maxConcurrentChildren`) remain
+		// ORCHESTRATION-class (team-lead-only, cookie does NOT bypass). A body
+		// that mixes in ANY orchestration field is classified as orchestration —
+		// the stricter class wins so the cookie can't pigg-back an orchestration
+		// change behind a sub-goal toggle.
+		const hasOrchestrationField =
+			body.divergencePolicy !== undefined || body.maxConcurrentChildren !== undefined;
+		const hasOperatorField =
+			body.subgoalsAllowed !== undefined || body.maxNestingDepth !== undefined;
+		if (!hasOrchestrationField && !hasOperatorField) {
+			json({ error: "No recognized policy fields", code: "NO_POLICY_FIELDS" }, 400);
+			return true;
+		}
+		const mutationClass: ChildrenMutationClass = hasOrchestrationField ? "orchestration" : "operator";
+		if (!authorizeTeamLeadOrReject(id, mutationClass)) return true;
 		const goalManager = getGoalManagerForGoal(id);
-		const updates: { divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number } = {};
+		const updates: {
+			divergencePolicy?: "strict" | "balanced" | "autonomous";
+			maxConcurrentChildren?: number;
+			subgoalsAllowed?: boolean;
+			maxNestingDepth?: number;
+		} = {};
 		if (body.divergencePolicy !== undefined) {
 			if (body.divergencePolicy !== "strict" && body.divergencePolicy !== "balanced" && body.divergencePolicy !== "autonomous") {
 				json({ error: "divergencePolicy must be one of strict|balanced|autonomous" }, 400);
 				return true;
 			}
 			updates.divergencePolicy = body.divergencePolicy;
+		}
+		if (body.subgoalsAllowed !== undefined) {
+			// Per-goal opt-in toggle. The SYSTEM pref remains the master gate
+			// (see subgoal-nesting-limit.ts) — flipping this to `true` only has
+			// effect when the system pref `subgoalsEnabled` is also ON.
+			if (typeof body.subgoalsAllowed !== "boolean") {
+				json({ error: "subgoalsAllowed must be a boolean" }, 400);
+				return true;
+			}
+			updates.subgoalsAllowed = body.subgoalsAllowed;
+		}
+		if (body.maxNestingDepth !== undefined) {
+			// Per-goal nesting cap. Route clamping through the SSOT helper and
+			// cap to the INHERITED ceiling — descendants can only tighten, never
+			// widen. For a root goal the ceiling is the system-wide
+			// `maxNestingDepth`; for a child goal it is the parent's *effective*
+			// cap (`effectiveMaxNestingDepth(parent, prefs)` = system ∩ parent.own),
+			// so a child can never widen past its parent/ancestor tree cap. Server
+			// authority is mandatory here — the UI range is advisory.
+			const raw = Number(body.maxNestingDepth);
+			if (!Number.isFinite(raw)) {
+				json({ error: "maxNestingDepth must be a finite number" }, 400);
+				return true;
+			}
+			const prefs = getSubgoalNestingPrefs();
+			const parent = goal.parentGoalId
+				? getGoalAcrossProjects(goal.parentGoalId)
+				: undefined;
+			const ceiling = parent
+				? effectiveMaxNestingDepth(parent, prefs, getGoalAcrossProjects)
+				: prefs.maxNestingDepth;
+			updates.maxNestingDepth = Math.min(clampMaxDepth(raw), ceiling);
 		}
 		if (body.maxConcurrentChildren !== undefined) {
 			// C4: integer clamp. A fractional value (e.g. 1.5) would otherwise be
@@ -1375,6 +1441,8 @@ export async function tryHandleNestedGoalRoute(
 			goalId: id,
 			...(updatedGoal?.divergencePolicy !== undefined ? { divergencePolicy: updatedGoal.divergencePolicy } : {}),
 			...(updatedGoal?.maxConcurrentChildren !== undefined ? { maxConcurrentChildren: updatedGoal.maxConcurrentChildren } : {}),
+			...(updatedGoal?.subgoalsAllowed !== undefined ? { subgoalsAllowed: updatedGoal.subgoalsAllowed } : {}),
+			...(updatedGoal?.maxNestingDepth !== undefined ? { maxNestingDepth: updatedGoal.maxNestingDepth } : {}),
 		});
 		json({ ok: true });
 		return true;
