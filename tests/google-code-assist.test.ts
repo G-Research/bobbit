@@ -217,14 +217,15 @@ describe("session-selectability guard", () => {
 		assert.equal(isSessionSelectableModelString("no-slash"), true);
 	});
 
-	it("every emitted Code Assist model is sessionSelectable:false AND fails the guard (no drift)", () => {
+	it("emits Code Assist models as session-selectable with no unavailable gate", () => {
+		// Runtime support now exists (generated provider extension), so account models
+		// are emitted without a sessionSelectable:false gate or unavailable reason.
 		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
 		const models = getGoogleCodeAssistModels();
 		assert.ok(models.length > 0, "expected at least one Code Assist model");
 		for (const m of models) {
-			assert.equal(m.sessionSelectable, false, `${m.id} should be sessionSelectable:false`);
-			assert.equal(isSessionSelectableProvider(m.provider), false, `${m.provider} must fail the binding guard`);
-			assert.equal(isSessionSelectableModelString(`${m.provider}/${m.id}`), false, `${m.provider}/${m.id} must fail the binding guard`);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
+			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
 	});
 });
