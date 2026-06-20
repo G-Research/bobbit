@@ -4,6 +4,8 @@
 **Supersedes the launch/lifecycle model in:** [`pr-walkthrough-restore-ux.md`](pr-walkthrough-restore-ux.md) (PR #750, commit `4145abc`).
 **Builds on (unchanged foundation):** the `host.agents`-minted, role-granted, no-secret, binding-routed reviewer + the Host-API `PanelTarget.sessionId` (contract **v2**, already shipped) + the `setSessionSwitcher` full-switch path.
 
+> **Launcher-surface update:** this launch/lifecycle model still describes the spawn-on-click child-reviewer semantics, but its git-widget and command-palette launcher references are historical. Current PR Walkthrough launchers are `composer-slash` and `session-menu`, plus the `kind:"route"` deep-link.
+
 This doc finalises the **mechanism** for the four locked requirements. The product decisions in the goal spec are requirements, not options — this document designs only the *how*. Every behaviour stated here is an acceptance criterion.
 
 ---

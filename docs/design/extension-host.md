@@ -172,7 +172,7 @@ never rejects) exactly as in Phase 1.
 | `renderer:` | **load-bearing (P1)** | For **pack** tools it is the on-disk path (relative to the tool's group dir) of a pre-built ESM renderer module. For builtins it stays display-only metadata. |
 | `actions:` | **load-bearing (P1)** | Relative path to the server actions module (default `actions.js`) **and/or** an inline allowlist of action names. |
 | `panels:` | **IMPLEMENTED (P2)** | Persistent side-panel component contributions (artifacts / PR-walkthrough viewer). *(V1: moved to auto-discovered `panels/<panel>.yaml`; served bearer-only by the pack-addressed `GET /api/ext/packs/:packId/panels/:panelId`.)* Mounted via `host.ui.openPanel`. |
-| `entrypoints:` | **IMPLEMENTED (P2)** | Non-chat launchers (composer slash-commands, git-widget buttons, command palette) **and** `kind:"route"` deep-link routes. Parsed by `parseEntrypoints`; launchers click → `host.ui.openPanel`/`navigate`; routes populate the client pack-route registry. |
+| `entrypoints:` | **IMPLEMENTED (P2)** | Non-chat launchers (composer slash-commands and session-menu items) **and** `kind:"route"` deep-link routes. Parsed by `parseEntrypoints`; launchers click → `host.ui.openPanel`/`navigate`; routes populate the client pack-route registry. |
 | `routes:` | **IMPLEMENTED (P2)** | The pack's OWN gateway endpoints, reached via `host.callRoute`. Parsed by `parseRoutes` → `{ module?; names? }`; dispatched by `RouteDispatcher` keyed off the server-resolved `packId` (see §3.2). |
 | `stores:` | **IMPLEMENTED (P2)** | Ownership-scoped server-side persistence behind `host.store.*`; keys namespaced by the server-resolved `packId` (cross-pack reads rejected). Parsed by `parseStores`. |
 
@@ -1324,7 +1324,7 @@ never bundled.
 |---|---|
 | `submit.yaml` / `read_pr_walkthrough_bundle.yaml` / `readonly_bash.yaml` tools | pack-owned tool YAMLs under `tools/pr-walkthrough/`; normal role/tool-policy-resolved agent tools |
 | `PrWalkthroughPanel.ts` full-surface viewer | **`panels:`** → `host.ui.openPanel({ panelId: "pr-walkthrough.panel", params: { jobId } })` |
-| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (composer-slash / git-widget button / command palette launchers + a `kind:"route"` deep-link) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to `#/ext/pr-walkthrough?jobId=…`; the pack never builds a hash string) |
+| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (composer-slash / session-menu launchers + a `kind:"route"` deep-link) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to `#/ext/pr-walkthrough?jobId=…`; the pack never builds a hash string) |
 | `handlePrWalkthroughApiRoute` bespoke endpoints | **`routes:`** → the pack's OWN namespace, reached via the typed, pack-scoped `host.callRoute(name, init)` — **never** a raw gateway fetch |
 | Loading the changeset/diff bundle for the viewer | `host.callRoute("bundle", { query: { jobId } })` against the pack's own route — dynamic data without an escape hatch |
 | Persisted walkthrough store (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) | **`stores:`** → `host.store.*`, pack-scoped |
