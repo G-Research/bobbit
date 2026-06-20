@@ -96,6 +96,34 @@ async function closePopover(page: Page): Promise<void> {
 	}
 }
 
+async function expectQuickActionHiddenAndNonInteractive(action: Locator, description: string): Promise<void> {
+	await expect(action, `${description} should be hidden while the hamburger menu is open`).toBeHidden({ timeout: 5_000 });
+	const interactiveTargets = await action.evaluateAll((els) => els.map((el, index) => {
+		const target = el as HTMLElement;
+		let current: HTMLElement | null = target;
+		let hiddenByStyle = false;
+		while (current) {
+			const style = getComputedStyle(current);
+			if (style.display === "none" || style.visibility === "hidden") {
+				hiddenByStyle = true;
+				break;
+			}
+			current = current.parentElement;
+		}
+		const hiddenByAttribute = Boolean(target.closest("[hidden],[aria-hidden='true'],[inert]"));
+		const disabled = (target as HTMLButtonElement).disabled || target.getAttribute("aria-disabled") === "true";
+		const focusBlocked = hiddenByStyle || hiddenByAttribute || disabled || target.getAttribute("tabindex") === "-1" || target.tabIndex < 0;
+		const rect = target.getBoundingClientRect();
+		let pointerBlocked = rect.width <= 0 || rect.height <= 0 || getComputedStyle(target).pointerEvents === "none";
+		if (!pointerBlocked) {
+			const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+			pointerBlocked = !hit || (hit !== target && !target.contains(hit));
+		}
+		return focusBlocked && pointerBlocked ? "" : `target ${index}: focusBlocked=${focusBlocked} pointerBlocked=${pointerBlocked}`;
+	}).filter(Boolean));
+	expect(interactiveTargets, `${description} should not leave clickable or focusable targets`).toEqual([]);
+}
+
 async function popoverActionIds(page: Page): Promise<string[]> {
 	return page.locator(POPOVER_ACTION_SELECTOR).evaluateAll((els) =>
 		els.map((el) => (el as HTMLElement).dataset.sessionActionId || "").filter(Boolean),
@@ -294,8 +322,12 @@ test.describe("unified session actions", () => {
 			els.map((el) => (el as HTMLElement).dataset.sessionActionId || "").filter(Boolean),
 		);
 		expect(directIds, "mobile header should render exactly the icon-only quick actions next to the hamburger").toEqual(["modify", "terminate"]);
+		const quickButtons = {
+			modify: headerDirectAction(page, "modify"),
+			terminate: headerDirectAction(page, "terminate"),
+		};
 		for (const actionId of ["modify", "terminate"] as const) {
-			const button = headerDirectAction(page, actionId);
+			const button = quickButtons[actionId];
 			await expect(button, `${actionId} quick action should be visible in the mobile header`).toBeVisible({ timeout: 5_000 });
 			await expect(button).toHaveAttribute("aria-label", actionId === "modify" ? /Edit|Modify/ : /Terminate|End team/);
 			const visibleLabelText = await button.evaluate((el) => {
@@ -338,6 +370,8 @@ test.describe("unified session actions", () => {
 		await openHeaderActions(page);
 		const overflowIds = await popoverActionIds(page);
 		expect(overflowIds).toEqual(CANONICAL_SESSION_ACTION_IDS);
+		await expectQuickActionHiddenAndNonInteractive(quickButtons.modify, "mobile header modify quick action");
+		await expectQuickActionHiddenAndNonInteractive(quickButtons.terminate, "mobile header terminate quick action");
 		const sourceIds = await page.locator("sidebar-actions-popover").first().evaluate((el) => ((el as any).sourceRects || []).map((rect: { actionId: string }) => rect.actionId));
 		expect(sourceIds, "mobile header hamburger should capture quick-action source rects for FLIP").toEqual(expect.arrayContaining(["modify", "terminate"]));
 		await expect.poll(() => page.evaluate(() => (window as any).__mobileHeaderActionAnimations
@@ -345,6 +379,10 @@ test.describe("unified session actions", () => {
 			.map((call: any) => call.actionId)), { timeout: 5_000 }).toEqual(expect.arrayContaining(["modify", "terminate"]));
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow, "mobile header must not create horizontal document overflow").toBeLessThanOrEqual(1);
+
+		await closePopover(page);
+		await expect(quickButtons.modify, "mobile header modify quick action should return after close").toBeVisible({ timeout: 5_000 });
+		await expect(quickButtons.terminate, "mobile header terminate quick action should return after close").toBeVisible({ timeout: 5_000 });
 	});
 
 	test("fork trailing toggle is keyboard-accessible and does not fire fork until the row action runs", async ({ page }) => {
