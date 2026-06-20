@@ -141,9 +141,13 @@ export const routes = {
 		let baseSha = strOf(q.baseSha);
 		let headSha = strOf(q.headSha);
 
-		const finalPayload = await ctx.host.store.get(finalPayloadKey(jobId));
+		const finalAccess = await authorizeReviewAccess(ctx.host.store, jobId, ctx);
+		const finalPayload = finalAccess.authorized ? await ctx.host.store.get(finalPayloadKey(jobId)) : null;
 		if (isFinalPayload(finalPayload)) {
 			return finalBundleResult(finalPayload, jobId);
+		}
+		if (!finalAccess.authorized && await hasFinalPayload(ctx.host.store, jobId)) {
+			return { found: false, jobId, code: "PRW_REVIEW_UNAUTHORIZED", error: "This session is not authorized to read that PR walkthrough." };
 		}
 
 		// jobId-only: rehydrate base/head from the persisted job pointer so a deep-link
@@ -459,6 +463,63 @@ async function resolveReviewerBinding(ctx, body = {}) {
 	return { sessionId, binding };
 }
 
+function ctxPrincipals(ctx) {
+	return new Set([
+		strOf(ctx?.sessionId),
+		strOf(ctx?.ownerSessionId),
+		strOf(ctx?.principalId),
+		strOf(ctx?.userId),
+		strOf(ctx?.host?.principal?.id),
+	].filter(Boolean));
+}
+
+function bindingAuthorizes(binding, reviewerSessionId, principals, jobId) {
+	if (!binding || typeof binding !== "object") return false;
+	const bindingJobId = strOf(binding.jobId);
+	if (bindingJobId && bindingJobId !== jobId) return false;
+	for (const principal of principals) {
+		if (principal === reviewerSessionId) return true;
+		if (principal === strOf(binding.parentSessionId)) return true;
+		if (principal === strOf(binding.ownerSessionId)) return true;
+		if (principal === strOf(binding.intendedOwnerSessionId)) return true;
+	}
+	return false;
+}
+
+async function authorizeReviewAccess(store, jobId, ctx) {
+	const principals = ctxPrincipals(ctx);
+	const sessionId = strOf(ctx?.sessionId);
+	if (principals.size === 0) return { authorized: false };
+	if (sessionId) {
+		const direct = await loadReviewerBinding(store, sessionId, jobId);
+		if (bindingAuthorizes(direct, sessionId, principals, jobId)) return { authorized: true, binding: direct };
+	}
+	const scopedPrefix = `${reviewPrefix(jobId)}binding/`;
+	const scopedKeys = await store.list(scopedPrefix).catch(() => []);
+	if (Array.isArray(scopedKeys)) {
+		for (const key of scopedKeys) {
+			const reviewerSessionId = key.startsWith(scopedPrefix) ? key.slice(scopedPrefix.length) : undefined;
+			if (!reviewerSessionId || reviewerSessionId.includes("/")) continue;
+			const binding = await store.get(key).catch(() => null);
+			if (bindingAuthorizes(binding, reviewerSessionId, principals, jobId)) return { authorized: true, binding };
+		}
+	}
+	const legacyKeys = await store.list("binding/").catch(() => []);
+	if (Array.isArray(legacyKeys)) {
+		for (const key of legacyKeys) {
+			const reviewerSessionId = key.startsWith("binding/") ? key.slice("binding/".length) : undefined;
+			if (!reviewerSessionId || reviewerSessionId.includes("/")) continue;
+			const binding = await store.get(key).catch(() => null);
+			if (bindingAuthorizes(binding, reviewerSessionId, principals, jobId)) return { authorized: true, binding };
+		}
+	}
+	return { authorized: false };
+}
+
+async function hasFinalPayload(store, jobId) {
+	return isFinalPayload(await store.get(finalPayloadKey(jobId)).catch(() => null));
+}
+
 async function submitPrWalkthroughChunk(ctx, body) {
 	const { binding } = await resolveReviewerBinding(ctx, body);
 	const id = validateChunkId(body.section_id ?? body.sectionId);
@@ -515,19 +576,26 @@ async function finalizePrWalkthroughSubmission(ctx, body = {}) {
 
 async function publishYamlCompat(ctx, body) {
 	const jobId = normalizeJobId(body.jobId);
-	const binding = await bindingForPublish(ctx.host.store, jobId, body);
 	const yamlText = strOf(body.yaml);
+	const access = await authorizeReviewAccess(ctx.host.store, jobId, ctx);
 	if (!yamlText) {
+		if (!access.authorized) return { ok: true, jobId, changesetId: strOf(body.changesetId) || jobId, cardCount: 0 };
 		const finalPayload = await ctx.host.store.get(finalPayloadKey(jobId));
 		return { ok: true, jobId, changesetId: isFinalPayload(finalPayload) ? finalPayload.changesetId : strOf(body.changesetId) || jobId, persistedAt: isFinalPayload(finalPayload) ? finalPayload.persistedAt : undefined, cardCount: isFinalPayload(finalPayload) ? finalPayload.cardCount : 0 };
 	}
-	const finalPayload = await buildFinalPayload(ctx, binding, yamlText, body);
-	await ctx.host.store.put(finalPayloadKey(jobId), finalPayload, FINAL_QUOTA(jobId));
-	return { ok: true, jobId, changesetId: finalPayload.changesetId, persistedAt: finalPayload.persistedAt, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+	if (access.authorized) {
+		const finalPayload = await buildFinalPayload(ctx, access.binding || await bindingForPublish(ctx.host.store, jobId, body), yamlText, body);
+		await ctx.host.store.put(finalPayloadKey(jobId), finalPayload, FINAL_QUOTA(jobId));
+		return { ok: true, jobId, changesetId: finalPayload.changesetId, persistedAt: finalPayload.persistedAt, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+	}
+	const legacyBinding = await bindingForPublish(ctx.host.store, jobId, body, { skipFinalPayload: true });
+	const legacyPayload = await buildFinalPayload(ctx, legacyBinding, yamlText, { ...body, skipExistingFinalRead: true });
+	await writeLegacyPublishArtifacts(ctx.host.store, jobId, legacyPayload);
+	return { ok: true, jobId, changesetId: legacyPayload.changesetId, persistedAt: legacyPayload.persistedAt, finalizedAt: legacyPayload.finalizedAt, cardCount: legacyPayload.cardCount, legacy: true };
 }
 
-async function bindingForPublish(store, jobId, body) {
-	const existingFinal = await store.get(finalPayloadKey(jobId));
+async function bindingForPublish(store, jobId, body, opts = {}) {
+	const existingFinal = opts.skipFinalPayload ? null : await store.get(finalPayloadKey(jobId));
 	const legacyJob = await store.get(jobKey(jobId));
 	return {
 		jobId,
@@ -536,6 +604,25 @@ async function bindingForPublish(store, jobId, body) {
 		headSha: strOf(body.headSha) || (legacyJob && typeof legacyJob === "object" ? strOf(legacyJob.headSha) : undefined),
 		target: undefined,
 	};
+}
+
+async function writeLegacyPublishArtifacts(store, jobId, payload) {
+	await store.put(cardsKey(payload.changesetId), {
+		schemaVersion: STORE_SCHEMA_VERSION,
+		changesetId: payload.changesetId,
+		changeset: payload.changeset,
+		cards: payload.cards,
+		warnings: payload.warnings || [],
+		persistedAt: payload.persistedAt,
+	});
+	await store.put(jobKey(jobId), {
+		schemaVersion: STORE_SCHEMA_VERSION,
+		jobId,
+		changesetId: payload.changesetId,
+		baseSha: payload.baseSha,
+		headSha: payload.headSha,
+		persistedAt: payload.persistedAt,
+	});
 }
 
 async function readChunkRecords(store, jobId) {
@@ -723,7 +810,7 @@ async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 	const cards = Array.isArray(result.cards) ? result.cards : [];
 	const warnings = Array.isArray(result.warnings) ? result.warnings : [];
 	const changesetId = strOf(body.changesetId) || strOf(binding.changesetId) || (live && live.changesetId) || changesetIdFromDocument(validation.document, baseSha, headSha) || binding.jobId;
-	const existing = await ctx.host.store.get(finalPayloadKey(binding.jobId));
+	const existing = body.skipExistingFinalRead ? null : await ctx.host.store.get(finalPayloadKey(binding.jobId));
 	const persistedAt = existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now();
 	const finalizedAt = Date.now();
 	return { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, changesetId, baseSha, headSha, yaml: yamlText, changeset: result.changeset, cards, warnings, persistedAt, finalizedAt, cardCount: cards.length };

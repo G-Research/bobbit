@@ -74,7 +74,7 @@ test("beforePrompt returns a bounded durable progress block for reviewer session
 	assert.deepEqual(nonReviewer, { blocks: [] });
 });
 
-test("beforeCompact writes a bounded checkpoint with review-draft quota before finalization", async () => {
+test("beforeCompact writes and beforePrompt reads a bounded checkpoint with review-draft quota before finalization", async () => {
 	const store = seedStore();
 	await provider.beforeCompact(ctx(store, { summary: "saved summary" }));
 
@@ -85,6 +85,10 @@ test("beforeCompact writes a bounded checkpoint with review-draft quota before f
 	assert.equal(checkpoint.source, "summary");
 	assert.equal(checkpoint.text, "saved summary");
 	assert.deepEqual(store.puts.at(-1)?.opts, { quotaScope: { prefix: `reviews/${jobId}/draft/`, profile: "review-draft" } });
+
+	const prompt = await provider.beforePrompt(ctx(store));
+	assert.match(prompt.blocks[0].content, /Saved compacted-analysis checkpoint from summary/);
+	assert.match(prompt.blocks[0].content, /saved summary/);
 
 	store.data.set(`reviews/${jobId}/final/payload`, { jobId, changesetId });
 	await provider.beforeCompact(ctx(store, { summary: "should not replace finalized checkpoint" }));

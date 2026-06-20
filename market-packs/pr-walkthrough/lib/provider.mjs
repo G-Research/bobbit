@@ -109,7 +109,17 @@ function summarizeDraftStatus(status) {
 	return parts.length > 0 ? parts.join(", ") : undefined;
 }
 
-function contentForProgress({ jobId, binding, ids, status, hasFinal, finalPayload }) {
+function summarizeCheckpoint(checkpoint) {
+	if (!isObject(checkpoint)) return undefined;
+	const text = strOf(checkpoint.text);
+	if (!text) return undefined;
+	const updatedAt = typeof checkpoint.updatedAt === "number" ? new Date(checkpoint.updatedAt).toISOString() : strOf(checkpoint.updatedAt);
+	const source = strOf(checkpoint.source) || "checkpoint";
+	const suffix = checkpoint.truncated ? " (truncated)" : "";
+	return [`Saved compacted-analysis checkpoint from ${source}${updatedAt ? ` at ${updatedAt}` : ""}${suffix}:`, text].join("\n");
+}
+
+function contentForProgress({ jobId, binding, ids, status, checkpoint, hasFinal, finalPayload }) {
 	const lines = [
 		"PR Walkthrough durable progress is available for this reviewer session.",
 		`Job: ${jobId}`,
@@ -120,6 +130,8 @@ function contentForProgress({ jobId, binding, ids, status, hasFinal, finalPayloa
 	lines.push(chunkSummaryLine(ids));
 	const statusLine = summarizeDraftStatus(status);
 	if (statusLine) lines.push(`Draft status: ${statusLine}`);
+	const checkpointLine = summarizeCheckpoint(checkpoint);
+	if (checkpointLine) lines.push(checkpointLine);
 	lines.push(nextStepFor(ids, hasFinal));
 	lines.push("Use read_pr_walkthrough_submission_status for bounded readback before resuming work.");
 	return lines.join("\n");
@@ -160,9 +172,10 @@ export default {
 		const review = await resolveReview(ctx);
 		if (!review) return { blocks: [] };
 		const { store, jobId, binding } = review;
-		const [ids, status, finalPayload] = await Promise.all([
+		const [ids, status, checkpoint, finalPayload] = await Promise.all([
 			listChunkIds(store, jobId),
 			store.get(draftStatusKey(jobId)).catch(() => null),
+			store.get(draftCheckpointKey(jobId)).catch(() => null),
 			store.get(finalPayloadKey(jobId)).catch(() => null),
 		]);
 		const hasFinal = isObject(finalPayload);
@@ -173,7 +186,7 @@ export default {
 				authority: "tool",
 				priority: 30,
 				reason: "saved PR Walkthrough chunk/finalization status for this reviewer session",
-				content: contentForProgress({ jobId, binding, ids, status, hasFinal, finalPayload }),
+				content: contentForProgress({ jobId, binding, ids, status, checkpoint, hasFinal, finalPayload }),
 			}],
 		};
 	},

@@ -184,6 +184,34 @@ stats:
 	assert.match(yaml, /^    body: "preserved body"$/m);
 });
 
+test("bundle denies unauthorized reads of review-scoped final payloads", async () => {
+	const { ctx, store } = seedCtx();
+	await saveMinimumChunks(ctx);
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+
+	const denied = await routes.bundle({ sessionId: "attacker", host: { store } }, { query: { jobId } });
+	assert.equal(denied.found, false);
+	assert.equal(denied.code, "PRW_REVIEW_UNAUTHORIZED");
+	assert.equal(denied.cardsSource, undefined);
+});
+
+test("compat publish without binding cannot overwrite a review-scoped final payload", async () => {
+	const { ctx, store } = seedCtx();
+	await saveMinimumChunks(ctx);
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	const originalFinal: any = await store.get(`reviews/${jobId}/final/payload`);
+	const attackerYaml = originalFinal.yaml.replace("Durable chunks", "Attacker overwrite");
+
+	const result = await routes.publish({ sessionId: "attacker", host: { store } }, { body: { jobId, yaml: attackerYaml, baseSha, headSha } });
+	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(result.legacy, true);
+	const protectedFinal: any = await store.get(`reviews/${jobId}/final/payload`);
+	assert.equal(protectedFinal.yaml, originalFinal.yaml);
+	assert.doesNotMatch(protectedFinal.yaml, /Attacker overwrite/);
+});
+
 test("submit_pr_walkthrough_yaml rejects before writing document over incremental chunks", async () => {
 	const { ctx, store } = seedCtx();
 	await saveChunk(ctx, "metadata", "title: Partial\nstats:\n  files_changed: 1\n  additions: 1\n  deletions: 0\noriginal_description:\n  body: test\n  source: gh_api\n  fetched_at: \"2026-05-30T00:00:00.000Z\"");

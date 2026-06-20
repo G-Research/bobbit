@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
+import extension, {
 	loadPolicy,
 	normalizeReadonlyTimeout,
 	readonlyPolicyImportSpecifiers,
@@ -79,6 +79,37 @@ describe("PR walkthrough tool metadata", () => {
 		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_JOB_ID/);
 		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
 		assert.doesNotMatch(source, /X-Bobbit-Walkthrough-Submit-Proof/);
+	});
+
+	it("chunk/finalize tools return ok:false route results as tool errors", async () => {
+		const previousEnv = { ...process.env };
+		const previousFetch = globalThis.fetch;
+		try {
+			process.env.BOBBIT_SESSION_ID = "reviewer-1";
+			process.env.BOBBIT_GATEWAY_URL = "https://gateway.test";
+			process.env.BOBBIT_TOKEN = "token";
+			let calls = 0;
+			globalThis.fetch = (async (url: string) => {
+				calls += 1;
+				if (String(url).endsWith("/api/ext/surface-token")) {
+					return new Response(JSON.stringify({ token: "surface" }), { status: 200 });
+				}
+				return new Response(JSON.stringify({ ok: false, code: "PRW_FINALIZE_INCOMPLETE", error: "Saved chunks are incomplete for finalization." }), { status: 200 });
+			}) as any;
+			let finalizeTool: any;
+			extension({ registerTool(tool: any) { if (tool.name === "finalize_pr_walkthrough_submission") finalizeTool = tool; } } as any);
+			assert.ok(finalizeTool, "expected finalize tool to register");
+
+			const result = await finalizeTool.execute("call-1", {});
+			assert.equal(calls, 2);
+			assert.equal(result.isError, true);
+			assert.match(result.content[0].text, /finalize_pr_walkthrough_submission failed/);
+			assert.match(result.content[0].text, /PRW_FINALIZE_INCOMPLETE/);
+			assert.equal(result.details.code, "PRW_FINALIZE_INCOMPLETE");
+		} finally {
+			globalThis.fetch = previousFetch;
+			process.env = previousEnv;
+		}
 	});
 
 	it("readonly_bash extension calls the central policy and returns bounded inline output", () => {

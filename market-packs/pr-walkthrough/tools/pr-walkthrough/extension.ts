@@ -727,6 +727,18 @@ function routeToolError(name: string, err: any) {
 	return toolText(`${name} failed: ${err?.message || err}\n\n${formatGatewayResponse(err?.data ?? { error: err?.message || String(err), status: err?.status })}`, true, err?.data);
 }
 
+function isRouteFailure(data: unknown): data is { ok: false; code?: string; error?: string; details?: unknown } {
+	return !!data && typeof data === "object" && (data as any).ok === false;
+}
+
+function routeToolResult(name: string, data: unknown) {
+	if (isRouteFailure(data)) {
+		const message = typeof data.error === "string" && data.error ? data.error : (typeof data.code === "string" && data.code ? data.code : "route returned ok:false");
+		return toolText(`${name} failed: ${message}\n\n${formatGatewayResponse(data)}`, true, data);
+	}
+	return toolText(formatGatewayResponse(data), false, data);
+}
+
 const extension: ExtensionFactory = (pi) => {
 	// host.agents reviewer migration (design Decision C): the boundary is now the
 	// pr-reviewer role policy + the default-deny `PR Walkthrough` tool group — NOT an
@@ -913,7 +925,7 @@ const extension: ExtensionFactory = (pi) => {
 		async execute(_toolCallId, { section_id, yaml }) {
 			try {
 				const data = await callPrWalkthroughRoute("submit_pr_walkthrough_chunk", { op: "submitChunk", section_id, yaml }, sessionId);
-				return toolText(formatGatewayResponse(data), false, data);
+				return routeToolResult("submit_pr_walkthrough_chunk", data);
 			} catch (err: any) {
 				return routeToolError("submit_pr_walkthrough_chunk", err);
 			}
@@ -929,7 +941,7 @@ const extension: ExtensionFactory = (pi) => {
 		async execute() {
 			try {
 				const data = await callPrWalkthroughRoute("read_pr_walkthrough_submission_status", { op: "submissionStatus" }, sessionId);
-				return toolText(formatGatewayResponse(data), false, data);
+				return routeToolResult("read_pr_walkthrough_submission_status", data);
 			} catch (err: any) {
 				return routeToolError("read_pr_walkthrough_submission_status", err);
 			}
@@ -945,7 +957,7 @@ const extension: ExtensionFactory = (pi) => {
 		async execute() {
 			try {
 				const data = await callPrWalkthroughRoute("finalize_pr_walkthrough_submission", { op: "finalizeSubmission" }, sessionId);
-				return toolText(formatGatewayResponse(data), false, data);
+				return routeToolResult("finalize_pr_walkthrough_submission", data);
 			} catch (err: any) {
 				return routeToolError("finalize_pr_walkthrough_submission", err);
 			}
@@ -961,7 +973,7 @@ const extension: ExtensionFactory = (pi) => {
 		async execute(_toolCallId, { yaml }) {
 			try {
 				const data = await callPrWalkthroughRoute("submit_pr_walkthrough_yaml", { op: "submitYaml", yaml }, sessionId);
-				return toolText(formatGatewayResponse(data), false, data);
+				return routeToolResult("submit_pr_walkthrough_yaml", data);
 			} catch (err: any) {
 				return routeToolError("submit_pr_walkthrough_yaml", err);
 			}
