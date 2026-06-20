@@ -109,7 +109,7 @@ async function resolveHindsightContribution(): Promise<HindsightContribution | n
 	const meta = (await listContributions()).find((p) => p.packId === PACK);
 	if (!meta) return null;
 	if (!meta.panels?.some((p) => p.id === PANEL_ID)) return null;
-	const palette = meta.entrypoints?.find((e) => e.kind === "command-palette");
+	const palette = meta.entrypoints?.find((e) => e.kind === "session-menu");
 	const route = meta.entrypoints?.find((e) => e.kind === "route" && !!e.routeId);
 	if (!palette || !route?.routeId) return null;
 	for (const r of ["config", "status", "recall"]) {
