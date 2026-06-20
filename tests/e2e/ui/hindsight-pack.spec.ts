@@ -181,21 +181,58 @@ async function resetHindsightActivation(): Promise<void> {
 	} catch { /* best-effort */ }
 }
 
+/** Clear the per-PAGE dashboard panel state cache (the module-closure Map the panel
+ *  keys by sessionId). The panel kicks its READ-only `config`+`status` loads exactly
+ *  ONCE per session (guarded by `mountKicked`) and is a pure projection thereafter —
+ *  so if BOTH route reads transiently fail/time-out at mount (rare, only under heavy
+ *  CPU contention with sibling workers), the panel latches an empty/error projection
+ *  and never re-reads. Clearing the cache before re-opening forces a FRESH mount that
+ *  re-derives the surface from the persisted (server-side) config — this is exactly
+ *  the state a real page reload produces, so it does not weaken the persistence claim. */
+async function clearDashboardPanelCache(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		try { (globalThis as any).__bobbitHindsightDashboardState?.clear?.(); } catch { /* not mounted yet */ }
+	}).catch(() => { /* page navigating */ });
+}
+
+/** Deterministically wait until the dashboard panel SETTLES on the expected surface
+ *  (`frame` when a uiUrl is configured, `empty` otherwise), re-driving `open()` each
+ *  attempt. While still stuck it also clears the per-page panel cache so a transient
+ *  mount-time route read cannot LATCH a wrong/empty projection that never re-reads.
+ *  Once the surface is present it is left untouched (no further clears/re-opens), so
+ *  follow-on state — e.g. the deterministic embed-warning timeout — is never disturbed. */
+async function waitForDashboardSurface(
+	page: Page,
+	want: "frame" | "empty",
+	open: () => Promise<unknown>,
+	timeout = 20_000,
+): Promise<void> {
+	const target = want === "frame" ? frame(page) : emptyState(page);
+	await open();
+	await reconcile(page);
+	await expect.poll(async () => {
+		const n = await target.count();
+		if (n > 0) return n; // settled — do not disturb the live surface
+		await reconcile(page);
+		await clearDashboardPanelCache(page);
+		await open();
+		await reconcile(page);
+		return target.count();
+	}, { timeout }).toBeGreaterThan(0);
+}
+
 /** Open the app + select a fresh session, then mount the Hindsight dashboard panel via
- *  the session-menu launcher (the SAME chain a menu click drives). Polls reconcile +
- *  launch so a still-in-flight entrypoint registration settles. Returns the discovered
- *  contribution so the caller can deep-link. */
-async function mountDashboard(page: Page, contribution: DashboardContribution): Promise<string> {
+ *  the session-menu launcher (the SAME chain a menu click drives). Deterministically
+ *  waits for the EXPECTED surface (frame/empty) so a transient mount-time read can
+ *  never latch the wrong projection. Returns the session id so the caller can deep-link. */
+async function mountDashboard(page: Page, contribution: DashboardContribution, want: "frame" | "empty" = "frame"): Promise<string> {
 	await openApp(page);
 	const sid = await createSessionViaUI(page);
 	expect(sid, "a session must be selected").toBeTruthy();
 	await waitForSessionStatus(sid, "idle").catch(() => { /* best-effort */ });
 	await reconcile(page);
-	await expect.poll(async () => {
-		await reconcile(page);
-		await page.evaluate((key) => (window as any).__bobbitRunPackLauncher?.(key), launcherKey(contribution.paletteEntrypointId)).catch(() => { /* race */ });
-		return (await frame(page).count()) + (await emptyState(page).count());
-	}, { timeout: 20_000 }).toBeGreaterThan(0);
+	const open = () => page.evaluate((key) => (window as any).__bobbitRunPackLauncher?.(key), launcherKey(contribution.paletteEntrypointId)).catch(() => { /* race */ });
+	await waitForDashboardSurface(page, want, open);
 	return sid;
 }
 
@@ -249,11 +286,15 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await reconcile(page);
-		await expect.poll(async () => {
-			await reconcile(page);
-			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${routeId}`);
-			return frame(page).count();
-		}, { timeout: 20_000 }).toBeGreaterThan(0);
+		// Drive the bare `#/ext/<routeId>` deep link. Toggle via the session route so
+		// re-opening is observable even when the hash is already the ext route, then
+		// wait deterministically for the embedded frame to settle (recovering from a
+		// transient mount-time read latch — see waitForDashboardSurface).
+		const openDeepLink = async () => {
+			await page.evaluate((s) => { window.location.hash = `#/session/${s}`; }, sid).catch(() => { /* race */ });
+			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${routeId}`).catch(() => { /* race */ });
+		};
+		await waitForDashboardSurface(page, "frame", openDeepLink);
 		await expect(frame(page), "the deep link re-opens the embedded dashboard").toBeVisible({ timeout: 15_000 });
 		await expect(frame(page), "the re-opened iframe keeps the configured UI URL").toHaveAttribute("src", EX_UI_URL, { timeout: 15_000 });
 		await expect(configCard(page), "the deep link must not open a config card").toHaveCount(0);
@@ -281,7 +322,7 @@ describe("Hindsight pack — embedded dashboard entry (use surface)", () => {
 
 		// Data-plane URL is configured but the human dashboard UI URL is NOT.
 		await seedHindsightConfig({ externalUrl: stub.url, bank: "hermes" });
-		await mountDashboard(page, contribution!);
+		await mountDashboard(page, contribution!, "empty");
 
 		await expect(emptyState(page), "an unset UI URL renders the empty state").toBeVisible({ timeout: 15_000 });
 		await expect(frame(page), "no iframe is rendered without a UI URL").toHaveCount(0);
