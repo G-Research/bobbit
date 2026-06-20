@@ -623,18 +623,24 @@ const THINKING_LEVEL_LABELS: Record<string, string> = {
 type RoleFieldSourceUiKind = "role" | "inherited-role" | "default" | "auto";
 
 interface RoleFieldDisplay {
-	/** True when the value comes from a role-level override (current or inherited role). */
-	override: boolean;
+	/**
+	 * Source kind. `"role"` (current-scope override) is the ONLY kind that feeds
+	 * the editable picker and exposes clear/reset; everything else displays the
+	 * effective value + badge read-only (findings #1, #2).
+	 */
 	kind: RoleFieldSourceUiKind;
 	/** Compact source badge text, e.g. "Role override", "Session default". */
 	badge: string;
 	/** Resolved value text (model id / thinking label) for the source line. */
 	effectiveLabel: string;
 	/**
-	 * Raw effective value (model id / thinking level) for the row's interactive
-	 * picker — including inherited-role values that have no top-level
-	 * `role.model` / `role.thinkingLevel`. Empty string when the field falls
-	 * back to a pure default (so the picker renders its "(use default)" label).
+	 * Raw effective value (model id / thinking level) used ONLY for the
+	 * read-only source-line label (incl. inherited-role / default values).
+	 *
+	 * It is deliberately NOT fed into the editable picker: doing so let the
+	 * shared `renderModelRow` clamp an inherited/unsupported thinking value at
+	 * render time and auto-persist it as a spurious current-scope override
+	 * (review finding #1). The picker is fed only `currentScopeRoleOverrides`.
 	 */
 	effectiveValue: string;
 }
@@ -723,12 +729,12 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 		const value = m.value ?? "";
 		const effectiveLabel = value ? format(value) : emptyLabel;
 		switch (m.source) {
-			// Inherited-role values have no top-level `role.model`/`role.thinkingLevel`,
-			// so `effectiveValue` is what surfaces the real model/thinking in the picker
-			// instead of a misleading "(use default)".
-			case "role": return { override: true, kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
-			case "inherited-role": return { override: true, kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value };
-			default: return { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "" };
+			// `effectiveValue` only feeds the read-only source-line label; the
+			// editable picker is fed `currentScopeRoleOverrides` so inherited
+			// values are never clamped/auto-saved (finding #1).
+			case "role": return { kind: "role", badge: "Role override", effectiveLabel, effectiveValue: value };
+			case "inherited-role": return { kind: "inherited-role", badge: inheritedBadge(m), effectiveLabel, effectiveValue: value };
+			default: return { kind: defaultKind, badge: defaultBadge, effectiveLabel, effectiveValue: "" };
 		}
 	};
 
@@ -737,9 +743,9 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	if (meta) {
 		model = fromMeta(meta.model, (v) => formatModelPref(v), formatModelPref(def.model));
 	} else if (role.model) {
-		model = { override: true, kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model), effectiveValue: role.model };
+		model = { kind: "role", badge: "Role override", effectiveLabel: formatModelPref(role.model), effectiveValue: role.model };
 	} else {
-		model = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "" };
+		model = { kind: defaultKind, badge: defaultBadge, effectiveLabel: formatModelPref(def.model), effectiveValue: "" };
 	}
 
 	// THINKING
@@ -748,9 +754,9 @@ function computeRoleModelDisplay(role: RoleData): RoleModelDisplay {
 	if (meta) {
 		thinking = fromMeta(meta.thinkingLevel, (v) => thinkingLevelLabel(v), defThinkingLabel);
 	} else if (role.thinkingLevel) {
-		thinking = { override: true, kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel), effectiveValue: role.thinkingLevel };
+		thinking = { kind: "role", badge: "Role override", effectiveLabel: thinkingLevelLabel(role.thinkingLevel), effectiveValue: role.thinkingLevel };
 	} else {
-		thinking = { override: false, kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "" };
+		thinking = { kind: defaultKind, badge: defaultBadge, effectiveLabel: defThinkingLabel, effectiveValue: "" };
 	}
 
 	// State follows the CURRENT-SCOPE override (not the resolved winner): an
@@ -797,16 +803,28 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 		`;
 	}
 
-	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string, clearTestid?: string) => html`
+	// Only a CURRENT-SCOPE role override (source === "role") gets the picker's
+	// effective value and the clear/reset affordances. Inherited-role and
+	// default fields show their effective value + source in the read-only
+	// source line, but the picker is fed the empty current-scope override (so it
+	// renders "(use default)" and never clamps/auto-saves an inherited value),
+	// and no model-clear / thinking-reset control is exposed for them — clearing
+	// an empty local field would be a confusing no-op (review findings #1, #2).
+	const overrides = currentScopeRoleOverrides(role);
+
+	const sourceLine = (key: string, f: RoleFieldDisplay, testid: string, clearTestid?: string) => {
+		const currentOverride = f.kind === "role";
+		return html`
 		<span class="rrm-src" data-testid="${testid}">
 			<span class="rrm-src-key">${key}</span>
-			${f.override ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
+			${currentOverride ? nothing : html`<span class="rrm-src-val" title="${f.effectiveLabel}">${f.effectiveLabel}</span>`}
 			<span class="rrm-badge rrm-badge--${f.kind}">${f.badge}</span>
-			${clearTestid && f.override ? html`<button class="rrm-clear-btn" data-testid="${clearTestid}"
+			${clearTestid && currentOverride ? html`<button class="rrm-clear-btn" data-testid="${clearTestid}"
 				title="Reset thinking to default"
 				@click=${(e: Event) => { e.stopPropagation(); control.onThinkingChange(role, ""); }}>${icon(X, "xs")}</button>` : nothing}
 		</span>
 	`;
+	};
 
 	return html`
 		<div class="role-row-model-control role-row-model-control--${display.state}"
@@ -818,9 +836,9 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 				${renderModelRow(
 					"",
 					"",
-					display.model.effectiveValue,
+					overrides.model,
 					(v) => control.onModelChange(role, v),
-					display.thinking.effectiveValue,
+					overrides.thinkingLevel,
 					(v) => control.onThinkingChange(role, v),
 					"",
 					{ fallbackLabel: "(use default)" },

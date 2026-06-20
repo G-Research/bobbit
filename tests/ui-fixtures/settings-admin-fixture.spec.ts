@@ -423,10 +423,15 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(/Server/i);
 	});
 
-	test("list view shows inherited-role effective model + thinking even when top-level fields are absent (finding #2)", async ({ page }) => {
+	test("list view shows inherited-role effective model + thinking in the source line, not the editable picker, with no clear/reset (findings #1, #2)", async ({ page }) => {
 		// The role carries NO top-level model/thinkingLevel; the effective values
-		// live only in modelResolution (inherited from the server role layer). The
-		// row MUST surface those effective values in the picker, not "(use default)".
+		// live only in modelResolution (inherited from the server role layer).
+		//  - finding #1: inherited values must NOT be fed into the editable picker
+		//    (that lets renderModelRow clamp + auto-persist them as a spurious local
+		//    override on render). The picker shows the inherit placeholder; the
+		//    effective values are displayed in the read-only source line instead.
+		//  - finding #2: inherited-role fields expose NO model-clear / thinking-reset
+		//    affordances (clearing an empty local field would be a confusing no-op).
 		await resetFixture(page, {
 			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
 			roles: [
@@ -447,15 +452,55 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(control).toBeVisible();
 		// Current scope did not override → the row reads as inherited, NOT override.
 		await expect(control).toHaveAttribute("data-model-state", "inherited");
-		// Effective model surfaces in the picker (no "(use default)" placeholder).
+		// finding #1: picker shows the inherit placeholder, never the inherited value.
 		const modelPicker = control.locator("[data-testid='model-row'] button[title='Choose model']");
-		await expect(modelPicker).toContainText("claude-opus-4-1");
-		await expect(modelPicker).not.toContainText("(use default)");
-		// Effective thinking surfaces in the thinking selector.
-		await expect(control.locator("[data-testid='model-row'] button[role='combobox']")).toContainText("High");
-		// Both fields are badged as inherited-role overrides naming their source.
+		await expect(modelPicker).toContainText("(use default)");
+		await expect(modelPicker).not.toContainText("claude-opus-4-1");
+		await expect(control.locator("[data-testid='model-row'] button[role='combobox']")).toContainText("(use default)");
+		// The effective inherited values are surfaced in the source line + badged.
+		await expect(control.locator(LIST_MODEL_SOURCE)).toContainText("claude-opus-4-1");
 		await expect(control.locator(LIST_MODEL_SOURCE)).toHaveText(SRC_INHERITED_ROLE);
+		await expect(control.locator(LIST_THINKING_SOURCE)).toContainText("High");
 		await expect(control.locator(LIST_THINKING_SOURCE)).toHaveText(SRC_INHERITED_ROLE);
+		// finding #2: no clear/reset affordances for inherited-role fields.
+		await expect(control.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+		await expect(control.locator(LIST_THINKING_CLEAR)).toHaveCount(0);
+	});
+
+	test("list view rendering an inherited unsupported thinking value never auto-persists a clamped local override (finding #1)", async ({ page }) => {
+		// The inherited thinking value (xhigh) is unsupported by the inherited model
+		// in the registry. The old code fed it through the shared picker, whose
+		// render-time clamp fired onThinkingChange and auto-saved a spurious
+		// current-scope thinking override just from VIEWING the list. Now inherited
+		// values bypass the editable picker, so merely rendering must persist nothing.
+		await resetFixture(page, {
+			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
+			roles: [
+				{
+					name: "coder", label: "Coder", promptTemplate: "You write code.",
+					accessory: "none", toolPolicies: {},
+					createdAt: 1, updatedAt: 1, origin: "project",
+					modelResolution: {
+						model: { value: TEST_MODEL, source: "inherited-role", origin: "server", editable: true },
+						thinkingLevel: { value: "xhigh", source: "inherited-role", origin: "server", editable: true },
+					},
+				} as any,
+			],
+		});
+		await loadRoles(page, "#/roles");
+
+		const control = roleRow(page, "coder").locator(LIST_MODEL_CONTROL);
+		await expect(control).toBeVisible();
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+
+		// Give any render-time clamp microtask a chance to (wrongly) fire a save.
+		await page.waitForTimeout(300);
+
+		// Nothing was written: the role keeps no local model/thinking override.
+		await expect.poll(async () => {
+			const c = await storedRole(page, "coder");
+			return [c?.model ?? "", c?.thinkingLevel ?? ""];
+		}).toEqual(["", ""]);
 	});
 
 	test("list view thinking-only change does not promote an inherited model into an override (finding #3)", async ({ page }) => {

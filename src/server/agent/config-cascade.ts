@@ -330,12 +330,21 @@ export class ConfigCascade {
 				// effective value inherited from another band the user cannot edit
 				// in place at this scope.
 				const isEditableLayer = winnerRank === editableRank && entry.origin.kind !== "market";
+				// A winner ABOVE the editable band shadows any write to the editable
+				// layer: e.g. a `global-user` override while editing the server layer.
+				// `PUT /api/roles/:name` writes the server (or project) layer, which
+				// cannot override a higher-precedence winner, so the field is NOT
+				// editable in place at this scope — reporting it editable would make
+				// the inline control appear to no-op (review finding #3). Lower
+				// winners (builtin under server, server under project) remain editable
+				// because the editable-layer write DOES shadow them.
+				const shadowsEditableLayer = winnerRank > editableRank;
 				return {
 					value: wv,
 					source: isEditableLayer ? "role" : "inherited-role",
 					origin,
 					originPackName: packName,
-					editable,
+					editable: editable && !shadowsEditableLayer,
 					sourceLabel: packName ?? originSourceLabel(origin),
 				};
 			}
