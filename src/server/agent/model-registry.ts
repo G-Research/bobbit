@@ -258,6 +258,7 @@ const ENV_MAP: Record<string, string> = {
 	"amazon-bedrock": "AWS_ACCESS_KEY_ID",
 	"groq": "GROQ_API_KEY",
 	"mistral": "MISTRAL_API_KEY",
+	"openrouter": "OPENROUTER_API_KEY",
 };
 
 /**

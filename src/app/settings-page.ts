@@ -2172,7 +2172,7 @@ export function renderModelsTab() {
 // Providers offered in the Models-tab "Provider API Keys" fallback section. Plain
 // `google` is the Google AI Studio / Gemini Developer API-key provider (distinct
 // from the `google-gemini-cli` account OAuth flow in Settings → Account).
-const PROVIDER_KEY_PROVIDERS = ["google", "anthropic", "openai"] as const;
+const PROVIDER_KEY_PROVIDERS = ["google", "anthropic", "openai", "openrouter"] as const;
 
 /** Human-readable labels for known project config keys. */
 const PROJECT_KEY_LABELS: Record<string, string> = {
