@@ -80,6 +80,22 @@ const cardsKey = (changesetId) => `cards/${b64url(changesetId)}`;
 // owner-scoped recover pointer exists. status ∈ running|submitted|error.
 const bindingKey = (childSessionId) => `binding/${childSessionId}`;
 const submittedKey = (jobId) => `submitted/${jobId}`;
+const reviewerIndexKey = (sessionId) => `reviewers/${sessionId}`;
+const reviewPrefix = (jobId) => `reviews/${jobId}/`;
+const reviewBindingKey = (jobId, childSessionId) => `${reviewPrefix(jobId)}binding/${childSessionId}`;
+const draftPrefix = (jobId) => `${reviewPrefix(jobId)}draft/`;
+const finalPrefix = (jobId) => `${reviewPrefix(jobId)}final/`;
+const stagingPrefix = (jobId) => `${reviewPrefix(jobId)}staging/`;
+const chunkPrefix = (jobId) => `${draftPrefix(jobId)}chunks/`;
+const chunkKey = (jobId, chunkId) => `${chunkPrefix(jobId)}${chunkId}`;
+const draftStatusKey = (jobId) => `${draftPrefix(jobId)}status`;
+const draftCheckpointKey = (jobId) => `${draftPrefix(jobId)}checkpoint`;
+const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
+
+const DRAFT_QUOTA = (jobId) => ({ quotaScope: { prefix: draftPrefix(jobId), profile: "review-draft" } });
+const FINAL_QUOTA = (jobId) => ({ quotaScope: { prefix: finalPrefix(jobId), profile: "review-final" } });
+const CHUNK_ID_PATTERN = /^(?:metadata|context|merge_assessment|omissions_and_followups|audit|display|document|decision:[A-Za-z0-9_.-]+|chunk:[A-Za-z0-9_.-]+)$/;
+const DEFAULT_PHASE_ORDER = ["orientation", "design", "significant", "other", "audit"];
 
 // host.agents reviewer-launch retry bound (Decision E): clearly-transient spawn
 // errors are auto-retried (short backoff) so a blip never surfaces; non-transient
@@ -122,6 +138,11 @@ export const routes = {
 		const jobId = normalizeJobId(q.jobId);
 		let baseSha = strOf(q.baseSha);
 		let headSha = strOf(q.headSha);
+
+		const finalPayload = await ctx.host.store.get(finalPayloadKey(jobId));
+		if (isFinalPayload(finalPayload)) {
+			return finalBundleResult(finalPayload, jobId);
+		}
 
 		// jobId-only: rehydrate base/head from the persisted job pointer so a deep-link
 		// carrying only the jobId still recomputes the SAME changeset live. The repo
@@ -185,77 +206,15 @@ export const routes = {
 	// error (the panel surfaces it; nothing is persisted).
 	publish: async (ctx, req) => {
 		const body = (req && req.body) || {};
-		const jobId = normalizeJobId(body.jobId);
-		let baseSha = strOf(body.baseSha);
-		let headSha = strOf(body.headSha);
-
-		// Rehydrate base/head from the job pointer when a re-publish omits them.
-		if (!baseSha || !headSha) {
-			const job = await ctx.host.store.get(jobKey(jobId));
-			if (job && typeof job === "object") {
-				baseSha = baseSha || strOf(job.baseSha);
-				headSha = headSha || strOf(job.headSha);
-			}
+		try {
+			if (body.op === "submitChunk") return await submitPrWalkthroughChunk(ctx, body);
+			if (body.op === "submissionStatus") return await readPrWalkthroughSubmissionStatus(ctx, body);
+			if (body.op === "finalizeSubmission") return await finalizePrWalkthroughSubmission(ctx, body);
+			if (body.op === "submitYaml") return await submitPrWalkthroughYamlCompat(ctx, body);
+			return await publishYamlCompat(ctx, body);
+		} catch (err) {
+			return structuredErrorResult(err, body);
 		}
-
-		// LIVE changeset recompute against the session worktree (server-derived cwd).
-		// Provides BOTH the per-real-changeset store key and the parsed diff blocks the
-		// synthesis maps relevant_hunks / suggested-comment anchors against.
-		let live;
-		if (baseSha && headSha) {
-			live = await resolveLocalChangeset(workerCwd(), baseSha, headSha);
-		}
-		const changesetId = (live && live.changesetId)
-			|| strOf(body.changesetId)
-			|| (baseSha && headSha ? changesetIdForLocal(baseSha, headSha) : undefined)
-			|| jobId;
-
-		// Job pointer — lets a jobId-only deep-link rehydrate base/head. NEVER a repoDir.
-		await ctx.host.store.put(jobKey(jobId), {
-			schemaVersion: STORE_SCHEMA_VERSION,
-			jobId,
-			changesetId,
-			baseSha,
-			headSha,
-		});
-
-		// Validate + map the RAW production YAML through the SHARED synthesis.
-		const yamlText = strOf(body.yaml);
-		if (!yamlText) {
-			const keys = await ctx.host.store.list("");
-			return { ok: true, jobId, changesetId, persistedAt: undefined, cardCount: 0, keys };
-		}
-		const validation = validatePrWalkthroughYaml(yamlText);
-		if (!validation.ok) {
-			// Structured schema error — the panel renders the validation message; we
-			// persist NOTHING (the bundle then falls back to the structural cards).
-			return { ok: false, error: "YAML_SCHEMA_INVALID", summary: validation.summary, jobId, changesetId };
-		}
-		const parsedDiff = live
-			? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings }
-			: {};
-		const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff);
-		const cards = Array.isArray(result.cards) ? result.cards : [];
-		const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-
-		// Persist synthesized cards keyed by the LIVE changeset id; persistedAt once.
-		const existing = await ctx.host.store.get(cardsKey(changesetId));
-		const persistedAt = typeof body.persistedAt === "number"
-			? body.persistedAt
-			: (existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now());
-		await ctx.host.store.put(cardsKey(changesetId), {
-			schemaVersion: STORE_SCHEMA_VERSION,
-			changesetId,
-			// Persist the synthesized changeset too (it carries the production PR
-			// title/metadata) so `bundle` renders the real header, not the bare sha range.
-			changeset: result.changeset,
-			cards,
-			warnings,
-			persistedAt,
-		});
-
-		const keys = await ctx.host.store.list("");
-		return { ok: true, jobId, changesetId, persistedAt, cardCount: cards.length, keys };
 	},
 
 	// ── run ──────────────────────────────────────────────────────────────────────
@@ -333,55 +292,41 @@ export const routes = {
 	status: async (ctx, req) => {
 		const body = (req && req.body) || {};
 		const childSessionId = strOf(body.childSessionId);
-		const jobId = strOf(body.jobId);
+		const requestedJobId = strOf(body.jobId);
 		const store = ctx.host.store;
-		if (!childSessionId || !jobId) {
-			return { phase: "error", error: "childSessionId and jobId are required" };
+		if (!childSessionId || !requestedJobId) {
+			return { phase: "error", error: "childSessionId and jobId are required", code: "PRW_STATUS_REQUEST_INVALID" };
 		}
 
-		// Verify the caller owns the bound job; on mismatch read NOTHING else.
-		// Area D: authorize EITHER bound principal — the bound owner (parent) OR the
-		// reviewer child polling its OWN pane (ctx.sessionId === childSessionId). Right-
-		// job routing is preserved: the caller must still match the binding's jobId AND
-		// be one of the two named principals; a foreign session is still rejected.
-		const binding = await store.get(bindingKey(childSessionId));
-		const isOwner = !!binding && typeof binding === "object" && binding.parentSessionId === ctx.sessionId;
+		const binding = await loadReviewerBinding(store, childSessionId, requestedJobId);
+		const isOwner = !!binding && binding.parentSessionId === ctx.sessionId;
 		const isChild = childSessionId === ctx.sessionId;
-		if (!binding || typeof binding !== "object"
-			|| binding.jobId !== jobId
-			|| !(isOwner || isChild)) {
-			return { phase: "error", error: "unknown or mismatched binding" };
+		if (!binding || binding.jobId !== requestedJobId || !(isOwner || isChild)) {
+			return { phase: "error", error: "unknown or mismatched binding", code: "PRW_MISSING_BINDING" };
 		}
 
-		const submitted = await store.get(submittedKey(binding.jobId));
-
-		// Submitted marker wins for EITHER principal — the reviewer produced its
-		// walkthrough. NO-DISMISS (launch UX correction, req 3/4): the reviewer is NOT
-		// reaped on submit — it stays a live, selectable session until the user
-		// terminates it. The child panel flips pending → rendered cards on this phase.
-		if (submitted && typeof submitted === "object") {
-			return { phase: "submitted", yaml: submitted.yaml, baseSha: submitted.baseSha, headSha: submitted.headSha };
+		const finalPayload = await store.get(finalPayloadKey(binding.jobId));
+		if (isFinalPayload(finalPayload)) {
+			return finalSubmittedStatus(finalPayload, binding);
+		}
+		const legacySubmitted = await store.get(submittedKey(binding.jobId));
+		if (legacySubmitted && typeof legacySubmitted === "object" && strOf(legacySubmitted.yaml)) {
+			return { phase: "submitted", yaml: legacySubmitted.yaml, baseSha: legacySubmitted.baseSha ?? binding.baseSha, headSha: legacySubmitted.headSha ?? binding.headSha };
 		}
 
-		// FINDING 2 — CHILD-SELF poll: derive the phase PURELY from the submitted
-		// marker (handled above ⇒ here it is absent ⇒ running). A reviewer child cannot
-		// read its OWN agent status through host.agents (owner-only), so calling it
-		// would be denied, mis-read as terminated, and wrongly error the LIVE binding.
-		if (isChild && !isOwner) {
-			return { phase: "running" };
+		const chunkSummary = await summarizeChunks(store, binding.jobId);
+		if (chunkSummary.chunks.length > 0) {
+			return { phase: "draft", jobId: binding.jobId, chunkSummary, baseSha: binding.baseSha, headSha: binding.headSha };
 		}
 
-		// OWNER path (unchanged): detect a reviewer that terminated WITHOUT submitting.
+		if (isChild && !isOwner) return { phase: "running" };
+
 		let agentStatus = "preparing";
 		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
 		catch { agentStatus = "terminated"; }
 		if (agentStatus === "terminated") {
-			// Errored without submitting: mark the binding terminal. NO-DISMISS (launch UX
-			// correction): status polling NEVER reaps the reviewer — a genuinely terminated
-			// child is reported as phase:"error" but the session is left for the user to
-			// terminate via the standard session-dismiss control.
 			await store.put(bindingKey(childSessionId), { ...binding, status: "error" });
-			return { phase: "error", agentStatus, error: "The reviewer terminated without producing a walkthrough." };
+			return { phase: "error", agentStatus, error: "The reviewer terminated without producing a walkthrough.", code: "PRW_REVIEWER_TERMINATED" };
 		}
 		return { phase: "running", agentStatus };
 	},
@@ -398,24 +343,369 @@ export const routes = {
 	// pointer); keyed by ctx.sessionId; never auto-invoked from a non-child pane.
 	recover: async (ctx, _req) => {
 		const me = strOf(ctx && ctx.sessionId);
-		if (!me) return { found: false };
+		if (!me) return { found: false, code: "PRW_REVIEW_MISSING" };
 		const store = ctx.host.store;
-		const selfBinding = await store.get(bindingKey(me));
-		if (selfBinding && typeof selfBinding === "object" && strOf(selfBinding.jobId)) {
-			const submitted = await store.get(submittedKey(selfBinding.jobId));
-			if (submitted && typeof submitted === "object" && strOf(submitted.yaml)) {
-				return {
-					found: true,
-					jobId: selfBinding.jobId,
-					yaml: submitted.yaml,
-					baseSha: submitted.baseSha ?? selfBinding.baseSha,
-					headSha: submitted.headSha ?? selfBinding.headSha,
-				};
-			}
+		const selfBinding = await loadReviewerBinding(store, me);
+		if (!selfBinding) return { found: false, code: "PRW_REVIEW_MISSING", error: "Walkthrough data expired or was cleaned up. Start a new walkthrough." };
+		const finalPayload = await store.get(finalPayloadKey(selfBinding.jobId));
+		if (isFinalPayload(finalPayload)) {
+			return {
+				found: true,
+				jobId: selfBinding.jobId,
+				yaml: finalPayload.yaml,
+				baseSha: finalPayload.baseSha ?? selfBinding.baseSha,
+				headSha: finalPayload.headSha ?? selfBinding.headSha,
+			};
 		}
-		return { found: false };
+		const legacySubmitted = await store.get(submittedKey(selfBinding.jobId));
+		if (legacySubmitted && typeof legacySubmitted === "object" && strOf(legacySubmitted.yaml)) {
+			return {
+				found: true,
+				jobId: selfBinding.jobId,
+				yaml: legacySubmitted.yaml,
+				baseSha: legacySubmitted.baseSha ?? selfBinding.baseSha,
+				headSha: legacySubmitted.headSha ?? selfBinding.headSha,
+			};
+		}
+		const chunkSummary = await summarizeChunks(store, selfBinding.jobId);
+		if (chunkSummary.chunks.length > 0) {
+			return { found: false, phase: "draft", jobId: selfBinding.jobId, chunkSummary, code: "PRW_REVIEW_DRAFT", error: "Walkthrough analysis is saved but not finalized yet." };
+		}
+		return { found: false, code: "PRW_REVIEW_MISSING", error: "Walkthrough data expired or was cleaned up. Start a new walkthrough." };
 	},
 };
+
+function prwError(code, error, details, status = 400) {
+	const err = new Error(error);
+	err.code = code;
+	err.details = details;
+	err.status = status;
+	return err;
+}
+
+function structuredErrorResult(err, body = {}) {
+	const message = messageOf(err);
+	const code = err && typeof err === "object" && typeof err.code === "string"
+		? err.code
+		: (/quota|too large|maxTotalBytes|STORE_QUOTA/i.test(message) ? "STORE_QUOTA_EXCEEDED" : "PRW_ROUTE_FAILED");
+	return { ok: false, code, error: message, details: err && typeof err === "object" ? err.details : undefined, jobId: normalizeJobId(body.jobId) };
+}
+
+function isObject(value) {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseYamlValue(yamlText, _label = "YAML") {
+	const text = String(yamlText ?? "").trim();
+	if (!text) return null;
+	if (/^-\s+/m.test(text)) return [];
+	if (/^[A-Za-z0-9_.-]+\s*:/m.test(text)) return topLevelYamlMap(text);
+	return text.replace(/^['\"]|['\"]$/g, "");
+}
+
+function topLevelYamlMap(text) {
+	const out = {};
+	for (const line of String(text).split(/\r?\n/)) {
+		const match = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
+		if (match) out[match[1]] = match[2].replace(/^['\"]|['\"]$/g, "");
+	}
+	return out;
+}
+
+function validateChunkId(sectionId) {
+	const id = strOf(sectionId);
+	if (!id || !CHUNK_ID_PATTERN.test(id)) {
+		throw prwError("PRW_CHUNK_ID_INVALID", "section_id must be metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, or chunk:<id>.", { sectionId });
+	}
+	return id;
+}
+
+function chunkKind(id) {
+	if (id.startsWith("decision:")) return "decision";
+	if (id.startsWith("chunk:")) return "review_chunk";
+	if (id === "omissions_and_followups") return "omissions";
+	return id;
+}
+
+function lightValidateChunk(id, yamlText) {
+	const value = parseYamlValue(yamlText, id);
+	if ((id === "omissions_and_followups") && !Array.isArray(value)) throw prwError("PRW_CHUNK_INVALID", "omissions_and_followups must be a YAML array.");
+	if ((id.startsWith("decision:") || id.startsWith("chunk:")) && !isObject(value)) throw prwError("PRW_CHUNK_INVALID", `${id} must be a YAML mapping.`);
+	if (["metadata", "context", "merge_assessment", "audit", "display"].includes(id) && !isObject(value)) throw prwError("PRW_CHUNK_INVALID", `${id} must be a YAML mapping.`);
+	if (id === "document") {
+		const validation = validatePrWalkthroughYaml(String(yamlText));
+		if (!validation.ok) throw prwError("PRW_SCHEMA_INVALID", "PR walkthrough document failed validation.", validation.summary);
+	}
+	return value;
+}
+
+async function loadReviewerBinding(store, sessionId, expectedJobId) {
+	const indexed = await store.get(reviewerIndexKey(sessionId));
+	const indexedJobId = indexed && typeof indexed === "object" ? strOf(indexed.jobId) : undefined;
+	const jobId = expectedJobId || indexedJobId;
+	if (jobId) {
+		const scoped = await store.get(reviewBindingKey(jobId, sessionId));
+		if (scoped && typeof scoped === "object") return scoped;
+	}
+	const legacy = await store.get(bindingKey(sessionId));
+	if (legacy && typeof legacy === "object") return legacy;
+	return undefined;
+}
+
+async function resolveReviewerBinding(ctx, body = {}) {
+	const sessionId = strOf(ctx && ctx.sessionId);
+	if (!sessionId) throw prwError("PRW_MISSING_BINDING", "No bound reviewer session is available.", undefined, 403);
+	const binding = await loadReviewerBinding(ctx.host.store, sessionId, strOf(body.jobId));
+	if (!binding || !strOf(binding.jobId)) throw prwError("PRW_MISSING_BINDING", "Caller is not a bound PR-walkthrough reviewer.", undefined, 403);
+	return { sessionId, binding };
+}
+
+async function submitPrWalkthroughChunk(ctx, body) {
+	const { binding } = await resolveReviewerBinding(ctx, body);
+	const id = validateChunkId(body.section_id ?? body.sectionId);
+	const yamlText = typeof body.yaml === "string" ? body.yaml : undefined;
+	if (!yamlText) throw prwError("PRW_CHUNK_INVALID", "yaml is required.");
+	lightValidateChunk(id, yamlText);
+	const record = { schemaVersion: STORE_SCHEMA_VERSION, id, kind: chunkKind(id), yaml: yamlText, updatedAt: Date.now(), bytes: Buffer.byteLength(yamlText, "utf-8") };
+	await ctx.host.store.put(chunkKey(binding.jobId, id), record, DRAFT_QUOTA(binding.jobId));
+	const chunkSummary = await summarizeChunks(ctx.host.store, binding.jobId);
+	await ctx.host.store.put(draftStatusKey(binding.jobId), { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, updatedAt: Date.now(), chunkSummary }, DRAFT_QUOTA(binding.jobId));
+	return { ok: true, status: "chunk_saved", jobId: binding.jobId, chunk: summarizeChunkRecord(record), chunkSummary };
+}
+
+async function readPrWalkthroughSubmissionStatus(ctx, body = {}) {
+	const { binding } = await resolveReviewerBinding(ctx, body);
+	const finalPayload = await ctx.host.store.get(finalPayloadKey(binding.jobId));
+	const chunkSummary = await summarizeChunks(ctx.host.store, binding.jobId);
+	return {
+		ok: true,
+		jobId: binding.jobId,
+		phase: isFinalPayload(finalPayload) ? "submitted" : (chunkSummary.chunks.length ? "draft" : "running"),
+		finalized: isFinalPayload(finalPayload),
+		finalizedAt: isFinalPayload(finalPayload) ? finalPayload.finalizedAt : undefined,
+		chunkSummary,
+	};
+}
+
+async function submitPrWalkthroughYamlCompat(ctx, body) {
+	const saved = await submitPrWalkthroughChunk(ctx, { ...body, section_id: "document" });
+	const finalized = await finalizePrWalkthroughSubmission(ctx, body);
+	return { ...finalized, savedChunk: saved.chunk };
+}
+
+async function finalizePrWalkthroughSubmission(ctx, body = {}) {
+	const { binding } = await resolveReviewerBinding(ctx, body);
+	const assembled = await assembleSubmission(ctx.host.store, binding);
+	const finalPayload = await buildFinalPayload(ctx, binding, assembled.yaml, body);
+	await ctx.host.store.put(finalPayloadKey(binding.jobId), finalPayload, FINAL_QUOTA(binding.jobId));
+	await bestEffortDeletePrefix(ctx.host.store, stagingPrefix(binding.jobId));
+	await bestEffortDeletePrefix(ctx.host.store, draftPrefix(binding.jobId));
+	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }); } catch { /* legacy marker best-effort */ }
+	return { ok: true, status: "submitted", jobId: binding.jobId, changesetId: finalPayload.changesetId, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+}
+
+async function publishYamlCompat(ctx, body) {
+	const jobId = normalizeJobId(body.jobId);
+	const binding = await bindingForPublish(ctx.host.store, jobId, body);
+	const yamlText = strOf(body.yaml);
+	if (!yamlText) {
+		const finalPayload = await ctx.host.store.get(finalPayloadKey(jobId));
+		return { ok: true, jobId, changesetId: isFinalPayload(finalPayload) ? finalPayload.changesetId : strOf(body.changesetId) || jobId, persistedAt: isFinalPayload(finalPayload) ? finalPayload.persistedAt : undefined, cardCount: isFinalPayload(finalPayload) ? finalPayload.cardCount : 0 };
+	}
+	const finalPayload = await buildFinalPayload(ctx, binding, yamlText, body);
+	await ctx.host.store.put(finalPayloadKey(jobId), finalPayload, FINAL_QUOTA(jobId));
+	return { ok: true, jobId, changesetId: finalPayload.changesetId, persistedAt: finalPayload.persistedAt, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+}
+
+async function bindingForPublish(store, jobId, body) {
+	const existingFinal = await store.get(finalPayloadKey(jobId));
+	const legacyJob = await store.get(jobKey(jobId));
+	return {
+		jobId,
+		changesetId: strOf(body.changesetId) || (isFinalPayload(existingFinal) ? existingFinal.changesetId : undefined) || (legacyJob && typeof legacyJob === "object" ? strOf(legacyJob.changesetId) : undefined) || jobId,
+		baseSha: strOf(body.baseSha) || (legacyJob && typeof legacyJob === "object" ? strOf(legacyJob.baseSha) : undefined),
+		headSha: strOf(body.headSha) || (legacyJob && typeof legacyJob === "object" ? strOf(legacyJob.headSha) : undefined),
+		target: undefined,
+	};
+}
+
+async function readChunkRecords(store, jobId) {
+	const keys = await store.list(chunkPrefix(jobId));
+	const records = [];
+	for (const key of keys) {
+		const rec = await store.get(key);
+		if (rec && typeof rec === "object" && strOf(rec.id) && typeof rec.yaml === "string") records.push(rec);
+	}
+	return records.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+async function summarizeChunks(store, jobId) {
+	const records = await readChunkRecords(store, jobId);
+	const chunks = records.map(summarizeChunkRecord);
+	const ids = chunks.map((c) => c.id);
+	const missing = [];
+	for (const required of ["metadata", "context", "merge_assessment", "audit"]) if (!ids.includes(required) && !ids.includes("document")) missing.push(required);
+	if (!ids.includes("document") && !ids.some((id) => id.startsWith("chunk:"))) missing.push("chunk:<id> or audit.reviewer_checklist");
+	return { chunks, missing, nextRequired: missing[0], hasDocument: ids.includes("document"), finalized: false };
+}
+
+function summarizeChunkRecord(record) {
+	return { id: record.id, kind: record.kind, updatedAt: record.updatedAt, bytes: record.bytes };
+}
+
+async function assembleSubmission(store, binding) {
+	const records = await readChunkRecords(store, binding.jobId);
+	if (records.length === 0) throw prwError("PRW_FINALIZE_INCOMPLETE", "No PR walkthrough chunks have been saved yet.");
+	const document = records.find((r) => r.id === "document");
+	if (document) {
+		if (records.length > 1) throw prwError("PRW_CHUNK_CONFLICT", "document chunk cannot be finalized together with section chunks.");
+		return { yaml: document.yaml, source: "document" };
+	}
+	const byId = new Map(records.map((r) => [r.id, r]));
+	const required = ["metadata", "context", "merge_assessment", "audit"];
+	const missing = required.filter((id) => !byId.has(id));
+	const reviewChunks = records.filter((r) => r.id.startsWith("chunk:"));
+	const auditValue = byId.has("audit") ? parseYamlValue(byId.get("audit").yaml, "audit") : undefined;
+	const auditChecklist = Array.isArray(auditValue?.reviewer_checklist) ? auditValue.reviewer_checklist : [];
+	if (reviewChunks.length === 0 && auditChecklist.length === 0) missing.push("chunk:<id> or audit.reviewer_checklist");
+	if (missing.length > 0) throw prwError("PRW_FINALIZE_INCOMPLETE", "Saved chunks are incomplete for finalization.", { missing });
+
+	const decisions = records.filter((r) => r.id.startsWith("decision:")).map((r) => listItemYamlWithStableId(r, "decision:", 4));
+	const chunks = reviewChunks.map((r) => listItemYamlWithStableId(r, "chunk:", 4));
+	const chunkIds = reviewChunks.map((r) => r.id.slice("chunk:".length)).sort();
+	const docParts = [
+		"schema_version: 1",
+		"pr:",
+		indentYaml(byId.get("metadata").yaml, 2),
+		trustedPrYaml(binding, 2),
+		"walkthrough:",
+		"  context:",
+		indentYaml(byId.get("context").yaml, 4),
+		"  merge_assessment:",
+		indentYaml(byId.get("merge_assessment").yaml, 4),
+		"  design_decisions:",
+		decisions.length ? decisions.join("\n") : "    []",
+		"  review_chunks:",
+		chunks.length ? chunks.join("\n") : "    []",
+		"  omissions_and_followups:",
+		byId.has("omissions_and_followups") ? indentYaml(byId.get("omissions_and_followups").yaml, 4) : "    []",
+		"  audit:",
+		indentYaml(byId.get("audit").yaml, 4),
+		"  display:",
+		byId.has("display") ? indentYaml(byId.get("display").yaml, 4) : defaultDisplayYaml(chunkIds, 4),
+	];
+	return { yaml: docParts.filter(Boolean).join("\n") + "\n", source: "chunks" };
+}
+
+function listItemYamlWithStableId(record, prefix, indent) {
+	const stableId = record.id.slice(prefix.length);
+	const item = parseYamlValue(record.yaml, record.id);
+	if (!isObject(item)) throw prwError("PRW_CHUNK_INVALID", `${record.id} must be a mapping.`);
+	if (item.id !== undefined && item.id !== stableId) throw prwError("PRW_CHUNK_INVALID", `${record.id} item id must equal ${stableId}.`, { expected: stableId, actual: item.id });
+	let yaml = String(record.yaml || "").trimEnd();
+	if (item.id === undefined) yaml = `id: ${yamlScalar(stableId)}\n${yaml}`;
+	return listItemYaml(yaml, indent);
+}
+
+function trustedPrFields(binding) {
+	const target = binding.target && typeof binding.target === "object" ? binding.target : {};
+	const out = {};
+	if (target.provider) out.provider = target.provider;
+	if (target.owner) out.owner = target.owner;
+	if (target.repo) out.repo = target.repo;
+	if (target.number !== undefined) out.number = target.number;
+	if (target.prUrl) out.url = target.prUrl;
+	if (binding.baseSha) out.base_sha = binding.baseSha;
+	if (binding.headSha) out.head_sha = binding.headSha;
+	return out;
+}
+
+function trustedPrYaml(binding, indent) {
+	return Object.entries(trustedPrFields(binding)).map(([key, value]) => `${" ".repeat(indent)}${key}: ${yamlScalar(value)}`).join("\n");
+}
+
+function yamlScalar(value) {
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	return JSON.stringify(String(value));
+}
+
+function indentYaml(yamlText, spaces) {
+	const pad = " ".repeat(spaces);
+	const text = String(yamlText ?? "").trimEnd();
+	if (!text) return `${pad}{}`;
+	return text.split(/\r?\n/).map((line) => line.trim() ? `${pad}${line}` : line).join("\n");
+}
+
+function listItemYaml(yamlText, spaces) {
+	const pad = " ".repeat(spaces);
+	const childPad = " ".repeat(spaces + 2);
+	const lines = String(yamlText ?? "").trimEnd().split(/\r?\n/);
+	if (lines.length === 0 || !lines[0].trim()) return `${pad}- {}`;
+	return [`${pad}- ${lines[0]}`, ...lines.slice(1).map((line) => line.trim() ? `${childPad}${line}` : line)].join("\n");
+}
+
+function defaultDisplayYaml(chunkIds, spaces) {
+	const pad = " ".repeat(spaces);
+	const itemPad = " ".repeat(spaces + 2);
+	return [
+		`${pad}phase_order:`,
+		...DEFAULT_PHASE_ORDER.map((phase) => `${itemPad}- ${phase}`),
+		`${pad}chunk_order:`,
+		...(chunkIds.length ? chunkIds.map((id) => `${itemPad}- ${yamlScalar(id)}`) : [`${itemPad}[]`]),
+	].join("\n");
+}
+
+async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
+	const validation = validatePrWalkthroughYaml(yamlText, binding.target ? { target: binding.target } : undefined);
+	if (!validation.ok) throw prwError("PRW_SCHEMA_INVALID", "PR walkthrough YAML failed validation.", validation.summary);
+	let baseSha = strOf(body.baseSha) || strOf(binding.baseSha) || strOf(validation.document?.pr?.base_sha);
+	let headSha = strOf(body.headSha) || strOf(binding.headSha) || strOf(validation.document?.pr?.head_sha);
+	let live;
+	if (baseSha && headSha) {
+		try { live = await resolveLocalChangeset(workerCwd(), baseSha, headSha); }
+		catch { live = undefined; }
+	}
+	const parsedDiff = live ? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings } : {};
+	const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff);
+	const cards = Array.isArray(result.cards) ? result.cards : [];
+	const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+	const changesetId = strOf(body.changesetId) || strOf(binding.changesetId) || (live && live.changesetId) || changesetIdFromDocument(validation.document, baseSha, headSha) || binding.jobId;
+	const existing = await ctx.host.store.get(finalPayloadKey(binding.jobId));
+	const persistedAt = existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now();
+	const finalizedAt = Date.now();
+	return { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, changesetId, baseSha, headSha, yaml: yamlText, changeset: result.changeset, cards, warnings, persistedAt, finalizedAt, cardCount: cards.length };
+}
+
+function changesetIdFromDocument(document, baseSha, headSha) {
+	const pr = document && typeof document === "object" ? document.pr : undefined;
+	if (pr && pr.provider === "github" && pr.owner && pr.repo && pr.number !== undefined) return changesetIdForGithub(pr.owner, pr.repo, pr.number, pr.head_sha || headSha);
+	return baseSha && headSha ? changesetIdForLocal(baseSha, headSha) : undefined;
+}
+
+function isFinalPayload(value) {
+	return value && typeof value === "object" && typeof value.yaml === "string" && Array.isArray(value.cards);
+}
+
+function finalBundleResult(payload, jobId) {
+	return { found: true, live: false, jobId, changesetId: payload.changesetId, changeset: payload.changeset, cards: payload.cards, warnings: payload.warnings || [], cardsSource: "stored-final", persistedAt: payload.persistedAt, finalizedAt: payload.finalizedAt };
+}
+
+function finalSubmittedStatus(payload, binding) {
+	return { phase: "submitted", yaml: payload.yaml, baseSha: payload.baseSha ?? binding.baseSha, headSha: payload.headSha ?? binding.headSha, jobId: payload.jobId, changesetId: payload.changesetId, finalizedAt: payload.finalizedAt };
+}
+
+async function bestEffortDeletePrefix(store, prefix) {
+	try {
+		if (typeof store.deletePrefix === "function") await store.deletePrefix(prefix);
+	} catch { /* best-effort cleanup */ }
+}
+
+async function bestEffortDelete(store, key) {
+	try {
+		if (typeof store.delete === "function") await store.delete(key);
+		else await softDelete(store, key);
+	} catch { /* best-effort cleanup */ }
+}
 
 // ── The worker's process.cwd() — the server-derived session working dir (the
 //    bootstrap overrides process.cwd for tool parity, since worker threads can't
@@ -708,14 +998,28 @@ async function launchReviewer(ctx, parent, target, canonicalKey) {
 		status: "running",
 	};
 	try {
-		// ALWAYS-FRESH: write ONLY the binding (no reviewer index, no cross-worker
-		// reconcile). The client within-gesture guard is the only double-spawn guard.
+		const reviewerIndex = {
+			schemaVersion: STORE_SCHEMA_VERSION,
+			jobId,
+			parentSessionId: parent,
+			changesetId,
+			baseSha: target.baseSha,
+			headSha: target.headSha,
+			createdAt: Date.now(),
+		};
+		await store.put(reviewerIndexKey(childSessionId), reviewerIndex);
+		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: false });
+		// Legacy binding retained during the panel/tool migration so current child panes
+		// can still recover; new durable payloads live only under reviews/<jobId>/....
 		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: false });
 		await ctx.host.agents.prompt(childSessionId, kickoff);
+		await store.put(reviewBindingKey(jobId, childSessionId), { ...bindingBase, kickedOff: true });
 		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: true });
 	} catch (e) {
 		try { await ctx.host.agents.dismiss(childSessionId); } catch { /* no orphaned visible child */ }
-		await softDelete(store, bindingKey(childSessionId));
+		await bestEffortDelete(store, reviewerIndexKey(childSessionId));
+		await bestEffortDelete(store, reviewBindingKey(jobId, childSessionId));
+		await bestEffortDelete(store, bindingKey(childSessionId));
 		return { ok: false, retryable: true, error: messageOf(e), code: "LAUNCH_FAILED" };
 	}
 
@@ -801,7 +1105,7 @@ function buildKickoffPrompt(target) {
 		target.baseSha && target.headSha ? `Range: ${target.baseSha}..${target.headSha}` : undefined,
 		"Start by calling read_pr_walkthrough_bundle in manifest mode, then say you are beginning the investigation with an approximate progress percentage.",
 		"Treat the persisted bundle as authoritative for PR body, SHAs, stats, files, hunks, warnings, and limits.",
-		"Populate the panel only by calling submit_pr_walkthrough_yaml with valid YAML. Stay available after success.",
+		"Save durable progress as you go with submit_pr_walkthrough_chunk, check read_pr_walkthrough_submission_status after compaction/retry, then call finalize_pr_walkthrough_submission when complete. submit_pr_walkthrough_yaml remains available only as a compatibility wrapper.",
 	].filter(Boolean).join("\n");
 }
 
@@ -978,7 +1282,7 @@ async function inferGithubRepository(cwd) {
 	}
 }
 
-export const __test = { resolveCurrentBranchTarget };
+export const __test = { resolveCurrentBranchTarget, assembleSubmission, summarizeChunks, validateChunkId };
 
 function parseGithubRemoteUrl(url) {
 	if (!url) return undefined;
