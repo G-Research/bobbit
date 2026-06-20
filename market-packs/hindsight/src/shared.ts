@@ -168,10 +168,22 @@ export interface EffectiveConfig {
 	tagsMatch: "any" | "any_strict";
 	autoRecall: boolean;
 	autoRetain: boolean;
-	/** Auto-retain cadence: run an LLM extraction on one in every N turns (cost
-	 *  lever — `1` = every turn, the old behavior). `beforeCompact` ignores this and
-	 *  always retains synchronously so the about-to-be-lost span is never dropped. */
+	/** Auto-retain BATCH size: hold compact turn summaries in a durable per-session
+	 *  buffer and flush ONE aggregate retain (containing all pending turns) once the
+	 *  buffer reaches N turns (cost lever — `1` ≈ the old per-turn behavior). NOTHING
+	 *  is dropped: turns are batched, never sampled. `beforeCompact` flushes the
+	 *  buffer synchronously regardless so the about-to-be-lost span is never lost. */
 	retainEveryNTurns: number;
+	/** Hook-observed max age (ms) of the OLDEST pending buffered turn before it is
+	 *  flushed even though the batch is not full. A later hook observing a pending
+	 *  buffer older than this flushes it (no unreliable provider-local timers).
+	 *  `0` disables the time-based flush (count-only). */
+	retainMaxDelayMs: number;
+	/** How many of the just-flushed turn summaries to carry forward as OVERLAP
+	 *  context into the next aggregate (thread continuity across batches). The
+	 *  primary pending turns are cleared after each flush so the count always
+	 *  advances; overlap is bounded by this value so it never grows unbounded. */
+	retainOverlapTurns: number;
 	recallBudget: number;
 	/** Hindsight recall `types` filter — bias recall toward consolidated knowledge.
 	 *  Default favours `observation` plus `world`/`experience`. */
@@ -210,6 +222,8 @@ export const CONFIG_DEFAULTS: EffectiveConfig = {
 	autoRecall: true,
 	autoRetain: true,
 	retainEveryNTurns: 5,
+	retainMaxDelayMs: 1_800_000,
+	retainOverlapTurns: 2,
 	recallBudget: 1200,
 	recallTypes: [...RECALL_TYPES],
 	retainMission: DEFAULT_RETAIN_MISSION,
@@ -264,6 +278,8 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	const recallScope = flat(raw, "recallScope") === "all" ? "all" : "project";
 	const tagsMatch = flat(raw, "tagsMatch") === "any_strict" ? "any_strict" : "any";
 	const retainEveryNTurns = Math.max(1, Math.floor(asNum(flat(raw, "retainEveryNTurns"), CONFIG_DEFAULTS.retainEveryNTurns)));
+	const retainMaxDelayMs = Math.max(0, Math.floor(asNum(flat(raw, "retainMaxDelayMs"), CONFIG_DEFAULTS.retainMaxDelayMs)));
+	const retainOverlapTurns = Math.max(0, Math.floor(asNum(flat(raw, "retainOverlapTurns"), CONFIG_DEFAULTS.retainOverlapTurns)));
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
@@ -279,6 +295,8 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 		autoRecall: asBool(flat(raw, "autoRecall"), CONFIG_DEFAULTS.autoRecall),
 		autoRetain: asBool(flat(raw, "autoRetain"), CONFIG_DEFAULTS.autoRetain),
 		retainEveryNTurns,
+		retainMaxDelayMs,
+		retainOverlapTurns,
 		recallBudget: asNum(flat(raw, "recallBudget"), CONFIG_DEFAULTS.recallBudget),
 		recallTypes: asRecallTypes(flat(raw, "recallTypes"), CONFIG_DEFAULTS.recallTypes),
 		retainMission: asString(flat(raw, "retainMission")) ?? CONFIG_DEFAULTS.retainMission,
@@ -368,8 +386,9 @@ export const CONFIG_KEY = "provider-config:memory";
 export const PROJECT_CONFIG_KEY_PREFIX = "provider-config:memory:project:";
 /** Last-applied bank-mission signature cache prefix (one per namespace:bank). */
 export const BANK_CONFIG_APPLIED_PREFIX = "bank-config-applied:";
-/** Durable per-session auto-retain turn counter prefix (drives the cadence). */
-export const RETAIN_COUNT_PREFIX = "retain-turn-count:";
+/** Durable per-session auto-retain PENDING BUFFER prefix (holds the compact turn
+ *  summaries awaiting an aggregate flush — batching, never sampling). */
+export const RETAIN_PENDING_PREFIX = "retain-pending:";
 export const QUEUE_CAP = 100;
 
 export function projectConfigKey(projectId: string): string {
@@ -511,6 +530,16 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		const v = body.retainEveryNTurns;
 		if (typeof v === "number" && Number.isFinite(v) && v >= 1) value.retainEveryNTurns = Math.floor(v);
 		else errors.push("retainEveryNTurns must be a number >= 1");
+	}
+	if ("retainMaxDelayMs" in body) {
+		const v = body.retainMaxDelayMs;
+		if (typeof v === "number" && Number.isFinite(v) && v >= 0) value.retainMaxDelayMs = Math.floor(v);
+		else errors.push("retainMaxDelayMs must be a number >= 0 (0 disables the time-based flush)");
+	}
+	if ("retainOverlapTurns" in body) {
+		const v = body.retainOverlapTurns;
+		if (typeof v === "number" && Number.isFinite(v) && v >= 0) value.retainOverlapTurns = Math.floor(v);
+		else errors.push("retainOverlapTurns must be a number >= 0");
 	}
 	for (const key of ["recallBudget", "recallMaxInputChars", "timeoutMs"] as const) {
 		if (key in body) {
@@ -663,29 +692,94 @@ export async function applyBankMission(store: StoreLike | null, client: Hindsigh
 	}
 }
 
-// ── Auto-retain cadence ──────────────────────────────────────────────────────
+// ── Auto-retain batching (durable per-session pending buffer) ─────────────────
+//
+// Turns are BATCHED, never sampled: each `afterTurn` appends a compact summary to
+// a durable per-session buffer and an aggregate retain (containing ALL pending
+// primary turns) is flushed when the buffer reaches `retainEveryNTurns`, or when
+// the oldest pending turn ages past `retainMaxDelayMs` (a hook-observed timeout —
+// no provider-local timers). After a flush the last `retainOverlapTurns` summaries
+// are carried forward as bounded OVERLAP context and the primary turns are cleared
+// so the count always advances and the buffer never grows unbounded.
 
-/** Increment + return the durable per-session auto-retain turn counter. */
-export async function bumpRetainCounter(store: StoreLike, sessionId: string): Promise<number> {
-	const key = `${RETAIN_COUNT_PREFIX}${sessionId}`;
-	let n = 0;
-	try {
-		const v = await store.get<number>(key);
-		if (typeof v === "number" && Number.isFinite(v)) n = v;
-	} catch {
-		/* treat as 0 */
-	}
-	n += 1;
-	try {
-		await store.put(key, n);
-	} catch {
-		/* best-effort */
-	}
-	return n;
+/** One buffered turn summary + its capture timestamp (for the max-delay flush). */
+export interface PendingTurn {
+	summary: string;
+	ts: number;
 }
 
-/** Whether this auto-retain turn runs, given the post-increment count + cadence. */
-export function shouldRetainOnCount(count: number, everyN: number): boolean {
+/** Durable per-session retain buffer: primary `turns` (count toward the batch) plus
+ *  `overlap` carry-forward summaries from the previous flush (do NOT count). */
+export interface PendingBuffer {
+	turns: PendingTurn[];
+	overlap: string[];
+}
+
+/** Separator between turn summaries inside a flushed aggregate retain. */
+export const AGGREGATE_SEPARATOR = "\n\n---\n\n";
+
+export function pendingKey(sessionId: string): string {
+	return `${RETAIN_PENDING_PREFIX}${sessionId}`;
+}
+
+function asPendingTurns(v: unknown): PendingTurn[] {
+	if (!Array.isArray(v)) return [];
+	return v
+		.filter((t): t is PendingTurn => isObj(t) && typeof (t as { summary?: unknown }).summary === "string")
+		.map((t) => ({ summary: String(t.summary), ts: typeof t.ts === "number" && Number.isFinite(t.ts) ? t.ts : 0 }));
+}
+
+/** Read the durable pending buffer (tolerant of an absent/legacy/garbled value). */
+export async function loadPending(store: StoreLike, sessionId: string): Promise<PendingBuffer> {
+	try {
+		const v = await store.get<PendingBuffer>(pendingKey(sessionId));
+		if (isObj(v)) {
+			return {
+				turns: asPendingTurns((v as PendingBuffer).turns),
+				overlap: Array.isArray((v as PendingBuffer).overlap) ? (v as PendingBuffer).overlap.filter((s) => typeof s === "string") : [],
+			};
+		}
+	} catch {
+		/* fall through to empty */
+	}
+	return { turns: [], overlap: [] };
+}
+
+export async function savePending(store: StoreLike, sessionId: string, buf: PendingBuffer): Promise<void> {
+	try {
+		await store.put(pendingKey(sessionId), buf);
+	} catch {
+		/* best-effort durable buffer */
+	}
+}
+
+/** Whether the pending buffer should flush now: the batch is full (turns >=
+ *  everyN), OR (time-based) the oldest pending turn has aged past maxDelayMs.
+ *  Never flushes an empty buffer; `maxDelayMs <= 0` disables the time-based flush. */
+export function shouldFlushPending(buf: PendingBuffer, everyN: number, maxDelayMs: number, now: number): boolean {
+	if (buf.turns.length === 0) return false;
 	const n = Number.isFinite(everyN) && everyN >= 1 ? Math.floor(everyN) : 1;
-	return count % n === 0;
+	if (buf.turns.length >= n) return true;
+	if (Number.isFinite(maxDelayMs) && maxDelayMs > 0) {
+		const oldest = buf.turns[0]?.ts ?? now;
+		if (now - oldest >= maxDelayMs) return true;
+	}
+	return false;
+}
+
+/** Build the aggregate retain content: overlap context (from the previous flush)
+ *  followed by every pending primary turn, joined by {@link AGGREGATE_SEPARATOR}. */
+export function buildAggregateContent(buf: PendingBuffer): string {
+	const parts: string[] = [];
+	if (buf.overlap.length > 0) parts.push(`Earlier context (overlap):${AGGREGATE_SEPARATOR}${buf.overlap.join(AGGREGATE_SEPARATOR)}`);
+	for (const t of buf.turns) parts.push(t.summary);
+	return parts.join(AGGREGATE_SEPARATOR);
+}
+
+/** The overlap carry-forward for the NEXT batch: the last `overlapTurns` summaries
+ *  of the just-flushed primary turns (bounded — never the previous overlap). */
+export function nextOverlap(turns: PendingTurn[], overlapTurns: number): string[] {
+	const k = Number.isFinite(overlapTurns) && overlapTurns >= 1 ? Math.floor(overlapTurns) : 0;
+	if (k <= 0) return [];
+	return turns.slice(-k).map((t) => t.summary);
 }

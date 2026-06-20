@@ -47,9 +47,19 @@ config:
   tagsMatch: { type: enum, values: [any, any_strict], default: any }
   autoRecall: { type: boolean, default: true }
   autoRetain: { type: boolean, default: true }
-  # Auto-retain cadence: run an LLM extraction on one in every N turns (cost lever;
-  # 1 = every turn). beforeCompact always retains synchronously regardless.
+  # Auto-retain BATCH size: hold compact turn summaries in a durable per-session
+  # buffer and flush ONE aggregate retain (all pending turns) once N have buffered
+  # (cost lever; 1 ≈ every turn). Turns are batched, never sampled — nothing is
+  # dropped. beforeCompact flushes the buffer synchronously regardless.
   retainEveryNTurns: { type: number, default: 5 }
+  # Hook-observed max age (ms) of the oldest pending buffered turn before it flushes
+  # even when the batch is not full (default 30m). A later hook observing a stale
+  # buffer flushes it — no provider-local timers. 0 disables the time-based flush.
+  retainMaxDelayMs: { type: number, default: 1800000 }
+  # Turn summaries carried forward as bounded OVERLAP context into the next
+  # aggregate (thread continuity). Primary turns are cleared after each flush so the
+  # count always advances; overlap never grows unbounded.
+  retainOverlapTurns: { type: number, default: 2 }
   recallBudget: { type: number, default: 1200 }
   # Hindsight recall `types` filter — bias recall toward consolidated knowledge.
   recallTypes: { type: list, default: [observation, world, experience] }
