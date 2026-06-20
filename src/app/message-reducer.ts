@@ -33,13 +33,16 @@ export interface OrderedMessage {
 	/**
 	 * Durable marker set by `settle-optimistic`: an `_origin:"optimistic"` row
 	 * whose turn terminated WITHOUT a reconciling server user echo. Its `_order`
-	 * has been re-stamped out of the far-future tail sentinel into chronological
-	 * position. The marker survives across reduces so the snapshot survivor pass
-	 * can keep re-stamping it relative to each new snapshot's max order (a naive
-	 * one-shot `highestSeq + epsilon` would still sort AFTER negative-order
-	 * snapshot rows that arrive later — see `settle-optimistic` + the snapshot
-	 * survivor branch). The row stays `_origin:"optimistic"` with its
-	 * `optimistic_` id so a late server echo can still reconcile it in place.
+	 * has been re-stamped ONCE, out of the far-future tail sentinel into
+	 * chronological position (`highestSeq + epsilon` captured at turn-end — just
+	 * after the latest live message we had consumed). That value sorts AFTER any
+	 * negative-order snapshot transcript, which is exactly right: a failed prompt
+	 * was sent AFTER the persisted history, so it belongs after it. The marker is
+	 * durable so the snapshot survivor pass keeps the row VISIBLE and at that
+	 * settled position: it must NOT be consumed by the same-text dedup budget
+	 * (that budget is for PENDING rows awaiting echo reconciliation) and must NOT
+	 * be re-stamped into older history. The row stays `_origin:"optimistic"` with
+	 * its `optimistic_` id so a late server echo can still reconcile it in place.
 	 */
 	_settled?: boolean;
 }
@@ -72,8 +75,8 @@ export type Action =
 
 export const SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
 const OPTIMISTIC_ORDER_BASE = Number.MAX_SAFE_INTEGER - 1_000_000_000;
-/** Fractional nudge used to land settled/synthetic rows just-after/just-before a
- *  neighbouring integer `_order` without colliding with it. */
+/** Fractional nudge used to land a settled optimistic row just-after the latest
+ *  consumed live seq (`highestSeq + epsilon`) without colliding with it. */
 const SETTLE_EPSILON = 0.5;
 
 export function initialState(): ReducerState {
@@ -549,12 +552,29 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					// Optimistic prompts/steers normally survive — the server echo
 					// reconciles via id/text on a later live-event.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
-					// Step 4a (S18): dedup a same-text optimistic row against a snapshot
-					// that arrived BEFORE the live echo. Consume the same multiset budget
-					// the server-origin survivors use, so a snapshot user row
-					// representing this prompt drops the optimistic instead of leaving
-					// both. Multiset-counted → two genuinely-distinct same-text prompts
-					// still both survive.
+					// A SETTLED optimistic row (turn terminated, never echoed) must
+					// stay VISIBLE and keep its chronological position. Its settle
+					// `_order` (`highestSeq + epsilon`) already sits AFTER any
+					// negative-order snapshot transcript, so it correctly sorts after
+					// the persisted history — the failed prompt was sent after that
+					// transcript (reviewer issue 2: a `serverMaxOrder - epsilon`
+					// re-stamp wrongly inserted it INTO older history). It must also
+					// NOT be consumed by the same-text dedup budget below (reviewer
+					// issue 1: that budget is for PENDING rows awaiting echo
+					// reconciliation; a settled row sharing text with an old snapshot
+					// row would otherwise be silently dropped, breaking the
+					// stays-visible contract). Survive untouched. A late echo can
+					// still reconcile it in place via the id-match drop above.
+					if (m._settled === true) {
+						survivors.push(m);
+						continue;
+					}
+					// Step 4a (S18): dedup a same-text PENDING optimistic row against a
+					// snapshot that arrived BEFORE the live echo. Consume the same
+					// multiset budget the server-origin survivors use, so a snapshot
+					// user row representing this prompt drops the optimistic instead of
+					// leaving both. Multiset-counted → two genuinely-distinct same-text
+					// prompts still both survive.
 					if (isPlainTextRow(m)) {
 						const key = plainTextEquivKey(m);
 						const remaining = serverPlainTextCounts.get(key) ?? 0;
@@ -562,25 +582,6 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 							serverPlainTextCounts.set(key, remaining - 1);
 							continue;
 						}
-					}
-					// A SETTLED optimistic row (turn already terminated, never
-					// echoed) must keep sorting BEFORE this snapshot's tail. Its
-					// settle `_order` was `highestSeq + epsilon` (a small/positive
-					// value), but an independent snapshot's rows live in the
-					// negative SNAPSHOT_ORDER_FLOOR range, so without a re-stamp the
-					// settled row would sort AFTER the whole snapshot — the team-
-					// session strand (case R2). Re-stamp it to just below the
-					// snapshot max so it lands at the tail but never past it. Only
-					// pull it down when it currently sorts after the snapshot;
-					// PENDING optimistic rows (no `_settled`) are untouched so the
-					// legitimate pending case (5) still sits at the sentinel.
-					if (
-						m._settled === true &&
-						Number.isFinite(serverMaxOrder) &&
-						m._order > serverMaxOrder
-					) {
-						survivors.push({ ...m, _order: serverMaxOrder - SETTLE_EPSILON });
-						continue;
 					}
 					survivors.push(m);
 					continue;
