@@ -120,12 +120,81 @@ test.describe("Roles model reshuffle", () => {
 		const count = await controls.count();
 		expect(count).toBeGreaterThan(0);
 
-		// Every control carries a deterministic inherited|override state hook.
+		// Every control carries a deterministic state hook. The polished list adds
+		// thinking-only and read-only (pack) states alongside inherited/override.
 		const states = await controls.evaluateAll((els) =>
 			els.map((el) => el.getAttribute("data-model-state")));
 		expect(states.length).toBe(count);
 		for (const s of states) {
-			expect(["inherited", "override"]).toContain(s);
+			expect(["inherited", "override", "thinking-override", "partial-override", "readonly"]).toContain(s);
 		}
+	});
+
+	test("list rows: inline model control is compact and its chevrons do not overflow", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/roles");
+
+		const control = page.locator('[data-testid="role-row-model-control"]').first();
+		await expect(control).toBeVisible({ timeout: 15_000 });
+
+		const geom = await control.evaluate((root) => {
+			const cb = root.getBoundingClientRect();
+			const within = (el: Element | null, parent: DOMRect, tol = 1) => {
+				if (!el) return true;
+				const r = el.getBoundingClientRect();
+				return (
+					r.left >= parent.left - tol && r.right <= parent.right + tol &&
+					r.top >= parent.top - tol && r.bottom <= parent.bottom + tol
+				);
+			};
+			// 1) Every sub-control (buttons, selects, chevrons) stays within the
+			//    control's own bounds — nothing spills out of the row cell.
+			const subControls = Array.from(root.querySelectorAll('button, select, [role="combobox"], svg'));
+			const allContained = subControls.every((el) => within(el, cb));
+
+			// 2) Each select/combobox chevron stays within ITS OWN control bounds
+			//    (the "arrows must not overflow their option/control" requirement).
+			const selects = Array.from(root.querySelectorAll('[role="combobox"], select'));
+			let chevronContained = true;
+			for (const sel of selects) {
+				const selRect = sel.getBoundingClientRect();
+				for (const svg of Array.from(sel.querySelectorAll('svg'))) {
+					if (!within(svg, selRect, 1)) chevronContained = false;
+				}
+			}
+			return { allContained, chevronContained, height: cb.height };
+		});
+
+		expect(geom.allContained, "all sub-controls/chevrons contained within the control").toBe(true);
+		expect(geom.chevronContained, "select chevrons stay within their own control bounds").toBe(true);
+		// Compact: at most a small two-line control, not a sprawling block.
+		expect(geom.height, "inline control stays compact").toBeLessThanOrEqual(140);
+	});
+
+	test("list rows remain usable at a narrow viewport (edit/delete reachable)", async ({ page }) => {
+		await page.setViewportSize({ width: 380, height: 800 });
+		await openApp(page);
+		await navigateToHash(page, "#/roles");
+
+		const row = page.locator(".role-row").first();
+		await expect(row).toBeVisible({ timeout: 15_000 });
+
+		const editBtn = row.locator(".role-row-action-btn:not(.delete)").first();
+		const deleteBtn = row.locator(".role-row-action-btn.delete").first();
+		await expect(editBtn).toBeVisible();
+		await expect(deleteBtn).toBeVisible();
+
+		// Action buttons must not be clipped off the right edge of the viewport.
+		const vw = page.viewportSize()!.width;
+		for (const btn of [editBtn, deleteBtn]) {
+			const box = await btn.boundingBox();
+			expect(box, "action button has a layout box").not.toBeNull();
+			expect(box!.x).toBeGreaterThanOrEqual(0);
+			expect(box!.x + box!.width).toBeLessThanOrEqual(vw + 1);
+		}
+
+		// The edit action still works at narrow width.
+		await editBtn.click();
+		await expect(page.locator('[data-testid="role-editor"]')).toBeVisible({ timeout: 10_000 });
 	});
 });
