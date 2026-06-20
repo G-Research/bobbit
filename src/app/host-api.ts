@@ -48,6 +48,45 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
 	return { ...init, headers };
 }
 
+const compactDetails = (details: unknown): string | undefined => {
+	if (details == null) return undefined;
+	if (typeof details === "string") return details;
+	if (Array.isArray(details)) return details.slice(0, 3).map((item) => compactDetails(item)).filter(Boolean).join("; ") || undefined;
+	if (typeof details === "object") {
+		const record = details as Record<string, unknown>;
+		if (Array.isArray(record.errors)) return compactDetails(record.errors);
+		const path = typeof record.path === "string" ? record.path : undefined;
+		const message = typeof record.message === "string" ? record.message : undefined;
+		if (path || message) return [path, message].filter(Boolean).join(": ");
+		try { return JSON.stringify(details).slice(0, 240); }
+		catch { return undefined; }
+	}
+	return String(details);
+};
+
+async function routeHttpError(name: string, resp: Response): Promise<Error> {
+	let body: unknown;
+	try { body = await resp.clone().json(); }
+	catch { try { body = await resp.clone().text(); } catch { body = undefined; } }
+	const record = body && typeof body === "object" ? body as Record<string, unknown> : undefined;
+	const code = typeof record?.code === "string" ? record.code : undefined;
+	const routeError = typeof record?.error === "string" ? record.error : undefined;
+	const details = compactDetails(record?.details);
+	const textBody = typeof body === "string" ? body.trim() : undefined;
+	const parts = [`callRoute ${name} HTTP ${resp.status}`];
+	if (code) parts.push(code);
+	if (routeError) parts.push(routeError);
+	else if (textBody) parts.push(textBody.slice(0, 240));
+	if (details) parts.push(details);
+	const error = new Error(parts.join(" — ")) as Error & { status?: number; code?: string; routeError?: string; details?: unknown; body?: unknown };
+	error.status = resp.status;
+	if (code) error.code = code;
+	if (routeError) error.routeError = routeError;
+	if (record && "details" in record) error.details = record.details;
+	if (body !== undefined) error.body = body;
+	return error;
+}
+
 /** sha256 hex of `role + "\n" + text` — the content binding for a C2 session-write
  *  permit. Computed with SubtleCrypto so the value matches the server's Node
  *  `createHash("sha256")` exactly (same UTF-8 input, same hex encoding). Used by
@@ -245,7 +284,7 @@ export function getHostApi(
 				path: `/api/ext/route/${encodeURIComponent(name)}`,
 				init: { method: "POST", body: JSON.stringify({ sessionId, toolUseId, surfaceToken: token, init }) },
 			}));
-			if (!resp.ok) throw new Error(`callRoute ${name} HTTP ${resp.status}`);
+			if (!resp.ok) throw await routeHttpError(name, resp);
 			return resp.json() as Promise<TResult>;
 		},
 		session: {

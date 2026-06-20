@@ -89,6 +89,16 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(methods).toEqual(["get:function", "put:function", "list:function", "delete:function", "deletePrefix:function", "stats:function"]);
 	});
 
+	test("host.callRoute includes structured JSON error bodies on non-2xx responses", async ({ page }) => {
+		await gotoAndWait(page);
+		const err = await page.evaluate(() => (window as any).__callRouteHttpError());
+		expect(err).toMatchObject({ status: 500, code: "STORE_QUOTA_EXCEEDED", routeError: "Review payload is too large to save." });
+		expect(err.message).toContain("callRoute publish HTTP 500");
+		expect(err.message).toContain("STORE_QUOTA_EXCEEDED");
+		expect(err.message).toContain("Review payload is too large to save.");
+		expect(err.message).toContain("reviews/job/final/payload: maxTotalBytes exceeded");
+	});
+
 	test("no Phase-2 member is a frozen 'reserved for Phase 2' stub anymore", async ({ page }) => {
 		await gotoAndWait(page);
 		// Slices B1/B2/B3/B4/C1 implemented store.* / session.read* / callRoute / ui.*
