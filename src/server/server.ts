@@ -327,6 +327,7 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { seedBuiltinPackDefaults } from "./agent/builtin-pack-defaults.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -1056,6 +1057,12 @@ export function createGateway(config: GatewayConfig) {
 	const preferencesStore = new PreferencesStore(stateDir);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
 	const projectConfigStore = new ProjectConfigStore(configDir);
+	// One-time boot seed: first-party built-ins that ship DISABLED by default
+	// (opt-in). Subtractive activation model means built-ins are otherwise
+	// enabled, so we seed a server-scope pack_activation entry disabling all of
+	// the pack's toggleable entities — exactly once, guarded by a durable marker
+	// so enabling via the Market toggle stays sticky. Defensive: never throws.
+	seedBuiltinPackDefaults({ stateDir, store: projectConfigStore });
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;

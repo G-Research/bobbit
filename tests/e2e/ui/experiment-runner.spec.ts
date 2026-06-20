@@ -2,19 +2,23 @@
  * Browser E2E — the experiment-runner FIRST-PARTY BUILT-IN pack PANEL +
  * entrypoints (design docs/design/experiment-runner-panel-ux.md §12). The pack
  * ships as a built-in (FIRST_PARTY_PACKS in scripts/copy-builtin-packs.mjs,
- * alongside pr-walkthrough/hindsight), so it is resolved active-by-default by the
- * built-in resolver band with NO install. Its "clean install/uninstall"
- * requirement is met by the Market Built-in group enable/disable toggle model,
- * mirroring tests/e2e/ui/pr-walkthrough-pack.spec.ts (the canonical built-in-pack
- * test) for built-in resolution + disable/re-enable + non-removable, and the
- * reconcile + deep-link + pack-store seeding patterns.
+ * alongside pr-walkthrough/hindsight) BUT — unlike the others — it ships
+ * present-but-DISABLED by default (opt-in): the server boot seed
+ * (src/server/agent/builtin-pack-defaults.ts) writes a server-scope
+ * pack_activation entry disabling all of its entrypoints, so its launchers +
+ * the #/ext/experiment-runner deep-link are absent until the user flips the
+ * Market "Built-in" toggle on. Enabling clears the DisabledRefs; a durable
+ * marker keeps it enabled across restarts.
  *
  * Coverage:
- *   1. NO INSTALL — the built-in band resolves the pack: it appears in
- *      /api/ext/contributions (panel + the 15 canonical routes + the 3
- *      entrypoints) and in /api/marketplace/installed flagged builtin:true; the
- *      deep-link opens the panel at MODE-SELECT, defaulting to A/B (autoresearch
- *      carries the opt-in warning eyebrow).
+ *   0. OPT-IN DEFAULT — the pack is PRESENT (in /api/marketplace/installed flagged
+ *      builtin:true) but DISABLED by the boot seed: GET pack-activation shows the
+ *      entrypoints disabled, /api/ext/contributions exposes 0 entrypoints, and the
+ *      deep-link resolves to the "feature unavailable" empty state (no panel).
+ *   1. ENABLE — flipping the Market Built-in toggle on (PUT pack-activation, server
+ *      scope, cleared disabled refs) restores the panel + the 15 routes + the 3
+ *      entrypoints; the deep-link opens the panel at MODE-SELECT defaulting to A/B
+ *      (autoresearch carries the opt-in warning eyebrow).
  *   2. A/B VALIDATION — identical variants + zero budget block launch; making them
  *      distinct + setting a per-run budget enables it; the projection strip shows
  *      the run count + bounded cost.
@@ -72,12 +76,27 @@ async function listInstalled(): Promise<Array<{ packName: string; scope: string;
 	return (await res.json()).installed as Array<{ packName: string; scope: string; builtin?: boolean }>;
 }
 
-/** Server-scope activation persists between E2E runs; start/finish every test from
- *  the shipped all-enabled state so a failed disable test does not cascade. */
-async function resetActivation(): Promise<void> {
+async function getActivation(): Promise<{ disabled?: { entrypoints?: string[] } }> {
+	const res = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${PACK}`);
+	expect(res.ok).toBe(true);
+	return (await res.json()) as { disabled?: { entrypoints?: string[] } };
+}
+
+/** ENABLE the opt-in built-in: clear its DisabledRefs (the Market "Built-in"
+ *  toggle path). Mirrors marketplace-page.ts's enable payload. */
+async function enablePack(): Promise<void> {
 	await apiFetch("/api/marketplace/pack-activation", {
 		method: "PUT",
 		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [] } }),
+	});
+}
+
+/** DISABLE the pack: disable all of its entrypoints (matches the boot-seed shape
+ *  and the user toggling every entrypoint off). */
+async function disablePack(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [...ENTRYPOINT_LIST_NAMES] } }),
 	});
 }
 
@@ -97,16 +116,45 @@ async function openPanelDeepLink(page: import("@playwright/test").Page, query = 
 	await expect(page.locator(tid("experiment-runner-panel-root")).first()).toBeVisible({ timeout: 20_000 });
 }
 
-test.beforeEach(async () => {
-	await resetActivation().catch(() => {});
-});
-
+// Each test restores the seeded opt-in default (disabled) on the way OUT, so the
+// "ships disabled by default" assertion is deterministic even on a serial retry
+// (the worker-scoped gateway — and its persisted server-scope activation — are
+// reused across retries). Functional tests ENABLE the pack at their top.
 test.afterEach(async () => {
-	await resetActivation().catch(() => {});
+	await disablePack().catch(() => {});
 });
 
-test("no-install: built-in band contributes panel + 15 routes + 3 entrypoints; deep-link opens mode-select defaulting to A/B", async ({ page }) => {
-	// NO INSTALL — the built-in resolver band serves the pack active-by-default.
+test("ships present-but-disabled by default (opt-in); deep-link shows the unavailable empty state", async ({ page }) => {
+	// The boot seed (src/server/agent/builtin-pack-defaults.ts) disables every
+	// entrypoint at server scope, so the pack is PRESENT but OFF until enabled.
+	const activation = await getActivation();
+	expect(activation.disabled?.entrypoints ?? [], "the boot seed must disable all 3 entrypoints by default").toEqual(
+		expect.arrayContaining(ENTRYPOINT_LIST_NAMES),
+	);
+
+	// It still appears in the Installed list flagged builtin:true (present, not removed).
+	const builtinRow = (await listInstalled()).find((p) => p.packName === PACK && p.builtin);
+	expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
+	expect(builtinRow?.scope).toBe("server");
+
+	// No entrypoints are contributed while disabled (the panel + routes survive —
+	// they are not entrypoints — but the launchers + deep-link are gone).
+	const meta = (await listContributions()).find((p) => p.packId === PACK);
+	expect(meta, "the built-in pack metadata must still resolve while disabled").toBeTruthy();
+	expect(meta?.entrypoints?.length ?? 0, "disabled-by-default ⇒ 0 entrypoints contributed").toBe(0);
+
+	// The deep-link resolves to the dismissible "feature unavailable" empty state.
+	await openWithPack(page);
+	await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${ROUTE_ID}`);
+	const unavailable = page.locator('[data-testid="ext-route-unavailable"]');
+	await expect(unavailable).toBeVisible({ timeout: 15_000 });
+	await expect(unavailable).toContainText("unavailable");
+	await expect(page.locator(tid("experiment-runner-panel-root"))).toHaveCount(0);
+});
+
+test("enable via the Market Built-in toggle: built-in band contributes panel + 15 routes + 3 entrypoints; deep-link opens mode-select defaulting to A/B", async ({ page }) => {
+	// ENABLE — flip the Market Built-in toggle on (clear DisabledRefs).
+	await enablePack();
 	const meta = (await listContributions()).find((p) => p.packId === PACK);
 	expect(meta, "the built-in experiment-runner pack must be resolved with NO install").toBeTruthy();
 	expect(meta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
@@ -142,6 +190,7 @@ test("no-install: built-in band contributes panel + 15 routes + 3 entrypoints; d
 });
 
 test("A/B define: identical variants + missing budget block launch; distinct + budget enables it", async ({ page }) => {
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 	await page.locator(tid("experiment-runner-mode-ab")).click();
@@ -176,6 +225,7 @@ test("A/B define: identical variants + missing budget block launch; distinct + b
 });
 
 test("autoresearch refuses to start uncapped; draft persists across reload", async ({ page }) => {
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 
@@ -221,6 +271,7 @@ test("autoresearch launches successfully via iterate (not the A/B-only launch ro
 	// Regression for panel doLaunch fix #1: autoresearch used to call the A/B-only
 	// `launch` route, which returns LAUNCH_AB_ONLY, surfaced as a launch error and
 	// never navigated. The panel must branch to `iterate` and reach the dashboard.
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page);
 
@@ -293,6 +344,7 @@ test("autoresearch dashboard reflects a loop that advanced beyond iteration 0 (�
 	}
 	await store.put(PACK, "index/experiments", [experimentId]);
 
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page, `?experimentId=${experimentId}&view=dashboard`);
 
@@ -343,6 +395,7 @@ test("dashboard renders a seeded A/B experiment; editing the spec re-renders wit
 	}
 	await store.put(PACK, "index/experiments", { experiments: [{ experimentId, title: def.title, mode: "ab", status: "complete" }] });
 
+	await enablePack();
 	await openWithPack(page);
 	await openPanelDeepLink(page, `?experimentId=${experimentId}&view=dashboard`);
 
@@ -378,6 +431,8 @@ test("dashboard renders a seeded A/B experiment; editing the spec re-renders wit
 });
 
 test("built-in disable/re-enable removes & restores the launcher + deep-link; pack is non-removable", async ({ page }) => {
+	// Start from the ENABLED state (opt-in toggle on), then exercise disable→re-enable.
+	await enablePack();
 	await openWithPack(page);
 
 	// ── DISABLE via the Market built-in group → launcher + deep-link gone. ──
