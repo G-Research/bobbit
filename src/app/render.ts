@@ -825,6 +825,8 @@ function renderHeaderSessionActions(input: {
 	const actions = buildActions();
 	if (!actions.length) return html``;
 	const { directActions, overflowActions } = partitionHeaderSessionActions(actions, input.mobile);
+	const hideDirectActions = input.mobile && isHeaderSessionActionsPopoverOpen(input.session.id);
+	const visibleDirectActions = hideDirectActions ? [] : directActions;
 	const showOverflow = input.mobile || overflowActions.length > 0;
 	const openFromTrigger = (event: Event) => {
 		event.preventDefault();
@@ -844,7 +846,7 @@ function renderHeaderSessionActions(input: {
 	return html`
 		<div class="flex items-center gap-1 shrink-0 relative" data-session-action-surface="header" data-sidebar-actions-row-root>
 			<div class="sidebar-actions flex items-center gap-1">
-				${directActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
+				${visibleDirectActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
 				${showOverflow ? html`
 					<button
 						type="button"

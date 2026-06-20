@@ -119,6 +119,13 @@ models under provider `google-gemini-cli` with `api: "google-code-assist"` (see
 `… (Google account)` and are **session-selectable**: you can bind one to any agent session
 exactly like an Anthropic, OpenAI, or API-key Gemini model.
 
+The emitted set is a **curated allowlist** (`CODE_ASSIST_ALLOWLIST` in that file), not every
+`gemini-*` in pi-ai's `google` catalog. The catalog carries Developer API (AI Studio) ids
+that the Code Assist endpoint 404s on with `HTTP 404 Requested entity not found` —
+`gemini-2.0-*`, `gemini-3.5-flash`, and the `*-latest` aliases. Those are excluded so they
+can never be selected and fail a live session. Membership was confirmed against live Code
+Assist probes; update the allowlist when Google adds/removes served models.
+
 A selected `google-gemini-cli/<model>` session can answer, stream output, call tools,
 receive tool results, and continue multi-turn context. The selection persists as a
 `provider/modelId` preference and is re-pinned on every spawn (including restart, restore,
