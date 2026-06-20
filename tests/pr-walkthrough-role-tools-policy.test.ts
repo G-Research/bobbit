@@ -1,16 +1,18 @@
 /**
  * Role↔tool-group boundary for the PR-walkthrough host.agents reviewer migration
- * (design Decision C). The three reviewer tools share `group: PR Walkthrough`:
- *   readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml
+ * (design Decision C). The reviewer tools share `group: PR Walkthrough`:
+ *   readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_chunk,
+ *   read_pr_walkthrough_submission_status, finalize_pr_walkthrough_submission,
+ *   submit_pr_walkthrough_yaml
  *
  * For "only the reviewer submits" to hold WITHOUT a secret, the group must be
  * DEFAULT-DENY for everyone else, and the pack-shipped `pr-reviewer` role must
  * re-grant it. This test asserts the *resolved* policy (mirroring runtime
  * `resolveGrantPolicy`), not just YAML declarations:
  *   - the group default in `defaults/tool-group-policies.yaml` is `never`;
- *   - a `general` role AND an unrestricted (role-less) session resolve all three
+ *   - a `general` role AND an unrestricted (role-less) session resolve all PRW
  *     tools to `never` (group default-deny, resolveGrantPolicy step 4);
- *   - the pack `pr-reviewer` role resolves all three to `allow` (its group-level
+ *   - the pack `pr-reviewer` role resolves all PRW tools to `allow` (its group-level
  *     `toolPolicies: { "PR Walkthrough": allow }` beats the group default,
  *     resolveGrantPolicy step 2 > step 4).
  *
@@ -37,11 +39,16 @@ const PR_WALKTHROUGH_GROUP = "PR Walkthrough";
 const PR_WALKTHROUGH_TOOLS = [
 	"readonly_bash",
 	"read_pr_walkthrough_bundle",
+	"submit_pr_walkthrough_chunk",
+	"read_pr_walkthrough_submission_status",
+	"finalize_pr_walkthrough_submission",
 	"submit_pr_walkthrough_yaml",
 ];
 
-function loadRole(file: string): { name?: string; label?: string; accessory?: string; toolPolicies?: Record<string, GrantPolicy> } {
-	return YAML.parse(fs.readFileSync(file, "utf-8")) as { name?: string; label?: string; accessory?: string; toolPolicies?: Record<string, GrantPolicy> };
+type RoleDoc = { name?: string; label?: string; accessory?: string; promptTemplate?: string; toolPolicies?: Record<string, GrantPolicy> };
+
+function loadRole(file: string): RoleDoc {
+	return YAML.parse(fs.readFileSync(file, "utf-8")) as RoleDoc;
 }
 
 /** Group-policy provider backed by defaults/tool-group-policies.yaml. */
@@ -107,6 +114,18 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		);
 	});
 
+	it("the pr-reviewer prompt requires durable chunked submission before finalization", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		const prompt = reviewer.promptTemplate ?? "";
+		assert.match(prompt, /Start by calling read_pr_walkthrough_bundle/);
+		assert.match(prompt, /submit_pr_walkthrough_chunk/);
+		assert.match(prompt, /read_pr_walkthrough_submission_status/);
+		assert.match(prompt, /finalize_pr_walkthrough_submission/);
+		assert.match(prompt, /Stable IDs must be deterministic and retry-safe/);
+		assert.match(prompt, /Use submit_pr_walkthrough_yaml only as a compatibility fallback/);
+		assert.doesNotMatch(prompt, /When complete, call submit_pr_walkthrough_yaml/);
+	});
+
 	for (const tool of PR_WALKTHROUGH_TOOLS) {
 		it(`pr-reviewer role resolves ${tool} to allow`, () => {
 			const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
@@ -118,10 +137,10 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		});
 	}
 
-	// GAP 2: the reviewer must resolve to EXACTLY the three walkthrough tools — no
+	// GAP 2: the reviewer must resolve to EXACTLY the PR Walkthrough tools — no
 	// state-mutating / orchestration tools leak through. Enumerate every FIXED tool
 	// shipped under defaults/tools plus the pack-origin PR Walkthrough tool YAMLs and
-	// assert the pr-reviewer role resolves only the PR Walkthrough trio to a non-`never`
+	// assert the pr-reviewer role resolves only the PR Walkthrough tool surface to a non-`never`
 	// policy; every other tool resolves to `never`. (Dynamic per-server MCP tool groups
 	// use runtime keys not expressible in a static role file and are out of scope for
 	// this fixed-surface assertion.)
@@ -160,7 +179,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		return out;
 	}
 
-	it("pr-reviewer resolves to EXACTLY the three walkthrough tools across the fixed tool surface", () => {
+	it("pr-reviewer resolves to EXACTLY the PR Walkthrough tools across the fixed tool surface", () => {
 		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
 		const fixedTools = enumerateFixedTools();
 		assert.ok(fixedTools.length >= 20, "expected to enumerate the full fixed tool surface");
@@ -173,7 +192,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		assert.deepEqual(
 			allowed.sort(),
 			[...PR_WALKTHROUGH_TOOLS].sort(),
-			"pr-reviewer must resolve ONLY the three PR Walkthrough tools to a non-never policy",
+			"pr-reviewer must resolve ONLY the PR Walkthrough tools to a non-never policy",
 		);
 	});
 
@@ -181,8 +200,8 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 	// configured, `computeEffectiveAllowedTools` adds the server's meta-tool plus
 	// `mcp_describe` (both default-allow), and a static role file cannot enumerate
 	// the runtime `mcp__<server>` key. The pr-reviewer role's WILDCARD `mcp__: never`
-	// must deny every MCP server at once, so the resolved set stays EXACTLY the three
-	// walkthrough tools even with a fake MCP server present.
+	// must deny every MCP server at once, so the resolved set stays EXACTLY the PRW
+	// tools even with a fake MCP server present.
 	// A1 (guard-GENERATION path — the path that was actually bugged). The existing
 	// assertions above prove the *role policy* (`resolveGrantPolicy`). This block
 	// proves the downstream artefact the bug corrupted: the generated tool GUARD.
@@ -190,15 +209,15 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 	// Root cause recap: `session-setup._resolveToolActivation` resolved the role via
 	// `roleManager.getRole` only → `undefined` for the pack-shipped `pr-reviewer`
 	// → `computeToolPolicies` fell through to the `PR Walkthrough: never` group
-	// default → the three tools were stamped into the guard's `neverPolicies` map
+	// default → the PRW tools were stamped into the guard's `neverPolicies` map
 	// → every reviewer tool call was hard-blocked ("not permitted for this role").
 	//
 	// GIVEN the cascade-resolved `pr-reviewer` role (what the fixed `lookupRole`
 	// returns), `computeToolPolicies` / `generateToolGuardExtension` must produce a
-	// guard with NO `never` entry for the three tools. The contrast case (role
+	// guard with NO `never` entry for the PRW tools. The contrast case (role
 	// undefined — the bug) is asserted too, so this test pins the exact regression.
 	describe("A1 — generated tool GUARD does not block the reviewer tools", () => {
-		// Minimal ToolManager exposing the three walkthrough tools (+ a representative
+		// Minimal ToolManager exposing the PR Walkthrough tools (+ a representative
 		// mutating tool). The tool YAMLs declare no grantPolicy, so getToolByName
 		// returns undefined — faithfully reproducing the runtime cascade.
 		const guardToolManager = {
@@ -219,7 +238,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 			return Object.keys(JSON.parse(m![1]));
 		}
 
-		it("the resolved pr-reviewer role stamps NO `never` guard entry for any of the three tools", () => {
+		it("the resolved pr-reviewer role stamps NO `never` guard entry for any PR Walkthrough tool", () => {
 			const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
 			const policies = computeToolPolicies(guardToolManager, undefined, reviewer, groupPolicyStore);
 			for (const tool of PR_WALKTHROUGH_TOOLS) {
@@ -238,7 +257,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 			}
 		});
 
-		it("REGRESSION GUARD: an UNRESOLVED role (the bug) DOES stamp `never` for all three", () => {
+		it("REGRESSION GUARD: an UNRESOLVED role (the bug) DOES stamp `never` for all PR Walkthrough tools", () => {
 			// This is exactly what `_resolveToolActivation` produced before the fix
 			// (effectiveRole === undefined). If the guard generation ever stopped
 			// honouring the group default-deny, the fix above would be a no-op and this
@@ -253,7 +272,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		});
 	});
 
-	it("pr-reviewer resolves to EXACTLY the three walkthrough tools even with an MCP server configured", () => {
+	it("pr-reviewer resolves to EXACTLY the PR Walkthrough tools even with an MCP server configured", () => {
 		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
 		const fixedTools = enumerateFixedTools();
 
@@ -276,7 +295,7 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		assert.deepEqual(
 			effective,
 			[...PR_WALKTHROUGH_TOOLS].sort(),
-			"pr-reviewer must resolve ONLY the three PR Walkthrough tools (no mcp__/mcp_ tools) with an MCP server configured",
+			"pr-reviewer must resolve ONLY the PR Walkthrough tools (no mcp__/mcp_ tools) with an MCP server configured",
 		);
 	});
 });

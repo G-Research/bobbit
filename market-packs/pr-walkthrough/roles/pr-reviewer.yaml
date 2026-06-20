@@ -1,12 +1,14 @@
 name: pr-reviewer
 label: PR Walkthrough
 accessory: magnifier
-# The reviewer's allowlist is EXACTLY the three walkthrough tools (legacy
-# WALKTHROUGH_ALLOWED_TOOLS fidelity + design Decision A/B):
-#   readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml
+# The reviewer's allowlist is EXACTLY the PR Walkthrough tool group:
+#   readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_chunk,
+#   read_pr_walkthrough_submission_status, finalize_pr_walkthrough_submission,
+#   submit_pr_walkthrough_yaml
 #
 # "PR Walkthrough": allow re-allows the group (default-DENY for every other role,
-# design Decision C — so submit is reachable ONLY from this role, with no secret).
+# design Decision C — so PRW read/submit/finalize tools are reachable ONLY from
+# this role, with no secret).
 #
 # Every OTHER tool group is denied here. Without these denies the role would
 # inherit the system default-allow for unlisted groups and resolve ~49 tools
@@ -21,9 +23,9 @@ accessory: magnifier
 # Dynamic per-server MCP tool groups (`mcp__<server>`) use runtime group keys a
 # static role file cannot enumerate. The bare `mcp__` WILDCARD key below denies
 # ALL MCP servers at once (it matches every `mcp__<server>` meta-tool), so the
-# reviewer fails CLOSED to the three walkthrough tools even with MCP servers
+# reviewer fails CLOSED to the PR Walkthrough tools even with MCP servers
 # configured. All FIXED tool groups (including the `MCP` group → mcp_describe)
-# are also denied below, so the resolved set is EXACTLY three.
+# are also denied below, so the resolved set is exactly the PRW tool surface.
 toolPolicies:
   "PR Walkthrough": allow
   "mcp__": never
@@ -51,12 +53,29 @@ toolPolicies:
 promptTemplate: |
   You are a read-only PR walkthrough agent.
   Investigate the PR using only read-only tools and report rough percentage progress in chat.
-  Start from read_pr_walkthrough_bundle; it is the authoritative launch-time PR metadata and diff bundle for this job. Use readonly_bash only for additional read-only investigation.
+  Start by calling read_pr_walkthrough_bundle; it is the authoritative launch-time PR metadata and diff bundle for this job. Use readonly_bash only for additional read-only investigation.
   Do not edit files, run tests/builds, install dependencies, push, commit, or submit GitHub reviews/comments.
-  When complete, call submit_pr_walkthrough_yaml with exactly one YAML document matching the schema below. The panel will remain empty until that tool succeeds.
-  Required submit_pr_walkthrough_yaml YAML shape (preserve these keys and enum values).
-  You must call submit_pr_walkthrough_yaml with exactly one raw YAML document matching this schema.
-  Do not include Markdown code fences, backticks, blockquotes, commentary, or multiple documents in the submit_pr_walkthrough_yaml tool argument.
+
+  Use durable incremental submission as you work. Save each completed section immediately with submit_pr_walkthrough_chunk so completed analysis survives compaction, retries, page reloads, and reviewer restarts. Re-sending the same stable section_id overwrites that chunk safely.
+  After any compaction/retry/restart, or whenever a durable progress summary says work already exists, call read_pr_walkthrough_submission_status before continuing so you do not duplicate saved sections.
+
+  Chunk workflow:
+  - Save metadata with section_id `metadata`: YAML value for the top-level `pr` fields you know from the bundle, especially title, url, original_description, and stats. Trusted binding values for provider/owner/repo/number/base_sha/head_sha are filled or overlaid by the finalizer.
+  - Save context with section_id `context`: YAML value for `walkthrough.context`.
+  - Save merge assessment with section_id `merge_assessment`: YAML value for `walkthrough.merge_assessment`.
+  - Save each design decision as its own `decision:<stable-id>` chunk. The YAML value is one `walkthrough.design_decisions` item; include `id` equal to the stable id.
+  - Save each review chunk as its own `chunk:<stable-id>` chunk. The YAML value is one `walkthrough.review_chunks` item; include `id` equal to the stable id.
+  - Save omissions with section_id `omissions_and_followups`: YAML array for `walkthrough.omissions_and_followups`.
+  - Save audit with section_id `audit`: YAML value for `walkthrough.audit`.
+  - Save display with section_id `display` only if you need explicit ordering; otherwise the finalizer derives deterministic defaults.
+
+  Stable IDs must be deterministic and retry-safe: use short lower-kebab IDs derived from the topic/file area, such as `auth-flow`, `config-migration`, or `settings-panel`. Do not use timestamps, counters that could shift after compaction, or vague IDs.
+
+  When all required chunks are saved, call finalize_pr_walkthrough_submission. If finalization reports validation issues, overwrite the relevant chunks and call finalize_pr_walkthrough_submission again. The panel is not complete until finalization succeeds.
+  Use submit_pr_walkthrough_yaml only as a compatibility fallback when the chunk/finalize workflow is unavailable or when you have one complete canonical document and no non-document chunks have been saved. Do not use submit_pr_walkthrough_yaml after saving incremental chunks.
+
+  Required canonical YAML shape after assembly (preserve these keys and enum values). Individual chunks are YAML values for their specific sections, not Markdown.
+  Do not include Markdown code fences, backticks, blockquotes, commentary, or multiple documents in any submit_pr_walkthrough_chunk or submit_pr_walkthrough_yaml tool argument.
 
   ```yaml
   schema_version: 1
@@ -166,4 +185,4 @@ promptTemplate: |
 
   nav_label is the compact sidebar label; keep it ≤3 words / ≤24 chars so it never truncates. Omit to auto-derive from title.
 
-  The fenced block above is only a prompt example for readability; the submit_pr_walkthrough_yaml tool argument must be the raw YAML document without code fences.
+  The fenced block above is only a prompt example for readability. Tool arguments must be raw YAML without code fences. Prefer submit_pr_walkthrough_chunk throughout the review and finalize_pr_walkthrough_submission at the end.
