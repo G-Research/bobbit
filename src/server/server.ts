@@ -10080,6 +10080,7 @@ async function handleApiRoute(
 				const heartbeat = setInterval(() => { try { res.write("\n"); } catch { /* ignore */ } }, 60_000);
 				const startTime = Date.now();
 				const handles: Array<{ sessionId: string } | null> = [];
+				let responsePayload: unknown;
 				try {
 					// Spawn the full set. assertCanSpawn / spawn failures become a
 					// failed delegate entry rather than aborting the others.
@@ -10126,16 +10127,19 @@ async function handleApiRoute(
 					}
 					const completed = delegates.filter(d => d.status === "completed").length;
 					const summary = `${completed}/${delegates.length} delegates completed.`;
-					res.end(JSON.stringify({ delegates, summary }));
+					responsePayload = { delegates, summary };
 				} catch (err) {
-					res.end(JSON.stringify({ delegates: [], summary: "", error: String(err instanceof Error ? err.message : err) }));
+					responsePayload = { delegates: [], summary: "", error: String(err instanceof Error ? err.message : err) };
 				} finally {
-					// Guaranteed cleanup — dismiss EVERY spawned child regardless of outcome.
+					// Guaranteed cleanup — dismiss EVERY spawned child before the blocking
+					// response completes. Ending the chunked response first races callers that
+					// immediately list children and violates team_delegate's auto-dismiss contract.
 					for (const h of handles) {
 						if (h) { try { await orchestrationCore.dismiss(ownerId, h.sessionId); } catch { /* already gone */ } }
 					}
 					clearInterval(heartbeat);
 				}
+				res.end(JSON.stringify(responsePayload ?? { delegates: [], summary: "", error: "Delegate route ended without a result." }));
 				return;
 			}
 
