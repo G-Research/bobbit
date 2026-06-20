@@ -78,6 +78,12 @@ spawnGoal(opts: {
 
 ---
 
+## 2.2 Security / trust model
+
+The pack's server-side routes read child-goal outcomes (cost, gates, tasks, goal metadata) by calling the gateway REST API over `https://localhost`, authenticating with the gateway bearer token. That token is read from disk — `.bobbit/state/token` and `.bobbit/state/gateway-url` under the **project root** (discovered by walking up from the route worker's cwd and, failing that, deriving the root from `git rev-parse --git-common-dir`), never from the environment. This is a deliberate v1 choice: keeping outcome reads on the existing authenticated REST surface lets the only core change be `host.agents.spawnGoal`, instead of adding a second host capability. The consequence is that an enabled experiment-runner route runs with authenticated gateway API access as the user — the same ambient-OS trust level any pack route with `os` access already has, which is why the pack ships **disabled by default** and is opt-in. This is not a privilege escalation beyond that baseline. A future hardening would add a scoped, read-only goal-outcome host capability so the pack could read child results without reading the bearer token at all; the outcome-reader is already isolated behind `goalReaderFor`/`loadCreds` in `lib/engine.mjs`, so that swap is contained.
+
+---
+
 ## 3. Two Engine Modes & Safety Contract
 
 The Experiment Runner operates with a **strict separation of concerns** between its safe/bounded default mode and its opt-in/constrained optimizer mode.

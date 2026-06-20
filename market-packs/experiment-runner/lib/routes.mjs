@@ -83,10 +83,10 @@ const TERMINAL_RUN_STATUSES = ["collected", "failed", "cancelled"];
 
 /**
  * Flip exp/<id>/state.status → "done" once every run has reached a terminal
- * state (or all settled, for poll), so the panel stops polling/showing a
- * finished A/B experiment. Idempotent and never clobbers a cancelled/stopped
- * state. `allTerminal` lets the caller decide what "finished" means: collect
- * passes its all-collected check; poll passes allSettled.
+ * state, so the panel stops polling/showing a finished A/B experiment.
+ * Idempotent and never clobbers a cancelled/stopped state. SOLELY called by
+ * `collect` (all runs collected/failed/cancelled) — `poll` never flips done,
+ * since all-settled is premature before outcomes are collected.
  */
 async function markDoneIfFinished(ctx, experimentId, runs, finished) {
 	if (!runs.length || !finished) return;
@@ -296,11 +296,12 @@ export const routes = {
 			}
 			await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
 		}
-		// Persist a terminal state once every run has settled so the panel stops
-		// polling a finished A/B experiment. Autoresearch terminality is owned SOLELY
-		// by iterate's deterministic stop (state.stopped) — flipping "done" here after
-		// the first candidate collects would kill the loop before it can iterate.
-		if (def.mode !== "autoresearch") await markDoneIfFinished(ctx, experimentId, runs, allSettled);
+		// poll does NOT flip "done". `collect` is the sole owner of the A/B done
+		// transition: all-settled here is premature (settled runs still need their
+		// outcomes collected), and flipping early would stop the panel before metrics
+		// are read. collect flips once every run is terminal (collected/failed/
+		// cancelled). Autoresearch terminality stays owned by iterate's deterministic
+		// stop (state.stopped).
 		return { runs, allSettled };
 	},
 
