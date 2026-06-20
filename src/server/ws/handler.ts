@@ -34,6 +34,7 @@ import type { PackContributionResolver } from "../extension-host/pack-contributi
 import { handleSessionPost } from "../extension-host/session-write.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
+import { assertRuntimeSwitchAllowed, isRuntimeSwitchError } from "../agent/session-runtime.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -83,6 +84,8 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
 	const data: Record<string, unknown> = {};
+	if (persisted?.runtime) data.runtime = persisted.runtime;
+	if (persisted?.claudeCodeSessionId) data.claudeCodeSessionId = persisted.claudeCodeSessionId;
 	if (persisted?.modelProvider && persisted?.modelId) {
 		const meta = inferMeta(persisted.modelId);
 		data.model = {
@@ -125,7 +128,7 @@ function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, se
  * `getState()` push.
  */
 function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string },
+	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string; runtime?: string; claudeCodeSessionId?: string },
 	sessionManager: SessionManager,
 	sessionId: string,
 ): Record<string, unknown> {
@@ -136,6 +139,8 @@ function buildArchivedStateData(
 		status: "archived",
 		statusVersion: 0,
 	};
+	if (archived.runtime) data.runtime = archived.runtime;
+	if (archived.claudeCodeSessionId) data.claudeCodeSessionId = archived.claudeCodeSessionId;
 	if (archived.modelProvider && archived.modelId) {
 		const meta = inferMeta(archived.modelId);
 		data.model = {
@@ -665,6 +670,8 @@ export function handleWebSocketConnection(
 					break;
 				case "set_model":
 					try {
+						const persisted = sessionManager.getPersistedSession(session.id);
+						assertRuntimeSwitchAllowed(persisted?.runtime, msg.provider);
 						await session.rpcClient.setModel(msg.provider, msg.modelId);
 						sessionManager.updateModelNameFile(session.id, msg.modelId);
 						sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
@@ -673,8 +680,9 @@ export function handleWebSocketConnection(
 						// them — otherwise the client keeps showing the new model while the
 						// agent stays bound to the previous one and subsequent prompts go
 						// to the wrong model.
+						const code = isRuntimeSwitchError(err) ? "RUNTIME_SWITCH_REQUIRES_NEW_SESSION" : "SET_MODEL_FAILED";
 						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
-						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
+						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code });
 					}
 					break;
 				case "set_image_model": {

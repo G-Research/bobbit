@@ -16,7 +16,8 @@ import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
-import { RpcBridge } from "./rpc-bridge.js";
+import { createSessionBridge, assertRuntimeAllowedForSession, hydrateRuntimeOptions, modelAliasFromModelString, resolveSessionRuntime, runtimeFromModelString, type SessionBridgeOptions } from "./session-runtime.js";
+import type { SessionRuntime } from "./session-store.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -179,7 +180,8 @@ export interface SessionSetupPlan {
 	nonInteractive?: boolean;
 
 	// Computed during planning
-	bridgeOptions: RpcBridgeOptions;
+	runtime?: SessionRuntime;
+	bridgeOptions: SessionBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
@@ -512,6 +514,11 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
+
+	const runtime = resolveSessionRuntime({ runtime: plan.runtime, initialModel: plan.bridgeOptions.initialModel });
+	assertRuntimeAllowedForSession(runtime, plan.sandboxed);
+	plan.runtime = runtime;
+	plan.bridgeOptions = hydrateRuntimeOptions({ ...plan.bridgeOptions, runtime });
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
@@ -916,6 +923,10 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		runtime: plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi",
+		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
+		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodeModelAlias: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
 	});
 }
 
@@ -1140,6 +1151,12 @@ export async function executeWorktreeAsync(
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
+	ctx.store.update(session.id, {
+		runtime: plan.runtime ?? "pi",
+		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
+		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodeModelAlias: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || "default") : undefined,
+	});
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
@@ -1190,8 +1207,8 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
 
-	// Create real RpcBridge (replacing placeholder)
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	// Create real bridge (replacing placeholder)
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
@@ -1324,7 +1341,7 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 	const eventBuffer = new EventBuffer();
