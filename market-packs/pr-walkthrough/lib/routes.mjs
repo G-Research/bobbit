@@ -45,7 +45,6 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { parse as parseYamlDocument } from "yaml";
 
 // PRODUCTION-FAITHFUL SYNTHESIS (design built-in-first-party-packs §8.4): the pack
 // runs the SAME YAML→cards synthesis as the deleted built-in via the pure shared
@@ -55,7 +54,7 @@ import { parse as parseYamlDocument } from "yaml";
 // diff blocks, so the pack reaches REAL parity with the built-in viewer. This is a
 // pack-root-confined relative import (the routes module graph is allowed to import
 // sibling pack files in the confined worker).
-import { mapYamlToWalkthroughPayload, validatePrWalkthroughYaml } from "./yaml-to-cards.mjs";
+import { mapYamlToWalkthroughPayload, parsePrWalkthroughYamlValue, validatePrWalkthroughYaml } from "./yaml-to-cards.mjs";
 
 const STORE_SCHEMA_VERSION = 1;
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
@@ -405,7 +404,7 @@ function parseYamlValue(yamlText, label = "YAML") {
 	const text = String(yamlText ?? "").trim();
 	if (!text) return null;
 	try {
-		const value = parseYamlDocument(text);
+		const value = parsePrWalkthroughYamlValue(text);
 		return value === undefined ? null : value;
 	} catch (err) {
 		throw prwError("PRW_CHUNK_INVALID", `${label} must be valid YAML.`, { message: messageOf(err) });
