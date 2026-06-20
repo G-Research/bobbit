@@ -10,7 +10,7 @@ const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'
 const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stack frame";
 const FAILED_RETAINED_DIAGNOSTICS_CMD = `node -e "for (let i=1;i<=80;i++) console.log('prelude line '+i+' '+ 'x'.repeat(100)); console.log('${RETAINED_DIAGNOSTICS_MARKER}'); for (let i=81;i<=260;i++) console.log('tail line '+i+' '+ 'y'.repeat(100)); process.exit(1)"`;
 const PLAYWRIGHT_ERROR_CONTEXT_MARKER = "PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER";
-const PLAYWRIGHT_STYLE_ARTIFACT_CMD = `node -e "const fs=require('fs'),path=require('path'); const dir=path.join('test-results','retain-artifact-fixture'); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(path.join(dir,'error-context.md'),'# Error Context\\n${PLAYWRIGHT_ERROR_CONTEXT_MARKER}\\nlocator(\\\"text=Missing\\\") failed after retry\\n'); fs.writeFileSync(path.join(dir,'trace.zip'),'trace placeholder'); fs.writeFileSync(path.join(dir,'screenshot.png'),'png placeholder'); console.error('PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md'); process.exit(1)"`;
+const PLAYWRIGHT_STYLE_ARTIFACT_CMD = `node -e "const fs=require('fs'),path=require('path'); const dir=path.join('test-results','retain-artifact-fixture'); fs.mkdirSync(dir,{recursive:true}); const body=['# Instructions','You are given a Playwright error context.','','## Test failure','${PLAYWRIGHT_ERROR_CONTEXT_MARKER}','locator(\\\"text=Missing\\\") failed after retry',...Array.from({length:2600},(_,i)=>'artifact detail line '+(i+1)+' '+ 'z'.repeat(40))].join('\\n'); fs.writeFileSync(path.join(dir,'error-context.md'),body); fs.writeFileSync(path.join(dir,'trace.zip'),'trace placeholder'); fs.writeFileSync(path.join(dir,'screenshot.png'),'png placeholder'); console.error('PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md'); process.exit(1)"`;
 const RETAINED_LOG_CAP_MARKER = "RETAINED_GATE_DIAGNOSTICS_CAP_MARKER";
 const HUGE_RETAINED_LOG_CHUNKS = 3072;
 const HUGE_RETAINED_LOG_CHUNK_BYTES = 2048;
@@ -356,7 +356,7 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("copies and exposes Playwright-style error-context artifacts from the verification command cwd", async ({ gateway }) => {
+	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async ({ gateway }) => {
 		const workflowId = makeWorkflowId();
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
@@ -375,8 +375,51 @@ test.describe("gate inspect slicing", () => {
 			).toContain("error-context.md");
 			expect(
 				serialized,
-				"PLAYWRIGHT_ERROR_CONTEXT_CONTENT_MISSING: failed gate inspection must expose or link retained error-context.md content, not only the compact command tail",
-			).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+				"PLAYWRIGHT_ERROR_CONTEXT_INLINE_CONTENT: verification inspect must expose compact artifact metadata only; marker content belongs behind section=artifact",
+			).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(64 * 1024);
+
+			const artifact = body.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			expect(artifact).toMatchObject({
+				id: "retain-artifact-fixture",
+				relativePath: "test-results/retain-artifact-fixture/error-context.md",
+				kind: "test-results",
+				path: expect.stringContaining("gate-diagnostics"),
+			});
+			expect(artifact).not.toHaveProperty("content");
+
+			const byIdRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				step: "playwright-style failure",
+				artifact: artifact.id,
+				mode: "grep",
+				pattern: PLAYWRIGHT_ERROR_CONTEXT_MARKER,
+				context: 1,
+			});
+			expect(byIdRes.status).toBe(200);
+			const byId = await byIdRes.json();
+			expect(byId.section).toBe("artifact");
+			expect(byId.artifact).toMatchObject({ id: artifact.id, relativePath: artifact.relativePath });
+			expect(byId.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(byId.text).toContain("locator");
+			expect(byId.text).not.toContain("artifact detail line 100");
+			expect(byId.text).not.toContain("# Instructions");
+			expect(byId.selection).toMatchObject({ mode: "grep", matchCount: 1, shownMatches: 1 });
+
+			const byPathRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				step: "playwright-style failure",
+				artifact: artifact.relativePath,
+				mode: "slice",
+				from: 1,
+				to: 4,
+			});
+			expect(byPathRes.status).toBe(200);
+			const byPath = await byPathRes.json();
+			expect(byPath.artifact.relativePath).toBe(artifact.relativePath);
+			expect(byPath.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(byPath.text).toContain("artifact detail line 1");
+			expect(byPath.text).not.toContain("artifact detail line 5");
+			expect(byPath.text).not.toContain("# Instructions");
+			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
 
 			const stateMarkerFiles = findFilesContaining(path.join(gateway.bobbitDir, "state"), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
 				.filter(file => !file.endsWith("gates.json"));
@@ -384,6 +427,92 @@ test.describe("gate inspect slicing", () => {
 				stateMarkerFiles,
 				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: error-context.md content must be copied under Bobbit state outside gates.json so worktree cleanup/restart does not destroy diagnostics. This focused E2E covers the host-visible command cwd path; Docker sandbox transfer needs manual/docker coverage.",
 			).not.toEqual([]);
+		} finally {
+			await deleteGoal(goal.id);
+			await deleteInspectWorkflow(workflowId);
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("bounds artifact grep tail slice full modes and rejects invalid artifact requests", async () => {
+		const workflowId = makeWorkflowId();
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifact-selection-${Date.now()}-`));
+		await createInspectWorkflow(workflowId);
+		const goal = await createGoal({ title: `Gate Inspect Artifact Selection ${Date.now()}`, workflowId, cwd });
+		try {
+			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
+			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
+
+			const inspectRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification", { mode: "full" });
+			expect(inspectRes.status).toBe(200);
+			const inspect = await inspectRes.json();
+			const artifact = inspect.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			expect(artifact?.id).toBe("retain-artifact-fixture");
+
+			const grepRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				artifact: artifact.id,
+				mode: "grep",
+				pattern: "artifact detail line 25[0-9]",
+				context: 1,
+				max_results: 2,
+			});
+			expect(grepRes.status).toBe(200);
+			const grep = await grepRes.json();
+			expect(grep.text).toContain("artifact detail line 250");
+			expect(grep.text).not.toContain("artifact detail line 1 ");
+			expect(grep.selection).toMatchObject({ mode: "grep", shownMatches: 2 });
+
+			const tailRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				artifact: artifact.id,
+				mode: "tail",
+				lines: 3,
+			});
+			expect(tailRes.status).toBe(200);
+			const tail = await tailRes.json();
+			expect(tail.text).toContain("artifact detail line 2600");
+			expect(tail.text).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(tail.selection).toMatchObject({ mode: "tail" });
+			expect(tail.selection.range.to - tail.selection.range.from + 1).toBeLessThanOrEqual(3);
+
+			const sliceRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				artifact: artifact.relativePath,
+				mode: "slice",
+				from: 10,
+				to: 12,
+			});
+			expect(sliceRes.status).toBe(200);
+			const slice = await sliceRes.json();
+			expect(slice.text).toContain("artifact detail line");
+			expect(slice.text).toMatch(/^10\b/m);
+			expect(slice.text).toMatch(/^12\b/m);
+			expect(slice.text).not.toMatch(/^13\b/m);
+			expect(slice.selection).toMatchObject({ mode: "slice", range: { from: 10, to: 12 } });
+
+			const fullRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+				artifact: artifact.id,
+				mode: "full",
+			});
+			expect(fullRes.status).toBe(200);
+			const full = await fullRes.json();
+			expect(Buffer.byteLength(full.text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+			expect(full.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(full.text).not.toContain("artifact detail line 2600");
+			expect(full.text).not.toContain("# Instructions");
+			expect(full.selection).toMatchObject({ mode: "full", truncated: true });
+
+			const missingRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { mode: "tail" });
+			expect(missingRes.status).toBe(400);
+			expect((await missingRes.json()).error).toMatch(/artifact/i);
+
+			const unknownRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { artifact: "missing-artifact-id" });
+			expect(unknownRes.status).toBe(400);
+			const unknown = await unknownRes.json();
+			expect(unknown.error).toMatch(/unknown|not found|artifact/i);
+			expect(JSON.stringify(unknown)).toContain("retain-artifact-fixture");
+
+			const traversalRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { artifact: "../secrets.txt" });
+			expect(traversalRes.status).toBe(400);
+			expect((await traversalRes.json()).error).toMatch(/artifact|path|traversal|invalid/i);
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
@@ -425,7 +554,8 @@ test.describe("gate inspect slicing", () => {
 				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic log/artifact metadata",
 			).toMatch(/stdout\.log|stderr\.log|gate-diagnostics/i);
 			expect(explicitJson).toContain("error-context.md");
-			expect(explicitJson).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
 
 			const stateMarkerFiles = findFilesContaining(path.join(gateway.bobbitDir, "state"), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
 				.filter(file => !file.endsWith("gates.json"));
@@ -508,7 +638,7 @@ test.describe("gate inspect slicing", () => {
 			const wrongSectionRes = await inspectGate(goalId, "multi-verify-gate", "content", { step: "unit" });
 			expect(wrongSectionRes.status).toBe(400);
 			const wrongSectionBody = await wrongSectionRes.json();
-			expect(wrongSectionBody.error).toMatch(/step is only valid with section='verification'/);
+			expect(wrongSectionBody.error).toMatch(/step is only valid with section=.*verification.*artifact/i);
 		});
 	});
 
