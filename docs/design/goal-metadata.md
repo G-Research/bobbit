@@ -154,7 +154,7 @@ edge receives a **closure** wired by `server.ts`, never its own store lookup:
   (provider/bridge + goalProvisioned edges).
 - `SessionManager` reuses the hub resolver + its own pipeline ctx wiring.
 
-Resolution cost is trivial (≤32 store reads, in-memory). No caching needed; if a
+Resolution cost is trivial (≤64 store reads, bounded by the walk-depth cap, in-memory). No caching needed; if a
 hot path needs it, memoise on `(goalStore.getGeneration(), goalId)`.
 
 ## 4. Effective goal per session
@@ -199,8 +199,8 @@ derives a disabled-provider set inside the methods that enumerate providers:
 
 Bridge-install decision (the two identical call sites):
 
-- `session-setup.ts` ~L698: `hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, plan.goalId ?? plan.teamGoalId)`.
-- `session-manager.ts` ~L1807: `hasProviderBridgeHooks(this.lifecycleHub, projectId, session.goalId ?? session.teamGoalId)`.
+- `session-setup.ts`: `hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, plan.goalId ?? plan.teamGoalId)`.
+- `session-manager.ts`: `hasProviderBridgeHooks(this.lifecycleHub, projectId, session.goalId ?? session.teamGoalId)`.
 
 `provider-bridge-extension.ts::hasProviderBridgeHooks(hub, projectId, goalId?)`
 forwards `goalId` to `hub.hasProvidersForHooks`. Result: a goal with Hindsight
@@ -423,8 +423,8 @@ What is **kept** (do not confuse the two):
 
 ### 7.1 REST goal route — `server.ts`
 
-In the goal-creation handler (alongside the existing `worktreeSetupCommand`
-parse, ~L5101–5344), parse `body.metadata`:
+In the goal-creation handler (the `POST /api/goals` body parse), parse
+`body.metadata`:
 
 ```ts
 let metadata: Record<string, unknown> | undefined;
@@ -507,7 +507,7 @@ unit tests.
 - `resolveGoalMetadata` ancestry deep-merge: descendant overrides scalar; child
   array replaces parent array; nested object merges (child flips one sub-key);
   missing parent ref stops cleanly; deep chain (root→A→B→leaf); cycle guard /
-  32-hop bound; unknown/`undefined` goalId ⇒ `{}`.
+  64-hop bound; unknown/`undefined` goalId ⇒ `{}`.
 - `deepMergeMetadata` table: object+object recurse, array replace, scalar
   replace, object-over-scalar, scalar-over-object; returns fresh object (input
   not mutated).

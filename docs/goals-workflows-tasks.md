@@ -14,85 +14,14 @@ Goals can run in **team mode**, where a Team Lead agent orchestrates multiple ro
 
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
-### Per-goal worktree setup hook
+### Per-goal worktree provisioning
 
-A goal can carry an **optional per-goal worktree setup command** that runs once while its worktree is being provisioned. This is distinct from the per-component `worktree_setup_command` (set in project config, identical for every goal in the project): the per-goal hook is supplied **at goal-creation time** and is unique to that one goal.
+Worktree setup for a goal is driven by **per-component / project setup commands** plus, for goal-scoped variation, **hierarchical goal metadata**.
 
-**Why it exists.** The motivating use case is **A/B testing Bobbit configurations** — spin up two otherwise-identical goals for the same task where one goal's setup script configures a feature (e.g. building a knowledge-graph index) and the other does not, so you can measure the cost / token / time delta attributable to that feature. But the hook is **general-purpose**: any goal can inject any setup script — seed data, enable a flag, install an extra tool, warm a cache, build an index — without editing project config.
+- **Per-component setup** — each component's `worktree_setup_command` (project config) runs when a goal worktree is provisioned, identically for every goal in the project. Failures are non-fatal (logged; the worktree is still used). See [dev-workflow.md — Worktree branch namespaces](dev-workflow.md#worktree-branch-namespaces).
+- **Goal-scoped variation** — when you need one goal to differ from another (enable a feature, seed an index, disable a tool/provider, reorder prompt sections), use **hierarchical goal metadata** and the `goalProvisioned` extension hook. Metadata is set at goal creation, inherited down the goal tree, and applied uniformly to every session (team lead, members, delegates, reviewers, nested sub-goals). See **[docs/design/goal-metadata.md](design/goal-metadata.md)** for the full design.
 
-The two fields live on `PersistedGoal` (`src/server/agent/goal-store.ts`) and persist in `goals.json`:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `worktreeSetupCommand` | `string` | Host command run once after component setup. Blank/absent ⇒ no hook. |
-| `worktreeSetupTimeoutMs` | positive integer (ms) | Per-goal timeout override. Absent ⇒ default resolution (see below). |
-
-Both are **optional and backward-compatible**: a goal without them behaves exactly as before. The goal-store load path drops a `worktreeSetupTimeoutMs` that is not a finite positive integer, so existing persisted goals load cleanly.
-
-#### When and where it runs
-
-The command runs **once during provisioning**, in `GoalManager.setupWorktree` (via `runGoalSetup` in `src/server/skills/worktree-setup.ts`):
-
-- **After** any per-component `worktree_setup_command` hooks complete, so component dependencies are already installed.
-- **Also after a pool worktree is claimed.** The pre-built worktree pool cannot run a goal-specific script, so the per-goal hook fires on the pool-claim path too — it is the one setup step the pool cannot pre-bake.
-- **Once only.** It runs at provisioning time, outside the worktree-creation retry loop, and is **never re-run** on respawn or server restart.
-
-**Working directory:** the goal's resolved `cwd` — the offset-applied worktree path where the team will actually work (worktree root plus any project subdirectory offset).
-
-**Environment:** the inherited server process env, plus:
-
-| Variable | Value |
-|---|---|
-| `SOURCE_REPO` | the project's primary checkout root (`goal.repoPath`) |
-| `BOBBIT_GOAL_ID` | the goal id |
-| `BOBBIT_GOAL_BRANCH` | the goal branch (`goal/<slug>-<id>`) |
-| `BOBBIT_WORKTREE_PATH` | the goal's worktree root (before the subdirectory offset) |
-
-**Security / trust model:** the command runs on the **host, non-sandboxed** — exactly like the per-component `worktree_setup_command`. It is supplied by the goal creator at creation time, through the same goal-creation permissions; this does not widen who can run host commands. Only set a hook for commands you trust.
-
-#### Timeout resolution
-
-The hardcoded 120s limit is gone. The per-command timeout is resolved by a single helper (`resolveSetupTimeoutMs`) used for both per-component and per-goal setup, in this order:
-
-1. **Per-goal override** — `worktreeSetupTimeoutMs` on the goal, if a finite positive integer.
-2. **Project default** — the project config key `worktree_setup_timeout_ms` (number or numeric string), if a finite positive integer.
-3. **Default** — `DEFAULT_WORKTREE_SETUP_TIMEOUT_MS` = **120000 ms** (unchanged when nothing is set).
-
-Invalid, zero, negative, non-integer, or non-finite values at any level fall through to the next.
-
-#### Failure handling — fatal, unlike component setup
-
-Per-component setup failures are **non-fatal**: they are logged as warnings and the worktree is still used (a component install that partially fails should not block the goal). This semantics is unchanged.
-
-The **per-goal** hook is deliberately stricter. A failed per-goal setup means the goal would run mis-configured — fatal for A/B integrity. So a failure (non-zero exit or timeout) is **fatal**: `GoalManager` records `setupStatus: "error"` with a descriptive `setupError` (`Per-goal worktree setup failed: …`), surfaced in the UI, and the team does **not** auto-start. The goal can be re-driven through the normal setup retry path (`retrySetup`).
-
-#### Creation surfaces
-
-The fields are accepted through every goal-creation path:
-
-- **`propose_goal` tool** — optional `worktreeSetupCommand` and `worktreeSetupTimeoutMs` params (`defaults/tools/proposals/propose_goal.yaml`). The seeded proposal carries them through assistant acceptance, not just title/spec/cwd/workflow.
-- **REST `POST /api/goals`** — accepts either camelCase (`worktreeSetupCommand` / `worktreeSetupTimeoutMs`) or snake_case (`worktree_setup_command` / `worktree_setup_timeout_ms`); the command is trimmed and passed only when non-empty, the timeout only when a finite positive integer.
-- **Goal-creation dialog UI** — a **Setup command** textarea plus an optional timeout (ms) input in the goal proposal panel. An empty command means no hook; an empty timeout means default resolution. The values persist across reload.
-
-#### A/B testing example
-
-Create two goals for the same task and spec. Goal A enables the feature under test; Goal B is the control with no hook:
-
-```text
-# Goal A — feature enabled
-worktreeSetupCommand: "./scripts/build-index.sh"   # seed/enable the feature
-
-# Goal B — control
-worktreeSetupCommand: <empty>                       # no hook, baseline config
-```
-
-Both goals run the identical task; comparing their cost / token / time totals isolates the delta attributable to the feature the hook configured.
-
-#### Caveat — what the hook can and cannot reconfigure
-
-The hook reliably affects anything Bobbit reads **from the goal worktree or project config at goal/session start** — seed data, repo-local flags, generated indexes, installed tools, warmed caches.
-
-It does **not** retroactively change **globally boot-loaded configuration** that the gateway reads once at server boot (e.g. provider/credential config loaded into the running process). A setup script that writes such global config won't take effect for an already-running server. Making that class of config goal-scoped or reloadable is future work, not part of this hook.
+> **Legacy note — per-goal setup command removed.** An earlier design (PR #816) added bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` fields on `PersistedGoal`, plus matching REST, `propose_goal`, and goal-dialog affordances. That surface is **superseded by goal metadata and the `goalProvisioned` hook** and has been removed: the goal-store load path **drops** those legacy fields, the REST / `propose_goal` / UI inputs no longer exist, and posting them has no effect. Only the **component / project** `worktree_setup_command` (and its `worktree_setup_timeout_ms`) remains supported. To run goal-specific setup, declare metadata that an extension's `goalProvisioned` provider acts on — that hook fires at **every** worktree provisioning in the subtree (including pool claims), so filesystem treatments land on every agent and sub-goal worktree symmetrically, which the single per-goal command could not guarantee.
 
 ### Workflows
 
