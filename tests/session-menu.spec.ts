@@ -78,6 +78,21 @@ test.describe("pack launcher session-menu surfaces", () => {
 		expect(out.open).toBe(false);
 	});
 
+	test("unresolved route launchers show visible feedback without opening or switching", async ({ page }) => {
+		await ready(page);
+		const out = await page.evaluate(async () => {
+			const w = window as any;
+			w.__registerSessionMenu();
+			await w.__openSurface("sidebar");
+			await w.__clickMenuEntry(w.__key("sm.missing"));
+			return { feedback: w.__feedbackText(), hash: w.__hash(), open: w.__menuOpen(), panels: w.__openPanelCalls() };
+		});
+		expect(out.feedback).toMatch(/missing\.route|unavailable/i);
+		expect(out.hash).toBe("");
+		expect(out.open).toBe(false);
+		expect(out.panels).toEqual([]);
+	});
+
 	test("spawn launcher shows pending feedback, then opens the returned child panel on success", async ({ page }) => {
 		await ready(page);
 		const pending = await page.evaluate(async () => {
