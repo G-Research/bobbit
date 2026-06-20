@@ -13,12 +13,17 @@ import assert from "node:assert/strict";
 import provider, { __setClientFactory } from "../market-packs/hindsight/src/provider.ts";
 import { routes } from "../market-packs/hindsight/src/routes.ts";
 import {
+	CONFIG_DEFAULTS,
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	PROJECT_RECALL_TAGS_MATCH,
 	QUEUE_KEY,
 	clampRecallQuery,
+	loadEffectiveConfig,
+	projectConfigKey,
 	recallTagFilter,
+	validateConfigOverrides,
+	validateProjectOverride,
 } from "../market-packs/hindsight/src/shared.ts";
 
 // ── recallTagFilter — the shared project/all tag-scope source of truth ─────────
@@ -80,15 +85,17 @@ interface FakeState {
 	failRecall: boolean;
 	failRetain: boolean;
 	failEnsureBank: boolean;
+	failUpdateBankConfig: boolean;
 }
 
 function makeClient() {
-	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false };
+	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
 	const calls = {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
 		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
 		ensureBank: [] as string[],
 		reflect: [] as { bank: string; prompt: string; opts?: { tags?: Record<string, string>; tagsMatch?: string } }[],
+		updateBankConfig: [] as { bank: string; updates: Record<string, string> }[],
 		health: 0,
 		listBanks: 0,
 	};
@@ -118,18 +125,26 @@ function makeClient() {
 			calls.listBanks++;
 			return { banks: ["bobbit"] };
 		},
+		updateBankConfig: async (bank: string, updates: Record<string, string>) => {
+			calls.updateBankConfig.push({ bank, updates });
+			if (state.failUpdateBankConfig) throw new Error("updateBankConfig failed");
+		},
 	};
 	return { client, calls, state };
 }
 
+// retainEveryNTurns:1 keeps these tests on the OLD per-turn auto-retain behavior;
+// the cadence (default 5) is exercised by dedicated tests below.
 const ACTIVE = {
 	mode: "external",
 	externalUrl: "http://localhost:8888",
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all" as const,
+	tagsMatch: "any" as const,
 	autoRecall: true,
 	autoRetain: true,
+	retainEveryNTurns: 1,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -522,8 +537,10 @@ const MANAGED = {
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all" as const,
+	tagsMatch: "any" as const,
 	autoRecall: true,
 	autoRetain: true,
+	retainEveryNTurns: 1,
 	recallBudget: 1200,
 	timeoutMs: 1500,
 };
@@ -787,6 +804,240 @@ test("routes recall: managed mode WITH a running runtime dials the injected runt
 		assert.equal(res.memories[0].text, "managed-route-mem");
 		assert.equal(cap.baseUrl(), "http://127.0.0.1:38080", "recall dials the managed runtime base URL");
 		assert.equal(cap.calls.recall[0].bank, "bobbit");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── Memory-quality: defaults, scope/tags, cadence, missions, per-project overlay ─
+
+test("config defaults: project scope + tags_match any + cadence 5 + observation-biased recall", () => {
+	assert.equal(CONFIG_DEFAULTS.recallScope, "project", "default recall is project (project + global)");
+	assert.equal(CONFIG_DEFAULTS.tagsMatch, "any", "any includes untagged/global memory");
+	assert.equal(CONFIG_DEFAULTS.retainEveryNTurns, 5, "cost-conscious auto-retain cadence");
+	assert.deepEqual(CONFIG_DEFAULTS.recallTypes, ["observation", "world", "experience"]);
+	assert.ok(CONFIG_DEFAULTS.retainMission.length > 0);
+	assert.ok(CONFIG_DEFAULTS.observationsMission.length > 0);
+	assert.ok(CONFIG_DEFAULTS.reflectMission.length > 0);
+});
+
+test("recallTagFilter: tagsMatch + extraTags variants", () => {
+	// any_strict (hard-isolation) opt-in for project scope.
+	assert.deepEqual(recallTagFilter("project", "p", "any_strict"), { tags: { project: "p" }, tagsMatch: "any_strict" });
+	// Extra tags merge into a project filter.
+	assert.deepEqual(recallTagFilter("project", "p", "any", { goal: "g" }), { tags: { project: "p", goal: "g" }, tagsMatch: "any" });
+	// scope all + extra tags ⇒ additive filter (no fabricated project tag), tags_match any.
+	assert.deepEqual(recallTagFilter("all", "p", "any", { project: "other" }), { tags: { project: "other" }, tagsMatch: "any" });
+	// scope all without extra tags ⇒ no filter (whole bank).
+	assert.equal(recallTagFilter("all", "p", "any"), undefined);
+});
+
+test("validateConfigOverrides: tagsMatch, retainEveryNTurns, recallTypes, missions", () => {
+	const ok = validateConfigOverrides({ tagsMatch: "any_strict", retainEveryNTurns: 3, recallTypes: ["observation"], retainMission: "x" });
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value, { tagsMatch: "any_strict", retainEveryNTurns: 3, recallTypes: ["observation"], retainMission: "x" });
+	assert.equal(validateConfigOverrides({ tagsMatch: "nope" }).ok, false);
+	assert.equal(validateConfigOverrides({ retainEveryNTurns: 0 }).ok, false);
+	assert.equal(validateConfigOverrides({ recallTypes: [] }).ok, false);
+	assert.equal(validateConfigOverrides({ recallTypes: ["bogus"] }).ok, false);
+});
+
+test("validateProjectOverride: safe keys only; cleared keys dropped; unsafe keys ignored", () => {
+	const ok = validateProjectOverride({ recallScope: "all", bank: "team-bank", tagsMatch: "any_strict", recallBudget: 800, recallTypes: ["observation"] });
+	assert.deepEqual(ok.value, { recallScope: "all", bank: "team-bank", tagsMatch: "any_strict", recallBudget: 800, recallTypes: ["observation"] });
+	// Empty/null clears (dropped from the result).
+	assert.deepEqual(validateProjectOverride({ recallScope: "", bank: null }).value, {});
+	// Unsafe deployment/secret keys are ignored (never appear in the overlay).
+	assert.deepEqual(validateProjectOverride({ mode: "managed", externalUrl: "http://x", apiKey: "k", recallScope: "project" }).value, { recallScope: "project" });
+	assert.equal(validateProjectOverride({ recallScope: "bogus" }).ok, false);
+});
+
+test("loadEffectiveConfig precedence: project override > global > defaults", async () => {
+	const store = makeStore();
+	// No global, no overlay → defaults.
+	let cfg = await loadEffectiveConfig(store);
+	assert.equal(cfg.recallScope, "project");
+	assert.equal(cfg.bank, "bobbit");
+	// Global overrides defaults.
+	await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "all", bank: "global-bank" });
+	cfg = await loadEffectiveConfig(store, "proj-1");
+	assert.equal(cfg.recallScope, "all");
+	assert.equal(cfg.bank, "global-bank");
+	// Project overlay wins over global (safe keys only).
+	await store.put(projectConfigKey("proj-1"), { recallScope: "project", bank: "proj-bank" });
+	cfg = await loadEffectiveConfig(store, "proj-1");
+	assert.equal(cfg.recallScope, "project");
+	assert.equal(cfg.bank, "proj-bank");
+	// A different project does NOT see proj-1's overlay.
+	const other = await loadEffectiveConfig(store, "proj-2");
+	assert.equal(other.recallScope, "all");
+	assert.equal(other.bank, "global-bank");
+});
+
+test("provider recall applies the per-project overlay (overlay recallScope wins) + observation bias", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		// Global base scope is `all`; the project overlay flips it to `project`.
+		await store.put(projectConfigKey("proj-7"), { recallScope: "project" });
+		await provider.beforePrompt({ config: { ...ACTIVE, recallScope: "all" }, host: { store }, projectId: "proj-7", prompt: "q" });
+		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string; types?: string[] };
+		assert.deepEqual(o.tags, { project: "proj-7" }, "overlay forced project scope ⇒ project tag");
+		assert.equal(o.tagsMatch, "any", "project + global by default");
+		assert.deepEqual(o.types, ["observation", "world", "experience"], "recall is observation-biased by default");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall: tagsMatch any_strict (hard-isolation) flows through to the client", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await provider.beforePrompt({ config: { ...ACTIVE, recallScope: "project", tagsMatch: "any_strict" }, host: { store }, projectId: "p", prompt: "q" });
+		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(o.tags, { project: "p" });
+		assert.equal(o.tagsMatch, "any_strict", "any_strict excludes global (project-only)");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain cadence: default retainEveryNTurns skips 4 turns, retains the 5th", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 5 };
+		for (let i = 1; i <= 4; i++) {
+			await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+		}
+		assert.equal(calls.retain.length, 0, "first four turns are skipped (no LLM extraction)");
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "turn 5" });
+		assert.equal(calls.retain.length, 1, "the fifth turn retains");
+		assert.equal(calls.retain[0].content, "User: turn 5");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain cadence: retainEveryNTurns=1 preserves per-turn retain", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		for (let i = 1; i <= 3; i++) {
+			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: `t${i}` });
+		}
+		assert.equal(calls.retain.length, 3, "every turn retains when N=1");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("beforeCompact retains regardless of cadence (always captures the lost span)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// A high cadence would skip a turn retain, but compaction is cadence-exempt.
+		const cfg = { ...ACTIVE, retainEveryNTurns: 100 };
+		await provider.beforeCompact({ config: { ...cfg }, host: { store }, sessionId: "s", summary: "span" });
+		assert.equal(calls.retain.length, 1);
+		assert.equal(calls.retain[0].opts.sync, true);
+		assert.equal(calls.retain[0].opts.tags?.kind, "compaction");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("bank mission: PATCHed once per signature, re-applied only on change", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainMission: "M1" };
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "a" });
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "b" });
+		assert.equal(calls.updateBankConfig.length, 1, "PATCH only once for the same mission signature");
+		assert.equal(calls.updateBankConfig[0].updates.retain_mission, "M1");
+		assert.ok(calls.updateBankConfig[0].updates.observations_mission, "all missions are sent");
+		// A mission change re-applies (signature differs).
+		await provider.afterTurn({ config: { ...cfg, retainMission: "M2" }, host: { store }, sessionId: "s", prompt: "c" });
+		assert.equal(calls.updateBankConfig.length, 2, "signature change ⇒ re-PATCH");
+		assert.equal(calls.updateBankConfig[1].updates.retain_mission, "M2");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("bank mission PATCH failure is non-fatal — retain still proceeds", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.failUpdateBankConfig = true;
+		const store = makeStore();
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "x" });
+		assert.equal(calls.updateBankConfig.length, 1, "mission PATCH was attempted");
+		assert.equal(calls.retain.length, 1, "retain proceeds despite a mission PATCH failure");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes config: projectOverride write/read with precedence (requires a project ctx)", async () => {
+	__setClientFactory(() => makeClient().client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "all", bank: "global-bank" });
+		// No project ctx ⇒ a projectOverride write is rejected.
+		const noProj = (await routes.config(
+			{ host: { store } } as never,
+			{ method: "POST", body: { projectOverride: { recallScope: "project" } } } as never,
+		)) as { ok: boolean; error?: string };
+		assert.equal(noProj.ok, false);
+		assert.equal(noProj.error, "NO_PROJECT");
+
+		// With a project ctx the overlay persists, GET reflects effective + meta.
+		const set = (await routes.config(
+			{ host: { store }, projectId: "proj-1" } as never,
+			{ method: "POST", body: { projectOverride: { recallScope: "project", bank: "proj-bank" } } } as never,
+		)) as { ok: boolean; config: Record<string, unknown>; projectOverride: unknown; globalConfig: Record<string, unknown> };
+		assert.equal(set.ok, true);
+		assert.equal(set.config.recallScope, "project");
+		assert.equal(set.config.bank, "proj-bank");
+		assert.deepEqual(set.projectOverride, { recallScope: "project", bank: "proj-bank" });
+		assert.equal(set.globalConfig.recallScope, "all", "globalConfig meta shows the un-overlaid global");
+
+		// GET round-trips the overlay.
+		const get = (await routes.config({ host: { store }, projectId: "proj-1" } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal(get.config.bank, "proj-bank");
+		// A different project sees only the global.
+		const other = (await routes.config({ host: { store }, projectId: "proj-2" } as never, { method: "GET" } as never)) as { config: Record<string, unknown> };
+		assert.equal(other.config.bank, "global-bank");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes recall/reflect: optional tags param is an additive targeted filter", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://h", recallScope: "project" });
+		await routes.recall({ host: { store }, projectId: "p1" } as never, { body: { query: "q", tags: { goal: "g9" } } } as never);
+		const ro = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(ro.tags, { project: "p1", goal: "g9" });
+		assert.equal(ro.tagsMatch, "any");
+
+		await routes.reflect({ host: { store }, projectId: "p1" } as never, { body: { prompt: "x", scope: "project", tags: { topic: "auth" } } } as never);
+		assert.deepEqual(calls.reflect[0].opts?.tags, { project: "p1", topic: "auth" });
 	} finally {
 		__setClientFactory(null);
 	}

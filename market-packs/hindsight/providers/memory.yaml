@@ -38,10 +38,26 @@ config:
   dataDir: { type: string, default: ~/.hindsight }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
+  # Recall scope: project = this project + shared/global memories (tags_match `any`);
+  # all = every project in the shared bank. Default is now `project` (excludes other
+  # projects' noise while keeping global memories visible).
+  recallScope: { type: enum, values: [project, all], default: project }
+  # Tag-match for PROJECT scope: `any` = project + global (default; never hides
+  # global); `any_strict` = project-only, EXCLUDING global (rare hard-isolation opt-in).
+  tagsMatch: { type: enum, values: [any, any_strict], default: any }
   autoRecall: { type: boolean, default: true }
   autoRetain: { type: boolean, default: true }
+  # Auto-retain cadence: run an LLM extraction on one in every N turns (cost lever;
+  # 1 = every turn). beforeCompact always retains synchronously regardless.
+  retainEveryNTurns: { type: number, default: 5 }
   recallBudget: { type: number, default: 1200 }
+  # Hindsight recall `types` filter — bias recall toward consolidated knowledge.
+  recallTypes: { type: list, default: [observation, world, experience] }
+  # Bank-config missions applied idempotently to the shared bank: steer extraction/
+  # consolidation/reflection toward durable knowledge, away from transient noise.
+  retainMission: { type: string, optional: true }
+  observationsMission: { type: string, optional: true }
+  reflectMission: { type: string, optional: true }
   # Max characters of the recall QUERY sent to the data plane. The Hindsight recall
   # API caps queries at 500 tokens and returns HTTP 400 ("Query too long") for
   # longer queries; clamping keeps non-trivial turns working. Mirrors Hermes'

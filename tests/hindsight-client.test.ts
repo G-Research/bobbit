@@ -28,6 +28,7 @@ interface Stub {
 	setHealthy(ok: boolean): void;
 	seedMemories(bank: string, mem: Array<{ text: string; id?: string; score?: number; tags?: string[] }>): void;
 	retained(bank?: string): Array<{ content: string; tags: string[]; async: boolean }>;
+	bankConfig(bank: string): Record<string, string> | null;
 	close(): Promise<void>;
 }
 
@@ -94,6 +95,40 @@ describe("hindsight-client — round-trips against the stub", () => {
 		assert.equal("tags" in call.body, false);
 		assert.equal("tags_match" in call.body, false);
 		assert.equal("max_tokens" in call.body, false);
+		assert.equal("types" in call.body, false);
+	});
+
+	it("recall() forwards a `types` fact-type filter (observation bias) when provided", async () => {
+		const client = createClient({ baseUrl: stub.url });
+		stub.seedMemories("bobbit", [{ text: "obs", id: "o1" }]);
+		await client.recall("bobbit", "q", { types: ["observation", "world", "experience"] });
+		const call = stub.calls.at(-1)!;
+		assert.deepEqual(call.body.types, ["observation", "world", "experience"]);
+		// An empty types array is omitted (upstream default applies).
+		await client.recall("bobbit", "q", { types: [] });
+		assert.equal("types" in stub.calls.at(-1)!.body, false);
+	});
+
+	it("updateBankConfig() PATCHes …/config with a snake_case mission updates body", async () => {
+		const client = createClient({ baseUrl: stub.url });
+		await client.updateBankConfig("bobbit", {
+			retain_mission: "capture durable knowledge",
+			observations_mission: "consolidate stable facts",
+			reflect_mission: "ground answers in decisions",
+		});
+		const call = stub.calls.at(-1)!;
+		assert.equal(call.method, "PATCH");
+		assert.equal(call.path, "/v1/default/banks/bobbit/config");
+		assert.deepEqual(call.body.updates, {
+			retain_mission: "capture durable knowledge",
+			observations_mission: "consolidate stable facts",
+			reflect_mission: "ground answers in decisions",
+		});
+		assert.deepEqual(stub.bankConfig("bobbit"), {
+			retain_mission: "capture durable knowledge",
+			observations_mission: "consolidate stable facts",
+			reflect_mission: "ground answers in decisions",
+		});
 	});
 
 	it("retain() sends item-level tags and async = !sync", async () => {

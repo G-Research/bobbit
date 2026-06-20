@@ -26,19 +26,31 @@ export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
  *  it, which would drop global memories from a project recall.) */
 export const PROJECT_RECALL_TAGS_MATCH: TagsMatch = "any";
 
+/** Hindsight fact types (recall `types` filter). Biasing recall toward consolidated
+ *  `observation`s (plus `world`/`experience`) returns deduped knowledge over raw
+ *  per-turn chatter. */
+export type RecallType = "observation" | "world" | "experience";
+export const RECALL_TYPES: readonly RecallType[] = ["observation", "world", "experience"];
+
 /** Resolve the recall/reflect tag filter for a deployment scope on the single
  *  shared bank (the single source of truth shared by the provider auto-recall and
  *  the `recall`/`reflect` routes):
- *   - `project` scope WITH a real project id ⇒ `{ project:<id> }` matched with
- *     {@link PROJECT_RECALL_TAGS_MATCH} (project-tagged PLUS untagged/global).
- *   - any other case (scope `all`, or no project id in ctx) ⇒ NO tag filter, so
- *     recall/reflect runs over the whole bank rather than a fabricated tag. */
+ *   - `project` scope WITH a real project id ⇒ `{ project:<id>, ...extraTags }`
+ *     matched with `tagsMatch` (default `any` = project-tagged PLUS untagged/global;
+ *     `any_strict` = project-only, EXCLUDING global — a rare opt-in).
+ *   - `scope: all` (or no project id): NO fabricated project tag. An explicit
+ *     `extraTags` filter (a simple targeted cross-project/goal query) is still
+ *     applied additively, with `any` so global/untagged stays visible. */
 export function recallTagFilter(
 	scope: "project" | "all",
 	projectId: string | undefined,
+	tagsMatch: TagsMatch = PROJECT_RECALL_TAGS_MATCH,
+	extraTags?: Tags,
 ): { tags: Tags; tagsMatch: TagsMatch } | undefined {
 	const pid = typeof projectId === "string" && projectId.trim().length > 0 ? projectId.trim() : undefined;
-	if (scope === "project" && pid) return { tags: { project: pid }, tagsMatch: PROJECT_RECALL_TAGS_MATCH };
+	const extra = extraTags && Object.keys(extraTags).length > 0 ? { ...extraTags } : undefined;
+	if (scope === "project" && pid) return { tags: { project: pid, ...(extra ?? {}) }, tagsMatch };
+	if (extra) return { tags: extra, tagsMatch: "any" };
 	return undefined;
 }
 
@@ -48,17 +60,28 @@ export interface RecallMemory {
 	id?: string;
 }
 
+/** Bank-config mission updates (snake_case to mirror the Hindsight REST API
+ *  `PATCH …/banks/{bank}/config` body `{ updates: {...} }`). */
+export interface BankMissionUpdates {
+	retain_mission?: string;
+	observations_mission?: string;
+	reflect_mission?: string;
+}
+
 export interface HindsightClientLike {
 	health(): Promise<{ ok: boolean }>;
 	ensureBank(bank: string): Promise<void>;
 	recall(
 		bank: string,
 		query: string,
-		opts?: { maxTokens?: number; tags?: Tags; tagsMatch?: TagsMatch },
+		opts?: { maxTokens?: number; tags?: Tags; tagsMatch?: TagsMatch; types?: RecallType[] },
 	): Promise<{ memories: RecallMemory[] }>;
 	retain(bank: string, content: string, opts?: { tags?: Tags; sync?: boolean }): Promise<void>;
 	reflect(bank: string, prompt: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
+	/** Idempotent bank-config mission update (PATCH …/config). Optional so unit-test
+	 *  fakes need not implement it; {@link applyBankMission} no-ops when absent. */
+	updateBankConfig?(bank: string, updates: BankMissionUpdates): Promise<void>;
 }
 
 export interface ClientConfig {
@@ -139,9 +162,25 @@ export interface EffectiveConfig {
 	bank: string;
 	namespace: string;
 	recallScope: "project" | "all";
+	/** Tag-match mode for a PROJECT-scoped recall/reflect: `any` = project + global
+	 *  (the default; never hides shared/global memory); `any_strict` = project-only,
+	 *  EXCLUDING global (a rare opt-in for true isolation). */
+	tagsMatch: "any" | "any_strict";
 	autoRecall: boolean;
 	autoRetain: boolean;
+	/** Auto-retain cadence: run an LLM extraction on one in every N turns (cost
+	 *  lever — `1` = every turn, the old behavior). `beforeCompact` ignores this and
+	 *  always retains synchronously so the about-to-be-lost span is never dropped. */
+	retainEveryNTurns: number;
 	recallBudget: number;
+	/** Hindsight recall `types` filter — bias recall toward consolidated knowledge.
+	 *  Default favours `observation` plus `world`/`experience`. */
+	recallTypes: RecallType[];
+	/** Bank-config missions applied to the shared bank (steer extraction/observation/
+	 *  reflection toward durable knowledge, away from transient noise). */
+	retainMission: string;
+	observationsMission: string;
+	reflectMission: string;
 	/** Max characters of the recall QUERY sent to the data plane. The Hindsight
 	 *  recall API caps queries at 500 tokens and returns HTTP 400 ("Query too long")
 	 *  for longer queries; clamping the query keeps non-trivial turns working.
@@ -150,16 +189,32 @@ export interface EffectiveConfig {
 	timeoutMs: number;
 }
 
+/** Durable-knowledge bank missions — steer Hindsight extraction/consolidation/
+ *  reflection toward preferences, decisions, conventions, architecture, and lasting
+ *  project state, and away from transient noise. Configurable via config overrides. */
+export const DEFAULT_RETAIN_MISSION =
+	"Capture durable, reusable knowledge: user and team preferences, decisions and their rationale, conventions, standards, architecture, and lasting project state. Ignore transient noise — stack traces, PIDs, timestamps, one-off command output, failed attempts, greetings, and routine per-turn chatter — unless it records a decision or changes project state.";
+export const DEFAULT_OBSERVATIONS_MISSION =
+	"Observations are stable, durable facts about the people and projects in this bank: preferences, conventions, recurring decisions, architecture, and project state. Consolidate repeated facts into general, reusable statements. Ignore one-off events, ephemeral state, and transient per-turn details.";
+export const DEFAULT_REFLECT_MISSION =
+	"You are a long-term engineering memory for this team. Ground answers in documented decisions, preferences, conventions, and project state, drawing on consolidated observations rather than raw per-turn chatter. Be direct and precise; do not speculate or resurface transient noise.";
+
 /** Flat defaults — the single source of truth mirrored by providers/memory.yaml. */
 export const CONFIG_DEFAULTS: EffectiveConfig = {
 	mode: "external",
 	dataDir: "~/.hindsight",
 	bank: "bobbit",
 	namespace: "default",
-	recallScope: "all",
+	recallScope: "project",
+	tagsMatch: "any",
 	autoRecall: true,
 	autoRetain: true,
+	retainEveryNTurns: 5,
 	recallBudget: 1200,
+	recallTypes: [...RECALL_TYPES],
+	retainMission: DEFAULT_RETAIN_MISSION,
+	observationsMission: DEFAULT_OBSERVATIONS_MISSION,
+	reflectMission: DEFAULT_REFLECT_MISSION,
 	recallMaxInputChars: 3000,
 	timeoutMs: 1500,
 };
@@ -188,6 +243,15 @@ function asBool(v: unknown, d: boolean): boolean {
 function asNum(v: unknown, d: number): number {
 	return typeof v === "number" && Number.isFinite(v) ? v : d;
 }
+function isRecallType(v: unknown): v is RecallType {
+	return v === "observation" || v === "world" || v === "experience";
+}
+/** Parse a recall `types` array; falls back to the default when absent/invalid. */
+function asRecallTypes(v: unknown, d: RecallType[]): RecallType[] {
+	if (!Array.isArray(v)) return [...d];
+	const valid = v.filter(isRecallType);
+	return valid.length > 0 ? [...new Set(valid)] : [...d];
+}
 
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
@@ -195,7 +259,11 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	const apiKey = asString(flat(raw, "apiKey"));
 	const externalDatabaseUrl = asString(flat(raw, "externalDatabaseUrl"));
 	const llmApiKey = asString(flat(raw, "llmApiKey"));
-	const recallScope = flat(raw, "recallScope") === "project" ? "project" : "all";
+	// Default scope is now `project` (project + global via tags_match `any`); only an
+	// explicit `all` opts into whole-bank recall.
+	const recallScope = flat(raw, "recallScope") === "all" ? "all" : "project";
+	const tagsMatch = flat(raw, "tagsMatch") === "any_strict" ? "any_strict" : "any";
+	const retainEveryNTurns = Math.max(1, Math.floor(asNum(flat(raw, "retainEveryNTurns"), CONFIG_DEFAULTS.retainEveryNTurns)));
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
@@ -207,9 +275,15 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 		bank: asString(flat(raw, "bank")) ?? CONFIG_DEFAULTS.bank,
 		namespace: asString(flat(raw, "namespace")) ?? CONFIG_DEFAULTS.namespace,
 		recallScope,
+		tagsMatch,
 		autoRecall: asBool(flat(raw, "autoRecall"), CONFIG_DEFAULTS.autoRecall),
 		autoRetain: asBool(flat(raw, "autoRetain"), CONFIG_DEFAULTS.autoRetain),
+		retainEveryNTurns,
 		recallBudget: asNum(flat(raw, "recallBudget"), CONFIG_DEFAULTS.recallBudget),
+		recallTypes: asRecallTypes(flat(raw, "recallTypes"), CONFIG_DEFAULTS.recallTypes),
+		retainMission: asString(flat(raw, "retainMission")) ?? CONFIG_DEFAULTS.retainMission,
+		observationsMission: asString(flat(raw, "observationsMission")) ?? CONFIG_DEFAULTS.observationsMission,
+		reflectMission: asString(flat(raw, "reflectMission")) ?? CONFIG_DEFAULTS.reflectMission,
 		recallMaxInputChars: asNum(flat(raw, "recallMaxInputChars"), CONFIG_DEFAULTS.recallMaxInputChars),
 		timeoutMs: asNum(flat(raw, "timeoutMs"), CONFIG_DEFAULTS.timeoutMs),
 	};
@@ -289,7 +363,18 @@ export const LAST_ERROR_KEY = "last-error";
 // The host overlays this key over provider yaml defaults and evaluates
 // activation.requiresConfig against it before bridge injection.
 export const CONFIG_KEY = "provider-config:memory";
+/** Per-project config overlay key prefix (pack-managed, same pack store). The
+ *  overlay holds memory-quality keys only and layers OVER the global CONFIG_KEY. */
+export const PROJECT_CONFIG_KEY_PREFIX = "provider-config:memory:project:";
+/** Last-applied bank-mission signature cache prefix (one per namespace:bank). */
+export const BANK_CONFIG_APPLIED_PREFIX = "bank-config-applied:";
+/** Durable per-session auto-retain turn counter prefix (drives the cadence). */
+export const RETAIN_COUNT_PREFIX = "retain-turn-count:";
 export const QUEUE_CAP = 100;
+
+export function projectConfigKey(projectId: string): string {
+	return `${PROJECT_CONFIG_KEY_PREFIX}${projectId}`;
+}
 
 export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
 	try {
@@ -400,11 +485,32 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		if (body.recallScope === "project" || body.recallScope === "all") value.recallScope = body.recallScope;
 		else errors.push("recallScope must be 'project' or 'all'");
 	}
+	if ("tagsMatch" in body) {
+		if (body.tagsMatch === "any" || body.tagsMatch === "any_strict") value.tagsMatch = body.tagsMatch;
+		else errors.push("tagsMatch must be 'any' or 'any_strict'");
+	}
+	if ("recallTypes" in body) {
+		const v = body.recallTypes;
+		if (Array.isArray(v) && v.length > 0 && v.every(isRecallType)) value.recallTypes = [...new Set(v)];
+		else errors.push("recallTypes must be a non-empty array of 'observation'|'world'|'experience'");
+	}
+	// Configurable bank-mission strings ("" keeps the default — see resolveConfig).
+	for (const key of ["retainMission", "observationsMission", "reflectMission"] as const) {
+		if (key in body) {
+			if (typeof body[key] === "string") value[key] = body[key];
+			else errors.push(`${key} must be a string`);
+		}
+	}
 	for (const key of ["autoRecall", "autoRetain"] as const) {
 		if (key in body) {
 			if (typeof body[key] === "boolean") value[key] = body[key];
 			else errors.push(`${key} must be a boolean`);
 		}
+	}
+	if ("retainEveryNTurns" in body) {
+		const v = body.retainEveryNTurns;
+		if (typeof v === "number" && Number.isFinite(v) && v >= 1) value.retainEveryNTurns = Math.floor(v);
+		else errors.push("retainEveryNTurns must be a number >= 1");
 	}
 	for (const key of ["recallBudget", "recallMaxInputChars", "timeoutMs"] as const) {
 		if (key in body) {
@@ -414,6 +520,42 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		}
 	}
 
+	return errors.length > 0 ? { ok: false, errors } : { ok: true, value };
+}
+
+/** Validate a PER-PROJECT config overlay. Only memory-quality keys may be set per
+ *  project (`recallScope`, `bank`, `tagsMatch`, `recallBudget`, `recallTypes`); a
+ *  project overlay can NEVER change `mode`, `externalUrl`, secrets, or runtime
+ *  deployment (those stay server-global). A key set to `null`/`""` is cleared
+ *  (omitted from the result), so a full overlay write replaces the stored one. */
+export function validateProjectOverride(body: unknown): ConfigValidation {
+	if (!isObj(body)) return { ok: false, errors: ["projectOverride must be an object"] };
+	const errors: string[] = [];
+	const value: Record<string, unknown> = {};
+	const cleared = (v: unknown): boolean => v === null || v === "";
+
+	if ("recallScope" in body && !cleared(body.recallScope)) {
+		if (body.recallScope === "project" || body.recallScope === "all") value.recallScope = body.recallScope;
+		else errors.push("recallScope must be 'project' or 'all'");
+	}
+	if ("bank" in body && !cleared(body.bank)) {
+		if (typeof body.bank === "string" && body.bank.trim().length > 0) value.bank = body.bank.trim();
+		else errors.push("bank must be a non-empty string");
+	}
+	if ("tagsMatch" in body && !cleared(body.tagsMatch)) {
+		if (body.tagsMatch === "any" || body.tagsMatch === "any_strict") value.tagsMatch = body.tagsMatch;
+		else errors.push("tagsMatch must be 'any' or 'any_strict'");
+	}
+	if ("recallBudget" in body && !cleared(body.recallBudget)) {
+		const v = body.recallBudget;
+		if (typeof v === "number" && Number.isFinite(v) && v > 0) value.recallBudget = v;
+		else errors.push("recallBudget must be a positive number");
+	}
+	if ("recallTypes" in body && body.recallTypes !== null) {
+		const v = body.recallTypes;
+		if (Array.isArray(v) && v.length > 0 && v.every(isRecallType)) value.recallTypes = [...new Set(v)];
+		else errors.push("recallTypes must be a non-empty array of 'observation'|'world'|'experience'");
+	}
 	return errors.length > 0 ? { ok: false, errors } : { ok: true, value };
 }
 
@@ -429,13 +571,121 @@ export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
 	};
 }
 
-/** Effective config for the routes (store overrides over flat defaults). */
-export async function loadEffectiveConfig(store: StoreLike): Promise<EffectiveConfig> {
-	let stored: unknown;
+async function readStored(store: StoreLike, key: string): Promise<Record<string, unknown> | undefined> {
 	try {
-		stored = await store.get(CONFIG_KEY);
+		const v = await store.get(key);
+		return isObj(v) ? v : undefined;
 	} catch {
-		stored = undefined;
+		return undefined;
 	}
-	return resolveConfig({ ...CONFIG_DEFAULTS, ...(isObj(stored) ? stored : {}) });
+}
+
+const pidOf = (projectId?: string): string | undefined =>
+	typeof projectId === "string" && projectId.trim().length > 0 ? projectId.trim() : undefined;
+
+/** Read + validate the per-project config overlay (safe memory-quality keys only).
+ *  Returns undefined when there is no project id or no usable stored overlay. */
+export async function loadProjectOverride(store: StoreLike, projectId?: string): Promise<Record<string, unknown> | undefined> {
+	const pid = pidOf(projectId);
+	if (!pid) return undefined;
+	const raw = await readStored(store, projectConfigKey(pid));
+	if (!raw) return undefined;
+	const v = validateProjectOverride(raw);
+	return v.ok && v.value && Object.keys(v.value).length > 0 ? v.value : undefined;
+}
+
+/** Effective config for the routes. Resolution precedence (low → high):
+ *  CONFIG_DEFAULTS → global store config (CONFIG_KEY) → per-project overlay. */
+export async function loadEffectiveConfig(store: StoreLike, projectId?: string): Promise<EffectiveConfig> {
+	const global = (await readStored(store, CONFIG_KEY)) ?? {};
+	const overlay = (await loadProjectOverride(store, projectId)) ?? {};
+	return resolveConfig({ ...CONFIG_DEFAULTS, ...global, ...overlay });
+}
+
+/** Overlay the per-project config onto an ALREADY-resolved base (the provider's
+ *  `ctx.config`, which the host has merged from yaml defaults + global store). The
+ *  overlay only carries safe memory-quality keys, so deployment/activation fields
+ *  (mode/externalUrl) are never changed by it. */
+export async function overlayProjectConfig(
+	base: EffectiveConfig,
+	store: StoreLike | null,
+	projectId?: string,
+): Promise<EffectiveConfig> {
+	if (!store) return base;
+	const overlay = await loadProjectOverride(store, projectId);
+	if (!overlay) return base;
+	return resolveConfig({ ...base, ...overlay });
+}
+
+// ── Bank mission (durable-knowledge steering) ─────────────────────────────────
+
+/** Non-empty mission updates in the snake_case REST shape (empty ⇒ field omitted). */
+export function bankMissionUpdates(cfg: EffectiveConfig): BankMissionUpdates {
+	const u: BankMissionUpdates = {};
+	if (cfg.retainMission && cfg.retainMission.trim().length > 0) u.retain_mission = cfg.retainMission;
+	if (cfg.observationsMission && cfg.observationsMission.trim().length > 0) u.observations_mission = cfg.observationsMission;
+	if (cfg.reflectMission && cfg.reflectMission.trim().length > 0) u.reflect_mission = cfg.reflectMission;
+	return u;
+}
+
+/** Stable signature of the mission config for the applied-cache (skip redundant PATCH). */
+export function missionSignature(cfg: EffectiveConfig): string {
+	return JSON.stringify({ ns: cfg.namespace, bank: cfg.bank, ...bankMissionUpdates(cfg) });
+}
+
+/** Idempotently apply the bank-config missions (PATCH …/config) after ensureBank.
+ *  Caches the last-applied signature per namespace:bank in the pack store and
+ *  re-PATCHes ONLY when it changes (no extra call per turn). Best-effort: a PATCH
+ *  failure records a diagnostic but NEVER blocks retain — the caller proceeds. */
+export async function applyBankMission(store: StoreLike | null, client: HindsightClientLike, cfg: EffectiveConfig): Promise<void> {
+	const updates = bankMissionUpdates(cfg);
+	if (Object.keys(updates).length === 0 || typeof client.updateBankConfig !== "function") return;
+	const key = `${BANK_CONFIG_APPLIED_PREFIX}${cfg.namespace}:${cfg.bank}`;
+	const sig = missionSignature(cfg);
+	if (store) {
+		try {
+			if ((await store.get<string>(key)) === sig) return;
+		} catch {
+			/* fall through and (re)apply */
+		}
+	}
+	try {
+		await client.updateBankConfig(cfg.bank, updates);
+		if (store) {
+			try {
+				await store.put(key, sig);
+			} catch {
+				/* best-effort cache */
+			}
+		}
+	} catch (e) {
+		if (store) await recordError(store, e); // diagnostic only — never blocks retain
+	}
+}
+
+// ── Auto-retain cadence ──────────────────────────────────────────────────────
+
+/** Increment + return the durable per-session auto-retain turn counter. */
+export async function bumpRetainCounter(store: StoreLike, sessionId: string): Promise<number> {
+	const key = `${RETAIN_COUNT_PREFIX}${sessionId}`;
+	let n = 0;
+	try {
+		const v = await store.get<number>(key);
+		if (typeof v === "number" && Number.isFinite(v)) n = v;
+	} catch {
+		/* treat as 0 */
+	}
+	n += 1;
+	try {
+		await store.put(key, n);
+	} catch {
+		/* best-effort */
+	}
+	return n;
+}
+
+/** Whether this auto-retain turn runs, given the post-increment count + cadence. */
+export function shouldRetainOnCount(count: number, everyN: number): boolean {
+	const n = Number.isFinite(everyN) && everyN >= 1 ? Math.floor(everyN) : 1;
+	return count % n === 0;
 }

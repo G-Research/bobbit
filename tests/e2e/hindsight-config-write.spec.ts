@@ -19,12 +19,13 @@
  * and skips cleanly otherwise.
  */
 import { test as base, expect } from "./in-process-harness.js";
-import { apiFetch } from "./e2e-setup.js";
+import { apiFetch, defaultProjectId } from "./e2e-setup.js";
 
 const test = base;
 
 const PACK = "hindsight";
 const CONFIG_KEY = "provider-config:memory";
+const PROJECT_CONFIG_PREFIX = "provider-config:memory:project:";
 
 interface ContribMeta { packId: string; routeNames?: string[] }
 
@@ -42,7 +43,15 @@ async function hindsightConfigRouteReady(): Promise<boolean> {
  *  specs sharing the worker-scoped in-process gateway. */
 async function resetConfig(): Promise<void> {
 	const { getPackStore } = await import("../../dist/server/extension-host/pack-store.js");
-	await getPackStore().put(PACK, CONFIG_KEY, {});
+	const store = getPackStore();
+	await store.put(PACK, CONFIG_KEY, {});
+	// Clear any per-project overlay for the default project so writes here never leak.
+	try {
+		const pid = await defaultProjectId();
+		if (pid) await store.put(PACK, `${PROJECT_CONFIG_PREFIX}${pid}`, {});
+	} catch {
+		/* best-effort */
+	}
 }
 
 test.describe.configure({ mode: "serial" });
@@ -122,6 +131,64 @@ test.describe("Hindsight built-in pack-route config write seam", () => {
 		// And the read seam for that same route name still works as a GET.
 		const getRes = await apiFetch(`/api/ext/pack-route/${PACK}/status`);
 		expect(getRes.status).toBe(200);
+	});
+
+	test("new memory-quality config fields round-trip (defaults + tagsMatch/retainEveryNTurns)", async () => {
+		test.skip(!ready, "Hindsight built-in config route not served in this environment");
+
+		// GET reflects the new cost-conscious defaults before any write.
+		const def = await (await apiFetch(`/api/ext/pack-route/${PACK}/config`)).json();
+		expect(def.config.recallScope).toBe("project");
+		expect(def.config.tagsMatch).toBe("any");
+		expect(def.config.retainEveryNTurns).toBe(5);
+
+		const writeRes = await apiFetch(`/api/ext/pack-route/${PACK}/config`, {
+			method: "POST",
+			body: JSON.stringify({
+				mode: "external",
+				externalUrl: "http://localhost:9177",
+				tagsMatch: "any_strict",
+				retainEveryNTurns: 3,
+				recallScope: "all",
+			}),
+		});
+		expect(writeRes.status).toBe(200);
+		const w = await writeRes.json();
+		expect(w.config.tagsMatch).toBe("any_strict");
+		expect(w.config.retainEveryNTurns).toBe(3);
+		expect(w.config.recallScope).toBe("all");
+	});
+
+	test("a per-project override resolves over the global config with correct precedence (no Docker)", async () => {
+		test.skip(!ready, "Hindsight built-in config route not served in this environment");
+
+		const projectId = (await defaultProjectId())!;
+		// Global: scope all, bank global-bank.
+		await apiFetch(`/api/ext/pack-route/${PACK}/config`, {
+			method: "POST",
+			body: JSON.stringify({ mode: "external", externalUrl: "http://localhost:9177", recallScope: "all", bank: "global-bank" }),
+		});
+		// Per-project overlay: scope project, bank proj-bank (sessionless seam + ?projectId).
+		const setRes = await apiFetch(`/api/ext/pack-route/${PACK}/config?projectId=${encodeURIComponent(projectId)}`, {
+			method: "POST",
+			body: JSON.stringify({ projectOverride: { recallScope: "project", bank: "proj-bank" } }),
+		});
+		expect(setRes.status).toBe(200);
+		const setBody = await setRes.json();
+		expect(setBody.ok).toBe(true);
+		expect(setBody.config.recallScope).toBe("project");
+		expect(setBody.config.bank).toBe("proj-bank");
+		expect(setBody.projectOverride).toEqual({ recallScope: "project", bank: "proj-bank" });
+		expect(setBody.globalConfig.recallScope).toBe("all");
+		expect(setBody.globalConfig.bank).toBe("global-bank");
+
+		// GET with the project reflects the overlay; GET without it shows the global.
+		const withProj = await (await apiFetch(`/api/ext/pack-route/${PACK}/config?projectId=${encodeURIComponent(projectId)}`)).json();
+		expect(withProj.config.bank).toBe("proj-bank");
+		expect(withProj.config.recallScope).toBe("project");
+		const noProj = await (await apiFetch(`/api/ext/pack-route/${PACK}/config`)).json();
+		expect(noProj.config.bank).toBe("global-bank");
+		expect(noProj.config.recallScope).toBe("all");
 	});
 
 	test("an invalid override returns the route's CONFIG_INVALID structured error", async () => {
