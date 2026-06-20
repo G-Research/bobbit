@@ -97,12 +97,12 @@ contributions + the durable Host API:
 | Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels:` → `panel.js` (lazy ESM, host lit toolkit) — changeset header, phase **nav rail**, diff blocks, suggested comments |
 | Changeset/diff bundle endpoint | `src/server/pr-walkthrough/routes.ts` (`handlePrWalkthroughApiRoute`) | `routes:` → `routes.mjs` (`bundle` LIVE git recompute + `publish` persist), reached via `host.callRoute`, using ambient `child_process`/`fs` |
 | Persisted job/changeset state | `src/server/pr-walkthrough/walkthrough-store.ts` | `stores:` → `host.store.*` (pack-namespaced) |
-| Launcher + SPA deep-link | composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + **git-widget-button** + command-palette launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
+| Launcher + SPA deep-link | legacy composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + session-menu launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
 | Submitted YAML handoff | bespoke transcript access / viewer feed | the pack-spawned reviewer calls `submit_pr_walkthrough_yaml`; the server resolves the caller session, writes the pack-store submitted marker, and the panel observes it through `status`/`recover` |
 
 The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
 chain end-to-end (the pack resolves active-by-default via the built-in band →
-**git-widget-button** launcher opens the panel at `#/ext/pr-walkthrough` →
+session-menu launcher opens the panel at `#/ext/pr-walkthrough` →
 `bundle` recomputes the **REAL changeset LIVE via `git`** in the confined worker
 over a freshly-`git init`'d repo → real diff block renders → publish LLM-enhanced
 cards via the pack's own `publish` route → reload re-reads the SAME persisted cards

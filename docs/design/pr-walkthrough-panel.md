@@ -137,12 +137,13 @@ type CardReviewState = {
 
 V1 should review any two SHAs, defaulting to PR base..head when launched from a PR. Avoid coupling core logic to GitHub-specific concepts. GitHub/GitLab/etc. should be adapters for fetching PR metadata and exporting final review comments.
 
-Launch points and surfaces:
+Supported launch points and surfaces:
 
-1. Button in the Git Status Widget. It should pass branch/PR metadata plus insertion, deletion, and file-count stats into the changeset model.
-2. Popover/action on GitHub PR links in chat history, preserving PR URL/number/title metadata for header and toolbar links.
-3. `/walkthrough-pr <url|number>` skill.
-4. Side-panel toolbar actions for fullscreen/wide review and opening the same walkthrough in a standalone `/walkthrough?...` browser tab.
+1. **Session menu launcher.** The PR Walkthrough pack contributes a `kind: "session-menu"` entrypoint rendered in both existing session actions overflow menus: the sidebar session-row hamburger and the chat-header hamburger. The launcher uses the PR Walkthrough spawn target (`target: { action: "spawn", route: "run", panelId: "pr-walkthrough.panel" }`): `runLauncherEntrypoint` calls the pack `run` route in the launching session, mints a fresh read-only reviewer child, opens the panel in that child, and switches to it. `NO_PR` and route failures surface as visible menu feedback; failures must not spawn a child, switch views, or leave the menu wedged open.
+2. **Composer slash launcher.** `/pr-walkthrough` remains the chat/composer entrypoint and uses the same spawn-on-click semantics as the session-menu launcher.
+3. **Deep link route.** The `kind: "route"` entrypoint registers the `pr-walkthrough` route for panel restoration and deep linking inside the reviewer child session. It is not a standalone launcher and does not replace the spawn entrypoints.
+
+Historical launch points such as the Git Status Widget button, command-palette launcher, `/walkthrough-pr <url|number>` skill, chat-link popover action, and standalone `/walkthrough?...` route are obsolete and must not be documented or implemented as supported surfaces.
 
 ## LLM responsibilities
 

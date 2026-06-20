@@ -35,7 +35,7 @@
  *      reload.
  *   5. NON-REMOVABLE — the built-in source has no Remove control + DELETE → 403; the
  *      built-in pack has no Uninstall control + DELETE /installed → 403.
- *   T-2. NO_PR launch → inline git-widget error, no reviewer child, no view switch.
+ *   T-2. NO_PR launch → visible session-menu error, no reviewer child, no view switch.
  *   T-3. Bound reviewer child pane auto-shows pending + spinner, no Run/Load buttons.
  *   T-4. Bound reviewer child pane self-recovers READY cards from binding/<child> on
  *      mount (no click), and a reload re-renders the SAME cards via child-self recover.
@@ -55,18 +55,8 @@ test.describe.configure({ mode: "serial" });
 
 const PACK = "pr-walkthrough";
 const PANEL_ID = "pr-walkthrough.panel";
-// The git-widget SPAWN launcher. Its compound key is `pr-walkthrough\u0000pr-
-// walkthrough.git-widget` (packId NUL entrypointId); the test locates the rendered
-// button by its visible label "PR Walkthrough" rather than the NUL-bearing attr.
-const GIT_WIDGET_LAUNCHER = "pr-walkthrough.git-widget";
-// Entrypoint listNames (the basenames of entrypoints/*.yaml) → the activation
-// toggle testids in the Market built-in group.
-const ENTRYPOINT_LIST_NAMES = [
-	"pr-walkthrough-git-widget",
-	"pr-walkthrough-open",
-	"pr-walkthrough-palette",
-	"pr-walkthrough-route",
-];
+// Session-menu launchers use a NUL-bearing compound key at runtime; tests locate
+// the rendered row by its visible label "PR Walkthrough" rather than by attr.
 const PRW_TOOL_NAMES = [
 	"readonly_bash",
 	"read_pr_walkthrough_bundle",
@@ -354,7 +344,8 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(packMeta, "the built-in pr-walkthrough pack must be resolved with NO install").toBeTruthy();
 		expect(packMeta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
 		expect(packMeta?.routeNames).toEqual(expect.arrayContaining(["bundle", "publish"]));
-		expect(packMeta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER)).toBe(true);
+		expect(packMeta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough")).toBe(true);
+		expect((packMeta?.entrypoints ?? []).map((e) => e.listName)).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
 		const builtinRow = (await listInstalled()).find((p) => p.packName === PACK && p.builtin);
 		expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
 		expect(builtinRow?.scope).toBe("server");
@@ -413,7 +404,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		const metaAfterToolDisable = (await listContributions()).find((p) => p.packId === PACK);
 		expect(metaAfterToolDisable?.panels?.some((p) => p.id === PANEL_ID), "tool disable must not remove the pack panel").toBe(true);
 		expect(metaAfterToolDisable?.routeNames, "tool disable must not remove pack routes").toEqual(expect.arrayContaining(["bundle", "publish"]));
-		expect(metaAfterToolDisable?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER), "tool disable must not remove entrypoints").toBe(true);
+		expect(metaAfterToolDisable?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough"), "tool disable must not remove entrypoints").toBe(true);
 
 		put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
 		await toolToggle.click();
@@ -421,12 +412,25 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expect(toolToggle, `${TOGGLED_TOOL} toggle turns back on`).toBeChecked();
 		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 
-		const gitWidgetToggle = prwCard.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
-		await expect(gitWidgetToggle, "the built-in pack's entrypoint toggles must render").toBeVisible({ timeout: 15_000 });
-		for (const kind of ["Git widget", "Slash", "Command palette", "Route"]) {
+		const entrypointListNames = (metaAfterToolDisable?.entrypoints ?? [])
+			.map((e) => e.listName)
+			.filter((name): name is string => typeof name === "string" && name.length > 0);
+		const sessionMenuListNames = (metaAfterToolDisable?.entrypoints ?? [])
+			.filter((e) => e.kind === "session-menu")
+			.map((e) => e.listName)
+			.filter((name): name is string => typeof name === "string" && name.length > 0);
+		expect(sessionMenuListNames, "PR Walkthrough must expose at least one session-menu launcher").not.toHaveLength(0);
+		const sessionMenuListName = sessionMenuListNames[0] ?? "";
+		expect(entrypointListNames).toEqual(expect.arrayContaining(["pr-walkthrough-open", "pr-walkthrough-route"]));
+		expect(entrypointListNames).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
+		const sessionMenuToggle = prwCard.locator(`[data-testid="market-toggle-entrypoint-${sessionMenuListName}"]`);
+		await expect(sessionMenuToggle, "the built-in pack's entrypoint toggles must render").toBeVisible({ timeout: 15_000 });
+		for (const kind of ["Session menu", "Slash", "Route"]) {
 			await expect(prwCard.getByText(kind, { exact: true }), `entrypoint kind ${kind} must be visible`).toBeVisible();
 		}
-		for (const listName of ENTRYPOINT_LIST_NAMES) {
+		await expect(prwCard.getByText("Git widget", { exact: true })).toHaveCount(0);
+		await expect(prwCard.getByText("Command palette", { exact: true })).toHaveCount(0);
+		for (const listName of entrypointListNames) {
 			const toggle = prwCard.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			if (await toggle.isChecked()) {
 				put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
@@ -467,9 +471,9 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expect(group2).toBeVisible({ timeout: 20_000 });
 		const prwCard2 = group2.locator('[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="pr-walkthrough"]').first();
 		await expect(prwCard2).toBeVisible({ timeout: 15_000 });
-		const gitToggleAfterReload = prwCard2.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
-		await expect(gitToggleAfterReload).toBeVisible({ timeout: 15_000 });
-		await expect(gitToggleAfterReload, "disable must survive reload (toggle stays off)").not.toBeChecked();
+		const sessionMenuToggleAfterReload = prwCard2.locator(`[data-testid="market-toggle-entrypoint-${sessionMenuListName}"]`);
+		await expect(sessionMenuToggleAfterReload).toBeVisible({ timeout: 15_000 });
+		await expect(sessionMenuToggleAfterReload, "disable must survive reload (toggle stays off)").not.toBeChecked();
 		for (const toolName of PRW_TOOL_NAMES) {
 			await expect(prwCard2.locator(`[data-testid="market-toggle-tool-${toolName}"]`), `tool ${toolName} remains enabled after entrypoint reload`).toBeChecked();
 		}
@@ -479,7 +483,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		}, { timeout: 10_000 }).toBe(0);
 
 		// ── Re-enable → the launcher + deep-link are restored. ──
-		for (const listName of ENTRYPOINT_LIST_NAMES) {
+		for (const listName of entrypointListNames) {
 			const toggle = prwCard2.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			await expect(toggle).toBeVisible({ timeout: 10_000 });
 			if (!(await toggle.isChecked())) {
@@ -491,7 +495,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 		await expect.poll(async () => {
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
-			return meta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER) ? "ok" : "no";
+			return meta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough") ? "ok" : "no";
 		}, { timeout: 10_000 }).toBe("ok");
 		// The deep-link resolves again from a CLEAN context (re-open the session, then
 		// navigate the bare deep-link → the panel mounts via the re-registered route).
@@ -578,13 +582,11 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect(page.getByTestId("header-toast")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
 	});
 
-	// ── T-2: a NO_PR launch surfaces an INLINE error in the GitStatusWidget dropdown,
-	//    spawns NO reviewer child, and does NOT switch the view. ──
-	test("T-2 — NO_PR launch shows an inline git-widget error, spawns no reviewer, no view switch", async ({ page, gateway }) => {
+	// ── T-2: a NO_PR launch from the shared session actions menu surfaces a visible
+	//    error, spawns NO reviewer child, and does NOT switch the view. ──
+	test("T-2 — NO_PR session-menu launch shows visible feedback, spawns no reviewer, no view switch", async ({ page, gateway }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
-		// The session is selected on creation; resolve its id BEFORE the first message
-		// so the worktree can be made a git repo before the idle git-status refresh.
 		let sid: string | null = null;
 		await expect.poll(async () => {
 			sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
@@ -592,34 +594,17 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		}, { timeout: 15_000 }).toBeTruthy();
 		expect(sid).toBeTruthy();
 
-		// The git-widget pill renders only when the session worktree is a git repo;
-		// make it one so the launcher is reachable. (A bare-body `run` resolves NO_PR
-		// regardless — the repo is here only to surface the pill.)
-		const ps = gateway.sessionManager?.getPersistedSession(sid!) as { cwd?: string; worktreePath?: string } | undefined;
-		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
-		expect(sessionWorktree, "the session must have a resolvable working dir").toBeTruthy();
-		setupSessionGitRepo(sessionWorktree!);
-
-		// A message → working→idle transition re-runs the (unconditional) git-status
-		// refresh, which now sees the repo and renders the pill.
-		await sendMessage(page, "hello");
-		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
-
 		const runPosts: string[] = [];
 		page.on("request", (r) => {
 			if (r.method() === "POST" && /\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
 		});
 
-		// Open the git-widget dropdown (portaled under document.body).
-		const pill = page.locator(".git-status-pill").first();
-		await expect(pill, "the git-status pill must render once the worktree is a repo").toBeVisible({ timeout: 20_000 });
-		await pill.click();
-
-		// The launcher button's data-entrypoint-id is a NUL-bearing compound key, so
-		// locate it by its visible label instead of a CSS attribute selector.
-		const launcher = page.locator('[data-testid="git-widget-launcher"]', { hasText: "PR Walkthrough" }).first();
-		await expect(launcher, "the PR Walkthrough launcher must render in the dropdown").toBeVisible({ timeout: 10_000 });
+		const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
+		await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
+		await trigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR Walkthrough" }).first();
+		await expect(launcher, "the PR Walkthrough launcher must render in the session menu").toBeVisible({ timeout: 10_000 });
 
 		const runResp = page.waitForResponse(
 			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
@@ -629,23 +614,16 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		const resp = await runResp;
 		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
 
-		// The structured NO_PR error renders inline beneath the launcher button.
-		const err = page.locator('[data-testid="git-widget-launcher-error"]').first();
-		await expect(err).toBeVisible({ timeout: 10_000 });
-		await expect(err).toContainText(/No open GitHub PR/i);
-		// The dropdown stays OPEN (the launcher button is still visible).
-		await expect(launcher).toBeVisible();
-		// `run` fired exactly once.
+		await expect(page.locator("sidebar-actions-popover"), "session-menu launcher failures must not leave the menu wedged open").toHaveCount(0, { timeout: 5_000 });
+		await expect(page.locator('[data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
 		expect(runPosts, "the launcher must call `run` exactly once").toHaveLength(1);
 
-		// No reviewer child was minted (NO_PR returns before any spawn).
 		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
 			const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
 			return cps?.parentSessionId === sid && cps?.childKind === "host-agents";
 		});
 		expect(reviewerSpawned, "a NO_PR launch must not mint a reviewer child").toBe(false);
 
-		// The view did NOT switch — the same session is still selected.
 		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
 		expect(sidAfter, "a NO_PR launch must not switch the view").toBe(sid);
 	});
