@@ -118,7 +118,11 @@ export const routes = {
 		const validation = validateDef(input);
 		if (!validation.ok) return { error: validation.error };
 		const experimentId = makeExperimentId(input);
-		const parentGoalId = strOf(input.parentGoalId) || strOf(ctx && ctx.goalId) || strOf(ctx && ctx.sessionId);
+		// parentGoalId is only a caller ASSERTION the spawnGoal seam verifies against the
+		// server-derived parent (a mismatch → PARENT_MISMATCH). A session id is never a
+		// goal id, so NEVER fall back to ctx.sessionId: take an explicit real goal id
+		// (input.parentGoalId or ctx.goalId) or leave it undefined so the seam derives it.
+		const parentGoalId = strOf(input.parentGoalId) || strOf(ctx && ctx.goalId);
 		const def = {
 			experimentId,
 			title: strOf(input.title) || experimentId,
@@ -436,7 +440,13 @@ export const routes = {
 	listMetrics: async () => listMetricExtractors(),
 	listWidgets: async () => listWidgetDescriptors(),
 
-	// ── cancel — dismiss in-flight arm child goals; flip runs cancelled; stop AR ──
+	// ── cancel — flip in-flight runs cancelled + stop the AR loop (honest v1) ──
+	// v1 has NO goal-stop host verb (host.agents.dismiss takes a host-agent child
+	// SESSION id, not a goal id, so calling it with run.childGoalId only no-ops while
+	// falsely reporting the run cancelled). So cancel does what it CAN do honestly:
+	// it marks runs cancelled and sets state.stopped so the autoresearch loop stops
+	// spawning further candidates (iterate early-returns on state.stopped). It does
+	// NOT forcibly terminate arm goals already spawned — there is no host verb for it.
 	cancel: async (ctx, req) => {
 		const experimentId = strOf(bodyOf(req).experimentId);
 		if (!experimentId) return { error: "EXPERIMENT_ID_REQUIRED" };
@@ -446,14 +456,6 @@ export const routes = {
 		let cancelled = 0;
 		for (const run of runs) {
 			if (["collected", "failed", "cancelled"].includes(run.status)) continue;
-			// Best-effort stop: dismiss the arm child session if a helper exists; no new host verb.
-			if (run.childGoalId && typeof ctx.host.agents.dismiss === "function") {
-				try {
-					await ctx.host.agents.dismiss(run.childGoalId);
-				} catch {
-					/* best-effort */
-				}
-			}
 			run.status = "cancelled";
 			await ctx.host.store.put(keys.runRecordKey(experimentId, run.runId), run);
 			cancelled++;

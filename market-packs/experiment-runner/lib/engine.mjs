@@ -92,7 +92,9 @@ export function buildAbSpawnArgs(exp, variant, repeat) {
 		metadata: deepMerge(baseMeta, variant.metadata || {}),
 		inlineRoles: variant.inlineRoles,
 		workflowId: exp.workflowId,
-		parentGoalId: exp.parentGoalId,
+		// Only assert a parent when one is actually set; the seam treats an absent
+		// parentGoalId as "no assertion" and derives the parent server-side.
+		...(exp.parentGoalId ? { parentGoalId: exp.parentGoalId } : {}),
 	};
 }
 
@@ -111,7 +113,8 @@ export function buildCandidateSpawnArgs(exp, iteration, candidate) {
 		metadata: deepMerge(baseMeta, treatment),
 		inlineRoles: candidate && candidate.inlineRoles,
 		workflowId: exp.workflowId,
-		parentGoalId: exp.parentGoalId,
+		// Only assert a parent when one is actually set (see buildAbSpawnArgs).
+		...(exp.parentGoalId ? { parentGoalId: exp.parentGoalId } : {}),
 	};
 }
 

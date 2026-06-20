@@ -271,17 +271,26 @@ function projectionFor(d) {
 	return d.mode === "autoresearch" ? validateAuto(d) : validateAB(d);
 }
 
-// ── Definition serialization (the shape the routes consume) ─────────────────────
+// ── Definition serialization (the CANONICAL shape the routes consume — mirrors
+//    lib/store-keys.mjs JSDoc / src/shared/experiment-report/types.ts). ────────────────
 function buildDefinition(d) {
 	const basics = d.basics || {};
+	// MetricSelection[]: { metricId, aggregation?, directionOverride? } (+ ui-only
+	// hints the backend ignores). The draft uses `metric` internally; emit metricId.
 	const metrics = arrayOf(d.metrics).filter((m) => m.collect).map((m) => ({
-		metric: m.metric, aggregation: m.aggregation, direction: m.direction, primary: !!m.primary,
+		metricId: m.metric, aggregation: m.aggregation, direction: m.direction, primary: !!m.primary,
 	}));
+	// RunnableSpec: a command unit → kind 'command' (body → command); otherwise the
+	// agent/goal-spec unit → kind 'agent' (body → spec). Never `body` / kind 'goal'.
+	const isCommand = basics.runnableUnit === "command";
+	const runnable = isCommand
+		? { kind: "command", command: asText(basics.body) }
+		: { kind: "agent", spec: asText(basics.body) };
 	const def = {
 		experimentId: d.experimentId,
 		title: asText(basics.name).trim(),
 		mode: d.mode === "autoresearch" ? "autoresearch" : "ab",
-		runnable: { kind: basics.runnableUnit === "goal" ? "goal" : "command", body: asText(basics.body) },
+		runnable,
 		workflowId: asText(basics.workflowId).trim() || undefined,
 		metrics,
 	};
@@ -299,16 +308,23 @@ function buildDefinition(d) {
 		def.perRunBudget = num(d.perRunBudget);
 	} else {
 		const auto = d.auto || {};
-		def.objective = { metric: auto.objectiveMetric, direction: auto.direction === "minimize" ? "minimize" : "maximize" };
+		// ObjectiveSpec: { metricId, direction: 'max'|'min' }.
+		def.objective = { metricId: auto.objectiveMetric, direction: auto.direction === "minimize" ? "min" : "max" };
 		def.correctnessGateId = asText(auto.correctnessGateId).trim() || undefined;
 		def.seed = { metadata: rowsToObject(auto.seed), inlineRoles: parseRolesJson(auto.seedRolesJson) };
+		// AutoresearchCaps: { maxIterations?, maxWallClockMs?, maxCostUsd? }. perRunBudget
+		// is a SEPARATE top-level field, never nested in caps; no `wallClockMs` key.
+		const wallClockHours = num(auto.caps && auto.caps.wallClockHours);
 		def.caps = {
 			maxIterations: num(auto.caps && auto.caps.maxIterations),
-			wallClockMs: num(auto.caps && auto.caps.wallClockHours) ? num(auto.caps.wallClockHours) * 3_600_000 : undefined,
+			maxWallClockMs: wallClockHours ? wallClockHours * 3_600_000 : undefined,
 			maxCostUsd: num(auto.caps && auto.caps.costUsd),
-			perRunBudget: num(auto.caps && auto.caps.perIterBudget),
 		};
-		def.stop = { plateauK: num(auto.stops && auto.stops.plateauK), target: num(auto.stops && auto.stops.target) };
+		// StopSpec: only include `target` when the user gave a finite number — coercing
+		// a blank to 0 would falsely satisfy the stop-condition guard.
+		const target = num(auto.stops && auto.stops.target);
+		def.stop = { plateauK: num(auto.stops && auto.stops.plateauK) };
+		if (target != null) def.stop.target = target;
 		def.strategy = auto.strategy === "best-of-batch" ? "best-of-batch" : "greedy";
 		def.batchSize = num(auto.batchSize);
 		def.perRunBudget = num(auto.caps && auto.caps.perIterBudget);
@@ -417,13 +433,20 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return byInstance.get(instanceKey);
 	}
 
+	// listExperiments returns an ARRAY of ExperimentDef objects; the store INDEX_KEY
+	// is an ARRAY of experimentId strings. Derive the panel's display rows from
+	// whichever is available — never the legacy `{ experiments: [...] }` object.
+	const defToRow = (def) => ({ experimentId: def.experimentId, title: asText(def.title, def.experimentId), mode: def.mode === "autoresearch" ? "autoresearch" : "ab" });
 	async function refreshExperimentIndex(host, instanceKey) {
 		const res = await callRoute(host, "listExperiments", { method: "GET" });
 		let experiments = [];
-		if (res.ok && res.data && Array.isArray(res.data.experiments)) experiments = res.data.experiments;
-		else {
-			const idx = await storeGet(host, K.index);
-			if (idx && Array.isArray(idx.experiments)) experiments = idx.experiments;
+		if (res.ok && Array.isArray(res.data)) {
+			experiments = res.data.filter((d) => d && typeof d === "object").map(defToRow);
+		} else {
+			// Offline store fallback: read the id array and load each def.
+			const ids = arrayOf(await storeGet(host, K.index)).filter((id) => typeof id === "string");
+			const defs = await Promise.all(ids.map((id) => storeGet(host, K.exp(id))));
+			experiments = defs.filter((d) => d && typeof d === "object").map(defToRow);
 		}
 		patch(host, instanceKey, { experiments });
 	}
@@ -494,7 +517,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const definition = buildDefinition(d);
 
 		// Persist the definition (route-first, then store mirror for resilience).
-		const defined = await callRoute(host, "defineExperiment", { method: "POST", body: { definition } });
+		// defineExperiment reads req.body DIRECTLY (the def object IS the body).
+		const defined = await callRoute(host, "defineExperiment", { method: "POST", body: definition });
 		let experimentId = d.experimentId;
 		if (defined.ok && defined.data && defined.data.experimentId) experimentId = defined.data.experimentId;
 		if (!experimentId) experimentId = `${safeId(definition.title)}-${Date.now().toString(36)}`;
@@ -517,10 +541,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	}
 
 	async function appendIndex(host, instanceKey, row) {
-		const idx = (await storeGet(host, K.index)) || { experiments: [] };
-		const experiments = arrayOf(idx.experiments).filter((e) => e.experimentId !== row.experimentId);
+		// INDEX_KEY store value is an ARRAY of experimentId strings (canonical). Never
+		// overwrite it with an object — that corrupts the route-backed listing.
+		const ids = arrayOf(await storeGet(host, K.index)).filter((id) => typeof id === "string" && id !== row.experimentId);
+		ids.push(row.experimentId);
+		await storePut(host, K.index, ids);
+		// The panel's in-memory display list is derived rows (deduped by id).
+		const cur = byInstance.get(instanceKey) || {};
+		const experiments = arrayOf(cur.experiments).filter((e) => e.experimentId !== row.experimentId);
 		experiments.push(row);
-		await storePut(host, K.index, { experiments });
 		patch(host, instanceKey, { experiments });
 	}
 
@@ -943,16 +972,19 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			];
 	}
 
+	// Selection entries are canonical `{ metricId }`; tolerate the legacy `metric`
+	// field (older stored selections / direct seeds).
+	const selId = (m) => (m && (m.metricId || m.metric)) || undefined;
 	function collectedMetricIds(dash) {
 		const sel = arrayOf(dash && dash.metrics);
-		const ids = sel.filter((m) => m.collect !== false).map((m) => m.metric);
+		const ids = sel.filter((m) => m.collect !== false).map(selId).filter(Boolean);
 		return ids.length ? ids : ["objective.value", "cost.totalUsd", "time.wallClockMs"];
 	}
 	function primaryMetricId(dash) {
 		const sel = arrayOf(dash && dash.metrics);
 		const p = sel.find((m) => m.primary);
-		if (p) return p.metric;
-		if (dash && dash.def && dash.def.objective) return dash.def.objective.metric;
+		if (p) return selId(p);
+		if (dash && dash.def && dash.def.objective) return dash.def.objective.metricId || dash.def.objective.metric;
 		return collectedMetricIds(dash)[0];
 	}
 	const metricValue = (run, id) => {
@@ -975,7 +1007,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const sameBar = !(dash.def && dash.def.sameCompletionBar === false);
 		const arms = runsByArm(dash);
 		const sel = arrayOf(dash.metrics);
-		const aggOf = (id) => (sel.find((m) => m.metric === id) || {}).aggregation || "median";
+		const aggOf = (id) => (sel.find((m) => selId(m) === id) || {}).aggregation || "median";
 		return html`<table class="exp-table" data-testid="experiment-runner-widget-comparison-table">
 			<thead><tr><th>Variant</th>${metricIds.map((id) => html`<th class="exp-mono">${id}</th>`)}<th>n</th></tr></thead>
 			<tbody>
@@ -1201,8 +1233,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		};
 		return html`<table class="exp-table">
 			<thead><tr><th>Collect</th><th>Metric</th></tr></thead>
-			<tbody>${metrics.map((m, i) => html`<tr><td><input type="checkbox" data-testid="experiment-runner-dash-metric-collect" data-metric=${m.metric}
-				?checked=${m.collect !== false} @change=${(e) => toggle(i, e.currentTarget.checked)} /></td><td class="exp-mono">${m.metric}</td></tr>`)}</tbody>
+			<tbody>${metrics.map((m, i) => html`<tr><td><input type="checkbox" data-testid="experiment-runner-dash-metric-collect" data-metric=${selId(m)}
+				?checked=${m.collect !== false} @change=${(e) => toggle(i, e.currentTarget.checked)} /></td><td class="exp-mono">${selId(m)}</td></tr>`)}</tbody>
 		</table>`;
 	}
 
