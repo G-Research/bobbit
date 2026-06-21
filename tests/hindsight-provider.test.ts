@@ -751,9 +751,9 @@ test("routes reflect: applies bank directives when explicitly enabled, otherwise
 	}
 });
 
-test("routes retain: kind:manual is enforced — user-supplied tags cannot override it", async () => {
-	// A manual retain must always carry kind:"manual" provenance. User `tags` stay
-	// additive, but a malicious/accidental `tags: { kind: ... }` must NOT win.
+test("routes retain: trusted manual context tags are enforced over user-supplied tags", async () => {
+	// Manual retain tags come from the trusted route ctx, not agent-supplied args.
+	// User `tags` stay additive, but spoofed canonical keys must NOT win.
 	const { client, calls } = makeClient();
 	__setClientFactory(() => client);
 	try {
@@ -761,16 +761,25 @@ test("routes retain: kind:manual is enforced — user-supplied tags cannot overr
 		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallScope: "project" });
 
 		const res = (await routes.retain(
-			{ host: { store }, projectId: "proj-3" } as never,
-			{ body: { content: "remember this", tags: { kind: "spoofed", topic: "auth" }, scope: "project" } } as never,
+			{ host: { store }, projectId: "proj-3", goalId: "goal-7", sessionId: "sess-9", roleName: "coder" } as never,
+			{
+				body: {
+					content: "remember this",
+					tags: { kind: "spoofed", project: "evil-project", goal: "evil-goal", session: "evil-session", agent: "evil-agent", topic: "auth" },
+					scope: "project",
+				},
+			} as never,
 		)) as { ok: boolean };
 		assert.equal(res.ok, true);
 		const tags = calls.retain[0].opts.tags as Record<string, string>;
-		// kind is forced to "manual" regardless of the user-supplied kind.
-		assert.equal(tags.kind, "manual");
-		// User + scope tags stay additive.
-		assert.equal(tags.topic, "auth");
-		assert.equal(tags.project, "proj-3");
+		assert.deepEqual(tags, {
+			kind: "manual",
+			project: "proj-3",
+			goal: "goal-7",
+			session: "sess-9",
+			agent: "coder",
+			topic: "auth",
+		});
 	} finally {
 		__setClientFactory(null);
 	}
