@@ -7,6 +7,7 @@ import {
 	getClaudeCodeProbeCwd,
 	readClaudeCodeConfig,
 	resolveClaudeCodeExecutable,
+	CLAUDE_CODE_MODEL_ALIASES,
 	type ClaudeCodeConfig,
 } from "./claude-code-config.js";
 
@@ -20,6 +21,7 @@ export interface ClaudeCodeStatus {
 	message?: string;
 	/** MVP: no safe authenticated no-op probe is documented, so auth is verified at session start. */
 	authenticationStatus?: "verified" | "login-required" | "unknown";
+	modelAliases?: string[];
 }
 
 type ExecFileLike = (
@@ -90,6 +92,7 @@ export async function probeClaudeCodeStatus(
 				? "Claude Code CLI is available."
 				: "Claude Code CLI is available. Login will be verified when a Claude Code session starts.",
 			authenticationStatus: testAssumeAuthenticated ? "verified" : "unknown",
+			modelAliases: [...CLAUDE_CODE_MODEL_ALIASES],
 		};
 	} catch (err: any) {
 		return statusFromProbeError(executablePath, err);
@@ -130,6 +133,7 @@ function statusFromProbeError(executablePath: string, err: any): ClaudeCodeStatu
 			executablePath,
 			reason: "Claude Code login required",
 			authenticationStatus: "login-required",
+			modelAliases: [...CLAUDE_CODE_MODEL_ALIASES],
 		};
 	}
 	return unavailable(executablePath, "Claude Code probe failed");
@@ -143,5 +147,6 @@ function unavailable(executablePath: string, reason: string): ClaudeCodeStatus {
 		executablePath,
 		reason,
 		authenticationStatus: "unknown",
+		modelAliases: [...CLAUDE_CODE_MODEL_ALIASES],
 	};
 }

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { PreferencesStore } from "./preferences-store.js";
 
 export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
-export type ClaudeCodeModelAlias = "default" | "sonnet" | "opus" | string;
+export type ClaudeCodeModelAlias = "claude-opus-4-8" | "default" | "sonnet" | "opus" | string;
 
 export interface ClaudeCodeConfig {
 	executablePath: string;
@@ -16,7 +16,7 @@ export interface ClaudeCodeConfig {
 
 export const CLAUDE_CODE_DEFAULT_CONFIG: ClaudeCodeConfig = {
 	executablePath: "claude",
-	defaultModel: "sonnet",
+	defaultModel: "claude-opus-4-8",
 	permissionMode: "default",
 	allowBypassPermissions: false,
 };
@@ -28,8 +28,31 @@ export const CLAUDE_CODE_PREF_KEYS = {
 	allowBypassPermissions: "claudeCode.allowBypassPermissions",
 } as const;
 
-export const CLAUDE_CODE_MODEL_ALIASES = ["default", "sonnet", "opus"] as const;
+export const CLAUDE_CODE_MODEL_ALIASES = ["claude-opus-4-8", "default", "sonnet", "opus"] as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions"] as const;
+
+export const CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE = "claude-code-preferences";
+
+export interface SensitiveClaudeCodePreferenceMutation {
+	requiresConfirmation: boolean;
+	values: Record<string, unknown>;
+	keys: string[];
+}
+
+export function sensitiveClaudeCodePreferenceMutation(patch: Record<string, unknown>): SensitiveClaudeCodePreferenceMutation {
+	const values: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(patch)) {
+		if (key === CLAUDE_CODE_PREF_KEYS.executablePath) {
+			values[key] = value === null || value === undefined ? null : validateExecutablePath(value);
+		} else if (key === CLAUDE_CODE_PREF_KEYS.allowBypassPermissions) {
+			if (value === true) values[key] = true;
+		} else if (key === CLAUDE_CODE_PREF_KEYS.permissionMode) {
+			if (value === "bypassPermissions") values[key] = "bypassPermissions";
+		}
+	}
+	const keys = Object.keys(values).sort();
+	return { requiresConfirmation: keys.length > 0, values, keys };
+}
 
 const PATH_KEYS = new Set(["PATH", "Path", "path"]);
 const SAFE_ENV_CANONICAL_KEYS = new Map<string, string>([
@@ -213,7 +236,7 @@ export function normalizeModelAlias(value: unknown): ClaudeCodeModelAlias {
 
 export function validateModelAlias(value: unknown): ClaudeCodeModelAlias {
 	if (typeof value !== "string" || !isValidModelAlias(value.trim())) {
-		throw new Error("Claude Code model alias must be default, sonnet, opus, or a short model token");
+		throw new Error("Claude Code model alias must be claude-opus-4-8, default, sonnet, opus, or a short model token");
 	}
 	return value.trim();
 }

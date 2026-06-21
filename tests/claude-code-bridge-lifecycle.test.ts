@@ -312,6 +312,7 @@ process.stdin.on('data', () => {
 	it("passes selected Claude Code model aliases while preserving default CLI behavior", () => {
 		assert.equal(buildClaudeCodeArgs({}).includes("--model"), false);
 		assert.deepEqual(buildClaudeCodeArgs({ claudeCodeModelAlias: "sonnet" }).slice(-2), ["--model", "sonnet"]);
+		assert.deepEqual(buildClaudeCodeArgs({ claudeCodeModelAlias: "vendor:model.alias-48" }).slice(-2), ["--model", "vendor:model.alias-48"]);
 		assert.deepEqual(buildClaudeCodeArgs({ initialModel: "claude-code/opus" }).slice(-2), ["--model", "opus"]);
 		assert.equal(buildClaudeCodeArgs({ claudeCodeModelAlias: "default" }).includes("--model"), false);
 		assert.equal(buildClaudeCodeArgs({ initialModel: "claude-code/default" }).includes("--model"), false);
@@ -378,6 +379,43 @@ process.stdin.on('data', () => {
 			assert.equal(argvRecords.length, 2);
 			assert.equal(argvRecords[0].argv.includes("--resume"), false);
 			assert.deepEqual(argvRecords[1].argv.slice(-2), ["--resume", "fake-claude-session"]);
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
+	});
+
+	it("switches Claude Code aliases in the same Bobbit bridge by restarting with --resume", async () => {
+		const tmp = tempRecord();
+		const bridge = new ClaudeCodeBridge({
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath }),
+			claudeCodeModelAlias: "sonnet",
+		});
+		const events: any[] = [];
+		bridge.onEvent((event) => events.push(event));
+
+		try {
+			await timeout(bridge.prompt("first"), 2000, "first prompt was not accepted");
+			await waitFor(() => events.some((event) => event.type === "agent_end"), "first prompt did not complete");
+			assert.equal((await bridge.getState()).data.claudeCodeSessionId, "fake-claude-session");
+			assert.equal((await bridge.getMessages()).data.messages.length, 2);
+
+			const result = await timeout(bridge.setModel("claude-code", "opus"), 2000, "model switch did not finish");
+			assert.equal(result.success, true);
+			assert.equal((await bridge.getState()).data.model.id, "opus");
+			assert.equal((await bridge.getMessages()).data.messages.length, 2, "restart must preserve translated Bobbit messages");
+
+			await waitFor(
+				() => readRecord(tmp.recordPath).filter((entry) => Array.isArray(entry.argv)).length >= 2,
+				"model switch did not spawn resumed Claude Code process",
+			);
+			const argvRecords = readRecord(tmp.recordPath).filter((entry) => Array.isArray(entry.argv));
+			assert.equal(argvRecords.length, 2);
+			assert.deepEqual(argvRecords[0].argv.slice(-2), ["--model", "sonnet"]);
+			assert.ok(argvRecords[1].argv.includes("--model"), `expected second argv to include --model: ${argvRecords[1].argv.join(" ")}`);
+			assert.equal(argvRecords[1].argv[argvRecords[1].argv.indexOf("--model") + 1], "opus");
+			assert.ok(argvRecords[1].argv.includes("--resume"), `expected second argv to include --resume: ${argvRecords[1].argv.join(" ")}`);
+			assert.equal(argvRecords[1].argv[argvRecords[1].argv.indexOf("--resume") + 1], "fake-claude-session");
 		} finally {
 			await bridge.stop();
 			fs.rmSync(tmp.dir, { recursive: true, force: true });

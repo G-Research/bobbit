@@ -68,7 +68,7 @@ For Claude Code rows:
 - Main label: `Claude Code Sonnet`
 - Secondary/metadata label: `sonnet`
 - Badges, right side:
-  - `Local runtime` using `Badge(..., "secondary")`
+  - Provider label `Claude Code (local)`; no separate `Local runtime` pill.
   - `Claude Code (local)` using `Badge(..., "outline")`
 - Tooltip when ready: `Runs through your local Claude Code CLI and existing Claude Code login.`
 - Tooltip when unavailable: use `sessionUnavailableReason` from the server.
@@ -109,7 +109,7 @@ type ClaudeCodeStatus = {
   checking: boolean;
   commandPath: string;       // resolved preference, default "claude"
   version?: string;
-  modelAliases: string[];    // e.g. ["default", "sonnet", "opus"]
+  modelAliases: string[];    // e.g. ["claude-opus-4-8", "default", "sonnet", "opus"]
   permissionMode: "default" | "acceptEdits" | "bypassPermissions";
   reason?: "cli_missing" | "auth_required" | "probe_failed";
   message?: string;          // safe, user-facing explanation
@@ -127,7 +127,7 @@ Picker copy by state:
 
 | State | Picker row | Tooltip |
 |---|---|---|
-| Ready | Enabled, `Local runtime` badge | `Runs through your local Claude Code CLI and existing Claude Code login.` |
+| Ready | Enabled, `Claude Code (local)` provider label | `Runs through your local Claude Code CLI and existing Claude Code login.` |
 | CLI missing | Disabled, `CLI missing` badge | `Claude Code CLI was not found. Set the executable path in Settings → Models → Claude Code.` |
 | Not authenticated | Disabled, `Login required` badge | `Claude Code is installed but not authenticated. Run Claude Code login locally, then refresh status.` |
 | Probe failed | Disabled, `Probe failed` badge | Server-provided safe `message`, with Settings path. |
@@ -176,7 +176,7 @@ Persist via existing `PUT /api/preferences`:
 | Field | Preference key | UI |
 |---|---|---|
 | Executable path | `claudeCode.executablePath` | Text input, placeholder `claude` |
-| Default model alias | `claudeCode.defaultModel` | Select: `default`, `sonnet`, `opus` |
+| Default model alias | `claudeCode.defaultModel` | Select: `claude-opus-4-8`, `default`, `sonnet`, `opus` |
 | Permission mode | `claudeCode.permissionMode` | Select: `default`, `acceptEdits`, `bypassPermissions` |
 | Allow bypass mode | `claudeCode.allowBypassPermissions` | Explicit checkbox/confirmation gate |
 
@@ -304,7 +304,7 @@ Add browser E2E coverage under `tests/e2e/ui/`.
 1. **Picker visibility / labeling**
    - Stub `/api/models` with ready `claude-code/sonnet`.
    - Open active-session model picker.
-   - Assert row contains `Claude Code Sonnet`, `Local runtime`, and `Claude Code (local)`.
+   - Assert row contains `Claude Code Opus 4.8` and `Claude Code (local)`, and does not contain a separate `Local runtime` pill or numeric local limits.
 
 2. **Unavailable CLI state**
    - Stub status/models with `sessionSelectable: false`, reason `cli_missing`.

@@ -61,6 +61,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/gate-diagnostics/",    // src/server/agent/gate-diagnostics-cleanup.ts
 	"state/proposal-drafts/",     // server.ts / session-manager.ts
 	"state/pr-walkthrough/",      // src/server/pr-walkthrough/routes.ts persisted walkthrough payloads
+	"state/claude-code-transcripts/", // session-manager.ts Claude Code runtime transcripts
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files
 	"state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)

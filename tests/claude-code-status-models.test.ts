@@ -9,9 +9,11 @@ import {
 	CLAUDE_CODE_PREF_KEYS,
 	CLAUDE_CODE_DEFAULT_CONFIG,
 	buildClaudeCodeSanitizedEnv,
+	isValidModelAlias,
 	normalizeClaudeCodePreferencePatch,
 	readClaudeCodeConfig,
 	resolveClaudeCodeExecutable,
+	sensitiveClaudeCodePreferenceMutation,
 } from "../src/server/agent/claude-code-config.ts";
 import {
 	invalidateClaudeCodeStatusCache,
@@ -60,6 +62,7 @@ describe("Claude Code config", () => {
 		const { prefs, dir } = makePrefs();
 		try {
 			assert.deepEqual(readClaudeCodeConfig(prefs), CLAUDE_CODE_DEFAULT_CONFIG);
+			assert.equal(CLAUDE_CODE_DEFAULT_CONFIG.defaultModel, "claude-opus-4-8");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -99,6 +102,27 @@ describe("Claude Code config", () => {
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("requires operator confirmation for executable changes and resets", () => {
+		const changed = sensitiveClaudeCodePreferenceMutation({
+			[CLAUDE_CODE_PREF_KEYS.executablePath]: "/usr/local/bin/claude",
+		});
+		assert.equal(changed.requiresConfirmation, true);
+		assert.deepEqual(changed.keys, [CLAUDE_CODE_PREF_KEYS.executablePath]);
+		assert.equal(changed.values[CLAUDE_CODE_PREF_KEYS.executablePath], "/usr/local/bin/claude");
+
+		const reset = sensitiveClaudeCodePreferenceMutation({
+			[CLAUDE_CODE_PREF_KEYS.executablePath]: null,
+		});
+		assert.equal(reset.requiresConfirmation, true);
+		assert.deepEqual(reset.keys, [CLAUDE_CODE_PREF_KEYS.executablePath]);
+		assert.equal(reset.values[CLAUDE_CODE_PREF_KEYS.executablePath], null);
+	});
+
+	it("uses one model alias validation contract", () => {
+		assert.equal(isValidModelAlias("vendor:model.alias-48"), true);
+		assert.equal(isValidModelAlias("bad alias; rm -rf"), false);
 	});
 
 	it("does not let project config choose host executable or enable bypassPermissions", () => {
@@ -259,7 +283,7 @@ describe("Claude Code synthetic models", () => {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, path.join(dir, "missing-claude"));
 			const models = await getAvailableModels(prefs);
 			const local = models.filter(m => m.provider === "claude-code");
-			assert.deepEqual(local.map(m => m.id), ["default", "sonnet", "opus"]);
+			assert.deepEqual(local.map(m => m.id), ["claude-opus-4-8", "default", "sonnet", "opus"]);
 			for (const model of local) {
 				assert.equal(model.api, "claude-code-runtime");
 				assert.equal(model.runtime, "claude-code");
@@ -279,11 +303,12 @@ describe("Claude Code synthetic models", () => {
 		try {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, process.execPath);
 			const models = await getAvailableModels(prefs);
-			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
-			assert.ok(sonnet);
-			assert.equal(sonnet.authenticated, false);
-			assert.equal(sonnet.sessionSelectable, true);
-			assert.equal(sonnet.sessionUnavailableReason, undefined);
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			assert.ok(opus48);
+			assert.equal(opus48.name, "Claude Code Opus 4.8");
+			assert.equal(opus48.authenticated, false);
+			assert.equal(opus48.sessionSelectable, true);
+			assert.equal(opus48.sessionUnavailableReason, undefined);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -299,10 +324,10 @@ describe("Claude Code synthetic models", () => {
 				},
 			};
 			const models = await getAvailableModels(prefs, projectConfig);
-			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
-			assert.ok(sonnet);
-			assert.equal(sonnet.sessionSelectable, false);
-			assert.equal(sonnet.sessionUnavailableReason, "Claude Code CLI not found");
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			assert.ok(opus48);
+			assert.equal(opus48.sessionSelectable, false);
+			assert.equal(opus48.sessionUnavailableReason, "Claude Code CLI not found");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -317,11 +342,11 @@ describe("Claude Code synthetic models", () => {
 			invalidateClaudeCodeStatusCache();
 			invalidateModelCache();
 			const models = await getAvailableModels(prefs);
-			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
-			assert.ok(sonnet);
-			assert.equal(sonnet.authenticated, true);
-			assert.equal(sonnet.sessionSelectable, true);
-			assert.equal(sonnet.sessionUnavailableReason, undefined);
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			assert.ok(opus48);
+			assert.equal(opus48.authenticated, true);
+			assert.equal(opus48.sessionSelectable, true);
+			assert.equal(opus48.sessionUnavailableReason, undefined);
 		} finally {
 			if (previous === undefined) delete process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED;
 			else process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED = previous;

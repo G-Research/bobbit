@@ -43,7 +43,7 @@ let claudeCodeStatus = {
 	checking: false,
 	commandPath: "claude",
 	version: "1.2.3",
-	modelAliases: ["default", "sonnet", "opus"],
+	modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
 	permissionMode: "default",
 	reason: "auth_required",
 	message: "Claude Code is installed but not authenticated.",
@@ -220,6 +220,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const body = parseBody(init);
 	fetchLog.push({ url, method, body });
 
+	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
+		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });
+	}
+
 	if (pathname === "/api/preferences") {
 		if (method === "GET") {
 			updatePlayFinishDataset();
@@ -349,7 +353,7 @@ updatePlayFinishDataset();
 		checking: false,
 		commandPath: "claude",
 		version: "1.2.3",
-		modelAliases: ["default", "sonnet", "opus"],
+		modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
 		permissionMode: "default",
 		reason: "auth_required",
 		message: "Claude Code is installed but not authenticated.",

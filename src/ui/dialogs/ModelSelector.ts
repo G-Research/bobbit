@@ -442,7 +442,6 @@ export class ModelSelector extends DialogBase {
 									</div>
 									<div class="flex items-center gap-1.5">
 										${sessionUnavailable ? Badge(unavailableBadgeLabel(model), "secondary") : ""}
-										${localRuntime ? Badge("Local runtime", "secondary") : ""}
 										${!hasKey && !sessionUnavailable && !localRuntime ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
 										${Badge(providerLabel, "outline")}
 									</div>
@@ -451,7 +450,7 @@ export class ModelSelector extends DialogBase {
 									<div class="flex items-center gap-2">
 										<span class="${model.reasoning ? "" : "opacity-30"}">${icon(Brain, "sm")}</span>
 										<span class="${model.input.includes("image") ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
-										<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>
+										${localRuntime ? html`<span>Claude Code managed</span>` : html`<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>`}
 									</div>
 									<span>${localRuntime ? "Claude Code account" : formatModelCost(model.cost)}</span>
 								</div>

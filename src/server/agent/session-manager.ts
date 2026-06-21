@@ -2923,6 +2923,29 @@ export class SessionManager {
 			});
 	}
 
+	private persistClaudeCodeMessageToTranscript(session: SessionInfo, event: any): void {
+		if (event?.type !== "message_end" || !event.message) return;
+		const store = this.resolveStoreForSession(session.id);
+		const ps = store.get(session.id);
+		if (resolveSessionRuntime({ runtime: ps?.runtime, modelProvider: ps?.modelProvider }) !== "claude-code") return;
+		let agentSessionFile = ps?.agentSessionFile;
+		if (!agentSessionFile) {
+			agentSessionFile = path.join(bobbitStateDir(), "claude-code-transcripts", `${session.id}.jsonl`);
+			store.update(session.id, { agentSessionFile });
+		}
+		try {
+			fs.mkdirSync(path.dirname(agentSessionFile), { recursive: true });
+			fs.appendFileSync(agentSessionFile, JSON.stringify({
+				type: "message",
+				id: event.message.id,
+				ts: new Date().toISOString(),
+				message: event.message,
+			}) + "\n");
+		} catch (err) {
+			console.warn(`[session-manager] Failed to persist Claude Code transcript for ${session.id}:`, err);
+		}
+	}
+
 	/**
 	 * Handle agent events that track error state and control queue draining.
 	 * Called from every event listener before broadcasting.
@@ -2934,6 +2957,7 @@ export class SessionManager {
 		if (claudeCodeSessionId) {
 			this.resolveStoreForSession(session.id).update(session.id, { runtime: "claude-code", claudeCodeSessionId });
 		}
+		this.persistClaudeCodeMessageToTranscript(session, event);
 
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal

@@ -153,6 +153,41 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect((await resp.json()).error).toBe("transcript_unavailable");
 	});
 
+	test("Claude Code live sessions without agentSessionFile fall back to get_messages", async ({ gateway }) => {
+		const { id } = seedSession(gateway, {
+			agentSessionFile: undefined,
+			runtime: "claude-code",
+			modelProvider: "claude-code",
+			modelId: "claude-opus-4-8",
+			claudeCodeSessionId: "cc-live-transcript",
+		}, "");
+		(gateway.sessionManager as any).sessions.set(id, {
+			id,
+			clients: new Set(),
+			status: "idle",
+			unsubscribe: () => {},
+			rpcClient: {
+				stop: async () => {},
+				getMessages: async () => ({
+					success: true,
+					data: { messages: [
+						{ id: "m1", role: "user", content: [{ type: "text", text: "live claude question" }] },
+						{ id: "m2", role: "assistant", content: [{ type: "text", text: "live claude answer" }] },
+					] },
+				}),
+			},
+		});
+		try {
+			const resp = await fetch(`${base()}/api/sessions/${id}/transcript?limit=10`, { headers: authHeaders() });
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.total).toBe(2);
+			expect(body.messages.map((m: any) => m.text)).toEqual(["live claude question", "live claude answer"]);
+		} finally {
+			(gateway.sessionManager as any).sessions.delete(id);
+		}
+	});
+
 	test("invalid_regex", async ({ gateway }) => {
 		const jsonl = makeJsonl([{ role: "user", content: "x" }]);
 		const { id } = seedSession(gateway, {}, jsonl);

@@ -196,6 +196,42 @@ test.describe("Settings Models tab redesign", () => {
 		expect(prefWrites[prefWrites.length - 1].body).toMatchObject({ "default.sessionModel": null });
 	});
 
+	test("Claude Code executable confirmation uses browser credentials", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate((opts) => (window as any).__resetModelsTab(opts), {
+			allModels: ALL_MODELS,
+			claudeCodeStatus: {
+				available: true,
+				authenticated: false,
+				ready: true,
+				checking: false,
+				commandPath: "claude",
+				modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
+			},
+		});
+		await page.evaluate(() => {
+			(window as any).__setNextFetchResponse((url: string) => {
+				if (url === "/api/preferences/claude-code/confirmation") return { ok: true, body: { confirmationRequired: true, confirmationToken: "fixture-token" } };
+				return { ok: true, body: { ok: true } };
+			});
+			(window as any).__clearFetchLog();
+		});
+
+		const section = page.locator('[data-testid="claude-code-section"]');
+		await section.locator('[data-testid="claude-code-executable"]').fill("/opt/bin/claude");
+		await section.locator('[data-testid="claude-code-executable"]').blur();
+		await page.getByRole("button", { name: "Change executable" }).click();
+
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getFetchLog());
+			return log.find((e: any) => e.url === "/api/preferences/claude-code/confirmation");
+		}).toMatchObject({ method: "POST", credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getFetchLog());
+			return log.find((e: any) => e.url === "/api/preferences" && e.method === "PUT");
+		}).toMatchObject({ credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
+	});
+
 	test("Test button invokes /api/models/test and shows result", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate((opts) => (window as any).__resetModelsTab(opts), {

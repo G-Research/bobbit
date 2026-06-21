@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, nonGitCwd } from "./e2e-setup.js";
+import { agentEndPredicate, apiFetch, base, connectWs, nonGitCwd, readE2EToken } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,39 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fakeCli = path.join(__dirname, "..", "fixtures", "claude-code", "fake-claude-cli.mjs");
+
+async function operatorCookie(): Promise<string> {
+	const res = await fetch(`${base()}/api/preferences`, {
+		headers: { Authorization: `Bearer ${readE2EToken()}` },
+	});
+	const setCookie = res.headers.get("set-cookie");
+	const cookie = setCookie?.split(";")[0];
+	if (!cookie) throw new Error("operator cookie was not minted");
+	return cookie;
+}
+
+async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
+	const cookie = await operatorCookie();
+	const commonHeaders = {
+		Authorization: `Bearer ${readE2EToken()}`,
+		Cookie: cookie,
+		"Content-Type": "application/json",
+	};
+	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify(patch),
+	});
+	expect(confirmation.status).toBe(200);
+	const data = await confirmation.json();
+	expect(data.confirmationToken).toBeTruthy();
+	return fetch(`${base()}/api/preferences`, {
+		method: "PUT",
+		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
+		body: JSON.stringify(patch),
+	});
+}
+
 
 async function resetClaudeCodePrefs(): Promise<void> {
 	await apiFetch("/api/preferences", {
@@ -42,6 +75,11 @@ async function waitForSpawnArgv(recordPath: string): Promise<string[]> {
 	return readRecord(recordPath)[0].argv;
 }
 
+async function waitForSpawnArgvs(recordPath: string, count: number): Promise<string[][]> {
+	await expect.poll(() => fs.existsSync(recordPath) ? readRecord(recordPath).filter((entry) => Array.isArray(entry.argv)).length : 0).toBeGreaterThanOrEqual(count);
+	return readRecord(recordPath).filter((entry) => Array.isArray(entry.argv)).map((entry) => entry.argv);
+}
+
 test.describe("Claude Code runtime session API", () => {
 	test.afterEach(async () => {
 		await resetClaudeCodePrefs().catch(() => {});
@@ -53,14 +91,12 @@ test.describe("Claude Code runtime session API", () => {
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({
-					"claudeCode.executablePath": wrapper.executable,
-					"claudeCode.defaultModel": "opus",
-					"claudeCode.permissionMode": "acceptEdits",
-				}),
+			const prefResp = await confirmedClaudeCodePrefs({
+				"claudeCode.executablePath": wrapper.executable,
+				"claudeCode.defaultModel": "opus",
+				"claudeCode.permissionMode": "acceptEdits",
 			});
+			expect(prefResp.status).toBe(200);
 
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
@@ -109,15 +145,13 @@ test.describe("Claude Code runtime session API", () => {
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({
-					"claudeCode.executablePath": wrapper.executable,
-					"claudeCode.defaultModel": "opus",
-					"claudeCode.allowBypassPermissions": true,
-					"claudeCode.permissionMode": "bypassPermissions",
-				}),
+			const prefResp = await confirmedClaudeCodePrefs({
+				"claudeCode.executablePath": wrapper.executable,
+				"claudeCode.defaultModel": "opus",
+				"claudeCode.allowBypassPermissions": true,
+				"claudeCode.permissionMode": "bypassPermissions",
 			});
+			expect(prefResp.status).toBe(200);
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, runtime: "claude-code" }),
@@ -137,17 +171,15 @@ test.describe("Claude Code runtime session API", () => {
 		}
 	});
 
-	test("unsupported Claude Code set_model failure is not persisted", async () => {
+	test("Claude Code set_model switches aliases in the same Bobbit session via restart/resume", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-setmodel-"));
 		const recordPath = path.join(tmp, "record.jsonl");
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({ "claudeCode.executablePath": wrapper.executable }),
-			});
+			const prefResp = await confirmedClaudeCodePrefs({ "claudeCode.executablePath": wrapper.executable });
+			expect(prefResp.status).toBe(200);
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/sonnet" }),
@@ -155,13 +187,36 @@ test.describe("Claude Code runtime session API", () => {
 			expect(create.status).toBe(201);
 			sessionId = (await create.json()).id;
 			conn = await connectWs(sessionId!);
+			conn.send({ type: "prompt", text: "capture Claude Code resume id" });
+			await conn.waitFor(agentEndPredicate());
+
 			conn.send({ type: "set_model", provider: "claude-code", modelId: "opus" });
-			const error = await conn.waitFor((m: any) => m.type === "error" && m.code === "SET_MODEL_FAILED");
-			expect(error.message).toContain("requires a new Claude Code session");
+			await expect.poll(async () => {
+				const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+				return detail.modelProvider === "claude-code" && detail.modelId === "opus" && detail.claudeCodeModelAlias === "opus";
+			}).toBe(true);
+
 			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+			expect(detail.id).toBe(sessionId);
+			expect(detail.runtime).toBe("claude-code");
+			expect(detail.claudeCodeSessionId).toBe("fake-claude-session");
 			expect(detail.modelProvider).toBe("claude-code");
-			expect(detail.modelId).toBe("sonnet");
-			expect(detail.claudeCodeModelAlias).toBe("sonnet");
+			expect(detail.modelId).toBe("opus");
+			expect(detail.claudeCodeModelAlias).toBe("opus");
+
+			const argvs = await waitForSpawnArgvs(recordPath, 2);
+			expect(argvs[0]).toContain("--model");
+			expect(argvs[0][argvs[0].indexOf("--model") + 1]).toBe("sonnet");
+			expect(argvs[1]).toContain("--model");
+			expect(argvs[1][argvs[1].indexOf("--model") + 1]).toBe("opus");
+			expect(argvs[1]).toContain("--resume");
+			expect(argvs[1][argvs[1].indexOf("--resume") + 1]).toBe("fake-claude-session");
+
+			conn.send({ type: "get_state" });
+			await conn.waitFor((m: any) => m.type === "state" && m.data?.model?.id === "opus");
+			const transcript = await (await apiFetch(`/api/sessions/${sessionId}/transcript?verbose=1`)).json();
+			expect(JSON.stringify(transcript)).toContain("capture Claude Code resume id");
+			expect(JSON.stringify(transcript)).toContain("Hi there");
 		} finally {
 			conn?.close();
 			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});

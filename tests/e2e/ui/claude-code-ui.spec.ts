@@ -1,34 +1,61 @@
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, defaultProject } from "../e2e-setup.js";
+import { apiFetch, base, createSession, defaultProject, readE2EToken } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const FAKE_CLAUDE_CLI = fileURLToPath(new URL("../../fixtures/claude-code/fake-claude-cli.mjs", import.meta.url));
 
+async function operatorCookie(): Promise<string> {
+	const res = await fetch(`${base()}/api/preferences`, {
+		headers: { Authorization: `Bearer ${readE2EToken()}` },
+	});
+	const setCookie = res.headers.get("set-cookie");
+	const cookie = setCookie?.split(";")[0];
+	if (!cookie) throw new Error("operator cookie was not minted");
+	return cookie;
+}
+
+async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
+	const cookie = await operatorCookie();
+	const commonHeaders = {
+		Authorization: `Bearer ${readE2EToken()}`,
+		Cookie: cookie,
+		"Content-Type": "application/json",
+	};
+	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify(patch),
+	});
+	expect(confirmation.status).toBe(200);
+	const data = await confirmation.json();
+	expect(data.confirmationToken).toBeTruthy();
+	return fetch(`${base()}/api/preferences`, {
+		method: "PUT",
+		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
+		body: JSON.stringify(patch),
+	});
+}
+
+
 async function seedFakeClaudeCodePrefs(): Promise<void> {
 	chmodSync(FAKE_CLAUDE_CLI, 0o755);
-	const resp = await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": FAKE_CLAUDE_CLI,
-			"claudeCode.defaultModel": "sonnet",
-			"claudeCode.permissionMode": "default",
-			"claudeCode.allowBypassPermissions": null,
-		}),
+	const resp = await confirmedClaudeCodePrefs({
+		"claudeCode.executablePath": FAKE_CLAUDE_CLI,
+		"claudeCode.defaultModel": "sonnet",
+		"claudeCode.permissionMode": "default",
+		"claudeCode.allowBypassPermissions": null,
 	});
 	expect(resp.status).toBe(200);
 }
 
 async function resetClaudeCodePrefs(): Promise<void> {
-	await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": null,
-			"claudeCode.defaultModel": null,
-			"claudeCode.permissionMode": null,
-			"claudeCode.allowBypassPermissions": null,
-		}),
+	await confirmedClaudeCodePrefs({
+		"claudeCode.executablePath": null,
+		"claudeCode.defaultModel": null,
+		"claudeCode.permissionMode": null,
+		"claudeCode.allowBypassPermissions": null,
 	});
 }
 
@@ -49,14 +76,20 @@ const CLAUDE_CODE_MODEL = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
 
+const CLAUDE_CODE_OPUS_MODEL = {
+	...CLAUDE_CODE_MODEL,
+	id: "claude-opus-4-8",
+	name: "Claude Code Opus 4.8",
+};
+
 test.describe("Claude Code local-runtime UI", () => {
 	test.afterEach(async () => {
 		await resetClaudeCodePrefs().catch(() => {});
 	});
 
-	test("model picker labels Claude Code as a local runtime", async ({ page }) => {
+	test("model picker labels Claude Code as local without extra pill or numeric limits", async ({ page }) => {
 		await page.route("**/api/models**", async (route) => {
-			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_MODEL]) });
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_OPUS_MODEL]) });
 		});
 		const sessionId = await createSession();
 		try {
@@ -66,12 +99,14 @@ test.describe("Claude Code local-runtime UI", () => {
 			await expect(footer).toBeVisible({ timeout: 15_000 });
 			await footer.click();
 
-			const row = page.locator('agent-model-selector [data-model-id="sonnet"]');
+			const row = page.locator('agent-model-selector [data-model-id="claude-opus-4-8"]');
 			await expect(row).toBeVisible({ timeout: 10_000 });
-			await expect(row).toContainText("Claude Code Sonnet");
-			await expect(row).toContainText("Local runtime");
+			await expect(row).toContainText("Claude Code Opus 4.8");
+			await expect(row).not.toContainText("Local runtime");
 			await expect(row).toContainText("Claude Code (local)");
+			await expect(row).toContainText("Claude Code managed");
 			await expect(row).toContainText("Claude Code account");
+			await expect(row).not.toContainText("200K/8K");
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -163,12 +198,15 @@ test.describe("Claude Code local-runtime UI", () => {
 					checking: false,
 					commandPath: "claude",
 					version: "1.2.3",
-					modelAliases: ["default", "sonnet", "opus"],
+					modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
 					permissionMode: "default",
 					reason: "auth_required",
 					message: "Claude Code is installed but not authenticated.",
 				}),
 			});
+		});
+		await page.route("**/api/preferences/claude-code/confirmation", async (route) => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ confirmationRequired: true, confirmationToken: "fixture-confirmation" }) });
 		});
 		await page.route("**/api/preferences", async (route) => {
 			if (route.request().method() === "GET") {
@@ -190,11 +228,12 @@ test.describe("Claude Code local-runtime UI", () => {
 
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
-		await section.locator("[data-testid='claude-code-default-model']").selectOption("opus");
+		await page.getByRole("button", { name: "Change executable" }).click();
+		await section.locator("[data-testid='claude-code-default-model']").selectOption("claude-opus-4-8");
 		await section.locator("[data-testid='claude-code-permission-mode']").selectOption("acceptEdits");
 
 		await expect.poll(() => writes.some((w) => w["claudeCode.executablePath"] === "/opt/bin/claude")).toBe(true);
-		await expect.poll(() => writes.some((w) => w["claudeCode.defaultModel"] === "opus")).toBe(true);
+		await expect.poll(() => writes.some((w) => w["claudeCode.defaultModel"] === "claude-opus-4-8")).toBe(true);
 		await expect.poll(() => writes.some((w) => w["claudeCode.permissionMode"] === "acceptEdits")).toBe(true);
 	});
 });

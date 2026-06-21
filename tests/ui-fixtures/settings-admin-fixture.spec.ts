@@ -245,7 +245,7 @@ test.describe("Settings/admin UI fixture", () => {
 				checking: false,
 				commandPath: "claude",
 				version: "1.2.3",
-				modelAliases: ["default", "sonnet", "opus"],
+				modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
 				permissionMode: "default",
 				reason: "auth_required",
 				message: "Claude Code is installed but not authenticated.",
@@ -259,6 +259,8 @@ test.describe("Settings/admin UI fixture", () => {
 
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
+		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
+		await page.keyboard.press("Enter");
 		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
 
 		await section.locator("[data-testid='claude-code-default-model']").selectOption("opus");

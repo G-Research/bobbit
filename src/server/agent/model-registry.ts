@@ -285,13 +285,13 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 	const unavailableReason = status.ready ? undefined : status.reason || "Claude Code CLI not ready";
 	return CLAUDE_CODE_MODEL_ALIASES.map(alias => ({
 		id: alias,
-		name: alias === "default" ? "Claude Code Default" : `Claude Code ${alias[0].toUpperCase()}${alias.slice(1)}`,
+		name: claudeCodeModelName(alias),
 		provider: "claude-code",
 		api: "claude-code-runtime",
 		runtime: "claude-code" as const,
 		localRuntime: true,
 		runtimeLabel: "Claude Code (local)",
-		contextWindow: 200_000,
+		contextWindow: claudeCodeContextWindow(alias),
 		maxTokens: 8192,
 		reasoning: true,
 		input: ["text"] as ("text" | "image")[],
@@ -300,6 +300,20 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 		sessionSelectable: status.ready,
 		...(unavailableReason ? { sessionUnavailableReason: unavailableReason } : {}),
 	}));
+}
+
+function claudeCodeContextWindow(alias: string): number {
+	if (alias === "sonnet" || alias === "opus") return 1_000_000;
+	if (/^claude-(?:opus|sonnet)/i.test(alias)) return Math.max(inferMeta(alias).contextWindow, 1_000_000);
+	return 200_000;
+}
+
+function claudeCodeModelName(alias: string): string {
+	if (alias === "claude-opus-4-8") return "Claude Code Opus 4.8";
+	if (alias === "default") return "Claude Code Default";
+	if (alias === "sonnet") return "Claude Code Sonnet";
+	if (alias === "opus") return "Claude Code Opus";
+	return `Claude Code ${alias}`;
 }
 
 // ── Authentication Detection ───────────────────────────────────────

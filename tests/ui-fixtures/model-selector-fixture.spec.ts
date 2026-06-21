@@ -105,11 +105,11 @@ test.describe("ModelSelector Claude Code local runtime", () => {
 		await loadFixture(page);
 	});
 
-	test("renders ready Claude Code rows with local-runtime labeling and searchable copy", async ({ page }) => {
+	test("renders ready Claude Code rows without local-runtime pill or numeric limits", async ({ page }) => {
 		await page.evaluate(() => (window as any).__setModelSelectorModels([
 			{
-				id: "sonnet",
-				name: "Claude Code Sonnet",
+				id: "claude-opus-4-8",
+				name: "Claude Code Opus 4.8",
 				provider: "claude-code",
 				api: "claude-code-runtime",
 				contextWindow: 200_000,
@@ -125,17 +125,21 @@ test.describe("ModelSelector Claude Code local runtime", () => {
 		]));
 		await page.evaluate(() => (window as any).__openModelSelectorFixture());
 
-		const row = page.locator('agent-model-selector [data-model-id="sonnet"]');
+		const row = page.locator('agent-model-selector [data-model-id="claude-opus-4-8"]');
 		await expect(row).toBeVisible({ timeout: 10_000 });
-		await expect(row).toContainText("Claude Code Sonnet");
-		await expect(row).toContainText("Local runtime");
+		await expect(row).toContainText("Claude Code Opus 4.8");
+		await expect(row).not.toContainText("Local runtime");
 		await expect(row).toContainText("Claude Code (local)");
+		await expect(row).toContainText("Claude Code managed");
 		await expect(row).toContainText("Claude Code account");
+		await expect(row).not.toContainText("200K/8K");
 		await expect(row).not.toContainText("$0");
 		expect(await row.getAttribute("title")).toContain("local Claude Code CLI");
 
-		await page.locator("agent-model-selector input").fill("local sonnet");
+		await page.locator("agent-model-selector input").fill("local opus 4.8");
 		await expect(row).toBeVisible();
+		await row.dispatchEvent("click");
+		expect(await page.evaluate(() => (window as any).__getSelectedModel()?.id)).toBe("claude-opus-4-8");
 	});
 
 	test("renders unavailable Claude Code rows with reason-specific badge and refuses selection", async ({ page }) => {
@@ -163,6 +167,8 @@ test.describe("ModelSelector Claude Code local runtime", () => {
 		const row = page.locator('agent-model-selector [data-model-id="sonnet"]');
 		await expect(row).toBeVisible({ timeout: 10_000 });
 		await expect(row).toContainText("CLI missing");
+		await expect(row).not.toContainText("Local runtime");
+		await expect(row).not.toContainText("200K/8K");
 		expect(await row.getAttribute("data-session-unavailable")).toBe("true");
 		expect(await row.getAttribute("title")).toContain("Claude Code CLI was not found");
 

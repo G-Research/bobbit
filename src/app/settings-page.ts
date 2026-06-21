@@ -1484,7 +1484,7 @@ let claudeCodeStatus: ClaudeCodeStatus | null = null;
 let claudeCodeStatusLoading = false;
 let claudeCodeStatusError = "";
 let prefClaudeCodeExecutable = "claude";
-let prefClaudeCodeDefaultModel = "sonnet";
+let prefClaudeCodeDefaultModel = "claude-opus-4-8";
 let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "default";
 let prefClaudeCodeAllowBypass = false;
 
@@ -1604,7 +1604,7 @@ function loadModelsState(): void {
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
 				prefClaudeCodeExecutable = prefs["claudeCode.executablePath"] || "claude";
-				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "sonnet";
+				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "claude-opus-4-8";
 				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
 				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
 				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "default";
@@ -1631,13 +1631,26 @@ function loadModelsState(): void {
 	})();
 }
 
-async function savePref(key: string, value: string | boolean | null): Promise<void> {
+async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
+			credentials: operatorConfirmationToken ? "include" : undefined,
+			headers: operatorConfirmationToken ? { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken } : undefined,
 			body: JSON.stringify({ [key]: value }),
 		});
 	} catch {}
+}
+
+async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
+	const res = await gatewayFetch("/api/preferences/claude-code/confirmation", {
+		method: "POST",
+		credentials: "include",
+		body: JSON.stringify(patch),
+	});
+	if (!res.ok) return undefined;
+	const data = await res.json().catch(() => ({}));
+	return typeof data.confirmationToken === "string" ? data.confirmationToken : undefined;
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
@@ -1683,13 +1696,24 @@ async function setSessionThinking(value: string): Promise<void> {
 }
 
 async function setClaudeCodeExecutable(value: string): Promise<void> {
-	prefClaudeCodeExecutable = value || "claude";
-	await savePref("claudeCode.executablePath", value.trim() ? value.trim() : null);
+	const next = value.trim() ? value.trim() : null;
+	if ((next || "claude") === prefClaudeCodeExecutable) return;
+	const confirmed = await confirmAction(
+		"Change Claude Code executable?",
+		"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
+		"Change executable",
+		true,
+	);
+	if (!confirmed) return;
+	const confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
+	if (!confirmationToken) return;
+	prefClaudeCodeExecutable = next || "claude";
+	await savePref("claudeCode.executablePath", next, confirmationToken);
 	renderApp();
 }
 
 async function setClaudeCodeDefaultModel(value: string): Promise<void> {
-	prefClaudeCodeDefaultModel = value || "sonnet";
+	prefClaudeCodeDefaultModel = value || "claude-opus-4-8";
 	await savePref("claudeCode.defaultModel", value || null);
 	renderApp();
 }
@@ -1697,8 +1721,20 @@ async function setClaudeCodeDefaultModel(value: string): Promise<void> {
 async function setClaudeCodePermissionMode(value: string): Promise<void> {
 	const next = normalizeClaudeCodePermissionMode(value);
 	if (next === "bypassPermissions" && !prefClaudeCodeAllowBypass) return;
+	let confirmationToken: string | undefined;
+	if (next === "bypassPermissions") {
+		const confirmed = await confirmAction(
+			"Use bypass permissions?",
+			"Bypass mode can let Claude Code run local actions without normal permission prompts.",
+			"Use bypass",
+			true,
+		);
+		if (!confirmed) return;
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.permissionMode": next });
+		if (!confirmationToken) return;
+	}
 	prefClaudeCodePermissionMode = next;
-	await savePref("claudeCode.permissionMode", next === "default" ? null : next);
+	await savePref("claudeCode.permissionMode", next === "default" ? null : next, confirmationToken);
 	renderApp();
 }
 
@@ -1712,12 +1748,17 @@ async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
 		);
 		if (!confirmed) return;
 	}
+	let confirmationToken: string | undefined;
+	if (value) {
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.allowBypassPermissions": true });
+		if (!confirmationToken) return;
+	}
 	prefClaudeCodeAllowBypass = value;
 	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
 		prefClaudeCodePermissionMode = "default";
 		await savePref("claudeCode.permissionMode", null);
 	}
-	await savePref("claudeCode.allowBypassPermissions", value ? true : null);
+	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
 	renderApp();
 }
 
@@ -2126,7 +2167,7 @@ function renderClaudeCodeSection() {
 	const commandPath = status?.commandPath || status?.executablePath || prefClaudeCodeExecutable || "claude";
 	const aliases = Array.isArray(status?.modelAliases) && status!.modelAliases!.length
 		? status!.modelAliases!
-		: ["default", "sonnet", "opus"];
+		: ["claude-opus-4-8", "default", "sonnet", "opus"];
 	const statusClass = tone === "ready"
 		? "bg-green-500/10 border-green-500/20"
 		: tone === "checking"
@@ -2168,7 +2209,7 @@ function renderClaudeCodeSection() {
 					placeholder="claude"
 					.value=${prefClaudeCodeExecutable}
 					data-testid="claude-code-executable"
-					@change=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
+					@blur=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
 				/>
 			</div>
 
@@ -2303,7 +2344,7 @@ export function __testResetModelsTab(opts: {
 	claudeCodeStatusLoading = false;
 	claudeCodeStatusError = "";
 	prefClaudeCodeExecutable = opts.prefClaudeCodeExecutable ?? "claude";
-	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "sonnet";
+	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "claude-opus-4-8";
 	prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(opts.prefClaudeCodePermissionMode);
 	prefClaudeCodeAllowBypass = opts.prefClaudeCodeAllowBypass ?? false;
 	prefSessionThinking = "";
