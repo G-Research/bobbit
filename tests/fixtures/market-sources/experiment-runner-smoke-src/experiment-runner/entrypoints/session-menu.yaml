@@ -1,0 +1,5 @@
+id: experiment-runner.session-menu
+kind: session-menu
+label: New experiment
+target:
+  panelId: experiment-runner.panel

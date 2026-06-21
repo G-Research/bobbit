@@ -1,14 +1,13 @@
-import type { Page, TestInfo } from "@playwright/test";
+import { fileURLToPath } from "node:url";
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
 	deleteGoal,
-	readE2ETokenAsync,
 	startTeam,
 	teardownTeam,
 	waitForSessionStatus,
-	base,
 } from "../e2e-setup.js";
 import { navigateToHash, openApp } from "./ui-helpers.js";
 
@@ -16,7 +15,25 @@ test.describe.configure({ mode: "serial" });
 
 const PACK_ID = "experiment-runner";
 const DEFAULT_ROUTE_ID = "experiment-runner";
+const SOURCE_DIR = fileURLToPath(new URL("../../fixtures/market-sources/experiment-runner-smoke-src", import.meta.url));
 const FORBIDDEN_ERRORS = /NO_EFFECTIVE_GOAL|SPAWN_GOAL_UNAVAILABLE|PARENT_MISMATCH|PACK_ROUTE|WORKFLOW_(?:REQUIRED|NOT_FOUND|INVALID)|workflow route error/i;
+// Pack-schema route names are lowercase-token identifiers; these fixture names
+// correspond to the Experiment Runner contract routes (defineExperiment,
+// saveMetrics, saveDashboard, getExperiment, listMetrics, listWidgets, etc.).
+const REQUIRED_ROUTE_NAMES = [
+	"defineexperiment",
+	"launch",
+	"poll",
+	"collect",
+	"aggregate",
+	"savemetrics",
+	"savedashboard",
+	"report",
+	"getexperiment",
+	"listmetrics",
+	"listwidgets",
+	"cancel",
+];
 
 type ContributionEntryPoint = {
 	id: string;
@@ -37,19 +54,42 @@ type PackContributionsMeta = {
 
 type RouteCallResult = { status: number; body: any; text: string };
 
+async function cleanupFixtureInstall(): Promise<void> {
+	await apiFetch("/api/marketplace/installed", {
+		method: "DELETE",
+		body: JSON.stringify({ scope: "server", packName: PACK_ID }),
+	}).catch(() => {});
+	try {
+		const res = await apiFetch("/api/marketplace/sources");
+		for (const source of ((await res.json()).sources ?? []) as Array<{ id: string }>) {
+			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(source.id)}`, { method: "DELETE" }).catch(() => {});
+		}
+	} catch { /* best-effort cleanup */ }
+}
+
+async function installExperimentRunnerFixture(): Promise<void> {
+	await cleanupFixtureInstall();
+	const addRes = await apiFetch("/api/marketplace/sources", {
+		method: "POST",
+		body: JSON.stringify({ url: SOURCE_DIR }),
+	});
+	const addBody = await addRes.text();
+	expect(addRes.status, addBody).toBe(201);
+	const sourceId = (JSON.parse(addBody) as { source: { id: string } }).source.id;
+
+	const installRes = await apiFetch("/api/marketplace/install", {
+		method: "POST",
+		body: JSON.stringify({ sourceId, dirName: PACK_ID, scope: "server" }),
+	});
+	const installBody = await installRes.text();
+	expect(installRes.status, installBody).toBe(201);
+}
+
 async function listContributions(): Promise<PackContributionsMeta[]> {
 	const res = await apiFetch("/api/ext/contributions");
 	const text = await res.text();
 	expect(res.ok, `/api/ext/contributions should be reachable: ${text}`).toBe(true);
 	return (JSON.parse(text) as { packs?: PackContributionsMeta[] }).packs ?? [];
-}
-
-function skipWhenPackAbsent(testInfo: TestInfo, packs: PackContributionsMeta[]): never {
-	const packIds = packs.map((p) => p.packId).sort().join(", ") || "<none>";
-	const reason = `${PACK_ID} is not present in /api/ext/contributions for this gateway; optional smoke journey skipped. Seen packs: ${packIds}`;
-	testInfo.annotations.push({ type: "skip", description: reason });
-	test.skip(true, reason);
-	throw new Error(reason);
 }
 
 function assertContributionShape(pack: PackContributionsMeta): { panelId: string; routeId: string } {
@@ -59,21 +99,12 @@ function assertContributionShape(pack: PackContributionsMeta): { panelId: string
 	const panelId = panels.find((p) => p.id === "experiment-runner.panel")?.id ?? panels[0]?.id;
 	const routeId = entrypoints.find((e) => e.kind === "route")?.routeId ?? DEFAULT_ROUTE_ID;
 
-	expect(panelId, "Experiment Runner must contribute a panel").toBeTruthy();
+	expect(panelId, "Experiment Runner must contribute a panel").toBe("experiment-runner.panel");
 	expect(panels.some((p) => p.id === "experiment-runner.panel" && /experiments/i.test(p.title ?? ""))).toBe(true);
 	expect(entrypoints.some((e) => e.kind === "session-menu" && /new experiment/i.test(e.label ?? e.listName ?? ""))).toBe(true);
 	expect(entrypoints.some((e) => e.kind === "composer-slash" && /experiments?/i.test(e.label ?? e.listName ?? e.id))).toBe(true);
-	expect(entrypoints.some((e) => e.kind === "route" && (e.routeId === DEFAULT_ROUTE_ID || e.routeId === routeId))).toBe(true);
-	expect(routeNames).toEqual(expect.arrayContaining([
-		"defineExperiment",
-		"launch",
-		"poll",
-		"collect",
-		"aggregate",
-		"saveMetrics",
-		"saveDashboard",
-		"report",
-	]));
+	expect(entrypoints.some((e) => e.kind === "route" && e.routeId === DEFAULT_ROUTE_ID)).toBe(true);
+	expect(routeNames).toEqual(expect.arrayContaining(REQUIRED_ROUTE_NAMES));
 
 	return { panelId, routeId };
 }
@@ -89,32 +120,32 @@ async function openGoalSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => {});
+	await page.evaluate(() => (window as any).__bobbitReconcilePackEntrypoints?.()).catch(() => {});
 }
 
-async function expectLauncherSurfaces(page: Page, routeId: string): Promise<void> {
+async function exerciseLauncherSurfaces(page: Page, routeId: string): Promise<void> {
+	const panel = page.getByTestId("experiment-runner-panel");
 	const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
 	await expect(trigger, "goal session header must expose the session menu").toBeVisible({ timeout: 10_000 });
 	await trigger.click();
 	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-	await expect(
-		page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: /new experiment/i }).first(),
-		"Experiment Runner must contribute the New experiment session-menu launcher",
-	).toBeVisible({ timeout: 10_000 });
-	await page.keyboard.press("Escape");
+	const menuItem = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: /new experiment/i }).first();
+	await expect(menuItem, "Experiment Runner must contribute the New experiment session-menu launcher").toBeVisible({ timeout: 10_000 });
+	await menuItem.click();
+	await expect(panel, "session-menu launcher should open the Experiments panel").toBeVisible({ timeout: 20_000 });
 
 	const textarea = page.locator("textarea").first();
 	await textarea.fill("/Exp");
-	await expect(
-		page.locator('[data-testid^="slash-command-"]').filter({ hasText: /experiments?|experiment-runner/i }).first(),
-		"Experiment Runner must contribute the Experiments composer slash launcher",
-	).toBeVisible({ timeout: 10_000 });
-	await textarea.fill("");
+	const command = page.locator('[data-testid^="slash-command-"]').filter({ hasText: /experiments?|experiment-runner/i }).first();
+	await expect(command, "Experiment Runner must contribute the Experiments composer slash launcher").toBeVisible({ timeout: 10_000 });
+	await command.click();
+	await textarea.press("Enter");
+	await expect(panel, "composer /Experiments launcher should open the Experiments panel").toBeVisible({ timeout: 20_000 });
 
 	await navigateToHash(page, `#/ext/${routeId}`);
-	await expect(page.locator("body")).toContainText(/Experiments|Experiment Runner/i, { timeout: 20_000 });
-	await expect(page.locator("body"), "A/B comparison should be the visible default/recommended path").toContainText(/A\/?B|A-B|comparison/i);
-	await expect(page.locator("body"), "Autoresearch should be present as an opt-in guarded mode").toContainText(/Autoresearch/i);
-	await expect(page.locator("body"), "Autoresearch must advertise opt-in/hard-cap guardrails").toContainText(/opt-in|hard caps|required|guardrail/i);
+	await expect(panel, "deep link should open the Experiments panel").toBeVisible({ timeout: 20_000 });
+	await expect(panel, "A/B comparison should be the visible default/recommended path").toContainText(/A\/B comparison/i);
+	await expect(panel, "Autoresearch must remain opt-in with hard caps").toContainText(/Autoresearch is opt-in.*hard caps/i);
 }
 
 async function mintSurfaceToken(sessionId: string, panelId: string): Promise<string> {
@@ -159,60 +190,22 @@ async function findExperimentChildren(parentGoalId: string, experimentId: string
 	expect(res.ok).toBe(true);
 	const payload = await res.json();
 	const goals = (payload.goals ?? payload) as any[];
-	return goals.filter((g) => g.parentGoalId === parentGoalId && String(g.spawnedFromPlanId ?? "").startsWith(`${experimentId}:`));
+	return goals.filter((g) => g.parentGoalId === parentGoalId && g.metadata?.experiment?.id === experimentId);
 }
 
-function minimalExperimentDefinition(experimentId: string, parentGoalId: string) {
-	return {
-		experimentId,
-		title: "E2E Experiment Runner smoke",
-		mode: "ab",
-		parentGoalId,
-		runnable: {
-			kind: "spec",
-			spec: "Minimal safe smoke-test arm. Do not edit files. Finish quickly with one sentence: Smoke arm complete.",
-		},
-		variants: [
-			{
-				armId: "baseline",
-				label: "baseline",
-				metadata: {
-					experiment: { userMetrics: { metric: 1, smokeBaselineMarker: 101 } },
-					smokeTreatment: { arm: "baseline", marker: "smoke-baseline-101" },
-				},
-			},
-			{
-				armId: "variant-b",
-				label: "variant-b",
-				metadata: {
-					experiment: { userMetrics: { metric: 2, smokeVariantMarker: 202 } },
-					smokeTreatment: { arm: "variant-b", marker: "smoke-variant-b-202" },
-				},
-			},
-		],
-		repeats: 1,
-		maxConcurrency: 1,
-		perRunBudget: 0.05,
-		sameCompletionBar: false,
-		metrics: [
-			{ metricId: "command.metric", aggregation: "median" },
-			{ metricId: "cost.totalUsd", aggregation: "median", directionOverride: "min" },
-		],
-		dashboard: {
-			widgets: [
-				{ id: "smoke-summary", type: "summary-cards", title: "Smoke summary", bind: { metricIds: ["command.metric", "cost.totalUsd"] } },
-			],
-		},
-	};
-}
+test.afterEach(async () => {
+	await cleanupFixtureInstall();
+});
 
-test.describe("Experiment Runner optional smoke journey", () => {
-	test("deep link + launchers + bounded A/B route lifecycle", async ({ page }, testInfo) => {
+test.describe("Experiment Runner smoke journey", () => {
+	test("fixture install + launchers + UI-driven bounded A/B lifecycle", async ({ page, gateway }) => {
 		test.setTimeout(180_000);
 
+		await installExperimentRunnerFixture();
 		const packs = await listContributions();
-		const pack = packs.find((p) => p.packId === PACK_ID) ?? skipWhenPackAbsent(testInfo, packs);
-		const { panelId, routeId } = assertContributionShape(pack);
+		const pack = packs.find((p) => p.packId === PACK_ID);
+		expect(pack, `${PACK_ID} fixture must be present after local marketplace install`).toBeTruthy();
+		const { panelId, routeId } = assertContributionShape(pack!);
 
 		let parentGoalId: string | undefined;
 		let teamLeadId: string | undefined;
@@ -235,37 +228,36 @@ test.describe("Experiment Runner optional smoke journey", () => {
 			parentGoalId = parent.id as string;
 			teamLeadId = await startTeam(parentGoalId);
 			await waitForSessionStatus(teamLeadId, "idle", 45_000).catch(() => {});
+			const teamLeadSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(teamLeadId);
 
 			await openGoalSession(page, teamLeadId);
-			await expectLauncherSurfaces(page, routeId);
+			await exerciseLauncherSurfaces(page, routeId);
 			await expectNoForbiddenErrors(page, consoleMessages.join("\n"), "launcher/deep-link UI");
 
 			surfaceToken = await mintSurfaceToken(teamLeadId, panelId);
 			experimentId = `e2e-smoke-${Date.now().toString(36)}`;
 
-			const arGuard = await callExperimentRoute(teamLeadId, surfaceToken, "defineExperiment", {
+			const arGuard = await callExperimentRoute(teamLeadId, surfaceToken, "defineexperiment", {
 				experimentId: `${experimentId}-ar-guard`,
 				mode: "autoresearch",
 				title: "Autoresearch guard probe",
+				parentGoalId,
+				teamLeadSecret,
 				runnable: { kind: "spec", spec: "Do not run; this validates guardrails only." },
 				objective: { metricId: "command.metric", direction: "max" },
 				stop: { plateauK: 1 },
 				perRunBudget: 0.05,
 			});
 			routeResponses.push(arGuard.body);
-			expect(arGuard.body.error, "Autoresearch must remain opt-in and reject missing finite hard caps").toBe("AR_UNCAPPED");
+			expect(arGuard.body.error, "Autoresearch must reject missing finite hard caps").toBe("AR_UNCAPPED");
 
-			const defined = await callExperimentRoute(teamLeadId, surfaceToken, "defineExperiment", minimalExperimentDefinition(experimentId, parentGoalId));
-			routeResponses.push(defined.body);
-			expect(defined.body.error).toBeUndefined();
-			expect(defined.body.experimentId).toBe(experimentId);
-			expect(defined.body.projection?.mode).toBe("ab");
-			expect(defined.body.projection?.arms).toBe(2);
-
-			const launched = await callExperimentRoute(teamLeadId, surfaceToken, "launch", { experimentId });
-			routeResponses.push(launched.body);
-			expect(launched.body.error).toBeUndefined();
-			expect(launched.body.launched).toHaveLength(2);
+			await page.getByTestId("exp-experiment-id").fill(experimentId);
+			await page.getByTestId("exp-parent-goal-id").fill(parentGoalId);
+			await page.getByTestId("exp-session-secret").fill(teamLeadSecret);
+			await page.getByTestId("exp-define-button").click();
+			await expect(page.getByTestId("exp-status")).toContainText(/Definition ready: 2 arms/i, { timeout: 20_000 });
+			await page.getByTestId("exp-launch-button").click();
+			await expect(page.getByTestId("exp-status")).toContainText(/Launch complete: 2 child goals/i, { timeout: 30_000 });
 
 			const children = await findExperimentChildren(parentGoalId, experimentId);
 			expect(children, "A/B launch must create exactly one child goal per arm").toHaveLength(2);
@@ -277,10 +269,9 @@ test.describe("Experiment Runner optional smoke journey", () => {
 			expect(byArm.get("baseline")?.metadata?.experiment?.budget).toBe(0.05);
 			expect(byArm.get("variant-b")?.metadata?.experiment?.budget).toBe(0.05);
 
-			for (const name of ["poll", "collect", "aggregate", "report"] as const) {
-				const result = await callExperimentRoute(teamLeadId, surfaceToken, name, { experimentId });
-				routeResponses.push(result.body);
-				expect(result.body.error, `${name} should not return a route error`).toBeUndefined();
+			for (const name of ["poll", "collect", "aggregate"] as const) {
+				await page.getByTestId(`exp-${name}`).click();
+				await expect(page.getByTestId("exp-status")).toContainText(new RegExp(`${name} complete`, "i"), { timeout: 20_000 });
 			}
 
 			const editedMetrics = [
@@ -293,14 +284,25 @@ test.describe("Experiment Runner optional smoke journey", () => {
 					{ id: "edited-raw", type: "raw-drilldown", title: "Edited raw", bind: { metricIds: ["cost.totalUsd"] } },
 				],
 			};
-			expect((await callExperimentRoute(teamLeadId, surfaceToken, "saveMetrics", { experimentId, metrics: editedMetrics })).body).toEqual({ ok: true });
-			expect((await callExperimentRoute(teamLeadId, surfaceToken, "saveDashboard", { experimentId, dashboard: editedDashboard })).body).toEqual({ ok: true });
+			await page.getByTestId("exp-metrics-json").fill(JSON.stringify(editedMetrics, null, 2));
+			await page.getByTestId("exp-save-metrics").click();
+			await expect(page.getByTestId("exp-status")).toContainText(/Metric spec saved/i, { timeout: 20_000 });
+			await page.getByTestId("exp-dashboard-json").fill(JSON.stringify(editedDashboard, null, 2));
+			await page.getByTestId("exp-save-dashboard").click();
+			await expect(page.getByTestId("exp-status")).toContainText(/Dashboard spec saved/i, { timeout: 20_000 });
+			await page.getByTestId("exp-report-button").click();
+			await expect(page.getByTestId("exp-report")).toContainText(/Experiment Runner Smoke Report/i, { timeout: 20_000 });
+			await expect(page.getByTestId("exp-report")).toContainText(/Edited smoke summary/i);
+			await expect(page.getByTestId("exp-report")).toContainText(/time\.wallClockMs/i);
 
-			const token = await readE2ETokenAsync();
-			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/ext/${routeId}?experimentId=${encodeURIComponent(experimentId)}&view=report`, { waitUntil: "domcontentloaded" });
-			await expect(page.locator("body")).toContainText(/Experiments|Experiment Runner/i, { timeout: 20_000 });
+			// Reopen after a real page reload, then revisit the extension deep link with the
+			// active goal session restored so the panel host can reload persisted specs.
+			await openGoalSession(page, teamLeadId);
+			await navigateToHash(page, `#/ext/${routeId}?experimentId=${encodeURIComponent(experimentId)}&view=report`);
+			await expect(page.getByTestId("experiment-runner-panel")).toBeVisible({ timeout: 20_000 });
+			await expect(page.getByTestId("experiment-runner-panel")).toContainText(/Edited smoke summary/i, { timeout: 20_000 });
 			surfaceToken = await mintSurfaceToken(teamLeadId, panelId);
-			const persisted = await callExperimentRoute(teamLeadId, surfaceToken, "getExperiment", { experimentId });
+			const persisted = await callExperimentRoute(teamLeadId, surfaceToken, "getexperiment", { experimentId });
 			expect(persisted.body.metrics.map((m: any) => m.metricId)).toEqual(["cost.totalUsd", "time.wallClockMs"]);
 			expect(persisted.body.dashboard.widgets.map((w: any) => w.id)).toEqual(["edited-summary", "edited-raw"]);
 			const editedReport = await callExperimentRoute(teamLeadId, surfaceToken, "report", { experimentId });
