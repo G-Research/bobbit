@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { agentEndPredicate, apiFetch, base, connectWs, nonGitCwd, readE2EToken } from "./e2e-setup.js";
+import { agentEndPredicate, apiFetch, connectWs, nonGitCwd } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,49 +8,21 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fakeCli = path.join(__dirname, "..", "fixtures", "claude-code", "fake-claude-cli.mjs");
 
-async function operatorCookie(): Promise<string> {
-	const res = await fetch(`${base()}/api/preferences`, {
-		headers: { Authorization: `Bearer ${readE2EToken()}` },
-	});
-	const setCookie = res.headers.get("set-cookie");
-	const cookie = setCookie?.split(";")[0];
-	if (!cookie) throw new Error("operator cookie was not minted");
-	return cookie;
+function setClaudeCodePrefs(gateway: any, patch: Record<string, unknown>): void {
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === null || value === undefined) gateway.preferencesStore.remove(key);
+		else gateway.preferencesStore.set(key, value);
+	}
 }
 
-async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
-	const cookie = await operatorCookie();
-	const commonHeaders = {
-		Authorization: `Bearer ${readE2EToken()}`,
-		Cookie: cookie,
-		"Content-Type": "application/json",
-	};
-	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
-		method: "POST",
-		headers: commonHeaders,
-		body: JSON.stringify(patch),
+async function resetClaudeCodePrefs(gateway: any): Promise<void> {
+	setClaudeCodePrefs(gateway, {
+		"claudeCode.executablePath": null,
+		"claudeCode.defaultModel": null,
+		"claudeCode.permissionMode": null,
+		"claudeCode.allowBypassPermissions": null,
 	});
-	expect(confirmation.status).toBe(200);
-	const data = await confirmation.json();
-	expect(data.confirmationToken).toBeTruthy();
-	return fetch(`${base()}/api/preferences`, {
-		method: "PUT",
-		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
-		body: JSON.stringify(patch),
-	});
-}
-
-
-async function resetClaudeCodePrefs(): Promise<void> {
-	await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": null,
-			"claudeCode.defaultModel": null,
-			"claudeCode.permissionMode": null,
-			"claudeCode.allowBypassPermissions": null,
-		}),
-	});
+	await apiFetch("/api/claude-code/status/refresh", { method: "POST" }).catch(() => undefined);
 }
 
 function makeFakeWrapper(recordPath: string): { dir: string; executable: string } {
@@ -81,22 +53,22 @@ async function waitForSpawnArgvs(recordPath: string, count: number): Promise<str
 }
 
 test.describe("Claude Code runtime session API", () => {
-	test.afterEach(async () => {
-		await resetClaudeCodePrefs().catch(() => {});
+	test.afterEach(async ({ gateway }) => {
+		await resetClaudeCodePrefs(gateway).catch(() => {});
 	});
 
-	test("POST /api/sessions honors Claude Code model/runtime and hydrated preferences reach spawn", async () => {
+	test("POST /api/sessions honors Claude Code model/runtime and hydrated preferences reach spawn", async ({ gateway }) => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-create-"));
 		const recordPath = path.join(tmp, "record.jsonl");
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			const prefResp = await confirmedClaudeCodePrefs({
+			setClaudeCodePrefs(gateway, {
 				"claudeCode.executablePath": wrapper.executable,
 				"claudeCode.defaultModel": "opus",
 				"claudeCode.permissionMode": "acceptEdits",
 			});
-			expect(prefResp.status).toBe(200);
+			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
 
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
@@ -139,19 +111,19 @@ test.describe("Claude Code runtime session API", () => {
 		}
 	});
 
-	test("Claude Code default alias and bypass opt-in hydrate into runtime options", async () => {
+	test("Claude Code default alias and bypass opt-in hydrate into runtime options", async ({ gateway }) => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-bypass-"));
 		const recordPath = path.join(tmp, "record.jsonl");
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			const prefResp = await confirmedClaudeCodePrefs({
+			setClaudeCodePrefs(gateway, {
 				"claudeCode.executablePath": wrapper.executable,
 				"claudeCode.defaultModel": "opus",
 				"claudeCode.allowBypassPermissions": true,
 				"claudeCode.permissionMode": "bypassPermissions",
 			});
-			expect(prefResp.status).toBe(200);
+			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, runtime: "claude-code" }),
@@ -171,15 +143,15 @@ test.describe("Claude Code runtime session API", () => {
 		}
 	});
 
-	test("Claude Code set_model switches aliases in the same Bobbit session via restart/resume", async () => {
+	test("Claude Code set_model switches aliases in the same Bobbit session via restart/resume", async ({ gateway }) => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-setmodel-"));
 		const recordPath = path.join(tmp, "record.jsonl");
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
 		try {
-			const prefResp = await confirmedClaudeCodePrefs({ "claudeCode.executablePath": wrapper.executable });
-			expect(prefResp.status).toBe(200);
+			setClaudeCodePrefs(gateway, { "claudeCode.executablePath": wrapper.executable });
+			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/sonnet" }),

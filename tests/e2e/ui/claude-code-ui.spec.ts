@@ -1,62 +1,37 @@
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, base, createSession, defaultProject, readE2EToken } from "../e2e-setup.js";
+import { apiFetch, createSession, defaultProject } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const FAKE_CLAUDE_CLI = fileURLToPath(new URL("../../fixtures/claude-code/fake-claude-cli.mjs", import.meta.url));
 
-async function operatorCookie(): Promise<string> {
-	const res = await fetch(`${base()}/api/preferences`, {
-		headers: { Authorization: `Bearer ${readE2EToken()}` },
-	});
-	const setCookie = res.headers.get("set-cookie");
-	const cookie = setCookie?.split(";")[0];
-	if (!cookie) throw new Error("operator cookie was not minted");
-	return cookie;
+function setClaudeCodePrefs(gateway: any, patch: Record<string, unknown>): void {
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === null || value === undefined) gateway.preferencesStore?.remove(key);
+		else gateway.preferencesStore?.set(key, value);
+	}
 }
 
-async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
-	const cookie = await operatorCookie();
-	const commonHeaders = {
-		Authorization: `Bearer ${readE2EToken()}`,
-		Cookie: cookie,
-		"Content-Type": "application/json",
-	};
-	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
-		method: "POST",
-		headers: commonHeaders,
-		body: JSON.stringify(patch),
-	});
-	expect(confirmation.status).toBe(200);
-	const data = await confirmation.json();
-	expect(data.confirmationToken).toBeTruthy();
-	return fetch(`${base()}/api/preferences`, {
-		method: "PUT",
-		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
-		body: JSON.stringify(patch),
-	});
-}
-
-
-async function seedFakeClaudeCodePrefs(): Promise<void> {
+async function seedFakeClaudeCodePrefs(gateway: any): Promise<void> {
 	chmodSync(FAKE_CLAUDE_CLI, 0o755);
-	const resp = await confirmedClaudeCodePrefs({
+	setClaudeCodePrefs(gateway, {
 		"claudeCode.executablePath": FAKE_CLAUDE_CLI,
 		"claudeCode.defaultModel": "sonnet",
 		"claudeCode.permissionMode": "default",
 		"claudeCode.allowBypassPermissions": null,
 	});
-	expect(resp.status).toBe(200);
+	await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
 }
 
-async function resetClaudeCodePrefs(): Promise<void> {
-	await confirmedClaudeCodePrefs({
+async function resetClaudeCodePrefs(gateway: any): Promise<void> {
+	setClaudeCodePrefs(gateway, {
 		"claudeCode.executablePath": null,
 		"claudeCode.defaultModel": null,
 		"claudeCode.permissionMode": null,
 		"claudeCode.allowBypassPermissions": null,
 	});
+	await apiFetch("/api/claude-code/status/refresh", { method: "POST" }).catch(() => undefined);
 }
 
 const CLAUDE_CODE_MODEL = {
@@ -83,8 +58,8 @@ const CLAUDE_CODE_OPUS_MODEL = {
 };
 
 test.describe("Claude Code local-runtime UI", () => {
-	test.afterEach(async () => {
-		await resetClaudeCodePrefs().catch(() => {});
+	test.afterEach(async ({ gateway }) => {
+		await resetClaudeCodePrefs(gateway).catch(() => {});
 	});
 
 	test("model picker labels Claude Code as local without extra pill or numeric limits", async ({ page }) => {
@@ -112,8 +87,8 @@ test.describe("Claude Code local-runtime UI", () => {
 		}
 	});
 
-	test("selecting Claude Code in an existing Pi session prompts for and creates a new runtime session", async ({ page }) => {
-		await seedFakeClaudeCodePrefs();
+	test("selecting Claude Code in an existing Pi session prompts for and creates a new runtime session", async ({ page, gateway }) => {
+		await seedFakeClaudeCodePrefs(gateway);
 		await page.route("**/api/models**", async (route) => {
 			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_MODEL]) });
 		});
@@ -149,8 +124,8 @@ test.describe("Claude Code local-runtime UI", () => {
 		}
 	});
 
-	test("Claude Code session runtime metadata is visible and survives reload", async ({ page }) => {
-		await seedFakeClaudeCodePrefs();
+	test("Claude Code session runtime metadata is visible and survives reload", async ({ page, gateway }) => {
+		await seedFakeClaudeCodePrefs(gateway);
 		let sessionId = "";
 		try {
 			const project = await defaultProject();
