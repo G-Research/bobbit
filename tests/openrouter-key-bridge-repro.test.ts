@@ -23,7 +23,7 @@ fs.mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
 process.env.BOBBIT_AGENT_DIR = agentDir;
 
-const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { SessionManager, emitSessionEvent } = await import("../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.ts");
 const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../src/server/agent/event-buffer.ts");
@@ -295,5 +295,133 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		const warningPayload = JSON.stringify(warnings);
 		assert.ok(/provider authentication failure|missing-api-key/i.test(warningPayload), "warning should remain diagnostically useful");
 		assert.doesNotMatch(warningPayload, new RegExp(AUTH_ERROR_SECRET), "terminated recovery warning must redact provider-auth secrets");
+	});
+
+	it("retry after provider-auth dispatch failure consumes the recovered queue row", async () => {
+		const client = makeClient();
+		const promptCalls: string[] = [];
+		const prompt = mock.fn(async (text: string) => {
+			promptCalls.push(text);
+			if (promptCalls.length === 1) return { success: false, error: AUTH_ERROR };
+			return { success: true };
+		});
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: mock.fn(() => ({ modelProvider: "openrouter" })),
+			update: mock.fn(() => {}),
+		};
+		managers.push(manager);
+		const session: any = {
+			id: "s-openrouter-retry-no-duplicate",
+			title: "OpenRouter retry no duplicate",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 0,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set([client]),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			modelProvider: "openrouter",
+			setupComplete: true,
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: makeBridge({ prompt }),
+		};
+		manager.sessions.set(session.id, session);
+
+		await assert.rejects(() => manager.enqueuePrompt(session.id, "retry me"), /No API key found for openrouter/);
+		assert.equal(session.promptQueue.length, 1, "failed auth dispatch should be recoverable before retry");
+
+		await manager.retryLastPrompt(session.id);
+		assert.equal(session.promptQueue.length, 0, "retry should consume the recovered queued prompt before dispatching");
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", messages: [] });
+		assert.deepEqual(promptCalls, ["retry me", "retry me"], "agent_end drain must not resend the recovered prompt after retry succeeds");
+	});
+
+	it("redacts provider-auth agent-turn message_end before client/EventBuffer broadcast", () => {
+		const client = makeClient();
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: mock.fn(() => ({ modelProvider: "openrouter" })),
+			update: mock.fn(() => {}),
+		};
+		managers.push(manager);
+		const session: any = {
+			id: "s-openrouter-agent-turn-redaction",
+			status: "streaming",
+			statusVersion: 0,
+			clients: new Set([client]),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			modelProvider: "openrouter",
+			inFlightSteerTexts: [],
+		};
+		manager.sessions.set(session.id, session);
+		const event = {
+			type: "message_end",
+			message: {
+				id: "m-auth-error",
+				role: "assistant",
+				content: [{ type: "text", text: "failed" }],
+				stopReason: "error",
+				errorMessage: AUTH_ERROR,
+			},
+		};
+
+		manager.handleAgentLifecycle(session, event);
+		emitSessionEvent(session, event);
+
+		const visiblePayload = JSON.stringify(client.sent);
+		const bufferedPayload = JSON.stringify(session.eventBuffer.getAll());
+		assert.doesNotMatch(visiblePayload, new RegExp(AUTH_ERROR_SECRET), "client frames must not leak raw provider-auth message_end secrets");
+		assert.doesNotMatch(bufferedPayload, new RegExp(AUTH_ERROR_SECRET), "EventBuffer must not leak raw provider-auth message_end secrets");
+		assert.match(visiblePayload, /provider authentication failure|missing-api-key|Fix API key/i, "redacted frames should remain actionable");
+	});
+
+	it("redacts provider-auth text in drainQueue catch and observed-turn suppression logs", async () => {
+		const logs: string[] = [];
+		const originalWarn = console.warn;
+		const originalError = console.error;
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: mock.fn(() => ({ modelProvider: "openrouter" })),
+			update: mock.fn(() => {}),
+		};
+		managers.push(manager);
+		let rejectPrompt!: (err: Error) => void;
+		const prompt = mock.fn(() => new Promise((_resolve, reject) => { rejectPrompt = reject; }));
+		const session: any = {
+			id: "s-openrouter-drain-log-redaction",
+			titleGenerated: true,
+			status: "idle",
+			statusVersion: 0,
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			modelProvider: "openrouter",
+			inFlightSteerTexts: [],
+			rpcClient: makeBridge({ prompt }),
+		};
+		manager.sessions.set(session.id, session);
+		session.promptQueue.enqueue("queued auth failure");
+
+		console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+		console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+		try {
+			manager.drainQueue(session);
+			session.agentObservedTurnVersion = 1;
+			rejectPrompt(new Error(AUTH_ERROR));
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			console.warn = originalWarn;
+			console.error = originalError;
+		}
+
+		const logPayload = JSON.stringify(logs);
+		assert.ok(/provider authentication failure|missing-api-key/i.test(logPayload), "logs should keep provider-auth classification");
+		assert.doesNotMatch(logPayload, new RegExp(AUTH_ERROR_SECRET), "drainQueue logs must redact provider-auth secrets");
 	});
 });
