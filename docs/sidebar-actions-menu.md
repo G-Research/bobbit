@@ -157,7 +157,7 @@ This is intentionally **mouse-only** — there is no keyboard shortcut and no en
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` creates a new session that rehydrates from a clone of the source session's conversation history. Unlike the old duplicate flow, fork copies history — it clones the source `.jsonl` transcript plus its tool-content cache and proposal drafts, then hands the clone to the new session via `switch_session` (the same lossless mechanism as Continue-Archived).
+`POST /api/sessions/:id/fork` creates a new session that rehydrates from the source session's conversation history. Unlike the old duplicate flow, fork preserves history. Pi-backed sessions clone the source `.jsonl` transcript plus tool-content cache and proposal drafts, then hand the clone to the new session via `switch_session` (the same lossless mechanism as Continue-Archived). Claude Code sessions preserve `claudeCodeSessionId` and resume through the local Claude Code CLI instead; see [Claude Code local runtime](claude-code-runtime.md#continue-fork-restart-and-resume).
 
 The endpoint preserves the project/task/goal/session configuration:
 
@@ -168,6 +168,7 @@ The endpoint preserves the project/task/goal/session configuration:
 - staff id, role, accessory, role prompt, and staff pinned memory when applicable
 - sandbox setting and allowed tools
 - selected model provider/model id
+- runtime metadata, including Claude Code `claudeCodeSessionId` when applicable
 
 The request body `{ newWorktree?: boolean }` (default `true`) controls the worktree:
 

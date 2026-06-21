@@ -35,7 +35,7 @@ Session-list invalidations (`session_created`, `sessions_changed`, and `session_
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
 | `restart_agent` | — | Restart the agent process for this socket's session. This is the active-session path; the sidebar `Refresh agent` action uses `POST /api/sessions/:id/restart` to target any live row by id. Both paths call the same session-manager restart implementation. |
-| `set_model` | `provider`, `modelId` | Switch the AI model |
+| `set_model` | `provider`, `modelId` | Switch the AI model. Runtime changes between Pi/API models and `claude-code/*` are rejected with `error.code = "RUNTIME_SWITCH_REQUIRES_NEW_SESSION"`; create a new session instead. Same-runtime Claude Code alias switches are allowed only while idle and restart the local CLI with `--resume <claudeCodeSessionId>`. |
 | `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
 | `get_state` | — | Request current agent state |
@@ -48,6 +48,12 @@ Session-list invalidations (`session_created`, `sessions_changed`, and `session_
 | `task_update` | `taskId`, `updates` | Update a task (title, spec, state, assignment, deps) |
 | `task_delete` | `taskId` | Delete a task |
 | `summarize_goal_title` | `goalTitle` | Auto-generate a shorter goal title |
+
+### `set_model` runtime rules
+
+`set_model` is an in-session model switch, not a runtime migration. Switching between Pi/API-backed providers and `provider: "claude-code"` requires a new session and the server replies with `{ type: "error", code: "RUNTIME_SWITCH_REQUIRES_NEW_SESSION", message }` if a client bypasses the UI guard.
+
+For Claude Code sessions, switching from one `claude-code/<alias>` to another keeps the Bobbit session when the runtime is idle. Bobbit stops the current local CLI process, starts it with the new alias, and passes `--resume <claudeCodeSessionId>` when a Claude Code session id is known. Active turns reject the switch until idle. See [Claude Code local runtime](claude-code-runtime.md#no-silent-runtime-switching).
 
 ## Server → Client
 
