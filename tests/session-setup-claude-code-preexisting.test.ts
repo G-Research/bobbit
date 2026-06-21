@@ -95,4 +95,34 @@ describe("session setup Claude Code pre-existing transcript recovery", () => {
 		);
 		assert.equal(rows.get("live-session").claudeCodeSessionId, "claude-live-456");
 	});
+
+	it("persists Claude Code model metadata from the Claude alias when runtime is explicit", () => {
+		const rows = new Map<string, any>();
+		const store = {
+			get: (id: string) => rows.get(id),
+			put: (row: any) => rows.set(row.id, row),
+		};
+		const plan = {
+			id: "explicit-claude-runtime",
+			cwd: process.cwd(),
+			runtime: "claude-code",
+			initialModel: "anthropic/claude-3-5-sonnet-latest",
+			bridgeOptions: {
+				initialModel: "anthropic/claude-3-5-sonnet-latest",
+				claudeCodeModelAlias: "opus",
+			},
+		};
+
+		persistOnce(
+			{ id: "explicit-claude-runtime", title: "Ready", cwd: process.cwd(), createdAt: 1, lastActivity: 1 },
+			plan as any,
+			store as any,
+		);
+
+		const row = rows.get("explicit-claude-runtime");
+		assert.equal(row.runtime, "claude-code");
+		assert.equal(row.modelProvider, "claude-code");
+		assert.equal(row.modelId, "opus");
+		assert.equal(row.claudeCodeModelAlias, "opus");
+	});
 });
