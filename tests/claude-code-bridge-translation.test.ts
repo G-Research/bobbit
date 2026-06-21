@@ -141,6 +141,65 @@ describe("Claude Code stream translation", () => {
 		assert.deepEqual(state.messages.map((message: any) => message.role), ["assistant", "toolResult", "assistant"]);
 	});
 
+	it("normalizes Claude Code ask-user tool_use to Bobbit ask_user_choices", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { messageIdPrefix: "test" });
+		const out = [
+			...translator.translate({
+				type: "assistant",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "tool_use",
+						id: "toolu_ask_1",
+						name: "Ask User Question",
+						input: {
+							questions: [{
+								question: "Which runtime should I use?",
+								header: "Runtime",
+								multiSelect: true,
+								options: [
+									{ label: "Claude Code", description: "Use local Claude Code" },
+									{ label: "Pi", description: "Use default Pi runtime" },
+								],
+							}],
+						},
+					}],
+				},
+			}),
+			...translator.translate({
+				type: "user",
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_1", content: "posted" }] },
+			}),
+		];
+		const expectedInput = {
+			questions: [{
+				question: "Which runtime should I use?",
+				options: ["Claude Code", "Pi"],
+				tab_label: "Runtime",
+				multi: true,
+			}],
+		};
+
+		const toolStart = out.find((event) => event.type === "tool_execution_start");
+		assert.equal(toolStart?.toolName, "ask_user_choices");
+		assert.equal(toolStart?.name, "ask_user_choices");
+		assert.deepEqual(toolStart?.input, expectedInput);
+		assert.deepEqual(toolStart?.arguments, expectedInput);
+
+		const toolUpdate = out.find((event) => event.type === "message_update" && event.message.content.some((block: any) => block.type === "toolCall"));
+		const toolCall = toolUpdate?.message.content.find((block: any) => block.type === "toolCall");
+		assert.equal(toolCall?.name, "ask_user_choices");
+		assert.deepEqual(toolCall?.input, expectedInput);
+		assert.deepEqual(toolCall?.arguments, expectedInput);
+
+		const toolEnd = out.find((event) => event.type === "tool_execution_end");
+		assert.equal(toolEnd?.toolCallId, "toolu_ask_1");
+		assert.equal(toolEnd?.toolName, "ask_user_choices");
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.toolCallId, "toolu_ask_1");
+		assert.equal(toolResultMessage?.message.toolName, "ask_user_choices");
+	});
+
 	it("preserves errored tool_result pairing", () => {
 		const translator = new ClaudeCodeStreamTranslator(undefined, { messageIdPrefix: "test" });
 		const out = [
