@@ -21,7 +21,7 @@ const CLAUDE_CODE_MODEL = {
 
 test.describe("Claude Code local-runtime UI", () => {
 	test("model picker labels Claude Code as a local runtime", async ({ page }) => {
-		await page.route("**/api/models", async (route) => {
+		await page.route("**/api/models**", async (route) => {
 			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_MODEL]) });
 		});
 		const sessionId = await createSession();
@@ -37,6 +37,7 @@ test.describe("Claude Code local-runtime UI", () => {
 			await expect(row).toContainText("Claude Code Sonnet");
 			await expect(row).toContainText("Local runtime");
 			await expect(row).toContainText("Claude Code (local)");
+			await expect(row).toContainText("Claude Code account");
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}

@@ -80,10 +80,11 @@ describe("Claude Code status", () => {
 		assert.deepEqual(seen.args, ["--version"]);
 		assert.equal(seen.options.shell, false);
 		assert.equal(status.available, true);
-		assert.equal(status.ready, false);
+		assert.equal(status.ready, true);
 		assert.equal(status.authenticated, false);
+		assert.equal(status.authenticationStatus, "unknown");
 		assert.equal(status.version, "1.2.3");
-		assert.match(status.reason || "", /authentication status unknown/);
+		assert.match(status.message || "", /verified when a Claude Code session starts/);
 	});
 
 	it("reports a missing CLI as unavailable", async () => {
@@ -118,7 +119,7 @@ describe("Claude Code synthetic models", () => {
 		}
 	});
 
-	it("keeps Claude Code models unavailable when only --version succeeds", async () => {
+	it("keeps Claude Code models selectable when CLI is available but auth is unknown", async () => {
 		const { prefs, dir } = makePrefs();
 		try {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, process.execPath);
@@ -126,8 +127,27 @@ describe("Claude Code synthetic models", () => {
 			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
 			assert.ok(sonnet);
 			assert.equal(sonnet.authenticated, false);
-			assert.equal(sonnet.sessionSelectable, false);
-			assert.match(sonnet.sessionUnavailableReason || "", /authentication status unknown/);
+			assert.equal(sonnet.sessionSelectable, true);
+			assert.equal(sonnet.sessionUnavailableReason, undefined);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("uses project-scoped Claude Code config for model selectability when provided", async () => {
+		const { prefs, dir } = makePrefs();
+		try {
+			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, path.join(dir, "missing-global-claude"));
+			const projectConfig = {
+				get(key: string) {
+					return key === "claudeCodeExecutablePath" ? process.execPath : undefined;
+				},
+			};
+			const models = await getAvailableModels(prefs, projectConfig);
+			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
+			assert.ok(sonnet);
+			assert.equal(sonnet.sessionSelectable, true);
+			assert.equal(sonnet.sessionUnavailableReason, undefined);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

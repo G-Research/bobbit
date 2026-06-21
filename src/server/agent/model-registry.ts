@@ -96,14 +96,17 @@ export function getBuiltInProviderIds(): string[] {
 	return getProviders().map(provider => String(provider));
 }
 
-export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+export async function getAvailableModels(
+	prefs: PreferencesStore,
+	projectConfig?: { get(key: string): string | undefined } | null,
+): Promise<ApiModel[]> {
 	const now = Date.now();
-	const currentVersion = getPrefsVersion(prefs);
+	const currentVersion = getPrefsVersion(prefs, projectConfig);
 	if (cachedModels && now < cacheExpiry && currentVersion === cacheConfigVersion) {
 		return cachedModels;
 	}
 
-	const result = await assembleModels(prefs);
+	const result = await assembleModels(prefs, projectConfig);
 	cachedModels = result;
 	cacheExpiry = now + 5000;
 	cacheConfigVersion = currentVersion;
@@ -114,7 +117,7 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
  * Simple version tracking — hash relevant preference keys.
  * We use a string hash of aigw.url + customProviders + providerKeys to detect changes.
  */
-function getPrefsVersion(prefs: PreferencesStore): number {
+function getPrefsVersion(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): number {
 	const all = prefs.getAll();
 	let hash = 0;
 	const str = JSON.stringify([
@@ -125,6 +128,10 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 		all["claudeCode.defaultModel"],
 		all["claudeCode.permissionMode"],
 		all["claudeCode.allowBypassPermissions"],
+		projectConfig?.get("claudeCodeExecutablePath"),
+		projectConfig?.get("claudeCodeDefaultModel"),
+		projectConfig?.get("claudeCodePermissionMode"),
+		projectConfig?.get("claudeCodeAllowBypassPermissions"),
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
 	]);
 	for (let i = 0; i < str.length; i++) {
@@ -149,7 +156,7 @@ function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: n
 	return explicit ?? inferredValue;
 }
 
-async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+async function assembleModels(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
 
@@ -215,7 +222,7 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	// 1c. Claude Code local runtime models are synthetic and remain visible even
 	// when AI Gateway exclusive mode hides direct API-backed providers.
 	try {
-		results.push(...await buildClaudeCodeModels(prefs));
+		results.push(...await buildClaudeCodeModels(prefs, projectConfig));
 	} catch (err) {
 		console.error("[model-registry] Failed to probe Claude Code runtime:", err);
 		results.push(...buildClaudeCodeModelsFromStatus({
@@ -271,8 +278,8 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	return results;
 }
 
-async function buildClaudeCodeModels(prefs: PreferencesStore): Promise<ApiModel[]> {
-	const status = await getClaudeCodeStatus(prefs);
+async function buildClaudeCodeModels(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): Promise<ApiModel[]> {
+	const status = await getClaudeCodeStatus(prefs, projectConfig);
 	return buildClaudeCodeModelsFromStatus(status);
 }
 

@@ -2783,6 +2783,29 @@ async function handleApiRoute(
 		return projectConfigStore;
 	}
 
+	function resolveClaudeCodeStatusConfigStore(url: URL): { ok: true; store?: ProjectConfigStore; projectId?: string } | { ok: false; status: number; error: string } {
+		const projectId = url.searchParams.get("projectId") || undefined;
+		if (projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) return { ok: false, status: 404, error: "Project not found" };
+			return { ok: true, store: ctx.projectConfigStore, projectId };
+		}
+		const cwd = url.searchParams.get("cwd") || undefined;
+		if (cwd) {
+			const resolvedCwd = path.resolve(cwd);
+			const matches = projectRegistry.list()
+				.filter(project => !project.hidden)
+				.map(project => ({ project, root: path.resolve(project.rootPath) }))
+				.filter(({ root }) => resolvedCwd === root || resolvedCwd.startsWith(root + path.sep))
+				.sort((a, b) => b.root.length - a.root.length);
+			if (matches[0]) {
+				const ctx = projectContextManager.getOrCreate(matches[0].project.id);
+				if (ctx) return { ok: true, store: ctx.projectConfigStore, projectId: ctx.project.id };
+			}
+		}
+		return { ok: true };
+	}
+
 	/**
 	 * Resolve the host-side cwd for slash-skill discovery.
 	 * For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...)
@@ -7278,10 +7301,13 @@ async function handleApiRoute(
 
 	// ── Unified Model Registry ──
 
-	// GET /api/claude-code/status — local Claude Code CLI readiness probe
+	// GET /api/claude-code/status — local Claude Code CLI readiness probe.
+	// Optional projectId/cwd scopes project-level Claude Code spawn config.
 	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
-			json(await getClaudeCodeStatus(preferencesStore));
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
 		}
@@ -7290,20 +7316,25 @@ async function handleApiRoute(
 
 	// POST /api/claude-code/status/refresh — clear cached status and re-probe.
 	if (url.pathname === "/api/claude-code/status/refresh" && req.method === "POST") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
 			invalidateClaudeCodeStatusCache();
 			invalidateModelCache();
-			json(await getClaudeCodeStatus(preferencesStore));
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
 		}
 		return;
 	}
 
-	// GET /api/models — unified model list from all sources
+	// GET /api/models — unified model list from all sources.
+	// Optional projectId/cwd scopes Claude Code local-runtime status to project config.
 	if (url.pathname === "/api/models" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
-			const models = await getAvailableModels(preferencesStore);
+			const models = await getAvailableModels(preferencesStore, scoped.store ?? null);
 			json(models);
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load models: ${err.message}` });

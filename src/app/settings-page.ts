@@ -36,7 +36,7 @@ import {
 } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
-import { setConfigScope, getConfigScope } from "./config-scope.js";
+import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
@@ -1476,6 +1476,7 @@ type ClaudeCodeStatus = {
 	permissionMode?: ClaudeCodePermissionMode;
 	reason?: string;
 	message?: string;
+	authenticationStatus?: "verified" | "login-required" | "unknown";
 	checkedAt?: number;
 };
 
@@ -1501,11 +1502,14 @@ function normalizeClaudeCodePermissionMode(value: unknown): ClaudeCodePermission
 function claudeCodeStatusTitle(status: ClaudeCodeStatus | null): string {
 	if (!status) return claudeCodeStatusError || "Status not checked";
 	if (status.checking || claudeCodeStatusLoading) return "Checking Claude Code…";
+	if (status.authenticationStatus === "login-required") return "Claude Code login required";
+	if (status.authenticationStatus === "unknown" && status.available !== false) return "CLI available; auth checked at session start";
 	if (status.ready) return "Ready";
 	const reason = String(status.reason ?? "").toLowerCase();
-	if (reason.includes("cli_missing") || status.available === false) return "Claude Code CLI not found";
-	if (reason.includes("auth_required") || status.authenticated === false) return "Claude Code login required";
-	if (reason.includes("probe_failed")) return "Claude Code probe failed";
+	if (reason.includes("cli_missing") || reason.includes("not found")) return "Claude Code CLI not found";
+	if (reason.includes("auth_required") || reason.includes("login required")) return "Claude Code login required";
+	if (reason.includes("probe_failed") || reason.includes("probe failed")) return "Claude Code probe failed";
+	if (status.available === false) return status.reason || status.message || "Claude Code not ready";
 	return status.message || "Claude Code not ready";
 }
 
@@ -1513,6 +1517,11 @@ function claudeCodeStatusTone(status: ClaudeCodeStatus | null): "ready" | "check
 	if (status?.ready) return "ready";
 	if (status?.checking || claudeCodeStatusLoading) return "checking";
 	return "warning";
+}
+
+function currentProjectQuery(): string {
+	const projectId = getConfigProjectId();
+	return projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 }
 
 async function runModelTest(pref: string): Promise<void> {
@@ -1568,12 +1577,13 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
+			const projectQuery = currentProjectQuery();
 			const [statusRes, prefsRes, modelsRes, imageModelsRes, claudeCodeStatusRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
-				gatewayFetch("/api/models"),
+				gatewayFetch(`/api/models${projectQuery}`),
 				gatewayFetch("/api/image-models"),
-				gatewayFetch("/api/claude-code/status"),
+				gatewayFetch(`/api/claude-code/status${projectQuery}`),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -1716,7 +1726,7 @@ async function refreshClaudeCodeStatus(): Promise<void> {
 	claudeCodeStatusError = "";
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/claude-code/status/refresh", { method: "POST" });
+		const res = await gatewayFetch(`/api/claude-code/status/refresh${currentProjectQuery()}`, { method: "POST" });
 		if (res.ok) {
 			claudeCodeStatus = await res.json();
 		} else {
@@ -1800,7 +1810,7 @@ async function setAigwExclusive(value: boolean): Promise<void> {
 	} catch {}
 	// Refresh the selector lists used on this page (registry cache is keyed on prefs version).
 	try {
-		const res = await gatewayFetch("/api/models");
+		const res = await gatewayFetch(`/api/models${currentProjectQuery()}`);
 		if (res.ok) {
 			const models = await res.json();
 			if (Array.isArray(models)) allModels = models;

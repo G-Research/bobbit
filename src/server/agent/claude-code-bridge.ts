@@ -36,7 +36,20 @@ export function buildClaudeCodeArgs(options: ClaudeCodeBridgeOptions = {}): stri
 		args.push("--permission-mode", permissionMode);
 	}
 
+	const resumeSessionId = normalizeResumeSessionId(options.claudeCodeSessionId);
+	if (resumeSessionId) {
+		args.push("--resume", resumeSessionId);
+	}
+
 	return args;
+}
+
+export function normalizeResumeSessionId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	// Claude Code session IDs are opaque but CLI-safe tokens. Reject anything
+	// needing shell quoting even though spawn() does not use a shell.
+	return /^[A-Za-z0-9._:@-]{1,200}$/.test(trimmed) ? trimmed : undefined;
 }
 
 export function normalizePermissionMode(mode: unknown, allowBypass = false): ClaudeCodePermissionMode {

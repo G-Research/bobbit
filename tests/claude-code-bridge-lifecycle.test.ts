@@ -136,11 +136,12 @@ describe("ClaudeCodeBridge lifecycle", () => {
 		}
 	});
 
-	it("does not pass resume session ids in the MVP arg list", () => {
+	it("passes persisted Claude Code session ids via the guarded resume flag", () => {
 		assert.deepEqual(
 			buildClaudeCodeArgs({ claudeCodeSessionId: "previous-claude-session" }),
-			["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"],
+			["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--resume", "previous-claude-session"],
 		);
+		assert.equal(buildClaudeCodeArgs({ claudeCodeSessionId: "bad session; rm -rf" }).includes("--resume"), false);
 	});
 
 	it("passes explicit non-default permission mode but downgrades bypass without opt-in", () => {

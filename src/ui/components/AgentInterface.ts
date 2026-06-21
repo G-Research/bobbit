@@ -1856,7 +1856,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); });
+					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); }, { projectId: this.projectId });
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
@@ -1900,6 +1900,7 @@ export class AgentInterface extends LitElement {
 		// Build context popover content
 		const popoverContent = this._contextPopoverOpen ? (() => {
 			const m = model as any;
+			const isClaudeCodeModel = this._currentRuntime() === "claude-code" || m?.runtime === "claude-code" || m?.provider === "claude-code";
 			// Find last assistant usage (same logic as above)
 			let lastUsage: Usage | undefined;
 			if (!usageStale) {
@@ -1939,7 +1940,7 @@ export class AgentInterface extends LitElement {
 							${row("Provider", m.provider)}
 							${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
 							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
-							${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
+							${row("Cost", isClaudeCodeModel ? "Claude Code account/local runtime" : (m.cost ? formatModelCost(m.cost) + "/M tokens" : "—"))}
 						</div>
 					` : nothing}
 
@@ -2204,7 +2205,7 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); });
+								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); }, { projectId: this.projectId });
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector

@@ -11,6 +11,7 @@ export interface ClaudeCodeStatus {
 	version?: string;
 	executablePath: string;
 	reason?: string;
+	message?: string;
 	/** MVP: no safe authenticated no-op probe is documented, so auth is verified at session start. */
 	authenticationStatus?: "verified" | "login-required" | "unknown";
 }
@@ -31,8 +32,11 @@ export function invalidateClaudeCodeStatusCache(): void {
 	cachedPromise = null;
 }
 
-export async function getClaudeCodeStatus(prefs: Pick<PreferencesStore, "get">): Promise<ClaudeCodeStatus> {
-	const config = readClaudeCodeConfig(prefs);
+export async function getClaudeCodeStatus(
+	prefs: Pick<PreferencesStore, "get">,
+	projectConfig?: { get(key: string): string | undefined } | null,
+): Promise<ClaudeCodeStatus> {
+	const config = readClaudeCodeConfig(prefs, projectConfig);
 	const key = cacheKey(config);
 	const now = Date.now();
 	if (cachedStatus && cachedStatus.key === key && cachedStatus.expiry > now) return cachedStatus.status;
@@ -66,10 +70,15 @@ export async function probeClaudeCodeStatus(
 		return {
 			available: true,
 			authenticated: testAssumeAuthenticated,
-			ready: testAssumeAuthenticated,
+			// `claude --version` proves the local runtime can be started. Claude Code
+			// does not document a safe authenticated no-op probe, so auth-unknown is
+			// selectable and any login failure is surfaced when the session starts.
+			ready: true,
 			...(version ? { version } : {}),
 			executablePath,
-			...(testAssumeAuthenticated ? {} : { reason: "Claude Code authentication status unknown; sign in with Claude Code and refresh status." }),
+			message: testAssumeAuthenticated
+				? "Claude Code CLI is available."
+				: "Claude Code CLI is available. Login will be verified when a Claude Code session starts.",
 			authenticationStatus: testAssumeAuthenticated ? "verified" : "unknown",
 		};
 	} catch (err: any) {

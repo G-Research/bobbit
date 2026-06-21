@@ -236,6 +236,25 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect.poll(async () => (await prefs(page))["claudeCode.permissionMode"]).toBe("acceptEdits");
 	});
 
+	test("Claude Code auth-unknown status is not labelled login required", async ({ page }) => {
+		await resetFixture(page, {
+			claudeCodeStatus: {
+				available: true,
+				authenticated: false,
+				ready: true,
+				checking: false,
+				commandPath: "claude",
+				version: "1.2.3",
+				authenticationStatus: "unknown",
+				message: "Claude Code CLI is available. Login will be verified when a Claude Code session starts.",
+			},
+		});
+		await renderSettings(page, "#/settings/system/models");
+		const title = page.locator("[data-testid='claude-code-status-title']");
+		await expect(title).toHaveText("CLI available; auth checked at session start");
+		await expect(title).not.toHaveText("Claude Code login required");
+	});
+
 	test("Claude Code status refresh posts and updates ready card", async ({ page }) => {
 		await resetFixture(page, {
 			claudeCodeStatus: {

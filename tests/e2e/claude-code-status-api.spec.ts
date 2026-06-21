@@ -74,8 +74,43 @@ test.describe("Claude Code status/model APIs", () => {
 		expect(refreshResp.status).toBe(200);
 		const refreshed = await refreshResp.json();
 		expect(refreshed.available).toBe(true);
-		expect(refreshed.ready).toBe(false);
-		expect(refreshed.reason).toContain("authentication status unknown");
+		expect(refreshed.ready).toBe(true);
+		expect(refreshed.authenticationStatus).toBe("unknown");
+		expect(refreshed.message).toContain("verified when a Claude Code session starts");
+	});
+
+	test("models and status honor project-scoped Claude Code executable config", async () => {
+		const projectsResp = await apiFetch("/api/projects");
+		expect(projectsResp.status).toBe(200);
+		const projects = await projectsResp.json();
+		const project = (Array.isArray(projects) ? projects : projects.projects)?.[0];
+		expect(project?.id).toBeTruthy();
+		const missing = path.join(os.tmpdir(), `missing-global-claude-${process.pid}-${Date.now()}`);
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "claudeCode.executablePath": missing }),
+		});
+		try {
+			const projectConfigResp = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ claudeCodeExecutablePath: process.execPath }),
+			});
+			expect(projectConfigResp.status).toBe(200);
+
+			const globalModels = await (await apiFetch("/api/models")).json();
+			expect(globalModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(false);
+
+			const scopedStatus = await (await apiFetch(`/api/claude-code/status?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(scopedStatus.executablePath).toBe(process.execPath);
+			expect(scopedStatus.ready).toBe(true);
+			const scopedModels = await (await apiFetch(`/api/models?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(true);
+		} finally {
+			await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ claudeCodeExecutablePath: null }),
+			}).catch(() => {});
+		}
 	});
 
 	test("preferences validate Claude Code bypass permission opt-in", async () => {

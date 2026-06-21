@@ -164,16 +164,18 @@ export class ModelSelector extends DialogBase {
 	@state() private loading = false;
 
 	private onSelectCallback?: (model: Model<any>) => void;
+	private projectId?: string;
 	private scrollContainerRef = createRef<HTMLDivElement>();
 	private searchInputRef = createRef<HTMLInputElement>();
 	private lastMousePosition = { x: 0, y: 0 };
 
 	protected override modalWidth = "min(400px, 90vw)";
 
-	static async open(currentModel: Model<any> | null, onSelect: (model: Model<any>) => void) {
+	static async open(currentModel: Model<any> | null, onSelect: (model: Model<any>) => void, opts?: { projectId?: string }) {
 		const selector = new ModelSelector();
 		selector.currentModel = currentModel;
 		selector.onSelectCallback = onSelect;
+		selector.projectId = opts?.projectId;
 		selector.open();
 		selector.loadModels();
 	}
@@ -181,7 +183,8 @@ export class ModelSelector extends DialogBase {
 	private async loadModels() {
 		this.loading = true;
 		try {
-			const res = await gatewayFetch("/api/models");
+			const query = this.projectId ? `?projectId=${encodeURIComponent(this.projectId)}` : "";
+			const res = await gatewayFetch(`/api/models${query}`);
 			if (res.ok) {
 				this.serverModels = await res.json();
 			}
@@ -402,9 +405,9 @@ export class ModelSelector extends DialogBase {
 					: filteredModels.map(({ provider, id, model }, index) => {
 						const isCurrent = modelsAreEqual(this.currentModel, model);
 						const isSelected = index === this.selectedIndex;
-						const hasKey = model.authenticated ?? false;
 						const sessionUnavailable = this.isSessionUnavailable(model);
 						const localRuntime = isLocalRuntimeModel(model);
+						const hasKey = localRuntime ? !sessionUnavailable : (model.authenticated ?? false);
 						const dimmed = sessionUnavailable || !hasKey;
 						const providerLabel = modelProviderLabel(model, provider);
 						const displayName = modelDisplayName(model, id);
@@ -450,7 +453,7 @@ export class ModelSelector extends DialogBase {
 										<span class="${model.input.includes("image") ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
 										<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>
 									</div>
-									<span>${formatModelCost(model.cost)}</span>
+									<span>${localRuntime ? "Claude Code account" : formatModelCost(model.cost)}</span>
 								</div>
 							</div>
 						`;

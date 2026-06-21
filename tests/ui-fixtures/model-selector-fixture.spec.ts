@@ -130,6 +130,8 @@ test.describe("ModelSelector Claude Code local runtime", () => {
 		await expect(row).toContainText("Claude Code Sonnet");
 		await expect(row).toContainText("Local runtime");
 		await expect(row).toContainText("Claude Code (local)");
+		await expect(row).toContainText("Claude Code account");
+		await expect(row).not.toContainText("$0");
 		expect(await row.getAttribute("title")).toContain("local Claude Code CLI");
 
 		await page.locator("agent-model-selector input").fill("local sonnet");
