@@ -670,6 +670,43 @@ type RestoreCoordinator = {
 	promise: Promise<SessionInfo | undefined>;
 };
 
+function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
+	const askToolIds = new Set<string>();
+	for (const message of messages as any[]) {
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
+			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
+		}
+	}
+	return messages.map((message: any) => {
+		if (message?.role !== "toolResult") return message;
+		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
+		const text = stringifyPersistedToolResultContent(message.content).trim();
+		if (text !== "Answer questions?") return message;
+		const rest = { ...message };
+		delete rest.error;
+		return {
+			...rest,
+			isError: false,
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
+		};
+	});
+}
+
+function stringifyPersistedToolResultContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content.map((item: any) => {
+			if (typeof item === "string") return item;
+			if (item?.type === "text" && typeof item.text === "string") return item.text;
+			try { return JSON.stringify(item); } catch { return String(item); }
+		}).join("\n");
+	}
+	if (content == null) return "";
+	try { return JSON.stringify(content); } catch { return String(content); }
+}
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -5115,7 +5152,8 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 		if (!ps?.agentSessionFile) return [];
 		if (opts?.archivedOnly && !ps.archived) return [];
-		if (opts?.claudeCodeOnly && resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) !== "claude-code") return [];
+		const isClaudeCode = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
+		if (opts?.claudeCodeOnly && !isClaudeCode) return [];
 		try {
 			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
 			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
@@ -5128,7 +5166,7 @@ export class SessionManager {
 					if (entry.type === "message" && entry.message) messages.push(entry.message);
 				} catch { /* skip malformed line */ }
 			}
-			return messages;
+			return isClaudeCode ? normalizePersistedClaudeCodeAskMessages(messages) : messages;
 		} catch {
 			return [];
 		}

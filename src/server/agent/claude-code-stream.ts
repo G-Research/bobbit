@@ -134,6 +134,7 @@ export interface ClaudeCodeTranslatorState {
 	messages: any[];
 	lastUsage?: any;
 	lastCostUsd?: number;
+	lastTiming?: any;
 }
 
 export interface ClaudeCodeTranslationResult {
@@ -222,13 +223,14 @@ export function translateClaudeCodeEvent(
 			const toolCallId = typeof block.tool_use_id === "string" ? block.tool_use_id : String(block.tool_use_id ?? "");
 			if (!toolCallId) continue;
 			const toolName = state.toolNamesById[toolCallId];
-			const postedStub = toolName === "ask_user_choices" && !block.is_error
+			const postedStub = isAskUserChoicesPostedPlaceholder(toolName, block)
 				? askUserChoicesPostedStub(toolCallId)
 				: undefined;
 			const result = postedStub ?? stringifyToolContent(block.content);
 			const resultContent = postedStub
 				? [{ type: "text", text: postedStub }]
 				: normalizeToolResultContent(block.content);
+			const isError = postedStub ? false : Boolean(block.is_error);
 			out.push({
 				type: "tool_execution_end",
 				id: toolCallId,
@@ -239,15 +241,15 @@ export function translateClaudeCodeEvent(
 				toolName,
 				result,
 				content: postedStub ? resultContent : block.content,
-				isError: Boolean(block.is_error),
-				error: block.is_error ? result : undefined,
+				isError,
+				...(isError ? { error: result } : {}),
 			});
 			const message = {
 				id: nextMessageId(),
 				role: "toolResult",
 				toolCallId,
 				toolName,
-				isError: Boolean(block.is_error),
+				isError,
 				content: resultContent,
 			};
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
@@ -320,8 +322,10 @@ export function translateClaudeCodeEvent(
 		if (typeof event.session_id === "string") state.claudeCodeSessionId = event.session_id;
 		const totalCostUsd = finiteNumber(event.total_cost_usd);
 		const normalizedUsage = normalizeClaudeCodeUsage(event.usage, totalCostUsd);
+		const normalizedTiming = normalizeClaudeCodeTiming(event);
 		state.lastUsage = normalizedUsage;
 		state.lastCostUsd = totalCostUsd ?? state.lastCostUsd;
+		state.lastTiming = normalizedTiming ?? state.lastTiming;
 		const isError = Boolean(event.is_error);
 		const resultText = typeof event.result === "string" ? event.result : "";
 		const finalText = state.assistantText || resultText;
@@ -333,8 +337,12 @@ export function translateClaudeCodeEvent(
 			if (normalizedUsage) message.usage = normalizedUsage;
 			if (event.usage) message.rawClaudeUsage = event.usage;
 			if (totalCostUsd !== undefined) message.cost = { totalUsd: totalCostUsd };
+			if (normalizedTiming) {
+				message.durationMs = normalizedTiming.durationMs;
+				message.timing = normalizedTiming;
+			}
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
-			out.push({ type: "message_end", message, usage: normalizedUsage, rawClaudeUsage: event.usage, cost: message.cost });
+			out.push({ type: "message_end", message, usage: normalizedUsage, rawClaudeUsage: event.usage, cost: message.cost, durationMs: normalizedTiming?.durationMs, timing: normalizedTiming });
 		}
 		state.assistantText = "";
 		state.assistantToolCalls = [];
@@ -348,6 +356,8 @@ export function translateClaudeCodeEvent(
 			usage: normalizedUsage,
 			rawClaudeUsage: event.usage,
 			cost: totalCostUsd !== undefined ? { totalUsd: totalCostUsd } : undefined,
+			durationMs: normalizedTiming?.durationMs,
+			timing: normalizedTiming,
 			error: isError ? resultText : undefined,
 		});
 		return out;
@@ -378,6 +388,17 @@ export function normalizeClaudeCodeUsage(rawUsage: any, totalCostUsd?: number): 
 			cacheWrite: finiteNumber(rawUsage.cost?.cacheWrite) ?? 0,
 			total: costTotal,
 		},
+	};
+}
+
+export function normalizeClaudeCodeTiming(event: any): any | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const durationMs = pickOptionalFiniteNumber(event, "durationMs", "duration_ms", "elapsedMs", "elapsed_ms");
+	const apiDurationMs = pickOptionalFiniteNumber(event, "apiDurationMs", "duration_api_ms", "api_duration_ms");
+	if (durationMs === undefined && apiDurationMs === undefined) return undefined;
+	return {
+		...(durationMs !== undefined ? { durationMs } : {}),
+		...(apiDurationMs !== undefined ? { apiDurationMs } : {}),
 	};
 }
 
@@ -457,6 +478,11 @@ function normalizeToolResultContent(content: any): any[] {
 
 function askUserChoicesPostedStub(toolUseId: string): string {
 	return JSON.stringify({ status: "posted", tool_use_id: toolUseId });
+}
+
+function isAskUserChoicesPostedPlaceholder(toolName: unknown, block: any): boolean {
+	if (toolName !== "ask_user_choices") return false;
+	return stringifyToolContent(block?.content).trim() === "Answer questions?";
 }
 
 function normalizeClaudeCodeToolUse(block: any): { toolName: string; input: any } {
