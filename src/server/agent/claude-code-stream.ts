@@ -276,14 +276,14 @@ export function translateClaudeCodeEvent(
 			} else if (block?.type === "tool_use") {
 				const toolCallId = typeof block.id === "string" ? block.id : String(block.id ?? "");
 				if (!toolCallId) continue;
-				const toolName = typeof block.name === "string" ? block.name : "unknown";
+				const { toolName, input } = normalizeClaudeCodeToolUse(block);
 				const toolCall = {
 					type: "toolCall",
 					id: toolCallId,
 					toolCallId,
 					name: toolName,
-					arguments: block.input ?? {},
-					input: block.input ?? {},
+					arguments: input,
+					input,
 				};
 				state.assistantOpen = true;
 				state.toolNamesById[toolCallId] = toolName;
@@ -298,8 +298,8 @@ export function translateClaudeCodeEvent(
 					tool_use_id: toolCallId,
 					toolName,
 					name: toolName,
-					input: block.input ?? {},
-					arguments: block.input ?? {},
+					input,
+					arguments: input,
 				});
 				out.push({
 					type: "message_update",
@@ -447,6 +447,46 @@ function normalizeToolResultContent(content: any): any[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
 	if (content == null) return [];
 	return [{ type: "text", text: stringifyToolContent(content) }];
+}
+
+function normalizeClaudeCodeToolUse(block: any): { toolName: string; input: any } {
+	const rawToolName = typeof block.name === "string" ? block.name : "unknown";
+	const rawInput = block.input ?? {};
+	if (!isClaudeCodeAskUserQuestionTool(rawToolName, rawInput)) {
+		return { toolName: rawToolName, input: rawInput };
+	}
+	return { toolName: "ask_user_choices", input: normalizeAskUserChoicesInput(rawInput) };
+}
+
+function isClaudeCodeAskUserQuestionTool(toolName: string, input: any): boolean {
+	const normalizedName = toolName.toLowerCase().replace(/[^a-z0-9]/g, "");
+	return normalizedName === "askuserquestion" && Array.isArray(input?.questions);
+}
+
+function normalizeAskUserChoicesInput(input: any): any {
+	return {
+		...input,
+		questions: input.questions.map((question: any) => normalizeAskUserChoicesQuestion(question)),
+	};
+}
+
+function normalizeAskUserChoicesQuestion(question: any): any {
+	if (!question || typeof question !== "object") return question;
+	const normalized: any = {
+		...question,
+		options: Array.isArray(question.options) ? question.options.map(normalizeAskUserChoiceOption) : question.options,
+	};
+	if (normalized.tab_label === undefined && typeof question.header === "string") normalized.tab_label = question.header;
+	if (normalized.multi === undefined && typeof question.multiSelect === "boolean") normalized.multi = question.multiSelect;
+	delete normalized.header;
+	delete normalized.multiSelect;
+	return normalized;
+}
+
+function normalizeAskUserChoiceOption(option: any): any {
+	if (typeof option === "string") return option;
+	if (option && typeof option === "object" && typeof option.label === "string") return option.label;
+	return option;
 }
 
 function stringifyToolContent(content: any): string {
