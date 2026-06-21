@@ -73,12 +73,17 @@ Error fixture:
 
 ## Unit tests: parser and event translation
 
-### Files to add
+### Final unit coverage
+
+The implementation split the original parser, bridge, status/model, and session setup assertions across:
 
 - `tests/claude-code-jsonl-parser.test.ts`
 - `tests/claude-code-bridge-translation.test.ts`
 - `tests/claude-code-bridge-lifecycle.test.ts`
-- `tests/claude-code-runtime-config.test.ts`
+- `tests/claude-code-status-models.test.ts`
+- `tests/session-runtime-selection.test.ts`
+- `tests/session-setup-claude-code-preexisting.test.ts`
+- `tests/session-manager-claude-restart.test.ts`
 
 ### Parser tests
 
@@ -117,9 +122,9 @@ Required assertions:
 - `abort()` sends the expected structured interrupt/abort request or kills the child, depending on MVP behavior; assert the documented behavior exactly.
 - `resume` passes the previous Claude Code session id when the implementation supports it; otherwise assert the MVP explicitly does not attempt resume and records that limitation.
 
-### Runtime config tests
+### Runtime config/status tests
 
-`tests/claude-code-runtime-config.test.ts` should cover pure config helpers:
+The planned standalone `tests/claude-code-runtime-config.test.ts` was superseded by final coverage in `tests/claude-code-status-models.test.ts`, `tests/session-runtime-selection.test.ts`, `tests/session-setup-claude-code-preexisting.test.ts`, and the Claude Code runtime API suites. Together they cover:
 
 - Default executable path is `claude`.
 - Default alias is a supported Claude Code alias such as `sonnet`.
@@ -131,11 +136,13 @@ Required assertions:
 
 ### Files to add or update
 
-- Add `tests/e2e/claude-code-runtime-api.spec.ts`
-- Update `tests/session-store.test.ts`
-- Update `tests/session-manager-restore.test.ts`
-- Update `tests/models-api.test.ts`
-- Optionally update `tests/e2e/models-api.spec.ts` if Claude Code readiness is exposed only through the live API path.
+- `tests/e2e/claude-code-runtime-api.spec.ts`
+- `tests/e2e/claude-code-status-api.spec.ts`
+- `tests/e2e/claude-code-confirmation-localhost.spec.ts`
+- `tests/session-runtime-selection.test.ts`
+- `tests/session-setup-claude-code-preexisting.test.ts`
+- `tests/session-manager-claude-restart.test.ts`
+- `tests/claude-code-status-models.test.ts`
 
 ### `/api/models` and readiness
 
@@ -186,9 +193,9 @@ Update `tests/session-manager-restore.test.ts`:
 
 ### Files to add or update
 
-- Add `tests/e2e/ui/claude-code-runtime.spec.ts`
-- Update `tests/ui-fixtures/model-selector-fixture.spec.ts`
-- Optionally update `tests/fixtures/settings-models-tab-entry.ts` and `tests/settings-models-tab-redesign.spec.ts` if settings/status lives in the existing Models settings tab.
+- `tests/e2e/ui/claude-code-ui.spec.ts`
+- `tests/ui-fixtures/model-selector-fixture.spec.ts`
+- `tests/ui-fixtures/settings-admin-fixture.spec.ts`
 
 ### Model selector unit-browser fixture
 
@@ -201,7 +208,7 @@ Update `tests/ui-fixtures/model-selector-fixture.spec.ts` with local fixture mod
 
 ### Full browser E2E
 
-`tests/e2e/ui/claude-code-runtime.spec.ts` should use `gateway-harness.js`, the fake CLI, and existing helpers from `tests/e2e/ui/ui-helpers.ts`.
+`tests/e2e/ui/claude-code-ui.spec.ts` uses `gateway-harness.js`, the fake CLI, and existing helpers from `tests/e2e/ui/ui-helpers.ts`.
 
 Required journeys:
 
@@ -242,11 +249,11 @@ Targeted during development:
 npx tsx --test --test-force-exit tests/claude-code-jsonl-parser.test.ts
 npx tsx --test --test-force-exit tests/claude-code-bridge-translation.test.ts
 npx tsx --test --test-force-exit tests/claude-code-bridge-lifecycle.test.ts
-npx tsx --test --test-force-exit tests/claude-code-runtime-config.test.ts
-npx tsx --test --test-force-exit tests/session-store.test.ts tests/session-manager-restore.test.ts tests/models-api.test.ts
-npx playwright test tests/e2e/claude-code-runtime-api.spec.ts
-npx playwright test tests/e2e/ui/claude-code-runtime.spec.ts
-npx playwright test tests/ui-fixtures/model-selector-fixture.spec.ts
+npx tsx --test --test-force-exit tests/claude-code-status-models.test.ts
+npx tsx --test --test-force-exit tests/session-runtime-selection.test.ts tests/session-setup-claude-code-preexisting.test.ts tests/session-manager-claude-restart.test.ts
+npx playwright test tests/e2e/claude-code-status-api.spec.ts tests/e2e/claude-code-runtime-api.spec.ts tests/e2e/claude-code-confirmation-localhost.spec.ts
+npx playwright test tests/e2e/ui/claude-code-ui.spec.ts
+npx playwright test tests/ui-fixtures/model-selector-fixture.spec.ts tests/ui-fixtures/settings-admin-fixture.spec.ts
 ```
 
 Final verification:

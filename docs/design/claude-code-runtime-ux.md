@@ -107,7 +107,7 @@ type ClaudeCodeStatus = {
   authenticated: boolean;    // lightweight auth probe succeeded, if feasible
   ready: boolean;            // available && authenticated
   checking: boolean;
-  commandPath: string;       // resolved preference, default "claude"
+  executablePath: string;    // resolved preference, default "claude"
   version?: string;
   modelAliases: string[];    // e.g. ["claude-opus-4-8", "default", "sonnet", "opus"]
   permissionMode: "default" | "acceptEdits" | "bypassPermissions";
@@ -234,7 +234,7 @@ Add runtime metadata to `PersistedSession` in `src/server/agent/session-store.ts
 runtime?: "pi" | "claude-code";
 claudeCodeSessionId?: string;
 claudeCodeModelAlias?: string;
-claudeCodeCommandPath?: string;
+claudeCodeExecutable?: string;
 claudeCodePermissionMode?: "default" | "acceptEdits" | "bypassPermissions";
 ```
 

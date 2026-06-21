@@ -1,6 +1,6 @@
 # REST API
 
-All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
+Most REST routes require `Authorization: Bearer <token>`; general API calls may also pass the token as `?token=`. Host-sensitive operator flows are stricter: Claude Code preference confirmation must be minted and consumed by an operator browser session, and bearer/query-token traffic alone is intentionally insufficient.
 
 ### Error response shape
 
@@ -702,7 +702,9 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
 | `POST` | `/api/preferences/claude-code/confirmation` | Mint a short-lived operator confirmation token required before sensitive Claude Code preference writes, such as executable-path changes or permission bypass. |
 
-`POST /api/preferences/claude-code/confirmation` accepts the same preference patch shape the caller intends to pass to `PUT /api/preferences`. It returns `{ confirmationRequired: false, sensitiveKeys: [] }` for non-sensitive patches, or `{ confirmationRequired: true, confirmationToken, expiresAt, sensitiveKeys }` for host-runtime changes. It requires an operator browser session; bearer/query-token API calls cannot mint this token.
+`POST /api/preferences/claude-code/confirmation` accepts the same preference patch shape the caller intends to pass to `PUT /api/preferences`. It returns `{ confirmationRequired: false, sensitiveKeys: [] }` for non-sensitive patches, or `{ confirmationRequired: true, confirmationToken, expiresAt, sensitiveKeys }` for host-runtime changes.
+
+Sensitive writes must then call `PUT /api/preferences` from the same operator browser session with header `X-Bobbit-Operator-Confirmation: <confirmationToken>`. Without that confirmation, `PUT /api/preferences` returns `403` with `{ confirmationRequired: true, sensitiveKeys }`. The confirmation route and the follow-up sensitive write reject bearer/query-token-only traffic; do not send `Authorization`, `?token=`, or session-bound agent headers for this operator-browser flow.
 
 ### Models
 
