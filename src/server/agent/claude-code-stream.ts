@@ -1,5 +1,41 @@
 import { StringDecoder } from "node:string_decoder";
 
+export const CLAUDE_CODE_STREAM_LIMITS = {
+	maxJsonlLineLength: 1024 * 1024,
+	maxDiagnosticLineLength: 4096,
+	maxDiagnosticsRetained: 100,
+	maxContentCharsPerEvent: 256 * 1024,
+	maxAssistantTextChars: 512 * 1024,
+	maxStoredMessages: 200,
+} as const;
+
+export class ClaudeCodeStreamLimitError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ClaudeCodeStreamLimitError";
+	}
+}
+
+export interface ClaudeCodeStreamLimits {
+	maxJsonlLineLength?: number;
+	maxDiagnosticLineLength?: number;
+	maxDiagnosticsRetained?: number;
+	maxContentCharsPerEvent?: number;
+	maxAssistantTextChars?: number;
+	maxStoredMessages?: number;
+}
+
+function resolveLimits(limits: ClaudeCodeStreamLimits = {}): Required<ClaudeCodeStreamLimits> {
+	return {
+		maxJsonlLineLength: limits.maxJsonlLineLength ?? CLAUDE_CODE_STREAM_LIMITS.maxJsonlLineLength,
+		maxDiagnosticLineLength: limits.maxDiagnosticLineLength ?? CLAUDE_CODE_STREAM_LIMITS.maxDiagnosticLineLength,
+		maxDiagnosticsRetained: limits.maxDiagnosticsRetained ?? CLAUDE_CODE_STREAM_LIMITS.maxDiagnosticsRetained,
+		maxContentCharsPerEvent: limits.maxContentCharsPerEvent ?? CLAUDE_CODE_STREAM_LIMITS.maxContentCharsPerEvent,
+		maxAssistantTextChars: limits.maxAssistantTextChars ?? CLAUDE_CODE_STREAM_LIMITS.maxAssistantTextChars,
+		maxStoredMessages: limits.maxStoredMessages ?? CLAUDE_CODE_STREAM_LIMITS.maxStoredMessages,
+	};
+}
+
 export interface ClaudeCodeParseDiagnostic {
 	level: "debug" | "warning";
 	message: string;
@@ -20,6 +56,16 @@ export class ClaudeCodeJsonlParser {
 	private decoder = new StringDecoder("utf8");
 	private lineBuffer = "";
 	readonly diagnostics: ClaudeCodeParseDiagnostic[] = [];
+	private readonly limits: Required<Pick<ClaudeCodeStreamLimits, "maxJsonlLineLength" | "maxDiagnosticLineLength" | "maxDiagnosticsRetained">>;
+
+	constructor(limits: Pick<ClaudeCodeStreamLimits, "maxJsonlLineLength" | "maxDiagnosticLineLength" | "maxDiagnosticsRetained"> = {}) {
+		const resolved = resolveLimits(limits);
+		this.limits = {
+			maxJsonlLineLength: resolved.maxJsonlLineLength,
+			maxDiagnosticLineLength: resolved.maxDiagnosticLineLength,
+			maxDiagnosticsRetained: resolved.maxDiagnosticsRetained,
+		};
+	}
 
 	push(chunk: Buffer | string): ClaudeCodeParseChunkResult {
 		const data = typeof chunk === "string" ? chunk : this.decoder.write(chunk);
@@ -42,6 +88,10 @@ export class ClaudeCodeJsonlParser {
 		if (!data) return { events, diagnostics };
 
 		this.lineBuffer += data;
+		if (this.lineBuffer.length > this.limits.maxJsonlLineLength && !this.lineBuffer.includes("\n")) {
+			this.lineBuffer = "";
+			throw new ClaudeCodeStreamLimitError(`Claude Code JSONL line exceeded ${this.limits.maxJsonlLineLength} characters`);
+		}
 		const lines = this.lineBuffer.split("\n");
 		this.lineBuffer = lines.pop() ?? "";
 
@@ -51,6 +101,9 @@ export class ClaudeCodeJsonlParser {
 
 	private parseLine(rawLine: string, events: any[], diagnostics: ClaudeCodeParseDiagnostic[]): void {
 		const line = rawLine.replace(/\r$/, "");
+		if (line.length > this.limits.maxJsonlLineLength) {
+			throw new ClaudeCodeStreamLimitError(`Claude Code JSONL line exceeded ${this.limits.maxJsonlLineLength} characters`);
+		}
 		const trimmed = line.trim();
 		if (!trimmed) return;
 
@@ -60,10 +113,11 @@ export class ClaudeCodeJsonlParser {
 			const diagnostic: ClaudeCodeParseDiagnostic = {
 				level: "warning",
 				message: "Ignoring non-JSON Claude Code stdout line",
-				line,
-				error: err?.message ? String(err.message) : String(err),
+				line: truncateString(line, this.limits.maxDiagnosticLineLength),
+				error: truncateString(err?.message ? String(err.message) : String(err), this.limits.maxDiagnosticLineLength),
 			};
 			this.diagnostics.push(diagnostic);
+			if (this.diagnostics.length > this.limits.maxDiagnosticsRetained) this.diagnostics.splice(0, this.diagnostics.length - this.limits.maxDiagnosticsRetained);
 			diagnostics.push(diagnostic);
 		}
 	}
@@ -87,7 +141,7 @@ export interface ClaudeCodeTranslationResult {
 	state: ClaudeCodeTranslatorState;
 }
 
-export interface ClaudeCodeTranslatorOptions {
+export interface ClaudeCodeTranslatorOptions extends ClaudeCodeStreamLimits {
 	messageIdPrefix?: string;
 }
 
@@ -107,15 +161,17 @@ export function createClaudeCodeTranslatorState(modelAlias = "sonnet"): ClaudeCo
 export class ClaudeCodeStreamTranslator {
 	readonly state: ClaudeCodeTranslatorState;
 	private readonly messageIdPrefix: string;
+	private readonly limits: Required<ClaudeCodeStreamLimits>;
 	private localMessageCounter = 0;
 
 	constructor(state: ClaudeCodeTranslatorState = createClaudeCodeTranslatorState(), options: ClaudeCodeTranslatorOptions = {}) {
 		this.state = state;
 		this.messageIdPrefix = options.messageIdPrefix ?? "claude-code";
+		this.limits = resolveLimits(options);
 	}
 
 	translate(event: any): any[] {
-		return translateClaudeCodeEvent(event, this.state, () => this.nextMessageId());
+		return translateClaudeCodeEvent(event, this.state, () => this.nextMessageId(), this.limits);
 	}
 
 	private nextMessageId(): string {
@@ -129,7 +185,10 @@ export function translateClaudeCodeEvent(
 	event: any,
 	state: ClaudeCodeTranslatorState = createClaudeCodeTranslatorState(),
 	nextMessageId: () => string = () => `claude-code-${++globalMessageCounter}`,
+	limits: ClaudeCodeStreamLimits = {},
 ): any[] {
+	const resolvedLimits = resolveLimits(limits);
+	assertEventContentWithinLimit(event, resolvedLimits.maxContentCharsPerEvent);
 	const out: any[] = [];
 	if (!event || typeof event !== "object") return out;
 
@@ -152,7 +211,7 @@ export function translateClaudeCodeEvent(
 		if (toolResults.length > 0 && (state.assistantOpen || state.assistantToolCalls.length > 0)) {
 			if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
 			const message = assistantMessageSnapshot(state);
-			state.messages.push(message);
+			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
 			state.assistantText = "";
 			state.assistantToolCalls = [];
@@ -185,7 +244,7 @@ export function translateClaudeCodeEvent(
 				isError: Boolean(block.is_error),
 				content: normalizeToolResultContent(block.content),
 			};
-			state.messages.push(message);
+			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
 		}
 		if (text) {
@@ -194,7 +253,7 @@ export function translateClaudeCodeEvent(
 				role: "user",
 				content: [{ type: "text", text }],
 			};
-			state.messages.push(message);
+			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
 		}
 		return out;
@@ -204,6 +263,9 @@ export function translateClaudeCodeEvent(
 		const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
 		for (const block of blocks) {
 			if (block?.type === "text" && typeof block.text === "string") {
+				if (state.assistantText.length + block.text.length > resolvedLimits.maxAssistantTextChars) {
+					throw new ClaudeCodeStreamLimitError(`Claude Code assistant text exceeded ${resolvedLimits.maxAssistantTextChars} characters`);
+				}
 				state.assistantText += block.text;
 				state.assistantOpen = true;
 				if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
@@ -262,7 +324,7 @@ export function translateClaudeCodeEvent(
 			if (isError) message.errorMessage = resultText || "Claude Code turn failed";
 			if (event.usage) message.usage = event.usage;
 			if (typeof event.total_cost_usd === "number") message.cost = { totalUsd: event.total_cost_usd };
-			state.messages.push(message);
+			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message, usage: event.usage, cost: message.cost });
 		}
 		state.assistantText = "";
@@ -296,6 +358,36 @@ function assistantMessageSnapshot(state: ClaudeCodeTranslatorState, extraContent
 			...extraContent,
 		],
 	};
+}
+
+function appendStoredMessage(state: ClaudeCodeTranslatorState, message: any, maxStoredMessages: number): void {
+	state.messages.push(message);
+	if (state.messages.length > maxStoredMessages) state.messages.splice(0, state.messages.length - maxStoredMessages);
+}
+
+function assertEventContentWithinLimit(event: any, maxContentCharsPerEvent: number): void {
+	const size = estimateContentChars(event?.message?.content ?? event?.result ?? event?.content);
+	if (size > maxContentCharsPerEvent) {
+		throw new ClaudeCodeStreamLimitError(`Claude Code event content exceeded ${maxContentCharsPerEvent} characters`);
+	}
+}
+
+function estimateContentChars(value: any): number {
+	if (typeof value === "string") return value.length;
+	if (typeof value === "number" || typeof value === "boolean" || value == null) return 0;
+	if (Array.isArray(value)) return value.reduce((sum, item) => sum + estimateContentChars(item), 0);
+	if (typeof value === "object") {
+		let total = 0;
+		for (const [key, nested] of Object.entries(value)) {
+			total += key.length + estimateContentChars(nested);
+		}
+		return total;
+	}
+	return String(value).length;
+}
+
+function truncateString(value: string, maxLength: number): string {
+	return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 function textFromContentBlocks(blocks: any[]): string {

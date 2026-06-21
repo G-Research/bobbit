@@ -1,3 +1,7 @@
+import { accessSync, existsSync, realpathSync } from "node:fs";
+import { constants } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { PreferencesStore } from "./preferences-store.js";
 
 export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
@@ -26,6 +30,30 @@ export const CLAUDE_CODE_PREF_KEYS = {
 
 export const CLAUDE_CODE_MODEL_ALIASES = ["default", "sonnet", "opus"] as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions"] as const;
+
+const PATH_KEYS = new Set(["PATH", "Path"]);
+const ENV_BLOCKLIST = new Set([
+	"NODE_OPTIONS",
+	"NODE_PATH",
+	"LD_PRELOAD",
+	"LD_LIBRARY_PATH",
+	"DYLD_INSERT_LIBRARIES",
+	"DYLD_LIBRARY_PATH",
+	"PYTHONPATH",
+	"RUBYOPT",
+	"BUNDLE_GEMFILE",
+]);
+
+export interface ClaudeCodeExecutableResolutionOptions {
+	cwd?: string;
+	pathEnv?: string;
+	platform?: NodeJS.Platform;
+}
+
+export interface ResolvedClaudeCodeExecutable {
+	executablePath: string;
+	pathEnv: string;
+}
 
 export function isClaudeCodePreferenceKey(key: string): boolean {
 	return key.startsWith("claudeCode.");
@@ -63,7 +91,71 @@ export function validateExecutablePath(value: unknown): string {
 	if (typeof value !== "string" || value.trim().length === 0) {
 		throw new Error("Claude Code executable path must be a non-empty string");
 	}
-	return value.trim();
+	const trimmed = value.trim();
+	if (isRelativeExecutablePath(trimmed)) {
+		throw new Error("Claude Code executable path must be a command name on PATH or an absolute path, not a relative path");
+	}
+	if (!path.isAbsolute(trimmed) && !/^[A-Za-z0-9._-]+$/.test(trimmed)) {
+		throw new Error("Claude Code executable name contains unsupported characters");
+	}
+	return trimmed;
+}
+
+export function resolveClaudeCodeExecutable(
+	value: unknown,
+	options: ClaudeCodeExecutableResolutionOptions = {},
+): ResolvedClaudeCodeExecutable {
+	const executablePath = normalizeExecutablePath(value);
+	const platform = options.platform ?? process.platform;
+	const pathEnv = buildTrustedPathEnv(options.pathEnv ?? process.env.PATH ?? process.env.Path ?? "", options.cwd, platform);
+
+	if (path.isAbsolute(executablePath)) {
+		return { executablePath: assertExecutableFile(executablePath, platform), pathEnv };
+	}
+	if (isRelativeExecutablePath(executablePath)) {
+		throw new Error("Claude Code executable path must be an absolute path or a command name on trusted PATH");
+	}
+	if (!/^[A-Za-z0-9._-]+$/.test(executablePath)) {
+		throw new Error("Claude Code executable name contains unsupported characters");
+	}
+
+	for (const dir of pathEnv.split(path.delimiter).filter(Boolean)) {
+		for (const candidate of executableCandidates(path.join(dir, executablePath), platform)) {
+			if (!existsSync(candidate)) continue;
+			try {
+				return { executablePath: assertExecutableFile(candidate, platform), pathEnv };
+			} catch {
+				// Keep searching PATH for a runnable Claude Code executable.
+			}
+		}
+	}
+	throw new Error("Claude Code CLI not found on trusted PATH");
+}
+
+export function buildClaudeCodeSanitizedEnv(
+	extraEnv: NodeJS.ProcessEnv | undefined,
+	options: ClaudeCodeExecutableResolutionOptions = {},
+): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value === undefined || shouldDropEnvKey(key)) continue;
+		env[key] = value;
+	}
+	for (const [key, value] of Object.entries(extraEnv ?? {})) {
+		if (value === undefined || shouldDropEnvKey(key)) continue;
+		env[key] = value;
+	}
+	const trustedPath = buildTrustedPathEnv(options.pathEnv ?? process.env.PATH ?? process.env.Path ?? "", options.cwd, options.platform);
+	if (trustedPath) env.PATH = trustedPath;
+	const pathext = process.env.PATHEXT;
+	if (pathext) env.PATHEXT = pathext;
+	return env;
+}
+
+export function getClaudeCodeProbeCwd(): string {
+	const home = os.homedir();
+	if (home && existsSync(home)) return home;
+	return path.parse(process.cwd()).root;
 }
 
 export function normalizeModelAlias(value: unknown): ClaudeCodeModelAlias {
@@ -101,6 +193,57 @@ export function validatePermissionMode(value: unknown, allowBypassPermissions: b
 		throw new Error("Claude Code bypassPermissions requires claudeCode.allowBypassPermissions=true");
 	}
 	return value as ClaudeCodePermissionMode;
+}
+
+function isRelativeExecutablePath(value: string): boolean {
+	if (path.isAbsolute(value)) return false;
+	return value.startsWith("./") || value.startsWith("../") || value === "." || value === ".." || value.includes("/") || value.includes("\\");
+}
+
+function buildTrustedPathEnv(pathEnv: string, unsafeCwd: string | undefined, platform: NodeJS.Platform = process.platform): string {
+	const unsafeReal = realpathOrUndefined(unsafeCwd);
+	const dirs: string[] = [];
+	const seen = new Set<string>();
+	for (const rawEntry of pathEnv.split(path.delimiter)) {
+		const entry = rawEntry.trim();
+		if (!entry || entry === "." || !path.isAbsolute(entry)) continue;
+		const realEntry = realpathOrUndefined(entry);
+		if (!realEntry) continue;
+		if (unsafeReal && (realEntry === unsafeReal || realEntry.startsWith(`${unsafeReal}${path.sep}`))) continue;
+		const key = platform === "win32" ? realEntry.toLowerCase() : realEntry;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		dirs.push(realEntry);
+	}
+	return dirs.join(path.delimiter);
+}
+
+function executableCandidates(base: string, platform: NodeJS.Platform): string[] {
+	if (platform !== "win32" || path.extname(base)) return [base];
+	const extensions = (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+		.split(";")
+		.map(ext => ext.trim())
+		.filter(Boolean);
+	return [base, ...extensions.map(ext => `${base}${ext.toLowerCase()}`), ...extensions.map(ext => `${base}${ext.toUpperCase()}`)];
+}
+
+function assertExecutableFile(file: string, platform: NodeJS.Platform): string {
+	const real = realpathSync(file);
+	accessSync(real, platform === "win32" ? constants.F_OK : constants.X_OK);
+	return real;
+}
+
+function realpathOrUndefined(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	try {
+		return realpathSync(value);
+	} catch {
+		return undefined;
+	}
+}
+
+function shouldDropEnvKey(key: string): boolean {
+	return PATH_KEYS.has(key) || ENV_BLOCKLIST.has(key) || key === "PATHEXT" || key === "PWD" || key === "OLDPWD";
 }
 
 export function normalizeClaudeCodePreferencePatch(

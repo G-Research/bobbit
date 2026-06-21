@@ -1,12 +1,21 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { IRpcBridge, RpcBridgeOptions, RpcEventListener } from "./rpc-bridge.js";
-import { ClaudeCodeJsonlParser, ClaudeCodeStreamTranslator, createClaudeCodeTranslatorState } from "./claude-code-stream.js";
+import {
+	CLAUDE_CODE_STREAM_LIMITS,
+	ClaudeCodeJsonlParser,
+	ClaudeCodeStreamTranslator,
+	createClaudeCodeTranslatorState,
+} from "./claude-code-stream.js";
+import { buildClaudeCodeSanitizedEnv, getClaudeCodeProbeCwd, resolveClaudeCodeExecutable } from "./claude-code-config.js";
 
 const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
 const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
 const ATTACHMENT_ONLY_TEXT = "Attachments:";
+const STDERR_TAIL_LINES = 20;
+const STDERR_LINE_LIMIT = CLAUDE_CODE_STREAM_LIMITS.maxDiagnosticLineLength;
 
 function synthesizeClaudeCodeAttachmentText(text: string, images?: Array<unknown> | null): string {
 	if (text && text.trim() !== "") return text;
@@ -104,6 +113,15 @@ function readClaudeCodeAppendSystemPrompt(systemPromptPath: string | undefined):
 	return prompt.trim() === "" ? undefined : prompt;
 }
 
+function safeSpawnCwd(cwd: string | undefined): string {
+	if (!cwd) return getClaudeCodeProbeCwd();
+	return path.resolve(cwd);
+}
+
+function truncateDiagnosticLine(line: string): string {
+	return line.length <= STDERR_LINE_LIMIT ? line : `${line.slice(0, STDERR_LINE_LIMIT - 1)}…`;
+}
+
 export class ClaudeCodeBridge implements IRpcBridge {
 	private process: ChildProcess | null = null;
 	private eventListeners: RpcEventListener[] = [];
@@ -121,6 +139,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 	private processExitEmitted = false;
 	private lastResultCompleted = false;
 	private promptCounter = 0;
+	private streamFailureEmitted = false;
 
 	constructor(private readonly options: ClaudeCodeBridgeOptions = {}) {
 		this.translator = new ClaudeCodeStreamTranslator(
@@ -138,7 +157,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			throw new Error("Claude Code local runtime is host-only in the MVP and cannot run inside a Bobbit sandbox");
 		}
 
-		const executable = this.options.claudeCodeExecutable || this.options.cliPath || "claude";
+		const executable = resolveClaudeCodeExecutable(this.options.claudeCodeExecutable || this.options.cliPath || "claude", { cwd: this.options.cwd });
 		const args = buildClaudeCodeArgs({
 			...this.options,
 			claudeCodeSessionId: this.translator.state.claudeCodeSessionId ?? this.options.claudeCodeSessionId,
@@ -149,13 +168,14 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		this.processExitEmitted = false;
 		this.lastResultCompleted = false;
 		this.stderrTail = [];
+		this.streamFailureEmitted = false;
 
 		await new Promise<void>((resolve, reject) => {
 			let settled = false;
-			const child = spawn(executable, args, {
+			const child = spawn(executable.executablePath, args, {
 				stdio: ["pipe", "pipe", "pipe"],
-				cwd: this.options.cwd,
-				env: { ...process.env, ...this.options.env },
+				cwd: safeSpawnCwd(this.options.cwd),
+				env: buildClaudeCodeSanitizedEnv(this.options.env, { cwd: this.options.cwd, pathEnv: executable.pathEnv }),
 			});
 			this.process = child;
 			this.attachProcessHandlers(child);
@@ -329,28 +349,35 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		const flushStdout = () => {
 			if (stdoutFlushed) return;
 			stdoutFlushed = true;
-			const parsed = this.parser.end();
-			for (const diagnostic of parsed.diagnostics) {
-				this.emit({ type: "diagnostic", source: "claude-code", diagnostic });
+			try {
+				const parsed = this.parser.end();
+				for (const diagnostic of parsed.diagnostics) {
+					this.emit({ type: "diagnostic", source: "claude-code", diagnostic });
+				}
+				for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
+			} catch (err: any) {
+				this.handleStreamFailure(err);
 			}
-			for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
 		};
 
 		child.stdout?.on("data", (chunk: Buffer) => {
-			const parsed = this.parser.push(chunk);
-			for (const diagnostic of parsed.diagnostics) {
-				this.emit({ type: "diagnostic", source: "claude-code", diagnostic });
+			try {
+				const parsed = this.parser.push(chunk);
+				for (const diagnostic of parsed.diagnostics) {
+					this.emit({ type: "diagnostic", source: "claude-code", diagnostic });
+				}
+				for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
+			} catch (err: any) {
+				this.handleStreamFailure(err);
 			}
-			for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
 		});
 		child.stdout?.on("close", flushStdout);
 		child.stdout?.on("end", flushStdout);
 
 		child.stderr?.on("data", (chunk: Buffer) => {
-			process.stderr.write(chunk);
-			const lines = this.stderrDecoder.write(chunk).split("\n").map((line) => line.trim()).filter(Boolean);
+			const lines = this.stderrDecoder.write(chunk).split("\n").map((line) => truncateDiagnosticLine(line.trim())).filter(Boolean);
 			this.stderrTail.push(...lines);
-			if (this.stderrTail.length > 20) this.stderrTail = this.stderrTail.slice(-20);
+			if (this.stderrTail.length > STDERR_TAIL_LINES) this.stderrTail = this.stderrTail.slice(-STDERR_TAIL_LINES);
 		});
 
 		child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
@@ -378,7 +405,13 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 	private handleClaudeEvent(rawEvent: any): void {
 		if (rawEvent?.type === "user") this.resolvePendingPrompt(rawEvent);
-		const events = this.translator.translate(rawEvent);
+		let events: any[];
+		try {
+			events = this.translator.translate(rawEvent);
+		} catch (err: any) {
+			this.handleStreamFailure(err);
+			return;
+		}
 		for (const event of events) this.emit(event);
 		if (rawEvent?.type === "result") {
 			this.lastResultCompleted = true;
@@ -401,6 +434,25 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		clearTimeout(pending.timeout);
 		this.pendingPrompt = null;
 		pending.reject(error);
+	}
+
+	private handleStreamFailure(error: Error): void {
+		if (this.streamFailureEmitted) return;
+		this.streamFailureEmitted = true;
+		const message = truncateDiagnosticLine(error?.message || String(error));
+		this.rejectPendingPrompt(new Error(message));
+		this.emit({
+			type: "diagnostic",
+			source: "claude-code",
+			diagnostic: {
+				level: "warning",
+				message: "Claude Code stream limit exceeded",
+				line: "",
+				error: message,
+			},
+		});
+		this.emit({ type: "agent_end", stopReason: "error", runtime: "claude-code", error: message });
+		this.process?.kill("SIGTERM");
 	}
 
 	private emit(event: any): void {

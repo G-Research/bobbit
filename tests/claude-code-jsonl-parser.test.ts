@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ClaudeCodeJsonlParser } from "../src/server/agent/claude-code-stream.ts";
+import { ClaudeCodeJsonlParser, ClaudeCodeStreamLimitError } from "../src/server/agent/claude-code-stream.ts";
 
 function parseChunks(chunks: Array<Buffer | string>) {
 	const parser = new ClaudeCodeJsonlParser();
@@ -58,5 +58,18 @@ describe("ClaudeCodeJsonlParser", () => {
 		const parser = new ClaudeCodeJsonlParser();
 		assert.equal(parser.push('{"type":"result"}').events.length, 0);
 		assert.deepEqual(parser.end().events, [{ type: "result" }]);
+	});
+
+	it("fails closed when a JSONL line exceeds the configured bound", () => {
+		const parser = new ClaudeCodeJsonlParser({ maxJsonlLineLength: 20 });
+		assert.throws(() => parser.push('{"type":"assistant","x":"too long"}\n'), ClaudeCodeStreamLimitError);
+	});
+
+	it("truncates retained non-JSON diagnostics", () => {
+		const parser = new ClaudeCodeJsonlParser({ maxDiagnosticLineLength: 8 });
+		const result = parser.push("not json but very long\n");
+		assert.equal(result.diagnostics.length, 1);
+		assert.equal(result.diagnostics[0].line.length, 8);
+		assert.match(result.diagnostics[0].line, /…$/);
 	});
 });

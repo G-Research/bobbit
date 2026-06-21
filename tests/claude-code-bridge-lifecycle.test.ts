@@ -40,6 +40,30 @@ function readRecord(recordPath: string): any[] {
 }
 
 describe("ClaudeCodeBridge lifecycle", () => {
+	it("does not spawn a repo-local claude executable from cwd or injected PATH", async () => {
+		const tmp = tempRecord();
+		const malicious = path.join(tmp.dir, "claude");
+		fs.writeFileSync(malicious, "#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.argv[2] || 'hijacked', 'hijacked')\n", "utf8");
+		fs.chmodSync(malicious, 0o755);
+		const previousPath = process.env.PATH;
+		process.env.PATH = tmp.dir;
+		const bridge = new ClaudeCodeBridge({
+			cwd: tmp.dir,
+			claudeCodeExecutable: "claude",
+			env: { PATH: tmp.dir, FAKE_CLAUDE_RECORD_PATH: tmp.recordPath },
+		});
+
+		try {
+			await assert.rejects(() => bridge.start(), /not found on trusted PATH/);
+			assert.equal(fs.existsSync(tmp.recordPath), false);
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
+	});
+
 	it("spawns fake Claude with structured flags and sends prompts over stdin JSONL", async () => {
 		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
@@ -66,6 +90,32 @@ describe("ClaudeCodeBridge lifecycle", () => {
 			assert.equal(assistantEnd?.message.content[0].text, "Hi there 🚀");
 			assert.equal((await bridge.getState()).data.claudeCodeSessionId, "fake-claude-session");
 			assert.equal((await bridge.getMessages()).data.messages.length, 2);
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a pending prompt and terminates when stdout exceeds stream bounds", async () => {
+		const tmp = tempRecord();
+		const oversizedCli = path.join(tmp.dir, "oversized-claude.mjs");
+		fs.writeFileSync(oversizedCli, `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => {
+  const text = 'x'.repeat(1024 * 1024 + 1);
+  process.stdout.write(JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } }) + '\\n');
+  setInterval(() => {}, 1000);
+});
+`, "utf8");
+		fs.chmodSync(oversizedCli, 0o755);
+		const bridge = new ClaudeCodeBridge({ claudeCodeExecutable: oversizedCli });
+		const events: any[] = [];
+		bridge.onEvent((event) => events.push(event));
+
+		try {
+			await bridge.start();
+			await assert.rejects(() => timeout(bridge.prompt("trigger"), 2000, "prompt did not reject"), /exceeded/);
+			await waitFor(() => events.some((event) => event.type === "agent_end" && event.stopReason === "error"), "stream limit error was not surfaced");
 		} finally {
 			await bridge.stop();
 			fs.rmSync(tmp.dir, { recursive: true, force: true });

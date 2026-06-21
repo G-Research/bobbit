@@ -10,6 +10,7 @@ import {
 	CLAUDE_CODE_DEFAULT_CONFIG,
 	normalizeClaudeCodePreferencePatch,
 	readClaudeCodeConfig,
+	resolveClaudeCodeExecutable,
 } from "../src/server/agent/claude-code-config.ts";
 import {
 	invalidateClaudeCodeStatusCache,
@@ -62,6 +63,12 @@ describe("Claude Code config", () => {
 			}, prefs);
 			assert.equal(badPath.ok, false);
 			assert.match((badPath as any).error, /non-empty/);
+
+			const relativePath = normalizeClaudeCodePreferencePatch({
+				[CLAUDE_CODE_PREF_KEYS.executablePath]: "./claude",
+			}, prefs);
+			assert.equal(relativePath.ok, false);
+			assert.match((relativePath as any).error, /relative path/);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -89,23 +96,29 @@ describe("Claude Code config", () => {
 });
 
 describe("Claude Code status", () => {
-	it("probes with execFile-style args and no shell", async () => {
+	it("probes with an absolute executable, execFile-style args, safe cwd, and sanitized env", async () => {
 		let seen: any;
-		const status = await probeClaudeCodeStatus({ executablePath: "claude-test" }, async (file, args, options) => {
+		const status = await probeClaudeCodeStatus({ executablePath: process.execPath }, async (file, args, options) => {
 			seen = { file, args, options };
 			return { stdout: "claude 1.2.3\n", stderr: "" };
 		});
 
-		assert.equal(seen.file, "claude-test");
+		assert.equal(seen.file, fs.realpathSync(process.execPath));
 		assert.deepEqual(seen.args, ["--version"]);
 		assert.equal(seen.options.shell, false);
-		assert.deepEqual(Object.keys(seen.options.env).sort(), Object.keys(seen.options.env).filter((key: string) => ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR"].includes(key)).sort());
+		assert.ok(path.isAbsolute(seen.options.cwd));
+		assert.equal(seen.options.env.NODE_OPTIONS, undefined);
+		assert.ok(!String(seen.options.env.PATH || "").split(path.delimiter).includes(process.cwd()));
 		assert.equal(status.available, true);
 		assert.equal(status.ready, true);
 		assert.equal(status.authenticated, false);
 		assert.equal(status.authenticationStatus, "unknown");
 		assert.equal(status.version, "1.2.3");
 		assert.match(status.message || "", /verified when a Claude Code session starts/);
+	});
+
+	it("rejects relative executable paths during trusted resolution", () => {
+		assert.throws(() => resolveClaudeCodeExecutable("./claude"), /absolute path or a command name/);
 	});
 
 	it("reports a missing CLI as unavailable", async () => {

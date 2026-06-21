@@ -2,7 +2,13 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import type { ExecFileOptions } from "node:child_process";
 import type { PreferencesStore } from "./preferences-store.js";
-import { readClaudeCodeConfig, type ClaudeCodeConfig } from "./claude-code-config.js";
+import {
+	buildClaudeCodeSanitizedEnv,
+	getClaudeCodeProbeCwd,
+	readClaudeCodeConfig,
+	resolveClaudeCodeExecutable,
+	type ClaudeCodeConfig,
+} from "./claude-code-config.js";
 
 export interface ClaudeCodeStatus {
 	available: boolean;
@@ -57,14 +63,17 @@ export async function probeClaudeCodeStatus(
 	config: Pick<ClaudeCodeConfig, "executablePath">,
 	execFile: ExecFileLike = execFileAsync,
 ): Promise<ClaudeCodeStatus> {
-	const executablePath = config.executablePath;
+	let executablePath = config.executablePath;
 	try {
+		const resolved = resolveClaudeCodeExecutable(config.executablePath, { cwd: process.cwd() });
+		executablePath = resolved.executablePath;
 		const { stdout, stderr } = await execFile(executablePath, ["--version"], {
 			timeout: STATUS_CACHE_TTL_MS,
 			windowsHide: true,
 			shell: false,
 			maxBuffer: 1024 * 1024,
-			env: sanitizedProbeEnv(),
+			env: buildClaudeCodeSanitizedEnv(undefined, { cwd: process.cwd(), pathEnv: resolved.pathEnv }),
+			cwd: getClaudeCodeProbeCwd(),
 		});
 		const version = parseVersion(stdout, stderr);
 		const testAssumeAuthenticated = process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED === "1";
@@ -91,15 +100,6 @@ function cacheKey(config: ClaudeCodeConfig): string {
 	return JSON.stringify({ executablePath: config.executablePath });
 }
 
-function sanitizedProbeEnv(): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = {};
-	for (const key of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR"]) {
-		const value = process.env[key];
-		if (value) env[key] = value;
-	}
-	return env;
-}
-
 function parseVersion(stdout: string | Buffer, stderr: string | Buffer): string | undefined {
 	const text = `${String(stdout || "")}\n${String(stderr || "")}`.trim();
 	const firstLine = text.split(/\r?\n/).map(line => line.trim()).find(Boolean);
@@ -110,8 +110,11 @@ function parseVersion(stdout: string | Buffer, stderr: string | Buffer): string 
 
 function statusFromProbeError(executablePath: string, err: any): ClaudeCodeStatus {
 	const output = [err?.stdout, err?.stderr, err?.message].filter(Boolean).map(String).join("\n");
-	if (err?.code === "ENOENT") {
+	if (err?.code === "ENOENT" || /not found on trusted PATH|CLI not found/i.test(output)) {
 		return unavailable(executablePath, "Claude Code CLI not found");
+	}
+	if (/absolute path or a command name|unsupported characters/i.test(output)) {
+		return unavailable(executablePath, "Claude Code executable path is not allowed");
 	}
 	if (err?.code === "EACCES" || err?.code === "EPERM") {
 		return unavailable(executablePath, "Claude Code executable is not runnable");
