@@ -892,7 +892,7 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = msgsResp.data as any;
+						const raw = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgsResp.data as any) as any;
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {

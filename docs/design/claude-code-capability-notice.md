@@ -1,6 +1,6 @@
 # Claude Code Capability Notice — In-session UX
 
-**Status:** Design artifact only. No production code or tests changed.  
+**Status:** Design artifact only. No production code or tests changed.
 **Scope:** In-session explanation of Claude Code local-runtime capability differences.
 
 ## Recommendation

@@ -164,6 +164,46 @@ describe("Claude Code restart/restore without Pi agentSessionFile", () => {
 		assert.match(jsonl, /"type":"message"/);
 	});
 
+	it("hydrates Claude Code get_messages snapshots from persisted transcript when restored bridge memory is empty", async () => {
+		const transcript = `${tmpRoot}/claude-snapshot.jsonl`;
+		const persistedMessages = [
+			{ id: "user-1", role: "user", content: [{ type: "text", text: "hello after restart" }] },
+			{ id: "assistant-1", role: "assistant", content: [{ type: "text", text: "restored answer" }] },
+		];
+		fs.writeFileSync(
+			transcript,
+			persistedMessages.map((message) => JSON.stringify({ type: "message", message })).join("\n") + "\n",
+		);
+		const ps = makePersisted({ id: "claude-snapshot", agentSessionFile: transcript });
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+
+		const hydrated = await manager.hydrateClaudeCodeSnapshotMessages(ps.id, { messages: [] });
+
+		assert.deepEqual(hydrated.messages, persistedMessages);
+	});
+
+	it("does not hydrate Pi snapshots from persisted transcripts", async () => {
+		const transcript = `${tmpRoot}/pi-snapshot.jsonl`;
+		fs.writeFileSync(transcript, JSON.stringify({
+			type: "message",
+			message: { id: "pi-msg", role: "assistant", content: [{ type: "text", text: "pi history" }] },
+		}) + "\n");
+		const ps = makePersisted({
+			id: "pi-snapshot",
+			runtime: "pi",
+			modelProvider: "anthropic",
+			claudeCodeSessionId: undefined,
+			agentSessionFile: transcript,
+		});
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+
+		const hydrated = await manager.hydrateClaudeCodeSnapshotMessages(ps.id, { messages: [] });
+
+		assert.deepEqual(hydrated, { messages: [] });
+	});
+
 	it("tryAutoSelectModel skips Pi role/default/aigw binding for Claude Code sessions", async () => {
 		const ps = makePersisted({ id: "claude-auto-model" });
 		const store = makeStore([ps]);
