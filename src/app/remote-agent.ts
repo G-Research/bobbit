@@ -65,7 +65,16 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
-import type { AutoRetryPendingEvent } from "../server/ws/protocol.js";
+import type { AutoRetryPendingEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction } from "../server/ws/protocol.js";
+
+export interface ProviderAuthRequiredState {
+	provider: string;
+	source: string;
+	reason: "missing-api-key";
+	message: string;
+	actions: ProviderAuthRecoveryAction[];
+	receivedAt: number;
+}
 
 // ───────────────────────────────────────────────────────────
 // Goal-state subscription fanout — additive bridge so renderer-level
@@ -593,6 +602,7 @@ export class RemoteAgent {
 				scheduledAt: number;
 				error?: string;
 			} | null,
+			providerAuthRequired: null as ProviderAuthRequiredState | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -920,6 +930,8 @@ export class RemoteAgent {
 	// ── Agent commands (proxied to gateway) ──────────────────────────
 
 	async prompt(input: string | any | any[], _images?: any[]): Promise<void> {
+		this._clearProviderAuthRequired();
+		this.emit({ type: "render" });
 		let text: string;
 		let attachments: any[] | undefined;
 		let imageData: any[] | undefined;
@@ -1009,7 +1021,9 @@ export class RemoteAgent {
 
 	/** Retry after a model/API error. */
 	retry(): void {
+		this._clearProviderAuthRequired();
 		this.send({ type: "retry" });
+		this.emit({ type: "render" });
 	}
 
 	compact(): void {
@@ -1159,6 +1173,7 @@ export class RemoteAgent {
 		this._state.pendingToolCalls = new Set();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
+		this._state.providerAuthRequired = null;
 		this._pendingAttachments = null;
 		this._pendingSkillExpansions = null;
 		this._highestSeq = 0;
@@ -1226,8 +1241,10 @@ export class RemoteAgent {
 
 	setModel(model: any): void {
 		this._state.model = model;
+		this._clearProviderAuthRequired();
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
 		state.chatPanel?.agentInterface?.requestUpdate();
+		this.emit({ type: "render" });
 	}
 
 	setThinkingLevel(level: any): void {
@@ -1762,6 +1779,10 @@ export class RemoteAgent {
 
 				// Sole writer of _state.status.
 				this._state.status = msg.status as ClientSessionStatus;
+
+				if (msg.status === "streaming") {
+					this._clearProviderAuthRequired();
+				}
 
 				if (msg.status === "archived" && (msg as any).archivedAt) {
 					this._state.archivedAt = (msg as any).archivedAt;
@@ -2450,6 +2471,10 @@ export class RemoteAgent {
 		this.apply({ type: "mutation-update", messageId: id, patch: { decided: decision === "approve" ? "approved" : "rejected" } });
 	}
 
+	private _clearProviderAuthRequired(): void {
+		this._state.providerAuthRequired = null;
+	}
+
 	private handleAgentEvent(event: any) {
 		// Track current event seq so live-event reducer dispatches use it.
 		const eventSeq = this._highestSeq;
@@ -2460,8 +2485,9 @@ export class RemoteAgent {
 				// signal: clear local error + capture timing.
 				this._state.error = undefined;
 				// New turn starting (either a fresh user prompt, an explicit retry,
-				// or a fired auto-retry timer) — the "retrying…" banner is done.
+				// or a fired auto-retry timer) — recovery banners are done.
 				this._state.autoRetryPending = null;
+				this._clearProviderAuthRequired();
 				this._taskStartTime = Date.now();
 				this._state.turnStartTime = this._taskStartTime;
 				break;
@@ -2490,6 +2516,26 @@ export class RemoteAgent {
 				// no field is read today (banner just clears) so no narrowing needed.
 				this._state.autoRetryPending = null;
 				break;
+
+			case "provider_auth_required": {
+				// Missing provider credentials are terminal until an operator fixes
+				// Settings or switches models. Store a redacted, renderable subset only.
+				const e = event as ProviderAuthRequiredEvent;
+				this._state.autoRetryPending = null;
+				this._state.providerAuthRequired = {
+					provider: typeof e.provider === "string" ? e.provider : "unknown",
+					source: typeof e.source === "string" ? e.source : "agent",
+					reason: "missing-api-key",
+					message: typeof e.message === "string" && e.message
+						? e.message
+						: "Provider API key is missing. Add or fix the key in Settings, switch provider, then retry.",
+					actions: Array.isArray(e.actions)
+						? e.actions.filter((a): a is ProviderAuthRecoveryAction => !!a && typeof a.type === "string" && typeof a.label === "string")
+						: [],
+					receivedAt: Date.now(),
+				};
+				break;
+			}
 
 			case "agent_end": {
 				this.streamingMessageId = undefined;

@@ -18,11 +18,14 @@ function makeAgent(readyState: number) {
 (window as any).__makeAgent = makeAgent;
 (window as any).__setReadyState = (ra: any, rs: number) => { ra.ws.readyState = rs; };
 (window as any).__flush = (ra: any) => ra._flushOutbox();
+(window as any).__event = (ra: any, event: any) => ra.handleAgentEvent(event);
 (window as any).__snapshot = (ra: any) => ({
 	outboxLen: ra._pendingOutbox.length,
 	sent: ra.__sentFrames.map((s: string) => JSON.parse(s)),
 	queue: ra.getQueue(),
 	messages: ra._state.messages.length,
+	providerAuthRequired: ra._state.providerAuthRequired,
+	autoRetryPending: ra._state.autoRetryPending,
 	queueUpdateCount: ra.__queueUpdates.length,
 });
 (window as any).__ready = true;
