@@ -8,7 +8,7 @@ module: ../lib/provider.mjs
 # resolves the runtime's status + API host port WITHOUT starting Docker; external
 # mode ignores this entirely.
 runtime: hindsight
-hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
 # Activation is additionally gated on `externalUrl` (see `activation` below); the
 # provider also enforces the same dormancy gate defensively at runtime.

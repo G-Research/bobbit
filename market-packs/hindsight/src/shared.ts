@@ -525,14 +525,18 @@ export function clampRecallQuery(query: string, maxChars: number): string {
  *  4xx such as auth) are unaffected and still surface.
  *
  *  Detected STRUCTURALLY (no static dependency on the client's `HindsightError`):
- *  `kind:"http"` + `status:400` + a "too long"/"query" message (the client surfaces
- *  the upstream `detail` body in the error message). */
+ *  `kind:"http"` + `status:400` + a message that names the query AND carries
+ *  query-too-long/token-limit wording (the client surfaces the upstream `detail`
+ *  body in the error message). */
 export function isQueryTooLongError(e: unknown): boolean {
 	if (!e || typeof e !== "object") return false;
 	const err = e as { kind?: unknown; status?: unknown; message?: unknown };
 	if (err.kind !== "http" || err.status !== 400) return false;
 	const msg = typeof err.message === "string" ? err.message.toLowerCase() : "";
-	return msg.includes("too long") || msg.includes("query");
+	if (!/\bquery\b/.test(msg)) return false;
+	if (/\btoo\s+(?:long|large|many\s+tokens?)\b/.test(msg)) return true;
+	return /\b(?:exceeds?|exceeded)\b.*\b(?:max(?:imum)?|limit|tokens?)\b/.test(msg)
+		|| /\b(?:max(?:imum)?|limit|tokens?)\b.*\b(?:exceeds?|exceeded)\b/.test(msg);
 }
 
 /** The dormancy gate (the central invariant): the provider runs a hook's work

@@ -29,6 +29,7 @@
 
 import {
 	applyBankMission,
+	applyDirectives,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
@@ -116,10 +117,11 @@ const BOBBIT_REFLECT_INSTRUCTION = [
 ].join("\n");
 
 function reflectPrompt(prompt: string, cfg: EffectiveConfig, body: Record<string, unknown>): string {
-	// Bank-wide directives are disabled by default for shared banks. Until scoped
-	// directive semantics are verified, keep Bobbit-specific behaviour per-request.
+	// Bank-wide directives are disabled by default for shared banks. Only suppress
+	// the per-request Bobbit instruction when bank directives are explicitly enabled
+	// with a non-disabled apply mode and the route applies them before reflect.
 	if (body.bobbitInstruction === false) return prompt;
-	if ((cfg as unknown as { directivesEnabled?: boolean }).directivesEnabled === true) return prompt;
+	if (cfg.directivesEnabled && cfg.directiveApplyMode !== "disabled") return prompt;
 	return `${BOBBIT_REFLECT_INSTRUCTION}\n\nUser query:\n${prompt}`;
 }
 
@@ -430,6 +432,7 @@ export const routes = {
 		const factTypes = factTypesOf(body.factTypes);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
+			await applyDirectives(store, client, cfg);
 			const reflectOptions = {
 				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 				...(responseSchema ? { responseSchema } : {}),

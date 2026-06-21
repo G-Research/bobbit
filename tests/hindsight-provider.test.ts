@@ -310,15 +310,19 @@ test("lastError is NOT cleared when recall fails", async () => {
 });
 
 // ── Soft-skip the data plane's 500-token "Query too long" 400 (defence in depth) ─
-test("isQueryTooLongError: only a kind:http status:400 'too long'/query error matches", () => {
+test("isQueryTooLongError: only kind:http status:400 query token-limit errors match", () => {
 	// The exact shape the client throws (status + detail surfaced in the message).
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "Hindsight HTTP 400 for POST .../recall: Query too long: 620 tokens exceeds maximum of 500" }), true);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "...query exceeds limit" }), true);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "query token count exceeded" }), true);
 	// Genuine errors are NOT soft-skipped: other statuses, kinds, and unrelated 400s.
 	assert.equal(isQueryTooLongError({ kind: "http", status: 500, message: "Query too long" }), false);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 401, message: "unauthorized" }), false);
 	assert.equal(isQueryTooLongError({ kind: "timeout", message: "Query too long" }), false);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "bad request" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "invalid query syntax" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "query parameter is required" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "prompt too long" }), false);
 	assert.equal(isQueryTooLongError(new Error("Query too long")), false);
 	assert.equal(isQueryTooLongError(null), false);
 	assert.equal(isQueryTooLongError("Query too long"), false);
@@ -694,6 +698,38 @@ test("routes reflect: project scope sends a project tag filter; all scope sends 
 			{ body: { prompt: "global", scope: "project" } } as never,
 		);
 		assert.equal(calls.reflect[2].opts, undefined);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes reflect: applies bank directives when explicitly enabled, otherwise keeps per-request Bobbit instruction", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "what do we know" } } as never);
+		assert.match(calls.reflect[0].prompt, /^Bobbit coding-agent memory reflection instructions:/);
+		assert.equal(calls.createDirective.length, 0);
+
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", directivesEnabled: true, directiveApplyMode: "disabled" });
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "still fallback" } } as never);
+		assert.match(calls.reflect[1].prompt, /^Bobbit coding-agent memory reflection instructions:/);
+		assert.equal(calls.createDirective.length, 0, "directivesEnabled alone does not write bank directives");
+
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", directivesEnabled: true, directiveApplyMode: "bank-wide-explicit-opt-in" });
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "use bank directives" } } as never);
+		assert.equal(calls.reflect[2].prompt, "use bank directives");
+		assert.equal(calls.listDirectives.length, 1);
+		assert.equal(calls.createDirective.length, 1);
+		assert.equal(calls.createDirective[0].directive.name, "bobbit-coding-agent-recall");
+
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "idempotent" } } as never);
+		assert.equal(calls.reflect[3].prompt, "idempotent");
+		assert.equal(calls.listDirectives.length, 1, "directive signature cache avoids repeated list/apply");
+		assert.equal(calls.createDirective.length, 1);
 	} finally {
 		__setClientFactory(null);
 	}
