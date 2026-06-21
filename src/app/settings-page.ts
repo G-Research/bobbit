@@ -1814,9 +1814,20 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: { fallbackLabel?: string; thinkingWidth?: string; thinkingFitContent?: boolean; onThinkingClear?: () => void; clearModelTitle?: string; clearThinkingTitle?: string },
+	opts?: {
+		fallbackLabel?: string;
+		thinkingFallbackLabel?: string;
+		thinkingWidth?: string;
+		thinkingFitContent?: boolean;
+		onThinkingClear?: () => void;
+		clearModelTitle?: string;
+		clearThinkingTitle?: string;
+		modelTitle?: string;
+		thinkingTitle?: string;
+	},
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
+	const thinkingFallbackLabel = opts?.thinkingFallbackLabel ?? opts?.fallbackLabel;
 
 	// Determine the selected model's capabilities. When the model is
 	// unknown (not in allModels yet — registry still loading, or the saved
@@ -1874,7 +1885,8 @@ export function renderModelRow(
 							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
 							flex-1 min-w-0 text-left
 							${modelValue ? "text-foreground" : "text-muted-foreground"}"
-						title="Choose model"
+						title=${opts?.modelTitle ?? "Choose model"}
+						data-testid="model-picker-btn"
 						@click=${() => openModelPicker(modelValue, onModelChange)}
 					>
 						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
@@ -1930,12 +1942,12 @@ export function renderModelRow(
 					<div class="w-px h-5 bg-border shrink-0"></div>
 					<!-- Thinking picker -->
 					<div class="shrink-0 ${thinkingDisabled ? "opacity-40 pointer-events-none" : ""}"
-						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
+						title=${thinkingDisabled ? "Selected model does not support thinking" : (opts?.thinkingTitle ?? "Thinking level")}
 					>
 						${Select({
-							value: displayedThinking || (opts?.fallbackLabel ? "" : thinkingDefault),
+							value: displayedThinking || (thinkingFallbackLabel ? "" : thinkingDefault),
 							options: [
-								...(opts?.fallbackLabel ? [{ value: "", label: opts.fallbackLabel, icon: icon(Brain, "sm") }] : []),
+								...(thinkingFallbackLabel ? [{ value: "", label: thinkingFallbackLabel, icon: icon(Brain, "sm") }] : []),
 								...supportedLevels.map(lvl => ({ value: lvl, label: thinkingLabels[lvl], icon: icon(Brain, "sm") })),
 							] as SelectOption[],
 							onChange: (value: string) => { onThinkingChange(value); },
