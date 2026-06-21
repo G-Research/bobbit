@@ -1,6 +1,7 @@
 import type { IRpcBridge, RpcBridgeOptions, RpcEventListener } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
-import type { ClaudeCodePermissionMode, SessionRuntime } from "./session-store.js";
+import type { ClaudeCodeConfig, ClaudeCodePermissionMode } from "./claude-code-config.js";
+import type { SessionRuntime } from "./session-store.js";
 
 export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-code";
@@ -8,6 +9,7 @@ export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	claudeCodeExecutable?: string;
 	claudeCodePermissionMode?: ClaudeCodePermissionMode;
 	claudeCodeModelAlias?: string;
+	claudeCodeAllowBypassPermissions?: boolean;
 }
 
 export type SessionBridgeOptions = RpcBridgeOptions & {
@@ -16,6 +18,7 @@ export type SessionBridgeOptions = RpcBridgeOptions & {
 	claudeCodeExecutable?: string;
 	claudeCodePermissionMode?: ClaudeCodePermissionMode;
 	claudeCodeModelAlias?: string;
+	claudeCodeAllowBypassPermissions?: boolean;
 };
 
 export class RuntimeSwitchError extends Error {
@@ -68,15 +71,16 @@ export function assertRuntimeAllowedForSession(runtime: SessionRuntime | undefin
 	}
 }
 
-export function hydrateRuntimeOptions(options: SessionBridgeOptions): SessionBridgeOptions {
+export function hydrateRuntimeOptions(options: SessionBridgeOptions, defaults?: ClaudeCodeConfig): SessionBridgeOptions {
 	const runtime = resolveSessionRuntime({ runtime: options.runtime, initialModel: options.initialModel });
 	if (runtime !== "claude-code") return { ...options, runtime: "pi" };
 	return {
 		...options,
 		runtime,
-		claudeCodeExecutable: options.claudeCodeExecutable || "claude",
-		claudeCodePermissionMode: options.claudeCodePermissionMode || "default",
-		claudeCodeModelAlias: options.claudeCodeModelAlias || modelAliasFromModelString(options.initialModel) || "default",
+		claudeCodeExecutable: options.claudeCodeExecutable || defaults?.executablePath || "claude",
+		claudeCodePermissionMode: options.claudeCodePermissionMode || defaults?.permissionMode || "default",
+		claudeCodeAllowBypassPermissions: options.claudeCodeAllowBypassPermissions ?? defaults?.allowBypassPermissions ?? false,
+		claudeCodeModelAlias: options.claudeCodeModelAlias || modelAliasFromModelString(options.initialModel) || defaults?.defaultModel || "default",
 	};
 }
 
@@ -116,7 +120,7 @@ class LazyClaudeCodeBridge implements IRpcBridge {
 	async promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any> { return (await this.load()).promptWhenReady(text, images, opts); }
 	async steer(text: string): Promise<any> { return (await this.load()).steer(text); }
 	async abort(): Promise<any> { return this.bridge ? this.bridge.abort() : { success: true }; }
-	async getState(): Promise<any> { return this.bridge ? this.bridge.getState() : { success: true, data: { runtime: "claude-code", model: { provider: "claude-code", id: this.options.claudeCodeModelAlias }, claudeCodeSessionId: this.options.claudeCodeSessionId } }; }
+	async getState(): Promise<any> { return this.bridge ? this.bridge.getState() : { success: true, data: { runtime: "claude-code", model: { provider: "claude-code", id: this.options.claudeCodeModelAlias }, claudeCodeSessionId: this.options.claudeCodeSessionId, claudeCodeModelAlias: this.options.claudeCodeModelAlias, claudeCodePermissionMode: this.options.claudeCodePermissionMode } }; }
 	async getMessages(): Promise<any> { return this.bridge ? this.bridge.getMessages() : { success: true, data: { messages: [] } }; }
 	async setModel(provider: string, modelId: string): Promise<any> { return (await this.load()).setModel(provider, modelId); }
 	async setThinkingLevel(level: string): Promise<any> { return (await this.load()).setThinkingLevel(level); }

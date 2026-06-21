@@ -57,6 +57,27 @@ test.describe("Claude Code status/model APIs", () => {
 		}
 	});
 
+	test("status refresh endpoint invalidates cache and re-probes", async () => {
+		const missing = path.join(os.tmpdir(), `missing-claude-${process.pid}-${Date.now()}`);
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "claudeCode.executablePath": missing }),
+		});
+		const first = await (await apiFetch("/api/claude-code/status")).json();
+		expect(first.reason).toBe("Claude Code CLI not found");
+
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "claudeCode.executablePath": process.execPath }),
+		});
+		const refreshResp = await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
+		expect(refreshResp.status).toBe(200);
+		const refreshed = await refreshResp.json();
+		expect(refreshed.available).toBe(true);
+		expect(refreshed.ready).toBe(false);
+		expect(refreshed.reason).toContain("authentication status unknown");
+	});
+
 	test("preferences validate Claude Code bypass permission opt-in", async () => {
 		const rejected = await apiFetch("/api/preferences", {
 			method: "PUT",

@@ -31,15 +31,32 @@ export function isClaudeCodePreferenceKey(key: string): boolean {
 	return key.startsWith("claudeCode.");
 }
 
-export function readClaudeCodeConfig(prefs: Pick<PreferencesStore, "get">): ClaudeCodeConfig {
-	const executablePath = normalizeExecutablePath(prefs.get(CLAUDE_CODE_PREF_KEYS.executablePath));
-	const defaultModel = normalizeModelAlias(prefs.get(CLAUDE_CODE_PREF_KEYS.defaultModel));
-	const allowBypassPermissions = prefs.get(CLAUDE_CODE_PREF_KEYS.allowBypassPermissions) === true;
+export function readClaudeCodeConfig(
+	prefs: Pick<PreferencesStore, "get">,
+	projectConfig?: { get(key: string): string | undefined } | null,
+): ClaudeCodeConfig {
+	const executablePath = normalizeExecutablePath(
+		projectConfig?.get("claudeCodeExecutablePath") ?? prefs.get(CLAUDE_CODE_PREF_KEYS.executablePath),
+	);
+	const defaultModel = normalizeModelAlias(
+		projectConfig?.get("claudeCodeDefaultModel") ?? prefs.get(CLAUDE_CODE_PREF_KEYS.defaultModel),
+	);
+	const projectAllowBypass = parseBooleanLike(projectConfig?.get("claudeCodeAllowBypassPermissions"));
+	const allowBypassPermissions = projectAllowBypass ?? (prefs.get(CLAUDE_CODE_PREF_KEYS.allowBypassPermissions) === true);
 	const permissionMode = normalizePermissionMode(
-		prefs.get(CLAUDE_CODE_PREF_KEYS.permissionMode),
+		projectConfig?.get("claudeCodePermissionMode") ?? prefs.get(CLAUDE_CODE_PREF_KEYS.permissionMode),
 		allowBypassPermissions,
 	);
 	return { executablePath, defaultModel, permissionMode, allowBypassPermissions };
+}
+
+function parseBooleanLike(value: unknown): boolean | undefined {
+	if (typeof value === "boolean") return value;
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim().toLowerCase();
+	if (["true", "1", "yes", "on"].includes(trimmed)) return true;
+	if (["false", "0", "no", "off"].includes(trimmed)) return false;
+	return undefined;
 }
 
 export function normalizeExecutablePath(value: unknown): string {

@@ -672,7 +672,10 @@ export function handleWebSocketConnection(
 					try {
 						const persisted = sessionManager.getPersistedSession(session.id);
 						assertRuntimeSwitchAllowed(persisted?.runtime, msg.provider);
-						await session.rpcClient.setModel(msg.provider, msg.modelId);
+						const result = await session.rpcClient.setModel(msg.provider, msg.modelId);
+						if (result && result.success === false) {
+							throw new Error(result.error || "model switch rejected by runtime");
+						}
 						sessionManager.updateModelNameFile(session.id, msg.modelId);
 						sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
 					} catch (err: any) {

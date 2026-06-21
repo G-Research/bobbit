@@ -18,6 +18,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime, runtimeFromModelString, runtimeFromProvider, type SessionBridgeOptions } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
@@ -1275,6 +1276,14 @@ export class SessionManager {
 		return this.sandboxManager;
 	}
 
+	private readClaudeCodeConfigForProject(projectId?: string) {
+		if (!this.preferencesStore) return undefined;
+		const projectConfigStore = projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore ?? null)
+			: (this.projectConfigStore ?? null);
+		return readClaudeCodeConfig(this.preferencesStore, projectConfigStore);
+	}
+
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
@@ -1310,6 +1319,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
@@ -4363,7 +4373,7 @@ export class SessionManager {
 			claudeCodeExecutable: ps.claudeCodeExecutable,
 			claudeCodePermissionMode: ps.claudeCodePermissionMode,
 			claudeCodeModelAlias: ps.claudeCodeModelAlias,
-		}));
+		}, this.readClaudeCodeConfigForProject(ps.projectId)));
 
 		const rpcClient = createSessionBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -4548,7 +4558,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: import("./session-store.js").SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4560,7 +4570,7 @@ export class SessionManager {
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
 		const requestedInitialModel = opts?.initialModel ?? (!opts?.skipAutoModel ? this.resolveInitialModel(opts?.role ?? opts?.roleName, projectId) : undefined);
-		const requestedRuntime = runtimeFromModelString(requestedInitialModel) ?? "pi";
+		const requestedRuntime = opts?.runtime ?? runtimeFromModelString(requestedInitialModel) ?? "pi";
 		assertRuntimeAllowedForSession(requestedRuntime, opts?.sandboxed);
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
@@ -5498,10 +5508,15 @@ export class SessionManager {
 				const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
 				if (stateResp.success && (stateRuntime === "claude-code" || claudeCodeSessionId)) {
 					const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
+					const ps = this.resolveStoreForSession(session.id).get(session.id);
 					this.resolveStoreForSession(session.id).update(session.id, {
 						runtime: "claude-code",
+						modelProvider: "claude-code",
+						modelId,
 						claudeCodeSessionId,
-						claudeCodeModelAlias: modelId,
+						claudeCodeExecutable: ps?.claudeCodeExecutable,
+						claudeCodePermissionMode: ps?.claudeCodePermissionMode,
+						claudeCodeModelAlias: modelId ?? ps?.claudeCodeModelAlias,
 					});
 					return;
 				}
@@ -5734,6 +5749,13 @@ export class SessionManager {
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
+		runtime?: import("./session-store.js").SessionRuntime;
+		claudeCodeSessionId?: string;
+		claudeCodeExecutable?: string;
+		claudeCodePermissionMode?: import("./session-store.js").ClaudeCodePermissionMode;
+		claudeCodeModelAlias?: string;
+		modelProvider?: string;
+		modelId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -5774,6 +5796,13 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
+				runtime: ps?.runtime ?? "pi",
+				claudeCodeSessionId: ps?.claudeCodeSessionId,
+				claudeCodeExecutable: ps?.claudeCodeExecutable,
+				claudeCodePermissionMode: ps?.claudeCodePermissionMode,
+				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
+				modelProvider: ps?.modelProvider,
+				modelId: ps?.modelId,
 			};
 		});
 	}
@@ -6072,7 +6101,7 @@ export class SessionManager {
 			claudeCodeExecutable: respawnPersisted?.claudeCodeExecutable,
 			claudeCodePermissionMode: respawnPersisted?.claudeCodePermissionMode,
 			claudeCodeModelAlias: respawnPersisted?.claudeCodeModelAlias,
-		}));
+		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
 		const rpcClient = createSessionBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
@@ -7399,7 +7428,7 @@ export class SessionManager {
 				claudeCodeExecutable: forceRespawnPersisted?.claudeCodeExecutable,
 				claudeCodePermissionMode: forceRespawnPersisted?.claudeCodePermissionMode,
 				claudeCodeModelAlias: forceRespawnPersisted?.claudeCodeModelAlias,
-			}));
+			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
 			const rpcClient = createSessionBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;

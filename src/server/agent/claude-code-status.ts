@@ -12,7 +12,7 @@ export interface ClaudeCodeStatus {
 	executablePath: string;
 	reason?: string;
 	/** MVP: no safe authenticated no-op probe is documented, so auth is verified at session start. */
-	authenticationStatus?: "assumed" | "login-required" | "unknown";
+	authenticationStatus?: "verified" | "login-required" | "unknown";
 }
 
 type ExecFileLike = (
@@ -62,13 +62,15 @@ export async function probeClaudeCodeStatus(
 			maxBuffer: 1024 * 1024,
 		});
 		const version = parseVersion(stdout, stderr);
+		const testAssumeAuthenticated = process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED === "1";
 		return {
 			available: true,
-			authenticated: true,
-			ready: true,
+			authenticated: testAssumeAuthenticated,
+			ready: testAssumeAuthenticated,
 			...(version ? { version } : {}),
 			executablePath,
-			authenticationStatus: "assumed",
+			...(testAssumeAuthenticated ? {} : { reason: "Claude Code authentication status unknown; sign in with Claude Code and refresh status." }),
+			authenticationStatus: testAssumeAuthenticated ? "verified" : "unknown",
 		};
 	} catch (err: any) {
 		return statusFromProbeError(executablePath, err);

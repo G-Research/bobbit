@@ -17,6 +17,7 @@ import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { createSessionBridge, assertRuntimeAllowedForSession, hydrateRuntimeOptions, modelAliasFromModelString, resolveSessionRuntime, runtimeFromModelString, type SessionBridgeOptions } from "./session-runtime.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
 import type { SessionRuntime } from "./session-store.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -242,6 +243,7 @@ export interface PipelineContext {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
+	preferencesStore?: import("./preferences-store.js").PreferencesStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
@@ -518,7 +520,10 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	const runtime = resolveSessionRuntime({ runtime: plan.runtime, initialModel: plan.bridgeOptions.initialModel });
 	assertRuntimeAllowedForSession(runtime, plan.sandboxed);
 	plan.runtime = runtime;
-	plan.bridgeOptions = hydrateRuntimeOptions({ ...plan.bridgeOptions, runtime });
+	const claudeCodeConfig = runtime === "claude-code" && ctx.preferencesStore
+		? readClaudeCodeConfig(ctx.preferencesStore, ctx.projectConfigStore)
+		: undefined;
+	plan.bridgeOptions = hydrateRuntimeOptions({ ...plan.bridgeOptions, runtime }, claudeCodeConfig);
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
@@ -889,6 +894,13 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 
 // ── Persistence ────────────────────────────────────────────────────────────
 
+function modelProviderFromModelString(model?: string): string | undefined {
+	if (!model) return undefined;
+	const slash = model.indexOf("/");
+	if (slash <= 0) return undefined;
+	return model.slice(0, slash);
+}
+
 /** Single store.put() with ALL structural fields. Called exactly once per session. */
 export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
 	store.put({
@@ -923,6 +935,8 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		modelProvider: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
+		modelId: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
 		runtime: plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi",
 		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
 		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,

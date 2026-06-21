@@ -80,9 +80,10 @@ describe("Claude Code status", () => {
 		assert.deepEqual(seen.args, ["--version"]);
 		assert.equal(seen.options.shell, false);
 		assert.equal(status.available, true);
-		assert.equal(status.ready, true);
-		assert.equal(status.authenticated, true);
+		assert.equal(status.ready, false);
+		assert.equal(status.authenticated, false);
 		assert.equal(status.version, "1.2.3");
+		assert.match(status.reason || "", /authentication status unknown/);
 	});
 
 	it("reports a missing CLI as unavailable", async () => {
@@ -117,10 +118,29 @@ describe("Claude Code synthetic models", () => {
 		}
 	});
 
-	it("marks Claude Code models selectable when the configured executable probes successfully", async () => {
+	it("keeps Claude Code models unavailable when only --version succeeds", async () => {
 		const { prefs, dir } = makePrefs();
 		try {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, process.execPath);
+			const models = await getAvailableModels(prefs);
+			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
+			assert.ok(sonnet);
+			assert.equal(sonnet.authenticated, false);
+			assert.equal(sonnet.sessionSelectable, false);
+			assert.match(sonnet.sessionUnavailableReason || "", /authentication status unknown/);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("allows test harnesses to fake authenticated status explicitly", async () => {
+		const { prefs, dir } = makePrefs();
+		const previous = process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED;
+		process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED = "1";
+		try {
+			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, process.execPath);
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
 			const models = await getAvailableModels(prefs);
 			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
 			assert.ok(sonnet);
@@ -128,6 +148,8 @@ describe("Claude Code synthetic models", () => {
 			assert.equal(sonnet.sessionSelectable, true);
 			assert.equal(sonnet.sessionUnavailableReason, undefined);
 		} finally {
+			if (previous === undefined) delete process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED;
+			else process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED = previous;
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});

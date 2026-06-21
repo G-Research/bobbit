@@ -252,6 +252,7 @@ export class RemoteAgent {
 	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
+	private _pendingModelRollback: { model: any; runtime: "pi" | "claude-code" | undefined } | null = null;
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
@@ -1226,9 +1227,11 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any): void {
+		this._pendingModelRollback = { model: this._state.model, runtime: this._state.runtime };
 		this._state.model = model;
 		this._state.runtime = model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		this.send({ type: "get_state" });
 		state.chatPanel?.agentInterface?.requestUpdate();
 	}
 
@@ -1555,6 +1558,7 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
+					this._pendingModelRollback = null;
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -2041,6 +2045,12 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if ((msg.code === "SET_MODEL_FAILED" || msg.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION") && this._pendingModelRollback) {
+					this._state.model = this._pendingModelRollback.model;
+					this._state.runtime = this._pendingModelRollback.runtime;
+					this._pendingModelRollback = null;
+					state.chatPanel?.agentInterface?.requestUpdate();
+				}
 				// Status mutation is the server's job — it broadcasts a matching
 				// `session_status` frame in the same termination path. We only
 				// clear local-only fields here.
