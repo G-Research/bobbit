@@ -357,6 +357,21 @@ export async function withRetry<T>(
 	throw lastError!;
 }
 
+export type PreExistingTranscriptSetupMode = "none" | "switch-session" | "claude-code-resume";
+
+export function resolvePreExistingTranscriptSetupMode(
+	plan: Pick<SessionSetupPlan, "preExistingAgentSessionFile" | "runtime" | "bridgeOptions">,
+): PreExistingTranscriptSetupMode {
+	if (!plan.preExistingAgentSessionFile) return "none";
+	const runtime = plan.runtime ?? plan.bridgeOptions.runtime ?? runtimeFromModelString(plan.bridgeOptions.initialModel) ?? "pi";
+	if (runtime !== "claude-code") return "switch-session";
+	if (plan.bridgeOptions.claudeCodeSessionId) return "claude-code-resume";
+	throw new Error(
+		"Continue/fork from a Bobbit transcript is not supported for Claude Code runtime in the MVP unless a Claude Code session id is available; " +
+		"Pi switch_session cannot be used with Claude Code.",
+	);
+}
+
 // ── Goal-metadata helpers ───────────────────────────────────────────────────
 
 /** Effective goal id for a session: own goal (lead) else team/parent goal (member). */
@@ -959,6 +974,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	resolvePreExistingTranscriptSetupMode(plan);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1176,6 +1192,7 @@ export async function executeWorktreeAsync(
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	resolvePreExistingTranscriptSetupMode(plan);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1270,7 +1287,8 @@ export async function executeWorktreeAsync(
 	);
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
-	if (plan.preExistingAgentSessionFile) {
+	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
+	if (preExistingMode === "switch-session") {
 		// The continue handler pre-computes the cloned-.jsonl path against the
 		// project-root cwd. For worktree-backed sessions, the agent CLI boots
 		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
@@ -1327,6 +1345,10 @@ export async function executeWorktreeAsync(
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+	} else if (preExistingMode === "claude-code-resume") {
+		// Claude Code resumes from its own session id via bridge options/startup args;
+		// Pi's transcript-path switch_session command is unsupported for this runtime.
+		console.log(`[session-setup] Using Claude Code session-id resume for ${session.id}; skipping switch_session transcript rehydrate.`);
 	}
 
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
@@ -1436,7 +1458,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
-	if (plan.preExistingAgentSessionFile) {
+	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
+	if (preExistingMode === "switch-session") {
 		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
@@ -1460,6 +1483,10 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+	} else if (preExistingMode === "claude-code-resume") {
+		// Claude Code resumes from its own session id via bridge options/startup args;
+		// Pi's transcript-path switch_session command is unsupported for this runtime.
+		console.log(`[session-setup] Using Claude Code session-id resume for ${session.id}; skipping switch_session transcript rehydrate.`);
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
