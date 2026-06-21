@@ -142,7 +142,7 @@ test.describe("Claude Code local-runtime UI", () => {
 
 			await expect.poll(async () => page.evaluate(() => (window as any).__bobbitState?.selectedSessionId)).toBe(newSessionId);
 			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local)");
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 			if (newSessionId) await apiFetch(`/api/sessions/${newSessionId}`, { method: "DELETE" }).catch(() => {});
@@ -167,7 +167,7 @@ test.describe("Claude Code local-runtime UI", () => {
 			await openApp(page);
 			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local)");
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
 			await expect.poll(async () => page.evaluate(() => ({
 				runtime: (window as any).__bobbitState?.chatPanel?.agentInterface?.sessionRuntime,
 				alias: (window as any).__bobbitState?.chatPanel?.agentInterface?.claudeCodeModelAlias,
@@ -175,7 +175,7 @@ test.describe("Claude Code local-runtime UI", () => {
 
 			await page.reload();
 			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local)");
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
 			await expect.poll(async () => page.evaluate(() => ({
 				runtime: (window as any).__bobbitState?.chatPanel?.agentInterface?.sessionRuntime,
 				alias: (window as any).__bobbitState?.chatPanel?.agentInterface?.claudeCodeModelAlias,

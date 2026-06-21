@@ -5320,18 +5320,15 @@ export class SessionManager {
 		return texts.join("\n\n");
 	}
 
-	/**
-	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
-	 * transcript file. Used as the H1 fallback so a child that completed before a
-	 * restart can still be collected via team_wait without a live process.
-	 */
-	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
+	private async getPersistedSessionMessages(sessionId: string, opts?: { claudeCodeOnly?: boolean; archivedOnly?: boolean }): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-		if (!ps?.agentSessionFile) return "";
+		if (!ps?.agentSessionFile) return [];
+		if (opts?.archivedOnly && !ps.archived) return [];
+		if (opts?.claudeCodeOnly && resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) !== "claude-code") return [];
 		try {
 			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
 			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
-			if (!content) return "";
+			if (!content) return [];
 			const messages: unknown[] = [];
 			for (const line of content.split(/\r?\n/)) {
 				if (!line.trim()) continue;
@@ -5340,10 +5337,39 @@ export class SessionManager {
 					if (entry.type === "message" && entry.message) messages.push(entry.message);
 				} catch { /* skip malformed line */ }
 			}
-			return this.extractAssistantText(messages);
+			return messages;
 		} catch {
-			return "";
+			return [];
 		}
+	}
+
+	/**
+	 * Claude Code resumes from Claude's session id instead of replaying Bobbit's
+	 * JSONL into the bridge, so immediately after gateway restart the live bridge
+	 * can have an empty/new-only in-memory snapshot. Prefer the persisted Claude
+	 * transcript fallback when it contains more complete history.
+	 */
+	async hydrateClaudeCodeSnapshotMessages(sessionId: string, liveData: unknown): Promise<unknown> {
+		const persisted = await this.getPersistedSessionMessages(sessionId, { claudeCodeOnly: true });
+		if (persisted.length === 0) return liveData;
+		const liveMessages = Array.isArray(liveData)
+			? liveData
+			: (liveData && typeof liveData === "object" && Array.isArray((liveData as any).messages) ? (liveData as any).messages : []);
+		if (persisted.length <= liveMessages.length) return liveData;
+		const messages = truncateLargeToolContentInMessages(persisted) as unknown[];
+		if (Array.isArray(liveData)) return messages;
+		if (liveData && typeof liveData === "object") return { ...(liveData as Record<string, unknown>), messages };
+		return { messages };
+	}
+
+	/**
+	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
+	 * transcript file. Used as the H1 fallback so a child that completed before a
+	 * restart can still be collected via team_wait without a live process.
+	 */
+	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
+		const messages = await this.getPersistedSessionMessages(sessionId);
+		return this.extractAssistantText(messages);
 	}
 
 	/**
@@ -6972,29 +6998,8 @@ export class SessionManager {
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
-		const ps = this.resolveStoreForId(id)?.get(id);
-		if (!ps?.archived || !ps.agentSessionFile) return [];
-		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
-			if (!content) return [];
-			const lines = content.trim().split("\n");
-			const messages: unknown[] = [];
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) {
-						messages.push(entry.message);
-					}
-				} catch {
-					// Skip malformed lines
-				}
-			}
-			return truncateLargeToolContentInMessages(messages) as unknown[];
-		} catch {
-			return [];
-		}
+		const messages = await this.getPersistedSessionMessages(id, { archivedOnly: true });
+		return truncateLargeToolContentInMessages(messages) as unknown[];
 	}
 
 	/** List archived sessions in the same format as listSessions(). */

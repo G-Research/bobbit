@@ -6,7 +6,7 @@ Detailed reference for all Bobbit features. For a quick overview, see the [READM
 
 Each session is either a standard `pi-coding-agent` child process or, when explicitly selected, a local Claude Code CLI runtime session.
 
-- **Runtimes**: The default session runtime remains Pi. Claude Code appears as a separate local runtime/model option backed by the user's installed `claude` CLI and existing Claude Code login, not by a normal API-backed provider; its picker rows show CLI-managed limits instead of numeric context/output limits. See [claude-code-runtime.md](claude-code-runtime.md).
+- **Runtimes**: The default session runtime remains Pi. Claude Code appears as a separate local runtime/model option backed by the user's installed `claude` CLI and existing Claude Code login, not by a normal API-backed provider. Bobbit displays mapped Claude Code structured tool events where possible, but Claude Code owns its tool catalog, permissions, model catalog, and runtime limits. See [claude-code-runtime.md](claude-code-runtime.md).
 - **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, Pi sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file; Claude Code sessions persist their own `claudeCodeSessionId` for `--resume` where available. If an agent was mid-turn when the server died, it is automatically re-prompted where the runtime supports it.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
@@ -81,6 +81,7 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 - Hydrates dashboard cost summaries via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
 - `CostPopover` fetches `/cost/breakdown` when opened and shows the **Cache hit** row from that response; it is not directly live-updated by `cost_update` frames.
 - Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost` — all responses include `cacheHitRate: number | null`.
+- For local Claude Code runtime sessions, token/cost display is best-effort and local-runtime managed; Bobbit normalizes token display when Claude Code reports usage.
 
 See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.

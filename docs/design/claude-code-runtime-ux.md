@@ -1,6 +1,6 @@
 # Claude Code Runtime UX
 
-**Status:** Design artifact only. No production code or tests changed in this task.  
+**Status:** Design artifact only. No production code or tests changed in this task.
 **Scope:** Model/runtime picker UX, Settings UI, readiness/auth states, existing-session runtime switching, reload metadata, and browser E2E coverage for adding a local Claude Code session runtime.
 
 ---
@@ -204,9 +204,9 @@ New behavior:
 4. If runtimes differ, **do not send** WS `set_model`.
 5. Show confirmation dialog:
 
-Title: `Start a Claude Code session?`  
-Body: `This session is running on the standard Bobbit runtime. Claude Code uses a different local runtime, so Bobbit will start a new session with the same project and working directory. The current session will stay unchanged.`  
-Primary: `Start new session`  
+Title: `Start a Claude Code session?`
+Body: `This session is running on the standard Bobbit runtime. Claude Code uses a different local runtime, so Bobbit will start a new session with the same project and working directory. The current session will stay unchanged.`
+Primary: `Start new session`
 Secondary: `Cancel`
 
 On confirm, call `POST /api/sessions` with:

@@ -2,7 +2,21 @@
 
 Bobbit can run a session through the user's local Claude Code CLI instead of the standard Pi-backed session runtime. This is a runtime switch, not another API-backed model provider: Bobbit starts `claude` on the gateway host, talks to its structured `stream-json` stdin/stdout protocol, and relies on the user's existing Claude Code installation and login.
 
-Use this mode when you want Bobbit's session UI, tools, tasks, and persistence around Claude Code's local runtime. Do not describe it as a billing workaround. Usage is governed by the user's Claude Code account, quota, and Anthropic/Claude Code terms.
+Use this mode when you want Bobbit's session UI, goal/task context, persistence, and renderers around Claude Code's local runtime. It does not change Claude Code account obligations. Usage is governed by the user's Claude Code account, quota, and Anthropic/Claude Code terms.
+
+## Supported capabilities
+
+The local runtime currently supports:
+
+- **Claude Code-backed chat sessions** — Bobbit sends user prompts to the local CLI over structured stdin and renders the streamed stdout response in the normal chat surface. Claude Code owns inference, authentication, permission prompts, and its internal context handling.
+- **Model alias selection** — picker rows use `claude-code/<alias>` ids. The default alias for new Claude Code sessions is `claude-opus-4-8`, with built-in rows for `default`, `sonnet`, and `opus`; short custom aliases may also be forwarded to the CLI.
+- **Same-session alias switching** — changing between Claude Code aliases keeps the Bobbit session when the runtime is idle. Bobbit restarts the local `claude` process with the new alias and resumes with the latest known Claude Code session id when available.
+- **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists.
+- **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
+- **Session status and errors** — readiness, runtime metadata, normal turn completion, CLI exits, malformed stream diagnostics, auth/start failures, and error results surface through Bobbit status/error events instead of failing silently.
+- **Stop/abort MVP behavior** — graceful stops terminate the local process, escalating when needed; abort emits a visible aborted turn and lets the next prompt start a fresh CLI process with the latest known resume id.
+- **Guarded host preferences** — executable path and permission-bypass settings are saved server-side and require operator confirmation because they affect host-local process execution.
+- **Usage display when reported** — token usage is normalized when Claude Code reports usage, and local-runtime cost/usage fields are treated as best-effort rather than authoritative API billing data.
 
 ## Runtime shape
 
@@ -25,7 +39,7 @@ Depending on session metadata and preferences Bobbit may also pass:
 - `--permission-mode acceptEdits|bypassPermissions` for explicit non-default permission modes.
 - `--resume <claudeCodeSessionId>` when Bobbit has a previous Claude Code session id.
 
-Claude Code stdout is parsed as JSONL. Bobbit translates Claude Code events into the same live event stream the UI already understands:
+Claude Code stdout is parsed as JSONL. Bobbit translates Claude Code events into the same live event stream the UI already understands. This is display/coordination only: Bobbit does not execute Claude Code's internal tool calls or substitute its own tool catalog for the CLI's tool catalog.
 
 | Claude Code event | Bobbit behavior |
 |---|---|
@@ -131,16 +145,23 @@ Claude Code resume uses Claude Code's own session id and `--resume`; it does not
 - Continue/fork from a Bobbit transcript is not supported for Claude Code unless a Claude Code session id is available.
 - Sessions with `runtime: "claude-code"` and a valid `claudeCodeSessionId` can be restored even if they do not have a Pi `agentSessionFile`.
 
-MVP limitations:
+### Stop and abort
 
-- Host-only: Claude Code sessions cannot run in Bobbit Docker sandboxes.
-- Live steer is not supported.
-- Thinking-level changes are not supported.
-- Compaction is not supported.
-- Claude Code alias switching is idle-only; active streaming turns are rejected until the turn finishes. If Bobbit has existing messages but no Claude Code session id to resume, the switch fails clearly instead of silently losing Claude Code context.
-- Auth failures may only appear when the first Claude Code session starts because the readiness probe intentionally avoids an undocumented auth no-op.
+`stop()` sends `SIGTERM` to the local Claude Code process and escalates to `SIGKILL` if it does not exit within the grace window. Bobbit uses this for session shutdown and idle model-alias restart/resume.
 
-Abort terminates the current Claude Code process, emits a visible aborted turn, and allows the next prompt to start a new Claude Code process using the latest known resume id.
+`abort()` is the MVP turn-cancel path. It emits a visible assistant message saying the Claude Code turn was aborted, emits `agent_end` with stop reason `abort`, sends `SIGTERM` to the current process, and suppresses the expected process-exit error. The next prompt starts a new Claude Code process and includes the latest known resume id when one is available. This is process-level cancellation, not a separate Claude Code structured interrupt command.
+
+## Current gaps and limitations
+
+- **Tool execution is owned by Claude Code** — Bobbit does not execute Claude Code's internal tools, rewrite their inputs, approve their permissions, or replace the CLI tool catalog with Bobbit's tool catalog. Claude Code owns permission prompts and tool availability.
+- **Tool rendering is best-effort** — common `tool_use` / `tool_result` shapes render as Bobbit tool events, but not every Claude Code tool schema or result maps perfectly to existing Bobbit renderers. Unknown or unusual fields may appear only as generic message content or diagnostics.
+- **Claude Code owns runtime limits and catalogs** — auth, account state, model catalog, context limits, permission semantics, and local CLI behavior come from the installed `claude` command, not Bobbit. Bobbit forwards validated aliases but does not verify the upstream model catalog.
+- **Reviewer and verification agents stay Pi-backed** — workflow verification, reviewer/runtime agents, and other automation paths remain on the existing Pi runtime unless they are explicitly redesigned to request `claude-code`.
+- **Host-only sandbox boundary** — Claude Code sessions cannot run in Bobbit Docker sandboxes in the MVP, and Bobbit does not mount or expose private Claude credentials into sandbox containers by default.
+- **Resume depends on the CLI** — restart, restore, continue, fork, and alias switching can pass `--resume <claudeCodeSessionId>` only when Bobbit has a valid Claude Code session id and the local CLI honors it. If Bobbit has messages but no Claude Code session id, operations that would lose Claude Code context fail clearly.
+- **Usage and cost are best-effort** — Bobbit normalizes token display when Claude Code reports usage and can surface CLI-reported cost fields, but usage/cost accounting is local-runtime managed and should not be treated as Bobbit API billing data.
+- **Unsupported Pi control surfaces** — live steer, thinking-level changes, and compaction are not supported for Claude Code sessions in the MVP. Active streaming turns reject alias switches until the turn finishes.
+- **Auth failures may be deferred** — the readiness probe intentionally avoids an undocumented authenticated no-op, so some login/account failures only appear when the first Claude Code session starts.
 
 ## Safety and credentials
 

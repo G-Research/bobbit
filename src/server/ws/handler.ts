@@ -415,9 +415,9 @@ export function handleWebSocketConnection(
 			const persistedForAttach = sessionManager.getPersistedSession(sessionId);
 			if (persistedForAttach?.runtime === "claude-code" || persistedForAttach?.modelProvider === "claude-code") {
 				session.rpcClient.getMessages?.()
-					.then((msgs: any) => {
+					.then(async (msgs: any) => {
 						if (!msgs?.success) return;
-						const raw = msgs.data ?? msgs;
+						const raw = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgs.data ?? msgs) as any;
 						let data: any = raw;
 						if (Array.isArray(raw)) data = truncateLargeToolContentInMessages(raw);
 						else if (raw && Array.isArray(raw.messages)) data = { ...raw, messages: truncateLargeToolContentInMessages(raw.messages) };
@@ -892,7 +892,7 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = msgsResp.data as any;
+						const raw = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgsResp.data as any) as any;
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
