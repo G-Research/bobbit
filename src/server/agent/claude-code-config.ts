@@ -31,7 +31,24 @@ export const CLAUDE_CODE_PREF_KEYS = {
 export const CLAUDE_CODE_MODEL_ALIASES = ["default", "sonnet", "opus"] as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions"] as const;
 
-const PATH_KEYS = new Set(["PATH", "Path"]);
+const PATH_KEYS = new Set(["PATH", "Path", "path"]);
+const SAFE_ENV_CANONICAL_KEYS = new Map<string, string>([
+	["HOME", "HOME"],
+	["USERPROFILE", "USERPROFILE"],
+	["HOMEDRIVE", "HOMEDRIVE"],
+	["HOMEPATH", "HOMEPATH"],
+	["USER", "USER"],
+	["USERNAME", "USERNAME"],
+	["LOGNAME", "LOGNAME"],
+	["TMPDIR", "TMPDIR"],
+	["TMP", "TMP"],
+	["TEMP", "TEMP"],
+	["LANG", "LANG"],
+	["LANGUAGE", "LANGUAGE"],
+	["SYSTEMROOT", "SystemRoot"],
+	["WINDIR", "WINDIR"],
+	["PATHEXT", "PATHEXT"],
+]);
 const ENV_BLOCKLIST = new Set([
 	"NODE_OPTIONS",
 	"NODE_PATH",
@@ -42,7 +59,44 @@ const ENV_BLOCKLIST = new Set([
 	"PYTHONPATH",
 	"RUBYOPT",
 	"BUNDLE_GEMFILE",
+	"SSLKEYLOGFILE",
 ]);
+const SECRET_ENV_KEY_EXACT = new Set([
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"NPM_TOKEN",
+	"DOCKER_AUTH_CONFIG",
+	"KUBECONFIG",
+	"NETRC",
+	"PGPASSWORD",
+	"DATABASE_URL",
+	"REDIS_URL",
+	"POSTGRES_URL",
+	"MYSQL_URL",
+	"SSH_AUTH_SOCK",
+]);
+const SECRET_ENV_PREFIXES = [
+	"AWS_",
+	"GITHUB_",
+	"BOBBIT_",
+	"ANTHROPIC_",
+	"OPENAI_",
+	"OPENROUTER_",
+	"GOOGLE_",
+	"GEMINI_",
+	"VERTEX_",
+	"AZURE_OPENAI_",
+	"COHERE_",
+	"MISTRAL_",
+	"GROQ_",
+	"DEEPSEEK_",
+	"XAI_",
+	"PERPLEXITY_",
+	"TOGETHER_",
+	"FIREWORKS_",
+	"REPLICATE_",
+	"HUGGINGFACE_",
+];
+const SECRET_ENV_SEGMENT_PATTERN = /(^|_)(API_)?(KEY|TOKEN|SECRET|CREDENTIAL|CREDENTIALS|PASSWORD|PASS|PRIVATE|AUTH|COOKIE|SESSION)(_|$)/;
 
 export interface ClaudeCodeExecutableResolutionOptions {
 	cwd?: string;
@@ -137,18 +191,11 @@ export function buildClaudeCodeSanitizedEnv(
 	options: ClaudeCodeExecutableResolutionOptions = {},
 ): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value === undefined || shouldDropEnvKey(key)) continue;
-		env[key] = value;
-	}
-	for (const [key, value] of Object.entries(extraEnv ?? {})) {
-		if (value === undefined || shouldDropEnvKey(key)) continue;
-		env[key] = value;
-	}
+	copyAllowedClaudeCodeEnv(env, process.env);
+	copyAllowedClaudeCodeEnv(env, extraEnv ?? {});
+
 	const trustedPath = buildTrustedPathEnv(options.pathEnv ?? process.env.PATH ?? process.env.Path ?? "", options.cwd, options.platform);
 	if (trustedPath) env.PATH = trustedPath;
-	const pathext = process.env.PATHEXT;
-	if (pathext) env.PATHEXT = pathext;
 	return env;
 }
 
@@ -242,8 +289,37 @@ function realpathOrUndefined(value: string | undefined): string | undefined {
 	}
 }
 
+function copyAllowedClaudeCodeEnv(target: NodeJS.ProcessEnv, source: NodeJS.ProcessEnv): void {
+	for (const [key, value] of Object.entries(source)) {
+		if (value === undefined) continue;
+		const canonicalKey = canonicalAllowedClaudeCodeEnvKey(key);
+		if (!canonicalKey) continue;
+		target[canonicalKey] = value;
+	}
+}
+
+function canonicalAllowedClaudeCodeEnvKey(key: string): string | undefined {
+	if (!isValidEnvKey(key) || shouldDropEnvKey(key) || isSecretLikeEnvKey(key)) return undefined;
+	const upper = key.toUpperCase();
+	const canonical = SAFE_ENV_CANONICAL_KEYS.get(upper);
+	if (canonical) return canonical;
+	if (upper.startsWith("LC_")) return upper;
+	return undefined;
+}
+
+function isValidEnvKey(key: string): boolean {
+	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
 function shouldDropEnvKey(key: string): boolean {
-	return PATH_KEYS.has(key) || ENV_BLOCKLIST.has(key) || key === "PATHEXT" || key === "PWD" || key === "OLDPWD";
+	return PATH_KEYS.has(key) || ENV_BLOCKLIST.has(key.toUpperCase()) || key === "PWD" || key === "OLDPWD";
+}
+
+function isSecretLikeEnvKey(key: string): boolean {
+	const upper = key.toUpperCase();
+	return SECRET_ENV_KEY_EXACT.has(upper)
+		|| SECRET_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))
+		|| SECRET_ENV_SEGMENT_PATTERN.test(upper);
 }
 
 export function normalizeClaudeCodePreferencePatch(
