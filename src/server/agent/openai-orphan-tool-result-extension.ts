@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
+export const OPENAI_ORPHAN_TOOL_RESULT_STATE_SUBDIR = "openai-orphan-tool-result";
+
 export interface OpenAiOrphanToolResultGuardResult {
 	payload: unknown;
 	dropped: number;
@@ -147,10 +149,11 @@ export function writeOpenAiOrphanToolResultExtension(): string | undefined {
 	}
 
 	try {
-		// `tool-guard` is already bind-mounted into sandbox containers, so keeping
-		// this generated guard below it makes `--extension` work for sandboxed and
-		// host sessions without broadening the mounted Bobbit state surface.
-		const baseDir = path.join(bobbitStateDir(), "tool-guard", "openai-orphan-tool-result");
+		// Content-addressed under its own sandbox-visible state subdir, mounted
+		// READ-ONLY by docker-args.ts. Do not place this always-loaded provider
+		// guard under writable tool-guard/, or a compromised sandbox could tamper
+		// with extension source reused by later sessions.
+		const baseDir = path.join(bobbitStateDir(), OPENAI_ORPHAN_TOOL_RESULT_STATE_SUBDIR);
 		const hash = createHash("sha256").update(cachedCode).digest("hex").slice(0, 12);
 		const extDir = path.join(baseDir, hash);
 		fs.mkdirSync(extDir, { recursive: true });

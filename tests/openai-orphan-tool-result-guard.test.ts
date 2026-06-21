@@ -1,9 +1,15 @@
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
 	dropOrphanFunctionCallOutputsFromPayload,
 	generateOpenAiOrphanToolResultExtension,
+	OPENAI_ORPHAN_TOOL_RESULT_STATE_SUBDIR,
+	resetOpenAiOrphanToolResultExtensionCache,
+	writeOpenAiOrphanToolResultExtension,
 } from "../src/server/agent/openai-orphan-tool-result-extension.ts";
 
 describe("dropOrphanFunctionCallOutputsFromPayload", () => {
@@ -109,6 +115,16 @@ describe("dropOrphanFunctionCallOutputsFromPayload", () => {
 });
 
 describe("generateOpenAiOrphanToolResultExtension", () => {
+	const previousBobbitDir = process.env.BOBBIT_DIR;
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		resetOpenAiOrphanToolResultExtensionCache();
+		if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+		else process.env.BOBBIT_DIR = previousBobbitDir;
+		for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+
 	it("registers the before_provider_request hook and logs only a bounded count", () => {
 		const source = generateOpenAiOrphanToolResultExtension();
 
@@ -116,5 +132,25 @@ describe("generateOpenAiOrphanToolResultExtension", () => {
 		assert.ok(source.includes("event && event.payload"));
 		assert.ok(source.includes("[bobbit-openai-orphan-guard] Dropped "));
 		assert.ok(!source.includes("output:"), "generated log path must not include raw tool output");
+	});
+
+	it("writes the guard under a dedicated read-only sandbox mount subdir, not writable tool-guard", () => {
+		const bobbitDir = fs.mkdtempSync(path.join(os.tmpdir(), "openai-orphan-guard-"));
+		tempDirs.push(bobbitDir);
+		process.env.BOBBIT_DIR = bobbitDir;
+		resetOpenAiOrphanToolResultExtensionCache();
+
+		const extensionPath = writeOpenAiOrphanToolResultExtension();
+
+		assert.ok(extensionPath, "expected extension path");
+		assert.ok(fs.existsSync(extensionPath), "expected extension file to be written");
+		assert.ok(
+			extensionPath!.includes(path.join("state", OPENAI_ORPHAN_TOOL_RESULT_STATE_SUBDIR)),
+			`expected dedicated state subdir path, got ${extensionPath}`,
+		);
+		assert.ok(
+			!extensionPath!.includes(path.join("state", "tool-guard")),
+			`OpenAI provider guard must not be written under writable tool-guard, got ${extensionPath}`,
+		);
 	});
 });
