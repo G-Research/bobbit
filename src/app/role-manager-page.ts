@@ -696,6 +696,17 @@ function thinkingLevelLabel(value: string): string {
 	return THINKING_LEVEL_LABELS[value] ?? value;
 }
 
+function renderRoleDefinitionOriginBadge(origin?: ConfigOrigin, overrides?: ConfigOrigin, originPackName?: string | null): TemplateResult | string {
+	if (!origin) return "";
+	if (!overrides) return renderOriginBadge(origin, undefined, originPackName);
+	return html`
+		<span class="role-origin-definition-badge" title="Role definition source only — model and thinking overrides are shown in the inline control.">
+			${renderOriginBadge(origin, undefined, originPackName)}
+			<span class="config-origin-overrides">role definition overrides ${overrides}</span>
+		</span>
+	`;
+}
+
 /**
  * Resolve the model + thinking display (effective value + source badge) for a
  * list row. Prefers the server's field-level `modelResolution` metadata when
@@ -858,7 +869,7 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					{
 						fallbackLabel: inlineFallback(display.model),
 						thinkingFallbackLabel: inlineFallback(display.thinking),
-						thinkingWidth: "132px",
+						thinkingWidth: "clamp(164px, 44%, 220px)",
 						thinkingFitContent: false,
 						onThinkingClear: () => control.onThinkingChange(role, ""),
 						// In the Roles list these resets clear a per-role OVERRIDE
@@ -897,7 +908,7 @@ export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
 				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}${modelControl?.savedFlashRole === role.name ? html` <span class="role-row-saved-flash" data-testid="role-row-saved-flash">Saved</span>` : nothing}</span>
 				<span class="role-meta">
 					<span class="role-row-slug">${role.name}</span>
-					${renderOriginBadge(origin, overrides, (role as any).originPackName)}
+					${renderRoleDefinitionOriginBadge(origin, overrides, (role as any).originPackName)}
 				</span>
 			</div>
 			${modelControl ? renderRoleRowModelControl(role, modelControl) : nothing}
@@ -1286,7 +1297,7 @@ export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
 					<div class="flex items-center justify-between">
 						<h2 class="roles-section-title">Identity</h2>
 						<span class="inline-flex items-center gap-2">
-							${renderOriginBadge(origin, overrides, (role as any).originPackName)}
+							${renderRoleDefinitionOriginBadge(origin, overrides, (role as any).originPackName)}
 							${headerExtras ?? nothing}
 						</span>
 					</div>
