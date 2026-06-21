@@ -103,11 +103,18 @@ prior turn was poisoned by a blank block specifically (vs. any other API error).
   leading text block is inserted), and non-string/non-array content. Every other
   line is left **byte-identical**, including trailing-newline shape, so
   re-running is a no-op.
-- **Tool results are never touched.** Tool results are also persisted as
-  `role:"user"` messages with a `tool_result` / `toolResult` block and no text —
-  that is valid history. Rewriting them to `"Attachments:"` would corrupt
-  tool-call history and break tool-result ordering, so any user message
-  carrying a tool-result block is left byte-identical.
+- **Valid matched tool results are never rewritten as attachment text.** Tool
+  results are also persisted as `role:"user"` messages with a `tool_result` /
+  `toolResult` block and no text — that is valid history when the retained
+  transcript still contains the matching assistant tool call. Rewriting a valid
+  matched tool result to `"Attachments:"` would corrupt tool-call history and
+  break tool-result ordering, so those rows stay byte-identical.
+- **Orphan tool results are repaired before blank-text rewriting.** The same
+  sanitizer now drops message-level tool-result rows and filters user-message
+  result blocks whose tool-call id is not present in retained valid assistant
+  history. If filtering leaves ordinary blank user content, the attachment-only
+  rewrite still applies. See [orphan-tool-result-hardening.md](orphan-tool-result-hardening.md)
+  for the orphan repair contract and diagnostics.
 
 `sanitizeAgentTranscriptFile(...)` wraps the pure function with I/O, called at
 the **rehydration boundary** in `session-setup.ts` — just before the
@@ -165,7 +172,7 @@ invalid content.
 | `synthesizeAttachmentText` rule (blank/whitespace/text/no-attachment) | `tests/synthesize-attachment-text.test.ts` |
 | Dispatch boundary: empty/whitespace text + image → non-blank dispatch; stuck-session retry preserves image | `tests/image-only-prompt-dispatch.test.ts` |
 | Stuck-session recovery via respawn + sanitized rehydrate; legacy non-image case; non-poison errors unaffected | `tests/image-only-prompt-unstick-recovery.test.ts` |
-| Sanitizer correctness, idempotency, tool-result protection, path-safety guards | `tests/transcript-sanitizer.test.ts` |
+| Sanitizer correctness, idempotency, valid matched tool-result preservation, orphan tool-result repair, path-safety guards | `tests/transcript-sanitizer.test.ts` |
 
 ## Related
 
