@@ -445,17 +445,21 @@ Field rules and defaults:
 **Provider hooks are wired.** The loader validates providers and the registry indexes them, and
 the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its `budget`
 ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and is
-installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
-section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
-extension, `afterTurn` / `sessionShutdown` fire server-side, and `goalCompleted` fires
-non-blockingly after goal completion for outcome side effects. The first built-in production
-provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped with
-`defaultDisabled: true`, so a fresh unconfigured install contributes nothing until setup enables it
-(or existing persisted Hindsight config preserves activation). Its installed row is the **primary setup path**: a
-Hindsight-specific status strip renders the [eight-state badge model, active config, and
+installed + active + enabled for the session's scope contributes a spawn-time **Dynamic Context**
+system-prompt section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated
+provider-bridge pi extension — `beforePrompt` blocks are delivered as hidden `bobbit:dynamic-context`
+custom/user-side messages, not appended to `systemPrompt`, so cached system-prompt bytes stay stable
+across turns, while `beforeCompact` does not amend prompt content. `afterTurn` / `sessionShutdown`
+fire server-side, and `goalCompleted` fires non-blockingly after goal completion for outcome side
+effects. The first built-in production provider is the **[Hindsight memory pack](hindsight-memory.md)**
+— shipped with `defaultDisabled: true`, so a fresh unconfigured install contributes nothing until
+setup enables it (or existing persisted Hindsight config preserves activation). Its installed row is
+the **primary setup path**: a Hindsight-specific status strip renders the [eight-state badge model,
+active config, and
 state-aware actions](hindsight-memory.md#setup-ux--marketplace-front-door-state-model--guided-setup)
 (Configure, Test connection, Open Hindsight UI, Start/Stop runtime, View logs) off a generic seam,
 not a change to every pack's row.
+
 
 #### Why providers are pack-scoped, *not* name-merged
 

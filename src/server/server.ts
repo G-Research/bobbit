@@ -4805,11 +4805,6 @@ async function handleApiRoute(
 	// sessionShutdown are gateway-internal dispatches and intentionally have NO
 	// public endpoint.
 	//
-	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
-	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
-	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
-
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
 	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
@@ -4847,7 +4842,7 @@ async function handleApiRoute(
 		}
 		const hub = sessionManager.lifecycleHub;
 		if (!hub) {
-			json({ tail: "", blocks: [] });
+			json({ content: "", blocks: [] });
 			return;
 		}
 		try {
@@ -4857,11 +4852,9 @@ async function handleApiRoute(
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			});
-			const tail = blocks.length
-				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
-				: "";
+			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
 			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -4872,7 +4865,7 @@ async function handleApiRoute(
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
 			json({
-				tail,
+				content,
 				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
 			});
 		} catch (err: any) {

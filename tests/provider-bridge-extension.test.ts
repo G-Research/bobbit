@@ -5,9 +5,9 @@
  *   1. Codegen string shape — delimiters, gateway URL/token reads with
  *      state-file fallback, AbortController + 5000/5000 timeout paths,
  *      `before_agent_start` + `session_before_compact` subscriptions, and the
- *      systemPrompt-only mutation (never event.prompt).
+ *      hidden custom-message dynamic context path (never event.prompt).
  *   2. Parse-validity + round-trip import of the generated source.
- *   3. `stripDelimitedTail` idempotency (no dynamic-context growth turn-over-turn).
+ *   3. `stripDelimitedTail` legacy idempotency for any stale dynamic-context tail.
  *   4. The no-provider helper: bridge is only warranted when an enabled provider
  *      declares `beforePrompt` or `beforeCompact`.
  */
@@ -33,10 +33,29 @@ import { readManifest } from "../src/server/agent/pack-manifest.ts";
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pbx-"));
+let bridgeImportCounter = 0;
 
 after(() => {
 	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
 });
+
+async function loadGeneratedBridge(source: string): Promise<any> {
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+	});
+	const file = path.join(tmpDir, `provider-bridge-${bridgeImportCounter++}.cjs`);
+	fs.writeFileSync(file, transpiled.outputText, "utf-8");
+	return import(pathToFileURL(file).href);
+}
+
+async function registerBeforeAgentStart(source: string): Promise<(event: any) => Promise<any>> {
+	const mod = await loadGeneratedBridge(source);
+	const handlers = new Map<string, (event: any) => Promise<any>>();
+	mod.default({ on: (event: string, handler: (event: any) => Promise<any>) => handlers.set(event, handler) });
+	const handler = handlers.get("before_agent_start");
+	assert.equal(typeof handler, "function", "expected before_agent_start handler to be registered");
+	return handler!;
+}
 
 describe("generateProviderBridgeExtension", () => {
 	const source = generateProviderBridgeExtension("sess-123");
@@ -102,11 +121,84 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(!/before-compact\",\s*\{\}/.test(source), "must NOT post an empty {} before-compact body");
 	});
 
-	it("mutates only systemPrompt and forwards prompt read-only", () => {
-		// The non-negotiable invariant: the user's message text is never rewritten.
-		assert.ok(source.includes("systemPrompt:"), "expected to return a systemPrompt field");
-		assert.ok(source.includes("event.prompt"), "expected event.prompt forwarded as read-only input");
-		assert.ok(!/return\s*\{\s*prompt:/.test(source), "must NOT return a mutated prompt");
+	it("returns dynamic context as a hidden custom message, never as systemPrompt", () => {
+		assert.ok(
+			!/return\s*\{\s*systemPrompt:/.test(source),
+			"before_agent_start dynamic context must not return systemPrompt (prompt-cache churn regression)",
+		);
+		assert.ok(source.includes('customType: "bobbit:dynamic-context"'), "expected bobbit dynamic-context customType");
+		assert.ok(source.includes("display: false"), "dynamic context message must be hidden");
+		assert.ok(source.includes("content"), "expected endpoint content to become message content");
+		assert.ok(!source.includes("resp.tail"), "before_agent_start must not consume a system-prompt tail");
+	});
+
+	it("forwards event.prompt read-only and returns a hidden custom dynamic-context message", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		let postedBody: any;
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+				postedBody = JSON.parse(String(init?.body ?? "{}"));
+				return new Response(JSON.stringify({ content: "<context-block>turn A</context-block>", blocks: [{ id: "demo:turn" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch;
+
+			const beforeAgentStart = await registerBeforeAgentStart(source);
+			const prompt = "Exact user prompt bytes\nwith unicode ☃";
+			const event: any = {};
+			Object.defineProperty(event, "prompt", { value: prompt, writable: false, enumerable: true });
+			Object.defineProperty(event, "systemPrompt", { value: "BASE SYSTEM", writable: false, enumerable: true });
+
+			const result = await beforeAgentStart(event);
+
+			assert.deepEqual(postedBody, { prompt }, "event.prompt must be forwarded byte-identically");
+			assert.equal(event.prompt, prompt, "event.prompt must remain unchanged after the hook");
+			assert.deepEqual(result, {
+				message: {
+					customType: "bobbit:dynamic-context",
+					content: "<context-block>turn A</context-block>",
+					display: false,
+				},
+			}, "before_agent_start must return hidden custom dynamic-context message, not systemPrompt");
+			assert.ok(!("systemPrompt" in (result ?? {})), "before_agent_start must not return systemPrompt");
+			assert.ok(!("prompt" in (result ?? {})), "must NOT return a mutated prompt");
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
+	});
+
+	it("returns undefined when beforePrompt produces empty or missing content", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		const replies = [{ content: "" }, {}];
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async () => new Response(JSON.stringify(replies.shift() ?? {}), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})) as typeof fetch;
+
+			const beforeAgentStart = await registerBeforeAgentStart(source);
+			assert.equal(await beforeAgentStart({ prompt: "empty", systemPrompt: "BASE" }), undefined);
+			assert.equal(await beforeAgentStart({ prompt: "missing", systemPrompt: "BASE" }), undefined);
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
 	});
 
 	it("embeds the session id", () => {
@@ -124,12 +216,7 @@ describe("generateProviderBridgeExtension", () => {
 	});
 
 	it("transpiled module loads and default-exports a function", async () => {
-		const transpiled = ts.transpileModule(source, {
-			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-		});
-		const file = path.join(tmpDir, "provider-bridge.cjs");
-		fs.writeFileSync(file, transpiled.outputText, "utf-8");
-		const mod = await import(pathToFileURL(file).href);
+		const mod = await loadGeneratedBridge(source);
 		assert.equal(typeof mod.default, "function");
 	});
 });

@@ -9,12 +9,11 @@
  * events and calls back into the gateway, which dispatches through the
  * `LifecycleHub`.
  *
- * NON-NEGOTIABLE invariant: the user's message text is NEVER mutated. Recall is
- * injected only into the outgoing **system-prompt tail**, delimited and
- * idempotent turn-over-turn. The bridge strips any prior delimited tail before
- * appending the fresh one, so the dynamic-context region never grows across
- * turns. Mutating the user prompt would corrupt the transcript echo and
- * re-open the comms-stack duplicate class.
+ * NON-NEGOTIABLE invariant: the user's message text is NEVER mutated. Per-turn
+ * recall is injected as a hidden custom/user-side message, never by amending
+ * the system prompt. This keeps provider prompt-cache system bytes stable across
+ * turns while preserving the transcript echo. Mutating the user prompt would
+ * corrupt the transcript echo and re-open the comms-stack duplicate class.
  *
  * Transport/auth mirrors `tool-guard-extension.ts`: read
  * `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`, falling back to
@@ -199,9 +198,10 @@ export default function(pi) {
     }
   }
 
-  // Per-turn beforePrompt: inject recall into the system-prompt TAIL only.
+  // Per-turn beforePrompt: inject recall as a hidden custom/user-side message.
   // The user's prompt text (event.prompt) is forwarded read-only and never
-  // mutated.
+  // mutated; the system prompt is never amended here so provider prompt-cache
+  // system bytes stay stable across turns.
   pi.on("before_agent_start", async (event) => {
     const resp = await postHook(
       "/provider-hooks/before-prompt",
@@ -209,9 +209,15 @@ export default function(pi) {
       ${BEFORE_PROMPT_TIMEOUT_MS},
     );
     if (!resp) return undefined; // failure / timeout — proceed unchanged
-    const stripped = stripDelimitedTail(event.systemPrompt || "");
-    const tail = typeof resp.tail === "string" ? resp.tail : "";
-    return { systemPrompt: stripped + tail };
+    const content = typeof resp.content === "string" ? resp.content : "";
+    if (!content) return undefined;
+    return {
+      message: {
+        customType: "bobbit:dynamic-context",
+        content,
+        display: false,
+      },
+    };
   });
 
   // beforeCompact: forward the about-to-be-lost span so providers can retain it
