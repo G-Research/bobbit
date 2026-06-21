@@ -13,6 +13,9 @@ type FixtureModel = {
 	authenticated: boolean;
 	sessionSelectable?: boolean;
 	sessionUnavailableReason?: string;
+	runtime?: "pi" | "claude-code";
+	localRuntime?: boolean;
+	runtimeLabel?: string;
 };
 
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
