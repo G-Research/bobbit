@@ -114,9 +114,9 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
-	/* Widened from 600px so full model names + source/origin text are readable
-	 * without ellipsising the key info (Option A). */
-	max-width: 880px;
+	/* Use the available page width so the inline model/thinking controls can
+	 * breathe instead of truncating inside a narrow centered column. */
+	max-width: min(100%, 1100px);
 	margin: 0 auto;
 }
 
@@ -231,9 +231,9 @@
  * the edit/delete actions. Only the main Roles page supplies it.
  * -------------------------------------------------------------------------- */
 .role-row-model-control {
-	flex: 1 1 340px;
+	flex: 1 1 520px;
 	min-width: 180px;
-	max-width: 520px;
+	max-width: none;
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
@@ -257,13 +257,12 @@
 	gap: 2px;
 }
 /* The thinking Select is rendered compact-by-construction for list rows
- * (renderModelRow opts: thinkingWidth=clamp(164px, 44%, 220px),
- * fitContent=false), so its trigger gets more room than the default compact row
- * while still avoiding the global Settings min-width:180px behavior. These
- * rules are a defensive cap only, preserving chevron containment in narrow rows. */
+ * (renderModelRow opts: thinkingWidth=clamp(220px, 36%, 360px),
+ * fitContent=false), giving it enough room for the inline default label while
+ * still avoiding the global Settings min-width:180px overflow behaviour. */
 .role-row-model-control [data-testid="model-row"] [role="combobox"] {
 	min-width: 0;
-	max-width: 220px;
+	max-width: 360px;
 }
 
 /* Override / thinking-override rows: accent the control box with a primary tint. */
@@ -591,6 +590,9 @@
 		flex: 0 0 100%;
 		order: 3;
 		max-width: none;
+	}
+	.role-row-model-control [data-testid="model-row"] [role="combobox"] {
+		max-width: min(190px, 46vw);
 	}
 	.role-row-action-btn {
 		width: 28px;
