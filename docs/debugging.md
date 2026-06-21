@@ -105,6 +105,13 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 - Tool-call messages stay in streaming until the next message starts.
 - See [docs/internals.md — Reducer ordering invariant](internals.md#reducer-ordering-invariant) for the single-sort-key contract.
 
+## OpenAI/Codex session stuck on orphan tool results
+
+- **Symptom**: an OpenAI Responses or Codex session fails every later turn after restore/compaction/abort because the request contains a `function_call_output` without a matching retained `function_call`.
+- **Where to look**: restore-boundary repair in `transcript-sanitizer.ts`; request preflight in `openai-orphan-tool-result-extension.ts`; sandbox mount policy in `docker-args.ts`.
+- **Key detail**: valid tool-call/result pairs stay byte-identical, but results following aborted/errored assistant tool-call rows, compaction boundaries, or missing calls are dropped/filtered with bounded count-only diagnostics.
+- **Reference**: [Orphan tool-result hardening](orphan-tool-result-hardening.md).
+
 ## Blob stuck idle while streaming (zzz visible with stop button)
 
 - **Symptom**: chat blob shows the desaturated idle sprite with floating `zzz` while the agent is actively streaming (stop button visible, tool calls running). Stays wrong until the next `isStreaming` transition. Most reproducible by sending a new message immediately after the previous turn ends.
