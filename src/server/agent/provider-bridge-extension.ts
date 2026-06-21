@@ -38,7 +38,7 @@ export const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
 export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "beforeCompact"];
 
 /** Timeout (ms) for the before-prompt callback — blocking-with-timeout. */
-export const BEFORE_PROMPT_TIMEOUT_MS = 2500;
+export const BEFORE_PROMPT_TIMEOUT_MS = 5000;
 /** Timeout (ms) for the before-compact callback. */
 export const BEFORE_COMPACT_TIMEOUT_MS = 5000;
 

@@ -148,7 +148,7 @@ function draftFromConfig(cfg) {
 		autoRecall: c.autoRecall !== false,
 		autoRetain: c.autoRetain !== false,
 		recallBudget: asText(c.recallBudget, "1200"),
-		timeoutMs: asText(c.timeoutMs, "1500"),
+		timeoutMs: asText(c.timeoutMs, "4000"),
 		apiKey: "",
 		externalDatabaseUrl: "",
 		llmApiKey: "",
@@ -282,7 +282,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	 *  session — `entry.touched[f]` for non-secrets, `entry.secretTouched[f]` for
 	 *  secrets. An UNTOUCHED field is NEVER sent, even if its (stale) draft value
 	 *  differs from the freshly-loaded config: this is the headline B2 fix. Example:
-	 *  the panel mounts dormant (externalUrl="", bank="bobbit", timeoutMs=1500), the
+	 *  the panel mounts dormant (externalUrl="", bank="bobbit", timeoutMs=4000), the
 	 *  server config changes out-of-band to external/hermes/15000, the user toggles
 	 *  ONLY autoRetain and Saves. A diff-everything body would POST the stale
 	 *  externalUrl/bank/timeout and clobber the good config; gating on `touched`
@@ -780,7 +780,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="hs-row"><dt>Auto-retain</dt><dd>On (async) — memories are saved in the background after each turn; no latency cost.</dd></div>
 				<div class="hs-row"><dt>Auto-recall</dt><dd>On — relevant memories are pulled in automatically.</dd></div>
 				<div class="hs-row"><dt>Recall scope</dt><dd><code>project</code> — this project + shared/global memories (<code>all</code> = every project in the shared bank).</dd></div>
-				<div class="hs-row"><dt>Timeout</dt><dd><code>1500 ms</code> — conservative; Hindsight calls never stall a turn.</dd></div>
+				<div class="hs-row"><dt>Timeout</dt><dd><code>4000 ms</code> — capped below the provider hook budget so slow recall fails open without stalling a turn indefinitely.</dd></div>
 				<div class="hs-row"><dt>LLM key (managed)</dt><dd>You supply it — Bobbit forwards it to the local runtime only; never hardcodes a provider secret.</dd></div>
 			</dl>
 		</div>`;

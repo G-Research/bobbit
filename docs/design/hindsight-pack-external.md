@@ -117,7 +117,7 @@ id: memory
 kind: memory
 module: ../lib/provider.mjs
 hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
-budget: { maxTokens: 1200, timeoutMs: 1500 }
+budget: { maxTokens: 1200, timeoutMs: 4500 }
 defaultEnabled: true        # provider default once the pack itself is enabled/configured
 config:
   mode:        { type: enum, values: [external, managed], default: external }  # managed reserved for G3
@@ -129,7 +129,7 @@ config:
   autoRecall:  { type: boolean, default: true }
   autoRetain:  { type: boolean, default: true }
   recallBudget:{ type: number, default: 1200 }
-  timeoutMs:   { type: number, default: 1500 }
+  timeoutMs:   { type: number, default: 4000 }
 activation:
   requiresConfig: [externalUrl]  # host omits the provider entirely until configured
 ```
@@ -176,7 +176,7 @@ export function createClient(cfg: {
   baseUrl: string;
   apiKey?: string;
   namespace?: string;   // default "default"
-  timeoutMs?: number;   // default 1500
+  timeoutMs?: number;   // default 4000
 }): HindsightClient;
 ```
 
@@ -190,7 +190,7 @@ export class HindsightError extends Error {
 ```
 
 - Every method wraps its `fetch` in an `AbortController` armed with `cfg.timeoutMs` (default
-  **1500 ms**). Abort ⇒ `HindsightError{ kind:"timeout" }`, thrown **within budget** (the test
+  **4000 ms**). Abort ⇒ `HindsightError{ kind:"timeout" }`, thrown **within budget** (the test
   asserts elapsed ≤ a small margin over `timeoutMs`).
 - Non-2xx ⇒ `HindsightError{ kind:"http", status }`.
 - DNS/connection refused/socket error ⇒ `HindsightError{ kind:"network" }`.
@@ -420,7 +420,7 @@ The provider must receive a **flat** config object that is **store-over-yaml-def
 
 1. The loader first resolves each `providers/memory.yaml` config schema entry to its `.default`
    value (or `undefined` for optional fields), producing values such as `mode: "external"`,
-   `bank: "bobbit"`, `namespace: "default"`, `autoRecall: true`, and `timeoutMs: 1500` — not raw
+   `bank: "bobbit"`, `namespace: "default"`, `autoRecall: true`, and `timeoutMs: 4000` — not raw
    `{ type, default }` schema objects.
 2. The `config` route persists validated overrides to the pack store.
 3. The loader overlays persisted store config over the flat defaults before constructing

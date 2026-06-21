@@ -99,7 +99,7 @@ provider reads.
 | `observationsMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight on how to consolidate observations. |
 | `reflectMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's synthesis/reflection logic. |
 | `recallMaxInputChars` | number | `3000` | Truncates recall query text to prevent Hindsight backend 400 "Query too long" errors (max 500 tokens). |
-| `timeoutMs` | number | `1500` | Per-request abort budget for the REST client. |
+| `timeoutMs` | number | `4000` | Per-request abort budget for the REST client. Provider hooks cap this below their 4500 ms manifest budget. |
 
 The `config` route validates overrides against this schema before persisting; an empty string
 clears an optional string (`externalUrl`/`apiKey`), and numeric keys must be positive.
@@ -518,7 +518,7 @@ The walkthrough surfaces an opinionated, safe defaults explainer (rationale show
 | Auto-retain | on (async) | Memories are saved in the background after each turn — no latency cost. |
 | Auto-recall | on | Relevant memories are pulled in automatically at session start and each turn. |
 | Recall scope | `project` | This project + shared/global memories — "have we solved this before in this project, or globally?" |
-| Timeout | `1500 ms` | Conservative: a slow Hindsight never stalls a turn; recall skips and retains queue. |
+| Timeout | `4000 ms` | Capped below the 4500 ms provider budget; slow recall fails open and retains queue. |
 | LLM key (managed) | none (user-supplied) | Hindsight uses your LLM key for extraction. Bobbit forwards it to the local runtime only; it never hardcodes a provider secret. |
 
 ### Managed mode never auto-starts Docker
@@ -567,7 +567,7 @@ HTTP API (`/v1/{namespace}/banks/{bank}/…`). Body shapes are mapped per the up
 (Hindsight 0.8.x); see [the design doc §3](design/hindsight-pack-external.md) for the exact request
 and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
 
-- Every method arms an `AbortController` with `timeoutMs` (default 1500); an abort surfaces as
+- Every method arms an `AbortController` with `timeoutMs` (default 4000); an abort surfaces as
   `HindsightError{ kind: "timeout" }` thrown **within budget**.
 - Non-2xx ⇒ `HindsightError{ kind: "http", status }`; DNS/connection/socket failure ⇒
   `HindsightError{ kind: "network" }`.

@@ -7,7 +7,7 @@
  * (Hindsight 0.8.x) — see docs/design/hindsight-pack-external.md §3.
  *
  * Design rules (do not soften — they are pinned by tests/hindsight-client.test.ts):
- *   - Every method arms an AbortController with `cfg.timeoutMs` (default 1500ms);
+ *   - Every method arms an AbortController with `cfg.timeoutMs` (default 4000ms);
  *     an abort surfaces as `HindsightError{ kind:"timeout" }` thrown WITHIN budget.
  *   - Non-2xx ⇒ `HindsightError{ kind:"http", status }`.
  *   - DNS/connection/socket failure ⇒ `HindsightError{ kind:"network" }`.
@@ -229,11 +229,11 @@ export interface HindsightClientConfig {
 	apiKey?: string;
 	/** Default `default`. */
 	namespace?: string;
-	/** Per-request abort budget in ms. Default 1500. */
+	/** Per-request abort budget in ms. Default 4000. */
 	timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 1500;
+const DEFAULT_TIMEOUT_MS = 4000;
 const DEFAULT_NAMESPACE = "default";
 
 /** Flatten `{ "project": "abc" }` → `["project:abc"]`, sorted for determinism. */
