@@ -817,16 +817,18 @@ for the full Hub contract.
 (visible in the prompt-sections inspector with `source: "providers"` provenance) — so a provider
 that declares `sessionSetup` and is installed + active + enabled for the session's scope contributes
 context today. A provider fault never blocks the spawn. Per-turn `beforePrompt` / `beforeCompact`
-fire via a generated provider-bridge pi extension — `beforePrompt` blocks are delivered as hidden
-`bobbit:dynamic-context` custom/user-side messages, not appended to `systemPrompt`, so provider
-cached system-prompt bytes stay stable across turns, while `sessionSetup` blocks remain spawn-time
-system-prompt context and `beforeCompact` is unchanged. `afterTurn` / `sessionShutdown` fire
-server-side from the gateway's agent-event stream, and `goalCompleted` fires after successful goal
-completion for non-blocking outcome/cleanup side effects. The first built-in production provider —
-the [Hindsight memory pack](hindsight-memory.md) — ships with `defaultDisabled: true`, so a fresh
-unconfigured install contributes no tools, provider hooks, entrypoints, runtime, or Dynamic Context
-until setup enables/configures it; existing configured installs remain active. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
+fire via a generated provider-bridge pi extension, `afterTurn` / `sessionShutdown` fire server-side
+from the gateway's agent-event stream, and `goalCompleted` fires after successful goal completion
+for non-blocking outcome/cleanup side effects.
+
+`beforePrompt` blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side messages,
+not appended to `systemPrompt`, so provider cached system-prompt bytes stay stable across turns;
+`sessionSetup` blocks remain spawn-time system-prompt context and `beforeCompact` is unchanged.
+
+The first built-in production provider — the [Hindsight memory pack](hindsight-memory.md) — ships
+with `defaultDisabled: true`, so a fresh unconfigured install contributes no tools, provider hooks,
+entrypoints, runtime, or Dynamic Context until setup enables/configures it; existing configured
+installs remain active. See [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
 and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API

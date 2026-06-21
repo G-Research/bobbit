@@ -292,10 +292,18 @@ describe("Hindsight pack — Marketplace state + actions (config home + embedded
 		await form.locator('[data-testid="market-hindsight-form-externalurl"]').fill(stub.url);
 		await form.locator('[data-testid="market-hindsight-form-bank"]').fill("hermes");
 		await form.locator('[data-testid="market-hindsight-form-uiurl"]').fill(EX_UI_URL);
+		await form.locator('[data-testid="market-hindsight-form-recallscope"]').selectOption("all");
 		expect(EX_UI_URL).not.toBe(stub.url);
+
+		await expect(form.locator('[data-testid="market-hindsight-config-dirty"]'), "dirty edits show an unsaved indicator before Save").toBeVisible({ timeout: 15_000 });
+		const recallField = form.locator('[data-testid="market-hindsight-field-recallscope"]');
+		await expect(recallField, "changed recall scope row is marked dirty").toHaveAttribute("data-dirty", "true");
+		await expect(form.locator('[data-testid="market-hindsight-field-changed-recallScope"]'), "changed recall scope label is shown").toBeVisible();
 
 		await form.locator('[data-testid="market-hindsight-config-save"]').click();
 		await expect(form.locator('[data-testid="market-hindsight-config-result"]'), "save reports a result").toContainText("Saved", { timeout: 20_000 });
+		await expect(form.locator('[data-testid="market-hindsight-config-dirty"]'), "dirty indicator clears after Save").toHaveCount(0, { timeout: 15_000 });
+		await expect(recallField, "recall scope row is no longer marked dirty after Save").toHaveAttribute("data-dirty", "false", { timeout: 15_000 });
 
 		// Reload the page entirely — the persisted config must survive (sessionless read).
 		await page.reload();
@@ -304,6 +312,12 @@ describe("Hindsight pack — Marketplace state + actions (config home + embedded
 		const summary = row.locator('[data-testid="market-hindsight-config"]');
 		await expect(summary, "the saved config surfaces after reload").toBeVisible({ timeout: 20_000 });
 		await expect(summary).toContainText("hermes");
+
+		// Re-open Configure: the saved recall scope persists and no dirty state is shown.
+		await row.locator('[data-testid="market-hindsight-configure"]').click();
+		const reloadedForm = row.locator('[data-testid="market-hindsight-config-form"]');
+		await expect(reloadedForm.locator('[data-testid="market-hindsight-form-recallscope"]'), "saved recall scope persists across reload").toHaveValue("all", { timeout: 15_000 });
+		await expect(reloadedForm.locator('[data-testid="market-hindsight-config-dirty"]'), "reload opens with no unsaved changes").toHaveCount(0);
 
 		// The external fallback link reflects the saved (distinct) UI URL verbatim.
 		const external = row.locator('[data-testid="market-hindsight-open-ui-external"]');

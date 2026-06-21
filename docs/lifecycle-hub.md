@@ -575,9 +575,9 @@ ambient context a session received and why blocks were dropped.
 - **Goal lifecycle hooks (done)** add `goalProvisioned` for filesystem treatments and
   `goalCompleted` for non-blocking completion/outcome side effects.
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
-  It declares `defaultDisabled: true`, so out-of-the-box behaviour is unchanged — with no active
-  provider, no Dynamic Context section is added and the per-turn bridge is never spawned until setup
-  enables/configures it (while existing configured installs remain active).
+  It declares `defaultDisabled: true` and remains dormant until setup enables/configures it, so
+  out-of-the-box behaviour is unchanged — with no active provider, no Dynamic Context section is
+  added and the per-turn bridge is never spawned (while existing configured installs remain active).
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also

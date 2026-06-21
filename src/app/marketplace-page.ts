@@ -202,6 +202,20 @@ interface HindsightConfigFormValues {
 	apiKey: string;
 }
 
+const HINDSIGHT_CONFIG_FIELD_KEYS: Array<keyof HindsightConfigFormValues> = [
+	"mode",
+	"externalUrl",
+	"uiUrl",
+	"bank",
+	"namespace",
+	"recallScope",
+	"autoRecall",
+	"autoRetain",
+	"timeoutMs",
+	"recallBudget",
+	"apiKey",
+];
+
 let hindsightStatus: HindsightStatusWire | null = null;
 let hindsightStatusLoaded = false;
 let hindsightRuntimes: PackRuntimeStatus[] = [];
@@ -2080,7 +2094,13 @@ async function loadHindsightConfigForm(pack: InstalledPackWire): Promise<void> {
 function setHindsightFormField<K extends keyof HindsightConfigFormValues>(key: K, value: HindsightConfigFormValues[K]): void {
 	if (!hindsightConfigForm) hindsightConfigForm = defaultHindsightForm();
 	hindsightConfigForm = { ...hindsightConfigForm, [key]: value };
+	hindsightConfigResult = null;
 	renderApp();
+}
+
+function hindsightConfigDirtyFields(): Set<keyof HindsightConfigFormValues> {
+	if (!hindsightConfigForm || !hindsightConfigLoaded) return new Set();
+	return new Set(HINDSIGHT_CONFIG_FIELD_KEYS.filter((key) => hindsightConfigForm?.[key] !== hindsightConfigLoaded?.[key]));
 }
 
 /** Build the POST body with TOUCHED-FIELD semantics: include a field ONLY when its
@@ -2242,69 +2262,80 @@ function renderHindsightConfigForm(pack: InstalledPackWire): TemplateResult {
 	if (!f) {
 		return html`<div class="market-hindsight-config-form mt-2" data-testid="market-hindsight-config-form"><div class="text-[11px] text-muted-foreground">Loading configuration…</div></div>`;
 	}
+	const dirtyFields = hindsightConfigDirtyFields();
+	const dirty = dirtyFields.size > 0;
+	const fieldClass = (key: keyof HindsightConfigFormValues) => `market-field ${dirtyFields.has(key) ? "market-field--dirty" : ""}`;
+	const fieldDirtyAttr = (key: keyof HindsightConfigFormValues) => (dirtyFields.has(key) ? "true" : "false");
+	const changedLabel = (key: keyof HindsightConfigFormValues) =>
+		dirtyFields.has(key)
+			? html`<span class="market-field-changed" data-testid=${`market-hindsight-field-changed-${key}`}>changed</span>`
+			: "";
 	return html`
-		<div class="market-hindsight-config-form mt-2 flex flex-col gap-2" data-testid="market-hindsight-config-form">
-			<label class="market-field">
-				<span class="market-field-label">Deployment mode</span>
+		<div class="market-hindsight-config-form mt-2 flex flex-col gap-2" data-testid="market-hindsight-config-form" data-dirty=${dirty ? "true" : "false"}>
+			${dirty
+				? html`<div class="market-hindsight-unsaved" data-testid="market-hindsight-config-dirty">${icon(AlertTriangle, "xs")} Unsaved changes — Save changes to persist ${dirtyFields.size === 1 ? "this field" : "these fields"}.</div>`
+				: html`<div class="market-hindsight-saved" data-testid="market-hindsight-config-clean">Configuration saved. Edit a field, then Save changes to persist it.</div>`}
+			<label class=${fieldClass("mode")} data-testid="market-hindsight-field-mode" data-dirty=${fieldDirtyAttr("mode")}>
+				<span class="market-field-label">Deployment mode ${changedLabel("mode")}</span>
 				<select class="market-input" data-testid="market-hindsight-form-mode" .value=${f.mode} @change=${(e: Event) => setHindsightFormField("mode", (e.target as HTMLSelectElement).value)}>
 					<option value="external" ?selected=${f.mode === "external"}>External (point at existing Hindsight)</option>
 					<option value="managed" ?selected=${f.mode === "managed"}>Managed (Bobbit runs Hindsight + Postgres)</option>
 					<option value="managed-external-postgres" ?selected=${f.mode === "managed-external-postgres"}>Managed + external Postgres</option>
 				</select>
 			</label>
-			<label class="market-field">
-				<span class="market-field-label">API / data-plane URL</span>
+			<label class=${fieldClass("externalUrl")} data-testid="market-hindsight-field-externalurl" data-dirty=${fieldDirtyAttr("externalUrl")}>
+				<span class="market-field-label">API / data-plane URL ${changedLabel("externalUrl")}</span>
 				<input class="market-input" type="text" data-testid="market-hindsight-form-externalurl" placeholder="http://localhost:9177" .value=${f.externalUrl} @input=${(e: Event) => setHindsightFormField("externalUrl", (e.target as HTMLInputElement).value)} />
 				<span class="market-field-help">The data-plane URL Bobbit dials for recall/retain. Required for external mode.</span>
 			</label>
-			<label class="market-field">
-				<span class="market-field-label">Dashboard UI URL</span>
+			<label class=${fieldClass("uiUrl")} data-testid="market-hindsight-field-uiurl" data-dirty=${fieldDirtyAttr("uiUrl")}>
+				<span class="market-field-label">Dashboard UI URL ${changedLabel("uiUrl")}</span>
 				<input class="market-input" type="text" data-testid="market-hindsight-form-uiurl" placeholder="http://localhost:19177/banks/bobbit?view=data" .value=${f.uiUrl} @input=${(e: Event) => setHindsightFormField("uiUrl", (e.target as HTMLInputElement).value)} />
 				<span class="market-field-help">The human-facing dashboard opened by "Open Hindsight UI". Never dialed by Bobbit.</span>
 			</label>
 			<div class="flex gap-2 flex-wrap">
-				<label class="market-field flex-1">
-					<span class="market-field-label">Bank</span>
+				<label class=${`${fieldClass("bank")} flex-1`} data-testid="market-hindsight-field-bank" data-dirty=${fieldDirtyAttr("bank")}>
+					<span class="market-field-label">Bank ${changedLabel("bank")}</span>
 					<input class="market-input" type="text" data-testid="market-hindsight-form-bank" .value=${f.bank} @input=${(e: Event) => setHindsightFormField("bank", (e.target as HTMLInputElement).value)} />
 				</label>
-				<label class="market-field flex-1">
-					<span class="market-field-label">Namespace</span>
+				<label class=${`${fieldClass("namespace")} flex-1`} data-testid="market-hindsight-field-namespace" data-dirty=${fieldDirtyAttr("namespace")}>
+					<span class="market-field-label">Namespace ${changedLabel("namespace")}</span>
 					<input class="market-input" type="text" data-testid="market-hindsight-form-namespace" .value=${f.namespace} @input=${(e: Event) => setHindsightFormField("namespace", (e.target as HTMLInputElement).value)} />
 				</label>
 			</div>
 			<div class="flex gap-2 flex-wrap">
-				<label class="market-field flex-1">
-					<span class="market-field-label">Recall scope</span>
+				<label class=${`${fieldClass("recallScope")} flex-1`} data-testid="market-hindsight-field-recallscope" data-dirty=${fieldDirtyAttr("recallScope")}>
+					<span class="market-field-label">Recall scope ${changedLabel("recallScope")}</span>
 					<select class="market-input" data-testid="market-hindsight-form-recallscope" .value=${f.recallScope} @change=${(e: Event) => setHindsightFormField("recallScope", (e.target as HTMLSelectElement).value)}>
 						<option value="project" ?selected=${f.recallScope === "project"}>project</option>
 						<option value="all" ?selected=${f.recallScope === "all"}>all</option>
 					</select>
 					<span class="market-field-help">project = this project + shared/global memories; all = every project in the shared bank.</span>
 				</label>
-				<label class="market-field flex-1">
-					<span class="market-field-label">Timeout (ms)</span>
+				<label class=${`${fieldClass("timeoutMs")} flex-1`} data-testid="market-hindsight-field-timeoutms" data-dirty=${fieldDirtyAttr("timeoutMs")}>
+					<span class="market-field-label">Timeout (ms) ${changedLabel("timeoutMs")}</span>
 					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-timeoutms" .value=${f.timeoutMs} @input=${(e: Event) => setHindsightFormField("timeoutMs", (e.target as HTMLInputElement).value)} />
 				</label>
-				<label class="market-field flex-1">
-					<span class="market-field-label">Recall budget</span>
+				<label class=${`${fieldClass("recallBudget")} flex-1`} data-testid="market-hindsight-field-recallbudget" data-dirty=${fieldDirtyAttr("recallBudget")}>
+					<span class="market-field-label">Recall budget ${changedLabel("recallBudget")}</span>
 					<input class="market-input" type="number" min="1" data-testid="market-hindsight-form-recallbudget" .value=${f.recallBudget} @input=${(e: Event) => setHindsightFormField("recallBudget", (e.target as HTMLInputElement).value)} />
 				</label>
 			</div>
 			<div class="flex gap-3 flex-wrap items-center">
-				<label class="flex items-center gap-1.5 text-[12px]">
-					<input type="checkbox" data-testid="market-hindsight-form-autorecall" .checked=${f.autoRecall} @change=${(e: Event) => setHindsightFormField("autoRecall", (e.target as HTMLInputElement).checked)} /> Auto recall
+				<label class=${`flex items-center gap-1.5 text-[12px] ${dirtyFields.has("autoRecall") ? "market-field--dirty" : ""}`} data-testid="market-hindsight-field-autorecall" data-dirty=${fieldDirtyAttr("autoRecall")}>
+					<input type="checkbox" data-testid="market-hindsight-form-autorecall" .checked=${f.autoRecall} @change=${(e: Event) => setHindsightFormField("autoRecall", (e.target as HTMLInputElement).checked)} /> Auto recall ${changedLabel("autoRecall")}
 				</label>
-				<label class="flex items-center gap-1.5 text-[12px]">
-					<input type="checkbox" data-testid="market-hindsight-form-autoretain" .checked=${f.autoRetain} @change=${(e: Event) => setHindsightFormField("autoRetain", (e.target as HTMLInputElement).checked)} /> Auto retain
+				<label class=${`flex items-center gap-1.5 text-[12px] ${dirtyFields.has("autoRetain") ? "market-field--dirty" : ""}`} data-testid="market-hindsight-field-autoretain" data-dirty=${fieldDirtyAttr("autoRetain")}>
+					<input type="checkbox" data-testid="market-hindsight-form-autoretain" .checked=${f.autoRetain} @change=${(e: Event) => setHindsightFormField("autoRetain", (e.target as HTMLInputElement).checked)} /> Auto retain ${changedLabel("autoRetain")}
 				</label>
 			</div>
-			<label class="market-field">
-				<span class="market-field-label">API key ${hindsightConfigApiKeySet ? html`<span class="text-muted-foreground">(set — leave blank to keep)</span>` : html`<span class="text-muted-foreground">(blank)</span>`}</span>
+			<label class=${fieldClass("apiKey")} data-testid="market-hindsight-field-apikey" data-dirty=${fieldDirtyAttr("apiKey")}>
+				<span class="market-field-label">API key ${hindsightConfigApiKeySet ? html`<span class="text-muted-foreground">(set — leave blank to keep)</span>` : html`<span class="text-muted-foreground">(blank)</span>`} ${changedLabel("apiKey")}</span>
 				<input class="market-input" type="password" autocomplete="off" data-testid="market-hindsight-form-apikey" placeholder=${hindsightConfigApiKeySet ? "••••••••" : "optional"} .value=${f.apiKey} @input=${(e: Event) => setHindsightFormField("apiKey", (e.target as HTMLInputElement).value)} />
 			</label>
 			${renderHindsightOverrideSection(pack)}
 			<div class="flex items-center gap-2 flex-wrap">
-				<button class="market-btn market-btn--primary" data-testid="market-hindsight-config-save" ?disabled=${saving} @click=${() => handleHindsightConfigSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} Save configuration</button>
+				<button class=${`market-btn ${dirty ? "market-btn--primary market-btn--dirty" : ""}`} data-testid="market-hindsight-config-save" ?disabled=${saving} @click=${() => handleHindsightConfigSave(pack)}>${icon(saving ? RotateCw : CheckCircle2, "xs", saving ? "animate-spin" : "")} ${dirty ? "Save changes" : "Save configuration"}</button>
 				<button class="market-btn" data-testid="market-hindsight-config-cancel" @click=${() => { hindsightConfigFormOpen = false; renderApp(); }}>Close</button>
 				${hindsightConfigResult
 					? html`<span

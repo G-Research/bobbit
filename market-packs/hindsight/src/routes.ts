@@ -62,6 +62,12 @@ interface RouteCtx {
 	/** The calling session's project id, supplied by the host route ctx. Used to
 	 *  scope a `project` recall to the REAL project; absent ⇒ no project filter. */
 	projectId?: string;
+	/** Effective goal id from trusted host session state (goalId, then teamGoalId).
+	 *  Used for automatic context tags on manual retains. */
+	goalId?: string;
+	/** Calling role name from trusted host session state. Used as the `agent` tag on
+	 *  manual retains. */
+	roleName?: string;
 	/** Managed-runtime context injected by the host for a route call against an
 	 *  ACTIVE managed Hindsight runtime (mirrors the provider's `ctx.runtime`).
 	 *  Carries the locally-running managed API base URL. Absent in external mode and
@@ -182,12 +188,20 @@ async function lastError(store: StoreLike): Promise<unknown> {
 	}
 }
 
-/** Auto-tags applied to a manual `retain` route call (mirrors the provider).
- *  `kind: "manual"` is spread LAST so user-supplied/scope tags stay additive but can
- *  NEVER override the manual-retain provenance marker (a user `tags: { kind: "x" }`
- *  is ignored for `kind`). */
-function manualTags(extra: Tags | undefined): Tags {
-	return { ...(extra ?? {}), kind: "manual" };
+/** Auto-tags applied to a manual `retain` route call (mirrors provider context).
+ *  Canonical tags are derived from trusted route ctx and spread LAST so user tags
+ *  stay additive but can NEVER spoof/override route-owned provenance/context. */
+function manualTags(ctx: RouteCtx, scope: "project" | "all", extra: Tags | undefined): Tags {
+	const projectId = strOf(ctx.projectId);
+	const canonical: Tags = { kind: "manual" };
+	if (scope === "project" && projectId) canonical.project = projectId;
+	const goalId = strOf(ctx.goalId);
+	if (goalId) canonical.goal = goalId;
+	const sessionId = strOf(ctx.sessionId);
+	if (sessionId) canonical.session = sessionId;
+	const roleName = strOf(ctx.roleName);
+	if (roleName) canonical.agent = roleName;
+	return { ...(extra ?? {}), ...canonical };
 }
 
 /** Per-project config metadata for the GET/SET config surface. Returns the global
@@ -356,9 +370,8 @@ export const routes = {
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectTag: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		const userTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
-		const tags = manualTags({ ...(userTags ?? {}), ...(projectTag ?? {}) });
+		const tags = manualTags(ctx, scope, userTags);
 		const sync = body.sync === true;
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));

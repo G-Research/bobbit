@@ -125,6 +125,9 @@ interface SerializableCtx {
 	 *  scope to the real project instead of fabricating one. Absent for
 	 *  global/server-scope sessions. Serialized by `module-host-worker.ts`. */
 	projectId?: string;
+	/** Effective trusted goal/role context from the calling session, when present. */
+	goalId?: string;
+	roleName?: string;
 	/** P3/P4 managed-runtime linkage (`{ baseUrl, headers, status }`) the route
 	 *  endpoint resolved for a managed-mode pack. A plain serializable object;
 	 *  absent in external mode and whenever no managed runtime is running. */
@@ -497,6 +500,9 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				// Plumb the serialized projectId so route handlers (e.g. Hindsight
 				// project-scoped recall) scope to the real project rather than dropping it.
 				projectId: msg.ctx.projectId,
+				// Trusted session metadata for route-owned context tags.
+				goalId: msg.ctx.goalId,
+				roleName: msg.ctx.roleName,
 				// Plumb the serialized managed-runtime linkage so route handlers (e.g.
 				// Hindsight status/recall) dial the running managed runtime via
 				// ctx.runtime.baseUrl. Absent ⇒ the route stays dormant (no Docker start).

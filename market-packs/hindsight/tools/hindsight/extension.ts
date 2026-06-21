@@ -160,7 +160,7 @@ async function callRoute(
 	);
 }
 
-const SCOPE_DESC = "Memory scope: 'project' (this project) or 'all' (shared bank). Defaults to config.";
+const SCOPE_DESC = "Scope: project=this project+shared/global by default; all=whole shared bank.";
 const TAGS_DESC = "Optional simple key→value tag filter for a targeted query (no boolean DSL).";
 const FACT_TYPE = Type.Union([Type.Literal("observation"), Type.Literal("world"), Type.Literal("experience")]);
 const JSON_SCHEMA_PARAM = Type.Record(Type.String(), Type.Any(), {
@@ -190,7 +190,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "hindsight_recall: Recall relevant long-term memories for a query.",
 		promptGuidelines: [
 			"Use hindsight_recall to fetch durable context (past decisions, preferences, project facts) before acting.",
-			"scope 'project' restricts to this project; 'all' searches the shared bank.",
+			"scope 'project' recalls this project plus shared/global memories by default; 'all' deliberately searches the whole shared bank.",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "What to recall." }),
@@ -262,6 +262,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "hindsight_retain: Save a durable memory for future recall.",
 		promptGuidelines: [
 			"Use hindsight_retain to durably record a decision, preference, or fact worth remembering.",
+			"The route adds trusted kind/project/goal/session/agent context tags automatically when available.",
 			"scope 'project' tags the memory to this project; 'all' keeps it unscoped on the shared bank.",
 		],
 		parameters: Type.Object({
@@ -270,7 +271,7 @@ const extension: ExtensionFactory = (pi) => {
 				Type.Union([Type.Literal("project"), Type.Literal("all")], { description: SCOPE_DESC }),
 			),
 			tags: Type.Optional(
-				Type.Record(Type.String(), Type.String(), { description: "Extra key/value tags (additive)." }),
+				Type.Record(Type.String(), Type.String(), { description: "Extra key/value tags; automatic context tags win on conflict." }),
 			),
 			sync: Type.Optional(Type.Boolean({ description: "Wait for the write to be durable. Default false." })),
 		}),
@@ -318,7 +319,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "hindsight_reflect: Synthesize an answer from long-term memory.",
 		promptGuidelines: [
 			"Use hindsight_reflect for a synthesized answer drawing on accumulated memory, not a raw recall list.",
-			"scope 'project' filters reflection to this project's memories; 'all' reflects over the shared bank.",
+			"scope 'project' reflects over this project plus shared/global memories by default; 'all' deliberately reflects over the whole shared bank.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String({ description: "The question to reflect on." }),
