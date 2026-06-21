@@ -602,6 +602,34 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 export { broadcastStatus } from "./session-status.js";
 import { broadcastStatus } from "./session-status.js";
 
+function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
+	if (!event || typeof event !== "object") return event;
+	const ev = event as any;
+	let next = ev;
+	const clone = () => {
+		if (next === ev) next = { ...ev };
+		return next;
+	};
+	const sanitizeErrorText = (value: unknown): string | undefined => {
+		if (typeof value !== "string" || value.length === 0) return undefined;
+		return redactDispatchFailureReason(value, isProviderAuthFailure(value));
+	};
+
+	if (ev.type === "message_end" && ev.message && typeof ev.message === "object") {
+		const safeMessageError = sanitizeErrorText(ev.message.errorMessage);
+		if (safeMessageError && safeMessageError !== ev.message.errorMessage) {
+			clone().message = { ...ev.message, errorMessage: safeMessageError };
+		}
+	}
+
+	const safeTopLevelError = sanitizeErrorText(ev.errorMessage);
+	if (safeTopLevelError && safeTopLevelError !== ev.errorMessage) {
+		clone().errorMessage = safeTopLevelError;
+	}
+
+	return next;
+}
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
@@ -609,7 +637,8 @@ import { broadcastStatus } from "./session-status.js";
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
-	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
+	const sanitized = sanitizeProviderAuthEventForEmit(truncated);
+	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
 	const entry = session.eventBuffer.push(spliced);
 	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
 	if (cpuDiagnosticsEnabled()) {
@@ -2819,9 +2848,11 @@ export class SessionManager {
 			// turn was accepted/observed. Local status changes such as Stop →
 			// "aborting" can happen before prompt() is accepted; those rows must be
 			// recovered or the queued prompt is lost.
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
 			if (observedTurnVersion !== dispatchObservedTurnVersion) {
-				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${reason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 				return;
 			}
 			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
@@ -2843,8 +2874,11 @@ export class SessionManager {
 				}
 			})
 			.catch((err: any) => {
-				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
-				recoverDispatchedRows(err?.message || String(err));
+				const reason = err?.message || String(err);
+				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
+				recoverDispatchedRows(reason);
 			});
 	}
 
@@ -2932,12 +2966,20 @@ export class SessionManager {
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			session.latestTurnAssistantText = extractUserMessageText(event.message);
 			const errored = event.message.stopReason === "error";
+			const rawErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
+			const providerAuthFailure = isProviderAuthFailure(rawErrorMessage);
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			session.lastTurnErrored = errored;
-			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
+			session.lastTurnErrorMessage = errored
+				? redactDispatchFailureReason(rawErrorMessage || "", providerAuthFailure, persistedProvider)
+				: undefined;
+			if (providerAuthFailure && rawErrorMessage) {
+				event.message = { ...event.message, errorMessage: session.lastTurnErrorMessage };
+			}
 			if (errored) {
 				session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
-				if (isProviderAuthFailure(session.lastTurnErrorMessage)) {
-					this.surfaceProviderAuthFailure(session, session.lastTurnErrorMessage || "Provider API key is missing", "agent turn");
+				if (providerAuthFailure) {
+					this.surfaceProviderAuthFailure(session, rawErrorMessage || "Provider API key is missing", "agent turn");
 				}
 			} else {
 				// Any non-error terminal assistant message resets the cap budget.
@@ -3364,6 +3406,20 @@ export class SessionManager {
 		return restored ?? this.sessions.get(session.id);
 	}
 
+	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
+		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
+		if (textSet.size === 0) return false;
+		const imageSignature = JSON.stringify(images ?? []);
+		const row = session.promptQueue.toArray().find((queued) => {
+			if (!textSet.has(queued.text)) return false;
+			return JSON.stringify(queued.images ?? []) === imageSignature;
+		});
+		if (!row) return false;
+		const removed = session.promptQueue.remove(row.id);
+		if (removed) this.broadcastQueue(session);
+		return removed;
+	}
+
 	/**
 	 * Retry after a model/API error. Behaviour depends on context:
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
@@ -3434,7 +3490,11 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			await session.rpcClient.prompt(retryText, session.lastPromptImages);
+			// Provider-auth dispatch failures re-enqueue the failed row for recovery.
+			// Explicit retry is the recovery dispatch, so consume that row first;
+			// otherwise the next successful agent_end drain would send it a second time.
+			this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			await session.rpcClient.prompt(
