@@ -106,6 +106,57 @@ function persistedOpenRouterSession(id = "s-openrouter-direct"): any {
 }
 
 describe("OpenRouter provider key bridge (reproducing)", () => {
+	it("initial direct/non-sandbox session setup passes providerKey.openrouter to RpcBridgeOptions.env without persisting the key", async () => {
+		previousOpenRouterEnv = process.env.OPENROUTER_API_KEY;
+		delete process.env.OPENROUTER_API_KEY;
+
+		const prefs = preferencesWithOpenRouterKey();
+		const storeWrites: any[] = [];
+		let capturedOptions: any | undefined;
+		registerRpcBridgeFactory((options: any) => {
+			capturedOptions = options;
+			return makeBridge({
+				getState: mock.fn(async () => ({
+					success: true,
+					data: { sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl") },
+				})),
+			});
+		});
+
+		const manager: any = new SessionManager({ preferencesStore: prefs });
+		manager._testStore = {
+			put: mock.fn((record: any) => { storeWrites.push({ op: "put", record }); }),
+			update: mock.fn((id: string, fields: any) => { storeWrites.push({ op: "update", id, fields }); }),
+			get: mock.fn(() => undefined),
+			archive: mock.fn(() => {}),
+		};
+		managers.push(manager);
+
+		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId: "s-openrouter-initial-direct",
+			sandboxed: false,
+			skipAutoModel: true,
+			skipAutoThinking: true,
+		});
+		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+
+		assert.equal(
+			capturedOptions?.env?.OPENROUTER_API_KEY,
+			FAKE_OPENROUTER_KEY,
+			"OPENROUTER_INITIAL_KEY_BRIDGE_MISSING: initial direct/non-sandbox session setup must inject providerKey.openrouter as OPENROUTER_API_KEY",
+		);
+		assert.equal(capturedOptions?.env?.BOBBIT_SESSION_ID, "s-openrouter-initial-direct");
+		assert.equal(typeof capturedOptions?.env?.BOBBIT_SESSION_SECRET, "string");
+		assert.notEqual(capturedOptions?.env?.BOBBIT_SESSION_SECRET, "");
+
+		const serializedPersisted = JSON.stringify({ storeWrites, liveSession: manager.sessions.get(session.id) });
+		assert.doesNotMatch(
+			serializedPersisted,
+			new RegExp(FAKE_OPENROUTER_KEY),
+			"fake OpenRouter key must never appear in initial session persistence or live session JSON",
+		);
+	});
+
 	it("restored direct/non-sandbox OpenRouter sessions pass providerKey.openrouter to RpcBridgeOptions.env without persisting the key", async () => {
 		previousOpenRouterEnv = process.env.OPENROUTER_API_KEY;
 		delete process.env.OPENROUTER_API_KEY;

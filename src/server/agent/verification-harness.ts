@@ -70,6 +70,7 @@ import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
+import { mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { inferMeta } from "./aigw-manager.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
@@ -3541,7 +3542,7 @@ export class VerificationHarness {
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
 			args: toolActivation.args,
-			env: toolActivation.env,
+			env: mergeHostAgentProviderEnv(toolActivation.env, this.preferencesStore),
 			toolManager: toolActivation.toolManager,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
