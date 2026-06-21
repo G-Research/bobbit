@@ -291,7 +291,7 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 		runtime: "claude-code" as const,
 		localRuntime: true,
 		runtimeLabel: "Claude Code (local)",
-		contextWindow: 200_000,
+		contextWindow: claudeCodeContextWindow(alias),
 		maxTokens: 8192,
 		reasoning: true,
 		input: ["text"] as ("text" | "image")[],
@@ -300,6 +300,12 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 		sessionSelectable: status.ready,
 		...(unavailableReason ? { sessionUnavailableReason: unavailableReason } : {}),
 	}));
+}
+
+function claudeCodeContextWindow(alias: string): number {
+	if (alias === "sonnet" || alias === "opus") return 1_000_000;
+	if (/^claude-(?:opus|sonnet)/i.test(alias)) return Math.max(inferMeta(alias).contextWindow, 1_000_000);
+	return 200_000;
 }
 
 function claudeCodeModelName(alias: string): string {

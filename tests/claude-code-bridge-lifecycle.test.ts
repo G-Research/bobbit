@@ -404,6 +404,10 @@ process.stdin.on('data', () => {
 			assert.equal((await bridge.getState()).data.model.id, "opus");
 			assert.equal((await bridge.getMessages()).data.messages.length, 2, "restart must preserve translated Bobbit messages");
 
+			await waitFor(
+				() => readRecord(tmp.recordPath).filter((entry) => Array.isArray(entry.argv)).length >= 2,
+				"model switch did not spawn resumed Claude Code process",
+			);
 			const argvRecords = readRecord(tmp.recordPath).filter((entry) => Array.isArray(entry.argv));
 			assert.equal(argvRecords.length, 2);
 			assert.deepEqual(argvRecords[0].argv.slice(-2), ["--model", "sonnet"]);
