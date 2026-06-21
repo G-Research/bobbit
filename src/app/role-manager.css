@@ -172,6 +172,13 @@
 	min-width: 0;
 }
 
+.role-origin-definition-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
 .role-row-slug {
 	font-size: 11px;
 	font-family: var(--font-mono, monospace);
@@ -250,14 +257,13 @@
 	gap: 2px;
 }
 /* The thinking Select is rendered compact-by-construction for list rows
- * (renderModelRow opts: thinkingWidth=132px, fitContent=false), so its trigger
- * carries an inline width:132px and NO inline min-width:180px. These rules are
- * a defensive cap only — they reinforce the fixed width without fighting it via
- * !important, so the chevron (a flex-shrink-0, justify-between child) always
- * stays inside the button bounds and inside the row control. */
+ * (renderModelRow opts: thinkingWidth=clamp(164px, 44%, 220px),
+ * fitContent=false), so its trigger gets more room than the default compact row
+ * while still avoiding the global Settings min-width:180px behavior. These
+ * rules are a defensive cap only, preserving chevron containment in narrow rows. */
 .role-row-model-control [data-testid="model-row"] [role="combobox"] {
 	min-width: 0;
-	max-width: 132px;
+	max-width: 220px;
 }
 
 /* Override / thinking-override rows: accent the control box with a primary tint. */
@@ -582,7 +588,7 @@
 		flex: 1 1 auto;
 	}
 	.role-row-model-control {
-		flex: 1 1 100%;
+		flex: 0 0 100%;
 		order: 3;
 		max-width: none;
 	}
