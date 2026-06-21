@@ -1695,6 +1695,7 @@ async function setSessionThinking(value: string): Promise<void> {
 
 async function setClaudeCodeExecutable(value: string): Promise<void> {
 	const next = value.trim() ? value.trim() : null;
+	if ((next || "claude") === prefClaudeCodeExecutable) return;
 	let confirmationToken: string | undefined;
 	if (next !== null) {
 		const confirmed = await confirmAction(
@@ -2137,7 +2138,7 @@ function renderClaudeCodeSection() {
 					placeholder="claude"
 					.value=${prefClaudeCodeExecutable}
 					data-testid="claude-code-executable"
-					@change=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
+					@blur=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
 				/>
 			</div>
 
