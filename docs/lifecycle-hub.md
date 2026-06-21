@@ -6,10 +6,10 @@
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
 > `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
 > `sessionShutdown` fire from the gateway's own agent-event stream — see
-> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). The first built-in
-> production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
-> built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
-> install still produces no Dynamic Context section. This page documents the Hub core and its
+> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). Built-in production
+> providers include the [Hindsight memory pack](hindsight-memory.md) and PR Walkthrough durable
+> progress provider; both are scoped so an out-of-the-box normal session receives no unrelated
+> Dynamic Context. This page documents the Hub core and its
 > session wiring.
 ## What it is, and why
 

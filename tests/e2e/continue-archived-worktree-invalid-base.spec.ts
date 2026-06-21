@@ -3,7 +3,7 @@
  * worktree/base-ref creation failures synchronously.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, agentEndPredicate, registerProject } from "./e2e-setup.js";
+import { apiFetch, connectWs, agentEndPredicate, defaultProjectId, registerProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -67,13 +67,16 @@ test.describe("Continue-Archived worktree base-ref failure", () => {
 		const baseDir = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-invalid-base-${process.pid}-${Date.now()}`;
 		const repoPath = join(baseDir, "repo");
 		let projectId: string | undefined;
+		let defaultId: string | undefined;
 		let srcId: string | undefined;
 		let unexpectedContinuedId: string | undefined;
 
 		try {
 			initRepo(repoPath);
+			defaultId = await defaultProjectId();
 			const project = await registerProject({ name: `cont-wt-invalid-base-${Date.now()}`, rootPath: repoPath });
 			projectId = project.id;
+			expect(projectId, "stale-base test project must not reuse the harness default project").not.toBe(defaultId);
 
 			const sourceResp = await apiFetch("/api/sessions", {
 				method: "POST",
@@ -102,6 +105,12 @@ test.describe("Continue-Archived worktree base-ref failure", () => {
 				body: JSON.stringify({ base_ref: staleBaseRef }),
 			});
 			expect(putBaseRef.status, await putBaseRef.text()).toBe(200);
+			if (defaultId) {
+				const defaultCfgResp = await apiFetch(`/api/projects/${defaultId}/config`);
+				expect(defaultCfgResp.status, await defaultCfgResp.clone().text()).toBe(200);
+				const defaultCfg = await defaultCfgResp.json();
+				expect(defaultCfg.base_ref, "stale-base setup must not poison the harness default project").not.toBe(staleBaseRef);
+			}
 
 			removeWorktreeIfPresent(repoPath, srcRec.worktreePath);
 			deleteBranchIfPresent(repoPath, srcRec.branch);
@@ -138,6 +147,12 @@ test.describe("Continue-Archived worktree base-ref failure", () => {
 			}
 			if (srcId) {
 				await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
+			}
+			if (defaultId) {
+				await apiFetch(`/api/projects/${defaultId}/config`, {
+					method: "PUT",
+					body: JSON.stringify({ base_ref: "" }),
+				}).catch(() => {});
 			}
 			if (projectId) {
 				await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});

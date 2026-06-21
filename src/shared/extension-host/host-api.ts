@@ -187,10 +187,31 @@ export interface HostUiApi {
 /** PHASE 2 — frozen, not implemented. Ownership-scoped server persistence.
  *  Keys are namespaced to the contributing pack server-side; one pack cannot read
  *  another pack's store. Maps onto the reserved `stores:` contribution. */
+export type StoreQuotaProfile = "default" | "review-draft" | "review-final";
+
+export interface StoreQuotaScope {
+	/** Non-empty server-owned scope prefix; the written key must start with it. */
+	prefix: string;
+	/** Server-owned quota profile. Unknown profiles are rejected. */
+	profile?: StoreQuotaProfile;
+}
+
+export interface StorePutOptions {
+	quotaScope?: StoreQuotaScope;
+}
+
+export interface StoreStats {
+	keys: number;
+	bytes: number;
+}
+
 export interface HostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
-	put<T = unknown>(key: string, value: T): Promise<void>;
+	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(prefix?: string): Promise<string[]>;
+	delete(key: string): Promise<boolean>;
+	deletePrefix(prefix: string): Promise<number>;
+	stats(prefix?: string): Promise<StoreStats>;
 }
 
 // ── Structured UI addressing (frozen; no hash strings) ──

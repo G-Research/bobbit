@@ -33,6 +33,11 @@ const PRW_PACK_ID = "pr-walkthrough";
 const PRW_TERMINAL_STATUSES = new Set(["submitted", "ready", "error"]);
 const prwBindingKey = (childSessionId: string): string => `binding/${childSessionId}`;
 const prwSubmittedKey = (jobId: string): string => `submitted/${jobId}`;
+const prwReviewerIndexKey = (sessionId: string): string => `reviewers/${sessionId}`;
+const prwReviewPrefix = (jobId: string): string => `reviews/${jobId}/`;
+const prwReviewBindingKey = (jobId: string, childSessionId: string): string => `${prwReviewPrefix(jobId)}binding/${childSessionId}`;
+const prwFinalPayloadKey = (jobId: string): string => `${prwReviewPrefix(jobId)}final/payload`;
+const prwReviewBindingQuota = (jobId: string) => ({ quotaScope: { prefix: prwReviewPrefix(jobId), profile: "default" as const } });
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -178,7 +183,8 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const store = deps.packStore ?? getPackStore();
-			const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwBindingKey(authSessionId));
+			const resolvedBinding = await resolvePrwReviewerBinding(store, authSessionId, input.jobId);
+			const binding = resolvedBinding?.binding;
 			if (!binding || typeof binding !== "object") {
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
@@ -217,7 +223,8 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const store = deps.packStore ?? getPackStore();
-			const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwBindingKey(authSessionId));
+			const resolvedBinding = await resolvePrwReviewerBinding(store, authSessionId);
+			const binding = resolvedBinding?.binding;
 			if (!binding || typeof binding !== "object") {
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
@@ -227,7 +234,8 @@ export async function handlePrWalkthroughApiRoute(
 			// validation/persistence so nothing is published for an untrusted host.
 			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
 			const already = await store.get(PRW_PACK_ID, prwSubmittedKey(binding.jobId));
-			if (already || PRW_TERMINAL_STATUSES.has(binding.status ?? "")) {
+			const finalized = await store.get(PRW_PACK_ID, prwFinalPayloadKey(binding.jobId));
+			if (already || finalized || PRW_TERMINAL_STATUSES.has(binding.status ?? "")) {
 				fail(409, "This PR walkthrough has already accepted a YAML submission.", { code: "WALKTHROUGH_ALREADY_READY", retryable: false });
 				return true;
 			}
@@ -239,13 +247,21 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const submittedAt = Date.now();
+			// Compatibility marker for the legacy submit_pr_walkthrough_yaml endpoint: the
+			// pack panel/status routes still read submitted/<jobId> when an old single-shot
+			// tool submits YAML. New launch state remains review-scoped; only legacy
+			// compatibility submissions use this unscoped marker until the wrapper is removed.
 			await store.put(PRW_PACK_ID, prwSubmittedKey(binding.jobId), {
 				yaml: body.yaml,
 				baseSha: binding.baseSha,
 				headSha: binding.headSha,
 				submittedAt,
 			});
-			await store.put(PRW_PACK_ID, prwBindingKey(authSessionId), { ...binding, status: "submitted" });
+			if (resolvedBinding?.kind === "scoped") {
+				await store.put(PRW_PACK_ID, prwReviewBindingKey(binding.jobId, authSessionId), { ...binding, status: "submitted" }, prwReviewBindingQuota(binding.jobId));
+			} else {
+				await store.put(PRW_PACK_ID, prwBindingKey(authSessionId), { ...binding, status: "submitted" });
+			}
 			// NO AUTO-DISMISS / PERSIST-UNTIL-TERMINATED LIFECYCLE (launch-ux design §5.1).
 			// Submitting the YAML does NOT reap the reviewer: it stays a live, read-only,
 			// selectable session whose child-session panel flips pending → rendered cards
@@ -988,6 +1004,25 @@ type PrWalkthroughBinding = {
 	status?: string;
 	kickedOff?: boolean;
 };
+
+type PrWalkthroughResolvedBinding = { binding: PrWalkthroughBinding; kind: "scoped" | "legacy" };
+
+async function resolvePrwReviewerBinding(
+	store: PackStore,
+	sessionId: string,
+	expectedJobId?: string,
+): Promise<PrWalkthroughResolvedBinding | undefined> {
+	const indexed = await store.get<{ jobId?: unknown }>(PRW_PACK_ID, prwReviewerIndexKey(sessionId));
+	const indexedJobId = indexed && typeof indexed === "object" ? stringValue(indexed.jobId) : undefined;
+	const jobId = expectedJobId || indexedJobId;
+	if (jobId) {
+		const scoped = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwReviewBindingKey(jobId, sessionId));
+		if (scoped && typeof scoped === "object") return { binding: scoped, kind: "scoped" };
+	}
+	const legacy = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwBindingKey(sessionId));
+	if (legacy && typeof legacy === "object") return { binding: legacy, kind: "legacy" };
+	return undefined;
+}
 
 /**
  * Resolve the AUTHENTIC caller session id from the REQUIRED `X-Bobbit-Session-Secret`

@@ -1,0 +1,10 @@
+name: read_pr_walkthrough_submission_status
+description: "Read saved PR walkthrough chunk ids and finalization status for this reviewer."
+summary: "Read walkthrough chunk status"
+params: []
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Call after compaction, retry, or restart to see which chunks are already saved and which required sections remain before finalization.

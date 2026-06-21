@@ -46,11 +46,12 @@ import { ActionDispatcher, ActionError, resolveActionToolManager } from "./exten
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
-import { getPackStore, withStoreTimeout, PackStoreTimeoutError } from "./extension-host/pack-store.js";
+import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
+import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
@@ -6285,8 +6286,8 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "put" && op !== "list") {
-			json({ error: `Unknown store op "${op}"` }, 404);
+		if (op !== "get" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
 		const body = (await readBody(req)) ?? {};
@@ -6342,10 +6343,16 @@ async function handleApiRoute(
 			if (op === "get") {
 				result = await withStoreTimeout(packStore.get(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "put") {
-				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value), undefined, `store ${op}`);
+				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.
 				notePackStoreWrite(key);
 				result = { ok: true };
+			} else if (op === "delete") {
+				result = await withStoreTimeout(packStore.delete(ident.packId, key as string), undefined, `store ${op}`);
+			} else if (op === "deletePrefix") {
+				result = await withStoreTimeout(packStore.deletePrefix(ident.packId, prefix as string), undefined, `store ${op}`);
+			} else if (op === "stats") {
+				result = await withStoreTimeout(packStore.stats(ident.packId, typeof prefix === "string" ? prefix : undefined), undefined, `store ${op}`);
 			} else {
 				result = await withStoreTimeout(packStore.list(ident.packId, typeof prefix === "string" ? prefix : undefined), undefined, `store ${op}`);
 			}
@@ -6356,8 +6363,12 @@ async function handleApiRoute(
 			// A timed-out store op is a 5xx (backend unavailable); other errors (quota,
 			// bad input) stay 4xx.
 			const status = err instanceof PackStoreTimeoutError ? 504 : 400;
+			const code = err instanceof PackStoreTimeoutError
+				? "STORE_TIMEOUT"
+				: err instanceof PackStoreQuotaError ? err.code : "STORE_ERROR";
+			const details = err instanceof PackStoreQuotaError ? err.details : undefined;
 			console.warn(`[ext-store] op=${op} tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
-			json({ error: message }, status);
+			json({ error: message, code, ...(details ? { details } : {}) }, status);
 		}
 		return;
 	}
@@ -10288,6 +10299,7 @@ async function handleApiRoute(
 				const heartbeat = setInterval(() => { try { res.write("\n"); } catch { /* ignore */ } }, 60_000);
 				const startTime = Date.now();
 				const handles: Array<{ sessionId: string } | null> = [];
+				let responsePayload: unknown;
 				try {
 					// Spawn the full set. assertCanSpawn / spawn failures become a
 					// failed delegate entry rather than aborting the others.
@@ -10334,16 +10346,19 @@ async function handleApiRoute(
 					}
 					const completed = delegates.filter(d => d.status === "completed").length;
 					const summary = `${completed}/${delegates.length} delegates completed.`;
-					res.end(JSON.stringify({ delegates, summary }));
+					responsePayload = { delegates, summary };
 				} catch (err) {
-					res.end(JSON.stringify({ delegates: [], summary: "", error: String(err instanceof Error ? err.message : err) }));
+					responsePayload = { delegates: [], summary: "", error: String(err instanceof Error ? err.message : err) };
 				} finally {
-					// Guaranteed cleanup — dismiss EVERY spawned child regardless of outcome.
+					// Guaranteed cleanup — dismiss EVERY spawned child before the blocking
+					// response completes. Ending the chunked response first races callers that
+					// immediately list children and violates team_delegate's auto-dismiss contract.
 					for (const h of handles) {
 						if (h) { try { await orchestrationCore.dismiss(ownerId, h.sessionId); } catch { /* already gone */ } }
 					}
 					clearInterval(heartbeat);
 				}
+				res.end(JSON.stringify(responsePayload ?? { delegates: [], summary: "", error: "Delegate route ended without a result." }));
 				return;
 			}
 

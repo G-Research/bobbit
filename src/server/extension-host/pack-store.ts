@@ -21,11 +21,15 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { StorePutOptions, StoreQuotaProfile, StoreStats } from "../../shared/extension-host/host-api.js";
 
 export interface PackStore {
 	get<T = unknown>(packId: string, key: string): Promise<T | null>;
-	put<T = unknown>(packId: string, key: string, value: T): Promise<void>;
+	put<T = unknown>(packId: string, key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(packId: string, prefix?: string): Promise<string[]>;
+	delete(packId: string, key: string): Promise<boolean>;
+	deletePrefix(packId: string, prefix: string): Promise<number>;
+	stats(packId: string, prefix?: string): Promise<StoreStats>;
 	/** Synchronous read of a single key (atomic-rename writes make the final file
 	 *  safe to read sync). Provider config-gated ACTIVATION feeds the synchronous
 	 *  session-setup bridge-injection decision, so it cannot await; this is the
@@ -37,13 +41,22 @@ export interface PackStore {
 /** Per-pack persistence quotas (Fix C). Enforced in `put` with a clear rejection
  *  BEFORE any write, so a pack cannot exhaust gateway disk. Defaults are generous
  *  for legitimate UI state but bound a runaway/malicious pack. */
+export interface PackStoreQuotaProfile {
+	/** Max cumulative bytes for keys under a caller-selected, server-owned scope prefix. */
+	maxTotalBytes: number;
+}
+
 export interface PackStoreQuota {
 	/** Max serialized bytes for a SINGLE value's on-disk envelope. */
 	maxValueBytes: number;
 	/** Max number of distinct keys a pack may hold. */
 	maxKeys: number;
-	/** Max cumulative on-disk bytes across ALL of a pack's keys. */
+	/** Max cumulative on-disk bytes across ALL of a pack's keys for unscoped writes. */
 	maxTotalBytes: number;
+	/** Absolute per-pack on-disk ceiling that also applies to scoped writes. */
+	maxTotalBytesEmergency: number;
+	/** Server-owned scoped quota profiles. Callers select by name; they never set limits. */
+	profiles: Record<StoreQuotaProfile, PackStoreQuotaProfile>;
 }
 
 export const DEFAULT_PACK_STORE_QUOTA: PackStoreQuota = {
@@ -52,15 +65,25 @@ export const DEFAULT_PACK_STORE_QUOTA: PackStoreQuota = {
 	// bytes as the disk-exhaustion bound while allowing one large persisted view.
 	maxValueBytes: 4 * 1024 * 1024, // 4 MiB per value
 	maxKeys: 1000,
-	maxTotalBytes: 5 * 1024 * 1024, // 5 MiB per pack
+	maxTotalBytes: 5 * 1024 * 1024, // 5 MiB per pack for legacy/unscoped writes
+	maxTotalBytesEmergency: 256 * 1024 * 1024, // absolute per-pack ceiling
+	profiles: {
+		default: { maxTotalBytes: 5 * 1024 * 1024 },
+		"review-draft": { maxTotalBytes: 5 * 1024 * 1024 },
+		"review-final": { maxTotalBytes: 5 * 1024 * 1024 },
+	},
 };
 
 /** Thrown when a `put` would exceed a {@link PackStoreQuota}. The endpoint maps it
  *  to a 4xx with `.message` so the pack sees a clear reason. */
 export class PackStoreQuotaError extends Error {
-	constructor(message: string) {
+	readonly code: string;
+	readonly details?: Record<string, unknown>;
+	constructor(message: string, code = "STORE_QUOTA_EXCEEDED", details?: Record<string, unknown>) {
 		super(message);
 		this.name = "PackStoreQuotaError";
+		this.code = code;
+		this.details = details;
 	}
 }
 
@@ -152,6 +175,54 @@ function assertKey(key: string): void {
 	}
 }
 
+function assertPrefix(prefix: string): void {
+	if (typeof prefix !== "string") {
+		throw new Error("store prefix must be a string");
+	}
+}
+
+export type PackStoreQuotaOptions = Partial<Omit<PackStoreQuota, "profiles">> & {
+	profiles?: Partial<Record<StoreQuotaProfile, Partial<PackStoreQuotaProfile>>>;
+};
+
+const STORE_QUOTA_PROFILES = new Set<StoreQuotaProfile>(["default", "review-draft", "review-final"]);
+
+function isStoreQuotaProfile(value: unknown): value is StoreQuotaProfile {
+	return typeof value === "string" && STORE_QUOTA_PROFILES.has(value as StoreQuotaProfile);
+}
+
+function normalizeQuota(input?: PackStoreQuotaOptions): PackStoreQuota {
+	return {
+		...DEFAULT_PACK_STORE_QUOTA,
+		...input,
+		profiles: {
+			default: { ...DEFAULT_PACK_STORE_QUOTA.profiles.default, ...input?.profiles?.default },
+			"review-draft": { ...DEFAULT_PACK_STORE_QUOTA.profiles["review-draft"], ...input?.profiles?.["review-draft"] },
+			"review-final": { ...DEFAULT_PACK_STORE_QUOTA.profiles["review-final"], ...input?.profiles?.["review-final"] },
+		},
+	};
+}
+
+function normalizeQuotaScope(key: string, opts?: StorePutOptions): { prefix: string; profile: StoreQuotaProfile } | undefined {
+	const scope = opts?.quotaScope;
+	if (scope === undefined) return undefined;
+	if (!scope || typeof scope !== "object" || typeof scope.prefix !== "string" || scope.prefix.length === 0) {
+		throw new PackStoreQuotaError("store quota scope prefix must be a non-empty string", "STORE_QUOTA_SCOPE_INVALID");
+	}
+	if (!key.startsWith(scope.prefix)) {
+		throw new PackStoreQuotaError(
+			`store quota scope prefix must match the written key: ${JSON.stringify(scope.prefix)} is not a prefix of ${JSON.stringify(key)}`,
+			"STORE_QUOTA_SCOPE_INVALID",
+			{ prefix: scope.prefix, key },
+		);
+	}
+	const profile = scope.profile ?? "default";
+	if (!isStoreQuotaProfile(profile)) {
+		throw new PackStoreQuotaError(`unknown store quota profile: ${String(profile)}`, "STORE_QUOTA_PROFILE_INVALID", { profile });
+	}
+	return { prefix: scope.prefix, profile };
+}
+
 /**
  * Per-pack async mutex — serializes the read-tally-then-write critical section of
  * `put` so concurrent puts to the SAME pack cannot RACE the quota check (each
@@ -221,9 +292,9 @@ async function replaceFileWithTemp(tmpFile: string, file: string): Promise<void>
  * Create a file-backed pack store. `rootDir` defaults to `bobbitStateDir()`; all
  * keys for a pack live under `<rootDir>/ext-store/<packId>/`.
  */
-export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackStoreQuota> }): PackStore {
+export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuotaOptions }): PackStore {
 	const baseDir = () => path.join(opts?.rootDir ?? bobbitStateDir(), "ext-store");
-	const quota: PackStoreQuota = { ...DEFAULT_PACK_STORE_QUOTA, ...opts?.quota };
+	const quota: PackStoreQuota = normalizeQuota(opts?.quota);
 	// One mutex per store instance — serializes each pack's `put` critical section.
 	const withPackLock = makePackMutex();
 
@@ -239,6 +310,37 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 		}
 		return { dir, file };
 	};
+
+	interface KeyFileStat { name: string; key: string; file: string; bytes: number }
+
+	const readKeyFileStats = async (dir: string, prefix?: string): Promise<KeyFileStat[]> => {
+		let names: string[];
+		try {
+			names = await fs.promises.readdir(dir);
+		} catch {
+			return [];
+		}
+		const out: KeyFileStat[] = [];
+		for (const name of names) {
+			if (!name.endsWith(".json")) continue;
+			const key = decodeKey(name.slice(0, -".json".length));
+			if (prefix !== undefined && !key.startsWith(prefix)) continue;
+			const file = path.join(dir, name);
+			let bytes = 0;
+			try {
+				bytes = (await fs.promises.stat(file)).size;
+			} catch {
+				bytes = 0;
+			}
+			out.push({ name, key, file, bytes });
+		}
+		return out;
+	};
+
+	const sumStats = (entries: KeyFileStat[]): StoreStats => ({
+		keys: entries.length,
+		bytes: entries.reduce((total, entry) => total + entry.bytes, 0),
+	});
 
 	/** Move a parse-failed file aside (so it is not re-read and is recoverable for
 	 *  inspection) and LOG it, rather than silently treating corruption as "absent".
@@ -278,8 +380,9 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 			return env.value;
 		},
 
-		async put<T = unknown>(packId: string, key: string, value: T): Promise<void> {
+		async put<T = unknown>(packId: string, key: string, value: T, opts?: StorePutOptions): Promise<void> {
 			const { dir, file } = resolveFile(packId, key);
+			const scope = normalizeQuotaScope(key, opts);
 			const env: StoreEnvelope<T> = { v: 1, value };
 			const serialized = JSON.stringify(env);
 			const newBytes = Buffer.byteLength(serialized, "utf8");
@@ -289,54 +392,56 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 			if (newBytes > quota.maxValueBytes) {
 				throw new PackStoreQuotaError(
 					`store value too large: ${newBytes} bytes exceeds the ${quota.maxValueBytes}-byte per-value limit`,
+					"STORE_QUOTA_EXCEEDED",
+					{ bytes: newBytes, limit: quota.maxValueBytes, dimension: "value" },
 				);
 			}
 
-			// SERIALIZE the tally→quota→write critical section PER PACK: without it,
-			// concurrent puts each read the pre-write key-count/byte-total, all pass
-			// the check, then all write — collectively exceeding maxKeys/maxTotalBytes.
+			// SERIALIZE the tally→quota→write/delete critical section PER PACK: without it,
+			// concurrent mutations can pass a stale quota check or race prefix cleanup.
 			await withPackLock(packId, async () => {
-				// Tally the pack's current keys + cumulative bytes (the file being
-				// overwritten is excluded from both the key count and the byte total).
-				let existingKeyCount = 0;
-				let existingTotalBytes = 0;
-				let overwriteBytes = 0;
-				let keyExists = false;
-				let names: string[] = [];
-				try {
-					names = await fs.promises.readdir(dir);
-				} catch {
-					names = []; // no dir yet
-				}
-				for (const name of names) {
-					if (!name.endsWith(".json")) continue;
-					existingKeyCount++;
-					let size = 0;
-					try {
-						size = (await fs.promises.stat(path.join(dir, name))).size;
-					} catch {
-						size = 0;
-					}
-					existingTotalBytes += size;
-					if (path.join(dir, name) === file) {
-						keyExists = true;
-						overwriteBytes = size;
-					}
-				}
+				const entries = await readKeyFileStats(dir);
+				const existingStats = sumStats(entries);
+				const existing = entries.find((entry) => entry.file === file);
+				const keyExists = existing !== undefined;
+				const overwriteBytes = existing?.bytes ?? 0;
 
 				// QUOTA 2 — reject a NEW key that would exceed the per-pack key count.
-				if (!keyExists && existingKeyCount >= quota.maxKeys) {
+				if (!keyExists && existingStats.keys >= quota.maxKeys) {
 					throw new PackStoreQuotaError(
-						`store key limit reached: ${existingKeyCount} keys at the ${quota.maxKeys}-key per-pack limit`,
+						`store key limit reached: ${existingStats.keys} keys at the ${quota.maxKeys}-key per-pack limit`,
+						"STORE_QUOTA_EXCEEDED",
+						{ keys: existingStats.keys, limit: quota.maxKeys, dimension: "keys" },
 					);
 				}
 
-				// QUOTA 3 — reject a write that would exceed the per-pack cumulative
-				// bytes (subtract the overwritten key's old size; add the new size).
-				const projectedTotal = existingTotalBytes - overwriteBytes + newBytes;
-				if (projectedTotal > quota.maxTotalBytes) {
+				const projectedPackTotal = existingStats.bytes - overwriteBytes + newBytes;
+				if (scope) {
+					// Scoped writes bypass the legacy 5 MiB cumulative pack cap, but remain
+					// bounded by their server-owned prefix profile and by the emergency ceiling.
+					const profile = quota.profiles[scope.profile];
+					const scopeStats = sumStats(entries.filter((entry) => entry.key.startsWith(scope.prefix)));
+					const projectedScopeTotal = scopeStats.bytes - overwriteBytes + newBytes;
+					if (projectedScopeTotal > profile.maxTotalBytes) {
+						throw new PackStoreQuotaError(
+							`store quota scope full: ${projectedScopeTotal} bytes would exceed the ${profile.maxTotalBytes}-byte ${scope.profile} limit for ${JSON.stringify(scope.prefix)}`,
+							"STORE_QUOTA_EXCEEDED",
+							{ bytes: projectedScopeTotal, limit: profile.maxTotalBytes, dimension: "scope", prefix: scope.prefix, profile: scope.profile },
+						);
+					}
+					if (projectedPackTotal > quota.maxTotalBytesEmergency) {
+						throw new PackStoreQuotaError(
+							`store emergency limit reached: ${projectedPackTotal} bytes would exceed the ${quota.maxTotalBytesEmergency}-byte per-pack emergency limit`,
+							"STORE_QUOTA_EXCEEDED",
+							{ bytes: projectedPackTotal, limit: quota.maxTotalBytesEmergency, dimension: "emergency" },
+						);
+					}
+				} else if (projectedPackTotal > quota.maxTotalBytes) {
+					// Legacy/unscoped writes keep the existing small cumulative pack cap.
 					throw new PackStoreQuotaError(
-						`store full: ${projectedTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
+						`store full: ${projectedPackTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
+						"STORE_QUOTA_EXCEEDED",
+						{ bytes: projectedPackTotal, limit: quota.maxTotalBytes, dimension: "pack" },
 					);
 				}
 
@@ -387,22 +492,50 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 
 		async list(packId: string, prefix?: string): Promise<string[]> {
 			assertPackId(packId);
+			if (prefix !== undefined) assertPrefix(prefix);
 			const dir = path.resolve(path.join(baseDir(), packId));
-			let names: string[];
-			try {
-				names = await fs.promises.readdir(dir);
-			} catch {
-				return []; // no dir yet → no keys
-			}
-			const out: string[] = [];
-			for (const name of names) {
-				if (!name.endsWith(".json")) continue;
-				const key = decodeKey(name.slice(0, -".json".length));
-				if (prefix && !key.startsWith(prefix)) continue;
-				out.push(key);
-			}
+			const out = (await readKeyFileStats(dir, prefix)).map((entry) => entry.key);
 			out.sort();
 			return out;
+		},
+
+		async delete(packId: string, key: string): Promise<boolean> {
+			const { file } = resolveFile(packId, key);
+			return withPackLock(packId, async () => {
+				try {
+					await fs.promises.unlink(file);
+					return true;
+				} catch (err) {
+					if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+					throw err;
+				}
+			});
+		},
+
+		async deletePrefix(packId: string, prefix: string): Promise<number> {
+			assertPackId(packId);
+			assertPrefix(prefix);
+			const dir = path.resolve(path.join(baseDir(), packId));
+			return withPackLock(packId, async () => {
+				const entries = await readKeyFileStats(dir, prefix);
+				let deleted = 0;
+				for (const entry of entries) {
+					try {
+						await fs.promises.unlink(entry.file);
+						deleted++;
+					} catch (err) {
+						if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
+					}
+				}
+				return deleted;
+			});
+		},
+
+		async stats(packId: string, prefix?: string): Promise<StoreStats> {
+			assertPackId(packId);
+			if (prefix !== undefined) assertPrefix(prefix);
+			const dir = path.resolve(path.join(baseDir(), packId));
+			return withPackLock(packId, async () => sumStats(await readKeyFileStats(dir, prefix)));
 		},
 	};
 }
