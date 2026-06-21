@@ -12,7 +12,7 @@ The local runtime currently supports:
 - **Model alias selection** — picker rows use `claude-code/<alias>` ids. The default alias for new Claude Code sessions is `claude-opus-4-8`, with built-in rows for `default`, `sonnet`, and `opus`; short custom aliases may also be forwarded to the CLI.
 - **Same-session alias switching** — changing between Claude Code aliases keeps the Bobbit session when the runtime is idle. Bobbit restarts the local `claude` process with the new alias and resumes with the latest known Claude Code session id when available.
 - **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists.
-- **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
+- **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Claude Code Ask User Question payloads render as Bobbit `ask_user_choices` when they use the supported structured question/options shape. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
 - **Session status and errors** — readiness, runtime metadata, normal turn completion, CLI exits, malformed stream diagnostics, auth/start failures, and error results surface through Bobbit status/error events instead of failing silently.
 - **Stop/abort MVP behavior** — graceful stops terminate the local process, escalating when needed; abort emits a visible aborted turn and lets the next prompt start a fresh CLI process with the latest known resume id.
 - **Guarded host preferences** — executable path and permission-bypass settings are saved server-side and require operator confirmation because they affect host-local process execution.
@@ -46,7 +46,7 @@ Claude Code stdout is parsed as JSONL. Bobbit translates Claude Code events into
 | `system` / `init` | Starts the runtime, captures `claudeCodeSessionId`, and records model alias metadata. |
 | `user` text replay | Emits a user `message_end`. |
 | `assistant` text | Streams assistant `message_update` snapshots. |
-| `tool_use` | Emits tool-start style events and includes tool calls in assistant content where renderable. |
+| `tool_use` | Emits tool-start style events and includes tool calls in assistant content where renderable. Claude Code Ask User Question blocks are normalized to Bobbit `ask_user_choices` when each question uses Bobbit-compatible `question`, optional `header`, optional `multiSelect`, and option labels. |
 | `tool_result` | Emits matching tool-result/end events. |
 | `result` | Ends the assistant turn and emits `agent_end`; errors surface as visible assistant errors. |
 | non-JSON stdout diagnostics | Kept as diagnostics instead of crashing the session. |
@@ -84,7 +84,7 @@ If the executable is missing, invalid, not runnable, times out, or reports a log
 
 ## Configuration
 
-Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API. Host-runtime preferences that affect process execution or permission bypass are sensitive: changing or resetting `claudeCode.executablePath`, enabling `claudeCode.allowBypassPermissions`, or setting `claudeCode.permissionMode` to `bypassPermissions` requires an operator-browser confirmation token. Direct API writes without that confirmation are rejected.
+Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API. Host-runtime preferences that affect process execution or permission bypass are sensitive: changing or resetting `claudeCode.executablePath`, enabling `claudeCode.allowBypassPermissions`, or setting `claudeCode.permissionMode` to `bypassPermissions` requires an operator-capable browser cookie and a short-lived confirmation token. Confirmation requests must not carry `Authorization`, query-token, or session-bound headers. Bearer-token or query-token REST traffic receives preview/API cookies only, cannot mint operator confirmations, and cannot self-confirm host-runtime changes. On localhost, the supported operator bootstrap path is a no-auth browser request to `/api/health`, followed by the normal Settings confirmation flow.
 
 | Preference key | Default | Meaning |
 |---|---|---|
@@ -154,7 +154,7 @@ Claude Code resume uses Claude Code's own session id and `--resume`; it does not
 ## Current gaps and limitations
 
 - **Tool execution is owned by Claude Code** — Bobbit does not execute Claude Code's internal tools, rewrite their inputs, approve their permissions, or replace the CLI tool catalog with Bobbit's tool catalog. Claude Code owns permission prompts and tool availability.
-- **Tool rendering is best-effort** — common `tool_use` / `tool_result` shapes render as Bobbit tool events, but not every Claude Code tool schema or result maps perfectly to existing Bobbit renderers. Unknown or unusual fields may appear only as generic message content or diagnostics.
+- **Tool rendering is best-effort** — common `tool_use` / `tool_result` shapes render as Bobbit tool events, and Ask User Question-style payloads render interactively as `ask_user_choices` when their questions/options match the supported shape. Other Claude Code tool schemas may not map perfectly to Bobbit renderers; unknown or unusual fields may appear only as generic message content or diagnostics.
 - **Claude Code owns runtime limits and catalogs** — auth, account state, model catalog, context limits, permission semantics, and local CLI behavior come from the installed `claude` command, not Bobbit. Bobbit forwards validated aliases but does not verify the upstream model catalog.
 - **Reviewer and verification agents stay Pi-backed** — workflow verification, reviewer/runtime agents, and other automation paths remain on the existing Pi runtime unless they are explicitly redesigned to request `claude-code`.
 - **Host-only sandbox boundary** — Claude Code sessions cannot run in Bobbit Docker sandboxes in the MVP, and Bobbit does not mount or expose private Claude credentials into sandbox containers by default.
