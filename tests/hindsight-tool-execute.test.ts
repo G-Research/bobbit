@@ -146,7 +146,7 @@ describe("hindsight_recall execute — memory text formatting (finding #4)", () 
 
 describe("Hindsight v2 route/tool execute wrappers", () => {
 	let reflect: ExecuteFn;
-	let retainOutcome: ExecuteFn;
+	let retain_outcome: ExecuteFn;
 	let invalidate: ExecuteFn;
 	const prevEnv: Record<string, string | undefined> = {};
 
@@ -161,7 +161,7 @@ describe("Hindsight v2 route/tool execute wrappers", () => {
 		const { api, get } = captureTools();
 		registerHindsightTools(api as any);
 		reflect = get("hindsight_reflect");
-		retainOutcome = get("hindsight_retain_outcome");
+		retain_outcome = get("hindsight_retain_outcome");
 		invalidate = get("hindsight_invalidate");
 	});
 
@@ -198,7 +198,7 @@ describe("Hindsight v2 route/tool execute wrappers", () => {
 	it("hindsight_retain_outcome dispatches the dedicated stable outcome route", async () => {
 		const records: FetchRecord[] = [];
 		restoreFetch = stubFetch({ ok: true, configured: true, documentId: "outcome:g1" }, records);
-		const result = await retainOutcome("tool-use-id", {
+		const result = await retain_outcome("tool-use-id", {
 			content: "Completed billing queue migration.",
 			goalId: "g1",
 			pr: 42,
@@ -210,7 +210,7 @@ describe("Hindsight v2 route/tool execute wrappers", () => {
 		assert.notEqual(result?.isError, true);
 		assert.match(textOf(result), /Outcome retained \(outcome:g1\)\./);
 		const dispatch = routeDispatch(records);
-		assert.match(records.find((r) => r.url.includes("/api/ext/route/"))?.url ?? "", /retainOutcome$/);
+		assert.match(records.find((r) => r.url.includes("/api/ext/route/"))?.url ?? "", /retain_outcome$/);
 		assert.equal(dispatch?.init?.body?.content, "Completed billing queue migration.");
 		assert.equal(dispatch?.init?.body?.goalId, "g1");
 		assert.equal(dispatch?.init?.body?.pr, 42);
@@ -307,7 +307,7 @@ describe("Hindsight v2 routes", () => {
 		assert.equal(calls[0].opts.excludeMentalModels, true);
 	});
 
-	it("retainOutcome builds stable document id, canonical tags, entities, and observation scopes", async () => {
+	it("retain_outcome builds stable document id, canonical tags, entities, and observation scopes", async () => {
 		const calls: any[] = [];
 		__setClientFactory(() => ({
 			health: async () => ({ ok: true }),
@@ -319,7 +319,7 @@ describe("Hindsight v2 routes", () => {
 			updateBankConfig: async () => {},
 		}));
 		const ctx = await activeRouteCtx("proj-7");
-		const res = await routes.retainOutcome(ctx, { body: { content: "Shipped billing queue.", goalId: "g7", pr: 88, files: ["src/billing.ts"], components: ["billing"], tags: { kind: "spoof", topic: "billing" }, timestamp: "2026-06-21T00:00:00.000Z" } });
+		const res = await routes.retain_outcome(ctx, { body: { content: "Shipped billing queue.", goalId: "g7", pr: 88, files: ["src/billing.ts"], components: ["billing"], tags: { kind: "spoof", topic: "billing" }, timestamp: "2026-06-21T00:00:00.000Z" } });
 		assert.equal(res.ok, true);
 		assert.equal(res.documentId, "outcome:g7");
 		assert.equal(calls[0].opts.documentId, "outcome:g7");

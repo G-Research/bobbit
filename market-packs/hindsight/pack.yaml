@@ -31,4 +31,4 @@ requires: []
 # stays inside the pack root.
 routes:
   module: lib/routes.mjs
-  names: [status, recall, retain, retainOutcome, reflect, invalidate, banks, config]
+  names: [status, recall, retain, retain_outcome, reflect, invalidate, banks, config]

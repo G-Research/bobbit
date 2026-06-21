@@ -424,7 +424,7 @@ const extension: ExtensionFactory = (pi) => {
 			try {
 				res = (await callRoute(
 					"hindsight_retain_outcome",
-					"retainOutcome",
+					"retain_outcome",
 					{
 						content,
 						...(params.goalId ? { goalId: params.goalId } : {}),

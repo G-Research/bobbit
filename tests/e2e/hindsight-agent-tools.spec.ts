@@ -83,7 +83,7 @@ const DEPS_READY =
 // New v2 routes are produced by the generated pack bundle. This task owns source
 // routes/tools only; keep the focused v2 cases dormant until the bundle/stub task
 // lands, while still defining the exact E2E coverage expected after generation.
-const V2_ROUTES_READY = DEPS_READY && fs.readFileSync(path.join(PACK_SRC, "lib", "routes.mjs"), "utf-8").includes("retainOutcome");
+const V2_ROUTES_READY = DEPS_READY && fs.readFileSync(path.join(PACK_SRC, "lib", "routes.mjs"), "utf-8").includes("retain_outcome");
 
 const test = base;
 const describe = DEPS_READY ? test.describe : test.describe.skip;
@@ -440,12 +440,12 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		expect(calls[0].body?.query).toContain("Bobbit coding-agent memory reflection instructions");
 	});
 
-	test("v2 retainOutcome writes a stable replacement outcome digest", async () => {
+	test("v2 retainOutcome route writes a stable replacement outcome digest", async () => {
 		test.skip(!V2_ROUTES_READY, "v2 generated routes/stub not present on this branch yet");
 		seedConfig(bobbitDir, externalConfig(stub.url));
 		const id = await newSession();
 		const before = stub.retained("bobbit").length;
-		const res = await invokeTool(id, RETAIN_OUTCOME, "retainOutcome", {
+		const res = await invokeTool(id, RETAIN_OUTCOME, "retain_outcome", {
 			content: "Completed billing queue migration.",
 			goalId: "g-outcome",
 			pr: 42,

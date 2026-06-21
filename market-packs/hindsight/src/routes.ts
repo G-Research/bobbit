@@ -374,7 +374,7 @@ export const routes = {
 	// manual `retain` route: stable document id, replace semantics, async write,
 	// canonical outcome tags, optional file/component entities, and project
 	// observation scopes when the host provides a real project id.
-	retainOutcome: async (ctx: RouteCtx, req: RouteReq) => {
+	retain_outcome: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const projectId = strOf(ctx.projectId);
 		const cfg = await loadEffectiveConfig(store, projectId);

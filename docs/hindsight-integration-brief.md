@@ -487,7 +487,7 @@ Files/functions:
 - `market-packs/hindsight/src/provider.ts`
   - Implement `goalCompleted(ctx)` by calling the shared outcome builder and `client.retain(..., { documentId:'outcome:<goalId>', updateMode:'replace', entities, timestamp, observationScopes, sync:false })`.
 - `market-packs/hindsight/src/routes.ts`
-  - Add route `retainOutcome` or extend `retain` with a constrained `kind: 'outcome'` path. Prefer a dedicated route for validation.
+  - Add route `retain_outcome` or extend `retain` with a constrained `kind: 'outcome'` path. Prefer a dedicated route for validation.
   - Body: `{ content, goalId?, pr?, files?, components?, decisions?, tags?, timestamp? }`.
   - Build `document_id: outcome:<goalId>` or `outcome:pr:<pr>`.
   - Send `update_mode: 'replace'`, `async: true`, project observation scopes, entities from files/components.
