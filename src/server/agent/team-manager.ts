@@ -1,5 +1,5 @@
 import { execFile as execFileCb } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { GoalCompletedCtx } from "./lifecycle-hub.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
 import {
@@ -75,6 +76,27 @@ function splitWorkerResultSummary(resultSummary: string): { summary?: string; br
 		commit,
 		checks: checks?.replace(/\s+/g, " ").trim() || undefined,
 	};
+}
+
+function extractLikelyPaths(text: string): string[] {
+	const out = new Set<string>();
+	const re = /(?:^|[\s'"`(])((?:[A-Za-z0-9_.-]+\/)+(?:[A-Za-z0-9_.-]+))(?:[\s'"`),.:;]|$)/g;
+	let match: RegExpExecArray | null;
+	while ((match = re.exec(text)) !== null) {
+		const candidate = match[1];
+		if (!candidate || candidate.includes("//") || candidate.length > 240) continue;
+		out.add(candidate);
+	}
+	return Array.from(out);
+}
+
+async function gitNameOnly(cwd: string, args: string[]): Promise<string[]> {
+	try {
+		const { stdout } = await execFile("git", ["-C", cwd, ...args], { timeout: 5_000 });
+		return stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -182,6 +204,12 @@ export interface TeamManagerConfig {
 	broadcastToGoal?: (goalId: string, event: any) => void;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
+	/** Best-effort lifecycle dispatch after a goal is durably marked complete. */
+	goalCompletedDispatcher?: (ctx: GoalCompletedCtx) => Promise<void> | void;
+	/** Optional active-provider probe so disabled/missing providers do not burn an idempotency marker. */
+	hasGoalCompletedProviders?: (goalId: string, projectId?: string) => boolean;
+	/** Optional PR cache resolver; omitted when no PR is known for the goal. */
+	resolveGoalPullRequest?: (goalId: string) => GoalCompletedCtx["pullRequest"] | undefined;
 	/** Tool manager for resolving extension paths via the cascade */
 	toolManager?: ToolManager;
 	/**
@@ -264,15 +292,19 @@ export class TeamManager {
 
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
+	/** In-flight goalCompleted dispatches keyed by goal id to collapse concurrent completions. */
+	private goalCompletedDispatchLocks = new Map<string, Promise<void>>();
+	private readonly localStateDir: string;
 
 	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string) {
 		this.sessionManager = sessionManager;
 		this.config = config;
 		this.taskManager = config.taskManager;
+		this.localStateDir = stateDir ?? bobbitStateDir();
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
-			const dir = stateDir ?? bobbitStateDir();
+			const dir = this.localStateDir;
 			this.localStore = new TeamStore(dir);
 			// Non-PCM test path: create a local GoalManager from the same stateDir
 			this._localGoalManager = new GoalManager(new GoalStore(dir));
@@ -2220,6 +2252,148 @@ export class TeamManager {
 		return entry.agents.find(a => a.sessionId === sessionId);
 	}
 
+	private async dispatchGoalCompletedOnce(goalId: string): Promise<void> {
+		if (!this.config.goalCompletedDispatcher) return;
+		const existing = this.goalCompletedDispatchLocks.get(goalId);
+		if (existing) return existing;
+		const dispatch = this._dispatchGoalCompletedOnce(goalId).finally(() => {
+			this.goalCompletedDispatchLocks.delete(goalId);
+		});
+		this.goalCompletedDispatchLocks.set(goalId, dispatch);
+		return dispatch;
+	}
+
+	private async _dispatchGoalCompletedOnce(goalId: string): Promise<void> {
+		const goal = this.resolveGoal(goalId);
+		if (!goal) return;
+		if (this.config.hasGoalCompletedProviders && !this.config.hasGoalCompletedProviders(goalId, goal.projectId)) return;
+		const headSha = await this.resolveGoalHeadSha(goal);
+		const markerKey = `goalCompleted:${goalId}:${headSha ?? "unknown"}`;
+		if (!this.claimGoalCompletedMarker(goalId, markerKey, headSha)) return;
+		const ctx = await this.buildGoalCompletedContext(goalId, goal, headSha);
+		try {
+			await this.config.goalCompletedDispatcher?.(ctx);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[team-manager] goalCompleted provider dispatch failed for ${goalId} (non-fatal): ${message}`);
+		}
+	}
+
+	private claimGoalCompletedMarker(goalId: string, markerKey: string, headSha?: string): boolean {
+		try {
+			const dir = path.join(this.resolveStateDir(goalId), "goal-completed-markers");
+			fs.mkdirSync(dir, { recursive: true });
+			const digest = createHash("sha256").update(markerKey).digest("hex");
+			const markerPath = path.join(dir, `${digest}.json`);
+			const fd = fs.openSync(markerPath, "wx");
+			try {
+				fs.writeFileSync(fd, JSON.stringify({ markerKey, goalId, headSha, createdAt: new Date().toISOString() }, null, 2), "utf-8");
+			} finally {
+				fs.closeSync(fd);
+			}
+			return true;
+		} catch (err: any) {
+			if (err?.code === "EEXIST") return false;
+			console.warn(`[team-manager] Unable to persist goalCompleted marker for ${goalId}; dispatching best-effort without marker:`, err);
+			return true;
+		}
+	}
+
+	private resolveStateDir(goalId: string): string {
+		if (this.config.projectContextManager) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.stateDir;
+		}
+		return this.localStateDir;
+	}
+
+	private async buildGoalCompletedContext(goalId: string, goal: PersistedGoal, headSha?: string): Promise<GoalCompletedCtx> {
+		const gateStore = this.resolveGateStore(goalId);
+		const gateStates = gateStore?.getGatesForGoal(goalId) ?? [];
+		const taskRows = this.getGoalTasks(goalId);
+		return {
+			goalId,
+			projectId: goal.projectId,
+			cwd: goal.worktreePath || goal.cwd || goal.repoPath || process.cwd(),
+			branch: goal.branch,
+			mergeTarget: goal.mergeTarget,
+			parentGoalId: goal.parentGoalId,
+			rootGoalId: goal.rootGoalId,
+			headSha,
+			teamLeadSessionId: goal.teamLeadSessionId ?? this.teams.get(goalId)?.teamLeadSessionId ?? undefined,
+			completedAt: new Date().toISOString(),
+			pullRequest: this.config.resolveGoalPullRequest?.(goalId),
+			gates: gateStates.map((state) => {
+				const def = goal.workflow?.gates.find((gate) => gate.id === state.gateId);
+				const latest = state.signals[state.signals.length - 1];
+				return {
+					gateId: state.gateId,
+					name: def?.name,
+					status: state.status,
+					signalCount: state.signals.length,
+					updatedAt: state.updatedAt,
+					metadata: state.currentMetadata,
+					content: state.currentContent,
+					latestCommitSha: latest?.commitSha,
+				};
+			}),
+			tasks: taskRows.map((task: any) => ({
+				id: String(task.id),
+				title: String(task.title ?? task.id),
+				type: typeof task.type === "string" ? task.type : undefined,
+				state: typeof task.state === "string" ? task.state : undefined,
+				branch: typeof task.branch === "string" ? task.branch : undefined,
+				headSha: typeof task.headSha === "string" ? task.headSha : undefined,
+				resultSummary: typeof task.resultSummary === "string" ? task.resultSummary : undefined,
+			})),
+			touchedFiles: await this.collectTouchedFiles(goal, taskRows),
+			metadata: goal.metadata ?? {},
+		};
+	}
+
+	private getGoalTasks(goalId: string): any[] {
+		try {
+			if (this.config.projectContextManager) {
+				const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+				if (ctx) return ctx.taskStore.getByGoalId(goalId);
+			}
+			const tm: any = this.taskManager as any;
+			if (typeof tm.getTasksForGoal === "function") return tm.getTasksForGoal(goalId) ?? [];
+			if (typeof tm.getTasksByGoal === "function") return tm.getTasksByGoal(goalId) ?? [];
+		} catch { /* best-effort context only */ }
+		return [];
+	}
+
+	private async collectTouchedFiles(goal: PersistedGoal, tasks: any[]): Promise<string[]> {
+		const files = new Set<string>();
+		for (const task of tasks) {
+			if (task && typeof task.resultSummary === "string") {
+				for (const file of extractLikelyPaths(task.resultSummary)) files.add(file);
+			}
+		}
+		const gitCwd = goal.worktreePath || goal.cwd || goal.repoPath;
+		if (gitCwd) {
+			for (const file of await gitNameOnly(gitCwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"])) files.add(file);
+			if (files.size === 0) {
+				for (const file of await gitNameOnly(gitCwd, ["show", "--name-only", "--format=", "HEAD"])) files.add(file);
+			}
+		}
+		return Array.from(files).sort().slice(0, 200);
+	}
+
+	private async resolveGoalHeadSha(goal: PersistedGoal): Promise<string | undefined> {
+		const gitCwd = goal.worktreePath || goal.cwd || goal.repoPath;
+		if (!gitCwd) return undefined;
+		const ref = goal.branch && !goal.worktreePath ? goal.branch : "HEAD";
+		try {
+			const { stdout } = await execFile("git", ["-C", gitCwd, "rev-parse", ref], { timeout: 5_000 });
+			const sha = stdout.trim();
+			return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
 	 * The team lead remains active to await further instructions.
@@ -2280,6 +2454,10 @@ export class TeamManager {
 		// Keep team tracking alive so the team lead can still be found
 		// but persist the updated state (agents cleared)
 		this.persistEntry(goalId);
+
+		await this.dispatchGoalCompletedOnce(goalId).catch((err) => {
+			console.warn(`[team-manager] goalCompleted lifecycle dispatch failed for ${goalId} (non-fatal):`, err);
+		});
 
 		console.log(`[team-manager] Completed team for goal ${goalId} — team lead remains active: ${entry.teamLeadSessionId}`);
 	}

@@ -53,6 +53,10 @@ const PROVIDER_HOOKS = new Set([
 	// provider apply per-goal filesystem treatments (content-addressed marker/
 	// cache) without per-turn cost. See docs/design/goal-metadata.md.
 	"goalProvisioned",
+	// Goal completion hook: fired once per completed goal/head after team_complete
+	// succeeds so memory providers can retain an outcome digest without affecting
+	// the completion path.
+	"goalCompleted",
 ]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
