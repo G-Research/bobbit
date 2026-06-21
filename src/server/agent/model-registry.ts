@@ -18,6 +18,8 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
+import { CLAUDE_CODE_MODEL_ALIASES } from "./claude-code-config.js";
+import { getClaudeCodeStatus } from "./claude-code-status.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -48,6 +50,12 @@ export interface ApiModel {
 	sessionSelectable?: boolean;
 	/** Human-readable reason shown in the selector when `sessionSelectable === false`. */
 	sessionUnavailableReason?: string;
+	/** Session runtime required for this model. Undefined/"pi" preserves legacy Pi runtime behavior. */
+	runtime?: "pi" | "claude-code";
+	/** True for host-local runtimes that are not normal API-backed models. */
+	localRuntime?: boolean;
+	/** Short provider/runtime label for selectors, e.g. "Claude Code (local)". */
+	runtimeLabel?: string;
 }
 
 export interface CustomProviderConfig {
@@ -113,6 +121,10 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 		all["aigw.url"],
 		all["aigw.exclusive"],
 		all["customProviders"],
+		all["claudeCode.executablePath"],
+		all["claudeCode.defaultModel"],
+		all["claudeCode.permissionMode"],
+		all["claudeCode.allowBypassPermissions"],
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
 	]);
 	for (let i = 0; i < str.length; i++) {
@@ -200,6 +212,19 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		}
 	}
 
+	// 1c. Claude Code local runtime models are synthetic and remain visible even
+	// when AI Gateway exclusive mode hides direct API-backed providers.
+	try {
+		results.push(...await buildClaudeCodeModels(prefs));
+	} catch (err) {
+		console.error("[model-registry] Failed to probe Claude Code runtime:", err);
+		results.push(...buildClaudeCodeModelsFromStatus({
+			ready: false,
+			authenticated: false,
+			reason: "Claude Code probe failed",
+		}));
+	}
+
 	// 2. AI Gateway models (if configured)
 	if (aigwUrl) {
 		try {
@@ -244,6 +269,32 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	}
 
 	return results;
+}
+
+async function buildClaudeCodeModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+	const status = await getClaudeCodeStatus(prefs);
+	return buildClaudeCodeModelsFromStatus(status);
+}
+
+function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated: boolean; reason?: string }): ApiModel[] {
+	const unavailableReason = status.ready ? undefined : status.reason || "Claude Code CLI not ready";
+	return CLAUDE_CODE_MODEL_ALIASES.map(alias => ({
+		id: alias,
+		name: alias === "default" ? "Claude Code Default" : `Claude Code ${alias[0].toUpperCase()}${alias.slice(1)}`,
+		provider: "claude-code",
+		api: "claude-code-runtime",
+		runtime: "claude-code" as const,
+		localRuntime: true,
+		runtimeLabel: "Claude Code (local)",
+		contextWindow: 200_000,
+		maxTokens: 8192,
+		reasoning: true,
+		input: ["text"] as ("text" | "image")[],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		authenticated: status.ready && status.authenticated,
+		sessionSelectable: status.ready,
+		...(unavailableReason ? { sessionUnavailableReason: unavailableReason } : {}),
+	}));
 }
 
 // ── Authentication Detection ───────────────────────────────────────

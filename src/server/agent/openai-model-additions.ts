@@ -6,10 +6,9 @@ import { getModels } from "@earendil-works/pi-ai";
 import { globalAgentDir } from "../bobbit-dir.js";
 import type { ApiModel } from "./model-registry.js";
 
-// `authenticated` is resolved at registry-merge time; `sessionSelectable` /
-// `sessionUnavailableReason` only apply to runtime-gated providers (e.g. Google
-// Code Assist) and are never carried by an OpenAI addition.
-type OpenAIAddition = Omit<ApiModel, "authenticated" | "sessionSelectable" | "sessionUnavailableReason">;
+// `authenticated` is resolved at registry-merge time; session/runtime selector
+// metadata is owned by registry emitters and is never carried by an OpenAI addition.
+type OpenAIAddition = Omit<ApiModel, "authenticated" | "sessionSelectable" | "sessionUnavailableReason" | "runtime" | "localRuntime" | "runtimeLabel">;
 
 /**
  * ── OpenAI / OpenAI-Codex model additions ─────────────────────────

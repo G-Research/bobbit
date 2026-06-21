@@ -310,6 +310,8 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch } from "./agent/claude-code-config.js";
+import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
@@ -6679,7 +6681,14 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preferences" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		for (const [key, value] of Object.entries(body)) {
+		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
+		let preferencePatch = body as Record<string, unknown>;
+		if (claudeCodePrefsChanged) {
+			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
+			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
+			preferencePatch = { ...preferencePatch, ...normalized.values };
+		}
+		for (const [key, value] of Object.entries(preferencePatch)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
 				// authoritative. An empty/invalid list removes the key entirely.
@@ -6691,6 +6700,10 @@ async function handleApiRoute(
 			} else {
 				preferencesStore.set(key, value);
 			}
+		}
+		if (claudeCodePrefsChanged) {
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
 		}
 		json({ ok: true });
 		broadcastPreferencesChanged();
@@ -7228,6 +7241,16 @@ async function handleApiRoute(
 	}
 
 	// ── Unified Model Registry ──
+
+	// GET /api/claude-code/status — local Claude Code CLI readiness probe
+	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
+		try {
+			json(await getClaudeCodeStatus(preferencesStore));
+		} catch (err: any) {
+			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
+		}
+		return;
+	}
 
 	// GET /api/models — unified model list from all sources
 	if (url.pathname === "/api/models" && req.method === "GET") {
