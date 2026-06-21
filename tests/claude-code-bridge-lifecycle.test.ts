@@ -3,11 +3,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ClaudeCodeBridge, buildClaudeCodeArgs } from "../src/server/agent/claude-code-bridge.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fakeCli = path.join(__dirname, "fixtures", "claude-code", "fake-claude-cli.mjs");
+
+function fakeCliWithEnv(dir: string, env: Record<string, string>): string {
+	const wrapper = path.join(dir, "fake-claude-wrapper.mjs");
+	const assignments = Object.entries(env)
+		.map(([key, value]) => `process.env[${JSON.stringify(key)}] = ${JSON.stringify(value)};`)
+		.join("\n");
+	fs.writeFileSync(wrapper, `#!/usr/bin/env node\n${assignments}\nawait import(${JSON.stringify(pathToFileURL(fakeCli).href)});\n`, "utf8");
+	fs.chmodSync(wrapper, 0o755);
+	return wrapper;
+}
 
 function timeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
 	let timer: ReturnType<typeof setTimeout>;
@@ -39,6 +49,65 @@ function readRecord(recordPath: string): any[] {
 		.map((line) => JSON.parse(line));
 }
 
+function withPatchedEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
+	const previous = new Map<string, string | undefined>();
+	for (const [key, value] of Object.entries(patch)) {
+		previous.set(key, process.env[key]);
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	const restore = () => {
+		for (const [key, value] of previous) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	};
+	try {
+		const result = fn();
+		if (result && typeof (result as any).finally === "function") {
+			return (result as Promise<unknown>).finally(restore) as T;
+		}
+		restore();
+		return result;
+	} catch (error) {
+		restore();
+		throw error;
+	}
+}
+
+function envRecordingCli(dir: string, recordPath: string): string {
+	const cli = path.join(dir, "env-recording-claude.mjs");
+	const keys = [
+		"PATH",
+		"HOME",
+		"TMPDIR",
+		"TEMP",
+		"LANG",
+		"LC_ALL",
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"GITHUB_TOKEN",
+		"AWS_SECRET_ACCESS_KEY",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"BOBBIT_GATEWAY_TOKEN",
+		"EXTRA_TOKEN",
+		"EXTRA_SAFE",
+	];
+	fs.writeFileSync(cli, `#!/usr/bin/env node
+import fs from "node:fs";
+const keys = ${JSON.stringify(keys)};
+const selected = Object.fromEntries(keys.map((key) => [key, process.env[key]]).filter(([, value]) => value !== undefined));
+fs.writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ env: selected }) + "\\n", "utf8");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", () => {
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok" }) + "\\n");
+  process.exit(0);
+});
+`, "utf8");
+	fs.chmodSync(cli, 0o755);
+	return cli;
+}
+
 describe("ClaudeCodeBridge lifecycle", () => {
 	it("does not spawn a repo-local claude executable from cwd or injected PATH", async () => {
 		const tmp = tempRecord();
@@ -50,7 +119,7 @@ describe("ClaudeCodeBridge lifecycle", () => {
 		const bridge = new ClaudeCodeBridge({
 			cwd: tmp.dir,
 			claudeCodeExecutable: "claude",
-			env: { PATH: tmp.dir, FAKE_CLAUDE_RECORD_PATH: tmp.recordPath },
+			env: { PATH: tmp.dir, ANTHROPIC_API_KEY: "must-not-leak" },
 		});
 
 		try {
@@ -64,12 +133,67 @@ describe("ClaudeCodeBridge lifecycle", () => {
 		}
 	});
 
+	it("passes only minimal safe environment to Claude Code child processes", async () => {
+		const tmp = tempRecord();
+		const safeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bridge-path-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bridge-home-"));
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bridge-temp-"));
+		const cli = envRecordingCli(tmp.dir, tmp.recordPath);
+		const bridge = new ClaudeCodeBridge({
+			claudeCodeExecutable: cli,
+			env: {
+				HOME: path.join(home, "override"),
+				TEMP: temp,
+				LANG: "fr_FR.UTF-8",
+				ANTHROPIC_API_KEY: "extra-anthropic-secret",
+				EXTRA_TOKEN: "extra-token-secret",
+				EXTRA_SAFE: "not-on-allowlist",
+			},
+		});
+
+		try {
+			await withPatchedEnv({
+				PATH: [path.dirname(process.execPath), safeBin].join(path.delimiter),
+				HOME: home,
+				TMPDIR: temp,
+				LANG: "en_US.UTF-8",
+				LC_ALL: "C.UTF-8",
+				ANTHROPIC_API_KEY: "process-anthropic-secret",
+				OPENAI_API_KEY: "process-openai-secret",
+				GITHUB_TOKEN: "process-github-secret",
+				AWS_SECRET_ACCESS_KEY: "process-aws-secret",
+				GOOGLE_APPLICATION_CREDENTIALS: "/secret/google.json",
+				BOBBIT_GATEWAY_TOKEN: "process-bobbit-secret",
+			}, () => timeout(bridge.prompt("check env"), 2000, "prompt was not accepted"));
+
+			const [{ env }] = readRecord(tmp.recordPath);
+			assert.equal(env.HOME, path.join(home, "override"));
+			assert.equal(env.TMPDIR, temp);
+			assert.equal(env.TEMP, temp);
+			assert.equal(env.LANG, "fr_FR.UTF-8");
+			assert.equal(env.LC_ALL, "C.UTF-8");
+			assert.ok(String(env.PATH || "").split(path.delimiter).includes(fs.realpathSync(safeBin)));
+			assert.equal(env.ANTHROPIC_API_KEY, undefined);
+			assert.equal(env.OPENAI_API_KEY, undefined);
+			assert.equal(env.GITHUB_TOKEN, undefined);
+			assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+			assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
+			assert.equal(env.BOBBIT_GATEWAY_TOKEN, undefined);
+			assert.equal(env.EXTRA_TOKEN, undefined);
+			assert.equal(env.EXTRA_SAFE, undefined);
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+			fs.rmSync(safeBin, { recursive: true, force: true });
+			fs.rmSync(home, { recursive: true, force: true });
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
 	it("spawns fake Claude with structured flags and sends prompts over stdin JSONL", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_SPLIT: "1" },
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_SPLIT: "1" }),
 		});
 		const events: any[] = [];
 		bridge.onEvent((event) => events.push(event));
@@ -123,11 +247,9 @@ process.stdin.on('data', () => {
 	});
 
 	it("rejects a pending prompt exactly once when the child exits mid-turn", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "crash-after-stdin" },
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "crash-after-stdin" }),
 		});
 		let processExitEvents = 0;
 		bridge.onEvent((event) => {
@@ -164,11 +286,9 @@ process.stdin.on('data', () => {
 	});
 
 	it("abort emits an aborted turn without marking the expected SIGTERM as process_exit", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "idle" },
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "idle" }),
 		});
 		const events: any[] = [];
 		bridge.onEvent((event) => events.push(event));
@@ -207,15 +327,13 @@ process.stdin.on('data', () => {
 	});
 
 	it("passes Bobbit's assembled system prompt to Claude Code without rewriting user text or images", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const promptPath = path.join(tmp.dir, "system-prompt.md");
 		const systemPrompt = "Role instructions\nGoal instructions\nDelegate instructions";
 		fs.writeFileSync(promptPath, systemPrompt, "utf8");
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath }),
 			systemPromptPath: promptPath,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath },
 		});
 
 		try {
@@ -241,11 +359,9 @@ process.stdin.on('data', () => {
 	});
 
 	it("uses the latest Claude session id for --resume on follow-up --print processes", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result" },
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result" }),
 		});
 		const events: any[] = [];
 		bridge.onEvent((event) => events.push(event));
@@ -269,11 +385,9 @@ process.stdin.on('data', () => {
 	});
 
 	it("flushes final stdout JSON without a trailing newline before process close handling", async () => {
-		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
-			claudeCodeExecutable: fakeCli,
-			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result", FAKE_CLAUDE_FINAL_NO_NEWLINE: "1" },
+			claudeCodeExecutable: fakeCliWithEnv(tmp.dir, { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result", FAKE_CLAUDE_FINAL_NO_NEWLINE: "1" }),
 		});
 		const events: any[] = [];
 		bridge.onEvent((event) => events.push(event));

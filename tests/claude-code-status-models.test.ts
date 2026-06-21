@@ -8,6 +8,7 @@ import { PreferencesStore } from "../src/server/agent/preferences-store.ts";
 import {
 	CLAUDE_CODE_PREF_KEYS,
 	CLAUDE_CODE_DEFAULT_CONFIG,
+	buildClaudeCodeSanitizedEnv,
 	normalizeClaudeCodePreferencePatch,
 	readClaudeCodeConfig,
 	resolveClaudeCodeExecutable,
@@ -21,6 +22,32 @@ import { getAvailableModels, invalidateModelCache } from "../src/server/agent/mo
 function makePrefs(): { prefs: PreferencesStore; dir: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-"));
 	return { prefs: new PreferencesStore(dir), dir };
+}
+
+function withPatchedEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
+	const previous = new Map<string, string | undefined>();
+	for (const [key, value] of Object.entries(patch)) {
+		previous.set(key, process.env[key]);
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	const restore = () => {
+		for (const [key, value] of previous) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	};
+	try {
+		const result = fn();
+		if (result && typeof (result as any).finally === "function") {
+			return (result as Promise<unknown>).finally(restore) as T;
+		}
+		restore();
+		return result;
+	} catch (error) {
+		restore();
+		throw error;
+	}
 }
 
 beforeEach(() => {
@@ -93,28 +120,122 @@ describe("Claude Code config", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("builds a minimal Claude Code environment and drops gateway/provider secrets", () => {
+		const safeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-safe-path-"));
+		const unsafeCwd = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-unsafe-cwd-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-home-"));
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tmp-"));
+		try {
+			withPatchedEnv({
+				PATH: [safeBin, unsafeCwd].join(path.delimiter),
+				HOME: home,
+				TMPDIR: tmp,
+				LANG: "en_US.UTF-8",
+				LC_ALL: "C.UTF-8",
+				ANTHROPIC_API_KEY: "anthropic-secret",
+				OPENAI_API_KEY: "openai-secret",
+				GITHUB_TOKEN: "github-secret",
+				AWS_SECRET_ACCESS_KEY: "aws-secret",
+				GOOGLE_APPLICATION_CREDENTIALS: "/secret/google.json",
+				BOBBIT_GATEWAY_TOKEN: "bobbit-secret",
+				UNRELATED_GATEWAY_VALUE: "must-not-copy-process-env",
+			}, () => {
+				const env = buildClaudeCodeSanitizedEnv({
+					HOME: path.join(home, "override"),
+					LANG: "fr_FR.UTF-8",
+					TEMP: tmp,
+					ANTHROPIC_API_KEY: "extra-anthropic-secret",
+					EXTRA_TOKEN: "extra-token-secret",
+					AWS_REGION: "extra-aws-value",
+					GITHUB_REPOSITORY: "extra-github-value",
+					BOBBIT_SESSION_ID: "extra-bobbit-value",
+					EXTRA_SAFE: "not-on-allowlist",
+				}, { cwd: unsafeCwd });
+
+				assert.equal(env.HOME, path.join(home, "override"));
+				assert.equal(env.LANG, "fr_FR.UTF-8");
+				assert.equal(env.LC_ALL, "C.UTF-8");
+				assert.equal(env.TMPDIR, tmp);
+				assert.equal(env.TEMP, tmp);
+				assert.ok(String(env.PATH || "").split(path.delimiter).includes(fs.realpathSync(safeBin)));
+				assert.ok(!String(env.PATH || "").split(path.delimiter).includes(fs.realpathSync(unsafeCwd)));
+
+				assert.equal(env.ANTHROPIC_API_KEY, undefined);
+				assert.equal(env.OPENAI_API_KEY, undefined);
+				assert.equal(env.GITHUB_TOKEN, undefined);
+				assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+				assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
+				assert.equal(env.BOBBIT_GATEWAY_TOKEN, undefined);
+				assert.equal(env.UNRELATED_GATEWAY_VALUE, undefined);
+				assert.equal(env.EXTRA_TOKEN, undefined);
+				assert.equal(env.AWS_REGION, undefined);
+				assert.equal(env.GITHUB_REPOSITORY, undefined);
+				assert.equal(env.BOBBIT_SESSION_ID, undefined);
+				assert.equal(env.EXTRA_SAFE, undefined);
+			});
+		} finally {
+			fs.rmSync(safeBin, { recursive: true, force: true });
+			fs.rmSync(unsafeCwd, { recursive: true, force: true });
+			fs.rmSync(home, { recursive: true, force: true });
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("Claude Code status", () => {
 	it("probes with an absolute executable, execFile-style args, safe cwd, and sanitized env", async () => {
 		let seen: any;
-		const status = await probeClaudeCodeStatus({ executablePath: process.execPath }, async (file, args, options) => {
-			seen = { file, args, options };
-			return { stdout: "claude 1.2.3\n", stderr: "" };
-		});
+		const safeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-status-path-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-status-home-"));
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-status-tmp-"));
+		try {
+			const status = await withPatchedEnv({
+				PATH: [path.dirname(process.execPath), safeBin, process.cwd()].join(path.delimiter),
+				HOME: home,
+				TMPDIR: tmp,
+				LANG: "en_US.UTF-8",
+				LC_CTYPE: "C.UTF-8",
+				NODE_OPTIONS: "--require ./malicious.js",
+				ANTHROPIC_API_KEY: "anthropic-secret",
+				OPENAI_API_KEY: "openai-secret",
+				GITHUB_TOKEN: "github-secret",
+				AWS_ACCESS_KEY_ID: "aws-secret",
+				GOOGLE_APPLICATION_CREDENTIALS: "/secret/google.json",
+				BOBBIT_GATEWAY_TOKEN: "bobbit-secret",
+			}, () => probeClaudeCodeStatus({ executablePath: process.execPath }, async (file, args, options) => {
+				seen = { file, args, options };
+				return { stdout: "claude 1.2.3\n", stderr: "" };
+			}));
 
-		assert.equal(seen.file, fs.realpathSync(process.execPath));
-		assert.deepEqual(seen.args, ["--version"]);
-		assert.equal(seen.options.shell, false);
-		assert.ok(path.isAbsolute(seen.options.cwd));
-		assert.equal(seen.options.env.NODE_OPTIONS, undefined);
-		assert.ok(!String(seen.options.env.PATH || "").split(path.delimiter).includes(process.cwd()));
-		assert.equal(status.available, true);
-		assert.equal(status.ready, true);
-		assert.equal(status.authenticated, false);
-		assert.equal(status.authenticationStatus, "unknown");
-		assert.equal(status.version, "1.2.3");
-		assert.match(status.message || "", /verified when a Claude Code session starts/);
+			assert.equal(seen.file, fs.realpathSync(process.execPath));
+			assert.deepEqual(seen.args, ["--version"]);
+			assert.equal(seen.options.shell, false);
+			assert.ok(path.isAbsolute(seen.options.cwd));
+			assert.equal(seen.options.env.HOME, home);
+			assert.equal(seen.options.env.TMPDIR, tmp);
+			assert.equal(seen.options.env.LANG, "en_US.UTF-8");
+			assert.equal(seen.options.env.LC_CTYPE, "C.UTF-8");
+			assert.equal(seen.options.env.NODE_OPTIONS, undefined);
+			assert.equal(seen.options.env.ANTHROPIC_API_KEY, undefined);
+			assert.equal(seen.options.env.OPENAI_API_KEY, undefined);
+			assert.equal(seen.options.env.GITHUB_TOKEN, undefined);
+			assert.equal(seen.options.env.AWS_ACCESS_KEY_ID, undefined);
+			assert.equal(seen.options.env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
+			assert.equal(seen.options.env.BOBBIT_GATEWAY_TOKEN, undefined);
+			assert.ok(String(seen.options.env.PATH || "").split(path.delimiter).includes(fs.realpathSync(safeBin)));
+			assert.ok(!String(seen.options.env.PATH || "").split(path.delimiter).includes(process.cwd()));
+			assert.equal(status.available, true);
+			assert.equal(status.ready, true);
+			assert.equal(status.authenticated, false);
+			assert.equal(status.authenticationStatus, "unknown");
+			assert.equal(status.version, "1.2.3");
+			assert.match(status.message || "", /verified when a Claude Code session starts/);
+		} finally {
+			fs.rmSync(safeBin, { recursive: true, force: true });
+			fs.rmSync(home, { recursive: true, force: true });
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects relative executable paths during trusted resolution", () => {
