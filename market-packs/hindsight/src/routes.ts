@@ -430,14 +430,19 @@ export const routes = {
 		const factTypes = factTypesOf(body.factTypes);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.reflect(cfg.bank, reflectPrompt(prompt, cfg, body as Record<string, unknown>), {
+			const reflectOptions = {
 				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 				...(responseSchema ? { responseSchema } : {}),
 				...(factTypes ? { factTypes } : {}),
 				...(typeof body.excludeMentalModels === "boolean" ? { excludeMentalModels: body.excludeMentalModels } : {}),
 				...(strOf(body.budget) ? { budget: strOf(body.budget) } : {}),
 				...(typeof body.maxTokens === "number" && Number.isFinite(body.maxTokens) ? { maxTokens: body.maxTokens } : {}),
-			} as never);
+			};
+			const res = await client.reflect(
+				cfg.bank,
+				reflectPrompt(prompt, cfg, body as Record<string, unknown>),
+				(Object.keys(reflectOptions).length > 0 ? reflectOptions : undefined) as never,
+			);
 			return { configured: true, text: res?.text ?? "", ...("structuredOutput" in (res ?? {}) ? { structuredOutput: (res as { structuredOutput?: unknown }).structuredOutput } : {}) };
 		} catch (e) {
 			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
