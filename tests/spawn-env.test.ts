@@ -75,6 +75,32 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
+	it("source: sandboxed session setup does not use host provider env injection", () => {
+		const src = readFileSync(
+			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
+			"utf-8",
+		);
+		assert.ok(
+			/const directProviderEnv\s*=\s*plan\.sandboxed\s*\?\s*undefined\s*:\s*mergeHostAgentProviderEnv\(undefined,\s*ctx\.preferencesStore\)/.test(src),
+			"sandboxed sessions must not receive Settings provider keys through the direct host env path; sandbox token policy remains the only sandbox credential path",
+		);
+	});
+
+	it("source: legacy direct verification RpcBridge fallback merges Settings provider env", () => {
+		const src = readFileSync(
+			path.join(process.cwd(), "src/server/agent/verification-harness.ts"),
+			"utf-8",
+		);
+		assert.ok(
+			/import \{ mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
+			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver",
+		);
+		assert.ok(
+			/env:\s*mergeHostAgentProviderEnv\(toolActivation\.env,\s*this\.preferencesStore\)/.test(src),
+			"legacy direct RpcBridge review fallback must merge providerKey.openrouter into bridgeOptions.env for non-sandbox review agents",
+		);
+	});
+
 	it("functional: gateway-owned BOBBIT_SESSION_ID + secret win over caller toolEnv", () => {
 		// Faithful reproduction of the env-merge in resolveBridgeOptions: direct
 		// provider env is spread first, caller env (`...plan.env`) next, then the
