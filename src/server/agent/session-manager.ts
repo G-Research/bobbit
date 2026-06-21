@@ -35,6 +35,7 @@ import { SessionStore, type PersistedSession } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
+import { redactSensitive } from "../auth/redact.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -132,13 +133,26 @@ const PROVIDER_AUTH_FAILURE_PATTERNS = [
 	/([A-Za-z0-9_.-]+)\s+API key is missing/i,
 ];
 
+function looksLikeSensitiveToken(value: string | undefined): boolean {
+	return !!value && /^(?:sk|pk|rk|ghp|gho|ghu|ghs|github_pat|ya29|xox[baprs]?)[-_]/i.test(value);
+}
+
+function safeProviderId(provider: string | undefined): string | undefined {
+	if (!provider) return undefined;
+	const normalized = provider.toLowerCase();
+	if (looksLikeSensitiveToken(normalized)) return undefined;
+	return normalized;
+}
+
 function providerFromAuthFailure(message: string | undefined, fallbackProvider?: string): string | undefined {
-	if (!message) return fallbackProvider;
+	const safeFallback = safeProviderId(fallbackProvider);
+	if (!message) return safeFallback;
 	for (const pattern of PROVIDER_AUTH_FAILURE_PATTERNS) {
 		const match = message.match(pattern);
-		if (match?.[1]) return match[1].toLowerCase();
+		const safeMatch = safeProviderId(match?.[1]);
+		if (safeMatch) return safeMatch;
 	}
-	return fallbackProvider;
+	return safeFallback;
 }
 
 function isProviderAuthFailure(message: string | undefined): boolean {
@@ -149,6 +163,16 @@ function providerLabel(provider: string | undefined): string {
 	if (!provider) return "provider";
 	if (provider.toLowerCase() === "openrouter") return "OpenRouter";
 	return provider;
+}
+
+function redactDispatchFailureReason(reason: string, providerAuthFailure: boolean, fallbackProvider?: string): string {
+	if (providerAuthFailure) {
+		const provider = providerFromAuthFailure(reason, fallbackProvider);
+		return `${providerLabel(provider)} provider authentication failure (missing-api-key)`;
+	}
+	return redactSensitive(reason)
+		.replace(/\b(?:sk|pk|rk)-(?:or-)?[A-Za-z0-9_-]{4,}\b/gi, "<redacted-api-key>")
+		.slice(0, 500);
 }
 
 /**
@@ -2639,7 +2663,7 @@ export class SessionManager {
 			provider,
 			source,
 			reason: "missing-api-key",
-			error: reason,
+			diagnostic: `${label} credentials are missing or invalid.`,
 			message: `${label} API key is missing. Add or fix the API key in Settings, switch provider, then retry or abort/respawn the agent.`,
 			actions: [
 				{ type: "open_settings", label: "Fix API key in Settings" },
@@ -2657,13 +2681,16 @@ export class SessionManager {
 		isSteered?: boolean;
 	}>, reason: string, source: string): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
+		const providerAuthFailure = isProviderAuthFailure(reason);
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		const safeReason = redactDispatchFailureReason(reason, providerAuthFailure, persistedProvider);
 		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
 		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
-			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
 			return;
 		}
 
-		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
+		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
 		for (const r of [...rows].reverse()) {
@@ -2673,7 +2700,7 @@ export class SessionManager {
 				isSteered: r.isSteered,
 			});
 		}
-		if (isProviderAuthFailure(reason)) {
+		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
 			this.broadcastQueue(session);
 			return;
@@ -2694,7 +2721,7 @@ export class SessionManager {
 		const attempts = (session.recoverDrainAttempts ?? 0) + 1;
 		if (attempts > MAX_RECOVER_DRAIN_RETRIES) {
 			session.recoverDrainAttempts = 0;
-			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${reason}); deferring ${rows.length} row(s) to the next agent_end drain`);
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
 			return;
 		}
 		session.recoverDrainAttempts = attempts;
