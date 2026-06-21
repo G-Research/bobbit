@@ -242,15 +242,36 @@ test.describe("fork worktree choice", () => {
 
 	test("newWorktree=true allocates a distinct worktree/branch; newWorktree=false reuses the source worktree", async ({ gateway }) => {
 		const created: string[] = [];
+		const defaultId = await defaultProjectId();
+		const staleBaseRef = `stale-continue-base-cross-project-${Date.now()}`;
+		if (defaultId) {
+			const poison = await apiFetch(`/api/projects/${defaultId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: staleBaseRef }),
+			});
+			expect(poison.status, await poison.text()).toBe(200);
+		}
+		const repoBaseRef = await apiFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ base_ref: "master" }),
+		});
+		expect(repoBaseRef.status, await repoBaseRef.text()).toBe(200);
+
 		const sresp = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
+			// Deliberately omit projectId: the E2E injector must select the project
+			// containing cwd, not leak the default project's stale base_ref into this repo.
+			// The repo project has a valid base_ref=master; the default project has a
+			// deliberately stale base_ref, so successful worktree setup proves the
+			// repo project's config was used.
+			body: JSON.stringify({ cwd: repoPath, worktree: true }),
 		});
-		expect(sresp.status).toBe(201);
+		expect(sresp.status, await sresp.clone().text()).toBe(201);
 		const sourceId = (await sresp.json()).id;
 		created.push(sourceId);
 		try {
 			const srcRec = await waitUntilReady(sourceId);
+			expect(srcRec.projectId).toBe(projectId);
 			expect(srcRec.worktreePath).toBeTruthy();
 			expect(srcRec.cwd).toBe(srcRec.worktreePath);
 			await sendPromptAndWait(sourceId, "FORK_WT_MARKER hello from worktree");
@@ -264,8 +285,10 @@ test.describe("fork worktree choice", () => {
 			const trueBody = await trueResp.json();
 			created.push(trueBody.id);
 			expect(trueBody.title).toMatch(/^Fork: /);
+			expect(trueBody.projectId).toBe(projectId);
 
 			const freshRec = await waitUntilReady(trueBody.id);
+			expect(freshRec.projectId).toBe(projectId);
 			expect(freshRec.archived).toBeFalsy();
 			expect(freshRec.worktreePath).toBeTruthy();
 			expect(freshRec.worktreePath).not.toBe(srcRec.worktreePath);
@@ -285,9 +308,11 @@ test.describe("fork worktree choice", () => {
 			expect(reuseResp.status).toBe(201);
 			const reuseBody = await reuseResp.json();
 			created.push(reuseBody.id);
+			expect(reuseBody.projectId).toBe(projectId);
 			expect(reuseBody.cwd).toBe(srcRec.worktreePath);
 
 			const reuseRec = await waitUntilReady(reuseBody.id);
+			expect(reuseRec.projectId).toBe(projectId);
 			expect(reuseRec.cwd).toBe(srcRec.worktreePath);
 			expect(reuseRec.worktreePath).toBeFalsy();
 			const reusePs = gateway.sessionManager.getPersistedSession(reuseBody.id);
@@ -295,6 +320,12 @@ test.describe("fork worktree choice", () => {
 			expect(existsSync(reusePs!.agentSessionFile!)).toBe(true);
 		} finally {
 			for (const id of created) await deleteSession(id);
+			if (defaultId) {
+				await apiFetch(`/api/projects/${defaultId}/config`, {
+					method: "PUT",
+					body: JSON.stringify({ base_ref: "" }),
+				}).catch(() => {});
+			}
 		}
 	});
 });

@@ -247,7 +247,7 @@ Built-in packs are **resolved in place**, never copied into a scope's `market-pa
 builtin-defaults  <  built-in-first-party  <  server-installed  <  global-user  <  project
 ```
 
-This was chosen over a copy-install model (auto-copy each pack into a scope on startup) because copy-install fights the user: re-installing a pack the user removed would need a persisted "opted-out" ledger, plus bespoke update-on-upgrade logic to refresh stale copies. With resolve-in-place, **"installed" just means present + active by default**, the only opt-out is *disable* (below), updates ride the app upgrade for free, and the user's `market-packs/` dirs stay purely user-owned. See [the design doc §2](design/built-in-first-party-packs.md) for the rejected alternative in full.
+This was chosen over a copy-install model (auto-copy each pack into a scope on startup) because copy-install fights the user: re-installing a pack the user removed would need a persisted "opted-out" ledger, plus bespoke update-on-upgrade logic to refresh stale copies. With resolve-in-place, **"installed" means present in the built-in band**; most built-in packs are active by default, while packs that declare `defaultDisabled: true` resolve with all contributions disabled until explicitly enabled or already configured. Updates ride the app upgrade for free, and the user's `market-packs/` dirs stay purely user-owned. See [the design doc §2](design/built-in-first-party-packs.md) for the rejected alternative in full.
 
 Because the shipped dir contains a literal `market-packs` path segment, the security-critical pack-identity derivation (`derivePackId` / `packIdFromRoot` / `isMarketPackBaseDir`) yields a stable, correct `packId` with **zero changes to the identity code** — a built-in pack's identity is its dir name exactly like any market pack.
 
@@ -260,7 +260,7 @@ The Market **Sources** tab shows a distinct, labelled **Built-in** section. It i
 
 ### Disabling a shipped feature
 
-Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)* group, flagged `builtin: true`, with **enable/disable toggles only — no Uninstall and no Update**. Disabling reuses the [#734 activation-override system](#activation-controls) verbatim: it writes `pack_activation` under the **`server` scope** (a shipped feature is a server-wide admin decision, so disabling applies across projects) and removes exactly the toggled user-facing entries (roles/tools/skills/entrypoints) from resolution. Panels and routes stay as support surfaces for whatever remains enabled. Because the migrated feature's old built-in code is **deleted** (the pack is the sole provider), disabling its pack makes the feature genuinely unavailable — the deep-link degrades to an empty "feature unavailable" state, never a crash. Toggling invalidates resolver caches synchronously, so the change takes effect with no restart/reload, and the disabled state **persists across reload and restart** (it lives in server config).
+Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)* group, flagged `builtin: true`, with **enable/disable toggles only — no Uninstall and no Update**. Disabling reuses the [#734 activation-override system](#activation-controls) verbatim: it writes `pack_activation` under the **`server` scope** (a shipped feature is a server-wide admin decision, so disabling applies across projects) and removes exactly the toggled entries from resolution. For default-disabled built-ins, the manifest flag (`defaultDisabled: true`) produces the same all-contributions-disabled overlay on fresh unconfigured installs; an explicit enable marker or already-configured provider config suppresses that overlay so setup and existing live installs keep working. Because migrated built-in code is deleted (the pack is the sole provider), disabling its pack makes the feature genuinely unavailable — deep links degrade to an empty "feature unavailable" state, never a crash. Toggling invalidates resolver caches synchronously, so the change takes effect with no restart/reload, and the state **persists across reload and restart** (it lives in server config).
 
 ### Same-name user override (shadowing)
 
@@ -324,11 +324,12 @@ absent (or `1`) keeps the exact v1 semantics.
 **Providers now dispatch through the Lifecycle Hub.** What began as a manifest-only step is
 live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforePrompt` /
 `beforeCompact` (via a generated provider-bridge pi extension) plus the server-side `afterTurn`
-/ `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
-contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). The
-first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
-ships in the built-in band but stays **dormant until a Hindsight URL is configured**, so an
-out-of-the-box install still contributes nothing until you opt in or add another provider pack.
+/ `sessionShutdown` hooks. Goal lifecycle hooks (`goalProvisioned`, `goalCompleted`) run
+server-side for provisioning and completion side effects. An installed + active + enabled provider
+that declares a hook contributes at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md).
+The first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
+ships with `defaultDisabled: true`, so a fresh install contributes nothing until setup enables it
+(or existing persisted Hindsight config preserves activation).
 
 Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
 independently-mergeable PRs. Defining the manifest surface and the per-entity activation
@@ -431,24 +432,26 @@ Field rules and defaults:
   re-validated (realpath-aware) to stay **inside the pack root** — the same containment guard
   used for routes/entrypoints. A module that resolves outside the pack root drops the provider.
 - **`hooks`** — a subset of the **hook allowlist**: `sessionSetup`, `beforePrompt`,
-  `afterTurn`, `beforeCompact`, `sessionShutdown`. An **unknown hook name drops *that*
-  provider** (warn) — the rest of the pack still loads. (This is the tolerant
-  warn-and-drop contract; only the duplicate-id conflict is hard.)
+  `afterTurn`, `beforeCompact`, `sessionShutdown`, `goalProvisioned`, `goalCompleted`. An
+  **unknown hook name drops *that* provider** (warn) — the rest of the pack still loads.
+  `goalCompleted` is a non-blocking completion hook for outcome/cleanup side effects; it does not
+  inject prompt context. (This is the tolerant warn-and-drop contract; only the duplicate-id
+  conflict is hard.)
 - **`budget`** — `{ maxTokens, timeoutMs }`. Defaults `{ maxTokens: 1600, timeoutMs: 1500 }`;
-  `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The budget exists
-  so the (future) dispatch tier can bound how much a provider may contribute and how long it
-  may run.
+  `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The Hub uses it to
+  bound how much a provider may contribute and how long it may run.
 - **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
-**All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
-indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
-`budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
-is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
+**Provider hooks are wired.** The loader validates providers and the registry indexes them, and
+the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its `budget`
+([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and is
+installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
 section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
-extension and `afterTurn` / `sessionShutdown` fire server-side. The first built-in
-production provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped in the
-built-in band but **dormant until a Hindsight URL is configured**, so a fresh install still
-contributes nothing until you opt in. Its installed row is the **primary setup path**: a
+extension, `afterTurn` / `sessionShutdown` fire server-side, and `goalCompleted` fires
+non-blockingly after goal completion for outcome side effects. The first built-in production
+provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped with
+`defaultDisabled: true`, so a fresh unconfigured install contributes nothing until setup enables it
+(or existing persisted Hindsight config preserves activation). Its installed row is the **primary setup path**: a
 Hindsight-specific status strip renders the [eight-state badge model, active config, and
 state-aware actions](hindsight-memory.md#setup-ux--marketplace-front-door-state-model--guided-setup)
 (Configure, Test connection, Open Hindsight UI, Start/Stop runtime, View logs) off a generic seam,

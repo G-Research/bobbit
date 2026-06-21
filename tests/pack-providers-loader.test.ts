@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { validateManifest } from "../src/server/agent/pack-manifest.ts";
+import { readManifest, validateManifest } from "../src/server/agent/pack-manifest.ts";
 import { loadPackContributions, loadProviders, PackContributionError } from "../src/server/agent/pack-contributions.ts";
 import type { PackManifest } from "../src/server/agent/pack-types.ts";
 
@@ -59,6 +59,17 @@ function validProviderYaml(id = "memory", extras = ""): string {
 }
 
 describe("loadProviders (schema v2)", () => {
+	it("real Hindsight memory provider declares goalCompleted", () => {
+		const root = path.resolve("market-packs", "hindsight");
+		const manifest = readManifest(root);
+		assert.ok(manifest, "real Hindsight pack manifest should parse");
+		assert.ok(manifest.contents.providers?.includes("memory"), "pack manifest should list the memory provider");
+
+		const memory = loadPackContributions(root, manifest).providers.find((p) => p.id === "memory");
+		assert.ok(memory, "memory provider contribution should load");
+		assert.ok(memory.hooks.includes("goalCompleted"), "goalCompleted must be declared or LifecycleHub.dispatchGoalCompleted skips the provider");
+	});
+
 	it("loads a valid listed provider and clamps its budget", () => {
 		const root = packRoot("valid");
 		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory", "budget:\n  maxTokens: 99999\n  timeoutMs: 5"));

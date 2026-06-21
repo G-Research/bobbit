@@ -26,14 +26,14 @@ let seq = 0;
 // Default to a generous 30s budget (matching ModuleHost's own default) so these
 // tests assert PRODUCT behavior, not wall-clock worker-startup jitter. Tests that
 // deliberately exercise the timeout path pass an explicit small `timeoutMs`.
-function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTokens?: number; timeoutMs?: number } = {}): ProviderContribution {
+function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTokens?: number; timeoutMs?: number } = {}, hooks: string[] = ["sessionSetup"]): ProviderContribution {
 	const file = path.join(tmp, `${id}-${seq++}.mjs`);
 	fs.writeFileSync(file, body);
 	return {
 		id,
 		kind: "memory",
 		module: path.basename(file),
-		hooks: ["sessionSetup"],
+		hooks,
 		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 30_000 },
 		config: { enabled: true },
 		listName: id,
@@ -60,7 +60,60 @@ function hub(tmp: string, providers: ProviderContribution[], moduleHost: ModuleH
 	});
 }
 
-describe("LifecycleHub", () => {
+describe("LifecycleHub", { concurrency: false }, () => {
+	it("dispatches goalCompleted providers with completion context and swallows provider errors", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const good = fixtureProvider(tmp, "good", `import fs from "node:fs"; export default { async goalCompleted(ctx) { fs.writeFileSync(ctx.cwd + "/goal-completed.json", JSON.stringify({ goalId: ctx.goalId, headSha: ctx.headSha, branch: ctx.branch, runtime: ctx.runtime?.status, gateway: ctx.gateway?.baseUrl, store: ctx.host?.capabilities?.store })); } };`, { timeoutMs: 4_000 }, ["goalCompleted"]);
+			good.runtime = "hindsight";
+			const bad = fixtureProvider(tmp, "bad", `export default { async goalCompleted() { throw new Error("retain failed"); } };`, {}, ["goalCompleted"]);
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([good, bad]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+					sessionId,
+					packId,
+					contributionId: "",
+					packStore: createPackStore({ rootDir: path.join(tmp, "state") }),
+					capabilityMask: { store: true, session: false, agents: false },
+				}),
+				runtimeResolver: async () => ({ baseUrl: "http://127.0.0.1:9177", headers: {}, status: "running" }),
+			});
+
+			const result = await lifecycleHub.dispatchGoalCompleted({
+				goalId: "goal-1",
+				projectId: "project-1",
+				cwd: tmp,
+				branch: "goal/test",
+				headSha: "abc1234",
+				completedAt: new Date().toISOString(),
+				gates: [],
+				tasks: [],
+				touchedFiles: [],
+				metadata: {},
+			});
+
+			assert.equal(result.diagnostics.length, 1);
+			assert.equal(result.diagnostics[0].providerId, "bad");
+			assert.match(result.diagnostics[0].error ?? "", /retain failed/);
+			const payload = JSON.parse(fs.readFileSync(path.join(tmp, "goal-completed.json"), "utf-8"));
+			assert.deepEqual(payload, {
+				goalId: "goal-1",
+				headSha: "abc1234",
+				branch: "goal/test",
+				runtime: "running",
+				gateway: "https://gateway.test",
+				store: true,
+			});
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("merges provider blocks, applies budgets, and forces provenance", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

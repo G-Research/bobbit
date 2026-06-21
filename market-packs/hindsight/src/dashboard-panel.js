@@ -168,15 +168,15 @@ export default function createDashboardPanel({ html, nothing }) {
 	};
 
 	const STYLE = html`<style>
-		.hd-root { color: var(--foreground); background: var(--background); min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; font-size: 13px; }
+		.hd-root { color: var(--foreground); background: var(--background); height: 100%; min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; font-size: 13px; }
 		.hd-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 		.hd-head h1 { font-size: 15px; margin: 0; color: var(--foreground); }
 		.hd-sub { color: var(--muted-foreground); font-size: 11px; margin: 2px 0 0; }
 		.hd-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 		.hd-link { color: var(--primary); text-decoration: none; border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; font: inherit; }
 		.hd-link:hover { border-color: var(--primary); text-decoration: underline; }
-		.hd-frame-wrap { position: relative; flex: 1 1 auto; min-height: 320px; display: flex; }
-		.hd-frame { border: 0; width: 100%; height: 100%; flex: 1 1 auto; background: var(--background); }
+		.hd-frame-wrap { position: relative; flex: 1 1 auto; min-height: 240px; display: flex; }
+		.hd-frame { border: 0; position: absolute; inset: 0; width: 100%; height: 100%; flex: 1 1 auto; background: var(--background); }
 		.hd-warning { padding: 10px 16px; border-bottom: 1px solid color-mix(in oklch, var(--warning) 45%, transparent); background: color-mix(in oklch, var(--warning) 12%, transparent); color: var(--foreground); font-size: 12px; flex: 0 0 auto; }
 		.hd-hint { padding: 6px 16px; color: var(--muted-foreground); font-size: 11px; flex: 0 0 auto; }
 		.hd-empty { display: flex; flex-direction: column; gap: 12px; padding: 24px 16px; }

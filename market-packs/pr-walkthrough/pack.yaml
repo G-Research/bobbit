@@ -1,16 +1,19 @@
 name: pr-walkthrough
+schema: 2
 description: >-
   Reviews pull requests in a dedicated walkthrough panel with a pack-scoped
   reviewer role and PR walkthrough analysis tools.
 version: 1.0.0
 contents:
   # pr-reviewer: the read-only reviewer role minted by the `run` route via
-  # host.agents.spawn. Its toolPolicies allow the "PR Walkthrough" group (the
-  # three walkthrough tools); that group is default-deny for every other role, so
-  # submit_pr_walkthrough_yaml is reachable ONLY from this role (design Decision C).
+  # host.agents.spawn. Its toolPolicies allow the "PR Walkthrough" group
+  # (read-only inspection plus durable chunk/status/finalize tools); that group is
+  # default-deny for every other role, so submission is reachable ONLY from this
+  # role.
   roles: [pr-reviewer]
   tools: [pr-walkthrough]
   skills: []
+  providers: [pr-walkthrough-durable]
   entrypoints:
     - pr-walkthrough-open
     - pr-walkthrough-session-menu
@@ -25,8 +28,8 @@ contents:
 #    LIVE against the SERVER-derived session worktree. `publish` persists
 #    LLM-enhanced cards to the implicit pack-scoped store.
 #    `run` mints the isolated read-only reviewer child via host.agents.spawn (no
-#    longer host.session.postMessage); `status` polls it (host.agents.status +
-#    pack-store submitted-YAML marker). `bundle`/`publish` are byte-stable.
+#    longer host.session.postMessage); `status` polls review-scoped chunk/final
+#    state. `bundle`/`publish` are byte-stable compatibility routes.
 routes:
   module: lib/routes.mjs
   names: [bundle, publish, run, status, recover]

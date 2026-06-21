@@ -1,6 +1,6 @@
 /**
  * API E2E — P5 Hindsight agent tools (`hindsight_recall`, `hindsight_retain`,
- * `hindsight_reflect`).
+ * `hindsight_reflect`, `hindsight_retain_outcome`, `hindsight_invalidate`).
  *
  * Verifies the three pack-owned agent tools round-trip through the REAL
  * tool-activation + authorization path to the in-process Hindsight STUB
@@ -62,11 +62,13 @@ const TOOLS_DIR = path.join(PACK_SRC, "tools", "hindsight");
 // ("memory")), which loadEffectiveConfig() reads inside the route.
 const CONFIG_STORE_KEY = "provider-config:memory";
 
-// The three P5 agent tools.
+// The P5 agent tools.
 const RECALL = "hindsight_recall";
 const RETAIN = "hindsight_retain";
 const REFLECT = "hindsight_reflect";
-const HINDSIGHT_TOOLS = [RECALL, RETAIN, REFLECT] as const;
+const RETAIN_OUTCOME = "hindsight_retain_outcome";
+const INVALIDATE = "hindsight_invalidate";
+const HINDSIGHT_TOOLS = [RECALL, RETAIN, REFLECT, RETAIN_OUTCOME, INVALIDATE] as const;
 
 // Gate the suite on the P5 tool descriptors being present so the e2e phase stays
 // green until the pack tools are merged. When the descriptors land they bring the
@@ -78,11 +80,16 @@ const DEPS_READY =
 	fs.existsSync(STUB_PATH) &&
 	HINDSIGHT_TOOLS.every((n) => fs.existsSync(path.join(TOOLS_DIR, `${n}.yaml`)));
 
+// New v2 routes are produced by the generated pack bundle. This task owns source
+// routes/tools only; keep the focused v2 cases dormant until the bundle/stub task
+// lands, while still defining the exact E2E coverage expected after generation.
+const V2_ROUTES_READY = DEPS_READY && fs.readFileSync(path.join(PACK_SRC, "lib", "routes.mjs"), "utf-8").includes("retain_outcome");
+
 const test = base;
 const describe = DEPS_READY ? test.describe : test.describe.skip;
 
 // ── stub typing (the .mjs is untyped; describe its shape locally) ────────────
-interface RetainedItem { content: string; tags: string[]; async: boolean }
+interface RetainedItem { content: string; tags: string[]; async: boolean; document_id?: string; update_mode?: string; entities?: Array<{ text: string; type?: string }>; observation_scopes?: string[][]; timestamp?: string }
 interface RecordedCall { method: string; path: string; bank?: string; namespace?: string; body?: any }
 interface HindsightStub {
 	url: string;
@@ -408,6 +415,71 @@ describe("hindsight agent tools — recall/retain/reflect round-trip (stub)", ()
 		expect(allCalls[0].bank).toBe("bobbit");
 		expect(allCalls[0].body?.tags).toBeUndefined();
 		expect(allCalls[0].body?.tags_match).toBeUndefined();
+	});
+
+	test("v2 reflect passes responseSchema/factTypes/excludeMentalModels and returns structuredOutput", async () => {
+		test.skip(!V2_ROUTES_READY, "v2 generated routes/stub not present on this branch yet");
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const schema = { type: "object", properties: { answer: { type: "string" } } };
+		const mark = stub.calls.length;
+		const res = await invokeTool(id, REFLECT, "reflect", {
+			prompt: "what did we learn?",
+			responseSchema: schema,
+			factTypes: ["observation"],
+			excludeMentalModels: true,
+		});
+		expect(res.status).toBe(200);
+		expect(res.body.configured).toBe(true);
+		expect(res.body.structuredOutput).toBeTruthy();
+		const calls = reflectCalls(stub, mark);
+		expect(calls.length).toBe(1);
+		expect(calls[0].body?.response_schema).toEqual(schema);
+		expect(calls[0].body?.fact_types).toEqual(["observation"]);
+		expect(calls[0].body?.exclude_mental_models).toBe(true);
+		expect(calls[0].body?.query).toContain("Bobbit coding-agent memory reflection instructions");
+	});
+
+	test("v2 retainOutcome route writes a stable replacement outcome digest", async () => {
+		test.skip(!V2_ROUTES_READY, "v2 generated routes/stub not present on this branch yet");
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		const id = await newSession();
+		const before = stub.retained("bobbit").length;
+		const res = await invokeTool(id, RETAIN_OUTCOME, "retain_outcome", {
+			content: "Completed billing queue migration.",
+			goalId: "g-outcome",
+			pr: 42,
+			files: ["src/billing.ts"],
+			components: ["billing"],
+			timestamp: "2026-06-21T00:00:00.000Z",
+		});
+		expect(res.status).toBe(200);
+		expect(res.body.ok).toBe(true);
+		expect(res.body.documentId).toBe("outcome:g-outcome");
+		const retained = stub.retained("bobbit");
+		expect(retained.length).toBe(before + 1);
+		const item = retained[retained.length - 1];
+		expect(item.document_id).toBe("outcome:g-outcome");
+		expect(item.update_mode).toBe("replace");
+		expect(item.tags).toContain("kind:outcome");
+		expect(item.tags).toContain(`project:${projectId}`);
+		expect(item.tags).toContain("goal:g-outcome");
+		expect(item.tags).toContain("pr:42");
+		expect(item.observation_scopes).toEqual([[`project:${projectId}`]]);
+		expect(item.entities).toEqual([{ text: "src/billing.ts", type: "file" }, { text: "billing", type: "component" }]);
+	});
+
+	test("v2 invalidate route retires a seeded memory from later recall", async () => {
+		test.skip(!V2_ROUTES_READY, "v2 generated routes/stub not present on this branch yet");
+		seedConfig(bobbitDir, externalConfig(stub.url));
+		stub.seedMemories("bobbit", [{ id: "m-stale", text: "Old stale decision.", tags: [`project:${projectId}`] }]);
+		const id = await newSession();
+		const inv = await invokeTool(id, INVALIDATE, "invalidate", { id: "m-stale", reason: "Superseded by new decision." });
+		expect(inv.status).toBe(200);
+		expect(inv.body.ok).toBe(true);
+		const recall = await invokeTool(id, RECALL, "recall", { query: "stale decision", scope: "project" });
+		expect(recall.status).toBe(200);
+		expect((recall.body.memories as Array<{ id?: string }>).some((m) => m.id === "m-stale")).toBe(false);
 	});
 
 	test("a configured custom bank flows through every route to the stub", async () => {

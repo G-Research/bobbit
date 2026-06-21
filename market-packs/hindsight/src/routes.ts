@@ -29,6 +29,7 @@
 
 import {
 	applyBankMission,
+	applyDirectives,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
@@ -81,6 +82,92 @@ function isObj(v: unknown): v is Record<string, unknown> {
 
 function strOf(v: unknown): string | undefined {
 	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+function numOrStringOf(v: unknown): string | undefined {
+	if (typeof v === "number" && Number.isFinite(v)) return String(v);
+	return strOf(v);
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return isObj(v);
+}
+
+const FACT_TYPES = new Set(["observation", "world", "experience"]);
+
+function factTypesOf(v: unknown): Array<"observation" | "world" | "experience"> | undefined {
+	if (!Array.isArray(v)) return undefined;
+	const out = v.filter((x): x is "observation" | "world" | "experience" => typeof x === "string" && FACT_TYPES.has(x));
+	return out.length > 0 ? [...new Set(out)] : undefined;
+}
+
+function queryTimestampOf(body: Record<string, unknown>, cfg: EffectiveConfig): string | undefined {
+	if (body.queryTimestamp === false || body.queryTimestamp === null) return undefined;
+	const explicit = strOf(body.queryTimestamp);
+	if (explicit) return explicit;
+	if ((cfg as unknown as { recallQueryTimestampEnabled?: boolean }).recallQueryTimestampEnabled === false) return undefined;
+	return new Date().toISOString();
+}
+
+const BOBBIT_REFLECT_INSTRUCTION = [
+	"Bobbit coding-agent memory reflection instructions:",
+	"- Prefer durable project facts, decisions, conventions, and recent outcomes over transient turn noise.",
+	"- Answer for a coding agent working in the repository; be concise, concrete, and cite source facts when Hindsight includes them.",
+	"- Do not invent facts that are not supported by memory.",
+].join("\n");
+
+function reflectPrompt(prompt: string, cfg: EffectiveConfig, body: Record<string, unknown>): string {
+	// Bank-wide directives are disabled by default for shared banks. Only suppress
+	// the per-request Bobbit instruction when bank directives are explicitly enabled
+	// with a non-disabled apply mode and the route applies them before reflect.
+	if (body.bobbitInstruction === false) return prompt;
+	if (cfg.directivesEnabled && cfg.directiveApplyMode !== "disabled") return prompt;
+	return `${BOBBIT_REFLECT_INSTRUCTION}\n\nUser query:\n${prompt}`;
+}
+
+interface EntityInput { text: string; type?: string }
+
+function entityListOf(v: unknown): EntityInput[] {
+	if (!Array.isArray(v)) return [];
+	const out: EntityInput[] = [];
+	for (const item of v) {
+		if (!isObj(item)) continue;
+		const text = strOf(item.text);
+		if (!text) continue;
+		const type = strOf(item.type);
+		out.push({ text, ...(type ? { type } : {}) });
+	}
+	return out;
+}
+
+function stringsOf(v: unknown): string[] {
+	return Array.isArray(v) ? v.map(strOf).filter((x): x is string => !!x) : [];
+}
+
+function outcomeEntities(body: Record<string, unknown>): EntityInput[] {
+	const entities = entityListOf(body.entities);
+	for (const file of stringsOf(body.files)) entities.push({ text: file, type: "file" });
+	for (const component of stringsOf(body.components)) entities.push({ text: component, type: "component" });
+	return entities;
+}
+
+function outcomeTags(body: Record<string, unknown>, projectId?: string): Tags {
+	const extra = isObj(body.tags) ? (body.tags as Tags) : {};
+	const goalId = strOf(body.goalId);
+	const pr = numOrStringOf(body.pr);
+	return {
+		...extra,
+		...(projectId ? { project: projectId } : {}),
+		...(goalId ? { goal: goalId } : {}),
+		...(pr ? { pr } : {}),
+		bobbit: "true",
+		kind: "outcome",
+	};
+}
+
+function projectObservationScopes(projectId?: string): string[][] | undefined {
+	const pid = strOf(projectId);
+	return pid ? [[`project:${pid}`]] : undefined;
 }
 
 async function queueDepth(store: StoreLike): Promise<number> {
@@ -231,11 +318,13 @@ export const routes = {
 		const clampedQuery = clampRecallQuery(query, cfg.recallMaxInputChars);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
+			const queryTimestamp = queryTimestampOf(body as Record<string, unknown>, cfg);
 			const res = await client.recall(cfg.bank, clampedQuery, {
 				maxTokens: cfg.recallBudget,
 				types: cfg.recallTypes,
+				...(queryTimestamp ? { queryTimestamp } : {}),
 				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
-			});
+			} as never);
 			await clearError(store);
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
@@ -283,6 +372,44 @@ export const routes = {
 		}
 	},
 
+	// Dedicated outcome-digest retain route. It is intentionally stricter than the
+	// manual `retain` route: stable document id, replace semantics, async write,
+	// canonical outcome tags, optional file/component entities, and project
+	// observation scopes when the host provides a real project id.
+	retain_outcome: async (ctx: RouteCtx, req: RouteReq) => {
+		const store = ctx.host.store;
+		const projectId = strOf(ctx.projectId);
+		const cfg = await loadEffectiveConfig(store, projectId);
+		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
+		const body = isObj(req?.body) ? req!.body : {};
+		const content = strOf(body.content);
+		if (!content) return { ok: false, configured: true, error: "content is required" };
+		const goalId = strOf(body.goalId);
+		const pr = numOrStringOf(body.pr);
+		const documentId = goalId ? `outcome:${goalId}` : pr ? `outcome:pr:${pr}` : undefined;
+		if (!documentId) return { ok: false, configured: true, error: "goalId or pr is required" };
+		const timestamp = strOf(body.timestamp) ?? new Date().toISOString();
+		const entities = outcomeEntities(body as Record<string, unknown>);
+		try {
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
+			await client.ensureBank(cfg.bank);
+			await applyBankMission(store, client, cfg);
+			await client.retain(cfg.bank, content, {
+				tags: outcomeTags(body as Record<string, unknown>, projectId),
+				sync: false,
+				documentId,
+				updateMode: "replace",
+				timestamp,
+				...(entities.length > 0 ? { entities } : {}),
+				...(projectObservationScopes(projectId) ? { observationScopes: projectObservationScopes(projectId) } : {}),
+			} as never);
+			await clearError(store);
+			return { ok: true, configured: true, documentId };
+		} catch (e) {
+			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e), documentId };
+		}
+	},
+
 	// { prompt, scope? } → reflect, with scope mapped to a tag filter on the single
 	// shared bank (NOT a different bank), mirroring `recall`:
 	//   - scope "project" + a REAL project id in the route ctx ⇒ filter on `project:<id>`.
@@ -301,12 +428,50 @@ export const routes = {
 		// bank. An optional `tags` map is a simple additive targeted filter (no DSL).
 		const extraTags = isObj(body.tags) ? (body.tags as Tags) : undefined;
 		const filter = recallTagFilter(scope, ctx.projectId, cfg.tagsMatch, extraTags);
+		const responseSchema = isRecord(body.responseSchema) ? body.responseSchema : undefined;
+		const factTypes = factTypesOf(body.factTypes);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.reflect(cfg.bank, prompt, filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : undefined);
-			return { configured: true, text: res?.text ?? "" };
+			await applyDirectives(store, client, cfg);
+			const reflectOptions = {
+				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
+				...(responseSchema ? { responseSchema } : {}),
+				...(factTypes ? { factTypes } : {}),
+				...(typeof body.excludeMentalModels === "boolean" ? { excludeMentalModels: body.excludeMentalModels } : {}),
+				...(strOf(body.budget) ? { budget: strOf(body.budget) } : {}),
+				...(typeof body.maxTokens === "number" && Number.isFinite(body.maxTokens) ? { maxTokens: body.maxTokens } : {}),
+			};
+			const res = await client.reflect(
+				cfg.bank,
+				reflectPrompt(prompt, cfg, body as Record<string, unknown>),
+				(Object.keys(reflectOptions).length > 0 ? reflectOptions : undefined) as never,
+			);
+			return { configured: true, text: res?.text ?? "", ...("structuredOutput" in (res ?? {}) ? { structuredOutput: (res as { structuredOutput?: unknown }).structuredOutput } : {}) };
 		} catch (e) {
 			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
+		}
+	},
+
+	// Minimal reversible curation route. Agents can invalidate a stale/incorrect
+	// memory but cannot permanently delete it; revert remains manual/direct API.
+	invalidate: async (ctx: RouteCtx, req: RouteReq) => {
+		const store = ctx.host.store;
+		const cfg = await loadEffectiveConfig(store, strOf(ctx.projectId));
+		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
+		const body = isObj(req?.body) ? req!.body : {};
+		const id = strOf(body.id);
+		const reason = strOf(body.reason);
+		if (!id) return { ok: false, configured: true, error: "id is required" };
+		if (!reason) return { ok: false, configured: true, error: "reason is required" };
+		try {
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
+			const invalidateMemory = (client as unknown as { invalidateMemory?: (bank: string, id: string, reason: string) => Promise<void> }).invalidateMemory;
+			if (typeof invalidateMemory !== "function") throw new Error("Hindsight client does not support memory invalidation");
+			await invalidateMemory.call(client, cfg.bank, id, reason);
+			await clearError(store);
+			return { ok: true, configured: true, id };
+		} catch (e) {
+			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e), id };
 		}
 	},
 

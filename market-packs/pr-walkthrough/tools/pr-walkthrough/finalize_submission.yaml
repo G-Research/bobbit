@@ -1,0 +1,10 @@
+name: finalize_pr_walkthrough_submission
+description: "Assemble saved chunks, validate the canonical walkthrough document, synthesize cards, and publish the final payload atomically."
+summary: "Finalize walkthrough submission"
+params: []
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Call once all required chunks are saved. The finalizer assembles chunks into the canonical PR walkthrough YAML, validates it, synthesizes cards, and commits the final payload. If validation fails, overwrite the relevant chunks and call this tool again.

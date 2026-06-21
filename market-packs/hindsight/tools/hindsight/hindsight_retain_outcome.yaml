@@ -1,0 +1,68 @@
+name: hindsight_retain_outcome
+description: "Persist a concise goal/PR outcome digest with stable replacement semantics."
+summary: "Save an outcome digest"
+params: [content, goalId?, pr?, files?, components?, decisions?, entities?, tags?, timestamp?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Hindsight
+docs: |-
+  Required: `content` plus either `goalId` or `pr`. Optional: `files`,
+  `components`, `decisions`, `entities`, `tags`, and `timestamp`.
+
+  Stores one concise outcome digest on the shared Hindsight bank using stable
+  replacement semantics: `document_id` is `outcome:<goalId>` or `outcome:pr:<pr>`,
+  `update_mode` is `replace`, and the write is async. The route adds canonical
+  `kind:outcome`, `bobbit`, project, goal, and PR tags, attaches file/component
+  entities, and uses a project observation scope when the session has a project id.
+detail_docs: >-
+  ## Purpose
+
+
+  `hindsight_retain_outcome` is a fallback/repair tool for completed goal or PR
+  summaries. Normal goal completion should emit the digest automatically; use this
+  tool when an agent needs to re-emit or repair a missing digest.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `content` | string | **Yes** | Concise outcome digest: achievements,
+  decisions, files/components touched, and follow-ups. |
+
+  | `goalId` | string | No* | Goal id. Produces `document_id: outcome:<goalId>`. |
+
+  | `pr` | string/number | No* | PR number/id. Used only when `goalId` is absent,
+  producing `document_id: outcome:pr:<pr>`. |
+
+  | `files` | string[] | No | File paths attached as `file` entities. |
+
+  | `components` | string[] | No | Components attached as `component` entities. |
+
+  | `decisions` | string[] | No | Key decisions included in the route payload for
+  future clients/providers. |
+
+  | `entities` | array | No | Additional entities, each `{ text, type? }`. |
+
+  | `tags` | map | No | Extra key/value tags. Canonical outcome tags win on
+  conflict. |
+
+  | `timestamp` | string | No | ISO event timestamp. Defaults to now. |
+
+
+  *Either `goalId` or `pr` is required.
+
+
+  ## Notes
+
+
+  - Scope maps to tags on the same shared bank; this tool never changes banks.
+
+  - Re-emitting the same goal/PR replaces the prior digest instead of duplicating
+  it.
+
+  - Unconfigured Hindsight returns a not-configured error (dormant).
