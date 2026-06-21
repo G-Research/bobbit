@@ -500,9 +500,15 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		// The deep-link resolves again from a CLEAN context (re-open the session, then
 		// navigate the bare deep-link → the panel mounts via the re-registered route).
 		// With NO binding for the owner session the panel renders the NEUTRAL state —
-		// prw-panel-root is visible; we do NOT assert cards.
+		// prw-panel-root is visible; we do NOT assert cards. Seed a stale same-session
+		// error first so the bare route proves it does not reuse a prior invalid probe.
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+		await page.evaluate((sessionId) => {
+			const w = window as any;
+			const state = w.__bobbitPrWalkthroughPanelState || (w.__bobbitPrWalkthroughPanelState = new Map());
+			state.set(sessionId, { status: "error", error: "Invalid baseSha: stale-probe", mountKicked: true });
+		}, sid);
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });

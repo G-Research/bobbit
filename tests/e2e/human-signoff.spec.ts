@@ -94,7 +94,17 @@ test.describe("human-signoff verification step", () => {
 			expect(signalRes.status, "signal POST 201").toBe(201);
 			const signalBody = await signalRes.json();
 			const signalId: string = signalBody.signal.id;
-			expect(signalBody.signal.steps).toEqual([{ name: "approve-design", type: "human-signoff" }]);
+			expect(signalBody.signal.steps).toEqual([
+				{
+					name: "approve-design",
+					type: "human-signoff",
+					status: "running",
+					passed: false,
+					phase: 0,
+					output: "",
+					duration_ms: 0,
+				},
+			]);
 
 			// 2. Poll /verifications/active until awaitingHuman appears.
 			const active = await waitForAwaitingHuman(goalId, signalId, "approve-design");

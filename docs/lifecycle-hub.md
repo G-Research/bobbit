@@ -4,13 +4,14 @@
 > New sessions dispatch `sessionSetup` through the `LifecycleHub`, and the blocks it returns
 > render as a **Dynamic Context** prompt section — see
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
-> `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, `afterTurn` /
-> `sessionShutdown` fire from the gateway's agent-event stream, and `goalCompleted` fires
-> non-blockingly after goal completion for outcome side effects. The first built-in production
-> provider — the [Hindsight memory pack](hindsight-memory.md) — ships with `defaultDisabled: true`,
-> so a fresh unconfigured install still produces no Dynamic Context section. This page documents
-> the Hub core and its session/goal wiring.
-
+> `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
+> `sessionShutdown` fire from the gateway's own agent-event stream — see
+> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). `goalCompleted` fires
+> non-blockingly after goal completion for outcome side effects. Built-in production providers
+> include the [Hindsight memory pack](hindsight-memory.md) and PR Walkthrough durable progress
+> provider; both are scoped so an out-of-the-box normal session receives no unrelated Dynamic
+> Context. Hindsight also ships with `defaultDisabled: true`, so a fresh unconfigured install still
+> produces no Dynamic Context section. This page documents the Hub core and its session/goal wiring.
 ## What it is, and why
 
 The Lifecycle Hub is the server-side seam that lets **pack-contributed providers** inject

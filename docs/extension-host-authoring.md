@@ -41,7 +41,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Side panel** | `panels/<panel>.yaml` (auto-discovered) | Browser, main UI thread | opened via `host.ui.openPanel` |
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
-| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
+| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -332,8 +332,8 @@ The server-side `ctx.host` carries:
 
 - `ctx.host.version` / `ctx.host.contractVersion` — the frozen contract revisions.
 - `ctx.host.capabilities` — the **single source of truth** for what is implemented.
-- `ctx.host.store.{get,put,list}` — pack-namespaced persistence, scoped to the
-  **server-derived** `packId` (you never pass an id).
+- `ctx.host.store.{get,put,list,delete,deletePrefix,stats}` — pack-namespaced
+  persistence, scoped to the **server-derived** `packId` (you never pass an id).
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
 - `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
   agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
@@ -493,12 +493,28 @@ namespace is the server-derived `packId`. Read/write it from any surface that ho
 await host.store.put(artifactId, { type: "html", html });   // value is JSON-serialized
 const payload = await host.store.get(artifactId);            // null if absent
 const keys = await host.store.list("draft-");                // optional prefix filter
+const stats = await host.store.stats("draft-");              // { keys, bytes }
+await host.store.delete(artifactId);                         // true if a key was removed
+await host.store.deletePrefix("draft-");                     // count of removed keys
+```
+
+Large independent namespaces can use server-owned quota scopes:
+
+```js
+await host.store.put(`reviews/${jobId}/final/payload`, payload, {
+  quotaScope: { prefix: `reviews/${jobId}/final/`, profile: "review-final" },
+});
 ```
 
 - **Backend:** one JSON file per key under `<state>/ext-store/<packId>/<encodedKey>.json`. Keys
   are percent-encoded and the resolved path is re-validated to stay inside the `packId` dir.
-- **Cross-pack reads are rejected by construction** — the `packId` comes from the surface
-  token, never the request.
+- **Cross-pack reads/deletes are rejected by construction** — the `packId` comes from the
+  surface token, never the request.
+- **Delete is real cleanup.** `delete` / `deletePrefix` unlink key files; they do not write
+  tombstones that keep consuming bytes or key count.
+- **Quota scopes are bounded.** The written key must start with `quotaScope.prefix`; the
+  profile is selected by name from server-owned limits (`default`, `review-draft`,
+  `review-final`). Per-value, key-count, and emergency per-pack byte limits still apply.
 - **Non-pack callers are rejected.** A deep-link carries only ids; the payload lives in the
   store, so a panel reopened from a URL rehydrates by `store.get(id)` and survives reload.
 
@@ -612,13 +628,13 @@ embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed
 
 **Sanctioned exception — the bound-child-pane auto-open carve-out.** There is exactly one
 documented exception to "no auto-invoke on mount". A panel mounted **inside a bound child
-session** — a pane whose `__sessionId` has a `binding/<self>` record in the pack store — may
-auto-open and self-drive **without a user gesture**, *provided it is strictly read-only*: it may
-only poll its own job's `status` route and render; it must never spawn or mutate. This is safe
-because it is the child's own pane reading the child's own job — nothing it does can reach
-another session. The PR-walkthrough reviewer-child pane is the one consumer: it auto-shows a
-pending state, self-polls `status`, flips to rendered cards on submit, and re-renders on reload
-via the child-self `recover` route (see
+session** — a pane whose `__sessionId` resolves to a review-scoped child binding in the pack
+store — may auto-open and self-drive **without a user gesture**, *provided it is strictly
+read-only*: it may only poll its own job's `status` route and render; it must never spawn or
+mutate. This is safe because it is the child's own pane reading the child's own job — nothing it
+does can reach another session. The PR-walkthrough reviewer-child pane is the one consumer: it
+auto-shows a pending state, self-polls `status`, flips to rendered cards after finalization, and
+re-renders on reload via the child-self `recover` route (see
 [docs/pr-walkthrough-panel.md § The pane lives only with the reviewer child](pr-walkthrough-panel.md#the-pane-lives-only-with-the-reviewer-child)).
 Do **not** generalise this to owner-session panels or to any mutating call.
 
@@ -1138,12 +1154,16 @@ example for combining pack-bound UI surfaces with normal role/tool-policy-resolv
 
 ```
 pr-walkthrough/
-  pack.yaml                              # contents.tools: [pr-walkthrough] + contents.roles: [pr-reviewer] + contents.entrypoints: [3 files] + routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
+  pack.yaml                              # schema 2 pack: role + tools + provider + entrypoints + routes
   roles/pr-reviewer.yaml                 # read-only reviewer role; allows the "PR Walkthrough" group, denies all else
+  providers/pr-walkthrough-durable.yaml  # beforePrompt / beforeCompact / sessionShutdown provider
   tools/pr-walkthrough/
     readonly_bash.yaml                   # concrete tool name: readonly_bash
     read_pr_walkthrough_bundle.yaml      # concrete tool name: read_pr_walkthrough_bundle
-    submit.yaml                          # concrete tool name: submit_pr_walkthrough_yaml
+    submit_chunk.yaml                    # concrete tool name: submit_pr_walkthrough_chunk
+    submission_status.yaml               # concrete tool name: read_pr_walkthrough_submission_status
+    finalize_submission.yaml             # concrete tool name: finalize_pr_walkthrough_submission
+    submit.yaml                          # compatibility tool name: submit_pr_walkthrough_yaml
     extension.ts                         # shared reviewer tool implementation
   tools/_shared/gateway.ts               # shared gateway helper for the tools
   panels/pr-walkthrough-panel.yaml       # id: pr-walkthrough.panel, entry: ../lib/panel.js
@@ -1154,17 +1174,18 @@ pr-walkthrough/
   lib/
     panel.js                             # built viewer panel
     routes.mjs                           # hand-authored pack-level routes (bundle, publish, run, status, recover)
+    provider.mjs                         # durable progress / cleanup provider
 ```
 
 | Built-in piece | Pack contribution |
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
-| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. They are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
+| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The durable flow uses chunk submit, status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
 | Launch — spawn-on-click, a real isolated reviewer | both launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
-| `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds the `binding/<child>` and `submitted/<jobId>` routing keys for the reviewer child. The old `reviewer/` dedup index and owner `last/` recovery pointer were removed (always-fresh launch + child-self recovery only) |
+| Durable review state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds `reviewers/<childSessionId>`, `reviews/<jobId>/binding/<childSessionId>`, draft chunks/status/checkpoints, and `reviews/<jobId>/final/payload`. Per-review quota scopes isolate draft/final payload size, and real `delete` / `deletePrefix` cleanup frees bytes on reviewer shutdown. Legacy `binding/<child>`, `submitted/<jobId>`, `job/<jobId>`, and `cards/<changesetId>` remain migration fallbacks only |
 | Deep-link + launchers | three `entrypoints/*.yaml` — two **spawn launchers** (composer-slash and session-menu) both carrying `target.action: spawn` **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) that re-registers the panel so a child-session reload restores `#/ext/pr-walkthrough` |
-| Reload recovery | the `recover` route is **child-self only**: the reviewer child pane auto-invokes it on mount (the read-only carve-out) and it resolves the persisted YAML from the child's own `binding/<childSessionId>` (`binding/<self>` → `submitted/<jobId>`). The old owner-scoped `last/<sessionId>` branch and the manual "Load walkthrough" gesture were removed with the owner-session surface |
+| Reload recovery | the `recover` route is **child-self only**: the reviewer child pane auto-invokes it on mount (the read-only carve-out) and resolves finalized or draft state from the child's own review-scoped binding. The old owner-scoped `last/<sessionId>` branch and the manual "Load walkthrough" gesture were removed with the owner-session surface |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two boundaries are worth copying:
@@ -1175,12 +1196,14 @@ Two boundaries are worth copying:
    does not authorize panels, routes, stores, or entrypoints.
 2. **Tools stay normal tools.** The reviewer tools flow through the existing tool resolver, role
    policies, group policies, tool guard, and extension loading path. `host.agents.spawn({ role:
-   "pr-reviewer" })` grants the child the **role's** resolved tools — exactly the three PR
-   walkthrough tools — never the owner session's broader toolset.
+   "pr-reviewer" })` grants the child the **role's** resolved PR Walkthrough tools — never the
+   owner session's broader toolset.
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
 launcher click spawns the reviewer child → the bound child pane auto-renders from `callRoute` +
-store via child-self `status`/`recover` → deep-link → concrete tool toggles and entrypoint toggles).
+store via child-self `status`/`recover` → deep-link → concrete tool toggles and entrypoint toggles),
+plus the durable route/provider/store tests listed in
+[PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md#test-coverage-pointers).
 There is no owner-transcript `readToolCall` scan and no manual Load path.
 
 ## First-party packs dogfood the Host API
