@@ -26,32 +26,23 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > [docs/design/hindsight-ux-polish.md](design/hindsight-ux-polish.md). The reflect UI and
 > cross-engine dedupe remain **out of scope** — see [Non-goals](#non-goals).
 
-## Installed but dormant by default
+## Installed but disabled by default
 
-The pack is in the built-in band, so it is **present and active by default** on a fresh install —
-but it does **nothing** until a Hindsight URL is configured. This is a hard, tested guarantee, not
-a soft default:
+The pack ships in the built-in band with `defaultDisabled: true` in `pack.yaml`. On a fresh,
+unconfigured install Bobbit synthesizes an activation overlay that disables all Hindsight
+contributions — tools, provider, entrypoints, and managed runtime — until an operator explicitly
+enables/configures it through Marketplace setup.
 
-- The provider declares `activation.requiresConfig: [externalUrl]` for external mode and
-  `activeWhenConfig` for managed modes in `providers/memory.yaml`. The host omits the provider
-  entirely from `listProviders(projectId)` until external mode has a **non-empty `externalUrl`** or a
-  managed mode has been selected.
-- Consequently, on an unconfigured install there is **no active provider**: no provider-bridge
-  pi extension is spawned, no per-turn `/provider-hooks/*` calls are made, the assembled
-  system-prompt text is **byte-identical** to a no-pack baseline, and **no Hindsight network is
-  touched**.
-- The provider also re-checks the same gate defensively at runtime (`isActive(cfg)` in
-  `market-packs/hindsight/src/shared.ts`): external mode needs a non-empty `externalUrl`, while
-  managed modes need a host-injected running runtime. Otherwise every hook returns immediately
-  (`{ blocks: [] }` for recall hooks, a no-op for retain hooks) and constructs no client.
+Activation is preserved for existing live setups: if persisted Hindsight config already has a
+non-empty `externalUrl` or selects a managed mode, the default-disabled overlay is not applied. Once
+the pack is enabled, the provider still uses its own activation gates: external mode requires
+`externalUrl`, managed modes require a running host-injected runtime, and inactive hooks construct
+no client.
 
-**Why dormant-by-default?** Memory is only useful if a backing store exists, and Bobbit must never
-make outbound calls or change prompts for users who have not opted in. Shipping the pack dormant
-means the feature is one config field away without imposing any cost — latency, network, or prompt
-drift — on everyone else.
-
-Like any first-party pack, you can also fully **disable** it from the Market UI; disabling is the
-only opt-out (there is no uninstall for built-in packs). See
+**Why disabled-by-default?** Memory is only useful if a backing store exists, and Bobbit must never
+make outbound calls, add tools, show entrypoints, start a runtime, or change prompts for users who
+have not opted in. Disabling the pack again from Market returns it to the same no-tools/no-provider
+state; there is no uninstall for built-in packs. See
 [built-in first-party packs](marketplace.md#built-in-first-party-packs).
 
 ## Turning it on

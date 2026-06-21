@@ -110,9 +110,10 @@ The PR walkthrough panel is a guided pull-request or changeset review surface. I
 
 The **Hindsight** built-in first-party pack (`market-packs/hindsight/`) gives agents persistent,
 cross-session memory backed by a Hindsight instance: it recalls relevant past memories into the
-prompt and retains a compact summary of each turn. It ships **active but dormant** — nothing
-happens (no network, no prompt drift) until a Hindsight URL is configured, so opted-out users pay
-no cost.
+prompt and retains a compact summary of each turn. It ships with `defaultDisabled: true`, so fresh
+installs have no Hindsight tools, provider hooks, entrypoints, runtime, network calls, or prompt
+drift until the operator enables/configures it through Marketplace setup. Existing configured
+installations remain active.
 
 All configuration, setup, and re-configuration are performed directly inside the **Marketplace** (via the inline Configure form/wizard on the Marketplace page). The session actions overflow menu entry (**Hindsight Memory**) and deep link `#/ext/hindsight` now open the **live Hindsight dashboard embedded as a sandboxed iframe** (utilizing `uiUrl`) in a first-class in-app Bobbit tab/panel. This lets the user seamlessly use, view, and query the memory bank without leaving the application. When `uiUrl` is unset, the in-app tab directs the user to the Marketplace for configuration with a helpful Call-to-Action (CTA) and displays any available API/external status context. See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and [managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed Docker/Postgres runtime details.
 

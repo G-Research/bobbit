@@ -75,7 +75,7 @@ Pack layout (this goal):
 ```
 market-packs/hindsight/
   pack.yaml                  # schema 2; contents.providers: [memory]; routes
-  providers/memory.yaml      # kind: memory; hooks: all five; config surface
+  providers/memory.yaml      # kind: memory; lifecycle hooks; config surface
   src/hindsight-client.ts    # → lib/hindsight-client.mjs
   src/provider.ts            # → lib/provider.mjs
   src/routes.ts              # → lib/routes.mjs
@@ -91,7 +91,7 @@ schema: 2
 name: hindsight
 description: >-
   Persistent agent memory backed by Hindsight (recall/retain/reflect over a shared,
-  tag-scoped bank). Dormant until a Hindsight URL is configured. See docs/design/agent-memory.md.
+  tag-scoped bank). Default-disabled until Marketplace setup enables/configures it. See docs/design/agent-memory.md.
 version: 1.0.0
 contents:
   roles: []
@@ -116,9 +116,9 @@ routes:
 id: memory
 kind: memory
 module: ../lib/provider.mjs
-hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
-defaultEnabled: true        # activation is additionally gated on externalUrl (see below)
+defaultEnabled: true        # provider default once the pack itself is enabled/configured
 config:
   mode:        { type: enum, values: [external, managed], default: external }  # managed reserved for G3
   externalUrl: { type: string, optional: true }
@@ -138,9 +138,11 @@ Loaded via the **pack-contributions path** (`pack-contributions.ts`-style loader
 `PackContributionRegistry`, keyed `(packId, contributionId)`), per impl-plan §0.2 — NOT a new
 `EntityType`. The provider runs on the Extension Host worker tier exactly like the `provider-demo`
 fixture. Per-entity activation still respects `DisabledRefs.providers` / `pack_activation`, but
-Hindsight also declares `activation.requiresConfig: [externalUrl]`. The registry/loader omits this
-provider until the effective config has a non-empty `externalUrl`; this is what prevents bridge
-injection and per-turn hook calls on a fresh install.
+Hindsight also declares pack-level `defaultDisabled: true` and provider-level activation gates. On
+fresh installs the pack-level overlay disables all contributions; after setup enables/configures the
+pack, `activation.requiresConfig: [externalUrl]` (or managed-mode `activeWhenConfig` in the current
+pack) keeps the provider omitted until the effective config/runtime is usable. This is what prevents
+bridge injection and per-turn hook calls before opt-in.
 
 ---
 
@@ -291,13 +293,14 @@ queue, last error, optional bank-ensured marker) lives in `ctx.host.store`, neve
 
 ### 5.1 Dormancy gate (the central invariant)
 
-Before any hook does work it evaluates **`isActive(ctx)`**: `config.mode === "external"` AND
-`config.externalUrl` is a non-empty string. If not active, **every hook returns immediately**:
-`sessionSetup`/`beforePrompt` ⇒ `{ blocks: [] }`; `afterTurn`/`beforeCompact`/`sessionShutdown`
-⇒ no-op. This is a defensive backstop. The primary dormant guarantee is earlier in the host:
-`activation.requiresConfig: [externalUrl]` means an unconfigured pack contributes no active
-provider, so the provider bridge is not injected and no per-turn hook route is called. No client is
-constructed, no Hindsight network is touched, and spawn args/prompt text stay at the no-pack
+Before any hook does work it evaluates **`isActive(ctx)`**: external mode requires a non-empty
+`externalUrl`, while managed modes require a host-injected running runtime. If not active, **every
+hook returns immediately**: `sessionSetup`/`beforePrompt` ⇒ `{ blocks: [] }`;
+`afterTurn`/`beforeCompact`/`sessionShutdown`/`goalCompleted` ⇒ no-op. This is a defensive
+backstop. The primary dormant guarantee is earlier in the host: `defaultDisabled: true` disables all
+pack contributions on a fresh unconfigured install, and provider activation gates keep the provider
+omitted until setup/config makes it usable. No client is constructed, no Hindsight network is
+touched, and spawn args/prompt text stay at the no-pack
 baseline until configured (§9.5).
 
 Health is treated as a runtime condition layered on top of activation: when active but the client
@@ -422,8 +425,9 @@ The provider must receive a **flat** config object that is **store-over-yaml-def
 2. The `config` route persists validated overrides to the pack store.
 3. The loader overlays persisted store config over the flat defaults before constructing
    `ctx.config`.
-4. The provider activation filter evaluates `activation.requiresConfig` against this same
-   effective flat config; absent `externalUrl` means the provider is omitted before bridge injection.
+4. The default-disabled pack overlay disables all contributions on fresh unconfigured installs;
+   after setup enables/configures the pack, provider activation filters evaluate the effective flat
+   config/runtime before bridge injection.
 
 If G1.1 currently exposes only static yaml, both the default-resolution step and the store-config
 overlay are added **in the loader path, not the provider** (so every provider benefits and

@@ -730,10 +730,10 @@ REST routes (and the marketplace activation path) build their `deploymentConfig`
 packId)`, which returns the winning pack's contributions **without** dropping
 config-gated providers.
 
-**Why raw?** Hindsight's memory provider is **dormant until `externalUrl` is
-configured** (its `requiresConfig` gate). The activation-filtered `getPack`
-therefore omits the provider on a fresh/default install, which would misclassify
-Hindsight as a *provider-less* pack and disclose/start the Docker default mode
+**Why raw?** Hindsight's pack ships `defaultDisabled: true`, and its memory provider also stays
+inactive until config/runtime gates pass. The activation-filtered `getPack` can therefore omit the
+provider on a fresh/default install, which would misclassify Hindsight as a *provider-less* pack and
+disclose/start the Docker default mode
 instead of the **external (no-Docker) setup path**. Reading the raw pack keeps
 the dormant provider visible so a fresh Hindsight is correctly classified as
 `external`.
@@ -806,10 +806,9 @@ returns `undefined` when the mode is `external`, when no supervisor is present,
 or when the API port is not yet known — so a provider can ask for memory before
 the stack is up without triggering a start.
 
-Activation linkage closes the loop. External mode activates the provider via the
-`requiresConfig: [externalUrl]` gate (dormant until a URL is set); the two
-managed modes activate it via the `activeWhenConfig: { mode: [managed,
-managed-external-postgres] }` escape hatch, which bridges the provider regardless
+Activation linkage closes the loop after the pack is enabled/configured. External mode activates
+the provider via the `requiresConfig: [externalUrl]` gate; the two managed modes activate it via the
+`activeWhenConfig: { mode: [managed, managed-external-postgres] }` escape hatch, which bridges the provider regardless
 of `externalUrl`. The provider's own `isActive(cfg, ctx.runtime)` gate
 (`market-packs/hindsight/src/shared.ts`) then keeps every hook dormant — no
 client, no network — until `ctx.runtime.status` reports the managed stack is

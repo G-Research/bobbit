@@ -1,25 +1,24 @@
 # The Lifecycle Hub
 
-> **Status — all five hooks wired (Extension Platform G1.3 + G1.4).**
+> **Status — provider hooks wired.**
 > New sessions dispatch `sessionSetup` through the `LifecycleHub`, and the blocks it returns
 > render as a **Dynamic Context** prompt section — see
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
-> `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
-> `sessionShutdown` fire from the gateway's own agent-event stream — see
-> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). The first built-in
-> production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
-> built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
-> install still produces no Dynamic Context section. This page documents the Hub core and its
-> session wiring.
+> `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, `afterTurn` /
+> `sessionShutdown` fire from the gateway's agent-event stream, and `goalCompleted` fires
+> non-blockingly after goal completion for outcome side effects. The first built-in production
+> provider — the [Hindsight memory pack](hindsight-memory.md) — ships with `defaultDisabled: true`,
+> so a fresh unconfigured install still produces no Dynamic Context section. This page documents
+> the Hub core and its session/goal wiring.
 
 ## What it is, and why
 
 The Lifecycle Hub is the server-side seam that lets **pack-contributed providers** inject
-*ambient context* into an agent session at well-defined moments — when a session starts, before
-each prompt, after a turn, before a compaction, and at shutdown. A provider is trusted,
+*ambient context* and lifecycle side effects at well-defined moments — when a session starts, before
+each prompt, after a turn, before a compaction, at shutdown, and after goal completion. A provider is trusted,
 pack-shipped code (see [provider contributions](marketplace.md#provider-contributions-providersidyaml)
 and the [authoring guide](extension-host-authoring.md)); the Hub is what eventually *runs* that
-code and folds its output into the prompt.
+code, folding context-hook output into the prompt and isolating side-effect-only hooks.
 
 The design problem the Hub solves: ambient context is powerful but dangerous. Untrusted *output*
 and slow/looping *code* can both wreck a session. So the Hub is built around a single principle —
@@ -54,7 +53,7 @@ The three core modules live under `src/server/agent/`:
 
 ## Hooks
 
-A **lifecycle hook** is a named moment in a session's life. The hook set is:
+A **lifecycle hook** is a named moment in a session or goal's life. The hook set is:
 
 | Hook | Dispatch point | How it fires | Wiring goal | Status |
 |---|---|---|---|---|
@@ -64,13 +63,14 @@ A **lifecycle hook** is a named moment in a session's life. The hook set is:
 | `afterTurn` | After a turn completes. | Server-side, from the gateway's `agent_end` event. | G1.4 | **wired** |
 | `sessionShutdown` | When a session is torn down. | Server-side, from the session archive path. | G1.4 | **wired** |
 | `goalProvisioned` | Every time a worktree in a goal's subtree is provisioned (goal worktree, team-member / delegate worktree, pooled worktree, sandbox worktree). | Server-side `dispatchGoalProvisioned`; fire-and-forget, returns no `ContextBlock`s. | — | **wired** |
+| `goalCompleted` | After a goal/team is durably completed. | Server-side `dispatchGoalCompleted`; non-blocking, returns diagnostics only. | — | **wired** |
 
 A provider declares which hooks it wants in its YAML `hooks:` list; the Hub only dispatches a
 hook to providers that declared it. The hooks split by **where** they fire:
 
-- **Server-side hooks** (`sessionSetup`, `afterTurn`, `sessionShutdown`) dispatch directly from
-  the gateway with no agent round-trip — they observe lifecycle moments but cannot amend the
-  outgoing turn.
+- **Server-side hooks** (`sessionSetup`, `afterTurn`, `sessionShutdown`, `goalCompleted`) dispatch
+  directly from the gateway with no agent round-trip — they observe lifecycle moments but cannot
+  amend the outgoing turn.
 - **Per-turn hooks** (`beforePrompt`, `beforeCompact`) must run *inside* the agent process so
   they can observe/amend the turn, so they fire via a Bobbit-generated
   [provider-bridge pi extension](#the-provider-bridge-extension) that calls back into the
@@ -85,6 +85,10 @@ hook to providers that declared it. The hooks split by **where** they fire:
   provider error is logged and swallowed so it never blocks goal/session start. For sandboxed
   sessions it is dispatched with **host** worktree coordinates, not the container path. See
   [Hierarchical goal metadata → Extension goal-lifecycle hook](design/goal-metadata.md#6-extension-goal-lifecycle-hook).
+- **The completion hook** (`goalCompleted`) is also side-effect-only. It fires after team/goal
+  completion succeeds so providers can retain outcome digests or run cleanup. It is non-blocking
+  from the user's perspective: provider failures are logged as diagnostics and cannot roll back
+  completion.
 
 **Per-goal provider filtering.** When a goal sets `bobbit.disabledProviders: ["<id>"]` in its
 metadata, the Hub drops those providers from `dispatch`, `hasProvidersForHooks`, and
@@ -351,8 +355,9 @@ produces a byte-identical prompt to before this wiring — the invariant a unit 
 ### What ships out of the box
 
 The [Hindsight memory pack](hindsight-memory.md) ships in the built-in band as the first production
-provider, but it is **dormant until a Hindsight URL is configured** — so a fresh install contributes
-no Dynamic Context until you opt in. The wiring itself is also exercised by a
+provider, but its pack manifest declares `defaultDisabled: true` — so a fresh unconfigured install
+contributes no Dynamic Context until setup enables/configures it. Already configured Hindsight
+installations preserve activation. The wiring itself is also exercised by a
 deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
 `DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
 E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
@@ -365,17 +370,18 @@ the whole worker-scoped gateway and broke sibling specs. Installing any schema-2
 
 ## Per-turn + lifecycle wiring (G1.4)
 
-G1.4 wires the remaining four hooks. They divide cleanly by **where they have to run**, and that
-division dictates the mechanism:
+G1.4 wires the per-turn/session lifecycle hooks. They divide cleanly by **where they have to run**,
+and that division dictates the mechanism:
 
 | Hook | Mechanism | Why |
 |---|---|---|
 | `afterTurn` | Gateway-internal, fire-and-forget. | A turn-complete signal; nothing to inject, so no agent round-trip is needed. |
 | `sessionShutdown` | Gateway-internal, awaited-with-timeout. | Lets providers flush durable state before teardown; the gateway already owns the archive path. |
+| `goalCompleted` | Gateway-internal, non-blocking after completion. | Lets providers retain outcome/cleanup side effects without affecting completion success. |
 | `beforePrompt` | In-process provider-bridge extension. | Must inject ambient recall into *this turn's* prompt, which only the agent process can see. |
 | `beforeCompact` | In-process provider-bridge extension. | Must fire at the agent's compaction moment, which the gateway does not observe directly. |
 
-### Server-side hooks: `afterTurn` and `sessionShutdown`
+### Server-side hooks: `afterTurn`, `sessionShutdown`, and `goalCompleted`
 
 These fire from the gateway's existing agent-event stream — no agent round-trip and no public
 endpoint (they are not reachable over REST by design; only the gateway dispatches them):
@@ -391,6 +397,9 @@ endpoint (they are not reachable over REST by design; only the gateway dispatche
   `terminateSession` archive path) in `session-manager.ts`, **awaited with a timeout** so
   providers get a bounded window to flush before teardown proceeds. Failures are caught and
   logged; archive always proceeds.
+- **`goalCompleted`** — dispatched after team completion succeeds and a once-per-goal/head marker is
+  claimed. The dispatcher is non-blocking with respect to completion semantics: provider errors and
+  timeouts are diagnostics only. Hindsight uses it to retain replaceable outcome digests.
 
 ### Per-turn hooks: the provider-bridge extension
 
@@ -558,15 +567,17 @@ ambient context a session received and why blocks were dropped.
   `dispatch("sessionSetup", …)` during session setup, rendering kept blocks as the
   `PromptParts.dynamicContext` → **Dynamic Context** system-prompt section — see
   [Session-setup wiring (G1.3)](#session-setup-wiring-g13).
-- **G1.4 (done)** wires the remaining four hooks: the per-turn `beforePrompt` / `beforeCompact`
+- **G1.4 (done)** wires the per-turn/session hooks: the per-turn `beforePrompt` / `beforeCompact`
   via the generated [provider-bridge extension](#the-provider-bridge-extension), and the
   server-side `afterTurn` / `sessionShutdown` from the gateway's agent-event stream; plus the
   REST surface (`/provider-hooks/*`, `/context-trace`) — see
   [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14).
+- **Goal lifecycle hooks (done)** add `goalProvisioned` for filesystem treatments and
+  `goalCompleted` for non-blocking completion/outcome side effects.
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
-  It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
-  with no active provider, no Dynamic Context section is added and the per-turn bridge is never
-  spawned.
+  It declares `defaultDisabled: true`, so out-of-the-box behaviour is unchanged — with no active
+  provider, no Dynamic Context section is added and the per-turn bridge is never spawned until setup
+  enables/configures it (while existing configured installs remain active).
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also
