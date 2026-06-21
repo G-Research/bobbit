@@ -2,15 +2,17 @@
  * Goal-creation dialog — per-goal metadata key/value editor (browser E2E).
  *
  * Supersedes the removed per-goal worktree-setup controls (PR #816). Verifies:
- *  - the goal form exposes a simple key/value metadata editor
- *    (data-testid goal-form-metadata + goal-metadata-{add,row,key,value});
+ *  - the tabbed goal proposal panel exposes the key/value metadata editor on
+ *    the dedicated Metadata tab (data-testid goal-proposal-tab-metadata /
+ *    goal-proposal-panel-metadata plus goal-form-metadata and
+ *    goal-metadata-{add,row,key,value});
  *  - manually-entered rows are forwarded to goal creation, JSON-parsed where
  *    possible, persist on the server-side goal, and survive a page reload;
  *  - an empty editor sends NO `metadata` override (backward-compatible goal);
  *  - the legacy per-goal worktree-setup controls are GONE;
  *  - a propose_goal-seeded proposal (mock trigger GOAL_PROPOSAL_METADATA)
- *    mirrors its `metadata` into the editor and preserves it through
- *    acceptance + reload.
+ *    mirrors its `metadata` into the Metadata tab editor, retains edits across
+ *    tab switches, and preserves the final rows through acceptance + reload.
  *
  * Mirrors tests/e2e/ui/goal-creation.spec.ts (assistant proposal flow + mock
  * agent). Persistence is asserted against the server-side goal via the API,
@@ -18,8 +20,12 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
 
+const GOAL_TAB_TESTID = "[data-testid='goal-proposal-tab-goal']";
+const GOAL_PANEL_TESTID = "[data-testid='goal-proposal-panel-goal']";
+const METADATA_TAB_TESTID = "[data-testid='goal-proposal-tab-metadata']";
+const METADATA_PANEL_TESTID = "[data-testid='goal-proposal-panel-metadata']";
 const METADATA_TESTID = "[data-testid='goal-form-metadata']";
 const ADD_TESTID = "[data-testid='goal-metadata-add']";
 const ROW_TESTID = "[data-testid='goal-metadata-row']";
@@ -58,6 +64,16 @@ async function openGoalAssistant(page: import("@playwright/test").Page, trigger:
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 }
 
+async function openRegularSessionProposal(page: import("@playwright/test").Page, trigger: string) {
+	test.setTimeout(90_000);
+	await openApp(page);
+	await createSessionViaUI(page);
+	await sendMessage(page, trigger);
+	const titleInput = page.locator("input[placeholder='Goal title']").first();
+	await expect(titleInput).toBeVisible({ timeout: 20_000 });
+	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+}
+
 /** Re-fetch a goal by id (the durable server record). Returns undefined if
  *  the goal no longer exists. Using the id (not the shared "E2E Test Goal"
  *  title) keeps the assertions collision-free under parallel workers. */
@@ -91,6 +107,40 @@ async function clickCreate(page: import("@playwright/test").Page): Promise<strin
 	return goal.id as string;
 }
 
+async function openMetadataTab(page: import("@playwright/test").Page) {
+	const tab = page.locator(METADATA_TAB_TESTID);
+	await expect(tab).toBeVisible({ timeout: 10_000 });
+	await expect(tab).toHaveAttribute("id", "goal-proposal-tab-metadata");
+	await expect(tab).toHaveAttribute("aria-controls", "goal-proposal-panel-metadata");
+	await tab.click();
+	await expect(tab).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+	await expect(page.locator(METADATA_PANEL_TESTID)).toBeVisible({ timeout: 10_000 });
+	await expect(page.locator(METADATA_PANEL_TESTID)).toHaveAttribute("id", "goal-proposal-panel-metadata");
+	await expect(page.locator(METADATA_PANEL_TESTID)).toHaveAttribute("aria-labelledby", "goal-proposal-tab-metadata");
+	await expect(page.locator(METADATA_TESTID).first()).toBeVisible({ timeout: 5_000 });
+}
+
+async function readMetadataRows(page: import("@playwright/test").Page): Promise<Record<string, string>> {
+	const keyInputs = page.locator(KEY_TESTID);
+	const valueInputs = page.locator(VALUE_TESTID);
+	const rowCount = await keyInputs.count();
+	const rows: Record<string, string> = {};
+	for (let i = 0; i < rowCount; i++) {
+		const key = await keyInputs.nth(i).inputValue();
+		rows[key] = await valueInputs.nth(i).inputValue();
+	}
+	return rows;
+}
+
+async function metadataRowIndex(page: import("@playwright/test").Page, key: string): Promise<number> {
+	const keyInputs = page.locator(KEY_TESTID);
+	const rowCount = await keyInputs.count();
+	for (let i = 0; i < rowCount; i++) {
+		if ((await keyInputs.nth(i).inputValue()) === key) return i;
+	}
+	return -1;
+}
+
 /**
  * Append a metadata key/value pair via the editor. Adds a fresh row, then fills
  * the just-created (last) row's key + value inputs. Re-reads the row count
@@ -109,11 +159,12 @@ async function addMetadataRow(page: import("@playwright/test").Page, key: string
 	await expect(valueInput).toHaveValue(value);
 }
 
-test.describe("Goal creation dialog — per-goal metadata editor", () => {
+test.describe("Goal proposal — Metadata tab", () => {
 	test("legacy worktree-setup controls are gone; metadata editor is present and empty by default", async ({ page }) => {
 		await openGoalAssistant(page, "Please create a GOAL_PROPOSAL for testing");
 
-		// The metadata editor is exposed and starts empty.
+		// Non-tabbed New Goal assistant behavior is preserved: the metadata editor
+		// remains in the main form and starts empty.
 		const editor = page.locator(METADATA_TESTID).first();
 		await expect(editor).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(ROW_TESTID)).toHaveCount(0);
@@ -217,41 +268,60 @@ test.describe("Goal creation dialog — per-goal metadata editor", () => {
 		}
 	});
 
-	test("a propose_goal-seeded proposal mirrors metadata into the editor and preserves it through acceptance", async ({ page }) => {
-		await openGoalAssistant(page, "Please GOAL_PROPOSAL_METADATA now");
+	test("metadata-seeded proposal supports edit/add/remove, retains rows across tab switches, and persists", async ({ page }) => {
+		await openRegularSessionProposal(page, "Please GOAL_PROPOSAL_METADATA now");
 
-		// The agent-seeded metadata must be mirrored into the editor rows (not
-		// just title/spec/cwd/workflow). The mock seeds two keys.
-		await expect(page.locator(METADATA_TESTID).first()).toBeVisible({ timeout: 10_000 });
+		// The tabbed proposal panel keeps metadata out of the Goal tab.
+		await expect(page.locator(GOAL_PANEL_TESTID)).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator(`${GOAL_PANEL_TESTID} ${METADATA_TESTID}`)).toHaveCount(0);
+		await openMetadataTab(page);
+
+		// The agent-seeded metadata must be mirrored into the Metadata tab rows.
 		await expect(page.locator(ROW_TESTID)).toHaveCount(2, { timeout: 10_000 });
+		let rows = await readMetadataRows(page);
+		expect(rows["hindsight.memory.enabled"]).toBe("false");
+		expect(rows["bobbit.disabledTools"]).toBe('["browser_navigate"]');
 
-		// Collect the rendered key/value pairs (order is insertion order).
-		const keyInputs = page.locator(KEY_TESTID);
-		const valueInputs = page.locator(VALUE_TESTID);
-		const rowCount = await keyInputs.count();
-		const seeded: Record<string, string> = {};
-		for (let i = 0; i < rowCount; i++) {
-			const k = await keyInputs.nth(i).inputValue();
-			seeded[k] = await valueInputs.nth(i).inputValue();
-		}
-		expect(seeded["hindsight.memory.enabled"]).toBe("false");
-		expect(seeded["bobbit.disabledTools"]).toBe('["browser_navigate"]');
+		// Edit one seeded row, add one new row, and remove the other seeded row.
+		const memoryIndex = await metadataRowIndex(page, "hindsight.memory.enabled");
+		expect(memoryIndex).toBeGreaterThanOrEqual(0);
+		await page.locator(VALUE_TESTID).nth(memoryIndex).fill("true");
+		await expect(page.locator(VALUE_TESTID).nth(memoryIndex)).toHaveValue("true");
 
-		// Accept the proposal as-is — the seeded metadata must reach creation.
+		await addMetadataRow(page, "experiment.flavor", "treatment");
+
+		const disabledToolsIndex = await metadataRowIndex(page, "bobbit.disabledTools");
+		expect(disabledToolsIndex).toBeGreaterThanOrEqual(0);
+		await page.locator(REMOVE_TESTID).nth(disabledToolsIndex).click();
+		await expect(page.locator(ROW_TESTID)).toHaveCount(2, { timeout: 5_000 });
+
+		// Switch away and back: metadata rows are draft state, not panel-local DOM state.
+		await page.locator(GOAL_TAB_TESTID).click();
+		await expect(page.locator(GOAL_PANEL_TESTID)).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator(`${GOAL_PANEL_TESTID} ${METADATA_TESTID}`)).toHaveCount(0);
+		await openMetadataTab(page);
+
+		rows = await readMetadataRows(page);
+		expect(rows["hindsight.memory.enabled"]).toBe("true");
+		expect(rows["experiment.flavor"]).toBe("treatment");
+		expect(rows["bobbit.disabledTools"]).toBeUndefined();
+
 		const goalId = await clickCreate(page);
 
 		const created = await findGoalById(goalId);
 		expect(created).toBeTruthy();
 		try {
 			expect(created.metadata).toBeTruthy();
-			expect(created.metadata["hindsight.memory.enabled"]).toBe(false);
-			expect(created.metadata["bobbit.disabledTools"]).toEqual(["browser_navigate"]);
+			expect(created.metadata["hindsight.memory.enabled"]).toBe(true);
+			expect(created.metadata["experiment.flavor"]).toBe("treatment");
+			expect(created.metadata["bobbit.disabledTools"]).toBeUndefined();
 
 			await page.reload();
 			const reloaded = await findGoalById(goalId);
 			expect(reloaded).toBeTruthy();
-			expect(reloaded.metadata["hindsight.memory.enabled"]).toBe(false);
-			expect(reloaded.metadata["bobbit.disabledTools"]).toEqual(["browser_navigate"]);
+			expect(reloaded.metadata["hindsight.memory.enabled"]).toBe(true);
+			expect(reloaded.metadata["experiment.flavor"]).toBe("treatment");
+			expect(reloaded.metadata["bobbit.disabledTools"]).toBeUndefined();
 		} finally {
 			await deleteGoal(goalId);
 		}

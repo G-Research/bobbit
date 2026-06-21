@@ -258,8 +258,8 @@ a slow or unhealthy backend never blocks or fails a session — recalls skip and
 
 | Hook | Behaviour |
 |---|---|
-| `sessionSetup` | If `autoRecall`: try the per-project mental model first. `injected` returns one **"Project memory model"** block (`authority: "memory"`, higher priority than raw recall) and suppresses raw recall for that hook. `empty`, `skipped`, or `failed` falls back to raw recall against `ctx.prompt`. |
-| `beforePrompt` | If `autoRecall`: targeted recall against the current user turn (`ctx.prompt`) under `timeoutMs`; skip on timeout (non-fatal). Recall sends configured `types`, an optional `query_timestamp`, and no default `include.chunks`. |
+| `sessionSetup` | If `autoRecall`: try the per-project mental model first. `injected` returns one **"Project memory model"** block (`authority: "memory"`, higher priority than raw recall) in the spawn-time system prompt and suppresses raw recall for that hook. `empty`, `skipped`, or `failed` falls back to raw recall against `ctx.prompt`. |
+| `beforePrompt` | If `autoRecall`: targeted recall against the current user turn (`ctx.prompt`) under `timeoutMs`; skip on timeout (non-fatal). Recall sends configured `types`, an optional `query_timestamp`, and no default `include.chunks`. Blocks are delivered for that turn as hidden `bobbit:dynamic-context` custom/user-side messages rather than a `systemPrompt` append. |
 | `afterTurn` | If `autoRetain`: build a compact turn summary, append to the pending buffer, and flush one aggregate async retain when count or max-delay thresholds are exceeded. Also health-gates and drains up to `retainQueueDrainMaxPerHook` queued entries. |
 | `beforeCompact` | If `autoRetain`: synchronously flush pending turns, then synchronously retain a compaction summary of the about-to-be-lost span (batch-exempt). Failure ⇒ enqueue. |
 | `sessionShutdown` | If active: flush remaining buffered turns, then health-gate and drain at most `retainQueueShutdownMax` queued entries. Never throws. |

@@ -17,7 +17,7 @@
  *
  * Assertion surfaces (all token-free, no pack tool/surface needed):
  *   - prompt-sections  → the "Dynamic Context" section carries recall blocks.
- *   - provider-hooks/before-prompt → the per-turn system-prompt tail.
+ *   - provider-hooks/before-prompt → the per-turn dynamic-context message content.
  *   - context-trace    → per-provider timing rows + non-fatal diagnostics.
  *   - the stub's own recorders (calls / retained) → what the provider actually
  *     sent to Hindsight (bank id + auto-tag taxonomy).
@@ -62,10 +62,6 @@ const STUB_PATH = path.resolve(__dirname, "hindsight-stub.mjs");
 // The pack-store key the loader persists provider config under. Must mirror
 // providerConfigStoreKey("memory") in src/server/agent/pack-contributions.ts.
 const CONFIG_STORE_KEY = "provider-config:memory";
-// Delimiters fencing the dynamic-context region in the system-prompt tail (G1.2).
-const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
-
 // Gate the suite on the implementation being present so the e2e phase stays green
 // until the pack + stub are merged from the sibling coder branches.
 const DEPS_READY =
@@ -193,7 +189,7 @@ async function readContextTrace(sessionId: string): Promise<TraceEntry[]> {
 	return [];
 }
 
-interface BeforePromptResult { status: number; tail: string; blocks: Array<Record<string, unknown>> }
+interface BeforePromptResult { status: number; content: string; blocks: Array<Record<string, unknown>> }
 async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
@@ -202,7 +198,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	const body = resp.status === 200 ? await resp.json() : {};
 	return {
 		status: resp.status,
-		tail: typeof body.tail === "string" ? body.tail : "",
+		content: typeof body.content === "string" ? body.content : "",
 		blocks: Array.isArray(body.blocks) ? body.blocks : [],
 	};
 }
@@ -291,13 +287,13 @@ describe("hindsight pack — external mode (stub)", () => {
 
 		const { id } = await newSession("setup");
 
-		// beforePrompt recall → fenced dynamic-context tail carrying the memory and
-		// refreshes the prompt-sections Dynamic Context snapshot.
+		// beforePrompt recall → fenced context block message content carrying the
+		// memory and refreshes the prompt-sections Dynamic Context snapshot.
 		const before = await callBeforePrompt(id, "how do we roll out risky changes safely?");
 		expect(before.status).toBe(200);
-		expect(before.tail).toContain(DYNAMIC_CONTEXT_START);
-		expect(before.tail).toContain(DYNAMIC_CONTEXT_END);
-		expect(before.tail).toContain("feature flag");
+		expect(before.content).toContain("<context-block");
+		expect(before.content).toContain("source=\"Relevant memory\"");
+		expect(before.content).toContain("feature flag");
 
 		const section = await dynamicContextSection(id);
 		expect(section, "Dynamic Context section present after beforePrompt recall").toBeTruthy();
@@ -353,7 +349,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		const { id } = await newSession("unhealthy");
 		const before = await callBeforePrompt(id, "recall should fail non-fatally");
 		expect(before.status).toBe(200);
-		expect(before.tail).toBe("");
+		expect(before.content).toBe("");
 		expect(before.blocks).toEqual([]);
 
 		// A non-fatal diagnostic is recorded against the memory provider.
@@ -372,12 +368,12 @@ describe("hindsight pack — external mode (stub)", () => {
 
 		stub.setHealthy(false);
 		const down = await callBeforePrompt(id, "memory while down");
-		expect(down.tail).toBe("");
+		expect(down.content).toBe("");
 
 		stub.setHealthy(true);
 		stub.seedMemories("bobbit", [{ text: "Recovered recall works.", id: "r1" }]);
 		const up = await callBeforePrompt(id, "memory after recovery");
-		expect(up.tail).toContain("Recovered recall works.");
+		expect(up.content).toContain("Recovered recall works.");
 	});
 
 	test("a 400 'Query too long' recall is SOFT-skipped (empty, non-fatal, no sticky diagnostic)", async () => {
@@ -452,7 +448,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		const section = await dynamicContextSection(id);
 		expect(section, "no Dynamic Context section when the provider is disabled").toBeUndefined();
 		const before = await callBeforePrompt(id, "anything");
-		expect(before.tail).toBe("");
+		expect(before.content).toBe("");
 		expect(before.blocks).toEqual([]);
 		// No recall was issued for the disabled provider.
 		expect(stub.calls.length).toBe(callsBefore);

@@ -10,10 +10,10 @@
  * — a treatment leak across the goal/agent tree.
  *
  * This pins the fix: a delegate session (teamGoalId only, no goalId) under a
- * goal whose metadata disables the `demo` provider gets an EMPTY before-prompt
- * tail (provider filtered via teamGoalId), while an otherwise-identical delegate
- * under a metadata-less goal still receives the demo block. The provider is
- * enabled globally in both cases, so the only differentiator is the
+ * goal whose metadata disables the `demo` provider gets EMPTY before-prompt
+ * content (provider filtered via teamGoalId), while an otherwise-identical
+ * delegate under a metadata-less goal still receives the demo block. The
+ * provider is enabled globally in both cases, so the only differentiator is the
  * teamGoalId-resolved metadata.
  */
 import { test, expect } from "./in-process-harness.js";
@@ -74,13 +74,13 @@ async function createDelegate(parentId: string): Promise<Record<string, any>> {
 	return resp.json();
 }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; tail: string }> {
+async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string }> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
-	return { status: resp.status, tail: typeof body.tail === "string" ? body.tail : "" };
+	return { status: resp.status, content: typeof body.content === "string" ? body.content : "" };
 }
 
 test.describe.serial("provider hook endpoints resolve the effective goal (teamGoalId)", () => {
@@ -102,7 +102,7 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
 	});
 
-	test("delegate (teamGoalId only) under a metadata-disabled goal gets an EMPTY tail; metadata-less control still fires", async () => {
+	test("delegate (teamGoalId only) under a metadata-disabled goal gets EMPTY content; metadata-less control still fires", async () => {
 		// Goal whose metadata disables the demo provider for the whole subtree.
 		const disabledGoal = await createGoalRaw({
 			title: "hook-disabled",
@@ -136,13 +136,13 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		// FIX: the endpoint resolves teamGoalId → goal metadata → demo filtered out.
 		const disabled = await callBeforePrompt(disabledDelegate.id, prompt);
 		expect(disabled.status).toBe(200);
-		expect(disabled.tail, "demo must be filtered for a delegate whose teamGoalId-goal disables it").toBe("");
+		expect(disabled.content, "demo must be filtered for a delegate whose teamGoalId-goal disables it").toBe("");
 
 		// Control delegate (metadata-less goal) still receives the demo block —
 		// proves the endpoint itself works and the filtering is goal-metadata-driven
 		// via teamGoalId, not a global outage.
 		const control = await callBeforePrompt(controlDelegate.id, prompt);
 		expect(control.status).toBe(200);
-		expect(control.tail).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
+		expect(control.content).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
 	});
 });
