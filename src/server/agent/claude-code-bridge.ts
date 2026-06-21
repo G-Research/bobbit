@@ -9,7 +9,12 @@ import {
 	ClaudeCodeStreamTranslator,
 	createClaudeCodeTranslatorState,
 } from "./claude-code-stream.js";
-import { buildClaudeCodeSanitizedEnv, getClaudeCodeProbeCwd, resolveClaudeCodeExecutable } from "./claude-code-config.js";
+import {
+	buildClaudeCodeSanitizedEnv,
+	getClaudeCodeProbeCwd,
+	isValidModelAlias as isValidClaudeCodeModelAliasToken,
+	resolveClaudeCodeExecutable,
+} from "./claude-code-config.js";
 
 const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
 const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
@@ -104,7 +109,7 @@ export function resolveClaudeCodeCliModelAlias(options: ClaudeCodeBridgeOptions 
 }
 
 function isValidClaudeCodeModelAlias(value: unknown): value is string {
-	return typeof value === "string" && /^[A-Za-z0-9._-]{1,48}$/.test(value);
+	return typeof value === "string" && isValidClaudeCodeModelAliasToken(value);
 }
 
 function readClaudeCodeAppendSystemPrompt(systemPromptPath: string | undefined): string | undefined {

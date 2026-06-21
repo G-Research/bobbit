@@ -9,7 +9,7 @@ import { setRenderApp } from "../../src/app/state.js";
 type StubResponseInit = { ok: boolean; status?: number; body: any };
 type Responder = StubResponseInit | ((url: string, method: string, body: any) => StubResponseInit);
 
-const fetchLog: Array<{ url: string; method: string; body: any }> = [];
+const fetchLog: Array<{ url: string; method: string; body: any; credentials?: RequestCredentials }> = [];
 let responder: Responder = { ok: true, body: {} };
 
 (window as any).__setNextFetchResponse = (r: Responder) => { responder = r; };
@@ -30,7 +30,7 @@ window.fetch = (async (input: any, init?: RequestInit) => {
 	if (init?.body && typeof init.body === "string") {
 		try { body = JSON.parse(init.body); } catch { body = init.body; }
 	}
-	fetchLog.push({ url: pathOnly, method, body });
+	fetchLog.push({ url: pathOnly, method, body, credentials: init?.credentials });
 	const picked = typeof responder === "function" ? (responder as any)(pathOnly, method, body) : responder;
 	return new Response(JSON.stringify(picked.body ?? {}), {
 		status: picked.status ?? (picked.ok ? 200 : 500),

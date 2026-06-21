@@ -9,9 +9,11 @@ import {
 	CLAUDE_CODE_PREF_KEYS,
 	CLAUDE_CODE_DEFAULT_CONFIG,
 	buildClaudeCodeSanitizedEnv,
+	isValidModelAlias,
 	normalizeClaudeCodePreferencePatch,
 	readClaudeCodeConfig,
 	resolveClaudeCodeExecutable,
+	sensitiveClaudeCodePreferenceMutation,
 } from "../src/server/agent/claude-code-config.ts";
 import {
 	invalidateClaudeCodeStatusCache,
@@ -100,6 +102,27 @@ describe("Claude Code config", () => {
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("requires operator confirmation for executable changes and resets", () => {
+		const changed = sensitiveClaudeCodePreferenceMutation({
+			[CLAUDE_CODE_PREF_KEYS.executablePath]: "/usr/local/bin/claude",
+		});
+		assert.equal(changed.requiresConfirmation, true);
+		assert.deepEqual(changed.keys, [CLAUDE_CODE_PREF_KEYS.executablePath]);
+		assert.equal(changed.values[CLAUDE_CODE_PREF_KEYS.executablePath], "/usr/local/bin/claude");
+
+		const reset = sensitiveClaudeCodePreferenceMutation({
+			[CLAUDE_CODE_PREF_KEYS.executablePath]: null,
+		});
+		assert.equal(reset.requiresConfirmation, true);
+		assert.deepEqual(reset.keys, [CLAUDE_CODE_PREF_KEYS.executablePath]);
+		assert.equal(reset.values[CLAUDE_CODE_PREF_KEYS.executablePath], null);
+	});
+
+	it("uses one model alias validation contract", () => {
+		assert.equal(isValidModelAlias("vendor:model.alias-48"), true);
+		assert.equal(isValidModelAlias("bad alias; rm -rf"), false);
 	});
 
 	it("does not let project config choose host executable or enable bypassPermissions", () => {

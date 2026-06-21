@@ -1635,6 +1635,7 @@ async function savePref(key: string, value: string | boolean | null, operatorCon
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
+			credentials: operatorConfirmationToken ? "include" : undefined,
 			headers: operatorConfirmationToken ? { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken } : undefined,
 			body: JSON.stringify({ [key]: value }),
 		});
@@ -1644,6 +1645,7 @@ async function savePref(key: string, value: string | boolean | null, operatorCon
 async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
 	const res = await gatewayFetch("/api/preferences/claude-code/confirmation", {
 		method: "POST",
+		credentials: "include",
 		body: JSON.stringify(patch),
 	});
 	if (!res.ok) return undefined;
@@ -1696,18 +1698,15 @@ async function setSessionThinking(value: string): Promise<void> {
 async function setClaudeCodeExecutable(value: string): Promise<void> {
 	const next = value.trim() ? value.trim() : null;
 	if ((next || "claude") === prefClaudeCodeExecutable) return;
-	let confirmationToken: string | undefined;
-	if (next !== null) {
-		const confirmed = await confirmAction(
-			"Change Claude Code executable?",
-			"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
-			"Change executable",
-			true,
-		);
-		if (!confirmed) return;
-		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
-		if (!confirmationToken) return;
-	}
+	const confirmed = await confirmAction(
+		"Change Claude Code executable?",
+		"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
+		"Change executable",
+		true,
+	);
+	if (!confirmed) return;
+	const confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
+	if (!confirmationToken) return;
 	prefClaudeCodeExecutable = next || "claude";
 	await savePref("claudeCode.executablePath", next, confirmationToken);
 	renderApp();

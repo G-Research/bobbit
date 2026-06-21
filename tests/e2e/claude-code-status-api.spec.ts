@@ -37,14 +37,11 @@ async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise
 }
 
 async function resetClaudeCodePrefs(): Promise<void> {
-	await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": null,
-			"claudeCode.defaultModel": null,
-			"claudeCode.permissionMode": null,
-			"claudeCode.allowBypassPermissions": null,
-		}),
+	await confirmedClaudeCodePrefs({
+		"claudeCode.executablePath": null,
+		"claudeCode.defaultModel": null,
+		"claudeCode.permissionMode": null,
+		"claudeCode.allowBypassPermissions": null,
 	});
 }
 
@@ -152,6 +149,13 @@ test.describe("Claude Code status/model APIs", () => {
 			}),
 		});
 		expect(safe.status).toBe(200);
+
+		const rejectedReset = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "claudeCode.executablePath": null }),
+		});
+		expect(rejectedReset.status).toBe(403);
+		expect(await rejectedReset.json()).toMatchObject({ confirmationRequired: true, sensitiveKeys: ["claudeCode.executablePath"] });
 
 		const rejectedBypass = await apiFetch("/api/preferences", {
 			method: "PUT",

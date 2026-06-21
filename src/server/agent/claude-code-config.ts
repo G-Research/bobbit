@@ -43,7 +43,7 @@ export function sensitiveClaudeCodePreferenceMutation(patch: Record<string, unkn
 	const values: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(patch)) {
 		if (key === CLAUDE_CODE_PREF_KEYS.executablePath) {
-			if (value !== null && value !== undefined) values[key] = validateExecutablePath(value);
+			values[key] = value === null || value === undefined ? null : validateExecutablePath(value);
 		} else if (key === CLAUDE_CODE_PREF_KEYS.allowBypassPermissions) {
 			if (value === true) values[key] = true;
 		} else if (key === CLAUDE_CODE_PREF_KEYS.permissionMode) {

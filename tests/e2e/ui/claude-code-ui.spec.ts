@@ -51,14 +51,11 @@ async function seedFakeClaudeCodePrefs(): Promise<void> {
 }
 
 async function resetClaudeCodePrefs(): Promise<void> {
-	await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": null,
-			"claudeCode.defaultModel": null,
-			"claudeCode.permissionMode": null,
-			"claudeCode.allowBypassPermissions": null,
-		}),
+	await confirmedClaudeCodePrefs({
+		"claudeCode.executablePath": null,
+		"claudeCode.defaultModel": null,
+		"claudeCode.permissionMode": null,
+		"claudeCode.allowBypassPermissions": null,
 	});
 }
 

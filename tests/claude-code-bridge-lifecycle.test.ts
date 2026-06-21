@@ -312,6 +312,7 @@ process.stdin.on('data', () => {
 	it("passes selected Claude Code model aliases while preserving default CLI behavior", () => {
 		assert.equal(buildClaudeCodeArgs({}).includes("--model"), false);
 		assert.deepEqual(buildClaudeCodeArgs({ claudeCodeModelAlias: "sonnet" }).slice(-2), ["--model", "sonnet"]);
+		assert.deepEqual(buildClaudeCodeArgs({ claudeCodeModelAlias: "vendor:model.alias-48" }).slice(-2), ["--model", "vendor:model.alias-48"]);
 		assert.deepEqual(buildClaudeCodeArgs({ initialModel: "claude-code/opus" }).slice(-2), ["--model", "opus"]);
 		assert.equal(buildClaudeCodeArgs({ claudeCodeModelAlias: "default" }).includes("--model"), false);
 		assert.equal(buildClaudeCodeArgs({ initialModel: "claude-code/default" }).includes("--model"), false);
