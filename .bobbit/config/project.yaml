@@ -68,12 +68,10 @@ workflows:
               Compare the goal specification to this design document.
 
 
-
               The goal spec is:
 
 
               {{goal_spec}}
-
 
 
               Identify:
@@ -89,7 +87,6 @@ workflows:
 
 
               4. Any contradictions between the goal and the design
-
 
 
               Use your tools to read the design document content from the
@@ -129,12 +126,10 @@ workflows:
               implementation on this branch.
 
 
-
               The goal spec is:
 
 
               {{goal_spec}}
-
 
 
               Run `git diff origin/{{baseBranch}}...{{branch}} -- .
@@ -142,7 +137,6 @@ workflows:
 
 
               Read the design document content from upstream gates.
-
 
 
               Identify:
@@ -155,7 +149,6 @@ workflows:
 
 
               3. Implemented behavior that contradicts the specification
-
 
 
               IMPORTANT: Ignore documentation gaps. This gap analysis runs
@@ -174,7 +167,6 @@ workflows:
               origin/{{baseBranch}} for quality.
 
 
-
               Start with `git diff --stat origin/{{baseBranch}}...{{branch}} --
               . ':!package-lock.json'` to see which files changed.
 
@@ -187,7 +179,6 @@ workflows:
 
               For large diffs, review files individually with `read` rather than
               dumping the entire diff into context.
-
 
 
               Check:
@@ -215,88 +206,30 @@ workflows:
               covering the user journey for this feature.
 
 
-
               The goal spec is:
 
 
               {{goal_spec}}
 
 
-
               Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see all changes.
 
 
-
-              **Step 1 — Identify what the feature adds or changes:**
-
-
-              From the diff, determine the user-facing behavior: new UI views,
-              settings tabs, sidebar entries, dialogs, API endpoints, WebSocket
-              commands, etc.
-
-
-
-              **Step 2 — Check for corresponding E2E tests:**
-
-
-              Look for new or modified test files in:
-
-
-              - `tests/e2e/ui/*.spec.ts` — fullstack browser tests (preferred
-              for UI features)
-
-
-              - `tests/e2e/*.spec.ts` — API/WebSocket E2E tests
-
-
-
-              **Step 3 — Evaluate journey coverage:**
-
-
-              For each user-facing behavior, the E2E tests MUST cover:
-
-
-              1. **Navigation** — can the user reach the feature? (deep link,
-              sidebar click, button)
-
-
-              2. **Happy path** — does the core interaction work? (create, edit,
-              toggle, submit)
-
-
-              3. **Persistence** — do changes survive a page reload?
-
-
-              4. **Cleanup** — does removal/undo/delete work and reflect in the
-              UI?
-
-
-              5. **Integration** — does the feature interact correctly with
-              adjacent features? (e.g. a new settings tab should be reachable
-              from the settings page, its state should be independent of other
-              tabs)
-
-
-
-              If the feature is purely backend (no UI), API-level E2E tests
-              covering the request/response lifecycle are sufficient.
-
-
-
-              **Verdict criteria:**
-
-
-              - FAIL if no new E2E tests were added for a feature that changes
-              user-facing behavior
-
-
-              - FAIL if tests only cover the happy path but skip persistence or
-              cleanup
-
-
-              - PASS if tests cover navigation + happy path + persistence +
-              cleanup
+              Check navigation, happy path, persistence, cleanup, and
+              integration coverage in tests/e2e/ui/*.spec.ts or
+              tests/e2e/*.spec.ts. FAIL if no new E2E tests were added for
+              user-facing behavior, or if persistence/cleanup are skipped.
+          - name: Bug hunt
+            type: llm-review
+            role: bug-hunter
+            phase: 3
+            prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
+              for actionable bugs. Focus on correctness, edge cases, error
+              paths, cross-system interactions, concurrency/lifecycle, and
+              dangerous behavior. Fail only for critical/high actionable bugs;
+              include file:line, reproduction conditions, consequence, and why
+              it is a bug.
           - name: Security review
             type: llm-review
             role: security-reviewer
@@ -306,30 +239,12 @@ workflows:
               origin/{{baseBranch}}.
 
 
-
               Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see changes.
 
 
-
-              Check:
-
-
-              1. Injection risks — command injection, path traversal, template
-              injection
-
-
-              2. Auth/authz — are new endpoints properly authenticated?
-
-
-              3. Data validation — are inputs validated and sanitized?
-
-
-              4. Secrets handling — no hardcoded secrets, tokens, or credentials
-
-
-              5. Dependency risks — any new dependencies with known
-              vulnerabilities?
+              Check injection risks, auth/authz, data validation, secrets
+              handling, and dependency risks.
       - id: documentation
         name: Documentation
         depends_on:
@@ -342,141 +257,15 @@ workflows:
               origin/{{baseBranch}}.
 
 
-
               Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see all changes.
 
 
-              Read the key documentation files: AGENTS.md, README.md, and files
-              in docs/.
-
-
-
-              The goal spec is:
-
-
-              {{goal_spec}}
-
-
-
-              **Documentation location rules:**
-
-
-              - Detailed feature behavior, architecture explanations, workflows,
-              and durable reference material should usually live in `docs/*.md`.
-
-
-              - `README.md` should cover entrypoints, setup, and concise
-              high-level project orientation.
-
-
-              - `AGENTS.md` should only change when agent-operational guidance
-              changed: repo navigation, architecture launchpad notes, common
-              task recipes, debugging index entries, verification flow, or other
-              instructions an agent needs in many sessions.
-
-
-              - Do NOT require an `AGENTS.md` update for routine product or
-              feature documentation when `docs/` or `README.md` is the better
-              home.
-
-
-
-              **Check 1 — Every feature is documented:**
-
-
-              - Every new user-facing feature, API endpoint, config option, or
-              behavioral change introduced in this branch must be documented
-              somewhere.
-
-
-              - If a feature is only described in code comments, that is NOT
-              sufficient — it must appear in a .md file.
-
-
-              - List any undocumented features. Also flag documentation placed
-              in the wrong home when that placement creates pressure to grow
-              `AGENTS.md` unnecessarily.
-
-
-
-              **Check 2 — Existing documentation is updated:**
-
-
-              - If the changes modify behavior that is already documented, the
-              documentation must be updated to reflect the new behavior.
-
-
-              - Check for stale references: old API signatures, removed config
-              options, renamed files, changed defaults, altered workflows.
-
-
-              - List any stale documentation that was not updated.
-
-
-
-              **Check 3 — Documentation placement is appropriate:**
-
-
-              - Prefer `docs/` for detailed explanations. Prefer `README.md` for
-              top-level orientation. Only require `AGENTS.md` changes for
-              agent-facing operational guidance.
-
-
-              - Flag branches that add routine feature detail to `AGENTS.md`
-              instead of the better destination.
-
-
-
-              **Check 4 — Documentation quality standards:**
-
-
-              Evaluate all new or modified documentation against these
-              standards:
-
-
-
-              a) **Hierarchy of detail** — Top-level files (AGENTS.md,
-              README.md) should give concise summaries and link to specific
-              docs/*.md files for detail. Detailed explanations belong in docs/,
-              not crammed into AGENTS.md. Check that new docs follow this
-              layered pattern and add cross-references where appropriate.
-
-
-
-              b) **Resilience to future changes** — Documentation must NOT be
-              fragile. Flag:
-               - Hardcoded line numbers (e.g. "see line 42 of server.ts")
-               - Hardcoded counts that will drift (e.g. "the 15 tool groups")
-               - Exact file paths to files that are likely to move (prefer describing the module/concept and its location pattern instead)
-               - Version-specific claims without noting the version
-
-              c) **Explains the WHY, not just the what/how** — Documentation
-              should explain the reasoning behind design decisions, not just
-              describe the mechanics. "Sessions persist to disk" is what.
-              "Sessions persist to disk so they survive server restarts and the
-              user doesn't lose context" is why. Flag sections that describe
-              mechanics without motivation.
-
-
-
-              d) **Big-picture context** — New documentation should orient the
-              reader by connecting the feature to the broader system. Before
-              diving into details, briefly explain where this fits in the
-              architecture, what problem it solves, and how it relates to
-              adjacent features. Flag documentation that jumps straight into
-              implementation details without context.
-
-
-
-              Summarize your findings with:
-
-
-              - PASS/FAIL for each of the 3 checks
-
-
-              - Specific items that need to be addressed (with file paths and
-              descriptions)
+              Read AGENTS.md, README.md, and docs/. Verify every user-facing
+              feature, API endpoint, config option, or behavior change is
+              documented; stale docs are updated; documentation placement is
+              appropriate; and new docs have good hierarchy, resilience, WHY,
+              and big-picture context.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -527,58 +316,11 @@ workflows:
           - name: Code quality review report quality
             type: llm-review
             role: code-reviewer
-            prompt: >-
-              You are verifying the **quality of a review report**, not the PR
-              itself.
-
-
-              This is a review-only goal. The gate's deliverable is a written
-              code-quality review of PR #{{fetch-pr.meta.pr_number}} that will
-              be aggregated into a GitHub PR comment. The signaled gate content
-              IS the review.
-
-
-              Read the gate content (the review report). Your job is to decide
-              whether the report is good enough to deliver to the PR author.
-
-
-              PASS criteria — the review report:
-
-              - Identifies concrete findings (or explicitly states "no issues
-              found" with rationale)
-
-              - Each finding has: file:line reference, severity
-              (blocker/major/minor/nit), one-line suggestion or rationale
-
-              - Covers the five dimensions named in the prompt below:
-              correctness, error handling, edge cases, style, maintainability
-
-              - Is specific enough that a reader could act on it without
-              re-reading the diff
-
-
-              FAIL only if:
-
-              - The report is missing entirely or is empty
-
-              - Findings lack file:line references or severities
-
-              - The report is too vague to act on (e.g. "there might be some
-              issues")
-
-              - The report is clearly off-topic (not about this PR)
-
-
-              **Do NOT fail because the PR has bugs.** Identifying bugs is the
-              *purpose* of the review — a report listing many blockers is a
-              successful review.
-
-
-              Original review brief (for context only):
-
-              > Review PR #{{fetch-pr.meta.pr_number}} for correctness, error
-              handling, edge cases, style, and maintainability. Findings as
-              markdown list with severity + file:line + one-line suggestion.
+            prompt: "Verify the quality of the signaled code-quality review report for PR
+              #{{fetch-pr.meta.pr_number}}. PASS if it is concrete, actionable,
+              includes file:line/severity for findings or a reasoned no-issues
+              result, and covers correctness, error handling, edge cases, style,
+              and maintainability. Do not fail because the PR itself has bugs."
       - id: security
         name: Security Review
         content: true
@@ -589,37 +331,11 @@ workflows:
           - name: Security review report quality
             type: llm-review
             role: security-reviewer
-            prompt: >-
-              You are verifying the **quality of a security review report**, not
-              the PR's security posture.
-
-
-              This is a review-only goal. The gate content IS the security
-              review of PR #{{fetch-pr.meta.pr_number}} that will be posted to
-              GitHub.
-
-
-              PASS criteria — the report:
-
-              - Names the risk classes considered (injection, auth/authz, input
-              validation, secrets, dependencies, info disclosure) or explicitly
-              notes which are not applicable
-
-              - Each finding has: severity (critical/high/medium/low),
-              file:line, remediation guidance
-
-              - Or explicitly states "no security issues found" with the
-              rationale of what was checked
-
-              - Is specific and actionable
-
-
-              FAIL only if the report is missing, empty, vague, off-topic, or
-              its findings lack severities/file:line references.
-
-
-              **Do NOT fail because the PR has security issues.** A report
-              listing critical findings is a successful review.
+            prompt: "Verify the quality of the signaled security review report for PR
+              #{{fetch-pr.meta.pr_number}}. PASS if it names considered risk
+              classes and gives actionable findings with
+              severity/file:line/remediation or a reasoned no-issues result. Do
+              not fail because the PR itself has security issues."
       - id: test-coverage
         name: Test Coverage
         content: true
@@ -629,40 +345,10 @@ workflows:
         verify:
           - name: Test coverage review report quality
             type: llm-review
-            prompt: >-
-              You are verifying the **quality of a test-coverage review
-              report**, not the PR's test coverage.
-
-
-              This is a review-only goal. The gate content IS a written
-              test-coverage review of PR #{{fetch-pr.meta.pr_number}} that will
-              be posted to GitHub.
-
-
-              PASS criteria — the report:
-
-              - Lists the PR's behavior changes (new functions, endpoints, UI
-              flows, modified logic)
-
-              - For each behavior change, names the corresponding test
-              (file:line) OR explicitly notes its absence as a gap
-
-              - Distinguishes adequacy levels (covered / partial / missing) with
-              a clear severity for gaps
-
-              - Considers all relevant test layers: unit, API E2E, browser E2E
-
-              - Is specific enough that a developer could write the missing
-              tests from the report alone
-
-
-              FAIL only if the report is missing, empty, off-topic, or fails to
-              map behavior changes to tests at all.
-
-
-              **Do NOT fail because the PR has missing tests.** Identifying
-              coverage gaps IS the purpose of the review — a report listing many
-              gaps is a successful review.
+            prompt: "Verify the quality of the signaled test-coverage review report for PR
+              #{{fetch-pr.meta.pr_number}}. PASS if it maps behavior changes to
+              corresponding tests or explicit gaps across relevant test layers.
+              Do not fail because the PR has missing tests."
       - id: documentation
         name: Documentation
         content: true
@@ -672,37 +358,11 @@ workflows:
         verify:
           - name: Documentation review report quality
             type: llm-review
-            prompt: >-
-              You are verifying the **quality of a documentation review
-              report**, not the PR's documentation.
-
-
-              This is a review-only goal. The gate content IS a written
-              documentation review of PR #{{fetch-pr.meta.pr_number}} that will
-              be posted to GitHub.
-
-
-              PASS criteria — the report:
-
-              - Identifies undocumented new features (or notes none exist)
-
-              - Identifies stale references in existing docs (or notes none
-              exist)
-
-              - Comments on documentation quality (hierarchy of detail,
-              resilience, why-not-what, big-picture-first)
-
-              - Each finding has a file path and concrete remediation
-
-              - Is actionable
-
-
-              FAIL only if the report is missing, empty, off-topic, or skips one
-              of the three coverage areas above without comment.
-
-
-              **Do NOT fail because the PR has documentation gaps.** Identifying
-              gaps IS the purpose of the review.
+            prompt: "Verify the quality of the signaled documentation review report for PR
+              #{{fetch-pr.meta.pr_number}}. PASS if it identifies undocumented
+              features/stale references or notes none, comments on documentation
+              quality, and gives actionable remediation. Do not fail because the
+              PR has documentation gaps."
       - id: spec-conformance
         name: Spec Conformance
         content: true
@@ -713,38 +373,11 @@ workflows:
           - name: Spec conformance review report quality
             type: llm-review
             role: spec-auditor
-            prompt: >-
-              You are verifying the **quality of a spec-conformance review
-              report**, not whether the PR conforms to its spec.
-
-
-              This is a review-only goal. The gate content IS a written
-              spec-conformance review of PR #{{fetch-pr.meta.pr_number}} that
-              will be posted to GitHub.
-
-
-              PASS criteria — the report:
-
-              - References the source-of-truth spec (goal spec and/or PR
-              description)
-
-              - Lists conformance findings: missing requirements, unsatisfied
-              acceptance criteria, unhandled spec edge cases, contradictions,
-              scope creep
-
-              - Each finding cites the spec quote and the relevant file:line,
-              with a severity
-
-              - OR explicitly states the PR conforms with the rationale of what
-              was checked
-
-
-              FAIL only if the report is missing, empty, off-topic, or fails to
-              compare the PR against any spec at all.
-
-
-              **Do NOT fail because the PR diverges from spec.** Identifying
-              divergence IS the purpose of the review.
+            prompt: "Verify the quality of the signaled spec-conformance review report for
+              PR #{{fetch-pr.meta.pr_number}}. PASS if it references the
+              source-of-truth spec and lists conformance findings with spec
+              quotes, file:line, and severity, or explains why the PR conforms.
+              Do not fail because the PR diverges from spec."
       - id: post-review
         name: Post Review to GitHub
         content: true
@@ -789,27 +422,14 @@ workflows:
           - name: Design review
             type: llm-review
             role: architect
-            prompt: >-
-              Review this design document for structure, clarity, and
-              completeness. Verify:
-
-
-              1. Architecture and API surface are clearly described
-
-
-              2. File changes are listed with rationale
-
-
-              3. Acceptance criteria are specific and testable
-
-
-              4. Edge cases and error handling are considered
+            prompt: Review this design document for structure, clarity, and completeness.
+              Verify architecture/API surface, file-change rationale, testable
+              acceptance criteria, and edge/error handling.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
             prompt: >-
               Compare the goal specification to this design document.
-
 
 
               The goal spec is:
@@ -818,25 +438,9 @@ workflows:
               {{goal_spec}}
 
 
-
-              Identify:
-
-
-              1. Requirements in the goal spec not addressed in the design
-
-
-              2. Acceptance criteria not covered by the proposed changes
-
-
-              3. Edge cases mentioned in the goal but missing from the design
-
-
-              4. Any contradictions between the goal and the design
-
-
-
-              Use your tools to read the design document content from the
-              signal.
+              Identify unaddressed requirements, uncovered acceptance criteria,
+              missing edge cases, and contradictions. Use your tools to read the
+              design document content from the signal.
       - id: implementation
         name: Implementation
         depends_on:
@@ -869,120 +473,38 @@ workflows:
             phase: 3
             prompt: >-
               Compare the goal specification and design document to the actual
-              implementation on this branch.
-
+              implementation on this branch. Ignore documentation gaps; focus
+              exclusively on code/behavior gaps relative to the spec and design.
 
 
               The goal spec is:
 
 
               {{goal_spec}}
-
-
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see the implementation diff.
-
-
-              Read the design document content from upstream gates.
-
-
-
-              Identify:
-
-
-              1. Features described in the goal/design but not implemented
-
-
-              2. Acceptance criteria not met by the code changes
-
-
-              3. Implemented behavior that contradicts the specification
-
-
-
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs
-              during the implementation phase, BEFORE the documentation gate. Do
-              NOT flag missing or outdated documentation, README updates,
-              design-doc updates, code comments, or other docs-only artifacts as
-              gaps — those are addressed by the dedicated documentation gate
-              later in the workflow. Focus exclusively on code/behavior gaps
-              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
             phase: 3
-            prompt: >-
-              Review the code changes on branch {{branch}} vs
-              origin/{{baseBranch}} for quality.
-
-
-
-              Start with `git diff --stat origin/{{baseBranch}}...{{branch}} --
-              . ':!package-lock.json'` to see which files changed.
-
-
-              Then use `git diff origin/{{baseBranch}}...{{branch}} -M -- .
-              ':!package-lock.json'` (with rename detection) to see actual
-              content changes — this collapses pure renames into one-line
-              summaries.
-
-
-              For large diffs, review files individually with `read` rather than
-              dumping the entire diff into context.
-
-
-
-              Check:
-
-
-              1. Correctness — logic errors, off-by-one, race conditions
-
-
-              2. Error handling — missing try/catch, unhandled promise
-              rejections
-
-
-              3. Edge cases — null/undefined, empty arrays, boundary values
-
-
-              4. Code style — consistent naming, no dead code, clear intent
-
-
-              5. Test coverage — are new behaviors tested?
+            prompt: Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
+              for quality. Check correctness, error handling, edge cases, code
+              style, and test coverage.
+          - name: Bug hunt
+            type: llm-review
+            role: bug-hunter
+            phase: 3
+            prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
+              for actionable bugs. Focus on correctness, edge cases, error
+              paths, cross-system interactions, concurrency/lifecycle, and
+              dangerous behavior. Fail only for critical/high actionable bugs;
+              include file:line, reproduction conditions, consequence, and why
+              it is a bug.
           - name: Security review
             type: llm-review
             role: security-reviewer
             phase: 3
-            prompt: >-
-              Security review of changes on branch {{branch}} vs
-              origin/{{baseBranch}}.
-
-
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see changes.
-
-
-
-              Check:
-
-
-              1. Injection risks — command injection, path traversal, template
-              injection
-
-
-              2. Auth/authz — are new endpoints properly authenticated?
-
-
-              3. Data validation — are inputs validated and sanitized?
-
-
-              4. Secrets handling — no hardcoded secrets, tokens, or credentials
-
-
-              5. Dependency risks — any new dependencies with known
-              vulnerabilities?
+            prompt: Security review of changes on branch {{branch}} vs
+              origin/{{baseBranch}}. Check injection, auth/authz, validation,
+              secrets, and dependency risks.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -992,158 +514,11 @@ workflows:
             description: Spawn a QA agent that builds the project, starts an ephemeral
               server, and drives a real browser through user scenarios to
               validate the feature works end-to-end.
-            prompt: >-
-              You are performing QA testing for this goal. Stand up an ephemeral
-              test environment and drive browser-based testing scenarios.
-
-
-
-              Goal specification:
-
-
-              {{goal_spec}}
-
-
-
-              ## Step 0: Plan your scenarios FIRST
-
-
-
-              Before touching the browser or starting any server, read the goal
-              spec and upstream design doc above. Produce a numbered checklist
-              of 3-5 scenarios to test, in priority order. Output this checklist
-              as your first message.
-
-
-
-              Rules for scenario selection:
-
-
-              - Only include things verifiable through a browser (clicks,
-              navigation, visual states)
-
-
-              - Exclude API-only behavior, code quality, performance (covered by
-              automated tests)
-
-
-              - Each scenario is one specific sentence — what to do and what to
-              check
-
-
-              - Core happy path first, edge cases last
-
-
-              - Cap at 5 scenarios — you do not have time for more
-
-
-
-              Example:
-
-
-              1. Select Feature workflow in goal creation — verify ⓘ tooltip
-              appears next to optional toggles
-
-
-              2. Hover ⓘ icon — verify tooltip text matches the step description
-
-
-              3. Open workflow editor — verify description field is editable on
-              verification steps
-
-
-
-              Then work through the list in order. Do not add scenarios
-              mid-test.
-
-
-
-              ## How to test
-
-
-
-              The ephemeral server is a fully functional Bobbit instance. Use it
-              like a human would — create sessions, create goals, select
-              workflows, interact with the UI to put it in the state you need.
-              If you need a goal dashboard with verification history, create a
-              goal and signal its gates. If you need a session with tool calls,
-              create a session and send messages. Build up the state you need
-              through normal UI interactions.
-
-
-
-              ## Critical Rules
-
-
-
-              1. **Capture screenshots inline** — call `browser_screenshot()`
-              without `savePath`. The tool response includes base64 image data
-              directly. Use this data to embed screenshots in your HTML report
-              as `data:image/png;base64,<data>` URIs. No need to save to disk or
-              read back.
-
-
-
-              2. **Verify your port is unique** — check `cat
-              .bobbit/state/gateway-url` to see the dev server port. Your
-              ephemeral server MUST use a different port. If port allocation
-              gives you the same port, allocate again.
-
-
-
-              3. **Verify URL after each navigation** — run
-              `browser_eval(expression="window.location.href")` after navigating
-              and after significant interactions to confirm you're still on your
-              ephemeral server. If the port is wrong, re-navigate.
-
-
-
-              4. **Spend no more than 10 tool calls per scenario.** If you hit a
-              roadblock, mark it SKIPPED, move on to the next scenario, and come
-              back if time permits.
-
-
-
-              5. **Do NOT read source code** — do not grep or cat .ts/.js files,
-              minified bundles, or built assets. Test from the user's
-              perspective only.
-
-
-
-              6. **Do NOT write HTML files or test fixtures** — do not create
-              workaround HTML pages, inject WebSocket messages, or build
-              synthetic test harnesses. If a feature isn't visible in the UI,
-              report that as a finding — don't try to engineer around it.
-
-
-
-              Focus on testing the user-facing changes described in the goal
-              spec.
-
-
-              If the project does not have qa_start_command configured, call
-              `verification_result(verdict="pass", summary="QA testing is not
-              configured for this project.")`.
-
-
-
-              After completing all scenarios, call `verification_result` to
-              submit your results:
-
-
-              - `verdict`: "pass" or "fail" based on test results
-
-
-              - `summary`: concise summary of findings
-
-
-              - `report_html`: self-contained HTML report with embedded base64
-              screenshots
-
-
-
-              This tool call is REQUIRED. Do not emit <verdict> or <qa_report>
-              XML tags.
+            prompt: Perform QA testing for this goal. Stand up an ephemeral test environment
+              and drive browser-based testing scenarios from the user's
+              perspective. Plan 3-5 browser-verifiable scenarios first; then
+              execute them and submit verification_result with pass/fail,
+              concise summary, and self-contained HTML report with screenshots.
       - id: documentation
         name: Documentation
         depends_on:
@@ -1151,146 +526,11 @@ workflows:
         verify:
           - name: Documentation coverage
             type: llm-review
-            prompt: >-
-              Review documentation for the changes on branch {{branch}} vs
-              origin/{{baseBranch}}.
-
-
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see all changes.
-
-
-              Read the key documentation files: AGENTS.md, README.md, and files
-              in docs/.
-
-
-
-              The goal spec is:
-
-
-              {{goal_spec}}
-
-
-
-              **Documentation location rules:**
-
-
-              - Detailed feature behavior, architecture explanations, workflows,
-              and durable reference material should usually live in `docs/*.md`.
-
-
-              - `README.md` should cover entrypoints, setup, and concise
-              high-level project orientation.
-
-
-              - `AGENTS.md` should only change when agent-operational guidance
-              changed: repo navigation, architecture launchpad notes, common
-              task recipes, debugging index entries, verification flow, or other
-              instructions an agent needs in many sessions.
-
-
-              - Do NOT require an `AGENTS.md` update for routine product or
-              feature documentation when `docs/` or `README.md` is the better
-              home.
-
-
-
-              **Check 1 — Every feature is documented:**
-
-
-              - Every new user-facing feature, API endpoint, config option, or
-              behavioral change introduced in this branch must be documented
-              somewhere.
-
-
-              - If a feature is only described in code comments, that is NOT
-              sufficient — it must appear in a .md file.
-
-
-              - List any undocumented features. Also flag documentation placed
-              in the wrong home when that placement creates pressure to grow
-              `AGENTS.md` unnecessarily.
-
-
-
-              **Check 2 — Existing documentation is updated:**
-
-
-              - If the changes modify behavior that is already documented, the
-              documentation must be updated to reflect the new behavior.
-
-
-              - Check for stale references: old API signatures, removed config
-              options, renamed files, changed defaults, altered workflows.
-
-
-              - List any stale documentation that was not updated.
-
-
-
-              **Check 3 — Documentation placement is appropriate:**
-
-
-              - Prefer `docs/` for detailed explanations. Prefer `README.md` for
-              top-level orientation. Only require `AGENTS.md` changes for
-              agent-facing operational guidance.
-
-
-              - Flag branches that add routine feature detail to `AGENTS.md`
-              instead of the better destination.
-
-
-
-              **Check 4 — Documentation quality standards:**
-
-
-              Evaluate all new or modified documentation against these
-              standards:
-
-
-
-              a) **Hierarchy of detail** — Top-level files (AGENTS.md,
-              README.md) should give concise summaries and link to specific
-              docs/*.md files for detail. Detailed explanations belong in docs/,
-              not crammed into AGENTS.md. Check that new docs follow this
-              layered pattern and add cross-references where appropriate.
-
-
-
-              b) **Resilience to future changes** — Documentation must NOT be
-              fragile. Flag:
-               - Hardcoded line numbers (e.g. "see line 42 of server.ts")
-               - Hardcoded counts that will drift (e.g. "the 15 tool groups")
-               - Exact file paths to files that are likely to move (prefer describing the module/concept and its location pattern instead)
-               - Version-specific claims without noting the version
-
-              c) **Explains the WHY, not just the what/how** — Documentation
-              should explain the reasoning behind design decisions, not just
-              describe the mechanics. "Sessions persist to disk" is what.
-              "Sessions persist to disk so they survive server restarts and the
-              user doesn't lose context" is why. Flag sections that describe
-              mechanics without motivation.
-
-
-
-              d) **Big-picture context** — New documentation should orient the
-              reader by connecting the feature to the broader system. Before
-              diving into details, briefly explain where this fits in the
-              architecture, what problem it solves, and how it relates to
-              adjacent features. Flag documentation that jumps straight into
-              implementation details without context.
-
-
-
-              Summarize your findings with:
-
-
-              - PASS/FAIL for each of the 3 checks
-
-
-              - Specific items that need to be addressed (with file paths and
-              descriptions)
+            prompt: Review documentation for the changes on branch {{branch}} vs
+              origin/{{baseBranch}}. Verify user-facing
+              features/API/config/behavior changes are documented, existing docs
+              are updated, placement is appropriate, and documentation quality
+              standards are met.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -1320,34 +560,22 @@ workflows:
         verify:
           - name: Analysis quality
             type: llm-review
-            prompt: >-
-              Review the issue analysis for completeness. Check:
-
-              1. Reproduction steps are specific enough to follow mechanically
-
-              2. Root cause references actual source files and lines
-
-              3. Analysis distinguishes symptoms from underlying cause
-
-              4. **Test plan** — the analysis must describe what test will
-              verify the fix. A unit test or file:// fixture test is sufficient
-              for most bug fixes. E2E tests are only needed if the bug involves
-              a multi-step user journey that cannot be reproduced without a
-              running server (e.g. WebSocket interactions, cross-page
-              navigation, session persistence across reload).
+            prompt: Review the issue analysis for completeness. Check reproduction steps,
+              root cause, symptom/cause distinction, and test plan.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
-            prompt: |-
+            prompt: >-
               Compare the goal specification to this issue analysis.
 
+
               The goal spec is:
+
               {{goal_spec}}
 
-              Identify:
-              1. Bug symptoms mentioned in the goal but not analyzed
-              2. Missing reproduction steps for reported behavior
-              3. Root cause analysis gaps relative to the reported issue
+
+              Identify bug symptoms not analyzed, missing reproduction steps,
+              and root cause gaps.
       - id: reproducing-test
         name: Reproducing Test
         depends_on:
@@ -1397,131 +625,42 @@ workflows:
             phase: 3
             prompt: >-
               Compare the goal specification and design document to the actual
-              implementation on this branch.
+              implementation on this branch. Ignore documentation gaps; focus
+              exclusively on code/behavior gaps relative to the spec and design.
 
 
               The goal spec is:
 
               {{goal_spec}}
-
-
-              Run `git diff {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see the implementation diff.
-
-
-              Identify:
-
-              1. Features described in the goal but not implemented
-
-              2. Acceptance criteria not met by the code changes
-
-              3. Does the fix address the root cause identified in the issue
-              analysis?
-
-
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs
-              during the implementation phase, BEFORE the documentation gate. Do
-              NOT flag missing or outdated documentation, README updates,
-              design-doc updates, code comments, or other docs-only artifacts as
-              gaps — those are addressed by the dedicated documentation gate
-              later in the workflow. Focus exclusively on code/behavior gaps
-              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
             phase: 3
-            prompt: >-
-              Review the code changes on branch {{branch}} vs {{baseBranch}} for
-              quality.
-
-
-              Start with `git diff --stat {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see which files changed.
-
-              Then use `git diff {{baseBranch}}...{{branch}} -M -- .
-              ':!package-lock.json'` (with rename detection) to see actual
-              content changes — this collapses pure renames into one-line
-              summaries.
-
-              For large diffs, review files individually with `read` rather than
-              dumping the entire diff into context.
-
-
-              Check:
-
-              1. Correctness — does the fix address the root cause?
-
-              2. Minimality — no unrelated changes
-
-              3. Error handling — missing try/catch, unhandled promise
-              rejections
-
-              4. Regression risk — could this break other things?
-
-              5. Test coverage — is the fix adequately tested?
+            prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
+              quality. Check root-cause fix, minimality, error handling,
+              regression risk, and test coverage.
           - name: Regression test coverage
             type: llm-review
             phase: 3
-            prompt: >-
-              Verify that the bug fix includes a regression test that would
-              catch reintroduction.
-
-
-              The goal spec is:
-
-              {{goal_spec}}
-
-
-              Run `git diff {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see all changes.
-
-
-              Look for new or modified test files in:
-
-              - `tests/*.test.ts` or `tests/*.spec.ts` — unit tests and file://
-              fixture tests
-
-              - `tests/e2e/*.spec.ts` or `tests/e2e/ui/*.spec.ts` — E2E tests
-
-
-              Any test type is acceptable. A unit test or Playwright file://
-              fixture that reproduces the bug scenario is ideal — these run in
-              <1s and don't need a server. Full E2E tests are only warranted
-              when the bug involves multi-step server interactions (WebSocket
-              flows, cross-page navigation, session persistence).
-
-
-              **Verdict:**
-
-              - FAIL if no regression test was added at all
-
-              - PASS if at least one test (unit, fixture, or E2E) covers the
-              fixed behavior
+            prompt: Verify that the bug fix includes a regression test that would catch
+              reintroduction. PASS if at least one unit, fixture, or E2E test
+              covers the fixed behavior; FAIL if no regression test was added.
+          - name: Bug hunt
+            type: llm-review
+            role: bug-hunter
+            phase: 3
+            prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
+              actionable bugs. Focus on correctness, edge cases, error paths,
+              cross-system interactions, concurrency/lifecycle, and dangerous
+              behavior. Fail only for critical/high actionable bugs; include
+              file:line, reproduction conditions, consequence, and why it is a
+              bug.
           - name: Security review
             type: llm-review
             role: security-reviewer
             phase: 3
-            prompt: >-
-              Security review of changes on branch {{branch}} vs {{baseBranch}}.
-
-
-              Run `git diff {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see changes.
-
-
-              Check:
-
-              1. Injection risks — command injection, path traversal, template
-              injection
-
-              2. Auth/authz — are new endpoints properly authenticated?
-
-              3. Data validation — are inputs validated and sanitized?
-
-              4. Secrets handling — no hardcoded secrets, tokens, or credentials
-
-              5. Dependency risks — any new dependencies with known
-              vulnerabilities?
+            prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
+              injection, auth/authz, validation, secrets, and dependency risks.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -1531,127 +670,12 @@ workflows:
             description: Spawn a QA agent that builds the project, starts an ephemeral
               server, and drives a real browser through user scenarios to
               validate the fix works end-to-end.
-            prompt: >-
-              You are performing QA testing for this goal. Stand up an ephemeral
-              test environment and drive browser-based testing scenarios.
-
-
-              Goal specification:
-
-              {{goal_spec}}
-
-
-              ## Step 0: Plan your scenarios FIRST
-
-
-              Before touching the browser or starting any server, read the goal
-              spec and upstream design doc above. Produce a numbered checklist
-              of 3-5 scenarios to test, in priority order. Output this checklist
-              as your first message.
-
-
-              Rules for scenario selection:
-
-              - Only include things verifiable through a browser (clicks,
-              navigation, visual states)
-
-              - Exclude API-only behavior, code quality, performance (covered by
-              automated tests)
-
-              - Each scenario is one specific sentence — what to do and what to
-              check
-
-              - Core happy path first, edge cases last
-
-              - Cap at 5 scenarios — you do not have time for more
-
-
-              Example:
-
-              1. Reproduce the bug — navigate to [page], perform [action],
-              verify the bug is visible
-
-              2. Verify the fix — same steps, confirm the correct behavior
-
-              3. Check related flows — verify the fix didn't break adjacent
-              functionality
-
-
-              Then work through the list in order. Do not add scenarios
-              mid-test.
-
-
-              ## How to test
-
-
-              The ephemeral server is a fully functional Bobbit instance. Use it
-              like a human would — create sessions, create goals, select
-              workflows, interact with the UI to put it in the state you need.
-              If you need a goal dashboard with verification history, create a
-              goal and signal its gates. If you need a session with tool calls,
-              create a session and send messages. Build up the state you need
-              through normal UI interactions.
-
-
-              ## Critical Rules
-
-
-              1. **Capture screenshots inline** — call `browser_screenshot()`
-              without `savePath`. The tool response includes base64 image data
-              directly. Use this data to embed screenshots in your HTML report
-              as `data:image/png;base64,<data>` URIs. No need to save to disk or
-              read back.
-
-
-              2. **Verify your port is unique** — check `cat
-              .bobbit/state/gateway-url` to see the dev server port. Your
-              ephemeral server MUST use a different port. If port allocation
-              gives you the same port, allocate again.
-
-
-              3. **Verify URL after each navigation** — run
-              `browser_eval(expression="window.location.href")` after navigating
-              and after significant interactions to confirm you're still on your
-              ephemeral server. If the port is wrong, re-navigate.
-
-
-              4. **Spend no more than 10 tool calls per scenario.** If you hit a
-              roadblock, mark it SKIPPED, move on to the next scenario, and come
-              back if time permits.
-
-
-              5. **Do NOT read source code** — do not grep or cat .ts/.js files,
-              minified bundles, or built assets. Test from the user's
-              perspective only.
-
-
-              6. **Do NOT write HTML files or test fixtures** — do not create
-              workaround HTML pages, inject WebSocket messages, or build
-              synthetic test harnesses. If a feature isn't visible in the UI,
-              report that as a finding — don't try to engineer around it.
-
-
-              Focus on testing the user-facing changes described in the goal
-              spec.
-
-              If the project does not have qa_start_command configured, call
-              `verification_result(verdict="pass", summary="QA testing is not
-              configured for this project.")`.
-
-
-              After completing all scenarios, call `verification_result` to
-              submit your results:
-
-              - `verdict`: "pass" or "fail" based on test results
-
-              - `summary`: concise summary of findings
-
-              - `report_html`: self-contained HTML report with embedded base64
-              screenshots
-
-
-              This tool call is REQUIRED. Do not emit <verdict> or <qa_report>
-              XML tags.
+            prompt: Perform QA testing for this goal. Stand up an ephemeral test environment
+              and drive browser-based testing scenarios. Plan 3-5
+              browser-verifiable scenarios first, including reproducing the bug
+              and verifying the fix; then submit verification_result with
+              pass/fail, concise summary, and self-contained HTML report with
+              screenshots.
       - id: documentation
         name: Documentation
         depends_on:
@@ -1659,118 +683,10 @@ workflows:
         verify:
           - name: Documentation coverage
             type: llm-review
-            prompt: >-
-              Review documentation for the changes on branch {{branch}} vs
-              {{baseBranch}}.
-
-
-              Run `git diff {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see all changes.
-
-              Read the key documentation files: AGENTS.md, README.md, and files
-              in docs/.
-
-
-              The goal spec is:
-
-              {{goal_spec}}
-
-
-              **Documentation location rules:**
-
-              - Detailed feature behavior, architecture explanations, workflows,
-              and durable reference material should usually live in `docs/*.md`.
-
-              - `README.md` should cover entrypoints, setup, and concise
-              high-level project orientation.
-
-              - `AGENTS.md` should only change when agent-operational guidance
-              changed: repo navigation, architecture launchpad notes, common
-              task recipes, debugging index entries, verification flow, or other
-              instructions an agent needs in many sessions.
-
-              - Do NOT require an `AGENTS.md` update for routine product or
-              feature documentation when `docs/` or `README.md` is the better
-              home.
-
-
-              **Check 1 — Every feature is documented:**
-
-              - Every new user-facing feature, API endpoint, config option, or
-              behavioral change introduced in this branch must be documented
-              somewhere.
-
-              - If a feature is only described in code comments, that is NOT
-              sufficient — it must appear in a .md file.
-
-              - List any undocumented features. Also flag documentation placed
-              in the wrong home when that placement creates pressure to grow
-              `AGENTS.md` unnecessarily.
-
-
-              **Check 2 — Existing documentation is updated:**
-
-              - If the changes modify behavior that is already documented, the
-              documentation must be updated to reflect the new behavior.
-
-              - Check for stale references: old API signatures, removed config
-              options, renamed files, changed defaults, altered workflows.
-
-              - List any stale documentation that was not updated.
-
-
-              **Check 3 — Documentation placement is appropriate:**
-
-              - Prefer `docs/` for detailed explanations. Prefer `README.md` for
-              top-level orientation. Only require `AGENTS.md` changes for
-              agent-facing operational guidance.
-
-              - Flag branches that add routine feature detail to `AGENTS.md`
-              instead of the better destination.
-
-
-              **Check 4 — Documentation quality standards:**
-
-              Evaluate all new or modified documentation against these
-              standards:
-
-
-              a) **Hierarchy of detail** — Top-level files (AGENTS.md,
-              README.md) should give concise summaries and link to specific
-              docs/*.md files for detail. Detailed explanations belong in docs/,
-              not crammed into AGENTS.md. Check that new docs follow this
-              layered pattern and add cross-references where appropriate.
-
-
-              b) **Resilience to future changes** — Documentation must NOT be
-              fragile. Flag:
-               - Hardcoded line numbers (e.g. "see line 42 of server.ts")
-               - Hardcoded counts that will drift (e.g. "the 15 tool groups")
-               - Exact file paths to files that are likely to move (prefer describing the module/concept and its location pattern instead)
-               - Version-specific claims without noting the version
-
-              c) **Explains the WHY, not just the what/how** — Documentation
-              should explain the reasoning behind design decisions, not just
-              describe the mechanics. "Sessions persist to disk" is what.
-              "Sessions persist to disk so they survive server restarts and the
-              user doesn't lose context" is why. Flag sections that describe
-              mechanics without motivation.
-
-
-              d) **Big-picture context** — New documentation should orient the
-              reader by connecting the feature to the broader system. Before
-              diving into details, briefly explain where this fits in the
-              architecture, what problem it solves, and how it relates to
-              adjacent features. Flag documentation that jumps straight into
-              implementation details without context.
-
-
-              Summarize your findings with:
-
-              - PASS/FAIL for each of the 3 checks
-
-              - Specific items that need to be addressed (with file paths and
-              descriptions)
+            prompt: Review documentation for the changes on branch {{branch}} vs
+              {{baseBranch}}. Verify user-facing features/API/config/behavior
+              changes are documented, existing docs are updated, placement is
+              appropriate, and documentation quality standards are met.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -1824,87 +740,31 @@ workflows:
             phase: 3
             prompt: >-
               Compare the goal specification to the actual implementation on
-              this branch.
-
+              this branch. Ignore documentation gaps; focus exclusively on
+              code/behavior gaps.
 
 
               The goal spec is:
 
 
               {{goal_spec}}
-
-
-
-              Run `git diff {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see the implementation diff.
-
-
-
-              Identify:
-
-
-              1. Requirements in the goal spec not addressed by the changes
-
-
-              2. Acceptance criteria not met by the code
-
-
-              3. Implemented behavior that contradicts the specification
-
-
-              4. Any unrelated or unnecessary changes
-
-
-
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs
-              during the implementation phase, BEFORE the documentation gate. Do
-              NOT flag missing or outdated documentation, README updates,
-              design-doc updates, code comments, or other docs-only artifacts as
-              gaps — those are addressed by the dedicated documentation gate
-              later in the workflow. Focus exclusively on code/behavior gaps
-              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
             phase: 3
-            prompt: >-
-              Review the code changes on branch {{branch}} vs {{baseBranch}} for
-              quality.
-
-
-
-              Start with `git diff --stat {{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see which files changed.
-
-
-              Then use `git diff {{baseBranch}}...{{branch}} -M -- .
-              ':!package-lock.json'` (with rename detection) to see actual
-              content changes — this collapses pure renames into one-line
-              summaries.
-
-
-              For large diffs, review files individually with `read` rather than
-              dumping the entire diff into context.
-
-
-
-              Check:
-
-
-              1. Correctness — logic errors, off-by-one, race conditions
-
-
-              2. Error handling — missing try/catch, unhandled promise
-              rejections
-
-
-              3. Edge cases — null/undefined, empty arrays, boundary values
-
-
-              4. Minimality — no unrelated changes, no dead code
-
-
-              5. Test coverage — are new behaviors tested?
+            prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
+              quality. Check correctness, error handling, edge cases,
+              minimality, and test coverage.
+          - name: Bug hunt
+            type: llm-review
+            role: bug-hunter
+            phase: 3
+            prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
+              actionable bugs. Focus on correctness, edge cases, error paths,
+              cross-system interactions, concurrency/lifecycle, and dangerous
+              behavior. Fail only for critical/high actionable bugs; include
+              file:line, reproduction conditions, consequence, and why it is a
+              bug.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -1960,6 +820,16 @@ workflows:
             type: command
             run: sleep 60 && echo ok
             phase: 0
+          - name: Bug hunt
+            type: llm-review
+            role: bug-hunter
+            phase: 1
+            prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
+              actionable bugs. Focus on correctness, edge cases, error paths,
+              cross-system interactions, concurrency/lifecycle, and dangerous
+              behavior. Fail only for critical/high actionable bugs; include
+              file:line, reproduction conditions, consequence, and why it is a
+              bug.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
