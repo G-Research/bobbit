@@ -13,7 +13,7 @@ version: 1.0.0
 defaultDisabled: true
 contents:
   roles: []
-  tools: [hindsight] # explicit hindsight_recall/retain/reflect agent tools (P5)
+  tools: [hindsight] # explicit hindsight_recall/retain/reflect/outcome/invalidate agent tools (P5)
   skills: []
   entrypoints: [hindsight-session-menu, hindsight-route] # session-menu launcher + deep-link route for the embedded dashboard (use/view/query) panel
   providers: [memory] # → providers/memory.yaml
@@ -31,4 +31,4 @@ requires: []
 # stays inside the pack root.
 routes:
   module: lib/routes.mjs
-  names: [status, recall, retain, reflect, banks, config]
+  names: [status, recall, retain, retain_outcome, reflect, invalidate, banks, config]

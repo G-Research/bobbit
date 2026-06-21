@@ -1750,6 +1750,29 @@ export function createGateway(config: GatewayConfig) {
 		taskManager: new TaskManager(taskStore),
 		roleStore,
 		projectContextManager,
+		goalCompletedDispatcher: async (ctx) => {
+			const hub = sessionManager.lifecycleHub as unknown as {
+				dispatchGoalCompleted?: (c: typeof ctx) => Promise<unknown>;
+			} | undefined;
+			if (hub && typeof hub.dispatchGoalCompleted === "function") {
+				await hub.dispatchGoalCompleted(ctx);
+			}
+		},
+		hasGoalCompletedProviders: (goalId, projectId) => {
+			const hub = sessionManager.lifecycleHub;
+			return !!hub?.hasProvidersForHooks(projectId, ["goalCompleted"], goalId);
+		},
+		resolveGoalPullRequest: (goalId) => {
+			const pr = prStatusStore.get(goalId) as any;
+			if (!pr) return undefined;
+			return {
+				url: typeof pr.url === "string" ? pr.url : undefined,
+				number: typeof pr.number === "string" || typeof pr.number === "number" ? pr.number : undefined,
+				title: typeof pr.title === "string" ? pr.title : undefined,
+				state: typeof pr.state === "string" ? pr.state : undefined,
+				headSha: typeof pr.headSha === "string" ? pr.headSha : undefined,
+			};
+		},
 		toolManager,
 		orchestrationCore,
 	});

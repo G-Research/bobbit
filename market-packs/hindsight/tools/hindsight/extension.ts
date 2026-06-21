@@ -1,6 +1,6 @@
 /**
  * Hindsight agent tools (P5) — `hindsight_recall`, `hindsight_retain`,
- * `hindsight_reflect`.
+ * `hindsight_reflect`, `hindsight_retain_outcome`, `hindsight_invalidate`.
  *
  * These are PACK-OWNED tools: they ship with the built-in `hindsight` market
  * pack (`pack.yaml.contents.tools: [hindsight]`), so disabling the pack at any
@@ -162,6 +162,14 @@ async function callRoute(
 
 const SCOPE_DESC = "Memory scope: 'project' (this project) or 'all' (shared bank). Defaults to config.";
 const TAGS_DESC = "Optional simple key→value tag filter for a targeted query (no boolean DSL).";
+const FACT_TYPE = Type.Union([Type.Literal("observation"), Type.Literal("world"), Type.Literal("experience")]);
+const JSON_SCHEMA_PARAM = Type.Record(Type.String(), Type.Any(), {
+	description: "Optional JSON Schema object. When supplied, Hindsight may return structuredOutput.",
+});
+const ENTITY_PARAM = Type.Object({
+	text: Type.String({ description: "Entity text, e.g. a file path or component name." }),
+	type: Type.Optional(Type.String({ description: "Entity type, e.g. file or component." })),
+});
 
 interface ToolError {
 	content: Array<{ type: "text"; text: string }>;
@@ -318,20 +326,37 @@ const extension: ExtensionFactory = (pi) => {
 				Type.Union([Type.Literal("project"), Type.Literal("all")], { description: SCOPE_DESC }),
 			),
 			tags: Type.Optional(Type.Record(Type.String(), Type.String(), { description: TAGS_DESC })),
+			responseSchema: Type.Optional(JSON_SCHEMA_PARAM),
+			factTypes: Type.Optional(Type.Array(FACT_TYPE, { description: "Optional Hindsight fact_types filter." })),
+			excludeMentalModels: Type.Optional(Type.Boolean({ description: "Exclude mental models from reflection context." })),
 		}),
 		async execute(
 			_toolCallId: string,
-			params: { prompt?: string; scope?: "project" | "all"; tags?: Record<string, string> },
+			params: {
+				prompt?: string;
+				scope?: "project" | "all";
+				tags?: Record<string, string>;
+				responseSchema?: Record<string, unknown>;
+				factTypes?: Array<"observation" | "world" | "experience">;
+				excludeMentalModels?: boolean;
+			},
 			signal?: AbortSignal,
 		) {
 			const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
 			if (!prompt) return errorResult("prompt is required", {});
-			let res: { configured?: boolean; text?: string; error?: string };
+			let res: { configured?: boolean; text?: string; structuredOutput?: unknown; error?: string };
 			try {
 				res = (await callRoute(
 					"hindsight_reflect",
 					"reflect",
-					{ prompt, ...(params.scope ? { scope: params.scope } : {}), ...(params.tags ? { tags: params.tags } : {}) },
+					{
+						prompt,
+						...(params.scope ? { scope: params.scope } : {}),
+						...(params.tags ? { tags: params.tags } : {}),
+						...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
+						...(params.factTypes ? { factTypes: params.factTypes } : {}),
+						...(params.excludeMentalModels !== undefined ? { excludeMentalModels: params.excludeMentalModels } : {}),
+					},
 					signal,
 				)) as typeof res;
 			} catch (e) {
@@ -345,10 +370,118 @@ const extension: ExtensionFactory = (pi) => {
 				};
 			}
 			const text = typeof res?.text === "string" && res.text.length > 0 ? res.text : "(no reflection produced)";
+			const hasStructured = res && Object.prototype.hasOwnProperty.call(res, "structuredOutput") && res.structuredOutput !== undefined;
+			const display = hasStructured
+				? `${text}\n\n\`\`\`json\n${JSON.stringify(res.structuredOutput, null, 2)}\n\`\`\``
+				: text;
 			return {
-				content: [{ type: "text" as const, text }],
-				details: { prompt, configured: true },
+				content: [{ type: "text" as const, text: display }],
+				details: { prompt, configured: true, ...(hasStructured ? { structuredOutput: res.structuredOutput } : {}) },
 			};
+		},
+	});
+
+	// ── hindsight_retain_outcome ──
+	pi.registerTool({
+		name: "hindsight_retain_outcome",
+		label: "Hindsight Retain Outcome",
+		description: "Persist a concise goal/PR outcome digest with stable replacement semantics.",
+		promptSnippet: "hindsight_retain_outcome: Save a goal/PR outcome digest for future recall.",
+		promptGuidelines: [
+			"Use hindsight_retain_outcome only for completed work summaries or repair/re-emission of a missing outcome digest.",
+			"Provide goalId or pr so the route can use a stable document id and replace duplicates.",
+		],
+		parameters: Type.Object({
+			content: Type.String({ description: "Concise outcome digest: achievements, decisions, and follow-ups." }),
+			goalId: Type.Optional(Type.String({ description: "Goal id. Produces document_id outcome:<goalId>." })),
+			pr: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Pull request number/id. Used when goalId is absent." })),
+			files: Type.Optional(Type.Array(Type.String(), { description: "Touched files to attach as file entities." })),
+			components: Type.Optional(Type.Array(Type.String(), { description: "Touched components to attach as component entities." })),
+			decisions: Type.Optional(Type.Array(Type.String(), { description: "Key decisions to include in route metadata/context." })),
+			entities: Type.Optional(Type.Array(ENTITY_PARAM, { description: "Additional Hindsight entities." })),
+			tags: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra key/value tags; canonical outcome tags win." })),
+			timestamp: Type.Optional(Type.String({ description: "ISO event timestamp. Defaults to now." })),
+		}),
+		async execute(
+			_toolCallId: string,
+			params: {
+				content?: string;
+				goalId?: string;
+				pr?: string | number;
+				files?: string[];
+				components?: string[];
+				decisions?: string[];
+				entities?: Array<{ text: string; type?: string }>;
+				tags?: Record<string, string>;
+				timestamp?: string;
+			},
+			signal?: AbortSignal,
+		) {
+			const content = typeof params.content === "string" ? params.content.trim() : "";
+			if (!content) return errorResult("content is required", {});
+			if (!params.goalId && params.pr === undefined) return errorResult("goalId or pr is required", {});
+			let res: { ok?: boolean; configured?: boolean; documentId?: string; error?: string };
+			try {
+				res = (await callRoute(
+					"hindsight_retain_outcome",
+					"retain_outcome",
+					{
+						content,
+						...(params.goalId ? { goalId: params.goalId } : {}),
+						...(params.pr !== undefined ? { pr: params.pr } : {}),
+						...(params.files ? { files: params.files } : {}),
+						...(params.components ? { components: params.components } : {}),
+						...(params.decisions ? { decisions: params.decisions } : {}),
+						...(params.entities ? { entities: params.entities } : {}),
+						...(params.tags ? { tags: params.tags } : {}),
+						...(params.timestamp ? { timestamp: params.timestamp } : {}),
+					},
+					signal,
+				)) as typeof res;
+			} catch (e) {
+				return errorResult(`Outcome retain failed: ${(e as Error).message}`, {});
+			}
+			if (res?.ok) {
+				return {
+					content: [{ type: "text" as const, text: `Outcome retained${res.documentId ? ` (${res.documentId})` : ""}.` }],
+					details: { ok: true, configured: true, documentId: res.documentId },
+				};
+			}
+			if (res?.configured === false) return errorResult("Hindsight is not configured; outcome not retained.", { configured: false });
+			return errorResult(`Outcome retain failed: ${res?.error ?? "unknown error"}`, { configured: res?.configured, documentId: res?.documentId });
+		},
+	});
+
+	// ── hindsight_invalidate ──
+	pi.registerTool({
+		name: "hindsight_invalidate",
+		label: "Hindsight Invalidate",
+		description: "Invalidate a stale or incorrect Hindsight memory without deleting history.",
+		promptSnippet: "hindsight_invalidate: Mark a stale Hindsight memory invalid with a reason.",
+		promptGuidelines: [
+			"Use hindsight_invalidate only when you have a specific memory id and a concrete reason it is stale or incorrect.",
+			"This is reversible curation; do not use it as a delete-all or cleanup tool.",
+		],
+		parameters: Type.Object({
+			id: Type.String({ description: "Hindsight memory id to invalidate." }),
+			reason: Type.String({ description: "Why the memory is stale or incorrect." }),
+		}),
+		async execute(_toolCallId: string, params: { id?: string; reason?: string }, signal?: AbortSignal) {
+			const id = typeof params.id === "string" ? params.id.trim() : "";
+			const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+			if (!id) return errorResult("id is required", {});
+			if (!reason) return errorResult("reason is required", { id });
+			let res: { ok?: boolean; configured?: boolean; id?: string; error?: string };
+			try {
+				res = (await callRoute("hindsight_invalidate", "invalidate", { id, reason }, signal)) as typeof res;
+			} catch (e) {
+				return errorResult(`Invalidate failed: ${(e as Error).message}`, { id });
+			}
+			if (res?.ok) {
+				return { content: [{ type: "text" as const, text: `Memory invalidated (${res.id ?? id}).` }], details: { ok: true, configured: true, id: res.id ?? id } };
+			}
+			if (res?.configured === false) return errorResult("Hindsight is not configured; memory not invalidated.", { configured: false, id });
+			return errorResult(`Invalidate failed: ${res?.error ?? "unknown error"}`, { configured: res?.configured, id });
 		},
 	});
 };

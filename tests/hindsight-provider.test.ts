@@ -96,6 +96,7 @@ function makeStore() {
 interface FakeState {
 	healthy: boolean;
 	memories: { text: string; id?: string; score?: number }[];
+	mentalModel: Record<string, unknown> | null;
 	failRecall: boolean;
 	/** When set, recall throws THIS value (e.g. a HindsightError-shaped 400). */
 	recallError: unknown;
@@ -105,14 +106,21 @@ interface FakeState {
 }
 
 function makeClient() {
-	const state: FakeState = { healthy: true, memories: [], failRecall: false, recallError: undefined, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
+	const state: FakeState = { healthy: true, memories: [], mentalModel: null, failRecall: false, recallError: undefined, failRetain: false, failEnsureBank: false, failUpdateBankConfig: false };
 	const calls = {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
-		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
+		retain: [] as { bank: string; content: string; opts: Record<string, unknown> & { tags?: Record<string, string>; sync?: boolean } }[],
 		ensureBank: [] as string[],
 		reflect: [] as { bank: string; prompt: string; opts?: { tags?: Record<string, string>; tagsMatch?: string } }[],
 		updateBankConfig: [] as { bank: string; updates: Record<string, string> }[],
+		ensureMentalModel: [] as { bank: string; spec: Record<string, unknown> }[],
+		getMentalModel: [] as { bank: string; id: string }[],
+		refreshMentalModel: [] as { bank: string; id: string }[],
+		listDirectives: [] as string[],
+		createDirective: [] as { bank: string; directive: Record<string, unknown> }[],
+		updateDirective: [] as { bank: string; id: string; patch: Record<string, unknown> }[],
 		health: 0,
+		llmHealth: [] as string[],
 		listBanks: 0,
 	};
 	const client = {
@@ -130,7 +138,7 @@ function makeClient() {
 			if (state.failRecall) throw new Error("recall failed");
 			return { memories: state.memories };
 		},
-		retain: async (bank: string, content: string, opts: { tags?: Record<string, string>; sync?: boolean }) => {
+		retain: async (bank: string, content: string, opts: Record<string, unknown> & { tags?: Record<string, string>; sync?: boolean }) => {
 			calls.retain.push({ bank, content, opts });
 			if (state.failRetain) throw new Error("retain failed");
 		},
@@ -145,6 +153,34 @@ function makeClient() {
 		updateBankConfig: async (bank: string, updates: Record<string, string>) => {
 			calls.updateBankConfig.push({ bank, updates });
 			if (state.failUpdateBankConfig) throw new Error("updateBankConfig failed");
+		},
+		ensureMentalModel: async (bank: string, spec: Record<string, unknown>) => {
+			calls.ensureMentalModel.push({ bank, spec });
+			return { operation_id: "op-1" };
+		},
+		getMentalModel: async (bank: string, id: string) => {
+			calls.getMentalModel.push({ bank, id });
+			return state.mentalModel;
+		},
+		refreshMentalModel: async (bank: string, id: string) => {
+			calls.refreshMentalModel.push({ bank, id });
+			return { operation_id: "refresh-1" };
+		},
+		listDirectives: async (bank: string) => {
+			calls.listDirectives.push(bank);
+			return { items: [] };
+		},
+		createDirective: async (bank: string, directive: Record<string, unknown>) => {
+			calls.createDirective.push({ bank, directive });
+			return { id: String(directive.name ?? "directive-1"), ...directive };
+		},
+		updateDirective: async (bank: string, id: string, patch: Record<string, unknown>) => {
+			calls.updateDirective.push({ bank, id, patch });
+			return { id, ...patch };
+		},
+		llmHealth: async (bank: string) => {
+			calls.llmHealth.push(bank);
+			return { retain: { ok: state.healthy }, consolidation: { ok: state.healthy }, reflect: { ok: state.healthy } };
 		},
 	};
 	return { client, calls, state };
@@ -274,15 +310,19 @@ test("lastError is NOT cleared when recall fails", async () => {
 });
 
 // ── Soft-skip the data plane's 500-token "Query too long" 400 (defence in depth) ─
-test("isQueryTooLongError: only a kind:http status:400 'too long'/query error matches", () => {
+test("isQueryTooLongError: only kind:http status:400 query token-limit errors match", () => {
 	// The exact shape the client throws (status + detail surfaced in the message).
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "Hindsight HTTP 400 for POST .../recall: Query too long: 620 tokens exceeds maximum of 500" }), true);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "...query exceeds limit" }), true);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "query token count exceeded" }), true);
 	// Genuine errors are NOT soft-skipped: other statuses, kinds, and unrelated 400s.
 	assert.equal(isQueryTooLongError({ kind: "http", status: 500, message: "Query too long" }), false);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 401, message: "unauthorized" }), false);
 	assert.equal(isQueryTooLongError({ kind: "timeout", message: "Query too long" }), false);
 	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "bad request" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "invalid query syntax" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "query parameter is required" }), false);
+	assert.equal(isQueryTooLongError({ kind: "http", status: 400, message: "prompt too long" }), false);
 	assert.equal(isQueryTooLongError(new Error("Query too long")), false);
 	assert.equal(isQueryTooLongError(null), false);
 	assert.equal(isQueryTooLongError("Query too long"), false);
@@ -474,10 +514,10 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// drain head retained #6 + the new turn #106 ⇒ at least 2 successful retains.
 		assert.ok(calls.retain.length >= retainsBefore + 2);
 
-		// sessionShutdown does a one-pass drain of the rest.
+		// sessionShutdown does a bounded one-pass drain by default.
 		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "s" });
 		q = (await store.get(QUEUE_KEY)) as unknown[];
-		assert.equal(q.length, 0, "shutdown drained the remaining queue");
+		assert.equal(q.length, 89, "shutdown drains at most the default bound of 10 entries");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -658,6 +698,38 @@ test("routes reflect: project scope sends a project tag filter; all scope sends 
 			{ body: { prompt: "global", scope: "project" } } as never,
 		);
 		assert.equal(calls.reflect[2].opts, undefined);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("routes reflect: applies bank directives when explicitly enabled, otherwise keeps per-request Bobbit instruction", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "what do we know" } } as never);
+		assert.match(calls.reflect[0].prompt, /^Bobbit coding-agent memory reflection instructions:/);
+		assert.equal(calls.createDirective.length, 0);
+
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", directivesEnabled: true, directiveApplyMode: "disabled" });
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "still fallback" } } as never);
+		assert.match(calls.reflect[1].prompt, /^Bobbit coding-agent memory reflection instructions:/);
+		assert.equal(calls.createDirective.length, 0, "directivesEnabled alone does not write bank directives");
+
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", directivesEnabled: true, directiveApplyMode: "bank-wide-explicit-opt-in" });
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "use bank directives" } } as never);
+		assert.equal(calls.reflect[2].prompt, "use bank directives");
+		assert.equal(calls.listDirectives.length, 1);
+		assert.equal(calls.createDirective.length, 1);
+		assert.equal(calls.createDirective[0].directive.name, "bobbit-coding-agent-recall");
+
+		await routes.reflect({ host: { store }, projectId: "proj-9" } as never, { body: { prompt: "idempotent" } } as never);
+		assert.equal(calls.reflect[3].prompt, "idempotent");
+		assert.equal(calls.listDirectives.length, 1, "directive signature cache avoids repeated list/apply");
+		assert.equal(calls.createDirective.length, 1);
 	} finally {
 		__setClientFactory(null);
 	}
@@ -1403,6 +1475,250 @@ test("routes recall/reflect: optional tags NARROW a project recall (all_strict, 
 		await routes.reflect({ host: { store }, projectId: "p1" } as never, { body: { prompt: "x", scope: "project", tags: { topic: "auth" } } } as never);
 		assert.deepEqual(calls.reflect[0].opts?.tags, { project: "p1", topic: "auth" });
 		assert.equal(calls.reflect[0].opts?.tagsMatch, "all_strict");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── Hindsight v2 provider mechanics ─────────────────────────────────────────
+
+test("sessionSetup injects per-project mental model and makes zero raw recall calls", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "raw" }];
+		state.mentalModel = { content: "Project decisions and open threads", last_refreshed_at: new Date().toISOString() };
+		const store = makeStore();
+		const out = await provider.sessionSetup({ config: { ...ACTIVE, recallScope: "project" }, host: { store }, projectId: "proj-1", prompt: "setup" });
+		assert.equal(out.blocks.length, 1);
+		assert.equal(out.blocks[0].title, "Project memory model");
+		assert.equal(out.blocks[0].content, "Project decisions and open threads");
+		assert.equal(calls.recall.length, 0, "raw recall is skipped when model is injected");
+		assert.equal(calls.ensureMentalModel.length, 1);
+		const spec = calls.ensureMentalModel[0].spec;
+		assert.deepEqual(spec.tags, ["project:proj-1", "bobbit", "kind:mental-model"]);
+		assert.deepEqual(spec.trigger, {
+			fact_types: ["observation", "world", "experience"],
+			exclude_mental_models: true,
+			include: null,
+			tags: ["project:proj-1"],
+			tags_match: "all_strict",
+		});
+		assert.equal(calls.getMentalModel[0].id, "bobbit-proj-1");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("sessionSetup falls back to raw recall when mental model is empty or disabled", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "fallback" }];
+		state.mentalModel = null;
+		const store = makeStore();
+		const out = await provider.sessionSetup({ config: { ...ACTIVE, recallScope: "project" }, host: { store }, projectId: "proj-1", prompt: "setup" });
+		assert.equal(out.blocks[0].content, "- fallback");
+		assert.equal(calls.recall.length, 1, "empty async mental model falls back to raw recall");
+
+		await provider.sessionSetup({ config: { ...ACTIVE, recallScope: "project", mentalModelEnabled: false }, host: { store }, projectId: "proj-2", prompt: "setup2" });
+		assert.equal(calls.ensureMentalModel.length, 1, "disabled mental model does not call mental-model API");
+		assert.equal(calls.recall.length, 2);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("mental model refresh is cadence-bounded", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.mentalModel = { content: "state", is_stale: true };
+		const store = makeStore();
+		const c = { config: { ...ACTIVE, mentalModelRefreshEveryMs: 60_000 }, host: { store }, projectId: "proj-r", prompt: "setup" };
+		await provider.sessionSetup(c);
+		await provider.sessionSetup(c);
+		assert.equal(calls.refreshMentalModel.length, 1, "second setup is inside cadence window");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall opts carry queryTimestamp when enabled and never enable include.chunks", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore() }, prompt: "q" });
+		const opts = calls.recall[0].opts as Record<string, unknown>;
+		assert.equal(typeof opts.queryTimestamp, "string", "recallQueryTimestampEnabled defaults true");
+		assert.equal("include" in opts, false, "chunks stay default-disabled");
+		calls.recall.length = 0;
+		await provider.beforePrompt({ config: { ...ACTIVE, recallQueryTimestampEnabled: false }, host: { store: makeStore() }, prompt: "q2" });
+		assert.equal("queryTimestamp" in (calls.recall[0].opts as Record<string, unknown>), false);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("auto-retain forwards project observation_scopes and derived entities", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		await provider.afterTurn({
+			config: { ...ACTIVE },
+			host: { store: makeStore() },
+			sessionId: "s",
+			projectId: "proj-1",
+			prompt: "u",
+			response: "a",
+			changedFiles: ["src/a.ts"],
+			components: ["provider"],
+		});
+		const opts = calls.retain[0].opts;
+		assert.deepEqual(opts.observationScopes, [["project:proj-1"]]);
+		assert.deepEqual(opts.entities, [
+			{ text: "src/a.ts", type: "file" },
+			{ text: "provider", type: "component" },
+		]);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue preserves observation scopes and entities on replay", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", projectId: "p", prompt: "u", changedFiles: ["x.ts"] });
+		state.failRetain = false;
+		calls.retain.length = 0;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s2", prompt: "drain" });
+		const replay = calls.retain.find((r) => /User: u/.test(r.content));
+		assert.ok(replay);
+		assert.deepEqual(replay!.opts.observationScopes, [["project:p"]]);
+		assert.deepEqual(replay!.opts.entities, [{ text: "x.ts", type: "file" }]);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("directives are bank-wide safe: not applied by default, applied idempotently only when enabled", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "a" });
+		assert.equal(calls.createDirective.length, 0);
+		await provider.afterTurn({ config: { ...ACTIVE, directivesEnabled: true }, host: { store }, sessionId: "s", prompt: "b" });
+		assert.equal(calls.createDirective.length, 0, "directivesEnabled alone keeps bank-wide writes disabled");
+		const enabled = { ...ACTIVE, directivesEnabled: true, directiveApplyMode: "bank-wide-explicit-opt-in" as const };
+		await provider.afterTurn({ config: enabled, host: { store }, sessionId: "s", prompt: "c" });
+		await provider.afterTurn({ config: enabled, host: { store }, sessionId: "s", prompt: "d" });
+		assert.equal(calls.listDirectives.length, 1);
+		assert.equal(calls.createDirective.length, 1);
+		assert.equal(calls.createDirective[0].directive.name, "bobbit-coding-agent-recall");
+		assert.equal(calls.updateDirective.length, 0);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("health-gated shutdown drain defers on unhealthy probe and bounded drain honors max", async () => {
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(QUEUE_KEY, [
+			{ content: "one", tags: { kind: "turn" }, ts: 1, bank: "bobbit", namespace: "default" },
+			{ content: "two", tags: { kind: "turn" }, ts: 2, bank: "bobbit", namespace: "default" },
+			{ content: "three", tags: { kind: "turn" }, ts: 3, bank: "bobbit", namespace: "default" },
+		]);
+		state.healthy = false;
+		await provider.sessionShutdown({ config: { ...ACTIVE, retainQueueShutdownMax: 2 }, host: { store }, sessionId: "s" });
+		assert.equal(calls.retain.length, 0, "unhealthy probe defers queue drain");
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 3);
+
+		state.healthy = true;
+		await provider.sessionShutdown({ config: { ...ACTIVE, retainQueueShutdownMax: 2, retainQueueLlmHealthGate: true }, host: { store }, sessionId: "s" });
+		assert.deepEqual(calls.llmHealth, ["bobbit"], "uses llmHealth(bank) when LLM health gate is enabled");
+		assert.equal(calls.retain.length, 2, "bounded drain replays only max entries");
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 1);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("shutdown queue drain is bounded to 10 by default", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(QUEUE_KEY, Array.from({ length: 12 }, (_, i) => ({ content: `entry-${i}`, tags: { kind: "turn" }, ts: i, bank: "bobbit", namespace: "default" })));
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "s" });
+		assert.equal(calls.retain.length, 10);
+		assert.equal(((await store.get(QUEUE_KEY)) as unknown[]).length, 2);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("goalCompleted retains one async replace outcome digest and duplicate calls are idempotent", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const c = {
+			config: { ...ACTIVE },
+			host: { store },
+			projectId: "proj-1",
+			goalId: "goal-1",
+			headSha: "abc123",
+			pullRequest: { number: 42, state: "OPEN", url: "https://github.com/SuuBro/bobbit/pull/42", title: "Ship provider mechanics" },
+			title: "Ship provider mechanics",
+			touchedFiles: ["market-packs/hindsight/src/provider.ts"],
+			decisions: ["Use stable outcome document id"],
+			tasks: [
+				{ title: "Implement provider mechanics", type: "implementation", state: "complete", resultSummary: "Changed market-packs/hindsight/src/provider.ts" },
+			],
+			gates: [
+				{ gateId: "implementation", name: "Implementation", status: "passed", signalCount: 2, latestCommitSha: "abc123" },
+			],
+		};
+		await provider.goalCompleted(c as never);
+		await provider.goalCompleted(c as never);
+		assert.equal(calls.retain.length, 1);
+		const r = calls.retain[0];
+		assert.match(r.content, /Goal completed: goal-1/);
+		assert.equal(r.opts.documentId, "outcome:goal-1");
+		assert.equal(r.opts.updateMode, "replace");
+		assert.deepEqual(r.opts.observationScopes, [["project:proj-1"]]);
+		assert.deepEqual(r.opts.entities, [{ text: "market-packs/hindsight/src/provider.ts", type: "file" }]);
+		assert.match(r.content, /Pull request: #42 OPEN https:\/\/github\.com\/SuuBro\/bobbit\/pull\/42/);
+		assert.match(r.content, /Tasks:\n- \[complete\] Implement provider mechanics \(implementation\) — Changed market-packs\/hindsight\/src\/provider\.ts/);
+		assert.match(r.content, /Gates:\n- Implementation: passed, signals=2, commit=abc123/);
+		assert.equal(r.opts.tags?.kind, "outcome");
+		assert.equal(r.opts.tags?.pr, "42");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("goalCompleted queues outcome digest on retain failure without throwing", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.failRetain = true;
+		const store = makeStore();
+		await provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, projectId: "p", goalId: "g", headSha: "h", changedFiles: ["f.ts"] } as never);
+		const q = (await store.get(QUEUE_KEY)) as Array<Record<string, unknown>>;
+		assert.equal(q.length, 1);
+		assert.equal(q[0].documentId, "outcome:g");
+		assert.equal(q[0].updateMode, "replace");
+		assert.deepEqual(q[0].observationScopes, [["project:p"]]);
+		assert.deepEqual(q[0].entities, [{ text: "f.ts", type: "file" }]);
 	} finally {
 		__setClientFactory(null);
 	}

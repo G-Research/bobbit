@@ -30,7 +30,76 @@ export const PROJECT_RECALL_TAGS_MATCH: TagsMatch = "any";
  *  `observation`s (plus `world`/`experience`) returns deduped knowledge over raw
  *  per-turn chatter. */
 export type RecallType = "observation" | "world" | "experience";
+export type RecallBudget = "low" | "mid" | "high";
+export type UpdateMode = "replace" | "append";
 export const RECALL_TYPES: readonly RecallType[] = ["observation", "world", "experience"];
+
+export interface EntityInput {
+	text: string;
+	type?: string;
+}
+
+export interface RecallInclude {
+	entities?: null | Record<string, unknown>;
+	chunks?: null | Record<string, unknown>;
+	source_facts?: null | Record<string, unknown>;
+}
+
+export interface RetainClientOptions {
+	tags?: Tags;
+	sync?: boolean;
+	documentId?: string;
+	updateMode?: UpdateMode;
+	entities?: EntityInput[];
+	timestamp?: string;
+	observationScopes?: string | string[][];
+	metadata?: Record<string, string>;
+}
+
+export interface ReflectClientOptions {
+	tags?: Tags;
+	tagsMatch?: TagsMatch;
+	responseSchema?: Record<string, unknown>;
+	factTypes?: RecallType[];
+	budget?: RecallBudget;
+	maxTokens?: number;
+	include?: RecallInclude;
+	excludeMentalModels?: boolean;
+	excludeMentalModelIds?: string[];
+}
+
+export interface DirectiveConfig {
+	name: string;
+	content: string;
+	priority?: number;
+	tags?: string[];
+}
+
+export interface OutcomeDigestInput {
+	projectId?: string;
+	goalId?: string;
+	pr?: string | number;
+	branch?: string;
+	mergeTarget?: string;
+	title?: string;
+	content?: string;
+	achievements?: string[];
+	decisions?: string[];
+	files?: string[];
+	touchedFiles?: string[];
+	components?: string[];
+	tags?: Tags;
+	timestamp?: string;
+}
+
+export interface OutcomeDigest {
+	content: string;
+	documentId: string;
+	tags: Tags;
+	entities?: EntityInput[];
+	timestamp: string;
+	observationScopes?: string[][];
+}
 
 /** Resolve the recall/reflect tag filter for a deployment scope on the single
  *  shared bank (the single source of truth shared by the provider auto-recall and
@@ -93,14 +162,24 @@ export interface HindsightClientLike {
 	recall(
 		bank: string,
 		query: string,
-		opts?: { maxTokens?: number; tags?: Tags; tagsMatch?: TagsMatch; types?: RecallType[] },
+		opts?: { maxTokens?: number; budget?: RecallBudget; tags?: Tags; tagsMatch?: TagsMatch; types?: RecallType[]; include?: RecallInclude; queryTimestamp?: string; trace?: boolean },
 	): Promise<{ memories: RecallMemory[] }>;
-	retain(bank: string, content: string, opts?: { tags?: Tags; sync?: boolean }): Promise<void>;
-	reflect(bank: string, prompt: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ text: string }>;
+	retain(bank: string, content: string, opts?: RetainClientOptions): Promise<void>;
+	reflect(bank: string, prompt: string, opts?: ReflectClientOptions): Promise<{ text: string; structuredOutput?: unknown }>;
 	listBanks(): Promise<{ banks: string[] }>;
 	/** Idempotent bank-config mission update (PATCH …/config). Optional so unit-test
 	 *  fakes need not implement it; {@link applyBankMission} no-ops when absent. */
 	updateBankConfig?(bank: string, updates: BankMissionUpdates): Promise<void>;
+	getMentalModel?(bank: string, id: string): Promise<{ content?: string } | null>;
+	ensureMentalModel?(bank: string, opts: { id?: string; name: string; sourceQuery: string; tags?: string[]; maxTokens?: number; trigger?: Record<string, unknown> }): Promise<{ model: { content?: string } | null; created: boolean; operationId?: string }>;
+	refreshMentalModel?(bank: string, id: string): Promise<{ operationId?: string }>;
+	listDirectives?(bank: string): Promise<{ items: Array<{ id: string; name?: string; content?: string; priority?: number; is_active?: boolean; tags?: string[] }> }>;
+	createDirective?(bank: string, directive: { name: string; content: string; priority?: number; isActive?: boolean; tags?: string[] }): Promise<unknown>;
+	updateDirective?(bank: string, id: string, patch: { name?: string; content?: string; priority?: number; isActive?: boolean; tags?: string[] }): Promise<unknown>;
+	llmHealth?(bank: string): Promise<unknown>;
+	listOperations?(bank: string): Promise<{ items: unknown[] }>;
+	invalidateMemory?(bank: string, id: string, reason: string): Promise<void>;
+	getMemoryHistory?(bank: string, id: string): Promise<{ history: unknown[] }>;
 }
 
 export interface ClientConfig {
@@ -207,6 +286,20 @@ export interface EffectiveConfig {
 	/** Hindsight recall `types` filter — bias recall toward consolidated knowledge.
 	 *  Default favours `observation` plus `world`/`experience`. */
 	recallTypes: RecallType[];
+	recallQueryTimestampEnabled: boolean;
+	mentalModelEnabled: boolean;
+	mentalModelMaxTokens: number;
+	mentalModelRefreshEveryMs: number;
+	mentalModelRecallMaxTokens: number;
+	directivesEnabled: boolean;
+	directiveApplyMode: "disabled" | "bank-wide-explicit-opt-in" | "scoped-if-supported";
+	directiveSetVersion: string;
+	directives: DirectiveConfig[];
+	retainQueueDrainMaxPerHook: number;
+	retainQueueShutdownMax: number;
+	retainQueueHealthGate: boolean;
+	retainQueueLlmHealthGate: boolean;
+	retainQueueBatchPauseMs: number;
 	/** Bank-config missions applied to the shared bank (steer extraction/observation/
 	 *  reflection toward durable knowledge, away from transient noise). */
 	retainMission: string;
@@ -230,6 +323,15 @@ export const DEFAULT_OBSERVATIONS_MISSION =
 export const DEFAULT_REFLECT_MISSION =
 	"You are a long-term engineering memory for this team. Ground answers in documented decisions, preferences, conventions, and project state, drawing on consolidated observations rather than raw per-turn chatter. Be direct and precise; do not speculate or resurface transient noise.";
 
+export const DEFAULT_BOBBIT_DIRECTIVES: readonly DirectiveConfig[] = [
+	{
+		name: "bobbit-coding-agent-recall",
+		content: "Answer for a coding agent. Prefer recent, durable project facts and decisions; cite source facts when present; ignore transient turn noise unless it records a lasting decision or project-state change.",
+		priority: 50,
+		tags: ["bobbit"],
+	},
+];
+
 /** Flat defaults — the single source of truth mirrored by providers/memory.yaml. */
 export const CONFIG_DEFAULTS: EffectiveConfig = {
 	mode: "external",
@@ -245,6 +347,20 @@ export const CONFIG_DEFAULTS: EffectiveConfig = {
 	retainOverlapTurns: 2,
 	recallBudget: 1200,
 	recallTypes: [...RECALL_TYPES],
+	recallQueryTimestampEnabled: true,
+	mentalModelEnabled: true,
+	mentalModelMaxTokens: 1000,
+	mentalModelRefreshEveryMs: 86_400_000,
+	mentalModelRecallMaxTokens: 1200,
+	directivesEnabled: false,
+	directiveApplyMode: "disabled",
+	directiveSetVersion: "bobbit-v1",
+	directives: DEFAULT_BOBBIT_DIRECTIVES.map((d) => ({ ...d, tags: d.tags ? [...d.tags] : undefined })),
+	retainQueueDrainMaxPerHook: 1,
+	retainQueueShutdownMax: 10,
+	retainQueueHealthGate: true,
+	retainQueueLlmHealthGate: false,
+	retainQueueBatchPauseMs: 0,
 	retainMission: DEFAULT_RETAIN_MISSION,
 	observationsMission: DEFAULT_OBSERVATIONS_MISSION,
 	reflectMission: DEFAULT_REFLECT_MISSION,
@@ -285,6 +401,23 @@ function asRecallTypes(v: unknown, d: RecallType[]): RecallType[] {
 	const valid = v.filter(isRecallType);
 	return valid.length > 0 ? [...new Set(valid)] : [...d];
 }
+function isDirectiveApplyMode(v: unknown): v is EffectiveConfig["directiveApplyMode"] {
+	return v === "disabled" || v === "bank-wide-explicit-opt-in" || v === "scoped-if-supported";
+}
+function asDirectives(v: unknown, d: DirectiveConfig[]): DirectiveConfig[] {
+	if (!Array.isArray(v)) return d.map((x) => ({ ...x, tags: x.tags ? [...x.tags] : undefined }));
+	const out: DirectiveConfig[] = [];
+	for (const item of v) {
+		if (!isObj(item) || typeof item.name !== "string" || item.name.trim().length === 0 || typeof item.content !== "string") continue;
+		out.push({
+			name: item.name.trim(),
+			content: item.content,
+			...(typeof item.priority === "number" && Number.isFinite(item.priority) ? { priority: item.priority } : {}),
+			...(Array.isArray(item.tags) ? { tags: item.tags.filter((t) => typeof t === "string") } : {}),
+		});
+	}
+	return out.length > 0 ? out : d.map((x) => ({ ...x, tags: x.tags ? [...x.tags] : undefined }));
+}
 
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
@@ -299,6 +432,10 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	const retainEveryNTurns = Math.max(1, Math.floor(asNum(flat(raw, "retainEveryNTurns"), CONFIG_DEFAULTS.retainEveryNTurns)));
 	const retainMaxDelayMs = Math.max(0, Math.floor(asNum(flat(raw, "retainMaxDelayMs"), CONFIG_DEFAULTS.retainMaxDelayMs)));
 	const retainOverlapTurns = Math.max(0, Math.floor(asNum(flat(raw, "retainOverlapTurns"), CONFIG_DEFAULTS.retainOverlapTurns)));
+	const directiveApplyModeRaw = flat(raw, "directiveApplyMode");
+	const retainQueueDrainMaxPerHook = Math.max(0, Math.floor(asNum(flat(raw, "retainQueueDrainMaxPerHook"), CONFIG_DEFAULTS.retainQueueDrainMaxPerHook)));
+	const retainQueueShutdownMax = Math.max(0, Math.floor(asNum(flat(raw, "retainQueueShutdownMax"), CONFIG_DEFAULTS.retainQueueShutdownMax)));
+	const retainQueueBatchPauseMs = Math.max(0, Math.floor(asNum(flat(raw, "retainQueueBatchPauseMs"), CONFIG_DEFAULTS.retainQueueBatchPauseMs)));
 	return {
 		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
 		...(externalUrl ? { externalUrl } : {}),
@@ -318,6 +455,20 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 		retainOverlapTurns,
 		recallBudget: asNum(flat(raw, "recallBudget"), CONFIG_DEFAULTS.recallBudget),
 		recallTypes: asRecallTypes(flat(raw, "recallTypes"), CONFIG_DEFAULTS.recallTypes),
+		recallQueryTimestampEnabled: asBool(flat(raw, "recallQueryTimestampEnabled"), CONFIG_DEFAULTS.recallQueryTimestampEnabled),
+		mentalModelEnabled: asBool(flat(raw, "mentalModelEnabled"), CONFIG_DEFAULTS.mentalModelEnabled),
+		mentalModelMaxTokens: Math.max(1, Math.floor(asNum(flat(raw, "mentalModelMaxTokens"), CONFIG_DEFAULTS.mentalModelMaxTokens))),
+		mentalModelRefreshEveryMs: Math.max(0, Math.floor(asNum(flat(raw, "mentalModelRefreshEveryMs"), CONFIG_DEFAULTS.mentalModelRefreshEveryMs))),
+		mentalModelRecallMaxTokens: Math.max(1, Math.floor(asNum(flat(raw, "mentalModelRecallMaxTokens"), CONFIG_DEFAULTS.mentalModelRecallMaxTokens))),
+		directivesEnabled: asBool(flat(raw, "directivesEnabled"), CONFIG_DEFAULTS.directivesEnabled),
+		directiveApplyMode: isDirectiveApplyMode(directiveApplyModeRaw) ? directiveApplyModeRaw : CONFIG_DEFAULTS.directiveApplyMode,
+		directiveSetVersion: asString(flat(raw, "directiveSetVersion")) ?? CONFIG_DEFAULTS.directiveSetVersion,
+		directives: asDirectives(flat(raw, "directives"), CONFIG_DEFAULTS.directives),
+		retainQueueDrainMaxPerHook,
+		retainQueueShutdownMax,
+		retainQueueHealthGate: asBool(flat(raw, "retainQueueHealthGate"), CONFIG_DEFAULTS.retainQueueHealthGate),
+		retainQueueLlmHealthGate: asBool(flat(raw, "retainQueueLlmHealthGate"), CONFIG_DEFAULTS.retainQueueLlmHealthGate),
+		retainQueueBatchPauseMs,
 		retainMission: asString(flat(raw, "retainMission")) ?? CONFIG_DEFAULTS.retainMission,
 		observationsMission: asString(flat(raw, "observationsMission")) ?? CONFIG_DEFAULTS.observationsMission,
 		reflectMission: asString(flat(raw, "reflectMission")) ?? CONFIG_DEFAULTS.reflectMission,
@@ -374,14 +525,18 @@ export function clampRecallQuery(query: string, maxChars: number): string {
  *  4xx such as auth) are unaffected and still surface.
  *
  *  Detected STRUCTURALLY (no static dependency on the client's `HindsightError`):
- *  `kind:"http"` + `status:400` + a "too long"/"query" message (the client surfaces
- *  the upstream `detail` body in the error message). */
+ *  `kind:"http"` + `status:400` + a message that names the query AND carries
+ *  query-too-long/token-limit wording (the client surfaces the upstream `detail`
+ *  body in the error message). */
 export function isQueryTooLongError(e: unknown): boolean {
 	if (!e || typeof e !== "object") return false;
 	const err = e as { kind?: unknown; status?: unknown; message?: unknown };
 	if (err.kind !== "http" || err.status !== 400) return false;
 	const msg = typeof err.message === "string" ? err.message.toLowerCase() : "";
-	return msg.includes("too long") || msg.includes("query");
+	if (!/\bquery\b/.test(msg)) return false;
+	if (/\btoo\s+(?:long|large|many\s+tokens?)\b/.test(msg)) return true;
+	return /\b(?:exceeds?|exceeded)\b.*\b(?:max(?:imum)?|limit|tokens?)\b/.test(msg)
+		|| /\b(?:max(?:imum)?|limit|tokens?)\b.*\b(?:exceeds?|exceeded)\b/.test(msg);
 }
 
 /** The dormancy gate (the central invariant): the provider runs a hook's work
@@ -448,6 +603,12 @@ export interface QueueEntry {
 	bank?: string;
 	/** Target namespace captured at ENQUEUE time (mirrors {@link bank}). */
 	namespace?: string;
+	documentId?: string;
+	updateMode?: UpdateMode;
+	entities?: EntityInput[];
+	timestamp?: string;
+	observationScopes?: string | string[][];
+	metadata?: Record<string, string>;
 }
 
 export const QUEUE_KEY = "retain-queue";
@@ -464,6 +625,8 @@ export const BANK_CONFIG_APPLIED_PREFIX = "bank-config-applied:";
 /** Durable per-session auto-retain PENDING BUFFER prefix (holds the compact turn
  *  summaries awaiting an aggregate flush — batching, never sampling). */
 export const RETAIN_PENDING_PREFIX = "retain-pending:";
+export const MENTAL_MODEL_REFRESH_PREFIX = "mental-model-refresh:";
+export const DIRECTIVES_APPLIED_PREFIX = "directives-applied:";
 export const QUEUE_CAP = 100;
 
 export function projectConfigKey(projectId: string): string {
@@ -522,6 +685,178 @@ export function messageOf(e: unknown): string {
 
 export function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+function cleanIdPart(s: string): string {
+	return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+}
+
+export function mentalModelId(projectId: string): string {
+	return `bobbit-${cleanIdPart(projectId)}`;
+}
+
+export function mentalModelTags(projectId: string): string[] {
+	const pid = pidOf(projectId);
+	return pid ? [`project:${pid}`, "bobbit", "kind:mental-model"] : ["bobbit", "kind:mental-model"];
+}
+
+export function mentalModelSourceQuery(projectId: string, maxTokens: number): string {
+	const pid = pidOf(projectId) ?? "this project";
+	return `Current durable project state for ${pid}: key decisions, architecture, conventions, open threads, recent outcomes, and next actions. Prefer consolidated observations and durable facts. Limit to about ${Math.max(1, Math.floor(maxTokens))} tokens.`;
+}
+
+export interface MentalModelRefreshRecord {
+	lastAttemptAt?: number;
+	lastSuccessAt?: number;
+	operationId?: string;
+}
+
+export function mentalModelRefreshKey(cfg: EffectiveConfig, projectId: string): string {
+	return `${MENTAL_MODEL_REFRESH_PREFIX}${cfg.namespace}:${cfg.bank}:${mentalModelId(projectId)}`;
+}
+
+export async function shouldRefreshMentalModel(store: StoreLike | null, cfg: EffectiveConfig, projectId: string, now: number): Promise<boolean> {
+	if (!cfg.mentalModelEnabled) return false;
+	if (!Number.isFinite(cfg.mentalModelRefreshEveryMs) || cfg.mentalModelRefreshEveryMs <= 0) return true;
+	if (!store) return true;
+	try {
+		const rec = await store.get<MentalModelRefreshRecord>(mentalModelRefreshKey(cfg, projectId));
+		const last = rec && typeof rec.lastAttemptAt === "number" ? rec.lastAttemptAt : rec && typeof rec.lastSuccessAt === "number" ? rec.lastSuccessAt : 0;
+		return now - last >= cfg.mentalModelRefreshEveryMs;
+	} catch {
+		return true;
+	}
+}
+
+export async function recordMentalModelRefresh(store: StoreLike | null, cfg: EffectiveConfig, projectId: string, rec: MentalModelRefreshRecord): Promise<void> {
+	if (!store) return;
+	try {
+		await store.put(mentalModelRefreshKey(cfg, projectId), rec);
+	} catch {
+		/* best-effort cadence cache */
+	}
+}
+
+export function observationScopesForProject(projectId?: string): string[][] | undefined {
+	const pid = pidOf(projectId);
+	return pid ? [[`project:${pid}`]] : undefined;
+}
+
+function uniqueEntities(items: EntityInput[]): EntityInput[] {
+	const seen = new Set<string>();
+	const out: EntityInput[] = [];
+	for (const item of items) {
+		const text = typeof item.text === "string" ? item.text.trim() : "";
+		if (!text) continue;
+		const type = typeof item.type === "string" && item.type.trim().length > 0 ? item.type.trim() : undefined;
+		const key = `${type ?? ""}\0${text}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(type ? { text, type } : { text });
+	}
+	return out;
+}
+
+function stringArray(v: unknown): string[] {
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim()) : [];
+}
+
+export function entitiesFromContext(ctx: unknown): EntityInput[] | undefined {
+	if (!isObj(ctx)) return undefined;
+	const files = [...stringArray(ctx.files), ...stringArray(ctx.touchedFiles)];
+	const components = stringArray(ctx.components);
+	const entities = uniqueEntities([
+		...files.map((text) => ({ text, type: "file" })),
+		...components.map((text) => ({ text, type: "component" })),
+	]);
+	return entities.length > 0 ? entities : undefined;
+}
+
+export function entitiesFromOutcomeBody(body: unknown): EntityInput[] | undefined {
+	if (!isObj(body)) return undefined;
+	const explicit = Array.isArray(body.entities)
+		? body.entities.filter((e): e is EntityInput => isObj(e) && typeof e.text === "string").map((e) => ({ text: e.text, ...(typeof e.type === "string" ? { type: e.type } : {}) }))
+		: [];
+	const files = [...stringArray(body.files), ...stringArray(body.touchedFiles)];
+	const components = stringArray(body.components);
+	const entities = uniqueEntities([
+		...explicit,
+		...files.map((text) => ({ text, type: "file" })),
+		...components.map((text) => ({ text, type: "component" })),
+	]);
+	return entities.length > 0 ? entities : undefined;
+}
+
+export function outcomeTags(input: OutcomeDigestInput, extra?: Tags): Tags {
+	const tags: Tags = { kind: "outcome", bobbit: "true", ...(extra ?? {}), ...(input.tags ?? {}) };
+	const pid = pidOf(input.projectId);
+	if (pid) tags.project = pid;
+	if (typeof input.goalId === "string" && input.goalId.trim().length > 0) tags.goal = input.goalId.trim();
+	if (input.pr !== undefined && String(input.pr).trim().length > 0) tags.pr = String(input.pr).trim();
+	return tags;
+}
+
+export function buildOutcomeDigest(input: OutcomeDigestInput): OutcomeDigest {
+	const timestamp = input.timestamp && !Number.isNaN(Date.parse(input.timestamp)) ? input.timestamp : new Date().toISOString();
+	const goalOrPr = input.goalId ? `goal:${input.goalId}` : input.pr !== undefined ? `pr:${input.pr}` : `manual:${cleanIdPart(input.title ?? timestamp)}`;
+	const lines: string[] = [];
+	lines.push(input.title ? `Outcome: ${input.title}` : `Outcome digest for ${goalOrPr}`);
+	if (input.branch) lines.push(`Branch: ${input.branch}`);
+	if (input.mergeTarget) lines.push(`Merge target: ${input.mergeTarget}`);
+	if (input.content && input.content.trim()) lines.push(input.content.trim());
+	if (input.achievements?.length) lines.push(`Achievements:\n${input.achievements.map((x) => `- ${x}`).join("\n")}`);
+	if (input.decisions?.length) lines.push(`Decisions:\n${input.decisions.map((x) => `- ${x}`).join("\n")}`);
+	const files = [...stringArray(input.files), ...stringArray(input.touchedFiles)];
+	if (files.length) lines.push(`Files/components:\n${[...files, ...stringArray(input.components)].map((x) => `- ${x}`).join("\n")}`);
+	const entities = entitiesFromOutcomeBody(input);
+	return {
+		content: lines.join("\n\n"),
+		documentId: input.goalId ? `outcome:${input.goalId}` : input.pr !== undefined ? `outcome:pr:${input.pr}` : `outcome:${goalOrPr}`,
+		tags: outcomeTags(input),
+		...(entities ? { entities } : {}),
+		timestamp,
+		...(observationScopesForProject(input.projectId) ? { observationScopes: observationScopesForProject(input.projectId) } : {}),
+	};
+}
+
+export function currentQueryTimestamp(enabled: boolean, now = new Date()): string | undefined {
+	return enabled ? now.toISOString() : undefined;
+}
+
+export function directivesSignature(cfg: EffectiveConfig): string {
+	return JSON.stringify({ ns: cfg.namespace, bank: cfg.bank, mode: cfg.directiveApplyMode, version: cfg.directiveSetVersion, directives: cfg.directives });
+}
+
+export function reflectInstructionPrefix(cfg: EffectiveConfig): string {
+	if (cfg.directivesEnabled && cfg.directiveApplyMode !== "disabled") return "";
+	return DEFAULT_BOBBIT_DIRECTIVES[0]?.content ?? "";
+}
+
+export async function applyDirectives(store: StoreLike | null, client: HindsightClientLike, cfg: EffectiveConfig): Promise<void> {
+	if (!cfg.directivesEnabled || cfg.directiveApplyMode === "disabled") return;
+	if (typeof client.listDirectives !== "function" || typeof client.createDirective !== "function") return;
+	const key = `${DIRECTIVES_APPLIED_PREFIX}${cfg.namespace}:${cfg.bank}`;
+	const sig = directivesSignature(cfg);
+	if (store) {
+		try {
+			if ((await store.get<string>(key)) === sig) return;
+		} catch {
+			/* fall through */
+		}
+	}
+	try {
+		const existing = await client.listDirectives(cfg.bank);
+		for (const directive of cfg.directives) {
+			if (!directive.name.startsWith("bobbit-")) continue;
+			const current = existing.items.find((d) => d.name === directive.name);
+			const payload = { ...directive, isActive: true, tags: [...new Set([...(directive.tags ?? []), "bobbit"])] };
+			if (current?.id && typeof client.updateDirective === "function") await client.updateDirective(cfg.bank, current.id, payload);
+			else await client.createDirective(cfg.bank, payload);
+		}
+		if (store) await store.put(key, sig);
+	} catch (e) {
+		if (store) await recordError(store, e);
+	}
 }
 
 // ── Config validation (routes `config` SET). ──────────────────────────────────
@@ -588,6 +923,25 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		if (Array.isArray(v) && v.length > 0 && v.every(isRecallType)) value.recallTypes = [...new Set(v)];
 		else errors.push("recallTypes must be a non-empty array of 'observation'|'world'|'experience'");
 	}
+	for (const key of ["recallQueryTimestampEnabled", "mentalModelEnabled", "directivesEnabled", "retainQueueHealthGate", "retainQueueLlmHealthGate"] as const) {
+		if (key in body) {
+			if (typeof body[key] === "boolean") value[key] = body[key];
+			else errors.push(`${key} must be a boolean`);
+		}
+	}
+	if ("directiveApplyMode" in body) {
+		if (isDirectiveApplyMode(body.directiveApplyMode)) value.directiveApplyMode = body.directiveApplyMode;
+		else errors.push("directiveApplyMode must be 'disabled', 'bank-wide-explicit-opt-in', or 'scoped-if-supported'");
+	}
+	if ("directiveSetVersion" in body) {
+		if (typeof body.directiveSetVersion === "string" && body.directiveSetVersion.trim().length > 0) value.directiveSetVersion = body.directiveSetVersion.trim();
+		else errors.push("directiveSetVersion must be a non-empty string");
+	}
+	if ("directives" in body) {
+		const parsed = asDirectives(body.directives, []);
+		if (parsed.length > 0) value.directives = parsed;
+		else errors.push("directives must be a non-empty list of { name, content }");
+	}
 	// Configurable bank-mission strings ("" keeps the default — see resolveConfig).
 	for (const key of ["retainMission", "observationsMission", "reflectMission"] as const) {
 		if (key in body) {
@@ -616,11 +970,18 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		if (typeof v === "number" && Number.isFinite(v) && v >= 0) value.retainOverlapTurns = Math.floor(v);
 		else errors.push("retainOverlapTurns must be a number >= 0");
 	}
-	for (const key of ["recallBudget", "recallMaxInputChars", "timeoutMs"] as const) {
+	for (const key of ["recallBudget", "recallMaxInputChars", "timeoutMs", "mentalModelMaxTokens", "mentalModelRecallMaxTokens"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "number" && Number.isFinite(v) && v > 0) value[key] = v;
 			else errors.push(`${key} must be a positive number`);
+		}
+	}
+	for (const key of ["mentalModelRefreshEveryMs", "retainQueueDrainMaxPerHook", "retainQueueShutdownMax", "retainQueueBatchPauseMs"] as const) {
+		if (key in body) {
+			const v = body[key];
+			if (typeof v === "number" && Number.isFinite(v) && v >= 0) value[key] = Math.floor(v);
+			else errors.push(`${key} must be a number >= 0`);
 		}
 	}
 
