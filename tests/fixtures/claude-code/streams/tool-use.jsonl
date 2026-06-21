@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"claude-sess-1","model":"sonnet"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"README.md"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"# README"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}
+{"type":"result","subtype":"success","session_id":"claude-sess-1","result":"Done","is_error":false}

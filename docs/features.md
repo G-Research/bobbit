@@ -4,9 +4,10 @@ Detailed reference for all Bobbit features. For a quick overview, see the [READM
 
 ## Sessions
 
-Each session is a running `pi-coding-agent` child process with its own conversation history.
+Each session is either a standard `pi-coding-agent` child process or, when explicitly selected, a local Claude Code CLI runtime session.
 
-- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. If an agent was mid-turn when the server died, it is automatically re-prompted.
+- **Runtimes**: The default session runtime remains Pi. Claude Code appears as a separate local runtime/model option backed by the user's installed `claude` CLI and existing Claude Code login, not by a normal API-backed provider. See [claude-code-runtime.md](claude-code-runtime.md).
+- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, Pi sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file; Claude Code sessions persist their own `claudeCodeSessionId` for `--resume` where available. If an agent was mid-turn when the server died, it is automatically re-prompted where the runtime supports it.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
 - **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).

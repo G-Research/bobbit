@@ -17,7 +17,9 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
+import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime, runtimeFromModelString, runtimeFromProvider, type SessionBridgeOptions } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
@@ -175,6 +177,20 @@ function isBlankContentBlockError(errMsg: string | undefined): boolean {
 	return /text field in the ContentBlock/i.test(errMsg) && /is blank/i.test(errMsg);
 }
 
+function extractClaudeCodeSessionId(value: any): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	for (const key of ["claudeCodeSessionId", "session_id"] as const) {
+		const candidate = value[key];
+		if (typeof candidate === "string" && candidate.trim()) return candidate;
+	}
+	return extractClaudeCodeSessionId(value.data) ?? extractClaudeCodeSessionId(value.result) ?? extractClaudeCodeSessionId(value.metadata);
+}
+
+function canResumeClaudeCodeSession(ps: Pick<PersistedSession, "runtime" | "modelProvider" | "claudeCodeSessionId"> | undefined): boolean {
+	if (!ps || typeof ps.claudeCodeSessionId !== "string" || !ps.claudeCodeSessionId.trim()) return false;
+	return resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
+}
+
 /** Provenance of a prompt enqueued into a session. Read by TeamManager on
  *  agent_start to decide whether to reset idle-nudge backoff counters.
  *  Only "user" and "system" reset the counter; everything else preserves it. */
@@ -202,7 +218,7 @@ export interface SessionInfo {
 	createdAt: number;
 	lastActivity: number;
 	clients: Set<WebSocket>;
-	rpcClient: RpcBridge;
+	rpcClient: IRpcBridge;
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -1265,6 +1281,14 @@ export class SessionManager {
 		return this.sandboxManager;
 	}
 
+	private readClaudeCodeConfigForProject(projectId?: string) {
+		if (!this.preferencesStore) return undefined;
+		const projectConfigStore = projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore ?? null)
+			: (this.projectConfigStore ?? null);
+		return readClaudeCodeConfig(this.preferencesStore, projectConfigStore);
+	}
+
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
@@ -1300,6 +1324,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
@@ -2239,7 +2264,7 @@ export class SessionManager {
 			|| session.lifecycleFenced === true;
 		if (inReviveWindow) {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
+			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
 				// Coalesces: joins an in-flight restore or starts the single restore.
 				await this._restoreSessionCoalesced(ps);
 				const revived = this.sessions.get(sessionId);
@@ -2765,6 +2790,11 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		const claudeCodeSessionId = extractClaudeCodeSessionId(event);
+		if (claudeCodeSessionId) {
+			this.resolveStoreForSession(session.id).update(session.id, { runtime: "claude-code", claudeCodeSessionId });
+		}
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -3266,7 +3296,7 @@ export class SessionManager {
 		let ps: PersistedSession | undefined;
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
-		if (!ps?.agentSessionFile) return undefined;
+		if (!ps || (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps))) return undefined;
 		const restored = await this._respawnAgentInPlace(session, ps);
 		return restored ?? this.sessions.get(session.id);
 	}
@@ -3654,9 +3684,11 @@ export class SessionManager {
 		if (!ps) throw new Error("No persisted session data");
 
 		// Zombie-archive guard: a record with neither an agent session file nor a role
-		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
-		// instead of throwing opaquely on every Restart click.
-		if (!ps.agentSessionFile && !ps.role) {
+		// can't be bootstrapped by `_respawnAgentInPlace`. Claude Code sessions resume
+		// from their persisted Claude session id instead of a Pi JSONL transcript.
+		// Archive unrecoverable records surface-side instead of throwing opaquely on
+		// every Restart click.
+		if (!ps.agentSessionFile && !ps.role && !canResumeClaudeCodeSession(ps)) {
 			console.warn(
 				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
 				`(no agentSessionFile, no role) — archiving instead of restarting.`,
@@ -3800,7 +3832,7 @@ export class SessionManager {
 		// in restoreSession() — no delegate-specific registry.
 		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
-			if (!ps.agentSessionFile) {
+			if (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps)) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -3971,7 +4003,13 @@ export class SessionManager {
 				return;
 			}
 		}
-		if (!ps.agentSessionFile) {
+		const psRuntime = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider });
+		if (psRuntime === "claude-code" && ps.sandboxed) {
+			console.warn(`[session-manager] Archiving ${ps.id} — Claude Code local runtime is host-only in the MVP and cannot restore sandboxed sessions`);
+			sessionStore.archive(ps.id);
+			return;
+		}
+		if (!ps.agentSessionFile && !(psRuntime === "claude-code" && ps.claudeCodeSessionId)) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
 			const recovered = this.recoverSessionFile(ps);
@@ -4000,7 +4038,9 @@ export class SessionManager {
 			}
 		}
 		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
+		const fileFound = psRuntime === "claude-code" && !ps.agentSessionFile
+			? true
+			: await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
 			// `agentSessionFile` is set (persistSessionMetadata only records it after a
 			// live getState) but no transcript exists on disk. Pi (>=0.77) creates the
@@ -4072,7 +4112,7 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
-		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
+		const bridgeOptions: SessionBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
@@ -4331,7 +4371,18 @@ export class SessionManager {
 		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const runtime = resolveSessionRuntime({ runtime: ps.runtime, initialModel: bridgeOptions.initialModel, modelProvider: ps.modelProvider });
+		assertRuntimeAllowedForSession(runtime, ps.sandboxed);
+		Object.assign(bridgeOptions, hydrateRuntimeOptions({
+			...bridgeOptions,
+			runtime,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
+			claudeCodeExecutable: ps.claudeCodeExecutable,
+			claudeCodePermissionMode: ps.claudeCodePermissionMode,
+			claudeCodeModelAlias: ps.claudeCodeModelAlias,
+		}, this.readClaudeCodeConfigForProject(ps.projectId)));
+
+		const rpcClient = createSessionBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
 		// stash the previous session's streaming frame-of-reference on `ps` so the
@@ -4424,27 +4475,31 @@ export class SessionManager {
 
 		await rpcClient.start();
 
-		// Resume the agent's previous session file
-		// Session files are now stored on the host via bind-mounted state dir.
-		// No path translation needed — the agent session file is always a host path.
-		const switchSessionPath = ps.agentSessionFile;
-		// Un-poison any blank-text user messages persisted before the
-		// attachment-only fix, so the agent doesn't re-send an invalid blank
-		// ContentBlock on resume (best-effort, non-fatal).
-		await sanitizeAgentTranscriptFile(
-			{ sandboxed: ps.sandboxed, projectId: ps.projectId },
-			switchSessionPath,
-			this.sandboxManager,
-		);
-		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: switchSessionPath },
-			switchTimeout,
-		);
-		restoring = false;
-		if (!switchResp.success) {
-			await rpcClient.stop();
-			throw new Error(`switch_session failed: ${switchResp.error}`);
+		if (runtime === "claude-code") {
+			restoring = false;
+		} else {
+			// Resume the agent's previous session file
+			// Session files are now stored on the host via bind-mounted state dir.
+			// No path translation needed — the agent session file is always a host path.
+			const switchSessionPath = ps.agentSessionFile;
+			// Un-poison any blank-text user messages persisted before the
+			// attachment-only fix, so the agent doesn't re-send an invalid blank
+			// ContentBlock on resume (best-effort, non-fatal).
+			await sanitizeAgentTranscriptFile(
+				{ sandboxed: ps.sandboxed, projectId: ps.projectId },
+				switchSessionPath,
+				this.sandboxManager,
+			);
+			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
+			const switchResp = await rpcClient.sendCommand(
+				{ type: "switch_session", sessionPath: switchSessionPath },
+				switchTimeout,
+			);
+			restoring = false;
+			if (!switchResp.success) {
+				await rpcClient.stop();
+				throw new Error(`switch_session failed: ${switchResp.error}`);
+			}
 		}
 
 		broadcastStatus(session, "idle");
@@ -4510,7 +4565,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: import("./session-store.js").SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; claudeCodeSessionId?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4521,6 +4576,9 @@ export class SessionManager {
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
+		const requestedInitialModel = opts?.initialModel ?? (!opts?.skipAutoModel ? this.resolveInitialModel(opts?.role ?? opts?.roleName, projectId) : undefined);
+		const requestedRuntime = opts?.runtime ?? runtimeFromModelString(requestedInitialModel) ?? "pi";
+		assertRuntimeAllowedForSession(requestedRuntime, opts?.sandboxed);
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
 		// (`host.agents.spawn` → OrchestrationCore.spawn → createSession) threads only
@@ -4654,9 +4712,11 @@ export class SessionManager {
 				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
+				runtime: requestedRuntime,
 				initialModel: opts?.initialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+				claudeCodeSessionId: opts?.claudeCodeSessionId,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
 			};
@@ -4737,9 +4797,11 @@ export class SessionManager {
 			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
+			runtime: requestedRuntime,
 			initialModel: opts?.initialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+			claudeCodeSessionId: opts?.claudeCodeSessionId,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
 		};
@@ -4816,6 +4878,9 @@ export class SessionManager {
 		// ── Sandbox propagation from parent ──
 		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
 		let delegateSandboxed = false;
+		if (runtimeFromModelString(opts.initialModel) === "claude-code" && parentMeta?.sandboxed) {
+			throw new Error("Claude Code local runtime is host-only in the MVP and cannot run inside Bobbit Docker sandboxes.");
+		}
 		if (parentMeta?.sandboxed) {
 			// Always use the parent's validated host-side cwd — never trust the
 			// cwd from the container.  The agent sends process.cwd() which is a
@@ -4863,6 +4928,7 @@ export class SessionManager {
 		const plan: SessionSetupPlan = {
 			id,
 			mode: "delegate",
+			runtime: runtimeFromModelString(opts.initialModel) ?? "pi",
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
@@ -5184,6 +5250,64 @@ export class SessionManager {
 		}
 	}
 
+	private isClaudeCodeRuntimeSession(session: SessionInfo): boolean {
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.runtime === "claude-code") return true;
+			if (runtimeFromProvider(persisted?.modelProvider) === "claude-code") return true;
+		} catch { /* best-effort; fall through to spawn metadata */ }
+		return runtimeFromModelString(session.spawnPinnedModel) === "claude-code";
+	}
+
+	private async tryAutoSelectClaudeCodeModel(session: SessionInfo, spawnPinned: boolean): Promise<void> {
+		const roleModel = this.resolveRoleModel(session);
+		if (roleModel) {
+			await this.applyClaudeCodeAutoModelCandidate(session, roleModel, `role.${session.role}.model`, spawnPinned);
+			return;
+		}
+
+		const sessionModelPref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		if (sessionModelPref) {
+			await this.applyClaudeCodeAutoModelCandidate(session, sessionModelPref, "default.sessionModel", spawnPinned);
+		}
+	}
+
+	private async applyClaudeCodeAutoModelCandidate(session: SessionInfo, modelString: string, contextLabel: string, spawnPinned: boolean): Promise<void> {
+		const slash = modelString.indexOf("/");
+		if (slash <= 0 || slash === modelString.length - 1) {
+			console.warn(`[session-manager] Malformed ${contextLabel} preference for Claude Code session ${session.id}: "${modelString}", ignoring`);
+			return;
+		}
+		const provider = modelString.slice(0, slash);
+		if (provider !== "claude-code") {
+			console.warn(`[session-manager] ${contextLabel} "${modelString}" targets the Pi runtime; skipping for Claude Code session ${session.id}.`);
+			return;
+		}
+		if (!isSessionSelectableModelString(modelString)) {
+			console.warn(`[session-manager] ${contextLabel} "${modelString}" is not session-selectable for Claude Code session ${session.id}; skipping.`);
+			return;
+		}
+		const modelId = modelString.slice(slash + 1);
+		const skipSetModel = spawnPinned && session.spawnPinnedModel === modelString;
+		try {
+			await applyModelString(session.rpcClient, modelString, {
+				sessionManager: this,
+				sessionId: session.id,
+				contextLabel,
+				skipSetModel,
+			});
+			this._writeModelNameFile(session.id, modelString);
+			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+			broadcast(session.clients, {
+				type: "state",
+				data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+			});
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Confirmed Claude Code model "${modelString}" for session ${session.id}${skipSetModel ? " (spawn-pinned)" : ""}`);
+		} catch (err) {
+			console.warn(`[session-manager] Claude Code model "${modelString}" was not applied for ${session.id}:`, err);
+		}
+	}
+
 	/**
 	 * Resolve the model to pin at spawn time for a session, given its role &
 	 * project. Mirrors `tryAutoSelectModel`'s precedence: role override →
@@ -5268,6 +5392,11 @@ export class SessionManager {
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
+
+		if (this.isClaudeCodeRuntimeSession(session)) {
+			await this.tryAutoSelectClaudeCodeModel(session, spawnPinned);
+			return;
+		}
 
 		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
 		// matching the contract used for review/QA sessions: if a user explicitly
@@ -5447,6 +5576,22 @@ export class SessionManager {
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
 				const stateResp = await session.rpcClient.getState();
+				const stateRuntime = stateResp.data?.runtime as string | undefined;
+				const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
+				if (stateResp.success && (stateRuntime === "claude-code" || claudeCodeSessionId)) {
+					const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
+					const ps = this.resolveStoreForSession(session.id).get(session.id);
+					this.resolveStoreForSession(session.id).update(session.id, {
+						runtime: "claude-code",
+						modelProvider: "claude-code",
+						modelId,
+						claudeCodeSessionId,
+						claudeCodeExecutable: ps?.claudeCodeExecutable,
+						claudeCodePermissionMode: ps?.claudeCodePermissionMode,
+						claudeCodeModelAlias: modelId ?? ps?.claudeCodeModelAlias,
+					});
+					return;
+				}
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
@@ -5676,6 +5821,13 @@ export class SessionManager {
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
+		runtime?: import("./session-store.js").SessionRuntime;
+		claudeCodeSessionId?: string;
+		claudeCodeExecutable?: string;
+		claudeCodePermissionMode?: import("./session-store.js").ClaudeCodePermissionMode;
+		claudeCodeModelAlias?: string;
+		modelProvider?: string;
+		modelId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -5716,6 +5868,13 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
+				runtime: ps?.runtime ?? "pi",
+				claudeCodeSessionId: ps?.claudeCodeSessionId,
+				claudeCodeExecutable: ps?.claudeCodeExecutable,
+				claudeCodePermissionMode: ps?.claudeCodePermissionMode,
+				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
+				modelProvider: ps?.modelProvider,
+				modelId: ps?.modelId,
 			};
 		});
 	}
@@ -5960,7 +6119,7 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -6005,8 +6164,18 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
+		assertRuntimeAllowedForSession(runtime, session.sandboxed);
+		Object.assign(bridgeOptions, hydrateRuntimeOptions({
+			...bridgeOptions,
+			runtime,
+			claudeCodeSessionId: respawnPersisted?.claudeCodeSessionId,
+			claudeCodeExecutable: respawnPersisted?.claudeCodeExecutable,
+			claudeCodePermissionMode: respawnPersisted?.claudeCodePermissionMode,
+			claudeCodeModelAlias: respawnPersisted?.claudeCodeModelAlias,
+		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const rpcClient = createSessionBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		let switchingSession = true;
@@ -6026,7 +6195,7 @@ export class SessionManager {
 
 		// Restore conversation from session file — path is already in agent coordinate system.
 		const roleFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
-		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+		if (runtime !== "claude-code" && agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
 			const switchResp = await rpcClient.sendCommand(
 				{ type: "switch_session", sessionPath: agentSessionFile },
@@ -6225,7 +6394,13 @@ export class SessionManager {
 
 	/** Persist model provider/id so archived sessions can display model info. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
-		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
+		const runtime = runtimeFromProvider(provider);
+		this.resolveStoreForSession(sessionId).update(sessionId, {
+			modelProvider: provider,
+			modelId,
+			runtime,
+			claudeCodeModelAlias: runtime === "claude-code" ? modelId : undefined,
+		});
 	}
 
 	/** Persist per-session image generation model override. Validates against the
@@ -6375,7 +6550,18 @@ export class SessionManager {
 		// the conversation may still be empty. This ensures the latest messages
 		// are written before we archive.
 		try {
-			await session.rpcClient.getState();
+			const stateResp = await session.rpcClient.getState();
+			const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
+			const persistedRuntime = resolveSessionRuntime(this.resolveStoreForSession(id).get(id) ?? {});
+			if (persistedRuntime === "claude-code" && stateResp?.success && claudeCodeSessionId) {
+				const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
+				this.resolveStoreForSession(id).update(id, {
+					runtime: "claude-code",
+					modelProvider: "claude-code",
+					...(modelId ? { modelId, claudeCodeModelAlias: modelId } : {}),
+					claudeCodeSessionId,
+				});
+			}
 		} catch {
 			// Agent may already be stopped — best-effort flush
 		}
@@ -7100,7 +7286,7 @@ export class SessionManager {
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
+			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this._restoreSessionCoalesced(ps)
 					.then(() => {
@@ -7243,7 +7429,7 @@ export class SessionManager {
 		try {
 			await this._coalesceRestore(id, async (generation) => {
 				session.lifecycleGeneration = generation;
-				const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+				const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -7316,8 +7502,18 @@ export class SessionManager {
 			}
 			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+			const runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: forceRespawnPersisted?.modelProvider });
+			assertRuntimeAllowedForSession(runtime, session.sandboxed);
+			Object.assign(bridgeOptions, hydrateRuntimeOptions({
+				...bridgeOptions,
+				runtime,
+				claudeCodeSessionId: forceRespawnPersisted?.claudeCodeSessionId,
+				claudeCodeExecutable: forceRespawnPersisted?.claudeCodeExecutable,
+				claudeCodePermissionMode: forceRespawnPersisted?.claudeCodePermissionMode,
+				claudeCodeModelAlias: forceRespawnPersisted?.claudeCodeModelAlias,
+			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-			const rpcClient = new RpcBridge(bridgeOptions);
+			const rpcClient = createSessionBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;
@@ -7339,7 +7535,7 @@ export class SessionManager {
 
 			// Resume session if we have the session file — path in agent coordinate system
 			const abortFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
-			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+			if (runtime !== "claude-code" && agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 				// Un-poison blank-text user messages before rehydrating — this is
 				// the route a live already-stuck session takes (forceAbort →
 				// respawn), so the re-spawned agent reads a sanitized transcript.

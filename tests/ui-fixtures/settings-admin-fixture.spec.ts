@@ -236,6 +236,82 @@ test.describe("Settings/admin UI fixture", () => {
 			.toBeUndefined();
 	});
 
+	test("Claude Code settings show auth status, save controls, and gate bypass permissions", async ({ page }) => {
+		await resetFixture(page, {
+			claudeCodeStatus: {
+				available: true,
+				authenticated: false,
+				ready: false,
+				checking: false,
+				commandPath: "claude",
+				version: "1.2.3",
+				modelAliases: ["default", "sonnet", "opus"],
+				permissionMode: "default",
+				reason: "auth_required",
+				message: "Claude Code is installed but not authenticated.",
+			},
+		});
+		await renderSettings(page, "#/settings/system/models");
+		const section = page.locator("[data-testid='claude-code-section']");
+		await expect(section).toBeVisible();
+		await expect(section.locator("[data-testid='claude-code-status-title']")).toHaveText("Claude Code login required");
+		await expect(section.getByText("Refresh status")).toBeVisible();
+
+		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
+		await section.locator("[data-testid='claude-code-executable']").blur();
+		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
+
+		await section.locator("[data-testid='claude-code-default-model']").selectOption("opus");
+		await expect.poll(async () => (await prefs(page))["claudeCode.defaultModel"]).toBe("opus");
+
+		const permission = section.locator("[data-testid='claude-code-permission-mode']");
+		expect(await permission.locator("option[value='bypassPermissions']").getAttribute("disabled")).not.toBeNull();
+		await permission.selectOption("acceptEdits");
+		await expect.poll(async () => (await prefs(page))["claudeCode.permissionMode"]).toBe("acceptEdits");
+	});
+
+	test("Claude Code auth-unknown status is not labelled login required", async ({ page }) => {
+		await resetFixture(page, {
+			claudeCodeStatus: {
+				available: true,
+				authenticated: false,
+				ready: true,
+				checking: false,
+				commandPath: "claude",
+				version: "1.2.3",
+				authenticationStatus: "unknown",
+				message: "Claude Code CLI is available. Login will be verified when a Claude Code session starts.",
+			},
+		});
+		await renderSettings(page, "#/settings/system/models");
+		const title = page.locator("[data-testid='claude-code-status-title']");
+		await expect(title).toHaveText("CLI available; auth checked at session start");
+		await expect(title).not.toHaveText("Claude Code login required");
+	});
+
+	test("Claude Code status refresh posts and updates ready card", async ({ page }) => {
+		await resetFixture(page, {
+			claudeCodeStatus: {
+				available: true,
+				authenticated: true,
+				ready: true,
+				checking: false,
+				commandPath: "claude",
+				version: "1.2.3",
+				modelAliases: ["sonnet"],
+				permissionMode: "default",
+			},
+		});
+		await renderSettings(page, "#/settings/system/models");
+		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
+		await page.locator("[data-testid='claude-code-refresh-status']").click();
+		await expect(page.locator("[data-testid='claude-code-status-title']")).toHaveText("Ready");
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getSettingsAdminFetchLog());
+			return log.some((e: any) => e.url === "/api/claude-code/status/refresh" && e.method === "POST");
+		}).toBe(true);
+	});
+
 	test("image model picker navigates, selects, persists, flags stale prefs, and clears", async ({ page }) => {
 		await renderSettings(page, "#/settings/system/models");
 		const row = page.locator("[data-testid='image-model-row']").first();

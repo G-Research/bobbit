@@ -155,6 +155,30 @@ describe("SessionStore", () => {
 			assert.equal(updated.teamGoalId, "goal-42");
 		});
 
+		it("round-trips Claude Code runtime metadata through disk", () => {
+			const store1 = freshStore();
+			store1.put(makeSession({
+				runtime: "claude-code",
+				modelProvider: "claude-code",
+				modelId: "sonnet",
+				claudeCodeSessionId: "cc-session-1",
+				claudeCodeExecutable: "claude",
+				claudeCodePermissionMode: "acceptEdits",
+				claudeCodeModelAlias: "sonnet",
+			}));
+			store1.flush();
+
+			const store2 = freshStore();
+			const restored = store2.get("sess-1")!;
+			assert.equal(restored.runtime, "claude-code");
+			assert.equal(restored.modelProvider, "claude-code");
+			assert.equal(restored.modelId, "sonnet");
+			assert.equal(restored.claudeCodeSessionId, "cc-session-1");
+			assert.equal(restored.claudeCodeExecutable, "claude");
+			assert.equal(restored.claudeCodePermissionMode, "acceptEdits");
+			assert.equal(restored.claudeCodeModelAlias, "sonnet");
+		});
+
 		it("persists first-class child session metadata", () => {
 			const walkthroughAllowedTools = ["read", "grep", "find", "ls", "readonly_bash", "submit_pr_walkthrough_yaml"];
 			const store1 = freshStore();

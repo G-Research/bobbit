@@ -18,6 +18,8 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
+import { CLAUDE_CODE_MODEL_ALIASES } from "./claude-code-config.js";
+import { getClaudeCodeStatus } from "./claude-code-status.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -48,6 +50,12 @@ export interface ApiModel {
 	sessionSelectable?: boolean;
 	/** Human-readable reason shown in the selector when `sessionSelectable === false`. */
 	sessionUnavailableReason?: string;
+	/** Session runtime required for this model. Undefined/"pi" preserves legacy Pi runtime behavior. */
+	runtime?: "pi" | "claude-code";
+	/** True for host-local runtimes that are not normal API-backed models. */
+	localRuntime?: boolean;
+	/** Short provider/runtime label for selectors, e.g. "Claude Code (local)". */
+	runtimeLabel?: string;
 }
 
 export interface CustomProviderConfig {
@@ -88,14 +96,17 @@ export function getBuiltInProviderIds(): string[] {
 	return getProviders().map(provider => String(provider));
 }
 
-export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+export async function getAvailableModels(
+	prefs: PreferencesStore,
+	projectConfig?: { get(key: string): string | undefined } | null,
+): Promise<ApiModel[]> {
 	const now = Date.now();
-	const currentVersion = getPrefsVersion(prefs);
+	const currentVersion = getPrefsVersion(prefs, projectConfig);
 	if (cachedModels && now < cacheExpiry && currentVersion === cacheConfigVersion) {
 		return cachedModels;
 	}
 
-	const result = await assembleModels(prefs);
+	const result = await assembleModels(prefs, projectConfig);
 	cachedModels = result;
 	cacheExpiry = now + 5000;
 	cacheConfigVersion = currentVersion;
@@ -106,13 +117,19 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
  * Simple version tracking — hash relevant preference keys.
  * We use a string hash of aigw.url + customProviders + providerKeys to detect changes.
  */
-function getPrefsVersion(prefs: PreferencesStore): number {
+function getPrefsVersion(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): number {
 	const all = prefs.getAll();
 	let hash = 0;
 	const str = JSON.stringify([
 		all["aigw.url"],
 		all["aigw.exclusive"],
 		all["customProviders"],
+		all["claudeCode.executablePath"],
+		all["claudeCode.defaultModel"],
+		all["claudeCode.permissionMode"],
+		all["claudeCode.allowBypassPermissions"],
+		projectConfig?.get("claudeCodeDefaultModel"),
+		projectConfig?.get("claudeCodePermissionMode"),
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
 	]);
 	for (let i = 0; i < str.length; i++) {
@@ -137,7 +154,7 @@ function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: n
 	return explicit ?? inferredValue;
 }
 
-async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+async function assembleModels(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
 
@@ -200,6 +217,19 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		}
 	}
 
+	// 1c. Claude Code local runtime models are synthetic and remain visible even
+	// when AI Gateway exclusive mode hides direct API-backed providers.
+	try {
+		results.push(...await buildClaudeCodeModels(prefs, projectConfig));
+	} catch (err) {
+		console.error("[model-registry] Failed to probe Claude Code runtime:", err);
+		results.push(...buildClaudeCodeModelsFromStatus({
+			ready: false,
+			authenticated: false,
+			reason: "Claude Code probe failed",
+		}));
+	}
+
 	// 2. AI Gateway models (if configured)
 	if (aigwUrl) {
 		try {
@@ -244,6 +274,32 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	}
 
 	return results;
+}
+
+async function buildClaudeCodeModels(prefs: PreferencesStore, projectConfig?: { get(key: string): string | undefined } | null): Promise<ApiModel[]> {
+	const status = await getClaudeCodeStatus(prefs, projectConfig);
+	return buildClaudeCodeModelsFromStatus(status);
+}
+
+function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated: boolean; reason?: string }): ApiModel[] {
+	const unavailableReason = status.ready ? undefined : status.reason || "Claude Code CLI not ready";
+	return CLAUDE_CODE_MODEL_ALIASES.map(alias => ({
+		id: alias,
+		name: alias === "default" ? "Claude Code Default" : `Claude Code ${alias[0].toUpperCase()}${alias.slice(1)}`,
+		provider: "claude-code",
+		api: "claude-code-runtime",
+		runtime: "claude-code" as const,
+		localRuntime: true,
+		runtimeLabel: "Claude Code (local)",
+		contextWindow: 200_000,
+		maxTokens: 8192,
+		reasoning: true,
+		input: ["text"] as ("text" | "image")[],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		authenticated: status.ready && status.authenticated,
+		sessionSelectable: status.ready,
+		...(unavailableReason ? { sessionUnavailableReason: unavailableReason } : {}),
+	}));
 }
 
 // ── Authentication Detection ───────────────────────────────────────

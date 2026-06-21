@@ -16,7 +16,9 @@ import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
-import { RpcBridge } from "./rpc-bridge.js";
+import { createSessionBridge, assertRuntimeAllowedForSession, hydrateRuntimeOptions, modelAliasFromModelString, resolveSessionRuntime, runtimeFromModelString, type SessionBridgeOptions } from "./session-runtime.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
+import type { SessionRuntime } from "./session-store.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -179,7 +181,8 @@ export interface SessionSetupPlan {
 	nonInteractive?: boolean;
 
 	// Computed during planning
-	bridgeOptions: RpcBridgeOptions;
+	runtime?: SessionRuntime;
+	bridgeOptions: SessionBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
@@ -220,6 +223,8 @@ export interface SessionSetupPlan {
 	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
 	 */
 	preExistingAgentSessionFile?: string;
+	/** Claude Code CLI session id used to resume continue/fork sessions with --resume. */
+	claudeCodeSessionId?: string;
 	/**
 	 * Continue/Fork rehydration: archived/provenance cwd values that may appear in
 	 * runtime-only transcript system metadata and should be rewritten to plan.cwd.
@@ -240,6 +245,7 @@ export interface PipelineContext {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
+	preferencesStore?: import("./preferences-store.js").PreferencesStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
@@ -353,6 +359,21 @@ export async function withRetry<T>(
 	throw lastError!;
 }
 
+export type PreExistingTranscriptSetupMode = "none" | "switch-session" | "claude-code-resume";
+
+export function resolvePreExistingTranscriptSetupMode(
+	plan: Pick<SessionSetupPlan, "preExistingAgentSessionFile" | "runtime" | "claudeCodeSessionId" | "bridgeOptions">,
+): PreExistingTranscriptSetupMode {
+	if (!plan.preExistingAgentSessionFile) return "none";
+	const runtime = plan.runtime ?? plan.bridgeOptions.runtime ?? runtimeFromModelString(plan.bridgeOptions.initialModel) ?? "pi";
+	if (runtime !== "claude-code") return "switch-session";
+	if (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId) return "claude-code-resume";
+	throw new Error(
+		"Continue/fork from a Bobbit transcript is not supported for Claude Code runtime in the MVP unless a Claude Code session id is available; " +
+		"Pi switch_session cannot be used with Claude Code.",
+	);
+}
+
 // ── Goal-metadata helpers ───────────────────────────────────────────────────
 
 /** Effective goal id for a session: own goal (lead) else team/parent goal (member). */
@@ -458,6 +479,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
+		claudeCodeSessionId: plan.claudeCodeSessionId,
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see
 		// `src/server/auth/session-secret.ts`.
@@ -512,6 +534,14 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
+
+	const runtime = resolveSessionRuntime({ runtime: plan.runtime, initialModel: plan.bridgeOptions.initialModel });
+	assertRuntimeAllowedForSession(runtime, plan.sandboxed);
+	plan.runtime = runtime;
+	const claudeCodeConfig = runtime === "claude-code" && ctx.preferencesStore
+		? readClaudeCodeConfig(ctx.preferencesStore, ctx.projectConfigStore)
+		: undefined;
+	plan.bridgeOptions = hydrateRuntimeOptions({ ...plan.bridgeOptions, runtime }, claudeCodeConfig);
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
@@ -882,8 +912,17 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 
 // ── Persistence ────────────────────────────────────────────────────────────
 
+function modelProviderFromModelString(model?: string): string | undefined {
+	if (!model) return undefined;
+	const slash = model.indexOf("/");
+	if (slash <= 0) return undefined;
+	return model.slice(0, slash);
+}
+
 /** Single store.put() with ALL structural fields. Called exactly once per session. */
 export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
+	const existing = store.get(session.id);
+	const runtime = plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi";
 	store.put({
 		id: session.id,
 		title: session.title,
@@ -916,6 +955,13 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		modelProvider: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
+		modelId: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
+		runtime,
+		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
+		claudeCodeExecutable: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
+		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodeModelAlias: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
 	});
 }
 
@@ -934,6 +980,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	resolvePreExistingTranscriptSetupMode(plan);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1140,11 +1187,18 @@ export async function executeWorktreeAsync(
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
+	ctx.store.update(session.id, {
+		runtime: plan.runtime ?? "pi",
+		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
+		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodeModelAlias: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || "default") : undefined,
+	});
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	resolvePreExistingTranscriptSetupMode(plan);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1190,8 +1244,8 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
 
-	// Create real RpcBridge (replacing placeholder)
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	// Create real bridge (replacing placeholder)
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
@@ -1239,7 +1293,10 @@ export async function executeWorktreeAsync(
 	);
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
-	if (plan.preExistingAgentSessionFile) {
+	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
+	if (preExistingMode === "switch-session") {
+		let preExistingSessionFile = plan.preExistingAgentSessionFile;
+		if (!preExistingSessionFile) throw new Error("switch_session requested without a pre-existing transcript path");
 		// The continue handler pre-computes the cloned-.jsonl path against the
 		// project-root cwd. For worktree-backed sessions, the agent CLI boots
 		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
@@ -1248,24 +1305,25 @@ export async function executeWorktreeAsync(
 		// actual cwd-slug before issuing switch_session.
 		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
-		if (correctPath !== plan.preExistingAgentSessionFile) {
+		if (correctPath !== preExistingSessionFile) {
 			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
 			const fsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
 			if (plan.sandboxed) {
 				// Container-side: copy via docker exec then delete the old file.
-				await sessionFileCopy(fsCtx, plan.preExistingAgentSessionFile, fsCtx, correctPath, ctx.sandboxManager);
-				await sessionFileDelete(fsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+				await sessionFileCopy(fsCtx, preExistingSessionFile, fsCtx, correctPath, ctx.sandboxManager);
+				await sessionFileDelete(fsCtx, preExistingSessionFile, ctx.sandboxManager).catch(() => {});
 			} else {
 				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
 				const fsp = await import("node:fs/promises");
 				await fsp.mkdir(path.dirname(correctPath), { recursive: true });
 				try {
-					await fsp.rename(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.rename(preExistingSessionFile, correctPath);
 				} catch (err) {
-					await fsp.copyFile(plan.preExistingAgentSessionFile, correctPath);
-					await fsp.unlink(plan.preExistingAgentSessionFile).catch(() => {});
+					await fsp.copyFile(preExistingSessionFile, correctPath);
+					await fsp.unlink(preExistingSessionFile).catch(() => {});
 				}
 			}
+			preExistingSessionFile = correctPath;
 			plan.preExistingAgentSessionFile = correctPath;
 			ctx.store.update(session.id, { agentSessionFile: correctPath });
 		}
@@ -1274,7 +1332,7 @@ export async function executeWorktreeAsync(
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
-				plan.preExistingAgentSessionFile,
+				preExistingSessionFile,
 				ctx.sandboxManager,
 				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
 			);
@@ -1284,18 +1342,22 @@ export async function executeWorktreeAsync(
 		// the agent rehydrates from it (best-effort, non-fatal).
 		await sanitizeAgentTranscriptFile(
 			transcriptFsCtx,
-			plan.preExistingAgentSessionFile,
+			preExistingSessionFile,
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: preExistingSessionFile },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+	} else if (preExistingMode === "claude-code-resume") {
+		// Claude Code resumes from its own session id via bridge options/startup args;
+		// Pi's transcript-path switch_session command is unsupported for this runtime.
+		console.log(`[session-setup] Using Claude Code session-id resume for ${session.id}; skipping switch_session transcript rehydrate.`);
 	}
 
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
@@ -1324,7 +1386,7 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 	const eventBuffer = new EventBuffer();
@@ -1405,30 +1467,37 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
-	if (plan.preExistingAgentSessionFile) {
+	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
+	if (preExistingMode === "switch-session") {
+		const preExistingSessionFile = plan.preExistingAgentSessionFile;
+		if (!preExistingSessionFile) throw new Error("switch_session requested without a pre-existing transcript path");
 		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
-				plan.preExistingAgentSessionFile,
+				preExistingSessionFile,
 				ctx.sandboxManager,
 				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
 			);
 		}
 		await sanitizeAgentTranscriptFile(
 			transcriptFsCtx,
-			plan.preExistingAgentSessionFile,
+			preExistingSessionFile,
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: preExistingSessionFile },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+	} else if (preExistingMode === "claude-code-resume") {
+		// Claude Code resumes from its own session id via bridge options/startup args;
+		// Pi's transcript-path switch_session command is unsupported for this runtime.
+		console.log(`[session-setup] Using Claude Code session-id resume for ${session.id}; skipping switch_session transcript rehydrate.`);
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.

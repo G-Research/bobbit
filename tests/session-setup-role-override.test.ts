@@ -91,7 +91,16 @@ type ResolverCtx = {
 
 const runResolver: (plan: ResolverPlan, ctx: ResolverCtx) => void = new Function(
 	"plan", "ctx",
-	RESOLVER_BLOCK,
+	[
+		// The extracted production block now continues through runtime hydration.
+		// This test is intentionally scoped to the model/thinking role fallback,
+		// so provide inert runtime helpers matching the Pi/default path.
+		"const resolveSessionRuntime = () => 'pi';",
+		"const assertRuntimeAllowedForSession = () => {};",
+		"const hydrateRuntimeOptions = (options) => options;",
+		"const readClaudeCodeConfig = () => undefined;",
+		RESOLVER_BLOCK,
+	].join("\n"),
 ) as any;
 
 // ── Test fixtures ─────────────────────────────────────────────────────────

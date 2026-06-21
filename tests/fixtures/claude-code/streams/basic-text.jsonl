@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"claude-sess-1","model":"sonnet","cwd":"/tmp/project","tools":["Read","Bash"],"permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hi "}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"there"}]}}
+{"type":"result","subtype":"success","session_id":"claude-sess-1","result":"Hi there","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2}}

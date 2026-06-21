@@ -252,6 +252,7 @@ export class RemoteAgent {
 	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
+	private _pendingModelRollback: { model: any; runtime: "pi" | "claude-code" | undefined } | null = null;
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
@@ -570,6 +571,7 @@ export class RemoteAgent {
 		this._state = {
 			systemPrompt: "",
 			model: { ...PLACEHOLDER_DEFAULT_MODEL, contextWindow: 0 },
+			runtime: "pi",
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],
@@ -1225,8 +1227,11 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any): void {
+		this._pendingModelRollback = { model: this._state.model, runtime: this._state.runtime };
 		this._state.model = model;
+		this._state.runtime = model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		this.send({ type: "get_state" });
 		state.chatPanel?.agentInterface?.requestUpdate();
 	}
 
@@ -1553,6 +1558,7 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
+					this._pendingModelRollback = null;
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -1560,6 +1566,11 @@ export class RemoteAgent {
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
+				if (msg.data?.runtime === "claude-code" || msg.data?.runtime === "pi") this._state.runtime = msg.data.runtime;
+				if (typeof msg.data?.runtimeLabel === "string") this._state.runtimeLabel = msg.data.runtimeLabel;
+				if (typeof msg.data?.claudeCodeSessionId === "string") this._state.claudeCodeSessionId = msg.data.claudeCodeSessionId;
+				if (typeof msg.data?.claudeCodeModelAlias === "string") this._state.claudeCodeModelAlias = msg.data.claudeCodeModelAlias;
+				if (typeof msg.data?.claudeCodePermissionMode === "string") this._state.claudeCodePermissionMode = msg.data.claudeCodePermissionMode;
 				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
 					this._state.serverCost = msg.data.serverCost ?? null;
 					if (this._state.serverCost) {
@@ -2034,6 +2045,12 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if ((msg.code === "SET_MODEL_FAILED" || msg.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION") && this._pendingModelRollback) {
+					this._state.model = this._pendingModelRollback.model;
+					this._state.runtime = this._pendingModelRollback.runtime;
+					this._pendingModelRollback = null;
+					state.chatPanel?.agentInterface?.requestUpdate();
+				}
 				// Status mutation is the server's job — it broadcasts a matching
 				// `session_status` frame in the same termination path. We only
 				// clear local-only fields here.

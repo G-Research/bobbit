@@ -1271,6 +1271,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				ai.delegateOf = s.delegateOf;
 				ai.teamGoalId = s.teamGoalId;
 				ai.assistantType = s.assistantType;
+				ai.sessionRuntime = s.runtime || (s.modelProvider === "claude-code" ? "claude-code" : "pi");
+				ai.runtimeLabel = s.runtimeLabel || (ai.sessionRuntime === "claude-code" ? "Claude Code (local)" : undefined);
+				ai.claudeCodeSessionId = s.claudeCodeSessionId;
+				ai.claudeCodeModelAlias = s.claudeCodeModelAlias || (s.modelProvider === "claude-code" ? s.modelId : undefined);
 				if (s.archived || s.status === "terminated" || s.status === "archived") {
 					ai.readOnly = true;
 				}
@@ -2103,6 +2107,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.delegateOf = sessionDataAny.delegateOf;
 			state.chatPanel.agentInterface.teamGoalId = sessionDataAny.teamGoalId;
 			state.chatPanel.agentInterface.assistantType = sessionDataAny.assistantType;
+			state.chatPanel.agentInterface.sessionRuntime = sessionDataAny.runtime || (sessionDataAny.modelProvider === "claude-code" ? "claude-code" : "pi");
+			state.chatPanel.agentInterface.runtimeLabel = sessionDataAny.runtimeLabel || (state.chatPanel.agentInterface.sessionRuntime === "claude-code" ? "Claude Code (local)" : undefined);
+			state.chatPanel.agentInterface.claudeCodeSessionId = sessionDataAny.claudeCodeSessionId;
+			state.chatPanel.agentInterface.claudeCodeModelAlias = sessionDataAny.claudeCodeModelAlias || (sessionDataAny.modelProvider === "claude-code" ? sessionDataAny.modelId : undefined);
 			if (sessionDataAny.goalId) {
 				const goal = state.goals.find((g) => g.id === sessionDataAny.goalId);
 				if (goal?.branch) {
@@ -2396,6 +2404,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.chatPanel.agentInterface.delegateOf = (sessionForRole as any).delegateOf;
 					state.chatPanel.agentInterface.teamGoalId = (sessionForRole as any).teamGoalId;
 					state.chatPanel.agentInterface.assistantType = (sessionForRole as any).assistantType;
+					state.chatPanel.agentInterface.sessionRuntime = (sessionForRole as any).runtime || ((sessionForRole as any).modelProvider === "claude-code" ? "claude-code" : "pi");
+					state.chatPanel.agentInterface.runtimeLabel = (sessionForRole as any).runtimeLabel || (state.chatPanel.agentInterface.sessionRuntime === "claude-code" ? "Claude Code (local)" : undefined);
+					state.chatPanel.agentInterface.claudeCodeSessionId = (sessionForRole as any).claudeCodeSessionId;
+					state.chatPanel.agentInterface.claudeCodeModelAlias = (sessionForRole as any).claudeCodeModelAlias || ((sessionForRole as any).modelProvider === "claude-code" ? (sessionForRole as any).modelId : undefined);
 					if (sessionForRole.goalId) {
 						const goal = state.goals.find((g) => g.id === sessionForRole.goalId);
 						if (goal?.branch) {

@@ -326,6 +326,8 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch } from "./agent/claude-code-config.js";
+import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
@@ -2971,6 +2973,19 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+function normalizePostedSessionModel(raw: unknown): string | undefined {
+	if (typeof raw === "string") {
+		const trimmed = raw.trim();
+		return /^[^/\s]+\/[^/\s]+$/.test(trimmed) ? trimmed : undefined;
+	}
+	if (raw && typeof raw === "object") {
+		const provider = typeof (raw as any).provider === "string" ? (raw as any).provider.trim() : "";
+		const id = typeof (raw as any).id === "string" ? (raw as any).id.trim() : "";
+		if (provider && id && !provider.includes("/") && !id.includes("/")) return `${provider}/${id}`;
+	}
+	return undefined;
+}
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -3156,6 +3171,29 @@ async function handleApiRoute(
 			if (ctx) return ctx.projectConfigStore;
 		}
 		return projectConfigStore;
+	}
+
+	function resolveClaudeCodeStatusConfigStore(url: URL): { ok: true; store?: ProjectConfigStore; projectId?: string } | { ok: false; status: number; error: string } {
+		const projectId = url.searchParams.get("projectId") || undefined;
+		if (projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) return { ok: false, status: 404, error: "Project not found" };
+			return { ok: true, store: ctx.projectConfigStore, projectId };
+		}
+		const cwd = url.searchParams.get("cwd") || undefined;
+		if (cwd) {
+			const resolvedCwd = path.resolve(cwd);
+			const matches = projectRegistry.list()
+				.filter(project => !project.hidden)
+				.map(project => ({ project, root: path.resolve(project.rootPath) }))
+				.filter(({ root }) => resolvedCwd === root || resolvedCwd.startsWith(root + path.sep))
+				.sort((a, b) => b.root.length - a.root.length);
+			if (matches[0]) {
+				const ctx = projectContextManager.getOrCreate(matches[0].project.id);
+				if (ctx) return { ok: true, store: ctx.projectConfigStore, projectId: ctx.project.id };
+			}
+		}
+		return { ok: true };
 	}
 
 	/**
@@ -4975,6 +5013,11 @@ async function handleApiRoute(
 					colorIndex: colorStore.get(archived.id),
 					preview: archived.preview,
 					reattemptGoalId: archived.reattemptGoalId,
+					runtime: archived.runtime ?? "pi",
+					claudeCodeSessionId: archived.claudeCodeSessionId,
+					claudeCodeExecutable: archived.claudeCodeExecutable,
+					claudeCodePermissionMode: archived.claudeCodePermissionMode,
+					claudeCodeModelAlias: archived.claudeCodeModelAlias,
 					archived: true,
 					archivedAt: archived.archivedAt,
 					imageGenerationModel: sessionManager.getImageModelForSession(archived.id),
@@ -5017,6 +5060,11 @@ async function handleApiRoute(
 			preview: session.preview,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
+			runtime: sessionPs?.runtime ?? "pi",
+			claudeCodeSessionId: sessionPs?.claudeCodeSessionId,
+			claudeCodeExecutable: sessionPs?.claudeCodeExecutable,
+			claudeCodePermissionMode: sessionPs?.claudeCodePermissionMode,
+			claudeCodeModelAlias: sessionPs?.claudeCodeModelAlias,
 			// Persisted model selection (provider+id). Surfaces the result of
 			// the WS `set_model` handler's `persistSessionModel` call so clients
 			// (and tests) can verify the selection round-tripped to disk without
@@ -5102,6 +5150,12 @@ async function handleApiRoute(
 		}
 
 		const args = body?.args;
+		const requestedModel = normalizePostedSessionModel(body?.model);
+		const requestedRuntime = body?.runtime === "claude-code" || requestedModel?.startsWith("claude-code/")
+			? "claude-code"
+			: body?.runtime === "pi"
+				? "pi"
+				: undefined;
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
@@ -5272,6 +5326,8 @@ async function handleApiRoute(
 				reattemptGoalId,
 				sandboxed,
 				projectId: resolvedProjectId,
+				...(requestedModel ? { initialModel: requestedModel } : {}),
+				...(requestedRuntime ? { runtime: requestedRuntime as any } : {}),
 				...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}),
 				parentSessionId: typeof body?.parentSessionId === "string" ? body.parentSessionId : undefined,
 				childKind: typeof body?.childKind === "string" ? body.childKind : undefined,
@@ -5312,6 +5368,11 @@ async function handleApiRoute(
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
+				runtime: sessionManager.getPersistedSession(session.id)?.runtime,
+				claudeCodeSessionId: sessionManager.getPersistedSession(session.id)?.claudeCodeSessionId,
+				claudeCodeExecutable: sessionManager.getPersistedSession(session.id)?.claudeCodeExecutable,
+				claudeCodePermissionMode: sessionManager.getPersistedSession(session.id)?.claudeCodePermissionMode,
+				claudeCodeModelAlias: sessionManager.getPersistedSession(session.id)?.claudeCodeModelAlias,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
@@ -7519,7 +7580,14 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preferences" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		for (const [key, value] of Object.entries(body)) {
+		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
+		let preferencePatch = body as Record<string, unknown>;
+		if (claudeCodePrefsChanged) {
+			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
+			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
+			preferencePatch = { ...preferencePatch, ...normalized.values };
+		}
+		for (const [key, value] of Object.entries(preferencePatch)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
 				// authoritative. An empty/invalid list removes the key entirely.
@@ -7531,6 +7599,10 @@ async function handleApiRoute(
 			} else {
 				preferencesStore.set(key, value);
 			}
+		}
+		if (claudeCodePrefsChanged) {
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
 		}
 		json({ ok: true });
 		broadcastPreferencesChanged();
@@ -8337,10 +8409,40 @@ async function handleApiRoute(
 
 	// ── Unified Model Registry ──
 
-	// GET /api/models — unified model list from all sources
-	if (url.pathname === "/api/models" && req.method === "GET") {
+	// GET /api/claude-code/status — local Claude Code CLI readiness probe.
+	// The executable path is user/admin preference only; project config never controls probes.
+	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
-			const models = await getAvailableModels(preferencesStore);
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
+		} catch (err: any) {
+			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
+		}
+		return;
+	}
+
+	// POST /api/claude-code/status/refresh — clear cached status and re-probe.
+	if (url.pathname === "/api/claude-code/status/refresh" && req.method === "POST") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
+		try {
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
+		} catch (err: any) {
+			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
+		}
+		return;
+	}
+
+	// GET /api/models — unified model list from all sources.
+	// Claude Code model probes use only the user/admin executable preference.
+	if (url.pathname === "/api/models" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
+		try {
+			const models = await getAvailableModels(preferencesStore, scoped.store ?? null);
 			json(models);
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load models: ${err.message}` });
@@ -11019,6 +11121,7 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
 			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
@@ -11524,6 +11627,7 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
 			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
 			// the archived source worktree/branch remain provenance only. Non-sandboxed
