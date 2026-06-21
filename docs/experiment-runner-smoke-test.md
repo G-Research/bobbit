@@ -8,7 +8,7 @@ Experiment id: `smoke-ab-20260621003841`
 
 ## Result
 
-**Status: pass with caveats.** The runner is ready for a small real Graphify A/B benchmark, provided the real run uses a realistic per-run budget and an intentional workflow choice. The smoke test verified pack activation, UI launchers, A/B child-goal fan-out, treatment metadata propagation, route lifecycle calls, editable metric/dashboard specs, report generation, and autoresearch guardrails.
+**Status: pass with caveats.** The runner is ready for a small real Graphify A/B benchmark, provided the real run uses a realistic per-run budget and an intentional workflow choice. The smoke test verified pack activation, UI launchers, A/B child-goal fan-out, treatment metadata propagation, route lifecycle calls, editable metric/dashboard specs, report generation, autoresearch guardrails, and non-optional UI-driven E2E fixture coverage.
 
 Caveats:
 - The intentionally low per-run budget (`0.05`) was below actual model startup cost, so both smoke arms were marked `failed` with `over_budget` during `poll`. This still verified bounded-budget enforcement and report generation, but did not produce collected success metrics.
@@ -207,7 +207,30 @@ Final session inspection showed no live sessions for either child goal.
 
 ## Automated coverage
 
-Added optional browser E2E coverage in `tests/e2e/ui/experiment-runner-smoke.spec.ts`. The test first checks `/api/ext/contributions` and skips with an explicit annotation when `experiment-runner` is absent on `origin/master`; when present, it exercises the deep link, session-menu launcher, slash launcher, bounded A/B route lifecycle, metadata propagation, spec persistence, reporting, and cancel cleanup.
+Added non-optional browser E2E coverage in `tests/e2e/ui/experiment-runner-smoke.spec.ts`. The test installs the deterministic local fixture pack from `tests/fixtures/market-sources/experiment-runner-smoke-src/`, so it no longer depends on `experiment-runner` already being installed on `origin/master` and does not skip when the pack is absent.
+
+The fixture pack contributes the same smoke-test surfaces required by this goal:
+
+- Session-menu launcher: `New experiment`
+- Composer slash launcher: `Experiments`
+- Deep link: `#/ext/experiment-runner`
+- Panel: `experiment-runner.panel`
+- Routes: `defineexperiment`, `launch`, `poll`, `collect`, `aggregate`, `savemetrics`, `savedashboard`, `report`, `getexperiment`, `listmetrics`, `listwidgets`, `cancel`
+
+The E2E is UI-driven for the launch path. It creates a temporary parent goal, starts its team lead to provide an effective parent goal/session, opens the Experiment Runner through the session menu, slash launcher, and deep link, fills the panel fields, clicks `Define experiment`, clicks `Confirm and launch`, and asserts exactly two child goals are created under that parent.
+
+Fixture child-goal expectations are exact:
+
+- Arms: `baseline`, `variant-b`
+- Repeats: one per arm
+- Per-run budget: `0.05`
+- Baseline treatment: `metadata.smokeTreatment = { arm: "baseline", marker: "smoke-baseline-101" }`
+- Variant-B treatment: `metadata.smokeTreatment = { arm: "variant-b", marker: "smoke-variant-b-202" }`
+- Experiment metadata includes `metadata.experiment.id`, `armId`, `repeat`, `budget`, and `planId`
+
+The test then drives the dashboard lifecycle from the panel (`poll` → `collect` → `aggregate`), edits and saves metric/dashboard JSON (`cost.totalUsd`, `time.wallClockMs`, `edited-summary`, `edited-raw`), generates a report, reloads the app, reopens `#/ext/experiment-runner?experimentId=...&view=report`, verifies the saved specs/report persisted through `getexperiment` and `report`, and cancels/cleans up the temporary experiment goals.
+
+Autoresearch coverage remains a guardrail only: the test calls `defineexperiment` with `mode: "autoresearch"` and no finite hard caps, expects `AR_UNCAPPED`, and never launches an autonomous loop. It also fails on `NO_EFFECTIVE_GOAL`, `SPAWN_GOAL_UNAVAILABLE`, parent mismatch, pack-route, or workflow errors in route responses, browser alerts/status messages, or console output.
 
 ## Readiness notes
 
