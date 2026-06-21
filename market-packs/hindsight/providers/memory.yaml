@@ -63,6 +63,34 @@ config:
   recallBudget: { type: number, default: 1200 }
   # Hindsight recall `types` filter — bias recall toward consolidated knowledge.
   recallTypes: { type: list, default: [observation, world, experience] }
+  # Send an ISO `query_timestamp` anchor on recall so relative-time queries resolve
+  # against the current turn/session time.
+  recallQueryTimestampEnabled: { type: boolean, default: true }
+  # Per-project mental model injection at session setup. Creation/refresh is
+  # best-effort; empty/missing models fall back to raw recall.
+  mentalModelEnabled: { type: boolean, default: true }
+  mentalModelMaxTokens: { type: number, default: 1000 }
+  mentalModelRefreshEveryMs: { type: number, default: 86400000 }
+  mentalModelRecallMaxTokens: { type: number, default: 1200 }
+  # Bank-wide directives are disabled by default for the shared bank. Bobbit-specific
+  # reflect behavior should use per-request instructions unless explicitly opted in.
+  directivesEnabled: { type: boolean, default: false }
+  directiveApplyMode: { type: enum, values: [disabled, bank-wide-explicit-opt-in, scoped-if-supported], default: disabled }
+  directiveSetVersion: { type: string, default: bobbit-v1 }
+  directives:
+    type: list
+    default:
+      - name: bobbit-coding-agent-recall
+        content: Answer for a coding agent. Prefer recent, durable project facts and decisions; cite source facts when present; ignore transient turn noise unless it records a lasting decision or project-state change.
+        priority: 50
+        tags: [bobbit]
+  # Queue drains are health-gated and bounded so shutdown cannot burst a large retry
+  # queue into an unhealthy Hindsight daemon.
+  retainQueueDrainMaxPerHook: { type: number, default: 1 }
+  retainQueueShutdownMax: { type: number, default: 10 }
+  retainQueueHealthGate: { type: boolean, default: true }
+  retainQueueLlmHealthGate: { type: boolean, default: false }
+  retainQueueBatchPauseMs: { type: number, default: 0 }
   # Bank-config missions applied idempotently to the shared bank: steer extraction/
   # consolidation/reflection toward durable knowledge, away from transient noise.
   retainMission: { type: string, optional: true }
