@@ -1484,7 +1484,7 @@ let claudeCodeStatus: ClaudeCodeStatus | null = null;
 let claudeCodeStatusLoading = false;
 let claudeCodeStatusError = "";
 let prefClaudeCodeExecutable = "claude";
-let prefClaudeCodeDefaultModel = "sonnet";
+let prefClaudeCodeDefaultModel = "claude-opus-4-8";
 let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "default";
 let prefClaudeCodeAllowBypass = false;
 
@@ -1604,7 +1604,7 @@ function loadModelsState(): void {
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
 				prefClaudeCodeExecutable = prefs["claudeCode.executablePath"] || "claude";
-				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "sonnet";
+				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "claude-opus-4-8";
 				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
 				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
 				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "default";
@@ -1689,7 +1689,7 @@ async function setClaudeCodeExecutable(value: string): Promise<void> {
 }
 
 async function setClaudeCodeDefaultModel(value: string): Promise<void> {
-	prefClaudeCodeDefaultModel = value || "sonnet";
+	prefClaudeCodeDefaultModel = value || "claude-opus-4-8";
 	await savePref("claudeCode.defaultModel", value || null);
 	renderApp();
 }
@@ -2054,7 +2054,7 @@ function renderClaudeCodeSection() {
 	const commandPath = status?.commandPath || status?.executablePath || prefClaudeCodeExecutable || "claude";
 	const aliases = Array.isArray(status?.modelAliases) && status!.modelAliases!.length
 		? status!.modelAliases!
-		: ["default", "sonnet", "opus"];
+		: ["claude-opus-4-8", "default", "sonnet", "opus"];
 	const statusClass = tone === "ready"
 		? "bg-green-500/10 border-green-500/20"
 		: tone === "checking"
@@ -2231,7 +2231,7 @@ export function __testResetModelsTab(opts: {
 	claudeCodeStatusLoading = false;
 	claudeCodeStatusError = "";
 	prefClaudeCodeExecutable = opts.prefClaudeCodeExecutable ?? "claude";
-	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "sonnet";
+	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "claude-opus-4-8";
 	prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(opts.prefClaudeCodePermissionMode);
 	prefClaudeCodeAllowBypass = opts.prefClaudeCodeAllowBypass ?? false;
 	prefSessionThinking = "";

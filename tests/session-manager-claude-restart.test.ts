@@ -1,5 +1,6 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { makeTmpDir } from "./helpers/tmp.ts";
 
 const tmpRoot = makeTmpDir("session-manager-claude-restart-");
@@ -142,6 +143,25 @@ describe("Claude Code restart/restore without Pi agentSessionFile", () => {
 		const restoredIds = manager.restoreOneSession.mock.calls.map((call: any) => call.arguments[0].id);
 		assert.ok(restoredIds.includes("delegate"), "Claude Code delegate must be routed through live restore");
 		assert.equal(store.archive.mock.callCount(), 0, "Claude Code delegate must not be archived for missing agentSessionFile");
+	});
+
+	it("persists Claude Code message_end events to a transcript fallback file", () => {
+		const ps = makePersisted({ id: "claude-transcript", agentSessionFile: undefined });
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+		const session = { ...makeLiveSession(ps.id), status: "idle" };
+		manager.sessions.set(ps.id, session);
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "msg-1", role: "user", content: [{ type: "text", text: "hello from claude" }] },
+		});
+
+		const updated = store.get(ps.id);
+		assert.match(updated.agentSessionFile, /claude-code-transcripts/);
+		const jsonl = fs.readFileSync(updated.agentSessionFile, "utf8");
+		assert.match(jsonl, /hello from claude/);
+		assert.match(jsonl, /"type":"message"/);
 	});
 
 	it("tryAutoSelectModel skips Pi role/default/aigw binding for Claude Code sessions", async () => {

@@ -11460,7 +11460,6 @@ async function handleApiRoute(
 		// Resolve target session (live or persisted).
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
 		// Authorization: caller must belong to the same project as the target.
 		// Caller session id is propagated via `x-bobbit-session-id` header by the
@@ -11497,7 +11496,21 @@ async function handleApiRoute(
 			};
 			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
 			const envelope = await readTranscript(params, {
-				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+				readContent: async () => {
+					if (targetPs.agentSessionFile) return sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager);
+					const live = sessionManager.getSession(targetId);
+					const isClaudeCode = targetPs.runtime === "claude-code" || targetPs.modelProvider === "claude-code";
+					if (!isClaudeCode || !live?.rpcClient?.getMessages) return null;
+					const msgsResp = await live.rpcClient.getMessages();
+					const messages = Array.isArray(msgsResp?.data) ? msgsResp.data : msgsResp?.data?.messages;
+					if (!msgsResp?.success || !Array.isArray(messages) || messages.length === 0) return null;
+					return messages.map((message: any) => JSON.stringify({
+						type: "message",
+						id: message?.id,
+						ts: new Date().toISOString(),
+						message,
+					})).join("\n") + "\n";
+				},
 			});
 			json(envelope);
 		} catch (err) {

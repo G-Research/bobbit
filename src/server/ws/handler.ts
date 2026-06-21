@@ -409,6 +409,23 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 
+			// Claude Code sessions do not always have a Pi agentSessionFile. Push an
+			// initial live snapshot on attach so a freshly opened local-runtime session
+			// hydrates from the bridge's in-memory transcript without changing Pi attach behavior.
+			const persistedForAttach = sessionManager.getPersistedSession(sessionId);
+			if (persistedForAttach?.runtime === "claude-code" || persistedForAttach?.modelProvider === "claude-code") {
+				session.rpcClient.getMessages?.()
+					.then((msgs: any) => {
+						if (!msgs?.success) return;
+						const raw = msgs.data ?? msgs;
+						let data: any = raw;
+						if (Array.isArray(raw)) data = truncateLargeToolContentInMessages(raw);
+						else if (raw && Array.isArray(raw.messages)) data = { ...raw, messages: truncateLargeToolContentInMessages(raw.messages) };
+						send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
+					})
+					.catch(() => {});
+			}
+
 			// Rehydrate any on-disk proposal drafts for this session so the
 			// client can rebuild its activeProposals slot after a server restart
 			// or fresh attach. Fire-and-forget; never blocks auth.

@@ -285,7 +285,7 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 	const unavailableReason = status.ready ? undefined : status.reason || "Claude Code CLI not ready";
 	return CLAUDE_CODE_MODEL_ALIASES.map(alias => ({
 		id: alias,
-		name: alias === "default" ? "Claude Code Default" : `Claude Code ${alias[0].toUpperCase()}${alias.slice(1)}`,
+		name: claudeCodeModelName(alias),
 		provider: "claude-code",
 		api: "claude-code-runtime",
 		runtime: "claude-code" as const,
@@ -300,6 +300,14 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 		sessionSelectable: status.ready,
 		...(unavailableReason ? { sessionUnavailableReason: unavailableReason } : {}),
 	}));
+}
+
+function claudeCodeModelName(alias: string): string {
+	if (alias === "claude-opus-4-8") return "Claude Code Opus 4.8";
+	if (alias === "default") return "Claude Code Default";
+	if (alias === "sonnet") return "Claude Code Sonnet";
+	if (alias === "opus") return "Claude Code Opus";
+	return `Claude Code ${alias}`;
 }
 
 // ── Authentication Detection ───────────────────────────────────────

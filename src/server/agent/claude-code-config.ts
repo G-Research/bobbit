@@ -5,7 +5,7 @@ import path from "node:path";
 import type { PreferencesStore } from "./preferences-store.js";
 
 export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
-export type ClaudeCodeModelAlias = "default" | "sonnet" | "opus" | string;
+export type ClaudeCodeModelAlias = "claude-opus-4-8" | "default" | "sonnet" | "opus" | string;
 
 export interface ClaudeCodeConfig {
 	executablePath: string;
@@ -16,7 +16,7 @@ export interface ClaudeCodeConfig {
 
 export const CLAUDE_CODE_DEFAULT_CONFIG: ClaudeCodeConfig = {
 	executablePath: "claude",
-	defaultModel: "sonnet",
+	defaultModel: "claude-opus-4-8",
 	permissionMode: "default",
 	allowBypassPermissions: false,
 };
@@ -28,7 +28,7 @@ export const CLAUDE_CODE_PREF_KEYS = {
 	allowBypassPermissions: "claudeCode.allowBypassPermissions",
 } as const;
 
-export const CLAUDE_CODE_MODEL_ALIASES = ["default", "sonnet", "opus"] as const;
+export const CLAUDE_CODE_MODEL_ALIASES = ["claude-opus-4-8", "default", "sonnet", "opus"] as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions"] as const;
 
 const PATH_KEYS = new Set(["PATH", "Path", "path"]);
@@ -213,7 +213,7 @@ export function normalizeModelAlias(value: unknown): ClaudeCodeModelAlias {
 
 export function validateModelAlias(value: unknown): ClaudeCodeModelAlias {
 	if (typeof value !== "string" || !isValidModelAlias(value.trim())) {
-		throw new Error("Claude Code model alias must be default, sonnet, opus, or a short model token");
+		throw new Error("Claude Code model alias must be claude-opus-4-8, default, sonnet, opus, or a short model token");
 	}
 	return value.trim();
 }

@@ -211,7 +211,7 @@ test.describe("Settings/admin UI fixture", () => {
 				checking: false,
 				commandPath: "claude",
 				version: "1.2.3",
-				modelAliases: ["default", "sonnet", "opus"],
+				modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
 				permissionMode: "default",
 				reason: "auth_required",
 				message: "Claude Code is installed but not authenticated.",

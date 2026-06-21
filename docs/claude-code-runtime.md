@@ -43,6 +43,7 @@ The parser has size limits for JSONL lines, diagnostic lines, per-event content,
 
 `GET /api/models` always emits synthetic Claude Code model rows for the local runtime aliases:
 
+- `claude-code/claude-opus-4-8` (default)
 - `claude-code/default`
 - `claude-code/sonnet`
 - `claude-code/opus`
@@ -51,8 +52,7 @@ Picker rows are deliberately labeled as local runtime rows:
 
 - Name: `Claude Code Sonnet`, `Claude Code Opus`, etc.
 - Provider/runtime label: `Claude Code (local)`.
-- Badge: `Local runtime`.
-- Detail text: `Claude Code account`.
+- Detail text: `Claude Code managed` / `Claude Code account`.
 - Tooltip when available: `Runs through your local Claude Code CLI and existing Claude Code login.`
 
 Readiness comes from `GET /api/claude-code/status`; `POST /api/claude-code/status/refresh` clears the short status/model cache and re-probes.
@@ -73,7 +73,7 @@ Settings → Models contains a **Claude Code (local)** section. These preference
 | Preference key | Default | Meaning |
 |---|---|---|
 | `claudeCode.executablePath` | `claude` | Command name on trusted `PATH` or an absolute executable path. Relative paths such as `./claude` are rejected. |
-| `claudeCode.defaultModel` | `sonnet` | Default model alias when a Claude Code session is created without a specific `claude-code/<alias>` model. Built-in choices are `default`, `sonnet`, and `opus`; short custom model tokens are accepted. |
+| `claudeCode.defaultModel` | `claude-opus-4-8` | Default model alias when a Claude Code session is created without a specific `claude-code/<alias>` model. Built-in choices are `claude-opus-4-8`, `default`, `sonnet`, and `opus`; short custom model tokens are accepted. |
 | `claudeCode.permissionMode` | `default` | Claude Code permission mode: `default`, `acceptEdits`, or `bypassPermissions`. |
 | `claudeCode.allowBypassPermissions` | `false` | Explicit user/admin opt-in required before `bypassPermissions` can be saved or used. |
 
@@ -107,7 +107,7 @@ Bobbit persists runtime metadata alongside normal session metadata:
 - `claudeCodePermissionMode`
 - `claudeCodeModelAlias`
 
-`claudeCodeSessionId` is the Claude Code CLI session id. It is separate from Bobbit's session id and is captured from Claude Code stream events.
+`claudeCodeSessionId` is the Claude Code CLI session id. It is separate from Bobbit's session id and is captured from Claude Code stream events. Bobbit also writes Claude Code `message_end` events to a Bobbit-owned transcript fallback when no Pi `agentSessionFile` exists, so live hydration and `read_session` can still read local-runtime conversations.
 
 ### No silent runtime switching
 
