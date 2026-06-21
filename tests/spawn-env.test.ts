@@ -45,15 +45,16 @@ describe("session-setup spawn env contract", () => {
 			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 			"utf-8",
 		);
-		// Verify the env-spread shape spreads caller env (`...plan.env`) FIRST, then
-		// the gateway-owned BOBBIT_SESSION_ID + per-session BOBBIT_SESSION_SECRET so
-		// a caller-supplied toolEnv key can NEVER clobber the session identity or its
-		// capability secret (which would let a child impersonate another session for
-		// the binding-routed PR-walkthrough tool routes):
-		//   { ...plan.env, BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ... }
+		// Verify the env-spread shape spreads provider env first, caller env
+		// (`...plan.env`) next, then the gateway-owned BOBBIT_SESSION_ID +
+		// per-session BOBBIT_SESSION_SECRET so a caller-supplied toolEnv key can
+		// NEVER clobber the session identity or its capability secret (which would
+		// let a child impersonate another session for the binding-routed
+		// PR-walkthrough tool routes):
+		//   { ...(directProviderEnv || {}), ...plan.env, BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ... }
 		assert.ok(
-			/env:\s*\{\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
-			"bridge env must spread caller env FIRST, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
+			/env:\s*\{\s*\.\.\.\(directProviderEnv\s*\|\|\s*\{\}\),\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
+			"bridge env must spread provider env, then caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
 		);
 	});
 
@@ -74,13 +75,40 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
+	it("source: sandboxed session setup does not use host provider env injection", () => {
+		const src = readFileSync(
+			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
+			"utf-8",
+		);
+		assert.ok(
+			/const directProviderEnv\s*=\s*plan\.sandboxed\s*\?\s*undefined\s*:\s*mergeHostAgentProviderEnv\(undefined,\s*ctx\.preferencesStore\)/.test(src),
+			"sandboxed sessions must not receive Settings provider keys through the direct host env path; sandbox token policy remains the only sandbox credential path",
+		);
+	});
+
+	it("source: legacy direct verification RpcBridge fallback merges Settings provider env", () => {
+		const src = readFileSync(
+			path.join(process.cwd(), "src/server/agent/verification-harness.ts"),
+			"utf-8",
+		);
+		assert.ok(
+			/import \{ mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
+			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver",
+		);
+		assert.ok(
+			/env:\s*mergeHostAgentProviderEnv\(toolActivation\.env,\s*this\.preferencesStore\)/.test(src),
+			"legacy direct RpcBridge review fallback must merge providerKey.openrouter into bridgeOptions.env for non-sandbox review agents",
+		);
+	});
+
 	it("functional: gateway-owned BOBBIT_SESSION_ID + secret win over caller toolEnv", () => {
-		// Faithful reproduction of the env-merge in resolveBridgeOptions: caller env
-		// (`...plan.env`) is spread FIRST, then the gateway-owned identity keys, so
-		// the gateway values always win. The delegate-of env branch is intentionally
-		// gone (see the source test above).
-		function buildBridgeEnv(plan: { id: string; env?: Record<string, string> }) {
+		// Faithful reproduction of the env-merge in resolveBridgeOptions: direct
+		// provider env is spread first, caller env (`...plan.env`) next, then the
+		// gateway-owned identity keys, so gateway values always win. The delegate-of
+		// env branch is intentionally gone (see the source test above).
+		function buildBridgeEnv(plan: { id: string; env?: Record<string, string> }, directProviderEnv?: Record<string, string>) {
 			const env: Record<string, string> = {
+				...(directProviderEnv || {}),
 				...(plan.env ?? {}),
 				BOBBIT_SESSION_ID: plan.id,
 				BOBBIT_SESSION_SECRET: `secret-for-${plan.id}`,
@@ -96,9 +124,13 @@ describe("session-setup spawn env contract", () => {
 		assert.equal(env2.BOBBIT_SESSION_ID, "delegate-xyz");
 		assert.equal(env2.BOBBIT_DELEGATE_OF, undefined);
 
-		const env3 = buildBridgeEnv({ id: "sess-keep", env: { OTHER_VAR: "v" } });
+		const env3 = buildBridgeEnv(
+			{ id: "sess-keep", env: { OTHER_VAR: "v" } },
+			{ OPENROUTER_API_KEY: "sk-or-test" },
+		);
 		assert.equal(env3.BOBBIT_SESSION_ID, "sess-keep");
 		assert.equal(env3.OTHER_VAR, "v");
+		assert.equal(env3.OPENROUTER_API_KEY, "sk-or-test");
 
 		// SECURITY: a malicious/buggy toolEnv that sets BOBBIT_SESSION_SECRET or
 		// BOBBIT_SESSION_ID must NOT override the gateway-issued values — otherwise a
@@ -111,9 +143,14 @@ describe("session-setup spawn env contract", () => {
 				BOBBIT_SESSION_SECRET: "stolen-secret",
 				OTHER_VAR: "v",
 			},
+		}, {
+			BOBBIT_SESSION_ID: "sess-provider-victim",
+			BOBBIT_SESSION_SECRET: "provider-stolen-secret",
+			OPENROUTER_API_KEY: "sk-or-test",
 		});
-		assert.equal(hijack.BOBBIT_SESSION_ID, "sess-real", "toolEnv must not override the gateway-issued BOBBIT_SESSION_ID");
-		assert.equal(hijack.BOBBIT_SESSION_SECRET, "secret-for-sess-real", "toolEnv must not override the gateway-issued BOBBIT_SESSION_SECRET");
+		assert.equal(hijack.BOBBIT_SESSION_ID, "sess-real", "toolEnv/provider env must not override the gateway-issued BOBBIT_SESSION_ID");
+		assert.equal(hijack.BOBBIT_SESSION_SECRET, "secret-for-sess-real", "toolEnv/provider env must not override the gateway-issued BOBBIT_SESSION_SECRET");
 		assert.equal(hijack.OTHER_VAR, "v", "unrelated toolEnv keys are still passed through");
+		assert.equal(hijack.OPENROUTER_API_KEY, "sk-or-test", "OpenRouter provider env is still passed through");
 	});
 });

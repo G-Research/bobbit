@@ -154,7 +154,9 @@ On successful retry (turn completes without error), `lastTurnErrored` is cleared
 
 ### Dispatch failure
 
-If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order, the optimistic `"streaming"` status is reverted to `"idle"`, and a follow-up drain is scheduled on the next tick.
+If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order.
+
+For ordinary dispatch rejections, the optimistic `"streaming"` status is reverted to `"idle"`, the updated queue is broadcast, and a follow-up drain is scheduled on the next tick. For provider-auth failures such as `No API key found for openrouter`, Bobbit stops there instead of redraining: it persists `wasStreaming: false`, clears `streamingStartedAt`, broadcasts `session_status: "idle"`, and emits `provider_auth_required` so the UI shows fix/retry/switch-provider/abort-respawn actions. The failed prompt stays at the front of the queue and is consumed by Retry after credentials or model choice are fixed.
 
 For `drainQueue()` recovery, Bobbit suppresses re-enqueue only after an inbound agent event advances `agentObservedTurnVersion`, proving the turn was accepted. Local status-only changes such as Stop → `"aborting"` do not count; that distinction prevents duplicate recovered task notifications without dropping a prompt that was rejected during abort/restart reconciliation.
 
@@ -203,6 +205,7 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 | Client → Server | `retry` | Retry after model/API error |
 | Server → Client | `queue_update` | Full queue state after any mutation |
 | Server → Client | `session_status` | `"streaming"`, `"aborting"`, or `"idle"` status changes |
+| Server → Client | `provider_auth_required` | Provider credential failure; client renders Settings, Retry, Switch provider, and Abort/respawn recovery actions |
 
 ## Key files
 
@@ -211,7 +214,7 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 | `src/server/agent/prompt-queue.ts` | Queue data structure with priority sorting; `enqueue` / `dequeue` / `dequeueAllSteered` / `enqueueAtFront` / `remove` / `reorderByIds`. No `dispatched` flag, no `markDispatched`/`removeDispatched`/`resetDispatched`. |
 | `src/server/agent/session-manager.ts` | `enqueuePrompt()`, `drainQueue()`, `deliverLiveSteer()`, `steerQueued()`, single `_dispatchSteer()` site, `_consumeSteerEcho()`, `_reconcileAfterAbort()`, `forceAbort()`, lifecycle |
 | `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
-| `src/server/ws/protocol.ts` | `QueuedMessage` type, client/server message unions |
+| `src/server/ws/protocol.ts` | `QueuedMessage`, `ProviderAuthRequiredEvent`, and client/server message unions |
 | `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
 
 ## Related

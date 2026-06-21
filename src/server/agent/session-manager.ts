@@ -37,6 +37,7 @@ import { SessionStore, type PersistedSession } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
+import { redactSensitive } from "../auth/redact.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -127,6 +128,54 @@ const MAX_CONSECUTIVE_ERROR_TURNS = 3;
  * we stop scheduling and leave the rows queued for the next agent_end drain.
  */
 const MAX_RECOVER_DRAIN_RETRIES = 2;
+
+const PROVIDER_AUTH_FAILURE_PATTERNS = [
+	/No API key found for\s+([A-Za-z0-9_.-]+)/i,
+	/Missing API key for\s+([A-Za-z0-9_.-]+)/i,
+	/([A-Za-z0-9_.-]+)\s+API key is missing/i,
+];
+
+function looksLikeSensitiveToken(value: string | undefined): boolean {
+	return !!value && /^(?:sk|pk|rk|ghp|gho|ghu|ghs|github_pat|ya29|xox[baprs]?)[-_]/i.test(value);
+}
+
+function safeProviderId(provider: string | undefined): string | undefined {
+	if (!provider) return undefined;
+	const normalized = provider.toLowerCase();
+	if (looksLikeSensitiveToken(normalized)) return undefined;
+	return normalized;
+}
+
+function providerFromAuthFailure(message: string | undefined, fallbackProvider?: string): string | undefined {
+	const safeFallback = safeProviderId(fallbackProvider);
+	if (!message) return safeFallback;
+	for (const pattern of PROVIDER_AUTH_FAILURE_PATTERNS) {
+		const match = message.match(pattern);
+		const safeMatch = safeProviderId(match?.[1]);
+		if (safeMatch) return safeMatch;
+	}
+	return safeFallback;
+}
+
+function isProviderAuthFailure(message: string | undefined): boolean {
+	return !!message && PROVIDER_AUTH_FAILURE_PATTERNS.some(pattern => pattern.test(message));
+}
+
+function providerLabel(provider: string | undefined): string {
+	if (!provider) return "provider";
+	if (provider.toLowerCase() === "openrouter") return "OpenRouter";
+	return provider;
+}
+
+function redactDispatchFailureReason(reason: string, providerAuthFailure: boolean, fallbackProvider?: string): string {
+	if (providerAuthFailure) {
+		const provider = providerFromAuthFailure(reason, fallbackProvider);
+		return `${providerLabel(provider)} provider authentication failure (missing-api-key)`;
+	}
+	return redactSensitive(reason)
+		.replace(/\b(?:sk|pk|rk)-(?:or-)?[A-Za-z0-9_-]{4,}\b/gi, "<redacted-api-key>")
+		.slice(0, 500);
+}
 
 /**
  * Returns true only for rpc events that represent genuine new user-visible
@@ -569,6 +618,34 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 export { broadcastStatus } from "./session-status.js";
 import { broadcastStatus } from "./session-status.js";
 
+function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
+	if (!event || typeof event !== "object") return event;
+	const ev = event as any;
+	let next = ev;
+	const clone = () => {
+		if (next === ev) next = { ...ev };
+		return next;
+	};
+	const sanitizeErrorText = (value: unknown): string | undefined => {
+		if (typeof value !== "string" || value.length === 0) return undefined;
+		return redactDispatchFailureReason(value, isProviderAuthFailure(value));
+	};
+
+	if (ev.type === "message_end" && ev.message && typeof ev.message === "object") {
+		const safeMessageError = sanitizeErrorText(ev.message.errorMessage);
+		if (safeMessageError && safeMessageError !== ev.message.errorMessage) {
+			clone().message = { ...ev.message, errorMessage: safeMessageError };
+		}
+	}
+
+	const safeTopLevelError = sanitizeErrorText(ev.errorMessage);
+	if (safeTopLevelError && safeTopLevelError !== ev.errorMessage) {
+		clone().errorMessage = safeTopLevelError;
+	}
+
+	return next;
+}
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
@@ -576,7 +653,8 @@ import { broadcastStatus } from "./session-status.js";
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
-	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
+	const sanitized = sanitizeProviderAuthEventForEmit(truncated);
+	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
 	const entry = session.eventBuffer.push(spliced);
 	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
 	if (cpuDiagnosticsEnabled()) {
@@ -670,6 +748,12 @@ type RestoreCoordinator = {
 	promise: Promise<SessionInfo | undefined>;
 };
 
+type IdleWaiter = {
+	resolve: () => void;
+	reject: (error: Error) => void;
+	cleanup: () => void;
+};
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -751,6 +835,7 @@ export class SessionManager {
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
+	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
 	 *  boot. The team-manager boot-resume nudge consults `wasBootReprompted` to
@@ -2617,6 +2702,44 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
+	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined): void {
+		if (sandboxed) return;
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore);
+	}
+
+	private safeDispatchError(session: SessionInfo, reason: string): Error {
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		return new Error(redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider));
+	}
+
+	private surfaceProviderAuthFailure(session: SessionInfo, reason: string, source: string): void {
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		const provider = providerFromAuthFailure(reason, persistedProvider);
+		const label = providerLabel(provider);
+		session.streamingStartedAt = undefined;
+		session.recoverDrainAttempts = 0;
+		this.resolveStoreForSession(session.id).update(session.id, {
+			wasStreaming: false,
+			streamingStartedAt: undefined,
+		});
+		broadcastStatus(session, "idle");
+		this.resolveIdleWaiters(session.id);
+		emitSessionEvent(session, {
+			type: "provider_auth_required",
+			provider,
+			source,
+			reason: "missing-api-key",
+			diagnostic: `${label} credentials are missing or invalid.`,
+			message: `${label} API key is missing. Add or fix the API key in Settings, switch provider, then retry or abort/respawn the agent.`,
+			actions: [
+				{ type: "open_settings", label: "Fix API key in Settings" },
+				{ type: "retry", label: "Retry after fixing credentials" },
+				{ type: "switch_provider", label: "Switch provider" },
+				{ type: "abort_respawn", label: "Abort/respawn agent" },
+			],
+		});
+	}
+
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -2624,13 +2747,16 @@ export class SessionManager {
 		isSteered?: boolean;
 	}>, reason: string, source: string): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
+		const providerAuthFailure = isProviderAuthFailure(reason);
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		const safeReason = redactDispatchFailureReason(reason, providerAuthFailure, persistedProvider);
 		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
 		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
-			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
 			return;
 		}
 
-		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
+		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
 		for (const r of [...rows].reverse()) {
@@ -2639,6 +2765,11 @@ export class SessionManager {
 				attachments: r.attachments,
 				isSteered: r.isSteered,
 			});
+		}
+		if (providerAuthFailure) {
+			this.surfaceProviderAuthFailure(session, reason, source);
+			this.broadcastQueue(session);
+			return;
 		}
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
@@ -2656,7 +2787,7 @@ export class SessionManager {
 		const attempts = (session.recoverDrainAttempts ?? 0) + 1;
 		if (attempts > MAX_RECOVER_DRAIN_RETRIES) {
 			session.recoverDrainAttempts = 0;
-			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${reason}); deferring ${rows.length} row(s) to the next agent_end drain`);
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
 			return;
 		}
 		session.recoverDrainAttempts = attempts;
@@ -2692,11 +2823,15 @@ export class SessionManager {
 				const reason = (resp as any).error || "unknown";
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
 				recovered = true;
-				throw new Error(reason);
+				throw this.safeDispatchError(session, reason);
 			}
 		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, err instanceof Error ? err.message : String(err), "direct prompt");
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
+			}
+			if (isProviderAuthFailure(reason)) {
+				throw this.safeDispatchError(session, reason);
 			}
 			throw err;
 		}
@@ -2754,9 +2889,11 @@ export class SessionManager {
 			// turn was accepted/observed. Local status changes such as Stop →
 			// "aborting" can happen before prompt() is accepted; those rows must be
 			// recovered or the queued prompt is lost.
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
 			if (observedTurnVersion !== dispatchObservedTurnVersion) {
-				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${reason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 				return;
 			}
 			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
@@ -2778,8 +2915,11 @@ export class SessionManager {
 				}
 			})
 			.catch((err: any) => {
-				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
-				recoverDispatchedRows(err?.message || String(err));
+				const reason = err?.message || String(err);
+				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
+				recoverDispatchedRows(reason);
 			});
 	}
 
@@ -2872,10 +3012,21 @@ export class SessionManager {
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			session.latestTurnAssistantText = extractUserMessageText(event.message);
 			const errored = event.message.stopReason === "error";
+			const rawErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
+			const providerAuthFailure = isProviderAuthFailure(rawErrorMessage);
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			session.lastTurnErrored = errored;
-			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
+			session.lastTurnErrorMessage = errored
+				? redactDispatchFailureReason(rawErrorMessage || "", providerAuthFailure, persistedProvider)
+				: undefined;
+			if (providerAuthFailure && rawErrorMessage) {
+				event.message = { ...event.message, errorMessage: session.lastTurnErrorMessage };
+			}
 			if (errored) {
 				session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+				if (providerAuthFailure) {
+					this.surfaceProviderAuthFailure(session, rawErrorMessage || "Provider API key is missing", "agent turn");
+				}
 			} else {
 				// Any non-error terminal assistant message resets the cap budget.
 				// Only stopReason:"error" advances the counter.
@@ -2976,6 +3127,7 @@ export class SessionManager {
 			}
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcastStatus(session, "idle");
+			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -3123,6 +3275,8 @@ export class SessionManager {
 				wasStreaming: false,
 				streamingStartedAt: undefined,
 			});
+			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
 			broadcastStatus(session, "terminated");
 		}
 
@@ -3301,6 +3455,20 @@ export class SessionManager {
 		return restored ?? this.sessions.get(session.id);
 	}
 
+	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
+		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
+		if (textSet.size === 0) return false;
+		const imageSignature = JSON.stringify(images ?? []);
+		const row = session.promptQueue.toArray().find((queued) => {
+			if (!textSet.has(queued.text)) return false;
+			return JSON.stringify(queued.images ?? []) === imageSignature;
+		});
+		if (!row) return false;
+		const removed = session.promptQueue.remove(row.id);
+		if (removed) this.broadcastQueue(session);
+		return removed;
+	}
+
 	/**
 	 * Retry after a model/API error. Behaviour depends on context:
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
@@ -3371,7 +3539,11 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			await session.rpcClient.prompt(retryText, session.lastPromptImages);
+			// Provider-auth dispatch failures re-enqueue the failed row for recovery.
+			// Explicit retry is the recovery dispatch, so consume that row first;
+			// otherwise the next successful agent_end drain would send it a second time.
+			this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			await session.rpcClient.prompt(
@@ -4370,6 +4542,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed);
 
 		const runtime = resolveSessionRuntime({ runtime: ps.runtime, initialModel: bridgeOptions.initialModel, modelProvider: ps.modelProvider });
 		assertRuntimeAllowedForSession(runtime, ps.sandboxed);
@@ -4983,6 +5156,24 @@ export class SessionManager {
 		return session;
 	}
 
+	private resolveIdleWaiters(sessionId: string): void {
+		const waiters = this._idleWaiters.get(sessionId);
+		if (!waiters) return;
+		for (const waiter of [...waiters]) {
+			waiter.cleanup();
+			waiter.resolve();
+		}
+	}
+
+	private rejectIdleWaiters(sessionId: string, error: Error): void {
+		const waiters = this._idleWaiters.get(sessionId);
+		if (!waiters) return;
+		for (const waiter of [...waiters]) {
+			waiter.cleanup();
+			waiter.reject(error);
+		}
+	}
+
 	/**
 	 * Wait for a session to become idle (not streaming).
 	 * Returns immediately if already idle.
@@ -4994,24 +5185,42 @@ export class SessionManager {
 		if (session.status === "idle") return Promise.resolve();
 
 		return new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				unsub();
+			let timer: ReturnType<typeof setTimeout>;
+			let unsub = () => {};
+			const waiters = this._idleWaiters.get(sessionId) ?? new Set<IdleWaiter>();
+			this._idleWaiters.set(sessionId, waiters);
+			const waiter: IdleWaiter = {
+				resolve,
+				reject,
+				cleanup: () => {
+					clearTimeout(timer);
+					unsub();
+					waiters.delete(waiter);
+					if (waiters.size === 0) this._idleWaiters.delete(sessionId);
+				},
+			};
+			timer = setTimeout(() => {
+				waiter.cleanup();
 				reject(new Error(`Timeout waiting for session ${sessionId} to become idle`));
 			}, timeoutMs);
 
-			const unsub = session.rpcClient.onEvent((event: any) => {
+			unsub = session.rpcClient.onEvent((event: any) => {
 				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsub();
+					waiter.cleanup();
 					resolve();
 				}
 				if (event.type === "process_exit") {
-					clearTimeout(timer);
-					unsub();
 					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
-					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+					const error = new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`);
+					waiter.cleanup();
+					reject(error);
 				}
 			});
+			waiters.add(waiter);
+			if (session.status === "idle") {
+				waiter.cleanup();
+				resolve();
+			}
 		});
 	}
 
@@ -6164,6 +6373,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
 		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
 		assertRuntimeAllowedForSession(runtime, session.sandboxed);
 		Object.assign(bridgeOptions, hydrateRuntimeOptions({
@@ -7502,6 +7712,7 @@ export class SessionManager {
 			}
 			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
 			const runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: forceRespawnPersisted?.modelProvider });
 			assertRuntimeAllowedForSession(runtime, session.sandboxed);
 			Object.assign(bridgeOptions, hydrateRuntimeOptions({
@@ -7651,7 +7862,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

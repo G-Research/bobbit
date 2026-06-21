@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
+import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -1226,6 +1226,12 @@ export class AgentInterface extends LitElement {
 				this._updateAndPin();
 				return;
 			}
+			if ((ev as any).type === "provider_auth_required") {
+				// Provider-auth recovery state changed — re-render so the fix/retry
+				// banner appears immediately instead of staying hidden in raw WS data.
+				this._updateAndPin();
+				return;
+			}
 			switch (ev.type) {
 				case "turn_end":
 				case "agent_start":
@@ -1676,6 +1682,102 @@ export class AgentInterface extends LitElement {
 		return map;
 	}
 
+	private _providerAuthActionLabel(auth: any, type: string, fallback: string): string {
+		const action = Array.isArray(auth?.actions)
+			? auth.actions.find((a: any) => a?.type === type && typeof a.label === "string")
+			: null;
+		return action?.label || fallback;
+	}
+
+	private _hasProviderAuthAction(auth: any, type: string): boolean {
+		const actions = Array.isArray(auth?.actions) ? auth.actions : [];
+		return actions.length === 0 || actions.some((a: any) => a?.type === type);
+	}
+
+	private _formatProviderLabel(provider: string | undefined): string {
+		if (!provider) return "Provider";
+		const known: Record<string, string> = {
+			openrouter: "OpenRouter",
+			openai: "OpenAI",
+			anthropic: "Anthropic",
+			google: "Google",
+			xai: "xAI",
+			groq: "Groq",
+			mistral: "Mistral",
+		};
+		return known[provider] || provider.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+	}
+
+	private _handleProviderAuthAction(type: "open_settings" | "retry" | "switch_provider" | "abort_respawn"): void {
+		const session = this.session as any;
+		if (type === "open_settings") {
+			setHashRoute("settings", "system/models");
+			return;
+		}
+		if (type === "retry") {
+			session?.retry?.();
+			this.requestUpdate();
+			return;
+		}
+		if (type === "switch_provider") {
+			const model = this.session?.state?.model;
+			if (model) {
+				void openModelSelector(model, (nextModel) => {
+					session?.setModel?.(nextModel);
+					this.requestUpdate();
+				});
+			}
+			return;
+		}
+		if (type === "abort_respawn") {
+			if (typeof session?.restartAgent === "function") session.restartAgent();
+			else session?.abort?.();
+			this.requestUpdate();
+		}
+	}
+
+	private renderProviderAuthRequired(auth: any) {
+		if (!auth) return nothing;
+		const state = this.session?.state as any;
+		const canRetry = !state?.isStreaming && typeof (this.session as any)?.retry === "function";
+		const canSwitch = this.enableModelSelector && !!state?.model && typeof (this.session as any)?.setModel === "function";
+		const canAbortRespawn = typeof (this.session as any)?.restartAgent === "function" || typeof (this.session as any)?.abort === "function";
+		const provider = this._formatProviderLabel(auth.provider);
+		const message = typeof auth.message === "string" && auth.message
+			? auth.message
+			: `${provider} API key is missing. Add or fix the key, switch provider, then retry.`;
+		return html`
+			<div
+				class="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+				role="alert"
+				data-testid="provider-auth-required-banner"
+				data-provider=${auth.provider || "unknown"}
+			>
+				<div class="flex items-start gap-3">
+					<div class="shrink-0 text-warning mt-0.5">${icon(AlertTriangle, "sm")}</div>
+					<div class="min-w-0 flex-1">
+						<div class="font-medium text-foreground">${provider} credentials required</div>
+						<div class="mt-1 text-muted-foreground">${message}</div>
+						<div class="mt-3 flex flex-wrap gap-2">
+							${this._hasProviderAuthAction(auth, "open_settings") ? html`
+								<button class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs" @click=${() => this._handleProviderAuthAction("open_settings")}>${this._providerAuthActionLabel(auth, "open_settings", "Fix API key")}</button>
+							` : nothing}
+							${this._hasProviderAuthAction(auth, "retry") && canRetry ? html`
+								<button class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs" @click=${() => this._handleProviderAuthAction("retry")}>Retry</button>
+							` : nothing}
+							${this._hasProviderAuthAction(auth, "switch_provider") && canSwitch ? html`
+								<button class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs" @click=${() => this._handleProviderAuthAction("switch_provider")}>Switch provider</button>
+							` : nothing}
+							${this._hasProviderAuthAction(auth, "abort_respawn") && canAbortRespawn ? html`
+								<button class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs" @click=${() => this._handleProviderAuthAction("abort_respawn")}>Abort/respawn</button>
+							` : nothing}
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
+	}
+
 	private renderMessages() {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
@@ -1750,6 +1852,8 @@ export class AgentInterface extends LitElement {
 					.onCostClick=${this.onCostClick}
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>
+
+				${this.renderProviderAuthRequired((state as any).providerAuthRequired)}
 
 				${(state as any).isPreparing ? html`
 					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm">

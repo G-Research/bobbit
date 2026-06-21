@@ -50,6 +50,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
+import { mergeHostAgentProviderEnv } from "./host-tokens.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -476,6 +477,9 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
 }
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	const directProviderEnv = plan.sandboxed
+		? undefined
+		: mergeHostAgentProviderEnv(undefined, ctx.preferencesStore);
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
@@ -491,6 +495,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
 		// unit test in tests/session-setup-env.test.ts.
 		env: {
+			...(directProviderEnv || {}),
 			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
 			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
