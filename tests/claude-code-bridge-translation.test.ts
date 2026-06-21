@@ -151,7 +151,7 @@ describe("Claude Code stream translation", () => {
 					content: [{
 						type: "tool_use",
 						id: "toolu_ask_1",
-						name: "Ask User Question",
+						name: "AskUserQuestion",
 						input: {
 							questions: [{
 								question: "Which runtime should I use?",
@@ -168,7 +168,7 @@ describe("Claude Code stream translation", () => {
 			}),
 			...translator.translate({
 				type: "user",
-				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_1", content: "posted" }] },
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_1", content: "Answer questions?" }] },
 			}),
 		];
 		const expectedInput = {
@@ -192,12 +192,50 @@ describe("Claude Code stream translation", () => {
 		assert.deepEqual(toolCall?.input, expectedInput);
 		assert.deepEqual(toolCall?.arguments, expectedInput);
 
+		const postedStub = JSON.stringify({ status: "posted", tool_use_id: "toolu_ask_1" });
+		const postedStubContent = [{ type: "text", text: postedStub }];
 		const toolEnd = out.find((event) => event.type === "tool_execution_end");
 		assert.equal(toolEnd?.toolCallId, "toolu_ask_1");
 		assert.equal(toolEnd?.toolName, "ask_user_choices");
+		assert.equal(toolEnd?.result, postedStub);
+		assert.deepEqual(toolEnd?.content, postedStubContent);
 		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
 		assert.equal(toolResultMessage?.message.toolCallId, "toolu_ask_1");
 		assert.equal(toolResultMessage?.message.toolName, "ask_user_choices");
+		assert.deepEqual(toolResultMessage?.message.content, postedStubContent);
+		assert.deepEqual(JSON.parse(toolResultMessage?.message.content[0].text), { status: "posted", tool_use_id: "toolu_ask_1" });
+	});
+
+	it("converts normalized ask_user_choices tool_result placeholder text to posted stub", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { messageIdPrefix: "test" });
+		const out = [
+			...translator.translate({
+				type: "assistant",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "tool_use",
+						id: "toolu_ask_normalized",
+						name: "ask_user_choices",
+						input: {
+							questions: [{
+								question: "Which area should we inspect?",
+								options: ["Runtime", "UI"],
+								tab_label: "Area",
+							}],
+						},
+					}],
+				},
+			}),
+			...translator.translate({
+				type: "user",
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_normalized", content: "Answer questions?" }] },
+			}),
+		];
+		const postedStub = JSON.stringify({ status: "posted", tool_use_id: "toolu_ask_normalized" });
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.toolName, "ask_user_choices");
+		assert.deepEqual(toolResultMessage?.message.content, [{ type: "text", text: postedStub }]);
 	});
 
 	it("preserves errored tool_result pairing", () => {
