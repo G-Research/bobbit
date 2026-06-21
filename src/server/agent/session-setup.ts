@@ -1289,6 +1289,8 @@ export async function executeWorktreeAsync(
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
 	if (preExistingMode === "switch-session") {
+		let preExistingSessionFile = plan.preExistingAgentSessionFile;
+		if (!preExistingSessionFile) throw new Error("switch_session requested without a pre-existing transcript path");
 		// The continue handler pre-computes the cloned-.jsonl path against the
 		// project-root cwd. For worktree-backed sessions, the agent CLI boots
 		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
@@ -1297,24 +1299,25 @@ export async function executeWorktreeAsync(
 		// actual cwd-slug before issuing switch_session.
 		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
-		if (correctPath !== plan.preExistingAgentSessionFile) {
+		if (correctPath !== preExistingSessionFile) {
 			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
 			const fsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
 			if (plan.sandboxed) {
 				// Container-side: copy via docker exec then delete the old file.
-				await sessionFileCopy(fsCtx, plan.preExistingAgentSessionFile, fsCtx, correctPath, ctx.sandboxManager);
-				await sessionFileDelete(fsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+				await sessionFileCopy(fsCtx, preExistingSessionFile, fsCtx, correctPath, ctx.sandboxManager);
+				await sessionFileDelete(fsCtx, preExistingSessionFile, ctx.sandboxManager).catch(() => {});
 			} else {
 				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
 				const fsp = await import("node:fs/promises");
 				await fsp.mkdir(path.dirname(correctPath), { recursive: true });
 				try {
-					await fsp.rename(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.rename(preExistingSessionFile, correctPath);
 				} catch (err) {
-					await fsp.copyFile(plan.preExistingAgentSessionFile, correctPath);
-					await fsp.unlink(plan.preExistingAgentSessionFile).catch(() => {});
+					await fsp.copyFile(preExistingSessionFile, correctPath);
+					await fsp.unlink(preExistingSessionFile).catch(() => {});
 				}
 			}
+			preExistingSessionFile = correctPath;
 			plan.preExistingAgentSessionFile = correctPath;
 			ctx.store.update(session.id, { agentSessionFile: correctPath });
 		}
@@ -1323,7 +1326,7 @@ export async function executeWorktreeAsync(
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
-				plan.preExistingAgentSessionFile,
+				preExistingSessionFile,
 				ctx.sandboxManager,
 				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
 			);
@@ -1333,12 +1336,12 @@ export async function executeWorktreeAsync(
 		// the agent rehydrates from it (best-effort, non-fatal).
 		await sanitizeAgentTranscriptFile(
 			transcriptFsCtx,
-			plan.preExistingAgentSessionFile,
+			preExistingSessionFile,
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: preExistingSessionFile },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
@@ -1460,23 +1463,25 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
 	if (preExistingMode === "switch-session") {
+		const preExistingSessionFile = plan.preExistingAgentSessionFile;
+		if (!preExistingSessionFile) throw new Error("switch_session requested without a pre-existing transcript path");
 		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
-				plan.preExistingAgentSessionFile,
+				preExistingSessionFile,
 				ctx.sandboxManager,
 				{ oldCwds: plan.preExistingAgentSessionOldCwds, newCwd: plan.cwd },
 			);
 		}
 		await sanitizeAgentTranscriptFile(
 			transcriptFsCtx,
-			plan.preExistingAgentSessionFile,
+			preExistingSessionFile,
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: preExistingSessionFile },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
