@@ -57,6 +57,7 @@ export interface GatewayInfo {
 	teamManager: any;     // Exposed for pause-cascade supervisor-respawn tests
 	orchestrationCore: any; // Exposed for orchestration restart-survival tests
 	projectContextManager: any; // Exposed for restart-survival (persisted-session list)
+	preferencesStore: any; // Exposed for direct preference seeding in auth-sensitive API tests
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -314,6 +315,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			teamManager: (gw as any).teamManager,
 			orchestrationCore: (gw as any).orchestrationCore,
 			projectContextManager: (gw as any).projectContextManager,
+			preferencesStore: (gw as any).preferencesStore,
 		};
 
 		// Orchestration routes require caller→owner auth via the per-session
