@@ -28,9 +28,10 @@ import crypto from "node:crypto";
  * `SandboxTokenStore` exactly (see `sandbox-token.ts`): nothing is persisted, so
  * there is zero disk surface an agent sandbox could mount and read. Critically,
  * the gateway never bind-mounts the `.bobbit/state` root into agent containers —
- * only specific subdirectories (`sessions/`, `tool-guard/`, `html-snapshots/` —
- * see `docker-args.ts`), and `sessions.json` lives at the state ROOT and is also
- * never mounted. Storing the secret on disk (even in `sessions.json`) was
+ * only specific subdirectories (`sessions/`, `tool-guard/`, `html-snapshots/`,
+ * generated read-only extension dirs — see `docker-args.ts`), and `sessions.json`
+ * lives at the state ROOT and is also never mounted. Storing the secret on disk
+ * (even in `sessions.json`) was
  * therefore unnecessary; keeping it purely in-memory is strictly safer.
  *
  * RESTART-SAFE

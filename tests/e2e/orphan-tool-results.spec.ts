@@ -27,6 +27,7 @@ interface CapturedConsole {
 
 const ORPHAN_SECRET = "ORPHAN_RESULT_SECRET_SHOULD_NOT_SURVIVE";
 const VALID_SECRET = "VALID_RESULT_SHOULD_SURVIVE";
+const OPENAI_ORPHAN_GUARD_STATE_SUBDIR = "openai-orphan-tool-result";
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(60_000);
@@ -134,11 +135,11 @@ async function persistedAgentSessionFile(gateway: any, sessionId: string): Promi
 }
 
 function removeOpenAiGuardDir(bobbitDir: string): void {
-	fs.rmSync(path.join(bobbitDir, "state", "tool-guard", "openai-orphan-tool-result"), { recursive: true, force: true });
+	fs.rmSync(path.join(bobbitDir, "state", OPENAI_ORPHAN_GUARD_STATE_SUBDIR), { recursive: true, force: true });
 }
 
 function openAiGuardExtensionFiles(bobbitDir: string): string[] {
-	const root = path.join(bobbitDir, "state", "tool-guard", "openai-orphan-tool-result");
+	const root = path.join(bobbitDir, "state", OPENAI_ORPHAN_GUARD_STATE_SUBDIR);
 	if (!fs.existsSync(root)) return [];
 	const files: string[] = [];
 	const stack = [root];
@@ -209,7 +210,8 @@ test.describe("orphan tool-result restore lifecycle", () => {
 
 		const extensionPath = writeOpenAiOrphanToolResultExtension();
 		expect(extensionPath).toBeTruthy();
-		expect(extensionPath).toContain(path.join(gateway.bobbitDir, "state", "tool-guard", "openai-orphan-tool-result"));
+		expect(extensionPath).toContain(path.join(gateway.bobbitDir, "state", OPENAI_ORPHAN_GUARD_STATE_SUBDIR));
+		expect(extensionPath).not.toContain(path.join(gateway.bobbitDir, "state", "tool-guard"));
 
 		const source = fs.readFileSync(extensionPath!, "utf-8");
 		const install = new Function(source.replace("export default function(pi)", "return function(pi)")) as () => (pi: { on: (event: string, cb: (event: any) => unknown) => void }) => void;

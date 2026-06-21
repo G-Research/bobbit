@@ -205,30 +205,25 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// `google-code-assist` holds the generated pi-coding-agent provider
-	// extension (`<hash>/provider.ts`, written by
-	// google-code-assist-provider-extension.ts) that registers the
-	// `google-code-assist` API provider inside the spawned agent. Sandboxed
-	// sessions load it via `--extension`, whose host path remapArgsForContainer
-	// rewrites to `/bobbit-state/google-code-assist/...`; that container path
-	// only resolves if the subdir is bind-mounted here. The dir contains only
-	// generated extension source (no secrets — the runtime token is fetched
-	// per-request from the gateway), so mounting it is safe.
+	// `google-code-assist` and `openai-orphan-tool-result` hold generated
+	// pi-coding-agent extensions loaded by sandboxed sessions via `--extension`.
+	// Host paths are remapped to `/bobbit-state/<subdir>/...` by
+	// remapArgsForContainer, so those container paths only resolve if the subdirs
+	// are bind-mounted here. They contain generated extension source only — no
+	// secrets are baked into either file.
 	//
-	// `google-code-assist` is mounted READ-ONLY (`:ro`): the sandboxed agent
-	// only ever *loads* the generated `provider.ts` via `--extension`, never
-	// writes it. A writable mount would let a compromised sandbox tamper with
-	// the generated extension source, which is then reused (content-addressed,
-	// shared across sessions) for a subsequent run — a sandbox-escape vector.
-	// The `:ro` flag closes that hole at the kernel mount level; the gateway
-	// also revalidates cached contents before reuse as defense-in-depth
-	// (see google-code-assist-provider-extension.ts).
+	// Both generated-extension subdirs are mounted READ-ONLY (`:ro`): sandboxed
+	// agents only ever *load* them. A writable mount would let a compromised
+	// sandbox tamper with content-addressed source reused by later sessions.
+	// The gateway also revalidates cached contents before reuse as
+	// defense-in-depth (see the corresponding extension writer modules).
 	if (stateDir) {
 		const sandboxStateDirs: Array<{ sub: string; readOnly?: boolean }> = [
 			{ sub: "sessions" },
 			{ sub: "tool-guard" },
 			{ sub: "html-snapshots" },
 			{ sub: "google-code-assist", readOnly: true },
+			{ sub: "openai-orphan-tool-result", readOnly: true },
 		];
 		for (const { sub, readOnly } of sandboxStateDirs) {
 			const hostPath = path.join(stateDir, sub);
