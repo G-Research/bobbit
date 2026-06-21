@@ -10,7 +10,7 @@ describe("session setup Claude Code pre-existing transcript recovery", () => {
 	it("rejects Claude Code continue/fork transcript recovery without a Claude session id", () => {
 		assert.match(SRC, /export function resolvePreExistingTranscriptSetupMode/);
 		assert.match(SRC, /runtime !== "claude-code"\) return "switch-session"/);
-		assert.match(SRC, /plan\.bridgeOptions\.claudeCodeSessionId\) return "claude-code-resume"/);
+		assert.match(SRC, /plan\.bridgeOptions\.claudeCodeSessionId \|\| plan\.claudeCodeSessionId\) return "claude-code-resume"/);
 		assert.match(SRC, /Continue\/fork from a Bobbit transcript is not supported for Claude Code runtime in the MVP/);
 		assert.match(SRC, /Pi switch_session cannot be used with Claude Code/);
 	});

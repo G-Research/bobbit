@@ -362,12 +362,12 @@ export async function withRetry<T>(
 export type PreExistingTranscriptSetupMode = "none" | "switch-session" | "claude-code-resume";
 
 export function resolvePreExistingTranscriptSetupMode(
-	plan: Pick<SessionSetupPlan, "preExistingAgentSessionFile" | "runtime" | "bridgeOptions">,
+	plan: Pick<SessionSetupPlan, "preExistingAgentSessionFile" | "runtime" | "claudeCodeSessionId" | "bridgeOptions">,
 ): PreExistingTranscriptSetupMode {
 	if (!plan.preExistingAgentSessionFile) return "none";
 	const runtime = plan.runtime ?? plan.bridgeOptions.runtime ?? runtimeFromModelString(plan.bridgeOptions.initialModel) ?? "pi";
 	if (runtime !== "claude-code") return "switch-session";
-	if (plan.bridgeOptions.claudeCodeSessionId) return "claude-code-resume";
+	if (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId) return "claude-code-resume";
 	throw new Error(
 		"Continue/fork from a Bobbit transcript is not supported for Claude Code runtime in the MVP unless a Claude Code session id is available; " +
 		"Pi switch_session cannot be used with Claude Code.",

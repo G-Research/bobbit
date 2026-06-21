@@ -6550,7 +6550,18 @@ export class SessionManager {
 		// the conversation may still be empty. This ensures the latest messages
 		// are written before we archive.
 		try {
-			await session.rpcClient.getState();
+			const stateResp = await session.rpcClient.getState();
+			const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
+			const persistedRuntime = resolveSessionRuntime(this.resolveStoreForSession(id).get(id) ?? {});
+			if (persistedRuntime === "claude-code" && stateResp?.success && claudeCodeSessionId) {
+				const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
+				this.resolveStoreForSession(id).update(id, {
+					runtime: "claude-code",
+					modelProvider: "claude-code",
+					...(modelId ? { modelId, claudeCodeModelAlias: modelId } : {}),
+					claudeCodeSessionId,
+				});
+			}
 		} catch {
 			// Agent may already be stopped — best-effort flush
 		}
