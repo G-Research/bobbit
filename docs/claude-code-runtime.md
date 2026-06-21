@@ -20,7 +20,7 @@ claude --print \
 
 Depending on session metadata and preferences Bobbit may also pass:
 
-- `--model <alias>` for non-`default` aliases such as `sonnet` or `opus`.
+- `--model <alias>` for non-`default` aliases such as `claude-opus-4-8`, `sonnet`, or `opus`.
 - `--append-system-prompt <text>` with Bobbit's assembled system prompt.
 - `--permission-mode acceptEdits|bypassPermissions` for explicit non-default permission modes.
 - `--resume <claudeCodeSessionId>` when Bobbit has a previous Claude Code session id.
@@ -50,10 +50,12 @@ The parser has size limits for JSONL lines, diagnostic lines, per-event content,
 
 Picker rows are deliberately labeled as local runtime rows:
 
-- Name: `Claude Code Sonnet`, `Claude Code Opus`, etc.
+- Name: `Claude Code Opus 4.8`, `Claude Code Sonnet`, `Claude Code Opus`, etc.
 - Provider/runtime label: `Claude Code (local)`.
 - Detail text: `Claude Code managed` / `Claude Code account`.
 - Tooltip when available: `Runs through your local Claude Code CLI and existing Claude Code login.`
+
+Claude Code owns context-window and output-token behavior for this runtime. Bobbit may keep synthetic fallback metadata in the model registry for compatibility, but the picker does not display numeric context/output limits for Claude Code rows; it shows `Claude Code managed` instead.
 
 Readiness comes from `GET /api/claude-code/status`; `POST /api/claude-code/status/refresh` clears the short status/model cache and re-probes.
 
@@ -68,7 +70,7 @@ If the executable is missing, invalid, not runnable, times out, or reports a log
 
 ## Configuration
 
-Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API.
+Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API. Host-runtime preferences that affect process execution or permission bypass are sensitive: changing or resetting `claudeCode.executablePath`, enabling `claudeCode.allowBypassPermissions`, or setting `claudeCode.permissionMode` to `bypassPermissions` requires an operator-browser confirmation token. Direct API writes without that confirmation are rejected.
 
 | Preference key | Default | Meaning |
 |---|---|---|
@@ -77,7 +79,7 @@ Settings → Models contains a **Claude Code (local)** section. These preference
 | `claudeCode.permissionMode` | `default` | Claude Code permission mode: `default`, `acceptEdits`, or `bypassPermissions`. |
 | `claudeCode.allowBypassPermissions` | `false` | Explicit user/admin opt-in required before `bypassPermissions` can be saved or used. |
 
-Project config may provide `claudeCodeDefaultModel` and `claudeCodePermissionMode` for sessions in that project. It cannot choose the host executable or enable bypass mode. If a project requests `bypassPermissions` and the user/admin has not enabled `claudeCode.allowBypassPermissions`, Bobbit downgrades the mode to `default`.
+Project config may provide `claudeCodeDefaultModel` and `claudeCodePermissionMode` for sessions in that project. It cannot choose the host executable for readiness probes or sessions, and repository-controlled keys such as `claudeCodeExecutablePath` are ignored for that purpose. Project config also cannot enable bypass mode. If a project requests `bypassPermissions` and the user/admin has not enabled `claudeCode.allowBypassPermissions`, Bobbit downgrades the mode to `default`.
 
 Permission modes are intentionally explicit:
 
@@ -159,6 +161,7 @@ Relevant REST surfaces:
 
 | Method | Path | Purpose |
 |---|---|---|
+| `POST` | `/api/preferences/claude-code/confirmation` | Mints the short-lived operator confirmation token required for sensitive Claude Code preference writes. |
 | `GET` | `/api/claude-code/status` | Probe local CLI readiness. Optional `projectId` validates the project context; the executable remains user/admin preference only. |
 | `POST` | `/api/claude-code/status/refresh` | Invalidate status/model caches and re-probe. |
 | `GET` | `/api/models` | Includes synthetic `claude-code/*` models with `runtime`, `localRuntime`, `runtimeLabel`, `sessionSelectable`, and unavailable reason metadata. |
