@@ -222,11 +222,14 @@ test.describe("Settings Models tab redesign", () => {
 		await section.locator('[data-testid="claude-code-executable"]').blur();
 		await page.getByRole("button", { name: "Change executable" }).click();
 
-		const log = await page.evaluate(() => (window as any).__getFetchLog());
-		const confirmation = log.find((e: any) => e.url === "/api/preferences/claude-code/confirmation");
-		expect(confirmation).toMatchObject({ method: "POST", credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
-		const prefWrite = log.find((e: any) => e.url === "/api/preferences" && e.method === "PUT");
-		expect(prefWrite).toMatchObject({ credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getFetchLog());
+			return log.find((e: any) => e.url === "/api/preferences/claude-code/confirmation");
+		}).toMatchObject({ method: "POST", credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
+		await expect.poll(async () => {
+			const log = await page.evaluate(() => (window as any).__getFetchLog());
+			return log.find((e: any) => e.url === "/api/preferences" && e.method === "PUT");
+		}).toMatchObject({ credentials: "include", body: { "claudeCode.executablePath": "/opt/bin/claude" } });
 	});
 
 	test("Test button invokes /api/models/test and shows result", async ({ page }) => {
