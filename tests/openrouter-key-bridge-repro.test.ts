@@ -33,7 +33,8 @@ const { initPromptDirs } = await import("../src/server/agent/system-prompt.ts");
 initPromptDirs(stateDir);
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
-const AUTH_ERROR = "No API key found for openrouter";
+const AUTH_ERROR_SECRET = "sk-or-secret-never-log";
+const AUTH_ERROR = `No API key found for openrouter: ${AUTH_ERROR_SECRET}`;
 
 const managers: any[] = [];
 let previousOpenRouterEnv: string | undefined;
@@ -226,10 +227,17 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		};
 		manager.sessions.set(session.id, session);
 
-		await assert.rejects(
-			() => manager.enqueuePrompt(session.id, "hello OpenRouter"),
-			/No API key found for openrouter/,
-		);
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+		try {
+			await assert.rejects(
+				() => manager.enqueuePrompt(session.id, "hello OpenRouter"),
+				/No API key found for openrouter/,
+			);
+		} finally {
+			console.warn = originalWarn;
+		}
 
 		assert.equal(session.status, "idle", "provider-auth dispatch failure must not leave the session streaming");
 		assert.equal(session.promptQueue.length, 1, "failed auth prompt should remain recoverable in the queue");
@@ -237,6 +245,8 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		const persistedStreamingFalse = updates.some((u) => u?.wasStreaming === false && "streamingStartedAt" in u);
 		const staleStreamingTimestampCleared = session.streamingStartedAt === undefined;
 		const visiblePayload = JSON.stringify(client.sent);
+		const bufferedPayload = JSON.stringify(session.eventBuffer.getAll());
+		const warningPayload = JSON.stringify(warnings);
 		const surfacedCredentialAction = /openrouter/i.test(visiblePayload)
 			&& /(?:credential|api key|provider[-_ ]?auth|No API key)/i.test(visiblePayload)
 			&& /(?:retry|fix|settings|switch provider|abort|respawn)/i.test(visiblePayload);
@@ -245,10 +255,45 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		if (!persistedStreamingFalse) missing.push("persist wasStreaming:false + streamingStartedAt:undefined");
 		if (!staleStreamingTimestampCleared) missing.push("clear in-memory streamingStartedAt");
 		if (!surfacedCredentialAction) missing.push("surface OpenRouter credential fix/retry action to clients");
+		if (visiblePayload.includes(AUTH_ERROR_SECRET)) missing.push("redact provider-auth secret from client frames");
+		if (bufferedPayload.includes(AUTH_ERROR_SECRET)) missing.push("redact provider-auth secret from EventBuffer");
+		if (warningPayload.includes(AUTH_ERROR_SECRET)) missing.push("redact provider-auth secret from console warnings");
+		if (/\"error\"\s*:/.test(visiblePayload) || /\"error\"\s*:/.test(bufferedPayload)) missing.push("do not emit raw provider error fields");
 		assert.deepEqual(
 			missing,
 			[],
 			`OPENROUTER_PROVIDER_AUTH_RECOVERY_MISSING: ${missing.join("; ")}. Updates=${JSON.stringify(updates)} clientFrames=${visiblePayload}`,
 		);
+	});
+
+	it("redacts provider-auth text in terminated dispatch recovery warnings", () => {
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: mock.fn(() => ({ modelProvider: "openrouter" })),
+			update: mock.fn(() => {}),
+		};
+		managers.push(manager);
+		const session: any = {
+			id: "s-openrouter-terminated-auth-failure",
+			status: "terminated",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			modelProvider: "openrouter",
+		};
+		manager.sessions.set(session.id, session);
+
+		console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+		try {
+			manager.recoverPromptDispatch(session, [{ text: "hello" }], AUTH_ERROR, "direct prompt");
+		} finally {
+			console.warn = originalWarn;
+		}
+
+		const warningPayload = JSON.stringify(warnings);
+		assert.ok(/provider authentication failure|missing-api-key/i.test(warningPayload), "warning should remain diagnostically useful");
+		assert.doesNotMatch(warningPayload, new RegExp(AUTH_ERROR_SECRET), "terminated recovery warning must redact provider-auth secrets");
 	});
 });
