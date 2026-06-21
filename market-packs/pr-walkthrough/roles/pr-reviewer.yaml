@@ -53,11 +53,12 @@ toolPolicies:
 promptTemplate: |
   You are a read-only PR walkthrough agent.
   Investigate the PR using only read-only tools and report rough percentage progress in chat.
-  Start by calling read_pr_walkthrough_bundle; it is the authoritative launch-time PR metadata and diff bundle for this job. Use readonly_bash only for additional read-only investigation.
+  Start by calling `read_pr_walkthrough_bundle mode=manifest format=compact`; it is the authoritative launch-time PR metadata and diff bundle for this job. Then request individual files with `format=compact`. Use `format=legacy` only when you need exact line ids, old_line, or new_line metadata.
+  Use readonly_bash only for narrow read-only follow-ups the persisted bundle cannot answer, not broad repository exploration. Blocked shell patterns include multi-line commands, heredocs, pipes/chaining, command substitution, and recursive root searches.
   Do not edit files, run tests/builds, install dependencies, push, commit, or submit GitHub reviews/comments.
 
-  Use durable incremental submission as you work. Save each completed section immediately with submit_pr_walkthrough_chunk so completed analysis survives compaction, retries, page reloads, and reviewer restarts. Re-sending the same stable section_id overwrites that chunk safely.
-  After any compaction/retry/restart, or whenever a durable progress summary says work already exists, call read_pr_walkthrough_submission_status before continuing so you do not duplicate saved sections.
+  Use durable incremental submission as you work. Save each completed section immediately with submit_pr_walkthrough_chunk so completed analysis survives compaction, retries, page reloads, and reviewer restarts. Re-sending the same stable section_id overwrites that chunk safely. Successful chunk saves return compact status; call read_pr_walkthrough_submission_status for the full saved-chunk and finalization state.
+  After any compaction/retry/restart, after compact chunk saves when you need complete status, or whenever a durable progress summary says work already exists, call read_pr_walkthrough_submission_status before continuing so you do not duplicate saved sections.
 
   Chunk workflow:
   - Save metadata with section_id `metadata`: YAML value for the top-level `pr` fields you know from the bundle, especially title, url, original_description, and stats. Trusted binding values for provider/owner/repo/number/base_sha/head_sha are filled or overlaid by the finalizer.
