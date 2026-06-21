@@ -84,6 +84,14 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { hasRuntime: false });
 	});
+
+	it("forwards trusted goal and role context to route handlers", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "trusted-context"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ goalId: ctx.goalId, roleName: ctx.roleName }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		const result = await d.dispatch(modulePath, packRoot, "bundle", { ...ctx(), goalId: "goal-1", roleName: "coder" }, { method: "GET" });
+		assert.deepEqual(result, { goalId: "goal-1", roleName: "coder" });
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {

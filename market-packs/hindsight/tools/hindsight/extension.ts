@@ -262,6 +262,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "hindsight_retain: Save a durable memory for future recall.",
 		promptGuidelines: [
 			"Use hindsight_retain to durably record a decision, preference, or fact worth remembering.",
+			"The route adds trusted kind/project/goal/session/agent context tags automatically when available.",
 			"scope 'project' tags the memory to this project; 'all' keeps it unscoped on the shared bank.",
 		],
 		parameters: Type.Object({
@@ -270,7 +271,7 @@ const extension: ExtensionFactory = (pi) => {
 				Type.Union([Type.Literal("project"), Type.Literal("all")], { description: SCOPE_DESC }),
 			),
 			tags: Type.Optional(
-				Type.Record(Type.String(), Type.String(), { description: "Extra key/value tags (additive)." }),
+				Type.Record(Type.String(), Type.String(), { description: "Extra key/value tags; automatic context tags win on conflict." }),
 			),
 			sync: Type.Optional(Type.Boolean({ description: "Wait for the write to be durable. Default false." })),
 		}),

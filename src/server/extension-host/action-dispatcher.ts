@@ -41,6 +41,12 @@ export interface ActionHandlerCtx {
 	 *  handler scope to the real project (e.g. a `project:<id>` recall tag filter)
 	 *  instead of fabricating one. Absent for global/server-scope sessions. */
 	projectId?: string;
+	/** Effective goal id derived from trusted session state (goalId, then teamGoalId),
+	 *  when present. Used by route handlers for server-derived context tags. */
+	goalId?: string;
+	/** Calling session role name, when present. Used by route handlers for
+	 *  server-derived agent context tags. */
+	roleName?: string;
 	/** The session working dir — the worker's `process.cwd()` for tool parity (a
 	 *  tool/MCP server runs rooted at the session worktree). Populated by the endpoint
 	 *  from the persisted session. Absent for sessions with no resolvable cwd (the

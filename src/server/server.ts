@@ -7054,10 +7054,9 @@ async function handleApiRoute(
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? sessionManager.getPersistedSession(routeHeaderSid)?.projectId)
-			: undefined;
+		const routeHeaderLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
+		const routeHeaderPersisted = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		const routeSessionProjectId = routeHeaderLive?.projectId ?? routeHeaderPersisted?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -7159,13 +7158,26 @@ async function handleApiRoute(
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
+			const routeLive = sessionManager.getSession(guard.sessionId);
 			const routePs = sessionManager.getPersistedSession(guard.sessionId);
 			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeGoalId = routeLive?.goalId ?? routeLive?.teamGoalId ?? routePs?.goalId ?? routePs?.teamGoalId;
+			const routeRoleName = routeLive?.role ?? routePs?.role;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, ...(routeRuntime ? { runtime: routeRuntime } : {}) },
+				{
+					host,
+					sessionId: guard.sessionId,
+					toolUseId: toolUseId ?? "",
+					tool: ident.contributionId,
+					projectId: routeSessionProjectId,
+					...(routeGoalId ? { goalId: routeGoalId } : {}),
+					...(routeRoleName ? { roleName: routeRoleName } : {}),
+					workingDir: routeWorkingDir,
+					...(routeRuntime ? { runtime: routeRuntime } : {}),
+				},
 				{ method, query, body: init.body },
 			);
 			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
