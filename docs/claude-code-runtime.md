@@ -9,10 +9,10 @@ Use this mode when you want Bobbit's session UI, goal/task context, persistence,
 The local runtime currently supports:
 
 - **Claude Code-backed chat sessions** — Bobbit sends user prompts to the local CLI over structured stdin and renders the streamed stdout response in the normal chat surface. Claude Code owns inference, authentication, permission prompts, and its internal context handling.
-- **Model alias selection** — picker rows use `claude-code/<alias>` ids. The default alias for new Claude Code sessions is `claude-opus-4-8`, with built-in rows for `default`, `sonnet`, and `opus`; short custom aliases may also be forwarded to the CLI.
+- **Model alias selection** — picker rows use `claude-code/<alias>` ids. The default alias for new Claude Code sessions is `claude-opus-4-8`, with built-in rows for `default`, `sonnet`, and `opus`; short custom aliases may also be forwarded to the CLI. Persisted model metadata is derived from the active local Claude Code alias, not from stale API/Pi model state.
 - **Same-session alias switching** — changing between Claude Code aliases keeps the Bobbit session when the runtime is idle. Bobbit restarts the local `claude` process with the new alias and resumes with the latest known Claude Code session id when available.
-- **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists.
-- **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Claude Code Ask User Question payloads render as Bobbit `ask_user_choices` when they use the supported structured question/options shape. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
+- **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists. Supported pending `ask_user_choices` widgets restored from that fallback remain answerable after a gateway restart.
+- **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Claude Code Ask User Question payloads render as Bobbit `ask_user_choices` when they use the supported structured question/options shape; those widgets are stored in the transcript fallback so they can be restored with the conversation. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
 - **Session status and errors** — readiness, runtime metadata, normal turn completion, CLI exits, malformed stream diagnostics, auth/start failures, and error results surface through Bobbit status/error events instead of failing silently.
 - **Stop/abort MVP behavior** — graceful stops terminate the local process, escalating when needed; abort emits a visible aborted turn and lets the next prompt start a fresh CLI process with the latest known resume id.
 - **Guarded host preferences** — executable path and permission-bypass settings are saved server-side and require operator confirmation because they affect host-local process execution.
@@ -46,7 +46,7 @@ Claude Code stdout is parsed as JSONL. Bobbit translates Claude Code events into
 | `system` / `init` | Starts the runtime, captures `claudeCodeSessionId`, and records model alias metadata. |
 | `user` text replay | Emits a user `message_end`. |
 | `assistant` text | Streams assistant `message_update` snapshots. |
-| `tool_use` | Emits tool-start style events and includes tool calls in assistant content where renderable. Claude Code Ask User Question blocks are normalized to Bobbit `ask_user_choices` when each question uses Bobbit-compatible `question`, optional `header`, optional `multiSelect`, and option labels. |
+| `tool_use` | Emits tool-start style events and includes tool calls in assistant content where renderable. Claude Code Ask User Question blocks are normalized to Bobbit `ask_user_choices` when each question uses Bobbit-compatible `question`, optional `header`, optional `multiSelect`, and option labels. Supported ask widgets are persisted as part of the Bobbit transcript fallback so pending cards can restore after reload or gateway restart. |
 | `tool_result` | Emits matching tool-result/end events. |
 | `result` | Ends the assistant turn and emits `agent_end`; errors surface as visible assistant errors. |
 | non-JSON stdout diagnostics | Kept as diagnostics instead of crashing the session. |
@@ -123,7 +123,11 @@ Bobbit persists runtime metadata alongside normal session metadata:
 - `claudeCodePermissionMode`
 - `claudeCodeModelAlias`
 
-`claudeCodeSessionId` is the Claude Code CLI session id. It is separate from Bobbit's session id and is captured from Claude Code stream events. Bobbit also writes Claude Code `message_end` events to a Bobbit-owned transcript fallback when no Pi `agentSessionFile` exists, so live hydration and `read_session` can still read local-runtime conversations.
+`modelId` and `claudeCodeModelAlias` come from the selected local Claude Code alias. This keeps restored session state and the footer/model picker tied to the Claude Code runtime instead of falling back to stale API/Pi model metadata.
+
+`claudeCodeSessionId` is the Claude Code CLI session id. It is separate from Bobbit's session id and is captured from Claude Code stream events. Bobbit also writes Claude Code `message_end` events to a Bobbit-owned transcript fallback when no Pi `agentSessionFile` exists, so live hydration, pending ask widgets, and `read_session` can still read local-runtime conversations.
+
+When a restored pending `ask_user_choices` widget is submitted, Bobbit validates the answer against the same hydrated transcript fallback before enqueueing the response. A gateway restart should therefore not make a restored Claude Code ask widget unanswerable, as long as the original Ask User Question used the supported structured shape.
 
 ### No silent runtime switching
 
