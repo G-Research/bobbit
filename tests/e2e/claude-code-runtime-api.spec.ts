@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { agentEndPredicate, apiFetch, connectWs, nonGitCwd } from "./e2e-setup.js";
+import { agentEndPredicate, apiFetch, base, connectWs, nonGitCwd, readE2EToken } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,39 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fakeCli = path.join(__dirname, "..", "fixtures", "claude-code", "fake-claude-cli.mjs");
+
+async function operatorCookie(): Promise<string> {
+	const res = await fetch(`${base()}/api/preferences`, {
+		headers: { Authorization: `Bearer ${readE2EToken()}` },
+	});
+	const setCookie = res.headers.get("set-cookie");
+	const cookie = setCookie?.split(";")[0];
+	if (!cookie) throw new Error("operator cookie was not minted");
+	return cookie;
+}
+
+async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
+	const cookie = await operatorCookie();
+	const commonHeaders = {
+		Authorization: `Bearer ${readE2EToken()}`,
+		Cookie: cookie,
+		"Content-Type": "application/json",
+	};
+	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify(patch),
+	});
+	expect(confirmation.status).toBe(200);
+	const data = await confirmation.json();
+	expect(data.confirmationToken).toBeTruthy();
+	return fetch(`${base()}/api/preferences`, {
+		method: "PUT",
+		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
+		body: JSON.stringify(patch),
+	});
+}
+
 
 async function resetClaudeCodePrefs(): Promise<void> {
 	await apiFetch("/api/preferences", {
@@ -58,14 +91,12 @@ test.describe("Claude Code runtime session API", () => {
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({
-					"claudeCode.executablePath": wrapper.executable,
-					"claudeCode.defaultModel": "opus",
-					"claudeCode.permissionMode": "acceptEdits",
-				}),
+			const prefResp = await confirmedClaudeCodePrefs({
+				"claudeCode.executablePath": wrapper.executable,
+				"claudeCode.defaultModel": "opus",
+				"claudeCode.permissionMode": "acceptEdits",
 			});
+			expect(prefResp.status).toBe(200);
 
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
@@ -114,15 +145,13 @@ test.describe("Claude Code runtime session API", () => {
 		const wrapper = makeFakeWrapper(recordPath);
 		let sessionId: string | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({
-					"claudeCode.executablePath": wrapper.executable,
-					"claudeCode.defaultModel": "opus",
-					"claudeCode.allowBypassPermissions": true,
-					"claudeCode.permissionMode": "bypassPermissions",
-				}),
+			const prefResp = await confirmedClaudeCodePrefs({
+				"claudeCode.executablePath": wrapper.executable,
+				"claudeCode.defaultModel": "opus",
+				"claudeCode.allowBypassPermissions": true,
+				"claudeCode.permissionMode": "bypassPermissions",
 			});
+			expect(prefResp.status).toBe(200);
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, runtime: "claude-code" }),
@@ -149,10 +178,8 @@ test.describe("Claude Code runtime session API", () => {
 		let sessionId: string | undefined;
 		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
 		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({ "claudeCode.executablePath": wrapper.executable }),
-			});
+			const prefResp = await confirmedClaudeCodePrefs({ "claudeCode.executablePath": wrapper.executable });
+			expect(prefResp.status).toBe(200);
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/sonnet" }),

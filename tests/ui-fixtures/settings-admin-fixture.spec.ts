@@ -225,6 +225,8 @@ test.describe("Settings/admin UI fixture", () => {
 
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
+		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
+		await page.keyboard.press("Enter");
 		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
 
 		await section.locator("[data-testid='claude-code-default-model']").selectOption("opus");

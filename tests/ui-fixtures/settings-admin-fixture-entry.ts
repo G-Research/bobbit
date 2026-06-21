@@ -216,6 +216,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const body = parseBody(init);
 	fetchLog.push({ url, method, body });
 
+	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
+		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });
+	}
+
 	if (pathname === "/api/preferences") {
 		if (method === "GET") {
 			updatePlayFinishDataset();

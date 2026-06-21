@@ -1631,13 +1631,24 @@ function loadModelsState(): void {
 	})();
 }
 
-async function savePref(key: string, value: string | boolean | null): Promise<void> {
+async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
+			headers: operatorConfirmationToken ? { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken } : undefined,
 			body: JSON.stringify({ [key]: value }),
 		});
 	} catch {}
+}
+
+async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
+	const res = await gatewayFetch("/api/preferences/claude-code/confirmation", {
+		method: "POST",
+		body: JSON.stringify(patch),
+	});
+	if (!res.ok) return undefined;
+	const data = await res.json().catch(() => ({}));
+	return typeof data.confirmationToken === "string" ? data.confirmationToken : undefined;
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
@@ -1683,8 +1694,21 @@ async function setSessionThinking(value: string): Promise<void> {
 }
 
 async function setClaudeCodeExecutable(value: string): Promise<void> {
-	prefClaudeCodeExecutable = value || "claude";
-	await savePref("claudeCode.executablePath", value.trim() ? value.trim() : null);
+	const next = value.trim() ? value.trim() : null;
+	let confirmationToken: string | undefined;
+	if (next !== null) {
+		const confirmed = await confirmAction(
+			"Change Claude Code executable?",
+			"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
+			"Change executable",
+			true,
+		);
+		if (!confirmed) return;
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
+		if (!confirmationToken) return;
+	}
+	prefClaudeCodeExecutable = next || "claude";
+	await savePref("claudeCode.executablePath", next, confirmationToken);
 	renderApp();
 }
 
@@ -1697,8 +1721,20 @@ async function setClaudeCodeDefaultModel(value: string): Promise<void> {
 async function setClaudeCodePermissionMode(value: string): Promise<void> {
 	const next = normalizeClaudeCodePermissionMode(value);
 	if (next === "bypassPermissions" && !prefClaudeCodeAllowBypass) return;
+	let confirmationToken: string | undefined;
+	if (next === "bypassPermissions") {
+		const confirmed = await confirmAction(
+			"Use bypass permissions?",
+			"Bypass mode can let Claude Code run local actions without normal permission prompts.",
+			"Use bypass",
+			true,
+		);
+		if (!confirmed) return;
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.permissionMode": next });
+		if (!confirmationToken) return;
+	}
 	prefClaudeCodePermissionMode = next;
-	await savePref("claudeCode.permissionMode", next === "default" ? null : next);
+	await savePref("claudeCode.permissionMode", next === "default" ? null : next, confirmationToken);
 	renderApp();
 }
 
@@ -1712,12 +1748,17 @@ async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
 		);
 		if (!confirmed) return;
 	}
+	let confirmationToken: string | undefined;
+	if (value) {
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.allowBypassPermissions": true });
+		if (!confirmationToken) return;
+	}
 	prefClaudeCodeAllowBypass = value;
 	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
 		prefClaudeCodePermissionMode = "default";
 		await savePref("claudeCode.permissionMode", null);
 	}
-	await savePref("claudeCode.allowBypassPermissions", value ? true : null);
+	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
 	renderApp();
 }
 

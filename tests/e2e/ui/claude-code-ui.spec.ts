@@ -1,21 +1,51 @@
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, defaultProject } from "../e2e-setup.js";
+import { apiFetch, base, createSession, defaultProject, readE2EToken } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const FAKE_CLAUDE_CLI = fileURLToPath(new URL("../../fixtures/claude-code/fake-claude-cli.mjs", import.meta.url));
 
+async function operatorCookie(): Promise<string> {
+	const res = await fetch(`${base()}/api/preferences`, {
+		headers: { Authorization: `Bearer ${readE2EToken()}` },
+	});
+	const setCookie = res.headers.get("set-cookie");
+	const cookie = setCookie?.split(";")[0];
+	if (!cookie) throw new Error("operator cookie was not minted");
+	return cookie;
+}
+
+async function confirmedClaudeCodePrefs(patch: Record<string, unknown>): Promise<Response> {
+	const cookie = await operatorCookie();
+	const commonHeaders = {
+		Authorization: `Bearer ${readE2EToken()}`,
+		Cookie: cookie,
+		"Content-Type": "application/json",
+	};
+	const confirmation = await fetch(`${base()}/api/preferences/claude-code/confirmation`, {
+		method: "POST",
+		headers: commonHeaders,
+		body: JSON.stringify(patch),
+	});
+	expect(confirmation.status).toBe(200);
+	const data = await confirmation.json();
+	expect(data.confirmationToken).toBeTruthy();
+	return fetch(`${base()}/api/preferences`, {
+		method: "PUT",
+		headers: { ...commonHeaders, "X-Bobbit-Operator-Confirmation": data.confirmationToken },
+		body: JSON.stringify(patch),
+	});
+}
+
+
 async function seedFakeClaudeCodePrefs(): Promise<void> {
 	chmodSync(FAKE_CLAUDE_CLI, 0o755);
-	const resp = await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({
-			"claudeCode.executablePath": FAKE_CLAUDE_CLI,
-			"claudeCode.defaultModel": "sonnet",
-			"claudeCode.permissionMode": "default",
-			"claudeCode.allowBypassPermissions": null,
-		}),
+	const resp = await confirmedClaudeCodePrefs({
+		"claudeCode.executablePath": FAKE_CLAUDE_CLI,
+		"claudeCode.defaultModel": "sonnet",
+		"claudeCode.permissionMode": "default",
+		"claudeCode.allowBypassPermissions": null,
 	});
 	expect(resp.status).toBe(200);
 }
@@ -178,6 +208,9 @@ test.describe("Claude Code local-runtime UI", () => {
 				}),
 			});
 		});
+		await page.route("**/api/preferences/claude-code/confirmation", async (route) => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ confirmationRequired: true, confirmationToken: "fixture-confirmation" }) });
+		});
 		await page.route("**/api/preferences", async (route) => {
 			if (route.request().method() === "GET") {
 				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
@@ -198,6 +231,7 @@ test.describe("Claude Code local-runtime UI", () => {
 
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
+		await page.getByRole("button", { name: "Change executable" }).click();
 		await section.locator("[data-testid='claude-code-default-model']").selectOption("claude-opus-4-8");
 		await section.locator("[data-testid='claude-code-permission-mode']").selectOption("acceptEdits");
 

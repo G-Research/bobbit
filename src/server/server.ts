@@ -303,6 +303,7 @@ import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
+import { consumeOperatorConfirmation, mintOperatorConfirmation, stableConfirmationBinding } from "./auth/operator-confirmation.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
@@ -311,7 +312,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
-import { isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch } from "./agent/claude-code-config.js";
+import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -1516,7 +1517,7 @@ export function createGateway(config: GatewayConfig) {
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Operator-Confirmation");
 
 			if (req.method === "OPTIONS") {
 				res.writeHead(204);
@@ -6741,6 +6742,59 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
+
+	function firstHeader(name: string): string | undefined {
+		const value = req.headers[name.toLowerCase()];
+		const str = Array.isArray(value) ? value[0] : value;
+		return typeof str === "string" && str.length > 0 ? str : undefined;
+	}
+
+	function hasSessionBoundHeaders(): boolean {
+		return Boolean(
+			firstHeader("x-bobbit-session-id")
+			|| firstHeader("x-bobbit-session-secret")
+			|| firstHeader("x-bobbit-spawning-session"),
+		);
+	}
+
+	function isHumanOperatorRequest(): boolean {
+		return Boolean(cookieStore && cookieTryAuth(req, cookieStore) && !sandboxScope && !hasSessionBoundHeaders());
+	}
+
+	function claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string } {
+		const sensitive = sensitiveClaudeCodePreferenceMutation(patch);
+		return {
+			requiresConfirmation: sensitive.requiresConfirmation,
+			keys: sensitive.keys,
+			binding: stableConfirmationBinding({ values: sensitive.values }),
+		};
+	}
+
+	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
+	// for host-local Claude Code preferences that affect process execution or permission bypass.
+	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {
+		if (!isHumanOperatorRequest()) {
+			json({ error: "Claude Code preference confirmation requires an operator browser session" }, 403);
+			return;
+		}
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
+		try {
+			confirmation = claudeCodeConfirmationBinding(body as Record<string, unknown>);
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 400);
+			return;
+		}
+		if (!confirmation.requiresConfirmation) {
+			json({ confirmationRequired: false, sensitiveKeys: [] });
+			return;
+		}
+		const minted = mintOperatorConfirmation({ purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
+		json({ confirmationRequired: true, confirmationToken: minted.token, expiresAt: minted.expiresAt, sensitiveKeys: confirmation.keys });
+		return;
+	}
+
 	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
 		json(getSafePreferences());
@@ -6754,6 +6808,26 @@ async function handleApiRoute(
 		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
 		let preferencePatch = body as Record<string, unknown>;
 		if (claudeCodePrefsChanged) {
+			let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
+			try {
+				confirmation = claudeCodeConfirmationBinding(preferencePatch);
+			} catch (err: any) {
+				json({ error: err?.message || String(err) }, 400);
+				return;
+			}
+			if (confirmation.requiresConfirmation) {
+				const token = firstHeader("x-bobbit-operator-confirmation");
+				const confirmed = isHumanOperatorRequest()
+					&& consumeOperatorConfirmation(token, { purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
+				if (!confirmed) {
+					json({
+						error: "Claude Code host-runtime preference changes require operator confirmation",
+						confirmationRequired: true,
+						sensitiveKeys: confirmation.keys,
+					}, 403);
+					return;
+				}
+			}
 			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
 			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
 			preferencePatch = { ...preferencePatch, ...normalized.values };
