@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
+import { ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Info, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -166,6 +166,7 @@ export class AgentInterface extends LitElement {
 	 */
 	@state() private _archivedProposalTypes: string[] = [];
 	@state() private _runtimeSwitchNotice = "";
+	@state() private _claudeCodeNoticeExpanded = false;
 	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
 	private _archivedProposalsFetchedFor: string | null = null;
 
@@ -218,6 +219,29 @@ export class AgentInterface extends LitElement {
 
 	private _runtimeDisplay(runtime: "pi" | "claude-code"): string {
 		return runtime === "claude-code" ? "Claude Code" : "standard Bobbit";
+	}
+
+	private _claudeCodeCapabilityNoticeKey(sessionId = this.session?.sessionId): string | null {
+		return sessionId ? `bobbit-claude-code-capability-notice-dismissed-${sessionId}` : null;
+	}
+
+	private _isClaudeCodeCapabilityNoticeDismissed(): boolean {
+		const key = this._claudeCodeCapabilityNoticeKey();
+		if (!key || typeof localStorage === "undefined") return false;
+		try { return localStorage.getItem(key) === "true"; } catch { return false; }
+	}
+
+	private _dismissClaudeCodeCapabilityNotice(): void {
+		const key = this._claudeCodeCapabilityNoticeKey();
+		try { if (key && typeof localStorage !== "undefined") localStorage.setItem(key, "true"); } catch { /* ignore storage failures */ }
+		this._claudeCodeNoticeExpanded = false;
+		this.requestUpdate();
+	}
+
+	private _openClaudeCodeRuntimeDocs(): void {
+		const opened = window.open("/docs/claude-code-runtime.md", "_blank", "noopener");
+		try { if (opened) opened.opener = null; } catch { /* ignore */ }
+		if (!opened) window.open("https://github.com/SuuBro/bobbit/blob/master/docs/claude-code-runtime.md", "_blank", "noopener");
 	}
 
 	private _applySelectedModel(model: any): void {
@@ -1629,6 +1653,7 @@ export class AgentInterface extends LitElement {
 		});
 		return html`
 			<div class="flex flex-col gap-3">
+				${this._renderClaudeCodeCapabilityNotice()}
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
@@ -1717,6 +1742,84 @@ export class AgentInterface extends LitElement {
 				})()}
 
 			</div>
+		`;
+	}
+
+	private _renderClaudeCodeCapabilityNotice() {
+		const sessionId = this.session?.sessionId;
+		if (!sessionId || this._currentRuntime() !== "claude-code" || this._isClaudeCodeCapabilityNoticeDismissed()) return nothing;
+		const detailsId = `claude-code-capability-details-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+		const detailsGroup = (title: string, items: string[]) => html`
+			<div class="rounded-md border border-border bg-background/40 p-2" data-testid="claude-code-capability-detail-group">
+				<div class="font-medium text-foreground mb-1">${title}</div>
+				<ul class="m-0 pl-4 text-muted-foreground">
+					${items.map((item) => html`<li>${item}</li>`)}
+				</ul>
+			</div>
+		`;
+		return html`
+			<section
+				role="note"
+				data-testid="claude-code-capability-notice"
+				class="mx-4 my-3 p-3 rounded-lg border border-border bg-card text-card-foreground text-sm"
+			>
+				<div class="flex items-start gap-3">
+					<span class="text-primary shrink-0 mt-0.5" aria-hidden="true">${icon(Info, "sm")}</span>
+					<div class="min-w-0 flex-1">
+						<div class="flex items-center gap-2 flex-wrap">
+							<div class="font-semibold text-foreground">Claude Code local runtime</div>
+							<span class="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">Claude Code (local)</span>
+						</div>
+						<p class="m-0 mt-1 text-muted-foreground">
+							This session runs through your local Claude Code CLI. Bobbit provides the chat shell, transcript, session metadata, alias switching, best-effort stop/abort, and mapped tool rendering.
+						</p>
+						${this._claudeCodeNoticeExpanded ? html`
+							<div id=${detailsId} class="grid gap-2 mt-3 sm:grid-cols-3 text-xs" data-testid="claude-code-capability-details">
+								${detailsGroup("Claude Code handles", [
+									"Login and account state",
+									"Available models and exact context behavior",
+									"Tool execution and permission prompts",
+									"Claude Code's own resume/context semantics",
+								])}
+								${detailsGroup("Bobbit handles", [
+									"Chat UI, transcript hydration, and session metadata",
+									"claude-code/* alias selection and same-runtime alias switching",
+									"Best-effort stop/abort",
+									"Rendering mapped tool use/results when Claude Code emits them structurally",
+								])}
+								${detailsGroup("Still standard Bobbit runtime", [
+									"Workflow gates, reviewers, and verification agents",
+									"Team/staff agents unless explicitly moved to Claude Code later",
+									"Bobbit-native tools that are not part of Claude Code's local tool run",
+								])}
+							</div>
+						` : html`<div id=${detailsId} hidden></div>`}
+						<div class="flex items-center gap-2 mt-3 flex-wrap">
+							<button
+								type="button"
+								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
+								aria-expanded=${String(this._claudeCodeNoticeExpanded)}
+								aria-controls=${detailsId}
+								data-testid="claude-code-capability-details-toggle"
+								@click=${() => { this._claudeCodeNoticeExpanded = !this._claudeCodeNoticeExpanded; }}
+							>${this._claudeCodeNoticeExpanded ? "Hide details" : "View details"}</button>
+							<button
+								type="button"
+								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
+								aria-label="Dismiss Claude Code runtime note for this session"
+								data-testid="claude-code-capability-dismiss"
+								@click=${() => this._dismissClaudeCodeCapabilityNotice()}
+							>Got it for this session</button>
+							<button
+								type="button"
+								class="text-xs rounded-md px-2 py-1 text-primary hover:bg-secondary"
+								data-testid="claude-code-capability-learn-more"
+								@click=${() => this._openClaudeCodeRuntimeDocs()}
+							>Learn more</button>
+						</div>
+					</div>
+				</div>
+			</section>
 		`;
 	}
 
@@ -1867,8 +1970,9 @@ export class AgentInterface extends LitElement {
 			: "";
 
 		const currentRuntime = this._currentRuntime();
+		const modelButtonTitle = currentRuntime === "claude-code" ? `Claude Code (local) · ${state.model?.id ?? this.claudeCodeModelAlias ?? "default"}` : state.model?.id;
 		const modelButton = this.enableModelSelector && state.model
-			? Button({
+			? html`<span title=${modelButtonTitle || ""} data-testid="footer-model-button-wrapper">${Button({
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
@@ -1876,13 +1980,13 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id">${state.model.id}</span>
-					${currentRuntime === "claude-code" ? html`<span class="sr-only" data-testid="footer-runtime-label">Claude Code (local)</span>` : ""}
+					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id" aria-hidden=${currentRuntime === "claude-code" ? "true" : "false"}>${state.model.id}</span>
+					${currentRuntime === "claude-code" ? html`<span class="sr-only" data-testid="footer-runtime-label">Claude Code (local) · ${state.model.id}</span>` : ""}
 				`,
 				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
 				// icon sits closer to the model name. ! beats Button's defaults.
 				className: "h-6 text-xs truncate !gap-1 sm:!gap-2 !px-1.5 sm:!px-3",
-			})
+			})}</span>`
 			: "";
 
 		const imageModel = (state as any).imageGenerationModel;
@@ -1950,14 +2054,25 @@ export class AgentInterface extends LitElement {
 				">
 					${m ? html`
 						<div style="font-weight:600;font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-							${icon(Sparkles, "sm")} ${m.id}
+							${icon(Sparkles, "sm")} ${isClaudeCodeModel ? "Claude Code local runtime" : m.id}
 						</div>
-						<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
-							${row("Provider", m.provider)}
-							${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
-							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
-							${row("Cost", isClaudeCodeModel ? "Claude Code account/local runtime" : (m.cost ? formatModelCost(m.cost) + "/M tokens" : "—"))}
-						</div>
+						${isClaudeCodeModel ? html`
+							<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;" data-testid="claude-code-runtime-popover-section">
+								<div style="color:var(--muted-foreground);margin-bottom:6px;">This session is backed by the local Claude Code CLI and your existing Claude Code login.</div>
+								${row("Alias", m.id)}
+								${row("Runtime owner", "Claude Code handles auth, models, context, tools, and permissions.")}
+								${row("Bobbit support", "Chat, transcript hydration, metadata, alias switching, best-effort stop/abort, mapped tool rendering.")}
+								${row("Automation note", "Some Bobbit gates, reviewers, team agents, and native tools still use the standard runtime.")}
+								<button type="button" class="mt-2 text-primary hover:underline" @click=${() => this._openClaudeCodeRuntimeDocs()}>Learn more about Claude Code runtime</button>
+							</div>
+						` : html`
+							<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
+								${row("Provider", m.provider)}
+								${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
+								${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
+								${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
+							</div>
+						`}
 					` : nothing}
 
 					<div style="font-weight:600;margin-bottom:6px;">Context Usage</div>

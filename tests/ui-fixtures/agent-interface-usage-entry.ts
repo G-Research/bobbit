@@ -2,12 +2,22 @@ import "../../src/ui/components/AgentInterface.js";
 
 type Listener = (event: any) => void | Promise<void>;
 
+type FixtureOptions = {
+	sessionId?: string;
+	runtime?: "pi" | "claude-code";
+};
+
 class FixtureSession {
-	sessionId = "claude-usage-fixture";
+	sessionId: string;
 	streamFn: any = Object.assign(async function* () {}, { __isDefault: true });
 	getApiKey = async () => "fixture-key";
 	private listeners = new Set<Listener>();
-	state: any = {
+	state: any;
+
+	constructor(options: FixtureOptions = {}) {
+		const runtime = options.runtime ?? "claude-code";
+		this.sessionId = options.sessionId ?? "claude-usage-fixture";
+		this.state = {
 		messages: [
 			{ id: "u1", role: "user", content: [{ type: "text", text: "Read the file and summarize it" }] },
 			{ id: "a1", role: "assistant", content: [{ type: "text", text: "I'll inspect it." }, { type: "toolCall", id: "toolu_reported_1", toolCallId: "toolu_reported_1", name: "Read", arguments: { file_path: "README.md" }, input: { file_path: "README.md" } }] },
@@ -36,6 +46,13 @@ class FixtureSession {
 		streamingMessage: null,
 		serverCost: { totalCost: 0 },
 	};
+		if (runtime === "pi") {
+			this.state.runtime = "pi";
+			this.state.model = { provider: "anthropic", id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", contextWindow: 200_000, reasoning: true };
+		} else {
+			this.state.runtime = "claude-code";
+		}
+	}
 
 	subscribe(listener: Listener): () => void {
 		this.listeners.add(listener);
@@ -74,14 +91,15 @@ function installCss(): void {
 	document.head.appendChild(style);
 }
 
-async function mountFixture(): Promise<void> {
+async function mountFixture(options: FixtureOptions = {}): Promise<void> {
 	installCss();
 	const app = document.getElementById("app");
 	if (!app) throw new Error("#app missing");
 	app.replaceChildren();
+	const runtime = options.runtime ?? "claude-code";
 	const el = document.createElement("agent-interface") as any;
-	el.session = new FixtureSession();
-	el.sessionRuntime = "claude-code";
+	el.session = new FixtureSession({ sessionId: options.sessionId, runtime });
+	el.sessionRuntime = runtime;
 	el.enableModelSelector = false;
 	el.enableThinkingSelector = false;
 	el.enableAttachments = false;
