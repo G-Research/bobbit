@@ -38,6 +38,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { GW_URL_KEY } from "./gateway-fetch.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
@@ -1631,21 +1632,47 @@ function loadModelsState(): void {
 	})();
 }
 
+async function operatorPreferenceFetch(path: string, init: RequestInit): Promise<Response> {
+	const url = localStorage.getItem(GW_URL_KEY) || window.location.origin;
+	const doFetch = () => fetch(`${url}${path}`, {
+		...init,
+		credentials: "include",
+		headers: {
+			"Content-Type": "application/json",
+			...(init.headers as Record<string, string> | undefined),
+		},
+	});
+	let res = await doFetch();
+	if (res.status === 403 || res.status === 401) {
+		// In localhost mode a same-origin, no-Authorization request mints the
+		// operator-capable cookie. Retry once so existing tabs whose only cookie
+		// was minted from bearer/API traffic keep the normal settings UX.
+		await fetch(`${url}/api/health`, { credentials: "include" }).catch(() => undefined);
+		res = await doFetch();
+	}
+	return res;
+}
+
 async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
 	try {
+		if (operatorConfirmationToken) {
+			await operatorPreferenceFetch("/api/preferences", {
+				method: "PUT",
+				headers: { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken },
+				body: JSON.stringify({ [key]: value }),
+			});
+			return;
+		}
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
-			credentials: operatorConfirmationToken ? "include" : undefined,
-			headers: operatorConfirmationToken ? { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken } : undefined,
 			body: JSON.stringify({ [key]: value }),
 		});
 	} catch {}
 }
 
 async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
-	const res = await gatewayFetch("/api/preferences/claude-code/confirmation", {
+	const res = await operatorPreferenceFetch("/api/preferences/claude-code/confirmation", {
 		method: "POST",
-		credentials: "include",
 		body: JSON.stringify(patch),
 	});
 	if (!res.ok) return undefined;

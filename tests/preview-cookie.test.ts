@@ -104,6 +104,15 @@ describe("CookieStore", () => {
 		assert.equal(b.verify(v), true);
 	});
 
+	it("distinguishes operator-capable cookies from preview/API cookies", () => {
+		const store = new CookieStore(storeDir);
+		const apiCookie = store.mint();
+		const operatorCookie = store.mint({ operator: true });
+		assert.equal(store.verify(apiCookie), true);
+		assert.equal(store.verify(apiCookie, { operator: true }), false);
+		assert.equal(store.verify(operatorCookie, { operator: true }), true);
+	});
+
 	it("writes file with restrictive permissions and v1 schema", () => {
 		const store = new CookieStore(storeDir);
 		store.mint();
@@ -172,6 +181,18 @@ describe("issueIfMissing", () => {
 		const res = fakeRes();
 		issueIfMissing(fakeReq(`${COOKIE_NAME}=${v}`) as any, res as any, store, {});
 		assert.equal(res.getHeader("Set-Cookie"), undefined);
+	});
+
+	it("re-issues when an operator-capable cookie is requested over a preview/API cookie", () => {
+		const store = new CookieStore(mkdtempSync(path.join(stateDir, "ii-")));
+		const v = store.mint();
+		const res = fakeRes();
+		issueIfMissing(fakeReq(`${COOKIE_NAME}=${v}`) as any, res as any, store, { operator: true });
+		const sc = res.getHeader("Set-Cookie");
+		assert.ok(sc);
+		const replacement = String(Array.isArray(sc) ? sc[0] : sc).match(new RegExp(`${COOKIE_NAME}=([0-9a-f]{64})`))?.[1];
+		assert.ok(replacement);
+		assert.equal(store.verify(replacement, { operator: true }), true);
 	});
 
 	it("does re-issue when present cookie is unknown", () => {

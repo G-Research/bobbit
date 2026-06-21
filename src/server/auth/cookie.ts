@@ -22,10 +22,20 @@ export const COOKIE_NAME = "bobbit_session";
 /** Max-Age 30 days (in seconds). */
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
+interface CookieRecord {
+	issuedAt: number;
+	/**
+	 * Operator-capable cookies can mint/consume human operator confirmations.
+	 * Cookies issued from bearer/API traffic intentionally do not get this flag;
+	 * they remain valid for normal API/preview cookie auth only.
+	 */
+	operator?: boolean;
+}
+
 interface CookieFile {
 	version: 1;
 	issuedAt: number;
-	values: Record<string, { issuedAt: number }>;
+	values: Record<string, CookieRecord>;
 }
 
 export class CookieStore {
@@ -53,7 +63,8 @@ export class CookieStore {
 					for (const [k, v] of Object.entries(raw.values)) {
 						if (typeof k === "string" && /^[0-9a-f]{64}$/i.test(k) && v && typeof v === "object") {
 							const issuedAt = (v as { issuedAt?: number }).issuedAt;
-							this.data.values[k] = { issuedAt: typeof issuedAt === "number" ? issuedAt : Date.now() };
+							const operator = (v as { operator?: unknown }).operator === true;
+							this.data.values[k] = { issuedAt: typeof issuedAt === "number" ? issuedAt : Date.now(), ...(operator ? { operator: true } : {}) };
 						}
 					}
 				}
@@ -87,18 +98,21 @@ export class CookieStore {
 	}
 
 	/** True if `value` is a known issued cookie. */
-	verify(value: string): boolean {
+	verify(value: string, opts: { operator?: boolean } = {}): boolean {
 		this.ensureLoaded();
 		if (!value || typeof value !== "string") return false;
 		if (!/^[0-9a-f]{64}$/i.test(value)) return false;
-		return Object.prototype.hasOwnProperty.call(this.data.values, value);
+		const record = this.data.values[value];
+		if (!record) return false;
+		if (opts.operator && record.operator !== true) return false;
+		return true;
 	}
 
 	/** Mint a new cookie value, persist it, return the value. */
-	mint(): string {
+	mint(opts: { operator?: boolean } = {}): string {
 		this.ensureLoaded();
 		const value = crypto.randomBytes(32).toString("hex");
-		this.data.values[value] = { issuedAt: Date.now() };
+		this.data.values[value] = { issuedAt: Date.now(), ...(opts.operator ? { operator: true } : {}) };
 		this.scheduleWrite();
 		return value;
 	}
@@ -146,10 +160,10 @@ export function parseCookies(req: http.IncomingMessage): Record<string, string> 
  * Module-level helper: returns true if the request carries a valid bobbit
  * session cookie known to `store`.
  */
-export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean {
+export function tryAuth(req: http.IncomingMessage, store: CookieStore, opts: { operator?: boolean } = {}): boolean {
 	const value = parseCookies(req)[COOKIE_NAME];
 	if (!value) return false;
-	return store.verify(value);
+	return store.verify(value, opts);
 }
 
 /**
@@ -162,12 +176,12 @@ export function issueIfMissing(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	store: CookieStore,
-	opts: { localhost?: boolean } = {},
+	opts: { localhost?: boolean; operator?: boolean } = {},
 ): void {
 	const existing = parseCookies(req)[COOKIE_NAME];
-	if (existing && store.verify(existing)) return;
+	if (existing && store.verify(existing, { operator: opts.operator === true })) return;
 
-	const value = store.mint();
+	const value = store.mint({ operator: opts.operator });
 	const attrs = [
 		`${COOKIE_NAME}=${value}`,
 		"HttpOnly",

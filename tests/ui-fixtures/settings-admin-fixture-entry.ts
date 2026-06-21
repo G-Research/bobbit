@@ -6,7 +6,7 @@ import { setConfigScope } from "../../src/app/config-scope.js";
 import { setProjects, setRenderApp, state, type Project } from "../../src/app/state.js";
 import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 
-type FetchLogEntry = { url: string; method: string; body: any };
+type FetchLogEntry = { url: string; method: string; body: any; credentials?: RequestCredentials };
 type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
 
@@ -214,7 +214,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const params = new URLSearchParams(query);
 	const method = (init?.method || "GET").toUpperCase();
 	const body = parseBody(init);
-	fetchLog.push({ url, method, body });
+	fetchLog.push({ url, method, body, credentials: init?.credentials });
 
 	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
 		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });

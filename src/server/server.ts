@@ -1542,6 +1542,18 @@ export function createGateway(config: GatewayConfig) {
 
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
+			const hasAuthorizationHeader = typeof req.headers.authorization === "string" && req.headers.authorization.length > 0;
+			const requestHeader = (value: string | string[] | undefined): string => Array.isArray(value) ? (value[0] || "") : (value || "");
+			const hasSessionBoundAuthHeaders = (): boolean => Boolean(
+				requestHeader(req.headers["x-bobbit-session-id"])
+				|| requestHeader(req.headers["x-bobbit-session-secret"])
+				|| requestHeader(req.headers["x-bobbit-spawning-session"]),
+			);
+			const canMintOperatorCookie = (): boolean => {
+				if (url.pathname !== "/api/health" || req.method !== "GET") return false;
+				if (hasAuthorizationHeader || url.searchParams.has("token") || hasSessionBoundAuthHeaders()) return false;
+				return true;
+			};
 
 			// Cookie auth short-circuit — if the browser presents a known
 			// bobbit_session cookie, treat the request as admin-authenticated
@@ -1579,16 +1591,21 @@ export function createGateway(config: GatewayConfig) {
 					}
 					sandboxScope = scope;
 				} else {
-					// Successful admin Bearer auth — mint session cookie if absent
-					// so subsequent requests (including iframe content origin) can
-					// authenticate without the Bearer token leaking into URLs.
-					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
+					// Successful admin Bearer/query-token auth mints only a preview/API
+					// cookie so iframe content origin can authenticate without the token
+					// leaking into URLs. Operator-confirmation-capable cookies must never
+					// be issued to token-authenticated REST traffic.
+					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode, operator: false });
 				}
 			} else if (!isPublicEndpoint && isLocalhostMode) {
 				// Localhost mode: skip auth check, still mint the cookie so the
 				// browser can use the same cookie auth path on non-localhost
 				// deployments later (and the SSE endpoint below remains uniform).
-				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
+				// Requests that carry Authorization or ?token are API/script traffic
+				// and only receive preview/API-capable cookies. Local no-auth browser
+				// bootstrap on /api/health receives the operator-capable cookie used
+				// by human confirmation flows.
+				issueCookieIfMissing(req, res, cookieStore, { localhost: true, operator: canMintOperatorCookie() });
 			}
 
 			// Enforce sandbox route guard
@@ -2021,6 +2038,8 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for in-process E2E tests that need direct preference seeding. */
+		preferencesStore,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -6758,7 +6777,13 @@ async function handleApiRoute(
 	}
 
 	function isHumanOperatorRequest(): boolean {
-		return Boolean(cookieStore && cookieTryAuth(req, cookieStore) && !sandboxScope && !hasSessionBoundHeaders());
+		return Boolean(
+			cookieStore
+			&& cookieTryAuth(req, cookieStore, { operator: true })
+			&& !sandboxScope
+			&& !hasSessionBoundHeaders()
+			&& !firstHeader("authorization")
+		);
 	}
 
 	function claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string } {
