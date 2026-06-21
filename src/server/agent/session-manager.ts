@@ -732,6 +732,12 @@ type RestoreCoordinator = {
 	promise: Promise<SessionInfo | undefined>;
 };
 
+type IdleWaiter = {
+	resolve: () => void;
+	reject: (error: Error) => void;
+	cleanup: () => void;
+};
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -813,6 +819,7 @@ export class SessionManager {
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
+	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
 	 *  boot. The team-manager boot-resume nudge consults `wasBootReprompted` to
@@ -2676,6 +2683,11 @@ export class SessionManager {
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore);
 	}
 
+	private safeDispatchError(session: SessionInfo, reason: string): Error {
+		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+		return new Error(redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider));
+	}
+
 	private surfaceProviderAuthFailure(session: SessionInfo, reason: string, source: string): void {
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 		const provider = providerFromAuthFailure(reason, persistedProvider);
@@ -2687,6 +2699,7 @@ export class SessionManager {
 			streamingStartedAt: undefined,
 		});
 		broadcastStatus(session, "idle");
+		this.resolveIdleWaiters(session.id);
 		emitSessionEvent(session, {
 			type: "provider_auth_required",
 			provider,
@@ -2786,11 +2799,15 @@ export class SessionManager {
 				const reason = (resp as any).error || "unknown";
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
 				recovered = true;
-				throw new Error(reason);
+				throw this.safeDispatchError(session, reason);
 			}
 		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, err instanceof Error ? err.message : String(err), "direct prompt");
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
+			}
+			if (isProviderAuthFailure(reason)) {
+				throw this.safeDispatchError(session, reason);
 			}
 			throw err;
 		}
@@ -3081,6 +3098,7 @@ export class SessionManager {
 			}
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcastStatus(session, "idle");
+			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -3228,6 +3246,8 @@ export class SessionManager {
 				wasStreaming: false,
 				streamingStartedAt: undefined,
 			});
+			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
 			broadcastStatus(session, "terminated");
 		}
 
@@ -5071,6 +5091,24 @@ export class SessionManager {
 		return session;
 	}
 
+	private resolveIdleWaiters(sessionId: string): void {
+		const waiters = this._idleWaiters.get(sessionId);
+		if (!waiters) return;
+		for (const waiter of [...waiters]) {
+			waiter.cleanup();
+			waiter.resolve();
+		}
+	}
+
+	private rejectIdleWaiters(sessionId: string, error: Error): void {
+		const waiters = this._idleWaiters.get(sessionId);
+		if (!waiters) return;
+		for (const waiter of [...waiters]) {
+			waiter.cleanup();
+			waiter.reject(error);
+		}
+	}
+
 	/**
 	 * Wait for a session to become idle (not streaming).
 	 * Returns immediately if already idle.
@@ -5082,24 +5120,42 @@ export class SessionManager {
 		if (session.status === "idle") return Promise.resolve();
 
 		return new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				unsub();
+			let timer: ReturnType<typeof setTimeout>;
+			let unsub = () => {};
+			const waiters = this._idleWaiters.get(sessionId) ?? new Set<IdleWaiter>();
+			this._idleWaiters.set(sessionId, waiters);
+			const waiter: IdleWaiter = {
+				resolve,
+				reject,
+				cleanup: () => {
+					clearTimeout(timer);
+					unsub();
+					waiters.delete(waiter);
+					if (waiters.size === 0) this._idleWaiters.delete(sessionId);
+				},
+			};
+			timer = setTimeout(() => {
+				waiter.cleanup();
 				reject(new Error(`Timeout waiting for session ${sessionId} to become idle`));
 			}, timeoutMs);
 
-			const unsub = session.rpcClient.onEvent((event: any) => {
+			unsub = session.rpcClient.onEvent((event: any) => {
 				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsub();
+					waiter.cleanup();
 					resolve();
 				}
 				if (event.type === "process_exit") {
-					clearTimeout(timer);
-					unsub();
 					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
-					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+					const error = new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`);
+					waiter.cleanup();
+					reject(error);
 				}
 			});
+			waiters.add(waiter);
+			if (session.status === "idle") {
+				waiter.cleanup();
+				resolve();
+			}
 		});
 	}
 

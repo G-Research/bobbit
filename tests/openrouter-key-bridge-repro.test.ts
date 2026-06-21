@@ -61,6 +61,13 @@ function makeClient(): any {
 	};
 }
 
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
 function makeBridge(overrides: Record<string, any> = {}): any {
 	return {
 		running: true,
@@ -233,7 +240,11 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		try {
 			await assert.rejects(
 				() => manager.enqueuePrompt(session.id, "hello OpenRouter"),
-				/No API key found for openrouter/,
+				(err: any) => {
+					assert.match(err?.message ?? "", /OpenRouter provider authentication failure \(missing-api-key\)/);
+					assert.doesNotMatch(err?.message ?? "", /No API key found|sk-or-secret-never-log/);
+					return true;
+				},
 			);
 		} finally {
 			console.warn = originalWarn;
@@ -264,6 +275,54 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			[],
 			`OPENROUTER_PROVIDER_AUTH_RECOVERY_MISSING: ${missing.join("; ")}. Updates=${JSON.stringify(updates)} clientFrames=${visiblePayload}`,
 		);
+	});
+
+	it("waitForIdle resolves when a pre-turn provider-auth prompt rejection is recovered", async () => {
+		const pending = deferred<any>();
+		const prompt = mock.fn(() => pending.promise);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: mock.fn(() => ({ modelProvider: "openrouter" })),
+			update: mock.fn(() => {}),
+		};
+		managers.push(manager);
+		const session: any = {
+			id: "s-openrouter-auth-waiter",
+			title: "OpenRouter auth waiter",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 0,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			modelProvider: "openrouter",
+			setupComplete: true,
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: makeBridge({ prompt }),
+		};
+		manager.sessions.set(session.id, session);
+
+		const sendPromise = manager.enqueuePrompt(session.id, "hello OpenRouter");
+		assert.equal(session.status, "streaming", "waiter subscribes after optimistic streaming starts");
+		const idlePromise = manager.waitForIdle(session.id, 1_000);
+		const sendRejection = assert.rejects(
+			sendPromise,
+			(err: any) => {
+				assert.match(err?.message ?? "", /OpenRouter provider authentication failure \(missing-api-key\)/);
+				assert.doesNotMatch(err?.message ?? "", /No API key found|sk-or-secret-never-log/);
+				return true;
+			},
+		);
+
+		pending.reject(new Error(AUTH_ERROR));
+		await sendRejection;
+		await idlePromise;
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
 	});
 
 	it("redacts provider-auth text in terminated dispatch recovery warnings", () => {
@@ -331,7 +390,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		};
 		manager.sessions.set(session.id, session);
 
-		await assert.rejects(() => manager.enqueuePrompt(session.id, "retry me"), /No API key found for openrouter/);
+		await assert.rejects(() => manager.enqueuePrompt(session.id, "retry me"), /OpenRouter provider authentication failure \(missing-api-key\)/);
 		assert.equal(session.promptQueue.length, 1, "failed auth dispatch should be recoverable before retry");
 
 		await manager.retryLastPrompt(session.id);
