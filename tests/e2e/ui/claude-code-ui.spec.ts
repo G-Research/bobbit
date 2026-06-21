@@ -1,6 +1,36 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createSession, defaultProject } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { chmodSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const FAKE_CLAUDE_CLI = fileURLToPath(new URL("../../fixtures/claude-code/fake-claude-cli.mjs", import.meta.url));
+
+async function seedFakeClaudeCodePrefs(): Promise<void> {
+	chmodSync(FAKE_CLAUDE_CLI, 0o755);
+	const resp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({
+			"claudeCode.executablePath": FAKE_CLAUDE_CLI,
+			"claudeCode.defaultModel": "sonnet",
+			"claudeCode.permissionMode": "default",
+			"claudeCode.allowBypassPermissions": null,
+		}),
+	});
+	expect(resp.status).toBe(200);
+}
+
+async function resetClaudeCodePrefs(): Promise<void> {
+	await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({
+			"claudeCode.executablePath": null,
+			"claudeCode.defaultModel": null,
+			"claudeCode.permissionMode": null,
+			"claudeCode.allowBypassPermissions": null,
+		}),
+	});
+}
 
 const CLAUDE_CODE_MODEL = {
 	id: "sonnet",
@@ -20,6 +50,10 @@ const CLAUDE_CODE_MODEL = {
 };
 
 test.describe("Claude Code local-runtime UI", () => {
+	test.afterEach(async () => {
+		await resetClaudeCodePrefs().catch(() => {});
+	});
+
 	test("model picker labels Claude Code as a local runtime", async ({ page }) => {
 		await page.route("**/api/models**", async (route) => {
 			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_MODEL]) });
@@ -44,6 +78,7 @@ test.describe("Claude Code local-runtime UI", () => {
 	});
 
 	test("selecting Claude Code in an existing Pi session prompts for and creates a new runtime session", async ({ page }) => {
+		await seedFakeClaudeCodePrefs();
 		await page.route("**/api/models**", async (route) => {
 			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([CLAUDE_CODE_MODEL]) });
 		});
@@ -58,11 +93,17 @@ test.describe("Claude Code local-runtime UI", () => {
 			await page.locator('agent-model-selector [data-model-id="sonnet"]').click();
 
 			await expect(page.getByText("Start a Claude Code session?")).toBeVisible({ timeout: 10_000 });
-			const responsePromise = page.waitForResponse((resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST");
+			const responsePromise = page.waitForResponse((resp) => new URL(resp.url()).pathname === "/api/sessions" && resp.request().method() === "POST");
 			await page.getByRole("button", { name: "Start new session" }).click();
 			const response = await responsePromise;
+			const requestBody = JSON.parse(response.request().postData() || "{}");
+			expect(requestBody).toMatchObject({ runtime: "claude-code", model: "claude-code/sonnet" });
 			expect(response.status()).toBe(201);
-			newSessionId = (await response.json()).id;
+			const created = await response.json();
+			newSessionId = created.id;
+			expect(created).toMatchObject({ runtime: "claude-code", claudeCodeModelAlias: "sonnet" });
+			const detail = await (await apiFetch(`/api/sessions/${newSessionId}`)).json();
+			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "sonnet", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
 
 			await expect.poll(async () => page.evaluate(() => (window as any).__bobbitState?.selectedSessionId)).toBe(newSessionId);
 			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
@@ -74,15 +115,20 @@ test.describe("Claude Code local-runtime UI", () => {
 	});
 
 	test("Claude Code session runtime metadata is visible and survives reload", async ({ page }) => {
-		const project = await defaultProject();
-		const resp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: project.rootPath, projectId: project.id, model: "claude-code/sonnet", runtime: "claude-code" }),
-		});
-		expect(resp.status).toBe(201);
-		const session = await resp.json();
-		const sessionId = session.id;
+		await seedFakeClaudeCodePrefs();
+		let sessionId = "";
 		try {
+			const project = await defaultProject();
+			const resp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: project.rootPath, projectId: project.id, worktree: false, model: "claude-code/sonnet", runtime: "claude-code" }),
+			});
+			expect(resp.status).toBe(201);
+			const session = await resp.json();
+			sessionId = session.id;
+			expect(session).toMatchObject({ runtime: "claude-code", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
+			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "sonnet", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
 			await openApp(page);
 			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
@@ -100,7 +146,7 @@ test.describe("Claude Code local-runtime UI", () => {
 				alias: (window as any).__bobbitState?.chatPanel?.agentInterface?.claudeCodeModelAlias,
 			}))).toEqual({ runtime: "claude-code", alias: "sonnet" });
 		} finally {
-			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
