@@ -812,18 +812,26 @@ function _flushDraft(rawVal?: string): Promise<void> | void {
 	const val: string = rawVal !== undefined ? rawVal
 		: (document.querySelector("message-editor") as any)?.value ?? "";
 	const sid = _draftSessionId;
-	if (val.trim()) {
-		const controller = new AbortController();
-		_draftAbort = controller;
-		const gen = _nextDraftGen(sid);
-		return _trackPendingDraftSave(
-			saveDraftToServer(sid, 'prompt', { text: val, gen }, controller.signal)
-				.finally(() => {
-					if (_draftAbort === controller) _draftAbort = null;
-				}),
-		);
-	}
-	return _trackPendingDraftSave(deleteDraftFromServer(sid, 'prompt'));
+	// Clears are persisted as gen-stamped empty tombstones ({ text: "", gen })
+	// rather than an unversioned DELETE. The server's setDraft staleness guard
+	// only protects writes that carry a `gen`; a bare DELETE bypasses it, so an
+	// older in-flight clear could land AFTER a newer typed PUT and wipe it (PR
+	// #830 follow-up). Routing the clear through the same gen-stamped save path
+	// means a stale clear carries a lower gen and is silently discarded by the
+	// guard, while the newer draft survives. The empty tombstone is treated as
+	// "no draft" on restore (_restorePromptDraft maps `text: ""` → null), and
+	// the send-on-tombstone anti-resurrection behaviour is unchanged (it already
+	// writes the same { text: "", gen } shape).
+	const controller = new AbortController();
+	_draftAbort = controller;
+	const gen = _nextDraftGen(sid);
+	const data = val.trim() ? { text: val, gen } : { text: "", gen };
+	return _trackPendingDraftSave(
+		saveDraftToServer(sid, 'prompt', data, controller.signal)
+			.finally(() => {
+				if (_draftAbort === controller) _draftAbort = null;
+			}),
+	);
 }
 
 /** Flush any pending draft save immediately (e.g. before HMR reload). */
@@ -991,8 +999,22 @@ function _restorePromptDraft(sessionId: string): void {
 			_draftGen = Math.max(_draftGen, loadedGen, _draftSendGen);
 
 			// User typed since binding — never clobber fresh local input with the
-			// server draft (closes the first-paint hydration window).
-			if (_draftTouchedSinceBind) return;
+			// server draft (closes the first-paint hydration window). BUT the
+			// local edit's 100ms debounced save may have raced ahead of this
+			// delayed server GET and been rejected by the server staleness guard
+			// for carrying a lower gen than the server's already-stored draft
+			// (fresh tab: no sessionStorage gen mirror, so _draftGen started at 0).
+			// We just reseeded _draftGen above to outrank the server, but the
+			// rejected local text was never retried — so a subsequent navigate/
+			// reload would lose it. Re-flush the local mirror now, at the corrected
+			// gen, so the typed text reliably converges to the server (PR #830).
+			// Tombstone-on-send is preserved: send removes the local mirror, so
+			// after a send localMirror is null/empty and we skip the re-flush.
+			if (_draftTouchedSinceBind) {
+				const touchedMirror = sessionStorage.getItem(`bobbit_draft_${sessionId}`);
+				if (touchedMirror && touchedMirror.trim()) _flushDraft(touchedMirror);
+				return;
+			}
 
 			// Freshness guard (Bug 2 step 4): the synchronous sessionStorage mirror
 			// is always at least as fresh as the debounced server draft within this

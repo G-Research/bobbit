@@ -280,6 +280,70 @@ test.describe("draft generation staleness (gen guard)", () => {
 			await deleteSession(sess);
 		}
 	});
+
+	test("a stale gen-stamped CLEAR tombstone cannot wipe a newer draft (PR #830 follow-up)", async () => {
+		// Prompt clears are persisted as gen-stamped empty tombstones
+		// ({ text: "", gen }) instead of an unversioned DELETE, precisely so the
+		// staleness guard protects them. Race: an older clear is in flight, the
+		// user types a newer draft whose PUT lands first, then the older clear
+		// arrives last. With a bare DELETE the older clear would wipe the newer
+		// draft; routed through the gen guard it carries a lower gen and is
+		// silently discarded, so the newer draft survives.
+		const sess = await createSession();
+		try {
+			// User typed; autosave landed at gen 1 (the about-to-be-cleared text).
+			await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: "old text", gen: 1 } }),
+			});
+			// Newer typed draft lands first (gen 3).
+			await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: "newer typed", gen: 3 } }),
+			});
+			// The delayed CLEAR tombstone from gen 2 arrives last.
+			const staleClear = await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: "", gen: 2 } }),
+			});
+			// Stale writes are silently discarded — still a 200, not an error.
+			expect(staleClear.status).toBe(200);
+
+			const getResp = await apiFetch(`/api/sessions/${sess}/draft?type=prompt`);
+			expect(getResp.status).toBe(200);
+			const body = await getResp.json();
+			// The newer draft must survive the stale clear.
+			expect(body.data).toEqual({ text: "newer typed", gen: 3 });
+		} finally {
+			await deleteSession(sess);
+		}
+	});
+
+	test("a gen-stamped CLEAR tombstone with a higher gen does clear the draft", async () => {
+		// The flip side: a legitimate (newer) clear must still take effect. The
+		// empty tombstone is treated as "no draft" on restore (client maps
+		// text:"" → null), and the server stores it so later equal/lower-gen
+		// writes are rejected.
+		const sess = await createSession();
+		try {
+			await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: "typed", gen: 1 } }),
+			});
+			const clear = await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: "", gen: 2 } }),
+			});
+			expect(clear.status).toBe(200);
+
+			const getResp = await apiFetch(`/api/sessions/${sess}/draft?type=prompt`);
+			expect(getResp.status).toBe(200);
+			const body = await getResp.json();
+			expect(body.data).toEqual({ text: "", gen: 2 });
+		} finally {
+			await deleteSession(sess);
+		}
+	});
 });
 
 test.describe("draft overwrite", () => {
