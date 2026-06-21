@@ -18,7 +18,7 @@ covers the topology rationale (one shared bank, tag-scoped) summarised under
 > `managed` and `managed-external-postgres`, explicit-consent start, disable/uninstall/purge, and
 > `ctx.runtime` injection) now ships as **P3** and is documented in
 > [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle). The
-> explicit `hindsight_recall/retain/reflect` agent tools now ship as **P5** — see
+> explicit `hindsight_recall/retain/reflect/retain_outcome/invalidate` agent tools ship as **P5** — see
 > [Agent tools](#agent-tools). The current **setup and dashboard UX** (Marketplace configuration,
 > guided setup walkthrough, the stale-form fix, `uiUrl`, and embedded dashboard entrypoints) ships
 > as the **UX polish** pass — see [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup),
@@ -32,17 +32,18 @@ The pack is in the built-in band, so it is **present and active by default** on 
 but it does **nothing** until a Hindsight URL is configured. This is a hard, tested guarantee, not
 a soft default:
 
-- The provider declares `activation.requiresConfig: [externalUrl]` in
-  `providers/memory.yaml`. The host omits the provider entirely from
-  `listProviders(projectId)` until the effective config has a **non-empty `externalUrl`**.
+- The provider declares `activation.requiresConfig: [externalUrl]` for external mode and
+  `activeWhenConfig` for managed modes in `providers/memory.yaml`. The host omits the provider
+  entirely from `listProviders(projectId)` until external mode has a **non-empty `externalUrl`** or a
+  managed mode has been selected.
 - Consequently, on an unconfigured install there is **no active provider**: no provider-bridge
   pi extension is spawned, no per-turn `/provider-hooks/*` calls are made, the assembled
   system-prompt text is **byte-identical** to a no-pack baseline, and **no Hindsight network is
   touched**.
 - The provider also re-checks the same gate defensively at runtime (`isActive(cfg)` in
-  `market-packs/hindsight/src/shared.ts`): unless `mode === "external"` **and** `externalUrl` is a
-  non-empty string, every hook returns immediately (`{ blocks: [] }` for recall hooks, a no-op for
-  retain hooks) and constructs no client.
+  `market-packs/hindsight/src/shared.ts`): external mode needs a non-empty `externalUrl`, while
+  managed modes need a host-injected running runtime. Otherwise every hook returns immediately
+  (`{ blocks: [] }` for recall hooks, a no-op for retain hooks) and constructs no client.
 
 **Why dormant-by-default?** Memory is only useful if a backing store exists, and Bobbit must never
 make outbound calls or change prompts for users who have not opted in. Shipping the pack dormant
@@ -89,7 +90,20 @@ provider reads.
 | `retainMaxDelayMs` | number | `1800000` | Hook-observed timeout in milliseconds (30m) to flush buffered turns, preventing memories from staling in long-running or inactive sessions. `0` disables time-based flush. |
 | `retainOverlapTurns` | number | `2` | Number of previous turn summaries to carry forward as bounded context/overlap into the next batch. |
 | `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
-| `recallTypes` | array of `observation` \| `world` \| `experience` | `["observation", "world", "experience"]` | Filters memory recall to bias toward consolidated/stable knowledge over Turn chatter. |
+| `recallTypes` | array of `observation` \| `world` \| `experience` | `["observation", "world", "experience"]` | Filters memory recall to bias toward consolidated/stable knowledge over turn chatter. |
+| `recallQueryTimestampEnabled` | boolean | `true` | Sends an ISO `query_timestamp` anchor on recall so relative-time queries resolve against the current turn/session time. |
+| `mentalModelEnabled` | boolean | `true` | Enables per-project mental model injection at `sessionSetup`; empty/missing models fall back to raw recall. |
+| `mentalModelMaxTokens` | number | `1000` | Max tokens requested for the injected project mental model. |
+| `mentalModelRefreshEveryMs` | number | `86400000` | Best-effort refresh cadence for existing mental models. `0` disables cadence-based refresh. |
+| `mentalModelRecallMaxTokens` | number | `1200` | Recall budget used by Hindsight's model generation trigger. |
+| `directivesEnabled` | boolean | `false` | Enables Bobbit-owned bank directive writes. Off by default because shared banks may apply directives globally. |
+| `directiveApplyMode` | enum `disabled` \| `bank-wide-explicit-opt-in` \| `scoped-if-supported` | `disabled` | Controls whether Bobbit writes `/directives`; non-disabled modes are explicit operator opt-ins. |
+| `directiveSetVersion` / `directives` | string / list | `bobbit-v1` / Bobbit coding-agent directive | Stable directive set and payload used only when directive writes are enabled. |
+| `retainQueueDrainMaxPerHook` | number | `1` | Max queued retain entries retried during `afterTurn`. |
+| `retainQueueShutdownMax` | number | `10` | Max queued retain entries retried during `sessionShutdown`. |
+| `retainQueueHealthGate` | boolean | `true` | Checks `/health` before draining the retain queue. |
+| `retainQueueLlmHealthGate` | boolean | `false` | Optional `/health/llm` check before queue drains. |
+| `retainQueueBatchPauseMs` | number | `0` | Reserved pacing knob for future drains; normal hooks do not sleep. |
 | `retainMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's extraction logic on what durable knowledge to keep and what noise to ignore. |
 | `observationsMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight on how to consolidate observations. |
 | `reflectMission` | string | (Defaults to detailed guideline) | Prompt mission guiding Hindsight's synthesis/reflection logic. |
@@ -142,7 +156,9 @@ context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>
 | `goal:<goalId>` | `ctx.goalId` | |
 | `agent:<roleName>` | `ctx.roleName` | The contributing agent's role. |
 | `session:<sessionId>` | `ctx.sessionId` | |
-| `kind:turn` / `kind:compaction` | derived | `turn` for `afterTurn`, `compaction` for `beforeCompact`. The `retain` pack route tags manual writes `kind:manual`. |
+| `kind:turn` / `kind:compaction` / `kind:outcome` | derived | `turn` for `afterTurn`, `compaction` for `beforeCompact`, `outcome` for `goalCompleted`. The `retain` pack route tags manual writes `kind:manual`. |
+| `bobbit:true` | provider/tool outcome digests | Marks Bobbit-owned outcome records. |
+| `pr:<number>` | goal/PR completion context | Added to outcome digests when PR metadata is known. |
 
 **Recall scope.**
 
@@ -163,6 +179,50 @@ Furthermore, the route-derived project ID is authoritative: any caller-supplied 
 The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
 correctness never depends on once-per-session in-memory state (provider workers are per-hook and
 stateless).
+
+## Memory v2 mechanics reference
+
+This section summarizes the pure memory mechanics added after the initial external-mode pack.
+Implementation details and the validation cost model live in
+[hindsight-integration-brief.md](hindsight-integration-brief.md).
+
+### Per-project mental model
+
+At `sessionSetup`, Bobbit first attempts to read or create a Hindsight mental model with a stable id
+`bobbit-<projectId>`. If the model has content, the provider injects one **Project memory model**
+block and does **not** run raw session-start recall. If the model is empty, pending async creation,
+skipped by config/no project id, or failed, Bobbit falls back to the previous raw recall path. Refresh
+is best-effort and cadence-bounded by `mentalModelRefreshEveryMs`.
+
+### Recall and reflect request shape
+
+Provider and route recall are observation-biased (`recallTypes`) and timestamp-anchored
+(`query_timestamp`) by default. They intentionally omit `include` so Hindsight 0.8.3 keeps raw
+chunks disabled unless a future explicit caller asks for them.
+
+Reflect supports structured synthesis: `responseSchema` maps to Hindsight `response_schema`, and a
+returned `structured_output` is surfaced as `structuredOutput` by the route and tool. `factTypes`,
+`excludeMentalModels`, `budget`, and `maxTokens` pass through when supplied.
+
+### Outcome digests and advanced retain fields
+
+Goal completion dispatches a non-fatal `goalCompleted` lifecycle hook after team completion. The
+Hindsight provider retains one async digest per completed goal/head using `document_id: "outcome:<goalId>"` and `update_mode: "replace"`. The digest includes PR, task, gate, branch,
+head-SHA, decision, and touched-file summaries when available.
+
+Retain now forwards advanced Hindsight item fields: `document_id`, `update_mode`, `entities`,
+`timestamp`, `observation_scopes`, and `metadata`. File paths become `{ text, type: "file" }`
+entities; components become `{ text, type: "component" }`. Project observation scopes use the
+nested shape `[["project:<projectId>"]]`.
+
+### Directives and curation
+
+Bank-wide Bobbit directives are disabled by default because shared banks may apply directives beyond
+Bobbit-tagged calls. Operators can explicitly opt in with `directivesEnabled` and a non-disabled
+`directiveApplyMode`; otherwise, reflect uses a per-request coding-agent instruction prefix.
+
+Agents can retire stale memories with `hindsight_invalidate`, which patches the memory to
+`state: "invalidated"` with a reason. It is reversible curation, not deletion.
 
 ## Retain Hygiene & Cost Levers
 
@@ -190,40 +250,45 @@ These are applied idempotently to the Hindsight bank config API. A signature of 
 - **Compaction Safety (`beforeCompact`)**: Before the gateway compacts a session's history and discards the oldest context, the provider intercepts this event via `beforeCompact` to guarantee zero context loss:
   - *Synchronous Flush*: It first performs a **synchronous flush/retain** (`sync: true`) of any pending turns currently held in the session buffer to ensure they land in Hindsight before context is pruned.
   - *Synchronous Retain*: It then performs a **synchronous, batch-exempt retain** (`sync: true`, "compaction" kind) of the compaction summary itself, ensuring the about-to-be-lost history span is durably written to Hindsight.
-- **Session Shutdown**: On `sessionShutdown`, Bobbit performs a best-effort best-practice:
+- **Session Shutdown**: On `sessionShutdown`, Bobbit performs a bounded best-effort drain:
   - First, it flushes any remaining buffered turns (`flushPending`, `sync: false`) to Hindsight.
-  - Then, it triggers a **one-pass full drain** (`drainQueueAll`) of the durable retry queue to flush any remaining unsaved items.
+  - Then, it drains at most `retainQueueShutdownMax` queued entries after the health gate passes, so shutdown cannot burst a large queue into an unhealthy daemon.
+
+### 3. Mental Model & Outcome Cost Levers
+- **Per-project mental model**: At `sessionSetup`, Bobbit prefers one Hindsight-maintained project state document over broad raw recall. When the model is injected, session setup makes zero raw recall calls for that hook; when the model is absent, pending, skipped, or failed, Bobbit falls back to raw recall.
+- **Goal/PR outcome digest**: On goal completion, Bobbit retains one concise replaceable digest (`document_id: outcome:<goalId>`, `update_mode: replace`) that includes PR/task/gate summaries and touched file entities. Future sessions can discover completed work without replaying every turn.
 
 ## Provider lifecycle behaviour
 
-The provider implements the five [Lifecycle Hub](lifecycle-hub.md) hooks. It runs on the Extension
+The provider implements six [Lifecycle Hub](lifecycle-hub.md) hooks. It runs on the Extension
 Host worker tier, reads merged config from `ctx.config`, builds a REST client per hook, and keeps
 all durable state in the pack-scoped `ctx.host.store`. Every Hindsight condition is **non-fatal**:
 a slow or unhealthy backend never blocks or fails a session — recalls skip and retains queue.
 
 | Hook | Behaviour |
 |---|---|
-| `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`). On error/timeout ⇒ no block + a diagnostic. |
-| `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars), append to the pending buffer, and trigger a batched flush as an async aggregate retain if the turn count or max delay limits are exceeded. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: synchronously flush any pending buffered turns. Then, build and synchronously retain a compaction summary of the about-to-be-lost span (batch-exempt) so all memory lands in Hindsight before context is pruned. Failure ⇒ enqueue. |
-| `sessionShutdown` | If `autoRetain`: flush any remaining buffered turns, then perform a best-effort **one-pass** drain of the retry queue. Never throws. |
+| `sessionSetup` | If `autoRecall`: try the per-project mental model first. `injected` returns one **"Project memory model"** block (`authority: "memory"`, higher priority than raw recall) and suppresses raw recall for that hook. `empty`, `skipped`, or `failed` falls back to raw recall against `ctx.prompt`. |
+| `beforePrompt` | If `autoRecall`: targeted recall against the current user turn (`ctx.prompt`) under `timeoutMs`; skip on timeout (non-fatal). Recall sends configured `types`, an optional `query_timestamp`, and no default `include.chunks`. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary, append to the pending buffer, and flush one aggregate async retain when count or max-delay thresholds are exceeded. Also health-gates and drains up to `retainQueueDrainMaxPerHook` queued entries. |
+| `beforeCompact` | If `autoRetain`: synchronously flush pending turns, then synchronously retain a compaction summary of the about-to-be-lost span (batch-exempt). Failure ⇒ enqueue. |
+| `sessionShutdown` | If active: flush remaining buffered turns, then health-gate and drain at most `retainQueueShutdownMax` queued entries. Never throws. |
+| `goalCompleted` | If `autoRetain`: retain one async outcome digest with stable `document_id`, `update_mode: replace`, PR/task/gate summaries, entities, metadata, and project observation scopes. Failure ⇒ enqueue when store access exists; goal completion still succeeds. |
 
 The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
-(see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Each block is titled "Relevant memory",
-`authority: "memory"`, `priority: 50`, with `content` a bulleted list of recalled memory text. An
-empty recall produces no block.
+(see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Raw recall blocks are titled "Relevant memory",
+`authority: "memory"`, `priority: 50`, with bulleted memory text. Mental model blocks are titled
+"Project memory model" and use higher priority so project state appears above raw recall. Empty
+recall/model output produces no block.
 
 ### Retry queue & diagnostics
 
-A retain that fails (network/timeout/HTTP) is **not lost**. The provider appends
-`{ content, tags, ts, bank, namespace }` to a durable queue in the pack store (key `retain-queue`):
+A retain that fails (network/timeout/HTTP) is **not lost**. The provider appends a durable queue entry in the pack store (key `retain-queue`) containing the content, tags, timestamp, target bank/namespace, and any advanced retain fields (`documentId`, `updateMode`, `entities`, `observationScopes`, `metadata`):
 
 - **Cap 100** — appending past 100 entries drops the oldest (FIFO eviction).
-- **Target Routing** — queue entries include the original target `bank` and `namespace` at the time of the failure, ensuring that retry attempts are routed back to their correct destination even if the current session config has since changed. Legacy queue entries that lack these fields transparently fall back to using the active, currently-configured bank and namespace.
-- **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
-  turn's own retain; success removes it, failure leaves it.
-- **Drain on `sessionShutdown`** — one best-effort full pass.
+- **Target Routing** — queue entries include the original target `bank` and `namespace` at the time of the failure, ensuring retry attempts route back to the correct destination even if current config has changed. Legacy entries without these fields fall back to the active config.
+- **Health-gated drain** — when `retainQueueHealthGate` is true, Bobbit probes `/health` before queue replay. If `retainQueueLlmHealthGate` is true, it also probes `/health/llm`.
+- **Drain on `afterTurn`** — retries up to `retainQueueDrainMaxPerHook` entries (default 1) before the turn's own retain; success removes entries, failure leaves the head for later.
+- **Drain on `sessionShutdown`** — retries at most `retainQueueShutdownMax` entries (default 10), preventing shutdown bursts.
 
 The queue is durable (not in-memory) precisely because provider workers terminate after every hook
 invocation, so an in-memory queue would lose everything between turns. Recall skips, retain
@@ -243,25 +308,29 @@ list) rather than erroring.
 | Route | Contract |
 |---|---|
 | `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides to the pack store, return the new effective config. |
-| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, externalUrl, uiUrl, timeoutMs, recallBudget, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueDepth` is the retry-queue length. The trailing `externalUrl`/`uiUrl`/`timeoutMs`/`recallBudget` fields are **additive** (UX-polish) so the panel and Marketplace can render the [active configured values](#active-configured-values-surfaced) without a second round-trip; both URLs are **non-secret** and secrets are still never echoed. `lastError` is persisted as a `{ message, ts }` object, so consumers must read `.message` (rendering the object raw yields `[object Object]`). |
-| `recall` | `{ query, scope?, tags? }` → resolves bank + tags (via `recallTagFilter(scope, projectId, tagsMatch, tags)`) and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
-| `retain` | `{ content, tags?, sync?, scope? }` → `ensureBank` + `client.retain` with merged auto-tags; `scope: project` (with a real project id) adds a `project:<id>` tag. The `kind:manual` marker is spread **last** so user/scope tags can't override it. Returns `{ ok }`. |
-| `reflect` | `{ prompt, scope?, tags? }` → `client.reflect` with the same `recallTagFilter(scope, projectId, tagsMatch, tags)` scope mapping as `recall`; returns `{ text }`. |
+| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, externalUrl, uiUrl, timeoutMs, recallBudget, lastError? }`. `healthy` is a fresh `client.health()` probe when a data plane is reachable. `queueDepth` is the retry-queue length; secrets are never echoed. |
+| `recall` | `{ query, scope?, tags?, queryTimestamp? }` → resolves bank + tags, clamps query length, sends configured `types`, optional `query_timestamp`, and no default `include.chunks`; returns `{ memories }`. |
+| `retain` | `{ content, tags?, sync?, scope? }` → `ensureBank` + conservative manual retain with merged tags. `kind:manual` is applied last so callers cannot override provenance. |
+| `retain_outcome` | `{ content, goalId? | pr?, files?, components?, entities?, tags?, timestamp? }` → async retain with stable `document_id`, `update_mode: replace`, canonical outcome tags, file/component entities, and project observation scopes. |
+| `reflect` | `{ prompt, scope?, tags?, responseSchema?, factTypes?, excludeMentalModels?, budget?, maxTokens? }` → scoped reflection. Returns `{ text, structuredOutput? }`; prepends Bobbit per-request instructions unless bank directives are explicitly enabled or the caller disables the prefix. |
+| `invalidate` | `{ id, reason }` → reversible curation via `PATCH /memories/{id}` with `state: invalidated`; no destructive delete path. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
 ## Agent tools
 
-The pack ships three **agent tools** (Extension Platform **P5**) that give an agent explicit,
+The pack ships five **agent tools** (Extension Platform **P5**) that give an agent explicit,
 on-demand access to memory — complementing the automatic recall/retain the [provider](#provider-lifecycle-behaviour)
 does every turn. Where the provider is implicit ("inject relevant memory into the prompt"), these
-tools are deliberate: the agent decides *when* to look something up, write something down, or ask
-for a synthesized answer.
+tools are deliberate: the agent decides *when* to look something up, write something down, synthesize
+an answer, repair an outcome digest, or invalidate a stale memory.
 
 | Tool | Purpose | Parameters | Output |
 |---|---|---|---|
 | `hindsight_recall` | Fetch durable memories matching a query before acting. | `query` (required), `scope?` (`project`\|`all`), `tags?` (simple map) | A numbered list of memory texts, plus the structured route result (`memories`, `count`, `configured`) under `details`. Empty recall ⇒ "No relevant memories found." |
 | `hindsight_retain` | Durably record a decision, preference, or fact. | `content` (required), `scope?`, `tags?` (extra key/value, additive), `sync?` (wait for durability; default `false`) | "Memory retained." on success; an error result otherwise. The route auto-applies a `kind:manual` tag. |
-| `hindsight_reflect` | Get a synthesized answer drawing on accumulated memory, not a raw list. | `prompt` (required), `scope?`, `tags?` (simple map) | The synthesized text. Empty reflection ⇒ "(no reflection produced)". |
+| `hindsight_reflect` | Get a synthesized answer drawing on accumulated memory, not a raw list. | `prompt` (required), `scope?`, `tags?`, `responseSchema?`, `factTypes?`, `excludeMentalModels?` | Synthesized text plus `structuredOutput` when Hindsight returns schema-shaped JSON. |
+| `hindsight_retain_outcome` | Repair or re-emit a completed goal/PR digest. | `content` plus `goalId` or `pr`; optional `files`, `components`, `entities`, `tags`, `timestamp` | Retains one replaceable outcome document and returns its `documentId`. |
+| `hindsight_invalidate` | Retire a known stale/incorrect memory without deleting history. | `id` and `reason` | Marks the memory invalidated via the pack route. |
 
 These tools live in `market-packs/hindsight/tools/hindsight/` (`extension.ts` plus one descriptor
 YAML per tool); each descriptor declares `provider: { type: bobbit-extension, extension: extension.ts }`.
@@ -280,7 +349,7 @@ deliberately thin. Each tool invocation does exactly two authenticated gateway c
    (the [tool-guard](#pack-routes) checks the tool is in `allowedTools`, belongs to the calling
    session, and resolves to a market pack). The server derives `{ packId, tool }` from the minted
    token, so the route body never carries a pack id.
-2. `POST /api/ext/route/<recall|retain|reflect>` with the minted `surfaceToken` — dispatch the
+2. `POST /api/ext/route/<recall|retain|retain_outcome|reflect|invalidate>` with the minted `surfaceToken` — dispatch the
    pack's own [route](#pack-routes) in the confined worker.
 
 The route — not the tool — owns config merge, bank resolution (the single shared bank, default
@@ -293,12 +362,13 @@ retain returns a not-configured error — never a crash.
 
 ### `scope` & `tags` → tags on the shared bank
 
-All three tools accept `scope: project | all` (defaulting to the configured `recallScope`, which is now `project`) and an optional flat `tags` map parameter (e.g., `{goal: "implement-auth"}`).
+The recall, retain, and reflect tools accept `scope: project | all` (defaulting to the configured `recallScope`, which is now `project`) and an optional flat `tags` map parameter (e.g., `{goal: "implement-auth"}`). Outcome and invalidation tools use their dedicated route semantics instead.
 
 **Scope is a tag filter on the single shared bank (`config.bank`, default `bobbit`) — never a different bank.**
 
 - `recall` / `reflect` — under `project` scope with no extra tags, this adds a `project:<id>` tag filter and resolves using the configured `tagsMatch` (default `"any"`, fetching project-tagged **plus** untagged/global memories, excluding other projects — see [Recall scope](#bank--tag-taxonomy)). When optional extra `tags` are supplied under `project` scope, they **narrow** results with strict `all_strict` semantics (matching the current project tag AND every extra tag, while excluding untagged/global and other-project memories sharing that extra tag). Any caller-supplied `tags.project` value is completely ignored and dropped; the route-derived current project ID is authoritative and cannot be overridden. Under `all` scope, no project tag filter is added, but optional extra `tags` are still applied additively (matching via `"any"`).
 - `retain` — `project` adds a `project:<id>` tag (again only with a real project id) alongside the auto `kind:manual` tag; `all` leaves the memory unscoped on the shared bank. User-supplied `tags` are additive and never change the bank. The `kind:manual` provenance marker is spread **last**, so a user-supplied `tags: { kind: "..." }` can never override it.
+- `retain_outcome` — always uses outcome semantics: canonical `kind:outcome`/`bobbit:true` tags, project/goal/PR tags when known, file/component entities, nested project observation scopes, and replacement by stable `document_id`.
 
 A configured custom `bank` (or `namespace`) flows through every tool to Hindsight unchanged — the scope→tag mapping is orthogonal to which bank is configured. This mirrors the provider's [bank & tag taxonomy](#bank--tag-taxonomy): scope is *always* expressed as tags on one bank, never as bank fan-out.
 
@@ -308,9 +378,10 @@ A configured custom `bank` (or `namespace`) flows through every tool to Hindsigh
 
 API E2E coverage lives in `tests/e2e/hindsight-agent-tools.spec.ts` (reusing the shared
 `tests/e2e/hindsight-stub.mjs`): it drives the real surface-token + route round-trip for each tool,
-asserts the scope→tag mapping and default/custom bank routing on the stub, confirms the three tools
-resolve for a project session, and that disabling the pack tools removes them from a newly-created
-session's tool list (and closes the surface-token mint with a 403).
+asserts the scope→tag mapping and default/custom bank routing on the stub, covers structured reflect,
+outcome retain, and invalidation, confirms the tools resolve for a project session, and verifies that
+disabling the pack tools removes them from a newly-created session's tool list (and closes the
+surface-token mint with a 403).
 
 ## Embedded Dashboard Tab
 
@@ -513,23 +584,29 @@ and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
 - `health()` is the sole exception that swallows errors — it is a pure reachability probe mapping
   every failure to `{ ok: false }`. Dormancy and skip-on-failure are the **provider's** job, so the
   client surface stays a faithful mapping.
+- v2 methods cover mental models, advanced retain fields, structured reflect, directives,
+  operations/LLM health, and reversible memory invalidation; exact request bodies are pinned in
+  `tests/hindsight-client.test.ts` and summarized in
+  [hindsight-integration-brief.md](hindsight-integration-brief.md).
 
 ## Testing
 
 | Test | Phase | What it pins |
 |---|---|---|
-| `tests/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building (vs the in-process stub). |
-| `tests/hindsight-provider.test.ts` | unit | Dormancy (no URL ⇒ no client constructed), auto-tag taxonomy, `recallScope` filter, retry-queue retry + cap, block shape. |
-| `tests/e2e/hindsight-external.spec.ts` | E2E | sessionSetup + beforePrompt blocks appear; a turn retains on the stub with bank `bobbit` + correct tags; unhealthy ⇒ session unaffected + diagnostic + `status` unhealthy; recovery flushes the queue; per-project disable ⇒ no injection; persists across reload. |
-| `tests/e2e/hindsight-agent-tools.spec.ts` | E2E | The three P5 agent tools round-trip through the real surface-token + route path to the stub; `scope`→tag mapping on the default/custom bank; tools resolve for a project session; per-project pack disable removes them (and 403s the surface-token mint). |
+| `tests/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building, mental-model/directive/operation/curation paths, chunks-off recall mapping, structured reflect, and advanced retain fields. |
+| `tests/hindsight-provider.test.ts` | unit | Dormancy, auto-tag taxonomy, `recallScope` filter, mental-model injection/fallback/refresh, timestamped chunk-free recall, batched retain, health-gated bounded queue drain, outcome digest idempotency, and queue preservation of advanced fields. |
+| `tests/lifecycle-hub.test.ts` / `tests/team-manager.test.ts` | unit | Non-fatal `goalCompleted` dispatch, provider hook context, persisted once-per-goal/head markers, and concurrent completion collapse. |
+| `tests/e2e/hindsight-external.spec.ts` | E2E | Configured provider behavior against the stub, including memory injection, retain/queue recovery, project disable, reload persistence, and Hindsight route behavior. |
+| `tests/e2e/hindsight-agent-tools.spec.ts` | E2E | P5 agent tools round-trip through the real surface-token + route path: recall/retain/reflect scope mapping, structured reflect, outcome retain, invalidation, default/custom bank routing, and disabled-pack denial. |
 | `tests/e2e/ui/hindsight-pack.spec.ts` | E2E (browser) | The native panel: open from the palette, Save, status flips to connected, search; **plus** the UX-polish [stale-form refresh regression](#stale-form--save-safety) and guided-setup behaviour. |
 | `tests/e2e/ui/hindsight-marketplace.spec.ts` | E2E (browser) | The Marketplace [state model](#state-model--one-source-two-surfaces) and [actions](#actions-state-aware): first-run Configure, connected/unreachable badges, Open-Hindsight-UI action, managed no-auto-start, and progress/status rendering against mocked runtime events. |
 | `tests/manual-integration/hindsight-external.test.ts` | manual | Real local Hindsight round-trip. |
 
 The shared in-process stub `tests/e2e/hindsight-stub.mjs` (`startHindsightStub`) backs the
 automated tests deterministically — no network. It records every call, serves seeded memories
-filtered by request tags, records retained items, and `setHealthy(false)` flips `/health` to 503 so
-the provider's skip/queue paths are exercised.
+filtered by request tags, records retained items with replacement semantics, supports mental models,
+directives, operations, LLM health, structured reflect, and invalidation, and `setHealthy(false)`
+flips `/health` to 503 so skip/queue paths are exercised.
 
 ### Manual integration against a real Hindsight
 
@@ -563,35 +640,28 @@ both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
 
 ## Cost & Signal Model (Before vs. After)
 
-By tuning the default scoping and retention cadence, Bobbit substantially lowers LLM and token overhead while increasing the signal-to-noise ratio:
+The v2 work reduces token and call cost by replacing broad session-start recall when a project
+mental model is ready, preserving existing retain batching, and bounding recovery bursts.
 
-| Dimension | Before (Legacy) | After (Optimized) | Impact / Benefit |
+| Dimension | Before v2 | After v2 | Impact / Benefit |
 |---|---|---|---|
-| **Routine Retain Cost** | LLM extraction run on **every turn** (100% cost overhead). | Batched LLM extraction runs **every 5 turns** by default. | **80% reduction** in routine extraction LLM calls and associated API charges. |
-| **Context Protection** | No special compaction handling. | **Compaction-exempt sync flush** (`beforeCompact`) always runs. | 100% of context is preserved before pruning; zero loss of crucial architectural decisions. |
-| **Recall Signal** | Scope defaulted to `all` (cross-project noise and other-project clutter). | Scope defaulted to `project` (this project + shared/global memories). | Eliminates cross-project pollution, keeping the prompt focused only on relevant context. |
-| **Recall Efficiency** | Raw turn summaries returned. | Configured `recallTypes` biased toward consolidated `observation` facts. | Prompts are injected with high-density consolidated facts instead of redundant chat logs. |
-| **Token Budgeting** | Default budget was high and loose. | Modest `recallBudget` (default 1200 tokens) with `recallMaxInputChars` (3000 chars) clamping. | Controls total token count per prompt and eliminates Hindsight's 500-token query limit errors. |
+| **Session-start memory** | One raw `sessionSetup` recall could inject up to `recallBudget` tokens (default 1200). | Mental-model `injected` state returns one curated project block capped by `mentalModelMaxTokens` (default 1000) and makes zero raw recall calls for that hook. | Roughly 15-25% direct session-start memory token reduction when the model stays near 900-1000 tokens, plus higher signal. |
+| **Cold/missing model path** | Raw recall only. | Empty, pending, skipped, or failed model states fall back to raw recall. | No cold-start regression. |
+| **Per-turn recall** | Targeted recall, observation-biased, chunk-free by default. | Same, plus default `query_timestamp` anchoring. | Keeps prompt context focused and makes relative-time queries deterministic. |
+| **Routine retain cost** | Batched retain every `retainEveryNTurns` turns (default 5). | Same. | Preserves the existing 80% reduction versus every-turn extraction. |
+| **Completion memory** | Completed work was discoverable only through retained turn history. | One async replace outcome digest per completed goal/head. | Adds one low-frequency write that reduces future rediscovery/search turns. |
+| **Queue recovery** | Head drain during turns; shutdown could attempt a broad one-pass drain. | Health-gated, max `retainQueueDrainMaxPerHook` per turn and max `retainQueueShutdownMax` at shutdown. | Avoids starving/restarting an unhealthy Hindsight daemon. |
+| **Structured answers** | Reflect returned prose only. | `responseSchema` can return compact `structuredOutput`. | Avoids prose parsing and follow-up correction turns for schema-shaped queries. |
+
+Validation commands and audit points are listed in
+[hindsight-integration-brief.md](hindsight-integration-brief.md#validation-commands).
 
 ## Non-goals
 
-Tracked in later Extension Platform goals, **not** in this release:
-
-- Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
-
-> **Now shipped (were non-goals):**
-> - The **setup UX** — Marketplace as the primary setup path, the eight-state badge model, the
->   guided setup walkthrough, the API-vs-UI-URL distinction (`uiUrl`), and the stale-form fix —
->   landed in the UX-polish pass; see
->   [Setup UX](#setup-ux--marketplace-front-door-state-model--guided-setup).
-> - The explicit **agent tools** `hindsight_recall/retain/reflect` landed in **P5** — see
->   [Agent tools](#agent-tools).
-> - The original native config/status panel landed in **P4**, but the current entrypoint model is
->   Marketplace for configuration and `#/ext/hindsight` / session-menu for the embedded dashboard.
->   Store-seeding is no longer the user-facing configuration path (test-only now).
-> - The managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
->   (`mode: managed` / `managed-external-postgres`) landed in **P3** — see
->   [managed-runtimes.md — P3](managed-runtimes.md#p3--deployment-modes-consent--lifecycle).
+This page covers memory mechanics plus the existing setup/embedded-dashboard references needed to
+orient users. The v2 memory work did **not** add new UI/surfaces, memory-browser filtering, cross-bank
+federation, or a full `tag_groups` DSL in agent tools. Complex Boolean memory queries remain a
+direct Hindsight API escape hatch.
 
 ## See also
 
