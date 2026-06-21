@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"claude-sess-reported","model":"claude-opus-4-8"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Read the file and summarize it"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll inspect it."},{"type":"tool_use","id":"toolu_reported_1","name":"Read","input":{"file_path":"README.md"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_reported_1","content":"# README\nBobbit project notes"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The file contains Bobbit project notes."}]}}
+{"type":"result","subtype":"success","session_id":"claude-sess-reported","result":"The file contains Bobbit project notes.","is_error":false,"usage":{"input_tokens":301,"cache_creation_input_tokens":6415,"cache_read_input_tokens":13231,"output_tokens":77,"server_tool_use":{"web_search_requests":0},"service_tier":"standard"}}

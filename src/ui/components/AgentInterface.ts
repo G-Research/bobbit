@@ -1720,21 +1720,37 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
+	private _usageNumber(value: unknown): number {
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	}
+
+	private _usageTotalTokens(usage: any): number {
+		return this._usageNumber(usage?.totalTokens)
+			|| (this._usageNumber(usage?.input) + this._usageNumber(usage?.output) + this._usageNumber(usage?.cacheRead) + this._usageNumber(usage?.cacheWrite));
+	}
+
+	private _usageCostTotal(usage: any): number {
+		return typeof usage?.cost === "number"
+			? this._usageNumber(usage.cost)
+			: this._usageNumber(usage?.cost?.total);
+	}
+
 	private renderStats() {
 		if (!this.session) return html`<div class="text-xs h-5"></div>`;
 
 		const state = this.session.state;
-		const totals = state.messages
+		const messages = Array.isArray(state.messages) ? state.messages : [];
+		const totals = messages
 			.filter((m) => m.role === "assistant")
 			.reduce(
 				(acc, msg: any) => {
 					const usage = msg.usage;
 					if (usage) {
-						acc.input += usage.input;
-						acc.output += usage.output;
-						acc.cacheRead += usage.cacheRead;
-						acc.cacheWrite += usage.cacheWrite;
-						acc.cost.total += usage.cost.total;
+						acc.input += this._usageNumber(usage.input);
+						acc.output += this._usageNumber(usage.output);
+						acc.cacheRead += this._usageNumber(usage.cacheRead);
+						acc.cacheWrite += this._usageNumber(usage.cacheWrite);
+						acc.cost.total += this._usageCostTotal(usage);
 					}
 					return acc;
 				},
@@ -1788,8 +1804,8 @@ export class AgentInterface extends LitElement {
 			} else {
 				// Find last assistant message with usage (skip aborted/error)
 				let lastUsage: Usage | undefined;
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const msg = messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
@@ -1797,7 +1813,7 @@ export class AgentInterface extends LitElement {
 				}
 
 				if (lastUsage) {
-					const contextTokens = lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite);
+					const contextTokens = this._usageTotalTokens(lastUsage);
 					const contextWindow = model.contextWindow;
 					const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
 					const barColor = pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)";
@@ -1904,19 +1920,19 @@ export class AgentInterface extends LitElement {
 			// Find last assistant usage (same logic as above)
 			let lastUsage: Usage | undefined;
 			if (!usageStale) {
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const msg = messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
 					}
 				}
 			}
-			const contextTokens = lastUsage ? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite)) : 0;
+			const contextTokens = lastUsage ? this._usageTotalTokens(lastUsage) : 0;
 			const contextWindow = m?.contextWindow || 0;
 			const pct = contextWindow ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
-			const msgCount = state.messages.length;
-			const turnCount = state.messages.filter((msg: any) => msg.role === "assistant").length;
+			const msgCount = messages.length;
+			const turnCount = messages.filter((msg: any) => msg.role === "assistant").length;
 
 			const row = (label: string, value: any) => html`
 				<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
@@ -1960,10 +1976,10 @@ export class AgentInterface extends LitElement {
 					${lastUsage ? html`
 						<div style="border-top:1px solid var(--border);padding-top:8px;">
 							<div style="font-weight:600;margin-bottom:6px;">Last Turn</div>
-							${row("Input tokens", formatTokenCount(lastUsage.input))}
-							${row("Output tokens", formatTokenCount(lastUsage.output))}
-							${lastUsage.cacheRead ? row("Cache read", formatTokenCount(lastUsage.cacheRead)) : nothing}
-							${lastUsage.cacheWrite ? row("Cache write", formatTokenCount(lastUsage.cacheWrite)) : nothing}
+							${row("Input tokens", formatTokenCount(this._usageNumber(lastUsage.input)))}
+							${row("Output tokens", formatTokenCount(this._usageNumber(lastUsage.output)))}
+							${this._usageNumber(lastUsage.cacheRead) ? row("Cache read", formatTokenCount(this._usageNumber(lastUsage.cacheRead))) : nothing}
+							${this._usageNumber(lastUsage.cacheWrite) ? row("Cache write", formatTokenCount(this._usageNumber(lastUsage.cacheWrite))) : nothing}
 						</div>
 					` : nothing}
 
