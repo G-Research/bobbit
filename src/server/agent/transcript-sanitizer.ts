@@ -1,6 +1,6 @@
 /**
- * Transcript sanitizer — un-poison persisted agent `.jsonl` transcripts whose
- * `user` messages carry a blank text body.
+ * Transcript sanitizer — repair persisted agent `.jsonl` transcripts at the
+ * restore boundary.
  *
  * Background: the model API rejects a user message whose ContentBlock has a
  * blank `text` field (next to an image block, or as a standalone empty text
@@ -20,11 +20,10 @@
  * a user message with only non-text content / no text block at all).
  *
  * IMPORTANT: tool results are also represented as `role:"user"` messages whose
- * content is a `tool_result`/`toolResult` block with no text. Those are normal,
- * valid history — rewriting them to "Attachments:" would corrupt tool-call
- * history and break tool-result ordering. So a user message that carries ANY
- * tool_result/toolResult block is left byte-identical. It leaves every other
- * line byte-identical too, so re-running it is a no-op.
+ * content is a `tool_result`/`toolResult` block with no text. Valid tool-result
+ * history is left byte-identical. Orphan results (no prior retained,
+ * non-aborted/non-errored assistant tool call) are repaired at this restore
+ * boundary so providers are not rehydrated with invalid tool-call history.
  */
 
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
@@ -53,17 +52,43 @@ function effectiveText(content: unknown): string {
 	return parts.join("");
 }
 
+/** Detect whether a content block is a tool-result block. */
+function isToolResultBlock(block: unknown): boolean {
+	return !!block && typeof block === "object" &&
+		((block as any).type === "tool_result" || (block as any).type === "toolResult");
+}
+
 /**
  * Detect whether a message `content` carries a tool-result block. Tool results
  * are persisted as `role:"user"` messages with a `tool_result` (or `toolResult`)
- * content block and no text — they are valid history and MUST NOT be rewritten.
+ * content block and no text — they are valid history only when matched to a
+ * prior retained assistant tool call.
  */
 function hasToolResultBlock(content: unknown): boolean {
 	if (!Array.isArray(content)) return false;
-	return content.some(
-		(b) => b && typeof b === "object" &&
-			((b as any).type === "tool_result" || (b as any).type === "toolResult"),
-	);
+	return content.some(isToolResultBlock);
+}
+
+function stringField(value: unknown): string | null {
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function toolCallIdFromAssistantBlock(block: unknown): string | null {
+	if (!block || typeof block !== "object") return null;
+	const b = block as any;
+	if (b.type === "toolCall" || b.type === "tool_use") return stringField(b.id);
+	if (typeof b.toolCallId === "string") return stringField(b.toolCallId);
+	return null;
+}
+
+function toolResultIdFromBlock(block: unknown): string | null {
+	if (!block || typeof block !== "object") return null;
+	const b = block as any;
+	return stringField(b.tool_use_id) ?? stringField(b.toolCallId) ?? stringField(b.id);
+}
+
+function messageStopReason(entry: any): unknown {
+	return entry?.message?.stopReason ?? entry?.stopReason;
 }
 
 /**
@@ -96,10 +121,14 @@ function rewriteBlankUserContent(content: unknown): unknown {
 export interface SanitizeResult {
 	/** The (possibly unchanged) JSONL content. */
 	content: string;
-	/** Whether any line was rewritten. */
+	/** Whether any line was rewritten or dropped. */
 	changed: boolean;
-	/** Number of transcript records rewritten. */
+	/** Number of blank user-message transcript records rewritten. */
 	rewritten: number;
+	/** Number of message-level orphan tool-result rows dropped. */
+	droppedToolResultRows: number;
+	/** Number of orphan tool-result content blocks filtered from user messages. */
+	filteredToolResultBlocks: number;
 }
 
 export interface RebaseTranscriptCwdMetadataOptions {
@@ -116,20 +145,114 @@ export interface RebaseTranscriptCwdMetadataOptions {
  * yields `changed:false`.
  */
 export function sanitizeTranscriptContent(content: string): SanitizeResult {
-	return transformTranscriptJsonl(content, (entry) => {
-		if (!entry || entry.type !== "message" || !entry.message) return false;
-		if (entry.message.role !== "user") return false;
+	if (!content) return emptySanitizeResult(content);
 
-		// Tool-result user messages are valid history (no text by design) —
-		// never touch them, or tool-call history/ordering is corrupted.
-		if (hasToolResultBlock(entry.message.content)) return false;
+	// Preserve the exact line structure when no rows are dropped: split on \n,
+	// keep empty segments, and rejoin with \n so unchanged lines stay byte-for-byte
+	// identical. Dropped orphan result rows are omitted from the output.
+	const lines = content.split("\n");
+	const outputLines: string[] = [];
+	const seenToolCallIds = new Set<string>();
+	let changed = false;
+	let rewritten = 0;
+	let droppedToolResultRows = 0;
+	let filteredToolResultBlocks = 0;
 
-		const text = effectiveText(entry.message.content);
-		if (text.trim() !== "") return false; // already valid — leave byte-identical
+	for (const raw of lines) {
+		const trimmed = raw.trim();
+		if (!trimmed) {
+			outputLines.push(raw);
+			continue;
+		}
 
-		entry.message.content = rewriteBlankUserContent(entry.message.content);
-		return true;
-	});
+		let entry: any;
+		try {
+			entry = JSON.parse(trimmed);
+		} catch {
+			outputLines.push(raw); // non-JSON line — leave untouched
+			continue;
+		}
+
+		if (!entry || entry.type !== "message" || !entry.message) {
+			outputLines.push(raw);
+			continue;
+		}
+
+		const message = entry.message;
+		if (message.role === "assistant") {
+			const stopReason = messageStopReason(entry);
+			if (stopReason !== "aborted" && stopReason !== "error" && Array.isArray(message.content)) {
+				for (const block of message.content) {
+					const id = toolCallIdFromAssistantBlock(block);
+					if (id) seenToolCallIds.add(id);
+				}
+			}
+			outputLines.push(raw);
+			continue;
+		}
+
+		if (message.role === "toolResult") {
+			const id = stringField(message.toolCallId);
+			if (!id || !seenToolCallIds.has(id)) {
+				changed = true;
+				droppedToolResultRows++;
+				continue;
+			}
+			outputLines.push(raw);
+			continue;
+		}
+
+		if (message.role !== "user") {
+			outputLines.push(raw);
+			continue;
+		}
+
+		if (hasToolResultBlock(message.content)) {
+			const filteredContent = (message.content as unknown[]).filter((block) => {
+				if (!isToolResultBlock(block)) return true;
+				const id = toolResultIdFromBlock(block);
+				const keep = !!id && seenToolCallIds.has(id);
+				if (!keep) filteredToolResultBlocks++;
+				return keep;
+			});
+
+			if (filteredContent.length !== (message.content as unknown[]).length) {
+				changed = true;
+				if (filteredContent.length === 0) continue;
+				entry.message.content = filteredContent;
+				message.content = filteredContent;
+				if (hasToolResultBlock(filteredContent)) {
+					outputLines.push(JSON.stringify(entry));
+					continue;
+				}
+			} else {
+				// Valid tool-result user messages are valid history (no text by design) —
+				// never rewrite them, or tool-call history/ordering is corrupted.
+				outputLines.push(raw);
+				continue;
+			}
+		}
+
+		const text = effectiveText(message.content);
+		if (text.trim() !== "") {
+			outputLines.push(raw); // already valid — leave byte-identical
+			continue;
+		}
+
+		entry.message.content = rewriteBlankUserContent(message.content);
+		outputLines.push(JSON.stringify(entry));
+		changed = true;
+		rewritten++;
+	}
+
+	if (!changed) return emptySanitizeResult(content);
+	return {
+		content: outputLines.join("\n"),
+		changed: true,
+		rewritten,
+		droppedToolResultRows,
+		filteredToolResultBlocks,
+	};
 }
 
 /**
@@ -144,7 +267,7 @@ export function rebaseTranscriptCwdMetadataContent(
 ): SanitizeResult {
 	const oldCwds = new Set(options.oldCwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0));
 	if (!content || !options.newCwd || oldCwds.size === 0) {
-		return { content, changed: false, rewritten: 0 };
+		return emptySanitizeResult(content);
 	}
 
 	return transformTranscriptJsonl(content, (entry) => {
@@ -163,11 +286,15 @@ function isRebasableRuntimeCwdMetadataRecord(entry: any): entry is { type: "sess
 	return entry.subtype === "init" || !hasSubtype;
 }
 
+function emptySanitizeResult(content: string): SanitizeResult {
+	return { content, changed: false, rewritten: 0, droppedToolResultRows: 0, filteredToolResultBlocks: 0 };
+}
+
 function transformTranscriptJsonl(
 	content: string,
 	mutateEntry: (entry: any) => boolean,
 ): SanitizeResult {
-	if (!content) return { content, changed: false, rewritten: 0 };
+	if (!content) return emptySanitizeResult(content);
 
 	// Preserve the exact line structure: split on \n, keep empty segments, and
 	// rejoin with \n so the only bytes that change are the rewritten JSON lines.
@@ -193,8 +320,8 @@ function transformTranscriptJsonl(
 		rewritten++;
 	}
 
-	if (!changed) return { content, changed: false, rewritten: 0 };
-	return { content: lines.join("\n"), changed: true, rewritten };
+	if (!changed) return emptySanitizeResult(content);
+	return { content: lines.join("\n"), changed: true, rewritten, droppedToolResultRows: 0, filteredToolResultBlocks: 0 };
 }
 
 /** True iff `target` is `root` itself or strictly nested inside it. */
@@ -303,7 +430,7 @@ function writeFileNoFollow(realPath: string, data: string): void {
  * container-path is translated to its host path and written there (visible
  * inside the container via the mount).
  *
- * @returns the number of user messages rewritten (0 when nothing changed).
+ * @returns the number of transcript repairs performed (0 when nothing changed).
  */
 export async function sanitizeAgentTranscriptFile(
 	ctx: SessionFsContext,
@@ -316,7 +443,14 @@ export async function sanitizeAgentTranscriptFile(
 		sandboxManager,
 		sanitizeTranscriptContent,
 		"sanitize",
-		(file, rewritten) => `Un-poisoned ${rewritten} blank-text user message(s) in ${file}`,
+		(file, result) => {
+			const parts: string[] = [];
+			if (result.rewritten) parts.push(`un-poisoned ${result.rewritten} blank-text user message(s)`);
+			if (result.droppedToolResultRows) parts.push(`dropped ${result.droppedToolResultRows} orphan tool result row(s)`);
+			if (result.filteredToolResultBlocks) parts.push(`filtered ${result.filteredToolResultBlocks} orphan tool result block(s)`);
+			return `${parts.join(", ")} in ${file}`;
+		},
+		(result) => result.rewritten + result.droppedToolResultRows + result.filteredToolResultBlocks,
 	);
 }
 
@@ -339,7 +473,7 @@ export async function rebaseAgentTranscriptCwdMetadataFile(
 		sandboxManager,
 		(content) => rebaseTranscriptCwdMetadataContent(content, options),
 		"cwd metadata rebase",
-		(file, rewritten) => `Rebased ${rewritten} runtime cwd metadata record(s) in ${file}`,
+		(file, result) => `Rebased ${result.rewritten} runtime cwd metadata record(s) in ${file}`,
 	);
 }
 
@@ -349,7 +483,8 @@ async function transformAgentTranscriptFile(
 	sandboxManager: SandboxManager | null,
 	transform: (content: string) => SanitizeResult,
 	operation: string,
-	logMessage: (filePath: string, rewritten: number) => string,
+	logMessage: (filePath: string, result: SanitizeResult) => string,
+	returnCount: (result: SanitizeResult) => number = (result) => result.rewritten,
 ): Promise<number> {
 	try {
 		// Resolve the host-side path. Non-sandboxed: filePath is already a host
@@ -384,8 +519,8 @@ async function transformAgentTranscriptFile(
 		}
 
 		writeFileNoFollow(realPath, result.content);
-		console.log(`[transcript-sanitizer] ${logMessage(filePath, result.rewritten)}`);
-		return result.rewritten;
+		console.log(`[transcript-sanitizer] ${logMessage(filePath, result)}`);
+		return returnCount(result);
 	} catch (err) {
 		console.warn(`[transcript-sanitizer] Failed to ${operation} ${filePath} (non-fatal):`, err);
 		return 0;

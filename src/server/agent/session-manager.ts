@@ -52,6 +52,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
+import { writeOpenAiOrphanToolResultExtension } from "./openai-orphan-tool-result-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -2060,6 +2061,14 @@ export class SessionManager {
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
 			}
+		}
+
+		// OpenAI Responses preflight guard. Mirrors session setup so restore,
+		// role-reassignment, and force-abort respawn paths keep dropping orphan
+		// function_call_output items before provider requests are sent.
+		const openAiOrphanGuardPath = writeOpenAiOrphanToolResultExtension();
+		if (openAiOrphanGuardPath) {
+			args.push("--extension", openAiOrphanGuardPath);
 		}
 
 		// Google account (Code Assist) provider extension. Mirrors

@@ -34,7 +34,7 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 	});
 
 	it("translates /bobbit-state subdirectory paths", () => {
-		// Only specific subdirs are mounted (sessions/, tool-guard/, html-snapshots/)
+		// Only specific state subdirs are mounted; never the state root.
 		const containerPath = "/bobbit-state/sessions/abc-123/2026-01-01.jsonl";
 		const hostPath = containerPathToHost(containerPath);
 		const expected = process.platform === "win32"
@@ -43,16 +43,23 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		assert.equal(hostPath, expected);
 	});
 
-	it("translates the google-code-assist provider extension path", () => {
-		// The generated provider.ts lives under <stateDir>/google-code-assist/<hash>/
-		// and is bind-mounted at /bobbit-state/google-code-assist so sandboxed
-		// pi-coding-agent can load it via --extension.
-		const containerPath = "/bobbit-state/google-code-assist/abc123def456/provider.ts";
-		const hostPath = containerPathToHost(containerPath);
-		const expected = process.platform === "win32"
-			? "C:\\Users\\test\\project\\.bobbit\\state\\google-code-assist\\abc123def456\\provider.ts"
-			: "/home/test/project/.bobbit/state/google-code-assist/abc123def456/provider.ts";
-		assert.equal(hostPath, expected);
+	it("translates generated extension paths", () => {
+		for (const { containerPath, expectedHost } of [
+			{
+				containerPath: "/bobbit-state/google-code-assist/abc123def456/provider.ts",
+				expectedHost: process.platform === "win32"
+					? "C:\\Users\\test\\project\\.bobbit\\state\\google-code-assist\\abc123def456\\provider.ts"
+					: "/home/test/project/.bobbit/state/google-code-assist/abc123def456/provider.ts",
+			},
+			{
+				containerPath: "/bobbit-state/openai-orphan-tool-result/def456abc123/extension.ts",
+				expectedHost: process.platform === "win32"
+					? "C:\\Users\\test\\project\\.bobbit\\state\\openai-orphan-tool-result\\def456abc123\\extension.ts"
+					: "/home/test/project/.bobbit/state/openai-orphan-tool-result/def456abc123/extension.ts",
+			},
+		]) {
+			assert.equal(containerPathToHost(containerPath), expectedHost);
+		}
 	});
 
 	it("does NOT translate /bobbit-state root files (not mounted)", () => {

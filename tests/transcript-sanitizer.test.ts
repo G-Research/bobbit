@@ -10,6 +10,8 @@
  *   (d) string-content blank user message  → rewritten
  *   (e) valid transcripts pass through unchanged + byte-identical (idempotent)
  *   (f) assistant / non-user blank messages are NOT touched
+ *   (g) valid tool-result history is left byte-identical while orphan results
+ *       are dropped or filtered
  *
  * Run with:
  *   npx tsx --test --test-force-exit tests/transcript-sanitizer.test.ts
@@ -31,6 +33,52 @@ import {
 
 function msg(role: string, content: unknown, id = "x"): string {
 	return JSON.stringify({ type: "message", id, ts: "2026-01-01T00-00-00-000Z", message: { role, content } });
+}
+
+function assistantToolCall(toolCallId: string, id = `assistant-${toolCallId}`, stopReason?: string): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolCallId, name: "bash", input: { command: "echo ok" } }],
+			...(stopReason ? { stopReason } : {}),
+		},
+	});
+}
+
+function assistantToolUse(toolCallId: string, id = `assistant-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "tool_use", id: toolCallId, name: "bash", input: { command: "echo ok" } }],
+		},
+	});
+}
+
+function assistantPiToolCall(toolCallId: string, id = `assistant-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ toolCallId, toolName: "bash", args: { command: "echo ok" } }],
+		},
+	});
+}
+
+function toolResultRow(toolCallId: string, id = `result-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: { role: "toolResult", toolCallId, content: "ok done" },
+	});
 }
 
 const IMG = { type: "image", source: { data: "AAAA" } };
@@ -95,27 +143,173 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(content, line);
 	});
 
-	it("(g) leaves a tool_result-only user message byte-identical (no text by design)", () => {
-		const line = msg("user", [{ type: "tool_result", toolCallId: "t1", content: "ok done" }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
-		assert.equal(changed, false, "tool_result user message must NOT be rewritten");
-		assert.equal(content, line, "tool_result user message must stay byte-identical");
+	it("(g) leaves a valid toolCall + toolResult row pair byte-identical and idempotent", () => {
+		const file = [assistantToolCall("t1"), toolResultRow("t1")].join("\n");
+		const first = sanitizeTranscriptContent(file);
+		assert.equal(first.changed, false, "valid message-level toolResult must stay unchanged");
+		assert.equal(first.content, file, "valid tool-call history must stay byte-identical");
+		assert.equal(first.droppedToolResultRows, 0);
+		assert.equal(first.filteredToolResultBlocks, 0);
+
+		const second = sanitizeTranscriptContent(first.content);
+		assert.equal(second.changed, false, "valid pair sanitizer pass must remain a no-op");
+		assert.equal(second.content, file);
 	});
 
-	it("(g') leaves a toolResult-variant user message byte-identical", () => {
-		const line = msg("user", [{ type: "toolResult", toolCallId: "t2", content: [{ type: "text", text: "" }] }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
-		assert.equal(changed, false, "toolResult user message must NOT be rewritten");
-		assert.equal(content, line, "toolResult user message must stay byte-identical");
+	it("(g') leaves a valid tool_use + toolResult-block user message byte-identical", () => {
+		const result = msg("user", [{ type: "toolResult", toolCallId: "t2", content: [{ type: "text", text: "" }] }], "result-t2");
+		const file = [assistantToolUse("t2"), result].join("\n");
+		const { changed, content } = sanitizeTranscriptContent(file);
+		assert.equal(changed, false, "valid toolResult user message must NOT be rewritten");
+		assert.equal(content, file, "valid toolResult user message must stay byte-identical");
 	});
 
-	it("(g'') leaves a tool_result + blank-text user message byte-identical (tool result wins)", () => {
-		// Even if a stray empty text block coexists, the presence of a tool_result
-		// block means this is tool-call history and must not be touched.
-		const line = msg("user", [{ type: "text", text: "" }, { type: "tool_result", content: "x" }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
+	it("(g' pi) leaves a valid pi {toolCallId,toolName} + toolResult row pair byte-identical", () => {
+		const file = [assistantPiToolCall("pi-tool"), toolResultRow("pi-tool")].join("\n");
+		const first = sanitizeTranscriptContent(file);
+		assert.equal(first.changed, false, "pi-shaped assistant tool call must validate the matching toolResult row");
+		assert.equal(first.content, file, "valid pi-shaped tool-call history must stay byte-identical");
+		assert.equal(first.droppedToolResultRows, 0);
+
+		const second = sanitizeTranscriptContent(first.content);
+		assert.equal(second.changed, false, "valid pi-shaped pair sanitizer pass must remain a no-op");
+		assert.equal(second.content, file);
+	});
+
+	it("(g'') leaves a valid tool_result + blank-text user message byte-identical (tool result wins)", () => {
+		// Even if a stray empty text block coexists, the presence of a valid
+		// tool_result block means this is tool-call history and must not be touched.
+		const result = msg("user", [{ type: "text", text: "" }, { type: "tool_result", tool_use_id: "t3", content: "x" }], "result-t3");
+		const file = [assistantToolCall("t3"), result].join("\n");
+		const { changed, content } = sanitizeTranscriptContent(file);
 		assert.equal(changed, false);
-		assert.equal(content, line);
+		assert.equal(content, file);
+	});
+
+	it("drops a toolResult row whose only matching assistant row was aborted", () => {
+		const assistant = assistantToolCall("aborted-tool", "assistant-aborted", "aborted");
+		const result = toolResultRow("aborted-tool", "late-result");
+		const after = msg("user", "after", "after");
+		const file = [assistant, result, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.rewritten, 0);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.filteredToolResultBlocks, 0);
+		assert.equal(sanitized.content, [assistant, after].join("\n"));
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "orphan repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("drops a toolResult row whose only matching assistant row errored", () => {
+		const assistant = assistantToolCall("errored-tool", "assistant-error", "error");
+		const result = toolResultRow("errored-tool", "late-error-result");
+		const file = [assistant, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, assistant);
+	});
+
+	it("drops a toolResult row after a compaction boundary with no retained tool call", () => {
+		const user = msg("user", "retained prompt", "retained-user");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const result = toolResultRow("pre-compaction-tool", "orphan-after-compaction");
+		const file = [user, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, [user, compaction].join("\n"));
+	});
+
+	it("filters orphan user/content tool_result blocks while preserving valid blocks and other content", () => {
+		const assistant = assistantToolCall("valid-block");
+		const userLine = msg("user", [
+			{ type: "text", text: "tool outputs:" },
+			{ type: "tool_result", tool_use_id: "valid-block", content: "keep me" },
+			{ type: "toolResult", toolCallId: "orphan-block", content: "drop me" },
+			IMG,
+		], "mixed-results");
+		const file = [assistant, userLine].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 0);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+
+		const lines = sanitized.content.split("\n");
+		assert.equal(lines[0], assistant, "assistant tool call must stay byte-identical");
+		const blocks = JSON.parse(lines[1]).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "tool outputs:" },
+			{ type: "tool_result", tool_use_id: "valid-block", content: "keep me" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "filtered transcript must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("rewrites blank/image-only user content after filtering orphan tool_result blocks", () => {
+		const userLine = msg("user", [
+			{ type: "text", text: "   " },
+			{ type: "tool_result", tool_use_id: "missing", content: "drop me" },
+			IMG,
+		], "orphan-plus-attachment");
+
+		const sanitized = sanitizeTranscriptContent(userLine);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.rewritten, 1);
+
+		const blocks = JSON.parse(sanitized.content).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "Attachments:" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "filter + blank-user repair must be idempotent in one pass");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("rewrites image-only user content after filtering orphan toolResult blocks", () => {
+		const userLine = msg("user", [
+			{ type: "toolResult", toolCallId: "missing", content: "drop me" },
+			IMG,
+		], "orphan-plus-image");
+
+		const sanitized = sanitizeTranscriptContent(userLine);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.rewritten, 1);
+
+		const blocks = JSON.parse(sanitized.content).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "Attachments:" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "image-only remainder must not need a second repair pass");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("drops a user/content tool_result-only row when every block is orphaned", () => {
+		const orphan = msg("user", [{ type: "tool_result", tool_use_id: "missing", content: "drop" }], "orphan-user-result");
+		const next = msg("user", "next", "next");
+		const file = [orphan, next].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.content, next);
 	});
 
 	it("preserves other lines and only rewrites poisoned ones in a multi-line file", () => {

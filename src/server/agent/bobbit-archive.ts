@@ -56,6 +56,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/tool-guard/",          // src/server/agent/tool-activation.ts
 	"state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts
 	"state/google-code-assist/",  // src/server/agent/google-code-assist-provider-extension.ts
+	"state/openai-orphan-tool-result/", // src/server/agent/openai-orphan-tool-result-extension.ts
 	"state/mcp-extensions/",      // src/server/agent/tool-activation.ts, rpc-bridge.ts
 	"state/html-snapshots/",      // server.ts
 	"state/gate-diagnostics/",    // src/server/agent/gate-diagnostics-cleanup.ts
