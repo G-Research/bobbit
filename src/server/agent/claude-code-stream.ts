@@ -221,8 +221,14 @@ export function translateClaudeCodeEvent(
 		for (const block of toolResults) {
 			const toolCallId = typeof block.tool_use_id === "string" ? block.tool_use_id : String(block.tool_use_id ?? "");
 			if (!toolCallId) continue;
-			const result = stringifyToolContent(block.content);
 			const toolName = state.toolNamesById[toolCallId];
+			const postedStub = toolName === "ask_user_choices" && !block.is_error
+				? askUserChoicesPostedStub(toolCallId)
+				: undefined;
+			const result = postedStub ?? stringifyToolContent(block.content);
+			const resultContent = postedStub
+				? [{ type: "text", text: postedStub }]
+				: normalizeToolResultContent(block.content);
 			out.push({
 				type: "tool_execution_end",
 				id: toolCallId,
@@ -232,7 +238,7 @@ export function translateClaudeCodeEvent(
 				tool_use_id: toolCallId,
 				toolName,
 				result,
-				content: block.content,
+				content: postedStub ? resultContent : block.content,
 				isError: Boolean(block.is_error),
 				error: block.is_error ? result : undefined,
 			});
@@ -242,7 +248,7 @@ export function translateClaudeCodeEvent(
 				toolCallId,
 				toolName,
 				isError: Boolean(block.is_error),
-				content: normalizeToolResultContent(block.content),
+				content: resultContent,
 			};
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
@@ -447,6 +453,10 @@ function normalizeToolResultContent(content: any): any[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
 	if (content == null) return [];
 	return [{ type: "text", text: stringifyToolContent(content) }];
+}
+
+function askUserChoicesPostedStub(toolUseId: string): string {
+	return JSON.stringify({ status: "posted", tool_use_id: toolUseId });
 }
 
 function normalizeClaudeCodeToolUse(block: any): { toolName: string; input: any } {
