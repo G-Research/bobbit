@@ -76,8 +76,9 @@ function stringField(value: unknown): string | null {
 function toolCallIdFromAssistantBlock(block: unknown): string | null {
 	if (!block || typeof block !== "object") return null;
 	const b = block as any;
-	if (b.type !== "toolCall" && b.type !== "tool_use") return null;
-	return stringField(b.id);
+	if (b.type === "toolCall" || b.type === "tool_use") return stringField(b.id);
+	if (typeof b.toolCallId === "string") return stringField(b.toolCallId);
+	return null;
 }
 
 function toolResultIdFromBlock(block: unknown): string | null {
@@ -219,14 +220,17 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 				changed = true;
 				if (filteredContent.length === 0) continue;
 				entry.message.content = filteredContent;
-				outputLines.push(JSON.stringify(entry));
+				message.content = filteredContent;
+				if (hasToolResultBlock(filteredContent)) {
+					outputLines.push(JSON.stringify(entry));
+					continue;
+				}
+			} else {
+				// Valid tool-result user messages are valid history (no text by design) —
+				// never rewrite them, or tool-call history/ordering is corrupted.
+				outputLines.push(raw);
 				continue;
 			}
-
-			// Valid tool-result user messages are valid history (no text by design) —
-			// never rewrite them, or tool-call history/ordering is corrupted.
-			outputLines.push(raw);
-			continue;
 		}
 
 		const text = effectiveText(message.content);
