@@ -143,4 +143,37 @@ describe("Claude Code restart/restore without Pi agentSessionFile", () => {
 		assert.ok(restoredIds.includes("delegate"), "Claude Code delegate must be routed through live restore");
 		assert.equal(store.archive.mock.callCount(), 0, "Claude Code delegate must not be archived for missing agentSessionFile");
 	});
+
+	it("tryAutoSelectModel skips Pi role/default/aigw binding for Claude Code sessions", async () => {
+		const ps = makePersisted({ id: "claude-auto-model" });
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+		manager.preferencesStore = {
+			get: mock.fn((key: string) => {
+				if (key === "default.sessionModel") return "aigw/us.anthropic.claude-haiku-4-5";
+				if (key === "aigw.url") return "https://aigw.example.invalid";
+				return undefined;
+			}),
+		};
+		manager._writeModelNameFile = mock.fn(() => {});
+		const setModel = mock.fn(async () => {
+			throw new Error("setModel must not be called for Pi models on Claude Code sessions");
+		});
+		const session: any = {
+			id: ps.id,
+			role: "coder",
+			clients: new Set(),
+			promptQueue: { size: 0 },
+			rpcClient: {
+				setModel,
+				getState: mock.fn(async () => ({ success: true, data: { runtime: "claude-code", model: { provider: "claude-code", id: "sonnet" } } })),
+			},
+		};
+		manager.sessions.set(ps.id, session);
+
+		await manager.tryAutoSelectModel(session);
+
+		assert.equal(setModel.mock.callCount(), 0);
+		assert.equal(manager._writeModelNameFile.mock.callCount(), 0);
+	});
 });

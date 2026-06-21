@@ -918,6 +918,8 @@ function modelProviderFromModelString(model?: string): string | undefined {
 
 /** Single store.put() with ALL structural fields. Called exactly once per session. */
 export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
+	const existing = store.get(session.id);
+	const runtime = plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi";
 	store.put({
 		id: session.id,
 		title: session.title,
@@ -952,10 +954,11 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		projectId: plan.projectId,
 		modelProvider: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
 		modelId: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
-		runtime: plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi",
-		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
-		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
-		claudeCodeModelAlias: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
+		runtime,
+		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
+		claudeCodeExecutable: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
+		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodeModelAlias: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
 	});
 }
 

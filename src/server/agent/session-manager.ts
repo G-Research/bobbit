@@ -5248,6 +5248,64 @@ export class SessionManager {
 		}
 	}
 
+	private isClaudeCodeRuntimeSession(session: SessionInfo): boolean {
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.runtime === "claude-code") return true;
+			if (runtimeFromProvider(persisted?.modelProvider) === "claude-code") return true;
+		} catch { /* best-effort; fall through to spawn metadata */ }
+		return runtimeFromModelString(session.spawnPinnedModel) === "claude-code";
+	}
+
+	private async tryAutoSelectClaudeCodeModel(session: SessionInfo, spawnPinned: boolean): Promise<void> {
+		const roleModel = this.resolveRoleModel(session);
+		if (roleModel) {
+			await this.applyClaudeCodeAutoModelCandidate(session, roleModel, `role.${session.role}.model`, spawnPinned);
+			return;
+		}
+
+		const sessionModelPref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		if (sessionModelPref) {
+			await this.applyClaudeCodeAutoModelCandidate(session, sessionModelPref, "default.sessionModel", spawnPinned);
+		}
+	}
+
+	private async applyClaudeCodeAutoModelCandidate(session: SessionInfo, modelString: string, contextLabel: string, spawnPinned: boolean): Promise<void> {
+		const slash = modelString.indexOf("/");
+		if (slash <= 0 || slash === modelString.length - 1) {
+			console.warn(`[session-manager] Malformed ${contextLabel} preference for Claude Code session ${session.id}: "${modelString}", ignoring`);
+			return;
+		}
+		const provider = modelString.slice(0, slash);
+		if (provider !== "claude-code") {
+			console.warn(`[session-manager] ${contextLabel} "${modelString}" targets the Pi runtime; skipping for Claude Code session ${session.id}.`);
+			return;
+		}
+		if (!isSessionSelectableModelString(modelString)) {
+			console.warn(`[session-manager] ${contextLabel} "${modelString}" is not session-selectable for Claude Code session ${session.id}; skipping.`);
+			return;
+		}
+		const modelId = modelString.slice(slash + 1);
+		const skipSetModel = spawnPinned && session.spawnPinnedModel === modelString;
+		try {
+			await applyModelString(session.rpcClient, modelString, {
+				sessionManager: this,
+				sessionId: session.id,
+				contextLabel,
+				skipSetModel,
+			});
+			this._writeModelNameFile(session.id, modelString);
+			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+			broadcast(session.clients, {
+				type: "state",
+				data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+			});
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Confirmed Claude Code model "${modelString}" for session ${session.id}${skipSetModel ? " (spawn-pinned)" : ""}`);
+		} catch (err) {
+			console.warn(`[session-manager] Claude Code model "${modelString}" was not applied for ${session.id}:`, err);
+		}
+	}
+
 	/**
 	 * Resolve the model to pin at spawn time for a session, given its role &
 	 * project. Mirrors `tryAutoSelectModel`'s precedence: role override →
@@ -5332,6 +5390,11 @@ export class SessionManager {
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
+
+		if (this.isClaudeCodeRuntimeSession(session)) {
+			await this.tryAutoSelectClaudeCodeModel(session, spawnPinned);
+			return;
+		}
 
 		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
 		// matching the contract used for review/QA sessions: if a user explicitly

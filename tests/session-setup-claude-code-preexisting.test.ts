@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const SRC = readFileSync(path.join(process.cwd(), "src/server/agent/session-setup.ts"), "utf8");
+const { persistOnce } = await import("../src/server/agent/session-setup.ts");
 
 describe("session setup Claude Code pre-existing transcript recovery", () => {
 	it("rejects Claude Code continue/fork transcript recovery without a Claude session id", () => {
@@ -37,5 +38,39 @@ describe("session setup Claude Code pre-existing transcript recovery", () => {
 		const worktreeBridgeIdx = SRC.indexOf("const rpcClient = createSessionBridge", worktreeIdx);
 		const worktreeValidateIdx = SRC.indexOf("resolvePreExistingTranscriptSetupMode(plan);", worktreeIdx);
 		assert.ok(worktreeValidateIdx > worktreeIdx && worktreeValidateIdx < worktreeBridgeIdx);
+	});
+
+	it("preserves Claude Code resume id across replacement persistOnce calls", () => {
+		const rows = new Map<string, any>();
+		const store = {
+			get: (id: string) => rows.get(id),
+			put: (row: any) => rows.set(row.id, row),
+		};
+		const plan = {
+			id: "bobbit-session",
+			cwd: process.cwd(),
+			runtime: "claude-code",
+			initialModel: "claude-code/sonnet",
+			preExistingAgentSessionFile: "/tmp/pre-existing.jsonl",
+			bridgeOptions: {
+				initialModel: "claude-code/sonnet",
+				claudeCodeSessionId: "claude-resume-123",
+				claudeCodeModelAlias: "sonnet",
+			},
+		};
+
+		persistOnce({ id: "bobbit-session", title: "Preparing", cwd: process.cwd(), createdAt: 1, lastActivity: 1 }, plan as any, store as any);
+		persistOnce({ id: "bobbit-session", title: "Ready", cwd: process.cwd(), createdAt: 2, lastActivity: 2 }, plan as any, store as any);
+
+		assert.equal(rows.get("bobbit-session").claudeCodeSessionId, "claude-resume-123");
+		assert.equal(rows.get("bobbit-session").runtime, "claude-code");
+
+		rows.set("live-session", { id: "live-session", runtime: "claude-code", claudeCodeSessionId: "claude-live-456" });
+		persistOnce(
+			{ id: "live-session", title: "Ready", cwd: process.cwd(), createdAt: 3, lastActivity: 3 },
+			{ ...plan, id: "live-session", bridgeOptions: { initialModel: "claude-code/sonnet", claudeCodeModelAlias: "sonnet" } } as any,
+			store as any,
+		);
+		assert.equal(rows.get("live-session").claudeCodeSessionId, "claude-live-456");
 	});
 });
