@@ -84,7 +84,7 @@ If the executable is missing, invalid, not runnable, times out, or reports a log
 
 ## Configuration
 
-Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API. Host-runtime preferences that affect process execution or permission bypass are sensitive: changing or resetting `claudeCode.executablePath`, enabling `claudeCode.allowBypassPermissions`, or setting `claudeCode.permissionMode` to `bypassPermissions` requires an operator-capable browser cookie and a short-lived confirmation token. Confirmation requests must not carry `Authorization`, query-token, or session-bound headers. Bearer-token or query-token REST traffic receives preview/API cookies only, cannot mint operator confirmations, and cannot self-confirm host-runtime changes. On localhost, the supported operator bootstrap path is a no-auth browser request to `/api/health`, followed by the normal Settings confirmation flow.
+Settings → Models contains a **Claude Code (local)** section. These preferences are saved with the existing preferences API. Host-runtime preferences that affect process execution or permission bypass are sensitive: changing or resetting `claudeCode.executablePath`, enabling `claudeCode.allowBypassPermissions`, or setting `claudeCode.permissionMode` to `bypassPermissions` requires an operator-capable browser cookie and a short-lived confirmation token. Confirmation requests must not carry `Authorization`, query-token, or session-bound headers. Bearer-token or query-token REST traffic receives preview/API cookies only, cannot mint operator confirmations, and cannot self-confirm host-runtime changes. On localhost, the supported operator bootstrap path is a no-auth browser request to `/api/health`, followed by the normal Settings confirmation flow. After a confirmation is minted, the sensitive `PUT /api/preferences` must come from the same operator browser session and include `X-Bobbit-Operator-Confirmation: <confirmationToken>`; missing or invalid confirmation is rejected with `403 { confirmationRequired: true, sensitiveKeys }`.
 
 | Preference key | Default | Meaning |
 |---|---|---|
@@ -186,7 +186,7 @@ Relevant REST surfaces:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/preferences/claude-code/confirmation` | Mints the short-lived operator confirmation token required for sensitive Claude Code preference writes. |
+| `POST` | `/api/preferences/claude-code/confirmation` | Mints the short-lived operator confirmation token required for sensitive Claude Code preference writes. The follow-up `PUT /api/preferences` must be from the same operator browser session with `X-Bobbit-Operator-Confirmation: <confirmationToken>`; missing or invalid confirmation returns `403 { confirmationRequired: true, sensitiveKeys }`. |
 | `GET` | `/api/claude-code/status` | Probe local CLI readiness. Optional `projectId` validates the project context; the executable remains user/admin preference only. |
 | `POST` | `/api/claude-code/status/refresh` | Invalidate status/model caches and re-probe. |
 | `GET` | `/api/models` | Includes synthetic `claude-code/*` models with `runtime`, `localRuntime`, `runtimeLabel`, `sessionSelectable`, and unavailable reason metadata. |
