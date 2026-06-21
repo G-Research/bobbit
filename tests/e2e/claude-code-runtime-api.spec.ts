@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, nonGitCwd } from "./e2e-setup.js";
+import { agentEndPredicate, apiFetch, connectWs, nonGitCwd } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +40,11 @@ function readRecord(recordPath: string): any[] {
 async function waitForSpawnArgv(recordPath: string): Promise<string[]> {
 	await expect.poll(() => fs.existsSync(recordPath) ? readRecord(recordPath)[0]?.argv : undefined).toBeTruthy();
 	return readRecord(recordPath)[0].argv;
+}
+
+async function waitForSpawnArgvs(recordPath: string, count: number): Promise<string[][]> {
+	await expect.poll(() => fs.existsSync(recordPath) ? readRecord(recordPath).filter((entry) => Array.isArray(entry.argv)).length : 0).toBeGreaterThanOrEqual(count);
+	return readRecord(recordPath).filter((entry) => Array.isArray(entry.argv)).map((entry) => entry.argv);
 }
 
 test.describe("Claude Code runtime session API", () => {
@@ -137,7 +142,7 @@ test.describe("Claude Code runtime session API", () => {
 		}
 	});
 
-	test("unsupported Claude Code set_model failure is not persisted", async () => {
+	test("Claude Code set_model switches aliases in the same Bobbit session via restart/resume", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-setmodel-"));
 		const recordPath = path.join(tmp, "record.jsonl");
 		const wrapper = makeFakeWrapper(recordPath);
@@ -155,13 +160,36 @@ test.describe("Claude Code runtime session API", () => {
 			expect(create.status).toBe(201);
 			sessionId = (await create.json()).id;
 			conn = await connectWs(sessionId!);
+			conn.send({ type: "prompt", text: "capture Claude Code resume id" });
+			await conn.waitFor(agentEndPredicate());
+
 			conn.send({ type: "set_model", provider: "claude-code", modelId: "opus" });
-			const error = await conn.waitFor((m: any) => m.type === "error" && m.code === "SET_MODEL_FAILED");
-			expect(error.message).toContain("requires a new Claude Code session");
+			await expect.poll(async () => {
+				const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+				return detail.modelProvider === "claude-code" && detail.modelId === "opus" && detail.claudeCodeModelAlias === "opus";
+			}).toBe(true);
+
 			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+			expect(detail.id).toBe(sessionId);
+			expect(detail.runtime).toBe("claude-code");
+			expect(detail.claudeCodeSessionId).toBe("fake-claude-session");
 			expect(detail.modelProvider).toBe("claude-code");
-			expect(detail.modelId).toBe("sonnet");
-			expect(detail.claudeCodeModelAlias).toBe("sonnet");
+			expect(detail.modelId).toBe("opus");
+			expect(detail.claudeCodeModelAlias).toBe("opus");
+
+			const argvs = await waitForSpawnArgvs(recordPath, 2);
+			expect(argvs[0]).toContain("--model");
+			expect(argvs[0][argvs[0].indexOf("--model") + 1]).toBe("sonnet");
+			expect(argvs[1]).toContain("--model");
+			expect(argvs[1][argvs[1].indexOf("--model") + 1]).toBe("opus");
+			expect(argvs[1]).toContain("--resume");
+			expect(argvs[1][argvs[1].indexOf("--resume") + 1]).toBe("fake-claude-session");
+
+			conn.send({ type: "get_state" });
+			await conn.waitFor((m: any) => m.type === "state" && m.data?.model?.id === "opus");
+			const transcript = await (await apiFetch(`/api/sessions/${sessionId}/transcript?verbose=1`)).json();
+			expect(JSON.stringify(transcript)).toContain("capture Claude Code resume id");
+			expect(JSON.stringify(transcript)).toContain("Hi there");
 		} finally {
 			conn?.close();
 			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});

@@ -116,9 +116,9 @@ Bobbit does not silently convert a running session between Pi and Claude Code.
 - Picking a Claude Code row from an existing Pi session opens a confirmation dialog and creates a new top-level Claude Code session from the same working directory.
 - Picking a Pi/API-backed model from a Claude Code session follows the same new-session pattern.
 - If the UI misses the guard, the bridge/server rejects the runtime-mismatched `set_model` request.
-- Changing a Claude Code model alias in-place also requires a new Claude Code session.
+- Changing between Claude Code aliases keeps the same Bobbit session. Bobbit does not rely on an undocumented in-process model-switch event; when idle, it gracefully stops the current Claude Code process, restarts `claude` with the new `--model <alias>`, and includes `--resume <claudeCodeSessionId>` when one is known.
 
-This keeps each session tied to the runtime that owns its process, transcript, and resume semantics.
+This keeps each session tied to the runtime that owns its process, transcript, and resume semantics while still allowing safe same-runtime alias changes.
 
 ### Continue, fork, restart, and resume
 
@@ -135,7 +135,7 @@ MVP limitations:
 - Live steer is not supported.
 - Thinking-level changes are not supported.
 - Compaction is not supported.
-- In-place alias changes are not supported.
+- Claude Code alias switching is idle-only; active streaming turns are rejected until the turn finishes. If Bobbit has existing messages but no Claude Code session id to resume, the switch fails clearly instead of silently losing Claude Code context.
 - Auth failures may only appear when the first Claude Code session starts because the readiness probe intentionally avoids an undocumented auth no-op.
 
 Abort terminates the current Claude Code process, emits a visible aborted turn, and allows the next prompt to start a new Claude Code process using the latest known resume id.

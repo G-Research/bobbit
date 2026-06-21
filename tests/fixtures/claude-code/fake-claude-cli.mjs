@@ -48,7 +48,7 @@ process.stdin.on("data", async (chunk) => {
     const promptText = extractText(parsed.message?.content) || "Hello";
     const priorResume = valueAfter("--resume");
     const sessionId = priorResume || "fake-claude-session";
-    await emit({ type: "system", subtype: "init", session_id: sessionId, model: "sonnet" });
+    await emit({ type: "system", subtype: "init", session_id: sessionId, model: valueAfter("--model") || "default" });
     await emit({ type: "user", message: { role: "user", content: [{ type: "text", text: promptText }] } });
     await emit({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Hi " }] } });
     await emit({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "there 🚀" }] } });

@@ -140,6 +140,9 @@ export class ClaudeCodeBridge implements IRpcBridge {
 	private lastResultCompleted = false;
 	private promptCounter = 0;
 	private streamFailureEmitted = false;
+	private expectedModelSwitchExit = false;
+	private switchingModel = false;
+	private turnActive = false;
 
 	constructor(private readonly options: ClaudeCodeBridgeOptions = {}) {
 		this.translator = new ClaudeCodeStreamTranslator(
@@ -222,8 +225,9 @@ export class ClaudeCodeBridge implements IRpcBridge {
 	async prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs = 30_000): Promise<any> {
 		if (!this.process?.stdin) await this.start();
 		if (!this.process?.stdin) throw new Error("Claude Code process not running");
-		if (this.pendingPrompt) throw new Error("Claude Code runtime is already processing a prompt");
+		if (this.pendingPrompt || this.turnActive) throw new Error("Claude Code runtime is already processing a prompt");
 		this.lastResultCompleted = false;
+		this.turnActive = true;
 
 		const effectiveText = synthesizeClaudeCodeAttachmentText(text, images);
 		const content: any[] = [{ type: "text", text: effectiveText }];
@@ -237,13 +241,19 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 		return new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => {
-				if (this.pendingPrompt?.resolve === resolve) this.pendingPrompt = null;
+				if (this.pendingPrompt?.resolve === resolve) {
+					this.pendingPrompt = null;
+					this.turnActive = false;
+				}
 				reject(new Error("Command timed out: prompt"));
 			}, timeoutMs);
 			this.pendingPrompt = { resolve, reject, timeout };
 			this.process!.stdin!.write(JSON.stringify(payload) + "\n", (error) => {
 				if (!error) return;
-				if (this.pendingPrompt?.resolve === resolve) this.pendingPrompt = null;
+				if (this.pendingPrompt?.resolve === resolve) {
+					this.pendingPrompt = null;
+					this.turnActive = false;
+				}
 				clearTimeout(timeout);
 				reject(error);
 			});
@@ -291,8 +301,46 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		if (provider !== "claude-code") {
 			return { success: false, error: "Switching between Pi and Claude Code runtimes requires a new session" };
 		}
-		if (modelId === this.translator.state.modelAlias) return { success: true };
-		return { success: false, error: "Changing Claude Code model aliases mid-session requires a new Claude Code session" };
+		if (!isValidClaudeCodeModelAlias(modelId)) {
+			return { success: false, error: "Invalid Claude Code model alias" };
+		}
+		const previousAlias = this.translator.state.modelAlias ?? resolveClaudeCodeModelAlias(this.options);
+		if (modelId === previousAlias) return { success: true };
+		if (this.switchingModel) {
+			return { success: false, error: "Claude Code model switch already in progress" };
+		}
+		if (this.pendingPrompt || this.turnActive || this.translator.state.assistantOpen) {
+			return { success: false, error: "Cannot switch Claude Code model while a turn is active; wait for the turn to finish first" };
+		}
+
+		const resumeSessionId = normalizeResumeSessionId(this.translator.state.claudeCodeSessionId ?? this.options.claudeCodeSessionId);
+		const hasConversation = this.translator.state.messages.length > 0;
+		if (!resumeSessionId && hasConversation) {
+			return {
+				success: false,
+				error: "Cannot switch Claude Code model alias because no Claude Code session id is available for resume",
+			};
+		}
+
+		this.switchingModel = true;
+		const wasRunning = !!this.process;
+		try {
+			if (this.process) await this.stopForModelSwitch();
+			this.options.claudeCodeModelAlias = modelId;
+			this.options.initialModel = `claude-code/${modelId}`;
+			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
+			this.translator.state.modelAlias = modelId;
+			if (wasRunning || resumeSessionId || hasConversation) await this.start();
+			return { success: true, runtime: "claude-code", model: { provider: "claude-code", id: modelId }, claudeCodeSessionId: resumeSessionId };
+		} catch (err: any) {
+			this.options.claudeCodeModelAlias = previousAlias;
+			this.options.initialModel = `claude-code/${previousAlias}`;
+			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
+			this.translator.state.modelAlias = previousAlias;
+			return { success: false, error: `Failed to restart Claude Code with model alias "${modelId}": ${err?.message || err}` };
+		} finally {
+			this.switchingModel = false;
+		}
 	}
 
 	async setThinkingLevel(_level: string): Promise<any> {
@@ -342,6 +390,28 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 	get running(): boolean {
 		return this.process !== null;
+	}
+
+	private async stopForModelSwitch(): Promise<void> {
+		const child = this.process;
+		if (!child) return;
+		this.expectedModelSwitchExit = true;
+		await new Promise<void>((resolve) => {
+			const killTimer = setTimeout(() => {
+				if (this.process === child) {
+					child.kill("SIGKILL");
+					this.process = null;
+				}
+				resolve();
+			}, 3000);
+			child.once("close", () => {
+				clearTimeout(killTimer);
+				if (this.process === child) this.process = null;
+				resolve();
+			});
+			child.kill("SIGTERM");
+		});
+		if (this.process === child) this.process = null;
 	}
 
 	private attachProcessHandlers(child: ChildProcess): void {
@@ -398,8 +468,10 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			this.rejectPendingPrompt(new Error(`Claude Code process exited with ${reason}${stderrContext}`));
 			const normalPrintExit = this.lastResultCompleted && code === 0 && !signal;
 			const expectedAbortExit = this.expectedAbortExit && (signal === "SIGTERM" || code === 143 || code === null);
+			const expectedModelSwitchExit = this.expectedModelSwitchExit && (signal === "SIGTERM" || code === 143 || code === null);
 			this.expectedAbortExit = false;
-			if (!normalPrintExit && !expectedAbortExit && (!this.stopping || code !== 0 || signal)) this.emitProcessExit(code, signal);
+			this.expectedModelSwitchExit = false;
+			if (!normalPrintExit && !expectedAbortExit && !expectedModelSwitchExit && (!this.stopping || code !== 0 || signal)) this.emitProcessExit(code, signal);
 		});
 	}
 
@@ -415,6 +487,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		for (const event of events) this.emit(event);
 		if (rawEvent?.type === "result") {
 			this.lastResultCompleted = true;
+			this.turnActive = false;
 			if (this.pendingPrompt) this.resolvePendingPrompt(rawEvent);
 		}
 	}
@@ -430,9 +503,13 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 	private rejectPendingPrompt(error: Error): void {
 		const pending = this.pendingPrompt;
-		if (!pending) return;
+		if (!pending) {
+			this.turnActive = false;
+			return;
+		}
 		clearTimeout(pending.timeout);
 		this.pendingPrompt = null;
+		this.turnActive = false;
 		pending.reject(error);
 	}
 
@@ -452,6 +529,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			},
 		});
 		this.emit({ type: "agent_end", stopReason: "error", runtime: "claude-code", error: message });
+		this.turnActive = false;
 		this.process?.kill("SIGTERM");
 	}
 
@@ -481,5 +559,6 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		};
 		this.emit({ type: "message_end", message });
 		this.emit({ type: "agent_end", stopReason: "abort", runtime: "claude-code" });
+		this.turnActive = false;
 	}
 }
