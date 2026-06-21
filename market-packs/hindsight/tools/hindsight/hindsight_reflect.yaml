@@ -1,14 +1,15 @@
 name: hindsight_reflect
 description: "Reflect over the Hindsight bank to synthesize an answer to a prompt."
 summary: "Synthesize an answer from long-term memory"
-params: [prompt, scope?, tags?]
+params: [prompt, scope?, tags?, responseSchema?, factTypes?, excludeMentalModels?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Hindsight
 docs: |-
   Required: `prompt`. Optional: `scope` (`project` | `all`), `tags` (simple
-  key→value map).
+  key→value map), `responseSchema` (JSON Schema object), `factTypes`, and
+  `excludeMentalModels`.
 
   Asks Hindsight to synthesize an answer over the shared bank rather than
   returning a raw recall list. Omit `scope` for the configured default
@@ -18,8 +19,9 @@ docs: |-
   including untagged/global. Use `tags` only for a simple targeted filter (e.g.
   `{ goal: "..." }`) — compound `tag_groups` queries are a direct Hindsight API
   escape hatch documented in docs/hindsight-memory.md. Scope maps to a tag filter
-  on the SAME shared bank — never a different bank. Returns the synthesized text.
-  Dormant (unconfigured) Hindsight returns empty text, not an error.
+  on the SAME shared bank — never a different bank. Returns the synthesized text
+  and, when `responseSchema` is supplied, any `structuredOutput` returned by
+  Hindsight. Dormant (unconfigured) Hindsight returns empty text, not an error.
 detail_docs: >-
   ## Purpose
 
@@ -50,6 +52,16 @@ detail_docs: >-
 
   | `tags` | map | No | Simple key→value filter for a targeted reflection (e.g. `{
   goal: "..." }`). Merged additively with the scope filter. |
+
+  | `responseSchema` | object | No | JSON Schema object. When supplied, Hindsight
+  may return `structuredOutput`; the tool displays it as fenced JSON and exposes it
+  in `details.structuredOutput`. |
+
+  | `factTypes` | array | No | Optional Hindsight `fact_types` filter
+  (`observation`, `world`, `experience`). |
+
+  | `excludeMentalModels` | boolean | No | Passes `exclude_mental_models` through to
+  Hindsight for schema-focused reflections. |
 
 
   ## Notes
