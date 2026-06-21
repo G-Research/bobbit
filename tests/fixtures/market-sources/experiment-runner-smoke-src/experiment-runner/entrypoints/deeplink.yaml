@@ -1,0 +1,6 @@
+id: experiment-runner.route
+kind: route
+routeId: experiment-runner
+target:
+  panelId: experiment-runner.panel
+paramKeys: [experimentId, view]

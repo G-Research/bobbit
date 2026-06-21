@@ -1,0 +1,26 @@
+name: experiment-runner
+description: Local Experiment Runner smoke fixture for deterministic E2E coverage.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints:
+    - session-menu
+    - composer-slash
+    - deeplink
+routes:
+  module: lib/routes.mjs
+  names:
+    - defineexperiment
+    - launch
+    - poll
+    - collect
+    - aggregate
+    - savemetrics
+    - savedashboard
+    - report
+    - getexperiment
+    - listmetrics
+    - listwidgets
+    - cancel
