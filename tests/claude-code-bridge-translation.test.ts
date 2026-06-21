@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeStreamTranslator } from "../src/server/agent/claude-code-stream.ts";
+import { ClaudeCodeStreamLimitError, ClaudeCodeStreamTranslator } from "../src/server/agent/claude-code-stream.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.join(__dirname, "fixtures", "claude-code", "streams");
@@ -122,5 +122,22 @@ describe("Claude Code stream translation", () => {
 	it("ignores unknown event types without crashing", () => {
 		const translator = new ClaudeCodeStreamTranslator();
 		assert.deepEqual(translator.translate({ type: "future_event", payload: true }), []);
+	});
+
+	it("rejects oversized assistant content before retaining it", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { maxContentCharsPerEvent: 12 });
+		assert.throws(
+			() => translator.translate({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "this is too long" }] } }),
+			ClaudeCodeStreamLimitError,
+		);
+		assert.equal(translator.state.assistantText, "");
+	});
+
+	it("bounds live message retention", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { maxStoredMessages: 2 });
+		for (const text of ["one", "two", "three"]) {
+			translator.translate({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
+		}
+		assert.deepEqual(translator.state.messages.map((message: any) => message.content[0].text), ["two", "three"]);
 	});
 });
