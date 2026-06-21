@@ -923,6 +923,15 @@ function modelProviderFromModelString(model?: string): string | undefined {
 export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
 	const existing = store.get(session.id);
 	const runtime = plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi";
+	const claudeCodeModelAlias = runtime === "claude-code"
+		? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default")
+		: undefined;
+	const persistedModelProvider = runtime === "claude-code"
+		? "claude-code"
+		: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel);
+	const persistedModelId = runtime === "claude-code"
+		? claudeCodeModelAlias
+		: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel);
 	store.put({
 		id: session.id,
 		title: session.title,
@@ -955,13 +964,13 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
-		modelProvider: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
-		modelId: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
+		modelProvider: persistedModelProvider,
+		modelId: persistedModelId,
 		runtime,
 		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
 		claudeCodeExecutable: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
 		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
-		claudeCodeModelAlias: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
+		claudeCodeModelAlias,
 	});
 }
 
