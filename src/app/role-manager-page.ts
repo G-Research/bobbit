@@ -869,7 +869,7 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					{
 						fallbackLabel: inlineFallback(display.model),
 						thinkingFallbackLabel: inlineFallback(display.thinking),
-						thinkingWidth: "clamp(164px, 44%, 220px)",
+						thinkingWidth: "clamp(220px, 36%, 360px)",
 						thinkingFitContent: false,
 						onThinkingClear: () => control.onThinkingChange(role, ""),
 						// In the Roles list these resets clear a per-role OVERRIDE

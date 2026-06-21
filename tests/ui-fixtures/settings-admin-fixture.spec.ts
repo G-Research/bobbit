@@ -465,8 +465,8 @@ test.describe("Settings/admin UI fixture", () => {
 		const thinking = reviewerControl.locator(LIST_THINKING_PICKER);
 		await expect(thinking).toContainText(USES_REVIEWER_DEFAULT);
 		const desktopWidth = await thinking.evaluate((el) => el.getBoundingClientRect().width);
-		expect(desktopWidth).toBeGreaterThanOrEqual(164);
-		expect(desktopWidth).toBeLessThanOrEqual(222);
+		expect(desktopWidth).toBeGreaterThanOrEqual(220);
+		expect(desktopWidth).toBeLessThanOrEqual(362);
 		expect(await thinking.evaluate((el) => {
 			const rect = el.getBoundingClientRect();
 			const svgs = Array.from(el.querySelectorAll("svg"));
