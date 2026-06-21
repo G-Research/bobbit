@@ -817,11 +817,14 @@ created, the Hub dispatches `sessionSetup` and the returned blocks render as a f
 active + enabled for the session's scope contributes context today. A provider fault never blocks
 the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforePrompt` /
 `beforeCompact` fire via a generated provider-bridge pi extension, and `afterTurn` /
-`sessionShutdown` fire server-side from the gateway's agent-event stream. The first built-in
-production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the built-in
-band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box install
-still produces no Dynamic Context section. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
+`sessionShutdown` fire server-side from the gateway's agent-event stream. `beforePrompt` blocks
+are delivered as hidden `bobbit:dynamic-context` custom/user-side messages, not appended to
+`systemPrompt`, so provider cached system-prompt bytes stay stable across turns; `sessionSetup`
+blocks remain spawn-time system-prompt context and `beforeCompact` is unchanged. The first
+built-in production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
+built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
+install still produces no Dynamic Context section. See
+[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13) and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
