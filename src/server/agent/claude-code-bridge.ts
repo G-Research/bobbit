@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import type { IRpcBridge, RpcBridgeOptions, RpcEventListener } from "./rpc-bridge.js";
 import { ClaudeCodeJsonlParser, ClaudeCodeStreamTranslator, createClaudeCodeTranslatorState } from "./claude-code-stream.js";
@@ -31,6 +32,19 @@ export function buildClaudeCodeArgs(options: ClaudeCodeBridgeOptions = {}): stri
 		"--replay-user-messages",
 	];
 
+	const modelAlias = resolveClaudeCodeCliModelAlias(options);
+	if (modelAlias) {
+		args.push("--model", modelAlias);
+	}
+
+	const appendSystemPrompt = readClaudeCodeAppendSystemPrompt(options.systemPromptPath);
+	if (appendSystemPrompt) {
+		// Claude Code does not accept Bobbit's Pi-only --system-prompt file flag.
+		// Its supported non-interactive mechanism is --append-system-prompt <text>;
+		// pass the assembled prompt as a single spawn argv element, never via a shell.
+		args.push("--append-system-prompt", appendSystemPrompt);
+	}
+
 	const permissionMode = normalizePermissionMode(options.claudeCodePermissionMode, options.claudeCodeAllowBypassPermissions);
 	if (permissionMode !== "default") {
 		args.push("--permission-mode", permissionMode);
@@ -60,13 +74,34 @@ export function normalizePermissionMode(mode: unknown, allowBypass = false): Cla
 
 export function resolveClaudeCodeModelAlias(options: ClaudeCodeBridgeOptions = {}): string {
 	const direct = options.claudeCodeModelAlias;
-	if (direct && /^[A-Za-z0-9._-]{1,48}$/.test(direct)) return direct;
+	if (isValidClaudeCodeModelAlias(direct)) return direct;
 	const initial = options.initialModel;
 	if (initial?.startsWith("claude-code/")) {
 		const alias = initial.slice("claude-code/".length);
-		if (/^[A-Za-z0-9._-]{1,48}$/.test(alias)) return alias;
+		if (isValidClaudeCodeModelAlias(alias)) return alias;
 	}
 	return "sonnet";
+}
+
+export function resolveClaudeCodeCliModelAlias(options: ClaudeCodeBridgeOptions = {}): string | undefined {
+	const direct = options.claudeCodeModelAlias;
+	if (isValidClaudeCodeModelAlias(direct)) return direct === "default" ? undefined : direct;
+	const initial = options.initialModel;
+	if (initial?.startsWith("claude-code/")) {
+		const alias = initial.slice("claude-code/".length);
+		if (isValidClaudeCodeModelAlias(alias)) return alias === "default" ? undefined : alias;
+	}
+	return undefined;
+}
+
+function isValidClaudeCodeModelAlias(value: unknown): value is string {
+	return typeof value === "string" && /^[A-Za-z0-9._-]{1,48}$/.test(value);
+}
+
+function readClaudeCodeAppendSystemPrompt(systemPromptPath: string | undefined): string | undefined {
+	if (!systemPromptPath) return undefined;
+	const prompt = readFileSync(systemPromptPath, "utf8");
+	return prompt.trim() === "" ? undefined : prompt;
 }
 
 export class ClaudeCodeBridge implements IRpcBridge {

@@ -139,12 +139,55 @@ describe("ClaudeCodeBridge lifecycle", () => {
 		}
 	});
 
+	it("passes selected Claude Code model aliases while preserving default CLI behavior", () => {
+		assert.equal(buildClaudeCodeArgs({}).includes("--model"), false);
+		assert.deepEqual(buildClaudeCodeArgs({ claudeCodeModelAlias: "sonnet" }).slice(-2), ["--model", "sonnet"]);
+		assert.deepEqual(buildClaudeCodeArgs({ initialModel: "claude-code/opus" }).slice(-2), ["--model", "opus"]);
+		assert.equal(buildClaudeCodeArgs({ claudeCodeModelAlias: "default" }).includes("--model"), false);
+		assert.equal(buildClaudeCodeArgs({ initialModel: "claude-code/default" }).includes("--model"), false);
+		assert.equal(buildClaudeCodeArgs({ claudeCodeModelAlias: "bad alias; rm -rf" }).includes("--model"), false);
+	});
+
 	it("passes persisted Claude Code session ids via the guarded resume flag", () => {
 		assert.deepEqual(
 			buildClaudeCodeArgs({ claudeCodeSessionId: "previous-claude-session" }),
 			["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--resume", "previous-claude-session"],
 		);
 		assert.equal(buildClaudeCodeArgs({ claudeCodeSessionId: "bad session; rm -rf" }).includes("--resume"), false);
+	});
+
+	it("passes Bobbit's assembled system prompt to Claude Code without rewriting user text or images", async () => {
+		fs.chmodSync(fakeCli, 0o755);
+		const tmp = tempRecord();
+		const promptPath = path.join(tmp.dir, "system-prompt.md");
+		const systemPrompt = "Role instructions\nGoal instructions\nDelegate instructions";
+		fs.writeFileSync(promptPath, systemPrompt, "utf8");
+		const bridge = new ClaudeCodeBridge({
+			claudeCodeExecutable: fakeCli,
+			systemPromptPath: promptPath,
+			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath },
+		});
+
+		try {
+			await bridge.start();
+			await timeout(bridge.prompt("Describe this", [{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]), 2000, "prompt with image was not accepted");
+
+			const record = readRecord(tmp.recordPath);
+			const argv = record[0].argv;
+			const promptFlagIndex = argv.indexOf("--append-system-prompt");
+			assert.ok(promptFlagIndex >= 0, `expected --append-system-prompt in argv: ${argv.join(" ")}`);
+			assert.equal(argv[promptFlagIndex + 1], systemPrompt);
+
+			const stdin = record.find((entry) => entry.type === "user");
+			assert.equal(stdin.message.content[0].type, "text");
+			assert.equal(stdin.message.content[0].text, "Describe this");
+			assert.equal(stdin.message.content[1].type, "image");
+			assert.equal(stdin.message.content[1].source.media_type, "image/png");
+			assert.equal(stdin.message.content[1].source.data, "ZmFrZQ==");
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
 	});
 
 	it("uses the latest Claude session id for --resume on follow-up --print processes", async () => {
