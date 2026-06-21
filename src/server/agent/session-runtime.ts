@@ -74,13 +74,17 @@ export function assertRuntimeAllowedForSession(runtime: SessionRuntime | undefin
 export function hydrateRuntimeOptions(options: SessionBridgeOptions, defaults?: ClaudeCodeConfig): SessionBridgeOptions {
 	const runtime = resolveSessionRuntime({ runtime: options.runtime, initialModel: options.initialModel });
 	if (runtime !== "claude-code") return { ...options, runtime: "pi" };
+	const initialModelRuntime = runtimeFromModelString(options.initialModel);
+	const initialModelAlias = initialModelRuntime === "claude-code"
+		? modelAliasFromModelString(options.initialModel)
+		: undefined;
 	return {
 		...options,
 		runtime,
 		claudeCodeExecutable: options.claudeCodeExecutable || defaults?.executablePath || "claude",
 		claudeCodePermissionMode: options.claudeCodePermissionMode || defaults?.permissionMode || "default",
 		claudeCodeAllowBypassPermissions: options.claudeCodeAllowBypassPermissions ?? defaults?.allowBypassPermissions ?? false,
-		claudeCodeModelAlias: options.claudeCodeModelAlias || modelAliasFromModelString(options.initialModel) || defaults?.defaultModel || "default",
+		claudeCodeModelAlias: options.claudeCodeModelAlias || initialModelAlias || defaults?.defaultModel || "default",
 	};
 }
 

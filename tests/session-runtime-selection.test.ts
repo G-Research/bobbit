@@ -39,4 +39,13 @@ describe("session runtime selection", () => {
 		assert.equal(options.claudeCodePermissionMode, "default");
 		assert.equal(options.claudeCodeModelAlias, "sonnet");
 	});
+
+	it("does not derive Claude Code aliases from API-backed model strings", () => {
+		const options = runtime.hydrateRuntimeOptions(
+			{ cwd: "/tmp/x", runtime: "claude-code", initialModel: "anthropic/claude-opus-4-1" },
+			{ executablePath: "claude", defaultModel: "sonnet", permissionMode: "default", allowBypassPermissions: false },
+		);
+		assert.equal(options.runtime, "claude-code");
+		assert.equal(options.claudeCodeModelAlias, "sonnet");
+	});
 });

@@ -186,6 +186,11 @@ function extractClaudeCodeSessionId(value: any): string | undefined {
 	return extractClaudeCodeSessionId(value.data) ?? extractClaudeCodeSessionId(value.result) ?? extractClaudeCodeSessionId(value.metadata);
 }
 
+function canResumeClaudeCodeSession(ps: Pick<PersistedSession, "runtime" | "modelProvider" | "claudeCodeSessionId"> | undefined): boolean {
+	if (!ps || typeof ps.claudeCodeSessionId !== "string" || !ps.claudeCodeSessionId.trim()) return false;
+	return resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
+}
+
 /** Provenance of a prompt enqueued into a session. Read by TeamManager on
  *  agent_start to decide whether to reset idle-nudge backoff counters.
  *  Only "user" and "system" reset the counter; everything else preserves it. */
@@ -2259,7 +2264,7 @@ export class SessionManager {
 			|| session.lifecycleFenced === true;
 		if (inReviveWindow) {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
+			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
 				// Coalesces: joins an in-flight restore or starts the single restore.
 				await this._restoreSessionCoalesced(ps);
 				const revived = this.sessions.get(sessionId);
@@ -3291,7 +3296,7 @@ export class SessionManager {
 		let ps: PersistedSession | undefined;
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
-		if (!ps?.agentSessionFile) return undefined;
+		if (!ps || (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps))) return undefined;
 		const restored = await this._respawnAgentInPlace(session, ps);
 		return restored ?? this.sessions.get(session.id);
 	}
@@ -3679,9 +3684,11 @@ export class SessionManager {
 		if (!ps) throw new Error("No persisted session data");
 
 		// Zombie-archive guard: a record with neither an agent session file nor a role
-		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
-		// instead of throwing opaquely on every Restart click.
-		if (!ps.agentSessionFile && !ps.role) {
+		// can't be bootstrapped by `_respawnAgentInPlace`. Claude Code sessions resume
+		// from their persisted Claude session id instead of a Pi JSONL transcript.
+		// Archive unrecoverable records surface-side instead of throwing opaquely on
+		// every Restart click.
+		if (!ps.agentSessionFile && !ps.role && !canResumeClaudeCodeSession(ps)) {
 			console.warn(
 				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
 				`(no agentSessionFile, no role) — archiving instead of restarting.`,
@@ -3825,7 +3832,7 @@ export class SessionManager {
 		// in restoreSession() — no delegate-specific registry.
 		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
-			if (!ps.agentSessionFile) {
+			if (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps)) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -7203,7 +7210,7 @@ export class SessionManager {
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
+			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this._restoreSessionCoalesced(ps)
 					.then(() => {
