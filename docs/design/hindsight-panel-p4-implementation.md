@@ -253,7 +253,7 @@ keys.
 | `recallScope` | enum `project` \| `all` (default `all`) | all | |
 | `autoRecall` / `autoRetain` | boolean (default `true`) | all | |
 | `recallBudget` | number (default `1200`) | all | positive. |
-| `timeoutMs` | number (default `1500`) | all | positive. |
+| `timeoutMs` | number (default `4000`) | all | positive. |
 
 ### 5.2 Secret handling (panel rules)
 

@@ -68,6 +68,8 @@ describe("loadProviders (schema v2)", () => {
 		const memory = loadPackContributions(root, manifest).providers.find((p) => p.id === "memory");
 		assert.ok(memory, "memory provider contribution should load");
 		assert.ok(memory.hooks.includes("goalCompleted"), "goalCompleted must be declared or LifecycleHub.dispatchGoalCompleted skips the provider");
+		assert.equal(memory.budget.timeoutMs, 4500, "memory recall budget must cover observed 1–3.4s Hindsight recall latency");
+		assert.equal(memory.config?.timeoutMs, 4000, "default Hindsight client timeout must stay below the provider budget");
 	});
 
 	it("loads a valid listed provider and clamps its budget", () => {

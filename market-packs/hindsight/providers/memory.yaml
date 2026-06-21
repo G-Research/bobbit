@@ -9,7 +9,7 @@ module: ../lib/provider.mjs
 # mode ignores this entirely.
 runtime: hindsight
 hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
-budget: { maxTokens: 1200, timeoutMs: 1500 }
+budget: { maxTokens: 1200, timeoutMs: 4500 }
 # Activation is additionally gated on `externalUrl` (see `activation` below); the
 # provider also enforces the same dormancy gate defensively at runtime.
 defaultEnabled: true
@@ -103,7 +103,7 @@ config:
   # 3.5 chars/token) so the query can never trip the 500-token cap regardless of
   # this value (even <= 0). Mirrors Hermes' recall_max_input_chars.
   recallMaxInputChars: { type: number, default: 3000 }
-  timeoutMs: { type: number, default: 1500 }
+  timeoutMs: { type: number, default: 4000 }
 activation:
   # EXTERNAL-mode dormancy gate: the host omits the provider entirely (no bridge
   # injection, no per-turn hook calls) until the effective config has a non-empty

@@ -202,7 +202,7 @@ const ACTIVE = {
 	retainMaxDelayMs: 1_800_000,
 	retainOverlapTurns: 0,
 	recallBudget: 1200,
-	timeoutMs: 1500,
+	timeoutMs: 4000,
 };
 
 function ctx(extra: Record<string, unknown>) {
@@ -403,6 +403,22 @@ test("recall block shape: memories ⇒ one memory block; empty ⇒ no block", as
 		state.memories = [];
 		const out2 = await provider.beforePrompt(c);
 		assert.deepEqual(out2.blocks, []);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("provider hooks cap configured client timeout below the provider budget", async () => {
+	const cap = captureClientBaseUrl();
+	try {
+		cap.state.memories = [{ text: "m" }];
+		await provider.beforePrompt({
+			config: { ...ACTIVE, timeoutMs: 15_000 },
+			host: { store: makeStore() },
+			prompt: "q",
+		});
+		assert.equal(cap.cfg()?.timeoutMs, 4000, "hook-path client timeout is capped below the 4500ms provider budget");
+		assert.equal(cap.calls.recall.length, 1);
 	} finally {
 		__setClientFactory(null);
 	}
@@ -779,14 +795,14 @@ const MANAGED = {
 	retainMaxDelayMs: 1_800_000,
 	retainOverlapTurns: 0,
 	recallBudget: 1200,
-	timeoutMs: 1500,
+	timeoutMs: 4000,
 };
 
 function captureClientBaseUrl() {
 	const { client, calls, state } = makeClient();
 	let seenBaseUrl: string | undefined;
-	let seenCfg: { baseUrl: string; apiKey?: string } | undefined;
-	__setClientFactory((cfg: { baseUrl: string; apiKey?: string }) => {
+	let seenCfg: { baseUrl: string; apiKey?: string; timeoutMs?: number } | undefined;
+	__setClientFactory((cfg: { baseUrl: string; apiKey?: string; timeoutMs?: number }) => {
 		seenBaseUrl = cfg.baseUrl;
 		seenCfg = cfg;
 		return client;

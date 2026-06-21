@@ -365,7 +365,7 @@ export const CONFIG_DEFAULTS: EffectiveConfig = {
 	observationsMission: DEFAULT_OBSERVATIONS_MISSION,
 	reflectMission: DEFAULT_REFLECT_MISSION,
 	recallMaxInputChars: 3000,
-	timeoutMs: 1500,
+	timeoutMs: 4000,
 };
 
 function isObj(v: unknown): v is Record<string, unknown> {

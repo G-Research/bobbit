@@ -3,7 +3,7 @@
  *
  * Covers:
  *   1. Codegen string shape — delimiters, gateway URL/token reads with
- *      state-file fallback, AbortController + 2500/5000 timeout paths,
+ *      state-file fallback, AbortController + 5000/5000 timeout paths,
  *      `before_agent_start` + `session_before_compact` subscriptions, and the
  *      systemPrompt-only mutation (never event.prompt).
  *   2. Parse-validity + round-trip import of the generated source.
@@ -20,12 +20,16 @@ import assert from "node:assert/strict";
 import ts from "typescript";
 
 import {
+	BEFORE_COMPACT_TIMEOUT_MS,
+	BEFORE_PROMPT_TIMEOUT_MS,
 	DYNAMIC_CONTEXT_START,
 	DYNAMIC_CONTEXT_END,
 	stripDelimitedTail,
 	providersDeclareTurnHooks,
 	generateProviderBridgeExtension,
 } from "../src/server/agent/provider-bridge-extension.ts";
+import { loadPackContributions } from "../src/server/agent/pack-contributions.ts";
+import { readManifest } from "../src/server/agent/pack-manifest.ts";
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pbx-"));
@@ -50,10 +54,20 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(source.includes('"token"'), "expected token state file fallback");
 	});
 
-	it("uses AbortController with 2500ms and 5000ms timeouts", () => {
+	it("uses AbortController with bridge hook timeouts", () => {
 		assert.ok(source.includes("AbortController"), "expected AbortController");
-		assert.ok(source.includes("2500"), "expected before-prompt 2500ms timeout");
-		assert.ok(source.includes("5000"), "expected before-compact 5000ms timeout");
+		assert.ok(source.includes(String(BEFORE_PROMPT_TIMEOUT_MS)), "expected before-prompt timeout");
+		assert.ok(source.includes(String(BEFORE_COMPACT_TIMEOUT_MS)), "expected before-compact timeout");
+	});
+
+	it("keeps bridge timeouts above the shipped Hindsight memory provider budget", () => {
+		const root = path.resolve("market-packs", "hindsight");
+		const manifest = readManifest(root);
+		assert.ok(manifest, "real Hindsight pack manifest should parse");
+		const memory = loadPackContributions(root, manifest).providers.find((p) => p.id === "memory");
+		assert.ok(memory, "memory provider contribution should load");
+		assert.ok(BEFORE_PROMPT_TIMEOUT_MS > memory.budget.timeoutMs, "beforePrompt bridge must not abort before provider budget");
+		assert.ok(BEFORE_COMPACT_TIMEOUT_MS >= memory.budget.timeoutMs, "beforeCompact bridge must cover provider budget");
 	});
 
 	it("does NOT downgrade TLS verification process-wide", () => {

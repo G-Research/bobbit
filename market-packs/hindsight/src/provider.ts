@@ -109,9 +109,20 @@ const SUMMARY_CAP = 2000;
 const DEFAULT_MENTAL_MODEL_REFRESH_EVERY_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_MENTAL_MODEL_MAX_TOKENS = 1000;
 const DEFAULT_QUEUE_DRAIN_MAX = 10;
+// Hook-path REST calls must finish below the provider manifest budget (4500ms)
+// so a user-configured 15000ms route/tool timeout cannot stall an agent turn.
+const HOOK_CLIENT_TIMEOUT_MS = 4000;
 const MENTAL_MODEL_REFRESH_PREFIX = "mental-model-refresh:";
 const GOAL_COMPLETED_PREFIX = "goal-completed:";
 const inFlightGoalCompleted = new Set<string>();
+
+function hookClientConfig(cfg: EffectiveConfig, runtime?: RuntimeContext) {
+	const resolved = clientConfig(cfg, runtime);
+	const requested = typeof resolved.timeoutMs === "number" && Number.isFinite(resolved.timeoutMs) && resolved.timeoutMs > 0
+		? resolved.timeoutMs
+		: HOOK_CLIENT_TIMEOUT_MS;
+	return { ...resolved, timeoutMs: Math.min(requested, HOOK_CLIENT_TIMEOUT_MS) };
+}
 
 type MentalModelState = "injected" | "empty" | "skipped" | "failed";
 
@@ -372,7 +383,7 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	// Clamp the query to avoid the data plane's 500-token "Query too long" 400.
 	const clampedQuery = clampRecallQuery(q, cfg.recallMaxInputChars);
 	try {
-		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		const client = await makeClient(hookClientConfig(cfg, ctx.runtime));
 		const queryTimestamp = currentQueryTimestamp(cfgBool(ctx, cfg, "recallQueryTimestampEnabled", true));
 		const res = await client.recall(cfg.bank, clampedQuery, {
 			maxTokens: cfg.recallBudget,
@@ -454,7 +465,7 @@ async function doMentalModel(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<Me
 	const filter = recallTagFilter("project", projectId, "all_strict");
 	const tags = [`project:${projectId}`, "bobbit", "kind:mental-model"];
 	try {
-		const client = (await makeClient(clientConfig(cfg, ctx.runtime))) as unknown as {
+		const client = (await makeClient(hookClientConfig(cfg, ctx.runtime))) as unknown as {
 			ensureMentalModel?: (bank: string, spec: Record<string, unknown>) => Promise<unknown>;
 			getMentalModel?: (bank: string, id: string) => Promise<unknown>;
 		};
@@ -508,7 +519,7 @@ async function retainQueueEntry(store: StoreLike, cfg: EffectiveConfig, runtime:
 	// agree on the ORIGINAL bank/namespace (deployment fields are server-global and
 	// unchanged by the per-project overlay, so reusing cfg's baseUrl/auth is correct).
 	const targetCfg: EffectiveConfig = { ...cfg, bank, namespace };
-	const cc = clientConfig(cfg, runtime);
+	const cc = hookClientConfig(cfg, runtime);
 	const client = await makeClient(cc.namespace === namespace ? cc : { ...cc, namespace });
 	await client.ensureBank(bank);
 	await applyBankMission(store, client, targetCfg);
@@ -531,7 +542,7 @@ async function applyDirectivesIfEnabled(store: StoreLike | null, client: unknown
 async function queueDrainHealthy(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<boolean> {
 	if (cfg.retainQueueHealthGate === false) return true;
 	try {
-		const client = (await makeClient(clientConfig(cfg, runtime))) as unknown as {
+		const client = (await makeClient(hookClientConfig(cfg, runtime))) as unknown as {
 			health?: () => Promise<{ ok?: boolean }>;
 			llmHealth?: (bank: string) => Promise<unknown>;
 		};
@@ -603,7 +614,7 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 	const tags = autoTags(ctx, kind);
 	const extras: RetainExtras = { observationScopes: projectObservationScopes(ctx), entities: derivedEntities(ctx), timestamp: new Date().toISOString() };
 	try {
-		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		const client = await makeClient(hookClientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
 		await applyBankMission(store, client, cfg);
 		await applyDirectivesIfEnabled(store, client, cfg);
@@ -630,7 +641,7 @@ async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: Store
 	const tags = autoTags(ctx, "turn");
 	const extras: RetainExtras = { observationScopes: projectObservationScopes(ctx), entities: derivedEntities(ctx), timestamp: new Date().toISOString() };
 	try {
-		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		const client = await makeClient(hookClientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
 		await applyBankMission(store, client, cfg);
 		await applyDirectivesIfEnabled(store, client, cfg);
@@ -753,7 +764,7 @@ const provider = {
 				metadata,
 			};
 			try {
-				const client = await makeClient(clientConfig(cfg, ctx.runtime));
+				const client = await makeClient(hookClientConfig(cfg, ctx.runtime));
 				await client.ensureBank(cfg.bank);
 				await applyBankMission(store, client, cfg);
 				await applyDirectivesIfEnabled(store, client, cfg);

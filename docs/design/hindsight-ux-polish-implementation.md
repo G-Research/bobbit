@@ -9,7 +9,7 @@ It exists to fix the UX gaps found while testing PR #820:
 
 1. **Stale config form** — the panel's status card refreshes to the live config
    (Connected + bank `hermes`) while the configuration form keeps showing the
-   mount-time defaults (empty External URL, bank `bobbit`, timeout `1500`). Save
+   mount-time defaults (empty External URL, bank `bobbit`, timeout `4000`). Save
    can then silently clobber a good server config.
 2. **Opaque Marketplace state** — the built-in `hindsight` row only ever says
    "Enabled", hiding the distinctions between disabled, dormant/unconfigured,
@@ -299,7 +299,7 @@ All steps are pure projection + user-gesture writes.
 
 **Recommended-defaults explainer** (`data-testid="hindsight-defaults-explainer"`):
 local/private data by default; shared `bobbit` bank unless connecting to an existing
-bank like `hermes`; async retain on; auto-recall on; conservative `1500ms` timeout;
+bank like `hermes`; async retain on; auto-recall on; conservative `4000ms` timeout;
 "bring your own LLM key for managed extraction — never hardcoded".
 
 **Clear "who manages what" matrix** (`data-testid="hindsight-ownership"`): four rows —

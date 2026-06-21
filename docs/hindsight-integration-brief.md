@@ -226,7 +226,7 @@ The source of truth is `market-packs/hindsight/providers/memory.yaml`, mirrored 
 | `retainQueueLlmHealthGate` | `false` | Optional `/health/llm` gate. |
 | `retainQueueBatchPauseMs` | `0` | Reserved pacing knob; no sleep by default. |
 
-Existing defaults remain important: the pack manifest declares `defaultDisabled: true` so fresh unconfigured installs have no Hindsight contributions until Marketplace setup enables/configures them; external mode still requires `externalUrl` once enabled. Existing configured installs preserve activation. `retainEveryNTurns` remains 5, `retainMaxDelayMs` remains 30 minutes, `retainOverlapTurns` remains 2, `recallBudget` remains 1200, and `timeoutMs` remains 1500 ms.
+Existing defaults remain important: the pack manifest declares `defaultDisabled: true` so fresh unconfigured installs have no Hindsight contributions until Marketplace setup enables/configures them; external mode still requires `externalUrl` once enabled. Existing configured installs preserve activation. `retainEveryNTurns` remains 5, `retainMaxDelayMs` remains 30 minutes, `retainOverlapTurns` remains 2, `recallBudget` remains 1200, and `timeoutMs` defaults to 4000 ms.
 
 Per-project overrides are still limited to memory-quality keys (`recallScope`, `bank`, `tagsMatch`, `recallBudget`, `recallTypes`). Deployment mode, URLs, and secrets remain server-global.
 

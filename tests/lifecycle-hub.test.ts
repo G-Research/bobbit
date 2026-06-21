@@ -124,6 +124,29 @@ describe("LifecycleHub", { concurrency: false }, () => {
 		}
 	});
 
+	it("lets a ~2s beforePrompt provider finish under the Hindsight memory budget", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const provider = fixtureProvider(
+				tmp,
+				"memory",
+				`export default { async beforePrompt() { await new Promise((r) => setTimeout(r, 2100)); return { blocks: [{ id: "memory", title: "Memory", authority: "memory", content: "slow recall completed", reason: "r", priority: 10 }] }; } };`,
+				{ timeoutMs: 4_500 },
+				["beforePrompt"],
+			);
+
+			const result = await hub(tmp, [provider], moduleHost).dispatch("beforePrompt", { ...base(tmp), prompt: "recall" });
+
+			assert.deepEqual(result.diagnostics, []);
+			assert.equal(result.blocks.length, 1);
+			assert.equal(result.blocks[0].content, "slow recall completed");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("times out one provider without preventing later providers", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

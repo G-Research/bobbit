@@ -28,7 +28,7 @@ contract for the follow-on `implementation` gate. It builds on and must preserve
    (`http://localhost:9177`, bank `hermes`, timeout `15000`, auto-retain on) the
    panel's **status card** correctly shows `Connected` + `hermes` after Refresh,
    but the **configuration form** still shows empty External URL, bank `bobbit`,
-   timeout `1500`. Pressing **Save** would diff those stale defaults against the
+   timeout `4000`. Pressing **Save** would diff those stale defaults against the
    persisted config and **overwrite the good config**.
 
    Root cause (panel.js): `loadConfig` runs **once** behind the `mountKicked`
@@ -386,7 +386,7 @@ the panel) stating Bobbit's opinionated, safe defaults and the rationale:
 | Auto-retain | on (async) | "Memories are saved in the background after each turn — no latency cost." |
 | Auto-recall | on | "Relevant memories are pulled in automatically at session start and each turn." |
 | Recall scope | `all` | "Search across everything you've done — 'have we solved this before, anywhere?'" |
-| Timeout | `1500 ms` | "Conservative: Hindsight calls never stall a turn; on timeout, recall skips and retains queue." |
+| Timeout | `4000 ms` | "Conservative: Hindsight calls never stall a turn; on timeout, recall skips and retains queue." |
 | LLM key (managed) | none (user-supplied) | "Hindsight uses your LLM key for extraction. Bobbit forwards it to the local runtime only; it never hardcodes a provider secret." |
 
 The explainer must avoid hardcoding provider-specific secrets and must frame the
