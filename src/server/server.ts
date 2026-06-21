@@ -7302,7 +7302,7 @@ async function handleApiRoute(
 	// ── Unified Model Registry ──
 
 	// GET /api/claude-code/status — local Claude Code CLI readiness probe.
-	// Optional projectId/cwd scopes project-level Claude Code spawn config.
+	// The executable path is user/admin preference only; project config never controls probes.
 	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
 		const scoped = resolveClaudeCodeStatusConfigStore(url);
 		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
@@ -7329,7 +7329,7 @@ async function handleApiRoute(
 	}
 
 	// GET /api/models — unified model list from all sources.
-	// Optional projectId/cwd scopes Claude Code local-runtime status to project config.
+	// Claude Code model probes use only the user/admin executable preference.
 	if (url.pathname === "/api/models" && req.method === "GET") {
 		const scoped = resolveClaudeCodeStatusConfigStore(url);
 		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }

@@ -79,7 +79,7 @@ test.describe("Claude Code status/model APIs", () => {
 		expect(refreshed.message).toContain("verified when a Claude Code session starts");
 	});
 
-	test("models and status honor project-scoped Claude Code executable config", async () => {
+	test("models and status ignore project-scoped Claude Code executable config", async () => {
 		const projectsResp = await apiFetch("/api/projects");
 		expect(projectsResp.status).toBe(200);
 		const projects = await projectsResp.json();
@@ -101,10 +101,12 @@ test.describe("Claude Code status/model APIs", () => {
 			expect(globalModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(false);
 
 			const scopedStatus = await (await apiFetch(`/api/claude-code/status?projectId=${encodeURIComponent(project.id)}`)).json();
-			expect(scopedStatus.executablePath).toBe(process.execPath);
-			expect(scopedStatus.ready).toBe(true);
+			expect(scopedStatus.executablePath).toBe(missing);
+			expect(scopedStatus.ready).toBe(false);
+			expect(scopedStatus.reason).toBe("Claude Code CLI not found");
 			const scopedModels = await (await apiFetch(`/api/models?projectId=${encodeURIComponent(project.id)}`)).json();
-			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(true);
+			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(false);
+			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionUnavailableReason).toBe("Claude Code CLI not found");
 		} finally {
 			await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",

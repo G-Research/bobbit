@@ -73,6 +73,8 @@ export interface ClaudeCodeTranslatorState {
 	claudeCodeSessionId?: string;
 	modelAlias?: string;
 	assistantText: string;
+	assistantToolCalls: any[];
+	toolNamesById: Record<string, string>;
 	assistantMessageId?: string;
 	assistantOpen: boolean;
 	messages: any[];
@@ -95,6 +97,8 @@ export function createClaudeCodeTranslatorState(modelAlias = "sonnet"): ClaudeCo
 	return {
 		modelAlias,
 		assistantText: "",
+		assistantToolCalls: [],
+		toolNamesById: {},
 		assistantOpen: false,
 		messages: [],
 	};
@@ -145,16 +149,44 @@ export function translateClaudeCodeEvent(
 		const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
 		const text = textFromContentBlocks(blocks);
 		const toolResults = blocks.filter((block: any) => block?.type === "tool_result");
+		if (toolResults.length > 0 && (state.assistantOpen || state.assistantToolCalls.length > 0)) {
+			if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
+			const message = assistantMessageSnapshot(state);
+			state.messages.push(message);
+			out.push({ type: "message_end", message });
+			state.assistantText = "";
+			state.assistantToolCalls = [];
+			state.assistantMessageId = undefined;
+			state.assistantOpen = false;
+		}
 		for (const block of toolResults) {
+			const toolCallId = typeof block.tool_use_id === "string" ? block.tool_use_id : String(block.tool_use_id ?? "");
+			if (!toolCallId) continue;
+			const result = stringifyToolContent(block.content);
+			const toolName = state.toolNamesById[toolCallId];
 			out.push({
 				type: "tool_execution_end",
-				id: block.tool_use_id,
-				toolUseId: block.tool_use_id,
-				tool_use_id: block.tool_use_id,
-				result: stringifyToolContent(block.content),
+				id: toolCallId,
+				toolId: toolCallId,
+				toolCallId,
+				toolUseId: toolCallId,
+				tool_use_id: toolCallId,
+				toolName,
+				result,
+				content: block.content,
 				isError: Boolean(block.is_error),
-				error: block.is_error ? stringifyToolContent(block.content) : undefined,
+				error: block.is_error ? result : undefined,
 			});
+			const message = {
+				id: nextMessageId(),
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				isError: Boolean(block.is_error),
+				content: normalizeToolResultContent(block.content),
+			};
+			state.messages.push(message);
+			out.push({ type: "message_end", message });
 		}
 		if (text) {
 			const message = {
@@ -180,20 +212,36 @@ export function translateClaudeCodeEvent(
 					message: assistantMessageSnapshot(state),
 				});
 			} else if (block?.type === "tool_use") {
+				const toolCallId = typeof block.id === "string" ? block.id : String(block.id ?? "");
+				if (!toolCallId) continue;
+				const toolName = typeof block.name === "string" ? block.name : "unknown";
+				const toolCall = {
+					type: "toolCall",
+					id: toolCallId,
+					toolCallId,
+					name: toolName,
+					arguments: block.input ?? {},
+					input: block.input ?? {},
+				};
 				state.assistantOpen = true;
+				state.toolNamesById[toolCallId] = toolName;
+				if (!state.assistantToolCalls.some((existing) => existing.id === toolCallId)) state.assistantToolCalls.push(toolCall);
 				if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
 				out.push({
 					type: "tool_execution_start",
-					id: block.id,
-					toolUseId: block.id,
-					tool_use_id: block.id,
-					toolName: block.name,
-					name: block.name,
+					id: toolCallId,
+					toolId: toolCallId,
+					toolCallId,
+					toolUseId: toolCallId,
+					tool_use_id: toolCallId,
+					toolName,
+					name: toolName,
 					input: block.input ?? {},
+					arguments: block.input ?? {},
 				});
 				out.push({
 					type: "message_update",
-					message: assistantMessageSnapshot(state, [{ type: "tool_use", id: block.id, name: block.name, input: block.input ?? {} }]),
+					message: assistantMessageSnapshot(state),
 				});
 			}
 		}
@@ -218,6 +266,7 @@ export function translateClaudeCodeEvent(
 			out.push({ type: "message_end", message, usage: event.usage, cost: message.cost });
 		}
 		state.assistantText = "";
+		state.assistantToolCalls = [];
 		state.assistantMessageId = undefined;
 		state.assistantOpen = false;
 		out.push({
@@ -243,6 +292,7 @@ function assistantMessageSnapshot(state: ClaudeCodeTranslatorState, extraContent
 		model: state.modelAlias ? `claude-code/${state.modelAlias}` : "claude-code",
 		content: [
 			...(text ? [{ type: "text", text }] : []),
+			...state.assistantToolCalls,
 			...extraContent,
 		],
 	};
@@ -253,6 +303,13 @@ function textFromContentBlocks(blocks: any[]): string {
 		.filter((block) => block?.type === "text" && typeof block.text === "string")
 		.map((block) => block.text)
 		.join("");
+}
+
+function normalizeToolResultContent(content: any): any[] {
+	if (Array.isArray(content)) return content;
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	if (content == null) return [];
+	return [{ type: "text", text: stringifyToolContent(content) }];
 }
 
 function stringifyToolContent(content: any): string {

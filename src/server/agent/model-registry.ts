@@ -128,10 +128,8 @@ function getPrefsVersion(prefs: PreferencesStore, projectConfig?: { get(key: str
 		all["claudeCode.defaultModel"],
 		all["claudeCode.permissionMode"],
 		all["claudeCode.allowBypassPermissions"],
-		projectConfig?.get("claudeCodeExecutablePath"),
 		projectConfig?.get("claudeCodeDefaultModel"),
 		projectConfig?.get("claudeCodePermissionMode"),
-		projectConfig?.get("claudeCodeAllowBypassPermissions"),
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
 	]);
 	for (let i = 0; i < str.length; i++) {

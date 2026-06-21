@@ -72,7 +72,7 @@ export function resolveClaudeCodeModelAlias(options: ClaudeCodeBridgeOptions = {
 export class ClaudeCodeBridge implements IRpcBridge {
 	private process: ChildProcess | null = null;
 	private eventListeners: RpcEventListener[] = [];
-	private readonly parser = new ClaudeCodeJsonlParser();
+	private parser = new ClaudeCodeJsonlParser();
 	private readonly stderrDecoder = new StringDecoder("utf8");
 	private stderrTail: string[] = [];
 	private translator: ClaudeCodeStreamTranslator;
@@ -82,6 +82,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		timeout: ReturnType<typeof setTimeout>;
 	} | null = null;
 	private stopping = false;
+	private expectedAbortExit = false;
 	private processExitEmitted = false;
 	private lastResultCompleted = false;
 	private promptCounter = 0;
@@ -103,8 +104,13 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		}
 
 		const executable = this.options.claudeCodeExecutable || this.options.cliPath || "claude";
-		const args = buildClaudeCodeArgs(this.options);
+		const args = buildClaudeCodeArgs({
+			...this.options,
+			claudeCodeSessionId: this.translator.state.claudeCodeSessionId ?? this.options.claudeCodeSessionId,
+		});
+		this.parser = new ClaudeCodeJsonlParser();
 		this.stopping = false;
+		this.expectedAbortExit = false;
 		this.processExitEmitted = false;
 		this.lastResultCompleted = false;
 		this.stderrTail = [];
@@ -204,6 +210,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 	async abort(): Promise<any> {
 		if (!this.process) return { success: false, error: "Claude Code process not running" };
+		this.expectedAbortExit = true;
 		this.emitAbortedTurn();
 		this.process.kill("SIGTERM");
 		return { success: true };
@@ -283,6 +290,17 @@ export class ClaudeCodeBridge implements IRpcBridge {
 	}
 
 	private attachProcessHandlers(child: ChildProcess): void {
+		let stdoutFlushed = false;
+		const flushStdout = () => {
+			if (stdoutFlushed) return;
+			stdoutFlushed = true;
+			const parsed = this.parser.end();
+			for (const diagnostic of parsed.diagnostics) {
+				this.emit({ type: "diagnostic", source: "claude-code", diagnostic });
+			}
+			for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
+		};
+
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const parsed = this.parser.push(chunk);
 			for (const diagnostic of parsed.diagnostics) {
@@ -290,6 +308,8 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			}
 			for (const rawEvent of parsed.events) this.handleClaudeEvent(rawEvent);
 		});
+		child.stdout?.on("close", flushStdout);
+		child.stdout?.on("end", flushStdout);
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
@@ -308,13 +328,16 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			this.process = null;
 		});
 
-		child.on("exit", (code, signal) => {
+		child.on("close", (code, signal) => {
+			flushStdout();
 			if (this.process === child) this.process = null;
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0 ? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}` : "";
 			this.rejectPendingPrompt(new Error(`Claude Code process exited with ${reason}${stderrContext}`));
 			const normalPrintExit = this.lastResultCompleted && code === 0 && !signal;
-			if (!normalPrintExit && (!this.stopping || code !== 0 || signal)) this.emitProcessExit(code, signal);
+			const expectedAbortExit = this.expectedAbortExit && (signal === "SIGTERM" || code === 143 || code === null);
+			this.expectedAbortExit = false;
+			if (!normalPrintExit && !expectedAbortExit && (!this.stopping || code !== 0 || signal)) this.emitProcessExit(code, signal);
 		});
 	}
 

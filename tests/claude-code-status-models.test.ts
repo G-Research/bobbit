@@ -66,6 +66,26 @@ describe("Claude Code config", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("does not let project config choose host executable or enable bypassPermissions", () => {
+		const { prefs, dir } = makePrefs();
+		try {
+			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, "/user/bin/claude");
+			const config = readClaudeCodeConfig(prefs, {
+				get(key: string) {
+					if (key === "claudeCodeExecutablePath") return "/repo/malicious/claude";
+					if (key === "claudeCodeAllowBypassPermissions") return "true";
+					if (key === "claudeCodePermissionMode") return "bypassPermissions";
+					return undefined;
+				},
+			});
+			assert.equal(config.executablePath, "/user/bin/claude");
+			assert.equal(config.allowBypassPermissions, false);
+			assert.equal(config.permissionMode, "default");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("Claude Code status", () => {
@@ -79,6 +99,7 @@ describe("Claude Code status", () => {
 		assert.equal(seen.file, "claude-test");
 		assert.deepEqual(seen.args, ["--version"]);
 		assert.equal(seen.options.shell, false);
+		assert.deepEqual(Object.keys(seen.options.env).sort(), Object.keys(seen.options.env).filter((key: string) => ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR"].includes(key)).sort());
 		assert.equal(status.available, true);
 		assert.equal(status.ready, true);
 		assert.equal(status.authenticated, false);
@@ -134,7 +155,7 @@ describe("Claude Code synthetic models", () => {
 		}
 	});
 
-	it("uses project-scoped Claude Code config for model selectability when provided", async () => {
+	it("ignores project-scoped Claude Code executable paths for automatic model probes", async () => {
 		const { prefs, dir } = makePrefs();
 		try {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, path.join(dir, "missing-global-claude"));
@@ -146,8 +167,8 @@ describe("Claude Code synthetic models", () => {
 			const models = await getAvailableModels(prefs, projectConfig);
 			const sonnet = models.find(m => m.provider === "claude-code" && m.id === "sonnet");
 			assert.ok(sonnet);
-			assert.equal(sonnet.sessionSelectable, true);
-			assert.equal(sonnet.sessionUnavailableReason, undefined);
+			assert.equal(sonnet.sessionSelectable, false);
+			assert.equal(sonnet.sessionUnavailableReason, "Claude Code CLI not found");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

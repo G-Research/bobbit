@@ -64,6 +64,7 @@ export async function probeClaudeCodeStatus(
 			windowsHide: true,
 			shell: false,
 			maxBuffer: 1024 * 1024,
+			env: sanitizedProbeEnv(),
 		});
 		const version = parseVersion(stdout, stderr);
 		const testAssumeAuthenticated = process.env.BOBBIT_TEST_CLAUDE_CODE_AUTHENTICATED === "1";
@@ -88,6 +89,15 @@ export async function probeClaudeCodeStatus(
 
 function cacheKey(config: ClaudeCodeConfig): string {
 	return JSON.stringify({ executablePath: config.executablePath });
+}
+
+function sanitizedProbeEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const key of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR"]) {
+		const value = process.env[key];
+		if (value) env[key] = value;
+	}
+	return env;
 }
 
 function parseVersion(stdout: string | Buffer, stderr: string | Buffer): string | undefined {

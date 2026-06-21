@@ -50,19 +50,60 @@ describe("Claude Code stream translation", () => {
 	});
 
 	it("maps tool_use and tool_result to renderable tool events", () => {
-		const { out } = translateAll(fixtureEvents("tool-use.jsonl"));
+		const { out, state } = translateAll(fixtureEvents("tool-use.jsonl"));
 
 		const toolStart = out.find((event) => event.type === "tool_execution_start");
 		assert.equal(toolStart?.id, "toolu_1");
+		assert.equal(toolStart?.toolCallId, "toolu_1");
+		assert.equal(toolStart?.toolId, "toolu_1");
 		assert.equal(toolStart?.toolName, "Read");
 		assert.deepEqual(toolStart?.input, { file_path: "README.md" });
+		assert.deepEqual(toolStart?.arguments, { file_path: "README.md" });
 
-		const toolUpdate = out.find((event) => event.type === "message_update" && event.message.content.some((block: any) => block.type === "tool_use"));
-		assert.equal(toolUpdate?.message.content.at(-1).name, "Read");
+		const toolUpdate = out.find((event) => event.type === "message_update" && event.message.content.some((block: any) => block.type === "toolCall"));
+		const toolCall = toolUpdate?.message.content.find((block: any) => block.type === "toolCall");
+		assert.equal(toolCall?.id, "toolu_1");
+		assert.equal(toolCall?.toolCallId, "toolu_1");
+		assert.equal(toolCall?.name, "Read");
+		assert.deepEqual(toolCall?.arguments, { file_path: "README.md" });
 
 		const toolEnd = out.find((event) => event.type === "tool_execution_end");
+		assert.equal(toolEnd?.toolCallId, "toolu_1");
+		assert.equal(toolEnd?.toolId, "toolu_1");
 		assert.equal(toolEnd?.toolUseId, "toolu_1");
+		assert.equal(toolEnd?.toolName, "Read");
 		assert.equal(toolEnd?.result, "# README");
+		assert.equal(toolEnd?.isError, false);
+
+		const assistantToolMessage = out.find((event) => event.type === "message_end" && event.message.role === "assistant" && event.message.content.some((block: any) => block.type === "toolCall"));
+		assert.ok(assistantToolMessage?.message.content.some((block: any) => block.type === "toolCall" && block.id === "toolu_1"));
+
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.toolCallId, "toolu_1");
+		assert.equal(toolResultMessage?.message.toolName, "Read");
+		assert.equal(toolResultMessage?.message.isError, false);
+		assert.deepEqual(toolResultMessage?.message.content, [{ type: "text", text: "# README" }]);
+
+		const finalAssistant = out.filter((event) => event.type === "message_end" && event.message.role === "assistant").at(-1);
+		assert.equal(finalAssistant?.message.content[0].text, "Done");
+		assert.equal(finalAssistant?.message.content.some((block: any) => block.type === "toolCall"), false);
+		assert.deepEqual(state.messages.map((message: any) => message.role), ["assistant", "toolResult", "assistant"]);
+	});
+
+	it("preserves errored tool_result pairing", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { messageIdPrefix: "test" });
+		const out = [
+			...translator.translate({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_error", name: "Bash", input: { command: "false" } }] } }),
+			...translator.translate({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_error", content: "exit 1", is_error: true }] } }),
+		];
+		const toolEnd = out.find((event) => event.type === "tool_execution_end");
+		assert.equal(toolEnd?.toolCallId, "toolu_error");
+		assert.equal(toolEnd?.toolName, "Bash");
+		assert.equal(toolEnd?.isError, true);
+		assert.equal(toolEnd?.error, "exit 1");
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.toolCallId, "toolu_error");
+		assert.equal(toolResultMessage?.message.isError, true);
 	});
 
 	it("maps error results to visible assistant error and agent_end", () => {

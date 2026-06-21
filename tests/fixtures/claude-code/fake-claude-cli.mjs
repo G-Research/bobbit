@@ -17,7 +17,7 @@ if (missing.length > 0 || valueAfter("--input-format") !== "stream-json" || valu
 
 const recordPath = process.env.FAKE_CLAUDE_RECORD_PATH;
 if (recordPath) {
-  fs.writeFileSync(recordPath, JSON.stringify({ argv: args, pid: process.pid }) + "\n", "utf8");
+  fs.appendFileSync(recordPath, JSON.stringify({ argv: args, pid: process.pid }) + "\n", "utf8");
 }
 
 if (process.env.FAKE_CLAUDE_MODE === "idle") {
@@ -46,11 +46,15 @@ process.stdin.on("data", async (chunk) => {
       continue;
     }
     const promptText = extractText(parsed.message?.content) || "Hello";
-    await emit({ type: "system", subtype: "init", session_id: "fake-claude-session", model: "sonnet" });
+    const priorResume = valueAfter("--resume");
+    const sessionId = priorResume || "fake-claude-session";
+    await emit({ type: "system", subtype: "init", session_id: sessionId, model: "sonnet" });
     await emit({ type: "user", message: { role: "user", content: [{ type: "text", text: promptText }] } });
     await emit({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Hi " }] } });
     await emit({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "there 🚀" }] } });
-    await emit({ type: "result", subtype: "success", session_id: "fake-claude-session", result: "Hi there 🚀", is_error: false, usage: { input_tokens: 4, output_tokens: 3 } });
+    const result = { type: "result", subtype: "success", session_id: sessionId, result: "Hi there 🚀", is_error: false, usage: { input_tokens: 4, output_tokens: 3 } };
+    await emit(result, process.env.FAKE_CLAUDE_FINAL_NO_NEWLINE === "1");
+    if (process.env.FAKE_CLAUDE_MODE === "exit-after-result") process.exit(0);
   }
 });
 
@@ -69,8 +73,8 @@ function extractText(content) {
   return content.filter((block) => block?.type === "text").map((block) => block.text || "").join("");
 }
 
-async function emit(event) {
-  const line = JSON.stringify(event) + "\n";
+async function emit(event, omitNewline = false) {
+  const line = JSON.stringify(event) + (omitNewline ? "" : "\n");
   if (process.env.FAKE_CLAUDE_SPLIT === "1") {
     const buf = Buffer.from(line, "utf8");
     for (let i = 0; i < buf.length; i += 3) {

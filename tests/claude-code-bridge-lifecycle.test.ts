@@ -113,7 +113,7 @@ describe("ClaudeCodeBridge lifecycle", () => {
 		}
 	});
 
-	it("abort emits an aborted turn and terminates the child for the MVP", async () => {
+	it("abort emits an aborted turn without marking the expected SIGTERM as process_exit", async () => {
 		fs.chmodSync(fakeCli, 0o755);
 		const tmp = tempRecord();
 		const bridge = new ClaudeCodeBridge({
@@ -129,7 +129,10 @@ describe("ClaudeCodeBridge lifecycle", () => {
 			await waitFor(() => !bridge.running, "abort did not terminate child");
 			assert.ok(events.some((event) => event.type === "message_end" && event.message?.stopReason === "error"));
 			assert.ok(events.some((event) => event.type === "agent_end" && event.stopReason === "abort"));
-			assert.ok(events.some((event) => event.type === "process_exit"), "abort should kill the MVP child process");
+			assert.equal(events.some((event) => event.type === "process_exit"), false, "expected abort exits must not terminate the session");
+
+			await timeout(bridge.prompt("after abort"), 2000, "bridge did not recover after abort");
+			await waitFor(() => events.filter((event) => event.type === "agent_end").length >= 2, "post-abort prompt did not complete");
 		} finally {
 			await bridge.stop();
 			fs.rmSync(tmp.dir, { recursive: true, force: true });
@@ -142,6 +145,55 @@ describe("ClaudeCodeBridge lifecycle", () => {
 			["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--resume", "previous-claude-session"],
 		);
 		assert.equal(buildClaudeCodeArgs({ claudeCodeSessionId: "bad session; rm -rf" }).includes("--resume"), false);
+	});
+
+	it("uses the latest Claude session id for --resume on follow-up --print processes", async () => {
+		fs.chmodSync(fakeCli, 0o755);
+		const tmp = tempRecord();
+		const bridge = new ClaudeCodeBridge({
+			claudeCodeExecutable: fakeCli,
+			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result" },
+		});
+		const events: any[] = [];
+		bridge.onEvent((event) => events.push(event));
+
+		try {
+			await timeout(bridge.prompt("first"), 2000, "first prompt was not accepted");
+			await waitFor(() => !bridge.running && events.some((event) => event.type === "agent_end"), "first --print process did not finish");
+			assert.equal((await bridge.getState()).data.claudeCodeSessionId, "fake-claude-session");
+
+			await timeout(bridge.prompt("second"), 2000, "second prompt was not accepted");
+			await waitFor(() => !bridge.running && events.filter((event) => event.type === "agent_end").length >= 2, "second --print process did not finish");
+
+			const argvRecords = readRecord(tmp.recordPath).filter((entry) => Array.isArray(entry.argv));
+			assert.equal(argvRecords.length, 2);
+			assert.equal(argvRecords[0].argv.includes("--resume"), false);
+			assert.deepEqual(argvRecords[1].argv.slice(-2), ["--resume", "fake-claude-session"]);
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
+	});
+
+	it("flushes final stdout JSON without a trailing newline before process close handling", async () => {
+		fs.chmodSync(fakeCli, 0o755);
+		const tmp = tempRecord();
+		const bridge = new ClaudeCodeBridge({
+			claudeCodeExecutable: fakeCli,
+			env: { FAKE_CLAUDE_RECORD_PATH: tmp.recordPath, FAKE_CLAUDE_MODE: "exit-after-result", FAKE_CLAUDE_FINAL_NO_NEWLINE: "1" },
+		});
+		const events: any[] = [];
+		bridge.onEvent((event) => events.push(event));
+
+		try {
+			await timeout(bridge.prompt("no newline"), 2000, "prompt was not accepted");
+			await waitFor(() => !bridge.running, "unterminated final result did not close");
+			assert.ok(events.some((event) => event.type === "agent_end" && event.stopReason === "stop"));
+			assert.equal(events.some((event) => event.type === "process_exit"), false);
+		} finally {
+			await bridge.stop();
+			fs.rmSync(tmp.dir, { recursive: true, force: true });
+		}
 	});
 
 	it("passes explicit non-default permission mode but downgrades bypass without opt-in", () => {
