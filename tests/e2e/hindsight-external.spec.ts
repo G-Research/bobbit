@@ -323,9 +323,9 @@ describe("hindsight pack — external mode (stub)", () => {
 		const { id } = await newSession("default-scope");
 		const before = await callBeforePrompt(id, "what do we know?");
 		expect(before.status).toBe(200);
-		expect(before.tail).toContain("GLOBAL untagged knowledge.");
-		expect(before.tail).toContain("MINE project knowledge.");
-		expect(before.tail).not.toContain("other-project secret");
+		expect(before.content).toContain("GLOBAL untagged knowledge.");
+		expect(before.content).toContain("MINE project knowledge.");
+		expect(before.content).not.toContain("other-project secret");
 	});
 
 	test("a turn remains unaffected while the Hindsight provider is configured", async () => {
@@ -387,7 +387,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		const { id } = await newSession("query-too-long");
 		const before = await callBeforePrompt(id, "an extremely long, dense query the data plane would reject");
 		expect(before.status).toBe(200);
-		expect(before.tail).toBe("");
+		expect(before.content).toBe("");
 		expect(before.blocks).toEqual([]);
 
 		// Recall WAS attempted against the stub (the 400 fired)...
