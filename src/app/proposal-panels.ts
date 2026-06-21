@@ -1098,7 +1098,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				`;})}
 				${!tabbed ? renderSubgoalsToggle(config) : ""}
 			</div>
-			${renderGoalMetadataEditor(config)}
+			${!tabbed ? renderGoalMetadataEditor(config) : ""}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<div class="flex items-center gap-1">
@@ -1191,7 +1191,7 @@ function renderGoalForm(config: GoalFormConfig) {
 	const subgoalsTab = showSubgoalsTab(config);
 	const onTabChange = (t: ProposalTab) => config.onTabChange?.(t);
 	const onTabKey = (e: KeyboardEvent) => {
-		const order: ProposalTab[] = subgoalsTab ? ["goal", "workflow", "roles", "subgoals"] : ["goal", "workflow", "roles"];
+		const order: ProposalTab[] = subgoalsTab ? ["goal", "workflow", "roles", "metadata", "subgoals"] : ["goal", "workflow", "roles", "metadata"];
 		const i = order.indexOf(activeTab);
 		if (e.key === "ArrowRight") { e.preventDefault(); onTabChange(order[(i + 1) % order.length]); }
 		else if (e.key === "ArrowLeft") { e.preventDefault(); onTabChange(order[(i - 1 + order.length) % order.length]); }
@@ -1238,6 +1238,17 @@ function renderGoalForm(config: GoalFormConfig) {
 				@click=${() => onTabChange("roles")}
 				@keydown=${onTabKey}
 			>Roles</button>
+			<button
+				role="tab"
+				id="goal-proposal-tab-metadata"
+				data-testid="goal-proposal-tab-metadata"
+				aria-selected=${activeTab === "metadata" ? "true" : "false"}
+				aria-controls="goal-proposal-panel-metadata"
+				tabindex=${activeTab === "metadata" ? 0 : -1}
+				class=${tabCls(activeTab === "metadata")}
+				@click=${() => onTabChange("metadata")}
+				@keydown=${onTabKey}
+			>Metadata</button>
 			${subgoalsTab ? html`<button
 				role="tab"
 				id="goal-proposal-tab-subgoals"
@@ -1256,9 +1267,11 @@ function renderGoalForm(config: GoalFormConfig) {
 		? goalBody
 		: activeTab === "workflow"
 			? renderProposalWorkflowTab(config)
-			: activeTab === "subgoals"
-				? renderProposalSubgoalsTab(config)
-				: renderProposalRolesTab(config);
+			: activeTab === "roles"
+				? renderProposalRolesTab(config)
+				: activeTab === "metadata"
+					? renderProposalMetadataTab(config)
+					: renderProposalSubgoalsTab(config);
 	return html`${tabBar}${panel}${footer}`;
 }
 
@@ -1416,6 +1429,24 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 						}))
 					: html`<p class="text-xs text-muted-foreground">Select a role from the list to inspect or customise it.</p>`}
 			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// PROPOSAL MODAL — METADATA TAB
+//
+// Reuses the goal metadata editor so tabbed proposals share the same draft rows
+// and submit semantics as the non-tabbed Goal form.
+// ============================================================================
+function renderProposalMetadataTab(config: GoalFormConfig): TemplateResult {
+	return html`
+		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5"
+			role="tabpanel"
+			id="goal-proposal-panel-metadata"
+			aria-labelledby="goal-proposal-tab-metadata"
+			data-testid="goal-proposal-panel-metadata">
+			${renderGoalMetadataEditor(config)}
 		</div>
 	`;
 }
@@ -2789,7 +2820,7 @@ let _proposalMaxConcurrentChildren: number | null = null;
 // the main Workflows/Roles page renderers. Pinned by
 // tests/source-pin-merge-invariants.test.ts.
 // ----------------------------------------------------------------------------
-type ProposalTab = "goal" | "workflow" | "roles" | "subgoals";
+type ProposalTab = "goal" | "workflow" | "roles" | "metadata" | "subgoals";
 let _proposalActiveTab: ProposalTab = "goal";
 let _proposalInlineWorkflow: Workflow | null = null;
 let _proposalInlineRoles: Record<string, RoleData> = {};
