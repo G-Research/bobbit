@@ -373,6 +373,51 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(reviewerControl.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
 	});
 
+	test("list view thinking picker has room and wraps cleanly on narrow screens", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await resetFixture(page, {
+			prefs: {
+				"default.sessionModel": SESSION_DEFAULT_MODEL,
+				"default.reviewModel": REVIEW_DEFAULT_MODEL,
+			},
+		});
+		await loadRoles(page, "#/roles");
+
+		const reviewerControl = roleRow(page, "reviewer").locator(LIST_MODEL_CONTROL);
+		const thinking = reviewerControl.locator(LIST_THINKING_PICKER);
+		await expect(thinking).toContainText(USES_REVIEWER_DEFAULT);
+		const desktopWidth = await thinking.evaluate((el) => el.getBoundingClientRect().width);
+		expect(desktopWidth).toBeGreaterThanOrEqual(164);
+		expect(desktopWidth).toBeLessThanOrEqual(222);
+		expect(await thinking.evaluate((el) => {
+			const rect = el.getBoundingClientRect();
+			const svgs = Array.from(el.querySelectorAll("svg"));
+			const chevron = svgs[svgs.length - 1];
+			if (!chevron) return false;
+			const iconRect = chevron.getBoundingClientRect();
+			return iconRect.left >= rect.left && iconRect.right <= rect.right;
+		})).toBe(true);
+
+		await page.setViewportSize({ width: 390, height: 740 });
+		await reloadFixture(page);
+		await loadRoles(page, "#/roles");
+		const row = roleRow(page, "reviewer");
+		const mobileControl = row.locator(LIST_MODEL_CONTROL);
+		const actions = row.locator(".role-row-actions");
+		await expect(mobileControl).toBeVisible();
+		await expect(actions).toBeVisible();
+		const mobile = await row.evaluate((el) => {
+			const rowRect = el.getBoundingClientRect();
+			const control = el.querySelector("[data-testid='role-row-model-control']")?.getBoundingClientRect();
+			const actions = el.querySelector(".role-row-actions")?.getBoundingClientRect();
+			return control && actions ? {
+				controlFitsRow: control.left >= rowRect.left && control.right <= rowRect.right,
+				actionsFitRow: actions.left >= rowRect.left && actions.right <= rowRect.right,
+			} : null;
+		});
+		expect(mobile).toEqual({ controlFitsRow: true, actionsFitRow: true });
+	});
+
 	test("list view inherited rows fall back to an Auto default label when prefs unset", async ({ page }) => {
 		// No session/review default prefs configured → effective model is Auto, but
 		// the row still shows a meaningful default source inline (never blank).
@@ -383,6 +428,31 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(coderControl).toContainText(/Auto/);
 		await expect(coderControl.locator(LIST_MODEL_PICKER)).toContainText(USES_AUTO_DEFAULT);
 		await expect(coderControl.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+	});
+
+	test("role-definition origin badge does not read like a model override", async ({ page }) => {
+		await resetFixture(page, {
+			prefs: { "default.sessionModel": SESSION_DEFAULT_MODEL },
+			roles: [
+				{
+					name: "coder", label: "Coder", promptTemplate: "You write code.",
+					accessory: "none", toolPolicies: {},
+					createdAt: 1, updatedAt: 1, origin: "server", overrides: "builtin",
+					modelResolution: {
+						model: { value: "", source: "default", editable: true },
+						thinkingLevel: { value: "", source: "default", editable: true },
+					},
+				} as any,
+			],
+		});
+		await loadRoles(page, "#/roles");
+
+		const row = roleRow(page, "coder");
+		const control = row.locator(LIST_MODEL_CONTROL);
+		await expect(control).toHaveAttribute("data-model-state", "inherited");
+		await expect(row.locator(".role-meta")).toContainText("role definition overrides builtin");
+		await expect(control.locator("[data-testid='model-clear-btn']")).toHaveCount(0);
+		await expect(control.locator("[data-testid='model-test-btn']")).toHaveCount(0);
 	});
 
 	test("list view inherited role override surfaces source inline", async ({ page }) => {
