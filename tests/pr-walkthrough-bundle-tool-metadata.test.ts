@@ -30,7 +30,10 @@ describe("PR walkthrough bundle access tool metadata", () => {
 		const text = readToolText("read_pr_walkthrough_bundle.yaml");
 		assert.equal(field(text, "name"), "read_pr_walkthrough_bundle");
 		assert.equal(field(text, "group"), "PR Walkthrough");
-		assert.match(text, /params:\s*\[(mode|file|path|index|offset|limit|hunks?)/i);
+		assert.match(text, /params:\s*\[[^\]]*(mode|file|path|index|offset|limit|hunks?)/i);
+		assert.match(text, /params:\s*\[[^\]]*format[^\]]*\]/is, "format should be an accepted tool parameter");
+		assert.match(text, /compact/i, "metadata should document compact bundle output");
+		assert.match(text, /legacy/i, "metadata should document legacy bundle output");
 		assert.match(text, /type:\s*bobbit-extension/);
 		assert.match(text, /extension:\s*extension\.ts/);
 		assert.match(text, /manifest|summary|file/i);
@@ -72,11 +75,11 @@ describe("PR walkthrough bundle access tool metadata", () => {
 			extension({ registerTool(tool: any) { if (tool.name === "read_pr_walkthrough_bundle") bundleTool = tool; } } as any);
 			assert.ok(bundleTool, "expected read_pr_walkthrough_bundle to be registered");
 
-			await bundleTool.execute("call-1", { mode: "file", path: "src/demo.ts", index: 3, offset: 4, limit: 5, hunkOffset: 6, hunkLimit: 7, sessionId: "attacker-session", jobId: "attacker-job", extra: "ignored" });
+			await bundleTool.execute("call-1", { mode: "file", path: "src/demo.ts", index: 3, offset: 4, limit: 5, hunkOffset: 6, hunkLimit: 7, format: "compact", sessionId: "attacker-session", jobId: "attacker-job", extra: "ignored" });
 
-			// No sessionId/jobId in the body — caller-supplied identity fields are dropped
-			// (the body is built from the explicit read-arg whitelist) and the authentic
-			// session is proven by the X-Bobbit-Session-Secret header.
+			// No sessionId/jobId/format in the body — caller-supplied identity fields are dropped,
+			// and compact/legacy is a local model-facing render choice, not a gateway route arg.
+			// The authentic session is proven by the X-Bobbit-Session-Secret header.
 			assert.deepEqual(postedBody, {
 				mode: "file",
 				path: "src/demo.ts",
