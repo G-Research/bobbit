@@ -205,6 +205,10 @@ To contain cost after evidence capture, child teams were torn down:
 
 Final session inspection showed no live sessions for either child goal.
 
+## Automated coverage
+
+Added optional browser E2E coverage in `tests/e2e/ui/experiment-runner-smoke.spec.ts`. The test first checks `/api/ext/contributions` and skips with an explicit annotation when `experiment-runner` is absent on `origin/master`; when present, it exercises the deep link, session-menu launcher, slash launcher, bounded A/B route lifecycle, metadata propagation, spec persistence, reporting, and cancel cleanup.
+
 ## Readiness notes
 
 The runner is ready for a real Graphify A/B benchmark smoke-sized launch. Recommended setup for the real benchmark:
