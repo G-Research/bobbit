@@ -312,8 +312,10 @@ export function translateClaudeCodeEvent(
 
 	if (event.type === "result") {
 		if (typeof event.session_id === "string") state.claudeCodeSessionId = event.session_id;
-		state.lastUsage = event.usage;
-		state.lastCostUsd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : state.lastCostUsd;
+		const totalCostUsd = finiteNumber(event.total_cost_usd);
+		const normalizedUsage = normalizeClaudeCodeUsage(event.usage, totalCostUsd);
+		state.lastUsage = normalizedUsage;
+		state.lastCostUsd = totalCostUsd ?? state.lastCostUsd;
 		const isError = Boolean(event.is_error);
 		const resultText = typeof event.result === "string" ? event.result : "";
 		const finalText = state.assistantText || resultText;
@@ -322,10 +324,11 @@ export function translateClaudeCodeEvent(
 			const message = assistantMessageSnapshot(state, undefined, finalText);
 			message.stopReason = isError ? "error" : "stop";
 			if (isError) message.errorMessage = resultText || "Claude Code turn failed";
-			if (event.usage) message.usage = event.usage;
-			if (typeof event.total_cost_usd === "number") message.cost = { totalUsd: event.total_cost_usd };
+			if (normalizedUsage) message.usage = normalizedUsage;
+			if (event.usage) message.rawClaudeUsage = event.usage;
+			if (totalCostUsd !== undefined) message.cost = { totalUsd: totalCostUsd };
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
-			out.push({ type: "message_end", message, usage: event.usage, cost: message.cost });
+			out.push({ type: "message_end", message, usage: normalizedUsage, rawClaudeUsage: event.usage, cost: message.cost });
 		}
 		state.assistantText = "";
 		state.assistantToolCalls = [];
@@ -336,14 +339,56 @@ export function translateClaudeCodeEvent(
 			stopReason: isError ? "error" : "stop",
 			runtime: "claude-code",
 			claudeCodeSessionId: state.claudeCodeSessionId,
-			usage: event.usage,
-			cost: typeof event.total_cost_usd === "number" ? { totalUsd: event.total_cost_usd } : undefined,
+			usage: normalizedUsage,
+			rawClaudeUsage: event.usage,
+			cost: totalCostUsd !== undefined ? { totalUsd: totalCostUsd } : undefined,
 			error: isError ? resultText : undefined,
 		});
 		return out;
 	}
 
 	return out;
+}
+
+export function normalizeClaudeCodeUsage(rawUsage: any, totalCostUsd?: number): any | undefined {
+	if (!rawUsage || typeof rawUsage !== "object") return undefined;
+	const input = pickFiniteNumber(rawUsage, "input", "input_tokens");
+	const output = pickFiniteNumber(rawUsage, "output", "output_tokens");
+	const cacheRead = pickFiniteNumber(rawUsage, "cacheRead", "cache_read", "cache_read_input_tokens");
+	const cacheWrite = pickFiniteNumber(rawUsage, "cacheWrite", "cache_write", "cache_creation_input_tokens");
+	const explicitTotal = pickOptionalFiniteNumber(rawUsage, "totalTokens", "total_tokens");
+	const totalTokens = explicitTotal ?? input + output + cacheRead + cacheWrite;
+	const costTotal = totalCostUsd ?? finiteNumber(rawUsage.cost?.total) ?? finiteNumber(rawUsage.cost) ?? 0;
+	return {
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		totalTokens,
+		cost: {
+			input: finiteNumber(rawUsage.cost?.input) ?? 0,
+			output: finiteNumber(rawUsage.cost?.output) ?? 0,
+			cacheRead: finiteNumber(rawUsage.cost?.cacheRead) ?? 0,
+			cacheWrite: finiteNumber(rawUsage.cost?.cacheWrite) ?? 0,
+			total: costTotal,
+		},
+	};
+}
+
+function pickFiniteNumber(source: any, ...keys: string[]): number {
+	return pickOptionalFiniteNumber(source, ...keys) ?? 0;
+}
+
+function pickOptionalFiniteNumber(source: any, ...keys: string[]): number | undefined {
+	for (const key of keys) {
+		const value = finiteNumber(source?.[key]);
+		if (value !== undefined) return value;
+	}
+	return undefined;
+}
+
+function finiteNumber(value: any): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function assistantMessageSnapshot(state: ClaudeCodeTranslatorState, extraContent: any[] = [], overrideText?: string): any {

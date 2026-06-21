@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeStreamLimitError, ClaudeCodeStreamTranslator } from "../src/server/agent/claude-code-stream.ts";
+import { ClaudeCodeStreamLimitError, ClaudeCodeStreamTranslator, normalizeClaudeCodeUsage } from "../src/server/agent/claude-code-stream.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.join(__dirname, "fixtures", "claude-code", "streams");
@@ -42,11 +42,62 @@ describe("Claude Code stream translation", () => {
 		const assistantEnd = out.find((event) => event.type === "message_end" && event.message.role === "assistant");
 		assert.equal(assistantEnd?.message.content[0].text, "Hi there");
 		assert.equal(assistantEnd?.message.stopReason, "stop");
-		assert.deepEqual(assistantEnd?.message.usage, { input_tokens: 10, output_tokens: 2 });
+		assert.deepEqual(assistantEnd?.message.usage, {
+			input: 10,
+			output: 2,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+		});
+		assert.deepEqual(assistantEnd?.message.rawClaudeUsage, { input_tokens: 10, output_tokens: 2 });
 		assert.equal(assistantEnd?.message.cost.totalUsd, 0.001);
 
 		const end = out.find((event) => event.type === "agent_end");
 		assert.equal(end?.stopReason, "stop");
+		assert.deepEqual(end?.usage, assistantEnd?.message.usage);
+	});
+
+	it("normalizes reported Claude Code snake_case result usage", () => {
+		const { out, state } = translateAll(fixtureEvents("reported-transcript-usage.jsonl"));
+		const rawUsage = {
+			input_tokens: 301,
+			cache_creation_input_tokens: 6415,
+			cache_read_input_tokens: 13231,
+			output_tokens: 77,
+			server_tool_use: { web_search_requests: 0 },
+			service_tier: "standard",
+		};
+		const expectedUsage = {
+			input: 301,
+			output: 77,
+			cacheRead: 13231,
+			cacheWrite: 6415,
+			totalTokens: 20024,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		assert.deepEqual(normalizeClaudeCodeUsage(rawUsage), expectedUsage);
+		assert.deepEqual(state.lastUsage, expectedUsage);
+
+		const assistantEnd = out.filter((event) => event.type === "message_end" && event.message.role === "assistant").at(-1);
+		assert.equal(assistantEnd?.message.content[0].text, "The file contains Bobbit project notes.");
+		assert.deepEqual(assistantEnd?.message.usage, expectedUsage);
+		assert.deepEqual(assistantEnd?.usage, expectedUsage);
+		assert.deepEqual(assistantEnd?.message.rawClaudeUsage, rawUsage);
+		assert.equal(assistantEnd?.message.usage.cost.total, 0);
+
+		const agentEnd = out.find((event) => event.type === "agent_end");
+		assert.deepEqual(agentEnd?.usage, expectedUsage);
+		assert.deepEqual(agentEnd?.rawClaudeUsage, rawUsage);
+
+		const toolStart = out.find((event) => event.type === "tool_execution_start");
+		assert.equal(toolStart?.toolName, "Read");
+		assert.deepEqual(toolStart?.input, { file_path: "README.md" });
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.toolCallId, "toolu_reported_1");
+		assert.equal(toolResultMessage?.message.toolName, "Read");
+		assert.deepEqual(toolResultMessage?.message.content, [{ type: "text", text: "# README\nBobbit project notes" }]);
 	});
 
 	it("maps tool_use and tool_result to renderable tool events", () => {
