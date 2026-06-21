@@ -13,10 +13,12 @@
 
 import {
 	applyBankMission,
+	applyDirectives,
 	buildAggregateContent,
 	clampRecallQuery,
 	clearError,
 	clientConfig,
+	currentQueryTimestamp,
 	enqueueRetain,
 	isActive,
 	isQueryTooLongError,
@@ -33,6 +35,8 @@ import {
 	shouldFlushPending,
 	truncate,
 	type EffectiveConfig,
+	type EntityInput,
+	type HindsightClientLike,
 	type PendingBuffer,
 	type QueueEntry,
 	type RuntimeContext,
@@ -70,6 +74,18 @@ interface ProviderCtx {
 	components?: unknown;
 	decisions?: unknown;
 	achievements?: unknown;
+	branch?: string;
+	mergeTarget?: string;
+	completedAt?: string;
+	pullRequest?: {
+		url?: string;
+		number?: string | number;
+		title?: string;
+		state?: string;
+		headSha?: string;
+	};
+	tasks?: unknown;
+	gates?: unknown;
 	/** Managed-runtime context injected by the host for ACTIVE managed Hindsight
 	 *  invocations (design § deployment modes). Absent in external mode and
 	 *  whenever the managed runtime is not running — the provider then stays dormant
@@ -92,9 +108,8 @@ const MENTAL_MODEL_TITLE = "Project memory model";
 const SUMMARY_CAP = 2000;
 const DEFAULT_MENTAL_MODEL_REFRESH_EVERY_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_MENTAL_MODEL_MAX_TOKENS = 1000;
-const DEFAULT_QUEUE_DRAIN_MAX = Number.POSITIVE_INFINITY;
+const DEFAULT_QUEUE_DRAIN_MAX = 10;
 const MENTAL_MODEL_REFRESH_PREFIX = "mental-model-refresh:";
-const DIRECTIVE_APPLIED_PREFIX = "directive-applied:";
 const GOAL_COMPLETED_PREFIX = "goal-completed:";
 const inFlightGoalCompleted = new Set<string>();
 
@@ -108,7 +123,7 @@ interface MentalModelResult {
 interface RetainExtras {
 	documentId?: string;
 	updateMode?: "replace" | "append";
-	entities?: string[];
+	entities?: EntityInput[];
 	observationScopes?: string[][];
 	timestamp?: string;
 	metadata?: Record<string, unknown>;
@@ -142,12 +157,15 @@ async function effectiveConfig(ctx: ProviderCtx, base: EffectiveConfig): Promise
 		"mentalModelEnabled",
 		"mentalModelRefreshEveryMs",
 		"mentalModelMaxTokens",
-		"queryTimestampEnabled",
+		"recallQueryTimestampEnabled",
 		"directivesEnabled",
-		"directiveText",
-		"retainHealthGateEnabled",
-		"retainHealthLlmProbeEnabled",
-		"retainQueueDrainMax",
+		"directiveApplyMode",
+		"directiveSetVersion",
+		"directives",
+		"retainQueueHealthGate",
+		"retainQueueLlmHealthGate",
+		"retainQueueDrainMaxPerHook",
+		"retainQueueShutdownMax",
 	] as const) {
 		if (key in raw) extras[key] = raw[key];
 	}
@@ -202,19 +220,40 @@ function unique(values: string[]): string[] {
 	return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
 }
 
+function uniqueEntityInputs(items: EntityInput[]): EntityInput[] {
+	const seen = new Set<string>();
+	const out: EntityInput[] = [];
+	for (const item of items) {
+		const text = typeof item.text === "string" ? item.text.trim() : "";
+		if (!text) continue;
+		const type = typeof item.type === "string" && item.type.trim().length > 0 ? item.type.trim() : undefined;
+		const key = `${type ?? ""}\0${text}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(type ? { text, type } : { text });
+	}
+	return out;
+}
+
+function tagArray(tags: Tags | undefined): string[] {
+	return Object.entries(tags ?? {}).map(([key, value]) => `${key}:${value}`);
+}
+
 function projectObservationScopes(ctx: ProviderCtx): string[][] | undefined {
 	const projectId = projectIdOf(ctx)?.trim();
 	return projectId ? [[`project:${projectId}`]] : undefined;
 }
 
-function derivedEntities(ctx: ProviderCtx): string[] | undefined {
-	const values = unique([
-		...normalizeList(ctx.files),
-		...normalizeList(ctx.touchedFiles),
-		...normalizeList(ctx.changedFiles),
-		...normalizeList(ctx.components),
+function derivedEntities(ctx: ProviderCtx): EntityInput[] | undefined {
+	const entities = uniqueEntityInputs([
+		...unique([
+			...normalizeList(ctx.files),
+			...normalizeList(ctx.touchedFiles),
+			...normalizeList(ctx.changedFiles),
+		]).map((text) => ({ text, type: "file" })),
+		...unique(normalizeList(ctx.components)).map((text) => ({ text, type: "component" })),
 	]);
-	return values.length > 0 ? values : undefined;
+	return entities.length > 0 ? entities : undefined;
 }
 
 function retainOpts(ctx: ProviderCtx, tags: Tags, sync: boolean, extras: RetainExtras = {}): Record<string, unknown> {
@@ -261,6 +300,66 @@ function buildCompactSummary(ctx: ProviderCtx): string {
 	return text ? text.slice(0, SUMMARY_CAP) : "";
 }
 
+function objectList(value: unknown): Record<string, unknown>[] {
+	return Array.isArray(value) ? value.filter((v): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)) : [];
+}
+
+function stringField(obj: Record<string, unknown>, key: string): string | undefined {
+	const value = obj[key];
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function outcomePrNumber(ctx: ProviderCtx): string | undefined {
+	const fromCtx = ctx.prNumber !== undefined ? String(ctx.prNumber).trim() : "";
+	if (fromCtx) return fromCtx;
+	const fromPr = ctx.pullRequest?.number !== undefined ? String(ctx.pullRequest.number).trim() : "";
+	return fromPr || undefined;
+}
+
+function outcomeLines(ctx: ProviderCtx, goalId: string, headSha: string, entities: EntityInput[] | undefined): string {
+	const prNumber = outcomePrNumber(ctx);
+	const title = textOf(ctx.title) ?? textOf(ctx.pullRequest?.title);
+	const lines: string[] = [`Goal completed: ${goalId}`];
+	if (title) lines.push(`Title: ${title}`);
+	if (ctx.branch) lines.push(`Branch: ${ctx.branch}`);
+	if (ctx.mergeTarget) lines.push(`Merge target: ${ctx.mergeTarget}`);
+	if (headSha !== "unknown") lines.push(`Head SHA: ${headSha}`);
+	if (ctx.completedAt) lines.push(`Completed at: ${ctx.completedAt}`);
+	if (ctx.pullRequest || prNumber) {
+		const parts = [prNumber ? `#${prNumber}` : undefined, ctx.pullRequest?.state, ctx.pullRequest?.url].filter(Boolean);
+		lines.push(`Pull request: ${parts.join(" ") || "known"}`);
+	}
+	for (const value of normalizeList(ctx.achievements)) lines.push(`Achievement: ${value}`);
+	for (const value of normalizeList(ctx.decisions)) lines.push(`Decision: ${value}`);
+	const tasks = objectList(ctx.tasks);
+	if (tasks.length > 0) {
+		lines.push("Tasks:");
+		for (const task of tasks.slice(0, 20)) {
+			const title = stringField(task, "title") ?? stringField(task, "id") ?? "task";
+			const state = stringField(task, "state") ?? "unknown";
+			const type = stringField(task, "type");
+			const result = stringField(task, "resultSummary");
+			lines.push(`- [${state}] ${title}${type ? ` (${type})` : ""}${result ? ` — ${truncate(result, 180)}` : ""}`);
+		}
+	}
+	const gates = objectList(ctx.gates);
+	if (gates.length > 0) {
+		lines.push("Gates:");
+		for (const gate of gates.slice(0, 20)) {
+			const name = stringField(gate, "name") ?? stringField(gate, "gateId") ?? "gate";
+			const status = stringField(gate, "status") ?? "unknown";
+			const signalCount = typeof gate.signalCount === "number" ? `, signals=${gate.signalCount}` : "";
+			const commit = stringField(gate, "latestCommitSha");
+			lines.push(`- ${name}: ${status}${signalCount}${commit ? `, commit=${commit}` : ""}`);
+		}
+	}
+	if (entities?.length) {
+		lines.push("Files/components:");
+		for (const entity of entities.slice(0, 50)) lines.push(`- ${entity.type ? `${entity.type}: ` : ""}${entity.text}`);
+	}
+	return lines.join("\n");
+}
+
 async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | undefined): Promise<ContextBlock[]> {
 	if (!cfg.autoRecall) return [];
 	const q = (query ?? "").trim();
@@ -274,10 +373,11 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	const clampedQuery = clampRecallQuery(q, cfg.recallMaxInputChars);
 	try {
 		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		const queryTimestamp = currentQueryTimestamp(cfgBool(ctx, cfg, "recallQueryTimestampEnabled", true));
 		const res = await client.recall(cfg.bank, clampedQuery, {
 			maxTokens: cfg.recallBudget,
 			types: cfg.recallTypes,
-			...(cfgBool(ctx, cfg, "queryTimestampEnabled", false) ? { queryTimestamp: new Date().toISOString() } : {}),
+			...(queryTimestamp ? { queryTimestamp } : {}),
 			...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
 		} as never);
 		if (store) await clearError(store);
@@ -352,7 +452,7 @@ async function doMentalModel(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<Me
 	if (!projectId) return { state: "skipped" };
 	const id = mentalModelId(projectId);
 	const filter = recallTagFilter("project", projectId, "all_strict");
-	const tags = { project: projectId, bobbit: "true", kind: "mental-model" };
+	const tags = [`project:${projectId}`, "bobbit", "kind:mental-model"];
 	try {
 		const client = (await makeClient(clientConfig(cfg, ctx.runtime))) as unknown as {
 			ensureMentalModel?: (bank: string, spec: Record<string, unknown>) => Promise<unknown>;
@@ -366,10 +466,10 @@ async function doMentalModel(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<Me
 			tags,
 			maxTokens: Math.max(1, cfgNumber(ctx, cfg, "mentalModelMaxTokens", DEFAULT_MENTAL_MODEL_MAX_TOKENS)),
 			trigger: {
-				factTypes: cfg.recallTypes,
-				excludeMentalModels: true,
+				fact_types: cfg.recallTypes,
+				exclude_mental_models: true,
 				include: null,
-				...(filter ? { tags: filter.tags, tagsMatch: filter.tagsMatch } : {}),
+				...(filter ? { tags: tagArray(filter.tags), tags_match: filter.tagsMatch } : {}),
 			},
 		};
 		const ensured = client.ensureMentalModel ? await client.ensureMentalModel(cfg.bank, spec) : undefined;
@@ -425,44 +525,24 @@ async function retainQueueEntry(store: StoreLike, cfg: EffectiveConfig, runtime:
 }
 
 async function applyDirectivesIfEnabled(store: StoreLike | null, client: unknown, cfg: EffectiveConfig): Promise<void> {
-	const raw = cfg as unknown as Record<string, unknown>;
-	if (raw.directivesEnabled !== true) return;
-	const ensureDirective = (client as { ensureDirective?: (bank: string, directive: Record<string, unknown>) => Promise<unknown> }).ensureDirective;
-	const applyDirectives = (client as { applyDirectives?: (bank: string, directives: unknown) => Promise<unknown> }).applyDirectives;
-	if (!ensureDirective && !applyDirectives) return;
-	const directiveText = typeof raw.directiveText === "string" && raw.directiveText.trim()
-		? raw.directiveText.trim()
-		: "For Bobbit coding agents: cite source facts when available, prefer recent durable observations, and answer concisely for an implementation agent.";
-	const signature = `${cfg.namespace}:${cfg.bank}:${directiveText}`;
-	const key = `${DIRECTIVE_APPLIED_PREFIX}${signature}`;
-	if (store && (await store.get(key))) return;
-	if (ensureDirective) {
-		await ensureDirective.call(client, cfg.bank, {
-			id: "bobbit-agent-behavior",
-			name: "Bobbit agent behavior",
-			text: directiveText,
-			tags: ["bobbit"],
-		});
-	} else if (applyDirectives) {
-		await applyDirectives.call(client, cfg.bank, [{ id: "bobbit-agent-behavior", text: directiveText, tags: ["bobbit"] }]);
-	}
-	if (store) await store.put(key, true);
+	await applyDirectives(store, client as HindsightClientLike, cfg);
 }
 
 async function queueDrainHealthy(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<boolean> {
-	const raw = cfg as unknown as Record<string, unknown>;
-	if (raw.retainHealthGateEnabled === false) return true;
+	if (cfg.retainQueueHealthGate === false) return true;
 	try {
 		const client = (await makeClient(clientConfig(cfg, runtime))) as unknown as {
 			health?: () => Promise<{ ok?: boolean }>;
-			healthLlm?: () => Promise<unknown>;
+			llmHealth?: (bank: string) => Promise<unknown>;
 		};
 		const health = client.health ? await client.health() : { ok: true };
 		if (health?.ok === false) return false;
-		if (raw.retainHealthLlmProbeEnabled === true && client.healthLlm) {
-			const llm = await client.healthLlm();
+		if (cfg.retainQueueLlmHealthGate === true && client.llmHealth) {
+			const llm = await client.llmHealth(cfg.bank);
 			if (llm && typeof llm === "object") {
-				const statuses = Object.values(llm as Record<string, unknown>);
+				const llmObj = llm as Record<string, unknown>;
+				if (llmObj.ok === false) return false;
+				const statuses = Object.values(llmObj);
 				if (statuses.some((v) => v && typeof v === "object" && (v as Record<string, unknown>).ok === false)) return false;
 			}
 		}
@@ -478,13 +558,18 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: 
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
 	if (!(await queueDrainHealthy(store, cfg, runtime))) return;
-	const head = q[0];
-	try {
-		await retainQueueEntry(store, cfg, runtime, head);
-		q.shift();
-		await saveQueue(store, q);
-	} catch (e) {
-		await recordError(store, e); // leave the head for a later attempt
+	const limit = Math.max(0, Math.floor(cfg.retainQueueDrainMaxPerHook));
+	if (limit <= 0) return;
+	for (let i = 0; i < limit && q.length > 0; i++) {
+		const head = q[0];
+		try {
+			await retainQueueEntry(store, cfg, runtime, head);
+			q.shift();
+			await saveQueue(store, q);
+		} catch (e) {
+			await recordError(store, e); // leave the head for a later attempt
+			return;
+		}
 	}
 }
 
@@ -495,7 +580,7 @@ async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, runtime?: R
 	const q = await loadQueue(store);
 	if (q.length === 0) return;
 	if (!(await queueDrainHealthy(store, cfg, runtime))) return;
-	const limit = Math.max(1, Math.floor((cfg as unknown as Record<string, unknown>).retainQueueDrainMax as number || DEFAULT_QUEUE_DRAIN_MAX));
+	const limit = Math.max(0, Math.floor(cfg.retainQueueShutdownMax || DEFAULT_QUEUE_DRAIN_MAX));
 	const remaining: QueueEntry[] = [];
 	let drained = 0;
 	for (const entry of q) {
@@ -642,7 +727,7 @@ const provider = {
 		const cfg = await effectiveConfig(ctx, base);
 		const store = getStore(ctx);
 		const goalId = ctx.goalId ? String(ctx.goalId) : "unknown";
-		const headSha = ctx.headSha ? String(ctx.headSha) : "unknown";
+		const headSha = (ctx.headSha ?? ctx.pullRequest?.headSha) ? String(ctx.headSha ?? ctx.pullRequest?.headSha) : "unknown";
 		const marker = `${GOAL_COMPLETED_PREFIX}${goalId}:${headSha}`;
 		if (store && (await store.get(marker))) return { blocks: [] };
 		if (inFlightGoalCompleted.has(marker)) return { blocks: [] };
@@ -651,25 +736,21 @@ const provider = {
 			if (store) await store.put(marker, { ts: Date.now(), state: "started" });
 			const tags = autoTags(ctx, "outcome");
 			tags.bobbit = "true";
-			if (ctx.prNumber !== undefined) tags.pr = String(ctx.prNumber);
+			const prNumber = outcomePrNumber(ctx);
+			if (prNumber) tags.pr = prNumber;
 			const entities = derivedEntities(ctx);
-			const lines = [
-				`Goal completed: ${goalId}`,
-				ctx.title ? `Title: ${ctx.title}` : undefined,
-				headSha !== "unknown" ? `Head SHA: ${headSha}` : undefined,
-				ctx.prNumber !== undefined ? `PR: ${ctx.prNumber}` : undefined,
-				...normalizeList(ctx.achievements).map((v) => `Achievement: ${v}`),
-				...normalizeList(ctx.decisions).map((v) => `Decision: ${v}`),
-				...(entities ? entities.map((v) => `Entity: ${v}`) : []),
-			].filter(Boolean) as string[];
-			const content = lines.join("\n");
+			const content = outcomeLines(ctx, goalId, headSha, entities);
+			const metadata: Record<string, string> = { headSha };
+			if (ctx.branch) metadata.branch = ctx.branch;
+			if (ctx.mergeTarget) metadata.mergeTarget = ctx.mergeTarget;
+			if (ctx.pullRequest?.url) metadata.pullRequestUrl = ctx.pullRequest.url;
 			const extras: RetainExtras = {
 				documentId: `outcome:${goalId}`,
 				updateMode: "replace",
 				entities,
 				observationScopes: projectObservationScopes(ctx),
-				timestamp: new Date().toISOString(),
-				metadata: { headSha },
+				timestamp: ctx.completedAt ?? new Date().toISOString(),
+				metadata,
 			};
 			try {
 				const client = await makeClient(clientConfig(cfg, ctx.runtime));
