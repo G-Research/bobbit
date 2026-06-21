@@ -1,11 +1,11 @@
 # Claude Code Capability Notice — In-session UX
 
-**Status:** Design artifact only. No production code or tests changed.
+**Status:** Implemented UX reference. The as-built notice and footer/runtime details live in `src/ui/components/AgentInterface.ts`.
 **Scope:** In-session explanation of Claude Code local-runtime capability differences.
 
 ## Recommendation
 
-Use a **top-of-session local runtime notice** plus a persistent **footer/runtime details popover**.
+Use a **top-of-session local runtime notice** plus a persistent **footer/runtime details popover**. This is the implemented behavior for Claude Code sessions.
 
 Do not add a new tab by default. A tab/panel is heavier than the problem: users need a quick, contextual explanation before they prompt, then a reliable place to re-check details later. The notice should feel like an informational setup note, not a fault warning.
 
