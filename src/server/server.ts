@@ -10013,6 +10013,7 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
 			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
@@ -10514,6 +10515,7 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
 			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
 			// the archived source worktree/branch remain provenance only. Non-sandboxed

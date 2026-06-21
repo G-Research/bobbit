@@ -223,6 +223,8 @@ export interface SessionSetupPlan {
 	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
 	 */
 	preExistingAgentSessionFile?: string;
+	/** Claude Code CLI session id used to resume continue/fork sessions with --resume. */
+	claudeCodeSessionId?: string;
 	/**
 	 * Continue/Fork rehydration: archived/provenance cwd values that may appear in
 	 * runtime-only transcript system metadata and should be rewritten to plan.cwd.
@@ -477,6 +479,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
+		claudeCodeSessionId: plan.claudeCodeSessionId,
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see
 		// `src/server/auth/session-secret.ts`.
@@ -955,7 +958,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		modelProvider: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
 		modelId: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel),
 		runtime,
-		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
+		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
 		claudeCodeExecutable: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
 		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
 		claudeCodeModelAlias: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default") : undefined,
