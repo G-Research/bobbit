@@ -1,0 +1,6 @@
+id: pr-walkthrough-durable
+kind: generic
+module: ../lib/provider.mjs
+hooks: [beforePrompt, beforeCompact, sessionShutdown]
+budget: { maxTokens: 512, timeoutMs: 1000 }
+defaultEnabled: true

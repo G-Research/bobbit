@@ -11,7 +11,7 @@
 
 import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
 
@@ -188,13 +188,18 @@ function token(): string {
 }
 
 /**
- * Routes where POST must carry a registered projectId (or a cwd matching one).
+ * Collection-create routes where POST must carry a registered projectId (or a
+ * cwd matching one). Session subroutes such as `/api/sessions/:id/fork` and
+ * `/continue` derive project scope from the source session; injecting the
+ * harness default into those bodies can leak stale default-project config into
+ * cross-project worktree tests.
+ *
  * The E2E harness registers a "default" project at startup; tests that omit
  * projectId get it injected automatically so they don't need to know about
  * the underlying server requirement. Tests that deliberately exercise the
  * 400-path bypass this helper by calling `fetch(...)` directly.
  */
-const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$|\/)/;
+const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$)/;
 
 /**
  * Routes where workflow mutations need projectId. Workflows are now project-scoped
@@ -228,7 +233,7 @@ export async function injectDefaultProjectId(body: unknown): Promise<unknown> {
 	if (typeof parsed.projectId === "string" && parsed.projectId) {
 		return typeof body === "string" ? body : JSON.stringify(parsed);
 	}
-	const pid = await defaultProjectId();
+	const pid = (await projectIdForRequestCwd(parsed.cwd)) ?? (await defaultProjectId());
 	if (!pid) return typeof body === "string" ? body : JSON.stringify(parsed);
 	return JSON.stringify({ ...parsed, projectId: pid });
 }
@@ -729,6 +734,45 @@ function formatLiveProjectState(state: LiveProjectState): string {
 		return safeJson({ ok: false, status: state.status, body: state.body, error: state.error });
 	}
 	return safeJson({ ok: true, status: state.status, rawKind: state.rawKind, projects: state.projects });
+}
+
+function canonicalPathForMatch(p: string): string {
+	try { return realpathSync(p); } catch { return resolve(p); }
+}
+
+function pathContains(parent: string, child: string): boolean {
+	const rel = relative(parent, child);
+	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function findProjectIdForCwd(state: LiveProjectState, cwdValue: string): string | undefined {
+	if (!state.ok) return undefined;
+	const cwd = canonicalPathForMatch(cwdValue);
+	let best: { id: string; root: string } | undefined;
+	for (const project of state.projects) {
+		if (project.hidden || !project.id || !project.rootPath) continue;
+		const root = canonicalPathForMatch(project.rootPath);
+		if (!pathContains(root, cwd)) continue;
+		if (!best || root.length > best.root.length) best = { id: project.id, root };
+	}
+	return best?.id;
+}
+
+async function projectIdForRequestCwd(cwdValue: unknown): Promise<string | undefined> {
+	if (typeof cwdValue !== "string" || !cwdValue.trim()) return undefined;
+	// Project registration and immediate session creation happen back-to-back in
+	// several E2E specs. Under broad-suite contention, the first list request can
+	// occasionally race the just-registered project becoming visible to this
+	// helper; retry briefly before falling back to the harness default project.
+	// Without this, worktree creation can incorrectly use default-project config
+	// such as a deliberately stale `base_ref` from another test.
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const state = await readLiveProjectState();
+		const match = findProjectIdForCwd(state, cwdValue);
+		if (match) return match;
+		if (attempt < 4) await new Promise(r => setTimeout(r, 25));
+	}
+	return undefined;
 }
 
 async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: string): Promise<void> {

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../src/server/gate-artifacts.ts";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../src/server/gate-verification-snapshot.ts";
 
 const tempDirs: string[] = [];
@@ -95,6 +96,42 @@ function makeDiagnosticsSnapshot(selectionOptions?: Parameters<typeof buildGateV
 	fs.writeFileSync(stderrPath, "retained stderr marker\n", "utf8");
 	fs.writeFileSync(artifactPath, "# Error Context\nretained artifact marker\n", "utf8");
 
+	return makeArtifactDiagnosticsSnapshot({
+		artifacts: [{ relativePath: "test-results/case/error-context.md", content: "# Error Context\nretained artifact marker\n" }],
+		selectionOptions,
+		dir,
+		stdoutPath,
+		stderrPath,
+	});
+}
+
+function makeArtifactDiagnosticsSnapshot(input: {
+	artifacts: Array<{ relativePath: string; content: string }>;
+	selectionOptions?: Parameters<typeof buildGateVerificationSnapshot>[0]["selectionOptions"];
+	dir?: string;
+	stdoutPath?: string;
+	stderrPath?: string;
+}) {
+	const dir = input.dir ?? makeTempDir();
+	const stdoutPath = input.stdoutPath ?? path.join(dir, "stdout.log");
+	const stderrPath = input.stderrPath ?? path.join(dir, "stderr.log");
+	if (!fs.existsSync(stdoutPath)) fs.writeFileSync(stdoutPath, "retained stdout marker\n", "utf8");
+	if (!fs.existsSync(stderrPath)) fs.writeFileSync(stderrPath, "retained stderr marker\n", "utf8");
+	const artifacts = input.artifacts.map((artifact) => {
+		const artifactPath = path.join(dir, "artifacts", ...artifact.relativePath.split("/"));
+		fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+		fs.writeFileSync(artifactPath, artifact.content, "utf8");
+		return {
+			path: artifactPath,
+			relativePath: artifact.relativePath,
+			sourcePath: path.join(dir, "source", ...artifact.relativePath.split("/")),
+			bytes: fs.statSync(artifactPath).size,
+			kind: "test-results" as const,
+			content: artifact.content,
+			contentType: "text/markdown",
+		};
+	});
+
 	return buildGateVerificationSnapshot({
 		goalId: "goal-1",
 		gateId: "gate-1",
@@ -113,20 +150,12 @@ function makeDiagnosticsSnapshot(selectionOptions?: Parameters<typeof buildGateV
 					baseDir: dir,
 					stdout: { path: stdoutPath, bytes: fs.statSync(stdoutPath).size, lines: 1 },
 					stderr: { path: stderrPath, bytes: fs.statSync(stderrPath).size, lines: 1 },
-					artifacts: [{
-						path: artifactPath,
-						relativePath: "test-results/case/error-context.md",
-						sourcePath: path.join(dir, "source", "test-results", "case", "error-context.md"),
-						bytes: fs.statSync(artifactPath).size,
-						kind: "test-results",
-						content: "# Error Context\nretained artifact marker\n",
-						contentType: "text/markdown",
-					}],
+					artifacts,
 					createdAt: 1,
 				},
 			}],
 		},
-		selectionOptions,
+		selectionOptions: input.selectionOptions,
 		now: 100,
 	});
 }
@@ -204,7 +233,154 @@ describe("gate verification retained diagnostics compactness", () => {
 		assert.match(explicitStep.output ?? "", /retained stderr marker/);
 		assert.match(explicitJson, /stdout\.log/);
 		assert.match(explicitJson, /error-context\.md/);
-		assert.match(explicitJson, /retained artifact marker/);
+		assert.doesNotMatch(explicitJson, /retained artifact marker/);
+		assert.ok(explicitStep.diagnostics?.artifacts?.files.every(file => !("content" in file)), "verification snapshots must expose artifact metadata only");
+	});
+
+	it("keeps many failed artifact metadata compact and never serializes artifact content", () => {
+		const artifactCount = 100;
+		const marker = "SYNTHETIC_ARTIFACT_BODY_MARKER_SHOULD_NOT_INLINE";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: Array.from({ length: artifactCount }, (_, i) => ({
+				relativePath: `test-results/failing-case-${String(i + 1).padStart(3, "0")}/error-context.md`,
+				content: `# Error Context\n${marker}-${i + 1}\n${"artifact body ".repeat(500)}\n`,
+			})),
+		});
+		const json = JSON.stringify(snapshot);
+		const files = snapshot.steps[0].diagnostics?.artifacts?.files ?? [];
+
+		assert.ok(Buffer.byteLength(json, "utf8") < 64 * 1024, `verification snapshot was ${Buffer.byteLength(json, "utf8")} bytes`);
+		assert.equal(snapshot.steps[0].diagnostics?.artifacts?.count, artifactCount);
+		assert.equal(files.length, artifactCount);
+		assert.ok(files.every(file => !("content" in file)), "artifact content fields must be omitted from verification snapshots");
+		assert.doesNotMatch(json, new RegExp(marker));
+	});
+
+	it("collapses Playwright retry artifacts under the stable base id", () => {
+		const baseSlug = "pr-walkthrough-host-agents-078cd-verable-child-self-recover--api";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: ["", "-retry1", "-retry2", "-retry3"].map(suffix => ({
+				relativePath: `test-results/${baseSlug}${suffix}/error-context.md`,
+				content: `# Error Context\nretry fixture ${suffix || "base"}\n`,
+			})),
+		});
+		const files = snapshot.steps[0].diagnostics?.artifacts?.files as Array<any> | undefined;
+		assert.ok(files);
+		assert.equal(snapshot.steps[0].diagnostics?.artifacts?.count, 4);
+		assert.equal(files!.length, 1);
+		assert.equal(files![0].id, baseSlug);
+		assert.equal(files![0].retries, 3);
+		assert.equal(files![0].relativePath, `test-results/${baseSlug}/error-context.md`);
+	});
+
+	it("keeps the stable Playwright slug exclusive to error-context.md artifacts", () => {
+		const slug = "retain-artifact-fixture";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: [
+				{ relativePath: `test-results/${slug}/trace.zip`, content: "trace placeholder" },
+				{ relativePath: `test-results/${slug}/screenshot.png`, content: "png placeholder" },
+				{ relativePath: `test-results/${slug}/error-context.md`, content: "# Error Context\nretained artifact marker\n" },
+			],
+		});
+		const files = snapshot.steps[0].diagnostics?.artifacts?.files as Array<any> | undefined;
+		assert.ok(files);
+		assert.equal(files!.length, 3);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/error-context.md"))?.id, slug);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/trace.zip"))?.id, `test-results/${slug}/trace.zip`);
+		assert.equal(files!.find(file => file.relativePath.endsWith("/screenshot.png"))?.id, `test-results/${slug}/screenshot.png`);
+		assert.equal(files!.filter(file => file.id === slug).length, 1);
+	});
+
+	it("resolves slug ids to error-context.md when sibling trace and screenshot artifacts exist", () => {
+		const dir = makeTempDir();
+		const slug = "retain-artifact-fixture";
+		const relativePaths = [
+			`test-results/${slug}/trace.zip`,
+			`test-results/${slug}/screenshot.png`,
+			`test-results/${slug}/error-context.md`,
+		];
+		const artifacts = relativePaths.map(relativePath => {
+			const artifactPath = path.join(dir, "artifacts", ...relativePath.split("/"));
+			fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+			fs.writeFileSync(artifactPath, relativePath.endsWith("error-context.md") ? "# Error Context\nmarker\n" : "placeholder", "utf8");
+			return {
+				path: artifactPath,
+				relativePath,
+				sourcePath: path.join(dir, "source", ...relativePath.split("/")),
+				bytes: fs.statSync(artifactPath).size,
+				kind: "test-results" as const,
+				contentType: relativePath.endsWith("error-context.md") ? "text/markdown" : undefined,
+			};
+		});
+		const lookup = buildArtifactLookup({
+			type: "retained-command-diagnostics",
+			baseDir: dir,
+			artifacts,
+			createdAt: 1,
+		});
+
+		assert.equal(resolveArtifactFromLookup(lookup, slug).relativePath, `test-results/${slug}/error-context.md`);
+		assert.equal(resolveArtifactFromLookup(lookup, `test-results/${slug}/trace.zip`).relativePath, `test-results/${slug}/trace.zip`);
+		assert.equal(resolveArtifactFromLookup(lookup, `test-results/${slug}/screenshot.png`).relativePath, `test-results/${slug}/screenshot.png`);
+	});
+
+	it("rejects ambiguous duplicate artifact ids instead of picking the first match", () => {
+		const dir = makeTempDir();
+		const slug = "duplicate-artifact-fixture";
+		const artifacts = ["a", "b"].map(name => {
+			const relativePath = `test-results/${slug}/error-context.md`;
+			const artifactPath = path.join(dir, "artifacts", name, "error-context.md");
+			fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+			fs.writeFileSync(artifactPath, `# Error Context\n${name}\n`, "utf8");
+			return {
+				path: artifactPath,
+				relativePath,
+				sourcePath: path.join(dir, "source", name, "error-context.md"),
+				bytes: fs.statSync(artifactPath).size,
+				kind: "test-results" as const,
+				contentType: "text/markdown",
+			};
+		});
+		const lookup = buildArtifactLookup({
+			type: "retained-command-diagnostics",
+			baseDir: dir,
+			artifacts,
+			createdAt: 1,
+		});
+
+		assert.throws(
+			() => resolveArtifactFromLookup(lookup, slug),
+			(err: unknown) => {
+				assert.ok(err instanceof GateArtifactResolutionError);
+				assert.equal(err.status, 400);
+				assert.match(err.message, /ambiguous/i);
+				assert.equal(err.validArtifacts.length, 2);
+				return true;
+			},
+		);
+	});
+
+	it("adds artifact retrieval examples to inspect hints using error-context.md when artifact metadata exists", () => {
+		const slug = "hint-error-context-fixture";
+		const snapshot = makeArtifactDiagnosticsSnapshot({
+			selectionOptions: { mode: "full" },
+			artifacts: [
+				{ relativePath: `test-results/${slug}/trace.zip`, content: "trace placeholder" },
+				{ relativePath: `test-results/${slug}/error-context.md`, content: "# Error Context\nretained artifact marker\n" },
+			],
+		});
+		const hints = snapshot.steps[0].diagnostics?.inspectHints ?? [];
+		assert.ok(
+			hints.some(hint => /section="artifact"/.test(hint) && new RegExp(`artifact="${slug}"`).test(hint) && /step="playwright command"/.test(hint)),
+			`expected artifact inspect hint, got: ${hints.join("\n")}`,
+		);
+		assert.ok(
+			hints.every(hint => !hint.includes(`artifact="test-results/${slug}/trace.zip"`)),
+			`artifact hints should prefer error-context.md, got: ${hints.join("\n")}`,
+		);
 	});
 });
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import type { GateSignal } from "./agent/gate-store.js";
 import { MAX_RETAINED_LOG_BYTES, type GateStepDiagnostics } from "./gate-diagnostics.js";
+import { buildArtifactIndex, type GateArtifactIndex } from "./gate-artifacts.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
 import {
 	MAX_SELECTED_BYTES,
@@ -46,12 +47,7 @@ export interface GateVerificationSnapshotStep {
 			stdout?: { path: string; bytes: number; lines: number; truncated?: boolean; truncationReason?: string };
 			stderr?: { path: string; bytes: number; lines: number; truncated?: boolean; truncationReason?: string };
 		};
-		artifacts?: {
-			count: number;
-			truncated?: boolean;
-			truncationReason?: string;
-			files: Array<{ path: string; relativePath: string; sourcePath: string; bytes: number; kind: string; content?: string; contentType?: string }>;
-		};
+		artifacts?: GateArtifactIndex;
 		inspectHints?: string[];
 		note?: string;
 	};
@@ -235,13 +231,22 @@ function safeReadText(filePath: string | undefined, maxBytes: number): BoundedLi
 	}
 }
 
-function buildInspectHints(gateId: string, stepName: string): string[] {
+function buildInspectHints(gateId: string, stepName: string, artifacts?: GateArtifactIndex): string[] {
 	const encodedStep = stepName.replace(/"/g, '\\"');
-	return [
+	const hints = [
 		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="grep", pattern="error|failed|Error", context=3)`,
 		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="slice", from=120, to=220)`,
 		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="tail", lines=200)`,
 	];
+	const artifact = artifacts?.files.find(file => file.relativePath === "error-context.md" || file.relativePath.endsWith("/error-context.md")) ?? artifacts?.files[0];
+	if (artifact) {
+		const encodedArtifact = artifact.id.replace(/"/g, '\\"');
+		hints.push(`gate_inspect(gate_id="${gateId}", section="artifact", step="${encodedStep}", artifact="${encodedArtifact}", mode="grep", pattern="Error|locator|failed", context=3)`);
+		if (artifact.retries && artifact.retries > 0) {
+			hints.push(`gate_inspect(gate_id="${gateId}", section="artifact", step="${encodedStep}", artifact="${encodedArtifact}", retry=1, mode="tail", lines=120)`);
+		}
+	}
+	return hints;
 }
 
 function diagnosticsMetadata(input: {
@@ -249,30 +254,21 @@ function diagnosticsMetadata(input: {
 	outputSource: GateVerificationOutputSource;
 	gateId: string;
 	stepName: string;
-	includeArtifactContent: boolean;
 }): GateVerificationSnapshotStep["diagnostics"] {
 	const diagnostics = input.diagnostics;
+	const artifacts = diagnostics?.artifacts?.length ? buildArtifactIndex(diagnostics) : undefined;
 	const out: NonNullable<GateVerificationSnapshotStep["diagnostics"]> = {
 		outputSource: input.outputSource,
-		inspectHints: buildInspectHints(input.gateId, input.stepName),
+		inspectHints: buildInspectHints(input.gateId, input.stepName, artifacts),
 	};
 	if (diagnostics) {
 		out.logs = {};
 		if (diagnostics.stdout) out.logs.stdout = diagnostics.stdout;
 		if (diagnostics.stderr) out.logs.stderr = diagnostics.stderr;
 		if (!out.logs.stdout && !out.logs.stderr) delete out.logs;
-		if (diagnostics.artifacts?.length) {
-			out.artifacts = {
-				count: diagnostics.artifacts.length,
-				truncated: diagnostics.truncated,
-				truncationReason: diagnostics.truncationReason,
-				files: input.includeArtifactContent
-					? diagnostics.artifacts
-					: diagnostics.artifacts.map(({ content, contentType, ...artifact }) => artifact),
-			};
-		}
+		if (artifacts) out.artifacts = artifacts;
 		out.note = input.outputSource === "retained-logs"
-			? "Inspection output is selected from retained stdout/stderr under Bobbit state; compact status output remains bounded."
+			? "Inspection output is selected from retained stdout/stderr under Bobbit state; compact status output remains bounded. Artifact content is metadata-only here; use section=\"artifact\" to fetch one retained artifact with bounded selection."
 			: "Status output is compact; use explicit gate_inspect modes to query retained logs when available.";
 	} else {
 		out.note = input.outputSource === "live-logs"
@@ -463,7 +459,6 @@ export function buildGateVerificationSnapshot(input: {
 				outputSource,
 				gateId: input.gateId,
 				stepName: persisted.name,
-				includeArtifactContent: true,
 			});
 		}
 		return out;

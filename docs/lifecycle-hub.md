@@ -6,10 +6,10 @@
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
 > `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
 > `sessionShutdown` fire from the gateway's own agent-event stream — see
-> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). The first built-in
-> production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
-> built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
-> install still produces no Dynamic Context section. This page documents the Hub core and its
+> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). Built-in production
+> providers include the [Hindsight memory pack](hindsight-memory.md) and PR Walkthrough durable
+> progress provider; both are scoped so an out-of-the-box normal session receives no unrelated
+> Dynamic Context. This page documents the Hub core and its
 > session wiring.
 ## What it is, and why
 
@@ -344,6 +344,11 @@ The section is added in **both** prompt builders, mirroring the skills-catalog d
   (`GET /api/sessions/:id/prompt-sections`) **for free**, with `source: "providers"` provenance and
   a token count; per-block `provider` / `reason` / token live inside the fence attributes.
 
+This `sessionSetup` Dynamic Context remains a **spawn-time system-prompt section**. It is
+cache-safe because it is assembled once for the session instead of changing on every turn. Per-turn
+`beforePrompt` Dynamic Context uses the custom-message path described below and is not appended to
+`systemPrompt`.
+
 **Empty / absent `dynamicContext` adds zero sections**, so a session with no contributing provider
 produces a byte-identical prompt to before this wiring — the invariant a unit test pins.
 
@@ -408,29 +413,29 @@ session id and `404` when the session is unknown (neither live nor persisted).
 
 | Method + path | Caller | Behaviour |
 |---|---|---|
-| `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ tail, blocks }`. |
+| `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
 | `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
 | `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
 
-**`before-prompt` response shape.** `tail` is the fenced blocks joined inside the
-dynamic-context delimiters, or `""` when no block survived budgeting:
+**`before-prompt` response shape.** `content` is the accepted blocks joined as fenced
+`<context-block …>` envelopes, or `""` when no block survived budgeting:
 
 ```
-\n<!-- bobbit:dynamic-context:start -->
 <context-block …>…</context-block>
 
 <context-block …>…</context-block>
-<!-- bobbit:dynamic-context:end -->
 ```
 
 `blocks` is **metadata-only** — each entry is `{ id, providerId, title, tokenEstimate }`. The
-full block content lives inside the fenced `tail`; the metadata array exists for the inspector
-and for diagnostics without re-sending the body. After dispatch the endpoint also refreshes the
-persisted prompt-sections snapshot **best-effort** (non-fatal: a failure is logged and the
-response still returns) so `GET /api/sessions/:id/prompt-sections` reflects the turn's
-dynamic-context tail.
+full block text lives in `content`; the metadata array exists for the inspector and diagnostics
+without parsing the body. `tail` is a temporary legacy system-prompt-tail wrapper for old generated
+bridges; current generated bridges ignore it and consume `content` only. After dispatch the endpoint also refreshes the persisted
+prompt-sections snapshot **best-effort** (non-fatal: a failure is logged and the response still
+returns) so `GET /api/sessions/:id/prompt-sections` shows the turn's latest Dynamic Context
+snapshot even though that context is delivered through a hidden message rather than the system
+prompt.
 
-When no `LifecycleHub` is configured, `before-prompt` returns `{ tail: "", blocks: [] }` and
+When no `LifecycleHub` is configured, `before-prompt` returns `{ content: "", tail: "", blocks: [] }` and
 `before-compact` returns `{}` — the turn proceeds unchanged.
 
 ## The provider-bridge extension
@@ -442,16 +447,21 @@ When no `LifecycleHub` is configured, `before-prompt` returns `{ tail: "", block
 written under `.bobbit/state/provider-bridge/<contentHash>/bridge.ts` and de-duplicated by
 hash.
 
-The generated extension subscribes to two pi events:
+The generated extension subscribes to three pi events:
 
 - **`before_agent_start`** (per turn) → POST `…/provider-hooks/before-prompt` with
-  `{ prompt: event.prompt }`, with an `AbortController` timeout of **2500 ms**. On success it
-  returns `{ systemPrompt: stripDelimitedTail(event.systemPrompt) + resp.tail }`. On **any**
-  failure (transport, timeout/abort, non-2xx, parse error) it returns `undefined` and the turn
-  proceeds with the unmodified prompt.
+  `{ prompt: event.prompt }`, with an `AbortController` timeout of **2500 ms**. On success, if the
+  response contains non-empty `content`, it returns a hidden custom message:
+  `{ message: { customType: "bobbit:dynamic-context", content, display: false } }`. On empty
+  content or **any** failure (transport, timeout/abort, non-2xx, parse error), it returns
+  `undefined` and the turn proceeds with the unmodified prompt and system prompt.
+- **`context`** → filters hidden `bobbit:dynamic-context` custom messages from future LLM
+  contexts. It removes stale dynamic-context messages before the latest real `user` message and
+  preserves current-turn dynamic context appended after that latest user.
 - **`session_before_compact`** → POST `…/provider-hooks/before-compact`, with a timeout of
-  **5000 ms**. The result is ignored (compaction output is not amended here); all failures are
-  swallowed.
+  **5000 ms**. The compacted span ignores `bobbit:dynamic-context` custom messages so summaries do
+  not retain stale recall. The result is ignored (compaction output is not amended here); all
+  failures are swallowed. This `beforeCompact` behavior is unchanged.
 
 Transport and auth are identical to the tool-guard: read `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`
 from the environment, falling back to `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and
@@ -460,37 +470,32 @@ unchanged".
 
 ### The injection invariant (non-negotiable)
 
-> **The user's message text is NEVER mutated.** Per-turn recall is injected only into the
-> outgoing **system-prompt tail**.
+> **The user's message text is NEVER mutated, and per-turn Dynamic Context is never appended to
+> `systemPrompt`.**
 
 This is a hard correctness boundary, not a style preference. Mutating the user prompt would
 corrupt the transcript echo and re-open the comms-stack optimistic-reconciliation **duplicate**
-class. The bridge forwards `event.prompt` to the gateway **read-only** and only ever returns a
-modified `systemPrompt`. A test pins that the user's message text is byte-identical with and
-without the bridge.
+class. Mutating `systemPrompt` on every `beforePrompt` turn would also churn provider prompt
+caches: Anthropic-style caching treats the system prompt as a strict byte prefix, so a changing
+Dynamic Context tail can force repeated cache writes for the full cached system block.
 
-pi's `before_agent_start` event exposes both `prompt: string` and `systemPrompt: string`, and
-`BeforeAgentStartEventResult` accepts `systemPrompt?: string`, so the bridge takes the simple,
-verified path: read `event.systemPrompt`, strip any prior delimited tail, append the fresh tail,
-return `{ systemPrompt }`.
+The bridge therefore forwards `event.prompt` to the gateway **read-only** and, when the gateway
+returns non-empty Dynamic Context, returns a hidden pi custom message with
+`customType: "bobbit:dynamic-context"`. pi appends extension messages on the user-side message
+channel, so the model still receives the fenced context for that turn, but `context.systemPrompt`
+stays byte-identical across turns even when the Dynamic Context content changes.
 
-### Idempotent, delimited tail
+If the gateway returns empty content, or the callback fails or times out, the bridge returns
+`undefined`. No prompt text, user text, or system prompt bytes are changed.
 
-The dynamic-context region is wrapped in delimiters that **must stay byte-identical** between
-`provider-bridge-extension.ts` and the `before-prompt` endpoint in `server.ts`:
+### System-prompt stability
 
-```
-<!-- bobbit:dynamic-context:start -->
-…fenced context-blocks…
-<!-- bobbit:dynamic-context:end -->
-```
-
-Each turn the bridge calls `stripDelimitedTail(systemPrompt)` to remove any prior region
-(including a truncated, end-delimiter-less one) and then appends the fresh tail. Applying
-strip-then-append repeatedly yields **exactly one** delimited region — the tail never grows
-turn-over-turn. This idempotency is unit-pinned. The strip helper is duplicated (host-side TS
-export + inlined JS in the generated extension) precisely so the two copies can be kept in sync;
-the delimiters are the contract between them.
+The old per-turn system-prompt tail path is intentionally retired for the generated bridge; the
+`before-prompt` endpoint still returns a temporary legacy `tail` field only for old bridges. The
+only Dynamic Context that belongs in `systemPrompt` is `sessionSetup` output, assembled once at
+spawn time. Per-turn blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side
+messages, and stale persisted copies are filtered from future LLM contexts; `beforeCompact` still
+only notifies providers before compaction and does not amend compaction output.
 
 ### Activation — generated only when a provider wants it
 
@@ -565,7 +570,8 @@ ambient context a session received and why blocks were dropped.
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
   It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
   with no active provider, no Dynamic Context section is added and the per-turn bridge is never
-  spawned.- Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
+  spawned.
+- Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also
 

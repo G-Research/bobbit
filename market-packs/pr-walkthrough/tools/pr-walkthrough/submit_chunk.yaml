@@ -1,0 +1,12 @@
+name: submit_pr_walkthrough_chunk
+description: "Persist one idempotent PR walkthrough YAML chunk under a stable section id."
+summary: "Save walkthrough chunk"
+params: [section_id, yaml]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Save each completed section immediately so progress survives compaction, retries, reloads, and reviewer restarts. Valid section_id values are metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, and chunk:<id>. Re-sending the same section_id overwrites the saved chunk rather than appending a duplicate.
+
+  Successful saves return compact model-facing status such as saved, section_id, nextRequired, and missing instead of the full growing chunk summary. Use read_pr_walkthrough_submission_status whenever you need the complete saved-chunk and finalization status.

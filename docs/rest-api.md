@@ -70,7 +70,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
-| `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ tail, blocks }` — `tail` is the delimited, fenced dynamic-context region appended to the system-prompt tail (or `""`), `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. `404` for unknown session; `{ tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
+| `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
@@ -1240,14 +1240,16 @@ Errors:
 
 **`GET /api/goals/:id/gates/:gateId/inspect`**
 
-A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool. It applies bounded text selection to text-heavy gate fields so agents can inspect large content, verification output, and signal history without loading the full payload into context.
+A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool. It applies bounded text selection to text-heavy gate fields so agents can inspect large content, verification output, retained artifacts, and signal history without loading the full payload into context.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
+| `section` | `"content"` \| `"verification"` \| `"artifact"` \| `"signals"` | yes | — | What data to retrieve |
 | `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
-| `step` | string | no | — | `section=verification` only: scope the response to a single verification step by name. Other sections return 400. |
-| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns the last 20 lines per selected field/verification step, not full output. |
+| `step` | string | no | — | `section=verification` or `section=artifact`: scope to a single verification step by name. Other sections return 400. |
+| `artifact` | string | for `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id` or exact `relativePath`. |
+| `retry` | integer | no | — | `section=artifact` only: fetch a specific Playwright retry for a collapsed artifact id. |
+| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns bounded tail output, not full output. |
 | `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
 | `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
 | `max_results` | integer | no | server default | Maximum grep matches before truncating. |
@@ -1261,7 +1263,7 @@ Retrieval controls mirror the background-shell inspection tools where they make 
 - `head` and `tail` return bounded ranges identified in metadata.
 - `full` requests the full rendered text, but normal line/byte/tool-result caps still apply.
 
-When `mode` is omitted, the endpoint defaults to the last 20 lines. If that implicit default omits earlier lines, the response includes an omission hint such as:
+When `mode` is omitted, content, verification, and signal-history reads default to the last 20 lines; artifact reads default to a bounded tail sized for one retained file. If an implicit default omits earlier lines, the response includes an omission hint such as:
 
 ```text
 [N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]
@@ -1300,7 +1302,9 @@ Selection metadata is returned with filtered output:
 
 **`section=verification`** — Returns a verification snapshot with each step's `output` independently selected. For the latest running signal, this is the same active snapshot used by `gate_status`: persisted signal rows are overlaid with active harness state before output selection. A top-level `selection` may also appear when the combined response is capped.
 
-Pass `step=<name>` to scope the snapshot to a single verification step. When set, `steps[]` contains only the matching step (still a single-element array, so the same response shape applies) and the selection mode applies to that one step's output. Step names come from `gate_status.failedSteps` and from each step's `name` in an unfiltered snapshot. An unknown step name returns 400 with the list of available step names for that signal; using `step` with `section=content` or `section=signals` returns 400 (`step is only valid with section='verification'`).
+Pass `step=<name>` to scope the snapshot to a single verification step. When set, `steps[]` contains only the matching step (still a single-element array, so the same response shape applies) and the selection mode applies to that one step's output. Step names come from `gate_status.failedSteps` and from each step's `name` in an unfiltered snapshot. An unknown step name returns 400 with the list of available step names for that signal; using `step` with `section=content` or `section=signals` returns 400.
+
+Retained artifact bodies are not inlined in verification snapshots. `steps[].diagnostics.artifacts.files[]` is a compact metadata index only, with ids, paths, sizes, kinds, and retry metadata so callers can choose one file to fetch via `section=artifact`.
 ```json
 {
   "gateId": "implementation",
@@ -1349,11 +1353,35 @@ Completed command steps can include retained diagnostics. When a verification re
 |---|---|
 | `diagnostics.outputSource` | `"retained-logs"`, `"live-logs"`, or `"compact-tail"` |
 | `diagnostics.logs.stdout` / `stderr` | Retained log path, bytes, line count, and cap/truncation metadata |
-| `diagnostics.artifacts` | Count and retained file metadata for copied `test-results` / `playwright-report` artifacts; small `error-context.md` files may include markdown `content` |
-| `diagnostics.inspectHints` | Suggested `gate_inspect` calls for targeted follow-up |
+| `diagnostics.artifacts` | Compact retained artifact index for copied `test-results` / `playwright-report` files. Rows include metadata such as `id`, `relativePath`, retained `path`, `bytes`, `kind`, optional `testName`, and retry fields; rows do not include file `content`. |
+| `diagnostics.inspectHints` | Suggested `gate_inspect` calls for targeted follow-up, including artifact fetch examples when artifacts exist |
 | `diagnostics.note` | Human-readable summary of which output source was used |
 
 Default `gate_status`, notifications, and omitted-mode inspection do not include retained log paths or artifact file lists. Retained stdout and stderr are capped at 20 MiB per stream, and explicit inspection exposes cap/truncation metadata. See [Retained gate diagnostics](gate-diagnostics.md) for artifact retention, symlink hardening, and cleanup lifecycle.
+
+**`section=artifact`** — Returns selected text from one retained artifact file. `artifact` is required and accepts either the stable metadata `id` or an exact `relativePath`. Use `retry=N` with a collapsed Playwright retry id, or pass the retry artifact's exact `relativePath`. Use `step=<name>` when the artifact id is ambiguous across verification steps.
+
+Artifact reads use the same `mode`, `pattern`, `context`, `max_results`, `lines`, `from`, and `to` selection controls. Omitted `mode` defaults to a bounded tail for a single file; explicit `mode=full` is still capped by normal selection and tool-result budgets. The retained `path` remains exposed in verification metadata so direct `read(path)` remains available as a fallback.
+
+```json
+{
+  "gateId": "implementation",
+  "section": "artifact",
+  "signalIndex": 21,
+  "signalId": "sig-22",
+  "step": "E2E tests",
+  "artifact": {
+    "id": "pr-walkthrough-host-agents-078cd-child-self-recover--api",
+    "relativePath": "test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md",
+    "path": "<stateDir>/gate-diagnostics/.../artifacts/test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md",
+    "bytes": 10094,
+    "kind": "test-results",
+    "retry": 1
+  },
+  "text": "bounded selected content",
+  "selection": { "mode": "tail", "totalLines": 300, "range": { "from": 101, "to": 300 }, "truncated": false }
+}
+```
 
 **`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json
@@ -1383,10 +1411,13 @@ GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=gre
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=tail&lines=80
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=slice&from=120&to=180
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&step=unit&mode=grep&pattern=error%7Cfailed&context=2
+GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&step=E2E%20tests&artifact=pr-walkthrough-host-agents-078cd-child-self-recover--api&mode=grep&pattern=Error%7Clocator%7Cfailed&context=3
+GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&step=E2E%20tests&artifact=pr-walkthrough-host-agents-078cd-child-self-recover--api&retry=1&mode=tail&lines=120
+GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&artifact=test-results%2Fpr-walkthrough-host-agents-078cd-child-self-recover--api%2Ferror-context.md&mode=slice&from=40&to=120
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=full
 ```
 
-Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, a slice range is missing/non-integer/below 1/`from > to`, `step` names an unknown step (the error lists the available step names), or `step` is combined with `section=content`/`section=signals`. Returns 404 if the resolved signal index is out of range.
+Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, a slice range is missing/non-integer/below 1/`from > to`, `step` names an unknown step, `step` is combined with `section=content`/`section=signals`, `artifact` is missing for `section=artifact`, an artifact id or relative path is unknown, or `retry` is invalid. Artifact lookup errors include available ids or step names where possible. Returns 404 if the resolved signal index is out of range.
 
 ### Session error-state fields
 

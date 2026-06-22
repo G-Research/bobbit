@@ -290,6 +290,109 @@ describe("SessionStore", () => {
 	});
 
 	// -----------------------------------------------------------------------
+	// Draft generation (gen) staleness guard — Bug 2 regression
+	//
+	// `setDraft` must silently discard an out-of-order write whose `gen` is
+	// strictly lower than the gen already stored, so a delayed save from an
+	// earlier generation can never resurrect/overwrite newer draft state.
+	// Equal or higher gens must always be accepted. Drafts without a `gen`
+	// field bypass the guard entirely (legacy / non-gen callers).
+	// -----------------------------------------------------------------------
+
+	describe("draft gen staleness guard", () => {
+		it("accepts a strictly increasing gen (newer write wins)", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			assert.equal(store.setDraft("sess-1", "prompt", { text: "first", gen: 1 }), true);
+			assert.equal(store.setDraft("sess-1", "prompt", { text: "second", gen: 2 }), true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "second", gen: 2 });
+		});
+
+		it("silently discards a stale (lower-gen) write without erroring", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.setDraft("sess-1", "prompt", { text: "newer", gen: 2 });
+			// A delayed save from an earlier generation arrives out of order.
+			const ok = store.setDraft("sess-1", "prompt", { text: "stale", gen: 1 });
+			// Returns true (not an error) but must NOT mutate the stored draft.
+			assert.equal(ok, true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "newer", gen: 2 });
+		});
+
+		it("accepts an equal-gen write (idempotent overwrite at same gen)", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.setDraft("sess-1", "prompt", { text: "a", gen: 3 });
+			assert.equal(store.setDraft("sess-1", "prompt", { text: "b", gen: 3 }), true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "b", gen: 3 });
+		});
+
+		it("accepts a gen write when the existing draft has no gen field", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.setDraft("sess-1", "prompt", { text: "legacy" }); // no gen
+			assert.equal(store.setDraft("sess-1", "prompt", { text: "with-gen", gen: 1 }), true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "with-gen", gen: 1 });
+		});
+
+		it("bypasses the guard when the incoming write has no gen field", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.setDraft("sess-1", "prompt", { text: "had-gen", gen: 5 });
+			// A gen-less write is always accepted (no staleness comparison possible).
+			assert.equal(store.setDraft("sess-1", "prompt", { text: "no-gen" }), true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "no-gen" });
+		});
+
+		it("does not resurrect a tombstone: stale text save after an empty-text send is dropped", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			// User typed, autosave landed at gen 1.
+			store.setDraft("sess-1", "prompt", { text: "draft text", gen: 1 });
+			// User sent: client overwrites with an empty-text tombstone at gen 2.
+			store.setDraft("sess-1", "prompt", { text: "", gen: 2 });
+			// A delayed autosave from the pre-send generation arrives late.
+			store.setDraft("sess-1", "prompt", { text: "draft text", gen: 1 });
+			// The tombstone must survive — the sent text must not reappear.
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "", gen: 2 });
+		});
+
+		it("applies the guard per draft type independently", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.setDraft("sess-1", "prompt", { text: "p", gen: 2 });
+			store.setDraft("sess-1", "goal", { title: "g", gen: 2 });
+			// Stale prompt write is dropped; goal type is unaffected by the prompt gen.
+			store.setDraft("sess-1", "prompt", { text: "stale-p", gen: 1 });
+			assert.equal(store.setDraft("sess-1", "goal", { title: "g2", gen: 3 }), true);
+			assert.deepEqual(store.getDraft("sess-1", "prompt"), { text: "p", gen: 2 });
+			assert.deepEqual(store.getDraft("sess-1", "goal"), { title: "g2", gen: 3 });
+		});
+
+		it("monotonic gen survives a disk reload (rejects stale write after reopen)", () => {
+			const store1 = freshStore();
+			store1.put(makeSession());
+			store1.setDraft("sess-1", "prompt", { text: "newest", gen: 4 });
+			store1.flush();
+			// New store instance reloads the persisted draft (and its gen).
+			const store2 = freshStore();
+			assert.deepEqual(store2.getDraft("sess-1", "prompt"), { text: "newest", gen: 4 });
+			// A stale write after reload must still be rejected.
+			store2.setDraft("sess-1", "prompt", { text: "stale", gen: 2 });
+			assert.deepEqual(store2.getDraft("sess-1", "prompt"), { text: "newest", gen: 4 });
+		});
+	});
+
+	// NOTE: Composer attachment drafts are deliberately NOT stored in the server
+	// SessionStore. They live client-side in IndexedDB (PromptDraftAttachmentsStore)
+	// because base64 image blobs are too large for the inline sessions.json draft
+	// map, and there is no persistent gen guard on them — stale-load resurrection
+	// is prevented by the in-flight async-load generation guard in AgentInterface.
+	// Store-level caps/eviction are covered by tests/prompt-draft-attachments-store.test.ts;
+	// the in-flight guard is covered by tests/agent-interface-attachment-draft-race.test.ts.
+	// See docs/design/composer-draft-persistence.md.
+
+	// -----------------------------------------------------------------------
 	// Persistence round-trips
 	// -----------------------------------------------------------------------
 

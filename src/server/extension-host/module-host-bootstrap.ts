@@ -122,6 +122,7 @@ interface SerializableCtx {
 	toolUseId?: string;
 	tool: string;
 	workingDir?: string;
+	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
 	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
@@ -484,6 +485,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
 				workingDir: msg.ctx.workingDir,
+				sessionArchived: msg.ctx.sessionArchived,
 			};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });

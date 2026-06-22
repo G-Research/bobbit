@@ -60,44 +60,46 @@ The current end-to-end flow:
   scoping.
 - **Poll + render (in the child session).** Inside the reviewer child session the
   panel auto-opens showing a pending state and **self-drives** the poll: it polls
-  the **`status`** route (read-only) until the reviewer submits the production
-  YAML, then runs the unchanged `publish`→`bundle` synthesis to render the same
-  cards. A long-but-progressing reviewer is **never** errored by a short clock —
-  past ~2 minutes the panel shows a non-error "still reviewing" hint and keeps
-  polling; only a route-confirmed terminal child or a 30-minute hard cap ends the
-  poll. See [Poll-loop robustness](#poll-loop-robustness).
+  the **`status`** route (read-only) until the reviewer finalizes durable saved
+  chunks into a submitted payload. A long-but-progressing reviewer is **never**
+  errored by a short clock — past ~2 minutes the panel shows a non-error "still
+  reviewing" hint and keeps polling; only a route-confirmed terminal child or a
+  30-minute hard cap ends the poll. See [Poll-loop robustness](#poll-loop-robustness).
 - **Data via pack routes.** The panel never makes a raw `fetch`. It calls the
   pack's own routes (`market-packs/pr-walkthrough/lib/routes.mjs`, registered in
   `pack.yaml` `routes:`) through `host.callRoute`:
-  - **`run`** launches the reviewer child and writes the pack-store routing
-    binding; **`status`** polls it; **`recover`** re-reads a completed
-    walkthrough on reload (see [Launch model](#launch-model-the-isolated-reviewer-child)).
-  - **`publish`** validates the submitted YAML and persists the synthesized cards
-    in the pack-namespaced `host.store`.
+  - **`run`** launches the reviewer child and writes review-scoped routing records;
+    **`status`** polls it; **`recover`** re-reads finalized or draft state on reload
+    (see [Launch model](#launch-model-the-isolated-reviewer-child)).
+  - **`publish`** is compatibility-only for full-YAML callers; current reviewer
+    completion goes through `submit_pr_walkthrough_chunk` and
+    `finalize_pr_walkthrough_submission`, which write the same final payload.
   - **`bundle`** recomputes the changeset **live** via `git` inside the confined
     worker (the git working dir is always the session worktree, server-derived —
-    never caller-supplied) and serves it together with any persisted cards.
+    never caller-supplied) and serves it together with finalized review cards.
 - **YAML → cards.** The synthesis that turns the agent's validated YAML into
   review cards is shared at **`src/shared/pr-walkthrough/yaml-to-cards.ts`** and
-  bundled into the pack's `publish` route, so the pack maps the YAML to cards
+  bundled into the pack routes, so the pack maps the canonical YAML to cards
   itself.
-- **Persistence.** On reload of the reviewer child session, the panel re-reads
-  state through the `bundle` route, which recomputes the changeset live and reads
-  any persisted cards from `host.store`; a stamped-once `persistedAt` keeps the
-  cards stable across reloads. Because the reviewer child's submit tool call lives
-  in the child session (and there is no owner-session surface), a completed
-  walkthrough is re-rendered after reload automatically through the **`recover`**
-  route, keyed by the child's own `binding/<self>` — no user gesture and no owner
-  pointer (see [Launch model](#launch-model-the-isolated-reviewer-child)).
+- **Durable review persistence.** Reviewer analysis is saved incrementally under
+  `reviews/<jobId>/draft/chunks/<sectionId>` and committed as
+  `reviews/<jobId>/final/payload`. Per-review quota scopes keep old reviews from
+  filling the shared pack store, and shutdown cleanup removes the review prefix
+  with real `deletePrefix`. See
+  [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md).
 
-The **agent-side toolchain** that actually produces the YAML — the three
-read-only tools (`readonly_bash`, `read_pr_walkthrough_bundle`,
-`submit_pr_walkthrough_yaml`) and the `/resolve` · `/export/*` routes — is
-**retained**, but it now ships from the pack under
-`market-packs/pr-walkthrough/tools/pr-walkthrough/` and runs inside a dedicated
+The **agent-side toolchain** that actually produces the YAML now uses compact
+bundle reads and durable incremental submission: `readonly_bash`,
+`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`,
+and compatibility `submit_pr_walkthrough_yaml`. Compact bundle output is opt-in
+with `format=compact`; omitted `format` and `format=legacy` preserve the legacy
+JSON result for exact line metadata. The tools ship from the pack under
+`market-packs/pr-walkthrough/tools/pr-walkthrough/` and run inside a dedicated
 **reviewer child session**, not the user's own agent (see
-[Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child)
-and [Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)).
+[Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child),
+[Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained),
+and [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md#reviewer-tool-output-contract)).
 `pack.yaml` advertises the `pr-walkthrough` tool group; Marketplace expands that
 group into concrete tool toggles, and `DisabledRefs.tools` is keyed by concrete
 tool name. The legacy `WalkthroughAgentManager` launcher, the
@@ -242,49 +244,46 @@ and finalised the `PanelTarget.sessionId` Host-API consumption.
 
 ### The run / status / recover routes
 
-The panel drives three pack routes (`market-packs/pr-walkthrough/lib/routes.mjs`,
+The panel drives pack routes (`market-packs/pr-walkthrough/lib/routes.mjs`,
 allow-listed in `pack.yaml`), all reached via `host.callRoute` — never a raw
 `fetch`:
 
 - **`run`** (the gesture-gated launch): resolves the changeset target, then calls
   `host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full",
   deferInitialPrompt: true, title: "PR Walkthrough", … })` to create the
-  **visible-but-not-yet-started** reviewer child. It then writes the
-  `binding/<childSessionId>` routing record (carrying the job id, canonical target,
-  and base/head SHAs) **before** prompting the child to start. Writing the binding
-  before the child's first tool call closes a spawn/binding race (the reviewer's
-  first `read_pr_walkthrough_bundle` can never 403 on a missing binding). On any
-  post-spawn failure the route **compensates** (dismisses the child, deletes the
-  binding) and returns `{ ok: false, retryable: true }` so a retry starts clean.
-  **`run` always spawns a fresh reviewer** — there is no `reviewerKey` dedup index
-  and no reuse of a live reviewer (see
-  [Lifecycle: no auto-dismiss](#lifecycle-no-auto-dismiss-restart-survival-and-termination)). On success it
-  returns `{ ok: true, childSessionId, jobId, … }`; a `NO_PR` /
+  **visible-but-not-yet-started** reviewer child. It writes both
+  `reviewers/<childSessionId>` and
+  `reviews/<jobId>/binding/<childSessionId>` before prompting the child to start.
+  Writing the binding before the child's first tool call closes a spawn/binding
+  race (the reviewer's first `read_pr_walkthrough_bundle` can never 403 on a
+  missing binding). On any post-spawn failure the route **compensates** by deleting
+  written keys and dismissing the child where possible, then returns
+  `{ ok: false, retryable: true }` so a retry starts clean. **`run` always spawns a
+  fresh reviewer** — there is no `reviewerKey` dedup index and no reuse of a live
+  reviewer (see
+  [Lifecycle: no auto-dismiss](#lifecycle-no-auto-dismiss-restart-survival-and-termination)).
+  On success it returns `{ ok: true, childSessionId, jobId, … }`; a `NO_PR` /
   `LOCAL_UNSUPPORTED` / failure returns `{ ok: false, code, error }` for the
   launcher to render inline.
 - **`status`** (the poll): input `{ childSessionId, jobId }`. It is
-  **binding-authoritative** — it loads `binding/<childSessionId>` first and
-  verifies the job id and that the caller is one of the binding's two named
-  principals before reading anything else, so a caller cannot probe another job's
-  state. The caller may be **either bound principal**: the bound owner
-  (`binding.parentSessionId === ctx.sessionId`) **or** the reviewer child polling
-  its own pane (`childSessionId === ctx.sessionId`). Right-job routing is preserved
-  — the caller must match the binding's `jobId` AND be owner or child; a foreign
-  session is still rejected. Completion is signalled by the pack-store
-  **`submitted/<jobId>`** marker (the submitted YAML), not the reviewer's idle
-  status — a read-only agent can go idle without submitting. Returns
-  `{ phase: "running" | "submitted" | "error", … }`.
-- **`recover`** (reload recovery): because the reviewer's
-  `submit_pr_walkthrough_yaml` tool call lives in the child session — and there is
-  no owner-session surface — a browser reload of the child session recovers a
-  completed walkthrough through this route. `recover` is **child-self only**: when
-  the caller is the bound reviewer child it resolves the submitted YAML directly
-  from its own `binding/<childSessionId>` (`binding/<self>` → `submitted/<jobId>`),
-  no extra store key. The old **owner** branch (the `last/<parentSessionId>`
-  pointer) was removed along with the owner-session surface. The child pane invokes
-  `recover` automatically on mount when its in-memory state is empty (the
-  read-only auto-open carve-out, below) — there is no manual "Load walkthrough"
-  gesture.
+  **binding-authoritative** — it resolves the review-scoped binding and verifies
+  the job id and that the caller is one of the binding's named principals before
+  reading review state. The caller may be **either bound principal**: the bound
+  owner (`binding.parentSessionId === ctx.sessionId`) **or** the reviewer child
+  polling its own pane (`childSessionId === ctx.sessionId`). Completion is
+  signalled by `reviews/<jobId>/final/payload`, not the reviewer's idle status — a
+  read-only agent can go idle without finalizing. If chunks exist but no final
+  payload exists, `status` returns `phase: "draft"` with a chunk summary. Legacy
+  `submitted/<jobId>` remains a migration fallback.
+- **`recover`** (reload recovery): because the reviewer tools run in the child
+  session — and there is no owner-session surface — a browser reload of the child
+  session recovers through this route. `recover` is **child-self only**: when the
+  caller is the bound reviewer child it resolves state from its own binding, then
+  returns finalized YAML, bounded draft state, or a structured missing/expired
+  result. The old **owner** branch (the `last/<parentSessionId>` pointer) was
+  removed along with the owner-session surface. The child pane invokes `recover`
+  automatically on mount when its in-memory state is empty (the read-only
+  auto-open carve-out, below) — there is no manual "Load walkthrough" gesture.
 
 ### The pane lives only with the reviewer child
 
@@ -298,9 +297,9 @@ and main view all follow. The pack touches **no** platform navigation code
 directly — only the versioned Host API, preserving pack purity.
 
 **The auto-open carve-out (read-only).** When the panel renders and its bound
-session (`params.__sessionId`) has a `binding/<self>` in the pack store — i.e. this
-view *is* a reviewer child — the pane **auto-opens and self-drives** with **no user
-gesture**. This is a documented, deliberate exception to the pack-panel
+session (`params.__sessionId`) has a review-scoped binding in the pack store — i.e.
+this view *is* a reviewer child — the pane **auto-opens and self-drives** with **no
+user gesture**. This is a documented, deliberate exception to the pack-panel
 "no auto-invoke on mount" invariant
 ([docs/extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel)),
 scoped **strictly to a bound reviewer-child pane**. The carve-out is **read-only**:
@@ -308,23 +307,23 @@ the child pane only polls its own job's `status` route and renders — it never
 spawns or mutates anything. It is safe precisely because it is the child's own
 pane reading the child's own job; nothing about it can affect another session.
 
-**Pending state.** Until a submitted YAML exists, the pane shows exactly
+**Pending state.** Until a final payload exists, the pane shows exactly
 `PR Walkthrough: In Progress` with a spinner (`data-testid="prw-pending"`, no
-progress %). The child pane self-drives the poll keyed off its own
-`binding/<self>`: on mount, with a binding present and no rendered bundle yet, a
-guarded one-shot starts the poll loop (single-flighted by a `polling` flag so a
-re-render never stacks loops). The `status` child-self path returns
-`phase: "running"` until the `submitted/<jobId>` marker appears — **without**
+progress %). The child pane self-drives the poll keyed off its own review binding:
+on mount, with a binding present and no rendered bundle yet, a guarded one-shot
+starts the poll loop (single-flighted by a `polling` flag so a re-render never
+stacks loops). The `status` child-self path returns `phase: "running"` or
+`phase: "draft"` until `reviews/<jobId>/final/payload` exists — **without**
 calling `host.agents.status`, so a read-only reviewer that goes idle without
-submitting is not mistaken for done.
+finalizing is not mistaken for done.
 
 **Submitted → rendered, and reload.** On `phase: "submitted"` the pane flips the
-pending state to the rendered walkthrough cards (the existing `publish`→`bundle`
-seam). On a reload of the child session the pane finds its in-memory `byJob` state
-empty and re-renders automatically via the **child-self `recover`** path
-(`binding/<self>` → `submitted/<jobId>`); `publishAndLoad` is idempotent, so the
-same cards re-render with the same `persistedAt`. The reviewer is **not** dismissed
-on submit — it stays a live, selectable session (see
+pending state to the rendered walkthrough cards served from `bundle`. On a reload
+of the child session the pane finds its in-memory `byJob` state empty and
+re-renders automatically via the **child-self `recover`** path (review binding →
+`reviews/<jobId>/final/payload`); the same finalized cards re-render with the same
+`persistedAt`. The reviewer is **not** dismissed on finalization — it stays a
+live, selectable session (see
 [Lifecycle: no auto-dismiss](#lifecycle-no-auto-dismiss-restart-survival-and-termination)).
 
 ### Ready-state shell parity contract
@@ -409,9 +408,10 @@ spawn:
 ### The reviewer's toolset — a pack-shipped role, no secret
 
 The reviewer child gets its tools from the pack-shipped **`pr-reviewer` role**
-(`market-packs/pr-walkthrough/roles/pr-reviewer.yaml`), which resolves to
-**exactly** the three walkthrough tools shipped in
-`market-packs/pr-walkthrough/tools/pr-walkthrough/`.
+(`market-packs/pr-walkthrough/roles/pr-reviewer.yaml`), which resolves to the PR
+Walkthrough tools shipped in `market-packs/pr-walkthrough/tools/pr-walkthrough/`:
+read-only inspection, bounded bundle reads, durable chunk submission, status
+readback, finalization, and compatibility full-YAML submission.
 
 **The role must resolve cascade-first.** Because `pr-reviewer` ships *in the pack*,
 it lives in the config cascade, not the in-memory `RoleManager`. Every server path
@@ -423,44 +423,40 @@ used. Two paths previously looked the role up in `RoleManager` alone, got
 (`lookupRole` in `src/server/agent/session-setup.ts`) and the restore/respawn role
 resolution (`resolveSessionRole(projectId)` in
 `src/server/agent/session-manager.ts`). With the `PR Walkthrough` group now
-default-deny, that fall-through hard-blocked all three walkthrough tools, so the
+default-deny, that fall-through hard-blocked the walkthrough tool group, so the
 spawned reviewer held the right allowlist yet was rejected on every call ("Tool X
 is not permitted for this role") — and, resolving the role's `promptTemplate`
-through the same `RoleManager`-only lookup, it never received the submission YAML
+through the same `RoleManager`-only lookup, it never received the submission
 schema. Resolving cascade-first in both paths (and threading the pack role's
 `promptTemplate` into the child's system prompt via `resolveRolePromptTemplate` +
 `createSession`'s `rolePrompt`) is what lets the reviewer actually **call** its
-tools and know the schema. This is pinned by a unit test asserting the generated
-guard carries no `never` entries for the three tools, plus
-`tests/e2e/pr-walkthrough-host-agents.spec.ts`. See
+tools and know the chunk/finalization schema. This is pinned by role/tool-policy
+unit tests plus `tests/e2e/pr-walkthrough-host-agents.spec.ts`. See
 [docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) § A.
 
-The role `allow`s the `PR Walkthrough`
-tool group and **denies every other fixed group plus all MCP servers** (an
-`mcp__` wildcard deny), so a read-only reviewer holds no state-mutating or
-orchestration tools. The `PR Walkthrough` group is **default-deny for every other
-role**, so `submit_pr_walkthrough_yaml` is reachable **only** from the reviewer —
-the "only the reviewer submits" boundary falls out of tool-granting, with **no
-secret**. This is separate from pack-bound surface authorization: panels, routes,
-and entrypoints are authorized by installed + active pack + own session, while
-these three tools remain normal role/tool-policy-resolved tools.
+The role `allow`s the `PR Walkthrough` tool group and **denies every other fixed
+group plus all MCP servers** (an `mcp__` wildcard deny), so a read-only reviewer
+holds no state-mutating or orchestration tools. The `PR Walkthrough` group is
+**default-deny for every other role**, so chunk submission/finalization tools are
+reachable **only** from the reviewer — the "only the reviewer submits" boundary
+falls out of tool-granting, with **no secret**. This is separate from pack-bound
+surface authorization: panels, routes, and entrypoints are authorized by installed
++ active pack + own session, while these tools remain normal
+role/tool-policy-resolved tools.
 
-**Submit / bundle authorization without a secret.** The reviewer's
-`submit_pr_walkthrough_yaml` and `read_pr_walkthrough_bundle` tools call the
-server endpoints (`src/server/pr-walkthrough/routes.ts`) with an
-`X-Bobbit-Session-Secret` header. The server resolves the **authentic caller
-session id** from that secret (`resolveSessionIdBySecret`) and routes the request
-via the pack-store `binding/<childSessionId>` mapping. This is **right-job
-routing**, not a security boundary: the YAML lands on exactly the job bound to the
-caller, a cross-job request can't resolve another session's binding, and a
-re-submit to a terminal job is rejected (409). Trusted-host enforcement
-(`githubTrustedHosts`) is applied server-side for GitHub targets, because the
-confined pack worker cannot read gateway preferences. **Why no secret is needed:**
-in Bobbit's single-user trust domain the result only ever surfaces in the user's
-own panel, so "fake review content" would be the user's own trusted agent writing
-wrong text into the user's own UI — a bug, not an attack. The old
-`BOBBIT_WALKTHROUGH_SUBMIT_PROOF` secret guarded a threat that does not exist
-here, and it was deleted.
+**Submit / bundle authorization without a submit proof.** The reviewer tools call
+server endpoints with an `X-Bobbit-Session-Secret` header. The server resolves the
+**authentic caller session id** from that secret (`resolveSessionIdBySecret`) and
+routes the request via the pack-store reviewer index and review binding. This is
+**right-job routing**, not a security boundary: chunks and finalization land on
+exactly the job bound to the caller, and a cross-job request cannot resolve another
+session's binding. Trusted-host enforcement (`githubTrustedHosts`) is applied
+server-side for GitHub targets, because the confined pack worker cannot read
+gateway preferences. **Why no submit proof is needed:** in Bobbit's single-user
+trust domain the result only ever surfaces in the user's own panel, so "fake review
+content" would be the user's own trusted agent writing wrong text into the user's
+own UI — a bug, not an attack. The old `BOBBIT_WALKTHROUGH_SUBMIT_PROOF` secret
+guarded a threat that does not exist here, and it was deleted.
 
 **Read-only scoping of `gh`.** The launched-PR identity reaches the reviewer's
 `readonly_bash` policy as non-secret `BOBBIT_WALKTHROUGH_TARGET_*` environment
@@ -480,27 +476,29 @@ reaps it automatically.
   The only double-spawn protection is the client **within-gesture guard**
   (`inFlightSpawnLaunch`), which stops one click from firing twice — it does **not**
   dedup across separate clicks.
-- **No auto-dismiss on submit.** The submit handler
-  (`src/server/pr-walkthrough/routes.ts`) persists the submitted YAML
-  (`submitted/<jobId>` + `binding.status = "submitted"`) and **stops there**. It no
-  longer dismisses the reviewer, no longer stamps a `childTerminal` / `terminalAt`
-  terminal marker, and no longer writes an owner `last/<owner>` pointer (there is
-  no owner-session surface to recover into). The pack `status` route likewise no
-  longer dismisses the child on either branch. After submit the reviewer posts a
-  one-line "walkthrough ready" note, goes idle, and stays **read-only, selectable,
-  and available for follow-up**.
-- **Restart survival.** Because no `childTerminal` marker is stamped, a post-submit
-  reviewer **survives a gateway restart** like any other session. It is reaped only
-  by the standard `host.agents` **owner-gone** rule (`shouldReapChildOnBoot` in
+- **No auto-dismiss on finalization.** Finalization writes
+  `reviews/<jobId>/final/payload`, best-effort cleans draft keys, and **stops
+  there**. It no longer dismisses the reviewer, no longer stamps a `childTerminal`
+  / `terminalAt` terminal marker, and no longer writes an owner `last/<owner>`
+  pointer (there is no owner-session surface to recover into). The pack `status`
+  route likewise no longer dismisses the child on either branch. After finalization
+  the reviewer posts a one-line "walkthrough ready" note, goes idle, and stays
+  **read-only, selectable, and available for follow-up**.
+- **Restart survival.** Because no `childTerminal` marker is stamped, a finalized
+  reviewer **survives a gateway restart** like any other session. Its durable
+  progress is review-scoped in the pack store, and the lifecycle provider injects
+  a bounded chunk/finalization summary before prompts. It is reaped only by the
+  standard `host.agents` **owner-gone** rule (`shouldReapChildOnBoot` in
   `OrchestrationCore` removes it when its owner is archived/gone) — never by a
   PR-walkthrough terminal marker. See
   [docs/orchestration.md](orchestration.md#hostagents--orchestration-for-extension-packs).
 - **Termination is the user's call.** The user terminates the reviewer through the
   existing per-session terminate/dismiss control in the sidebar (the same archive
-  action exposed for `host.agents` child sessions). Terminating discards the
-  session — the walkthrough is **not** preserved anywhere else, which is fine: it
-  is cheap to re-run. Archiving or terminating the **owner** still cascade-reaps the
-  reviewer like any other `host.agents` child.
+  action exposed for `host.agents` child sessions). On reviewer shutdown/archive,
+  the `pr-walkthrough-durable` provider deletes the review prefix, reviewer index,
+  and tied legacy aliases with real `delete` / `deletePrefix`. Archiving or
+  terminating the **owner** still cascade-reaps the reviewer like any other
+  `host.agents` child.
 
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
@@ -540,15 +538,15 @@ session-menu launcher on a branch with no PR shows visible launcher feedback
 and spawns **no** session / performs **no** view switch
 (the browser harness has no real PR, so a click resolves `NO_PR`); the child pane
 auto-shows the pending `PR Walkthrough: In Progress` + spinner with **no** Run/Load
-buttons; and on submit the child pane flips to rendered cards and **re-renders
-across a reload** via the child-self `recover` (same `persistedAt`). The
-launcher→spawn→select-child dispatch and the within-gesture guard are pinned by a
-unit test of `runSpawnLauncher` (a mocked launcher host whose `run` returns
+buttons; and after finalization the child pane flips to rendered cards and
+**re-renders across a reload** via the child-self `recover` (same `persistedAt`).
+The launcher→spawn→select-child dispatch and the within-gesture guard are pinned
+by a unit test of `runSpawnLauncher` (a mocked launcher host whose `run` returns
 `{ ok: true, childSessionId }` → asserts `host.ui.openPanel({ sessionId })` and no
 owner-session mount). The reviewer **spawn**, the **`magnifier` accessory** and
-**`PR Walkthrough` session title**, the exactly-three-tool allowlist, the
+**`PR Walkthrough` session title**, the PR Walkthrough tool allowlist, the
 child-side `status`/`recover` routing, the always-fresh (two clicks → two distinct
-reviewers) behaviour, the **no-dismiss-on-submit** + restart-survival lifecycle,
+reviewers) behaviour, the **no-dismiss-on-finalize** + restart-survival lifecycle,
 and the user-terminate control are pinned in the API spec
 `tests/e2e/pr-walkthrough-host-agents.spec.ts` (whose mock agent cannot resolve a
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
@@ -576,10 +574,10 @@ Key concepts:
 
 ## YAML-to-card mapping
 
-The agent submits exactly one YAML document matching the PR walkthrough schema.
-That YAML is mapped into the card model by the shared synthesis at
-`src/shared/pr-walkthrough/yaml-to-cards.ts` (bundled into the pack's `publish`
-route):
+The durable finalizer assembles reviewer chunks into one canonical YAML document
+matching the PR walkthrough schema. That YAML is mapped into the card model by the
+shared synthesis at `src/shared/pr-walkthrough/yaml-to-cards.ts` (bundled into the
+pack routes):
 
 - `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card, including the six structured guided `sections` (see [Guided orientation step-through](#guided-orientation-step-through)).
 - `design_decisions` become Key design choices cards with trade-offs, alternatives, suggested concerns, and linked hunks.
@@ -660,7 +658,7 @@ predicate and standalone panel simplification`) overflow and truncate badly in t
 
 - The rail renders `card.navLabel ?? deriveNavLabel(card.title)` for every card, and the beat's own `navLabel` for orientation circles.
 - `deriveNavLabel` and `navLabelError` live in `src/shared/pr-walkthrough/nav-label.ts` (shared by server and the pack panel). The cap is `NAV_LABEL_MAX_WORDS = 3` and `NAV_LABEL_MAX_CHARS = 24`. `deriveNavLabel` takes the text before the first `:` / `—` / ` - ` separator (when non-empty), keeps the first ≤3 words, and hard-truncates to 23 chars + `…` if still over the char cap. `navLabelError` rejects empty/whitespace-only, >3-word, or >24-char labels.
-- The review agent may supply an optional `nav_label` per card in its submitted YAML (see [PR walkthrough agent UX](design/pr-walkthrough-agent-ux.md)). In the `submit_pr_walkthrough_yaml` path the server derives a label from the title when `nav_label` is **missing or empty/whitespace-only**; a non-empty `nav_label` that exceeds the caps (>3 words or >24 chars) is **rejected with a validation error** rather than silently truncated, so the agent fixes it and resubmits. (The derive-on-invalid fallback applies only to the internal model card-synthesis path, not to submitted YAML.) Either way, existing and partial YAML always render a non-truncating rail label.
+- The review agent may supply an optional `nav_label` per card in submitted YAML (see [PR walkthrough agent UX](design/pr-walkthrough-agent-ux.md)). In the durable finalization path the server derives a label from the title when `nav_label` is **missing or empty/whitespace-only**; a non-empty `nav_label` that exceeds the caps (>3 words or >24 chars) is **rejected with a validation error** rather than silently truncated, so the agent fixes the relevant chunk and finalizes again. (The derive-on-invalid fallback applies only to the internal model card-synthesis path, not to submitted YAML.) Either way, existing and partial YAML always render a non-truncating rail label.
 
 ## Diff behaviour
 
@@ -735,23 +733,28 @@ The draft can always be copied, even when provider export is unavailable.
 
 The pack panel's reviewable state has three durable layers:
 
-- **Persisted cards (pack store)** — on a successful `submit_pr_walkthrough_yaml`, the pack's `publish` route validates the YAML, synthesizes cards via `yaml-to-cards.ts`, and persists them in the pack-namespaced `host.store` keyed by changeset id, with a stamped-once `persistedAt`. The persisted job pointer also records the base/head SHAs so a deep-link carrying only the `jobId` can recompute the same changeset.
-- **Live changeset (recomputed)** — the changeset itself is **not** stored as a frozen payload; the `bundle` route recomputes it live via `git` from the session worktree on every open, then overlays the persisted cards.
+- **Durable walkthrough payload (pack store)** — the reviewer saves incremental
+  chunks under `reviews/<jobId>/draft/chunks/<sectionId>` and finalizes them into
+  `reviews/<jobId>/final/payload`. The final payload contains canonical YAML,
+  synthesized cards, changeset metadata, warnings, `persistedAt`, `finalizedAt`,
+  and `cardCount`. Compatibility `submit_pr_walkthrough_yaml` writes a `document`
+  chunk and finalizes through the same path.
+- **Live changeset (recomputed)** — the changeset itself is **not** trusted from a
+  caller-supplied repo path; the `bundle` route recomputes it live via `git` from
+  the session worktree on every open, then serves the finalized cards when present.
 - **Reviewer interaction state (pack store + local fallback)** — the panel persists active card, orientation beat, rail collapsed/width, diff mode, comments, decisions, completed review status, dismissed suggestions, collapsed diff blocks, and context expansion under `review-state/<panel>/<job>` in the pack-scoped `host.store`. It also mirrors the same payload to `localStorage` under `bobbit:pr-walkthrough:<review-state-key>` so a tab can recover when host-store persistence is unavailable. This state is per reviewer child/job; it is not an owner-session surface.
 
 The walkthrough lives **only** in the reviewer child session, so reload recovery
-happens there. The reviewer's `submit_pr_walkthrough_yaml` call lives in the child
-session, not any owner transcript, and a full reload clears the in-memory poll
-state — so the child pane rehydrates **automatically on mount** (the read-only
-auto-open carve-out) by calling the **`recover`** route. `recover` is
-**child-self only**: it resolves the submitted YAML from the child's own
-`binding/<self>` (keyed by that binding's job id); the old owner-scoped
-`last/<owner>` fallback was removed with the owner-session surface. The child pane
-then re-reads the live changeset through the `bundle` route (live `git` recompute +
-persisted cards from `host.store`). `publishAndLoad` is idempotent, so the *same*
-persisted cards re-render (same `persistedAt`) on every reload of that child pane.
-See [the run / status / recover routes](#the-run--status--recover-routes) for the
-authorization detail.
+happens there. The reviewer tools run in the child session, not any owner
+transcript, and a full reload clears the in-memory poll state — so the child pane
+rehydrates **automatically on mount** (the read-only auto-open carve-out) by
+calling the **`recover`** route. `recover` is **child-self only**: it resolves the
+review-scoped binding and returns finalized YAML, a bounded draft state, or a
+missing/expired result; the old owner-scoped `last/<owner>` fallback was removed
+with the owner-session surface. The child pane then reads cards through the
+`bundle` route. See [the run / status / recover routes](#the-run--status--recover-routes)
+for the authorization detail and [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md)
+for store keys and cleanup rules.
 
 ## GitHub export
 
@@ -822,26 +825,29 @@ route were **deleted** — the pack's `run` route mints the reviewer directly vi
 `host.agents.spawn` (see
 [Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child)).
 The walkthrough now runs in a **dedicated read-only reviewer child session**, not
-the user's own agent; the read-only tool surface and the YAML-submission contract
-below are otherwise unchanged.
+the user's own agent. The read-only investigation surface is retained, but
+submission is now durable and incremental.
 
-### Read-only investigation tools
+### Read-only investigation and submission tools
 
 A walkthrough agent uses a narrow tool set:
 
 - `read_pr_walkthrough_bundle` for bounded reads of the scoped persisted launch-time PR metadata and diff bundle;
 - `readonly_bash` for additional read-only PR/diff/file inspection;
-- `submit_pr_walkthrough_yaml` for publishing the completed walkthrough.
+- `submit_pr_walkthrough_chunk` for saving one durable YAML section by stable id;
+- `read_pr_walkthrough_submission_status` for bounded saved-progress readback;
+- `finalize_pr_walkthrough_submission` for assembling chunks, validating YAML, synthesizing cards, and committing the final payload;
+- `submit_pr_walkthrough_yaml` as a compatibility wrapper for older single-document prompts.
 
 The agent prompt tells the agent to start with `read_pr_walkthrough_bundle` in
-manifest mode, then request bounded file/hunk reads as needed. The bundle tool
-authorizes by the reviewer's **verified caller session id** (sent as
-`X-Bobbit-Session-Secret`, resolved server-side), resolves the job from the
-reviewer's pack-store binding, reads only that walkthrough job's artifact, and
-does not loosen `readonly_bash` path or command policy.
+manifest mode, then request bounded file/hunk reads as needed. The bundle tool and
+submission tools authorize by the reviewer's **verified caller session id** (sent
+as `X-Bobbit-Session-Secret`, resolved server-side), resolve the job from the
+reviewer's review-scoped binding, and read or write only that walkthrough job's
+state. These tools do not loosen `readonly_bash` path or command policy.
 
-The reviewer holds **exactly** these three tools — granted by the pack-shipped
-`pr-reviewer` role (see
+The reviewer holds only the PR Walkthrough tool group — granted by the
+pack-shipped `pr-reviewer` role (see
 [Launch model](#launch-model-the-isolated-reviewer-child)). It does not receive
 unrestricted `bash`, file write/edit tools, build/test/install commands,
 commit/push tools, GitHub review/comment submission tools, orchestration tools, or
@@ -863,45 +869,56 @@ actions that would create reviews or comments. `git for-each-ref` is allowed onl
 read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`,
 `--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
 
-### YAML submission is the completion path
+### Durable YAML chunks are the completion path
 
-The walkthrough is populated only through `submit_pr_walkthrough_yaml`. The agent
-must submit exactly one YAML document matching the PR walkthrough schema. A final
+The walkthrough is populated only through the reviewer submission tools. A final
 chat answer is never treated as completion.
 
-The agent prompt includes the schema as a fenced `yaml` block for readability. That
-fence is documentation only: the `submit_pr_walkthrough_yaml` tool argument must be
-raw YAML with no Markdown fences, backticks, blockquotes, commentary, or extra YAML
-documents.
+The preferred flow is:
 
-The gateway validates:
+1. Save each completed section with `submit_pr_walkthrough_chunk(section_id, yaml)`.
+2. After compaction, retry, or restart, call `read_pr_walkthrough_submission_status()`
+   to see saved chunks and missing required sections.
+3. Call `finalize_pr_walkthrough_submission()` once required chunks are saved.
+4. If finalization returns validation issues, overwrite the affected chunks and
+   finalize again.
 
-- YAML syntax and single-document shape;
+Valid stable chunk ids are documented in
+[PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md#incremental-chunk-submission).
+Re-sending the same id overwrites that chunk, so retries do not duplicate data.
+
+The agent prompt includes YAML examples as fenced `yaml` blocks for readability.
+Those fences are documentation only: every chunk or single-shot YAML tool argument
+must be raw YAML with no Markdown fences, backticks, blockquotes, commentary, or
+extra YAML documents.
+
+Finalization validates:
+
+- YAML syntax and single-document shape after assembly;
 - required fields, enum values, size limits, and cross-field target consistency;
 - authoritative PR identity against the launched target;
 - hunk/file references against the stored launch-time analysis bundle where possible.
 
-On validation failure, the job moves to `validation_failed`, the panel remains
-unpopulated, and the tool returns field-level retry feedback such as `path` plus
-`message`. The agent can fix the YAML and call the tool again. If the stored bundle
-is missing, corrupt, or unusable, submission fails deterministically with retryable
-`PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit
-time. On success, Bobbit maps the YAML into the renderable payload, persists it,
-marks the job `ready`, and broadcasts the update. Further `submit_pr_walkthrough_yaml`
-calls are rejected once the job is `ready`; the published payload is immutable for
-that job.
+On validation failure, the panel remains unpopulated or in draft state and the tool
+returns structured retry feedback. The agent can overwrite chunks and finalize
+again. On success, Bobbit maps the canonical YAML into the renderable payload,
+writes `reviews/<jobId>/final/payload`, and the panel moves to submitted state.
+Compatibility `submit_pr_walkthrough_yaml` stores a `document` chunk and finalizes
+through the same path, but it is rejected if incremental section chunks already
+exist.
 
 ### Target scoping and canonicalization
 
-GitHub PR targets are canonicalized so repeated launches focus the same job instead
-of duplicating work:
+GitHub PR targets are canonicalized for stable diagnostics, target scoping, and
+changeset identity. Canonicalization does **not** deduplicate launches: every
+launcher click still creates a fresh reviewer and a fresh `prw-<uuid>` job.
 
 - Full PR URL: `github:<owner>/<repo>#<number>` for github.com, or `github:<host>/<owner>/<repo>#<number>` for a trusted enterprise host.
 - Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key (host-qualified for non-github.com remotes).
 
 The host is included in the canonical key for non-github.com hosts so two trusted
-enterprise hosts sharing the same owner/repo/PR number do not collide into one job;
-github.com keeps its legacy unqualified key. See
+enterprise hosts sharing the same owner/repo/PR number do not collide in target
+identity; github.com keeps its legacy unqualified key. See
 [Enterprise host identity and token scoping](#enterprise-host-identity-and-token-scoping).
 
 A number-only target fails with an actionable error when the session worktree has no
@@ -940,15 +957,15 @@ The walkthrough API is internal to Bobbit but useful for tests and integrations:
   `host.agents.spawn`; the analysis bundle is resolved lazily on first
   `read_pr_walkthrough_bundle` (see [Launch model](#launch-model-the-isolated-reviewer-child)).
 - `GET /api/internal/pr-walkthrough/bundle` / `POST /api/internal/pr-walkthrough/bundle` — internal endpoint used only by `read_pr_walkthrough_bundle`; authorizes by the verified caller session id (`X-Bobbit-Session-Secret`), resolves the job + target from the reviewer's pack-store binding, lazily resolves and caches the analysis bundle, and returns bounded manifest/file reads. `/api/internal/pr-walkthrough/analysis-bundle` is the compatibility alias.
-- `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; authorizes by the verified caller session id (`X-Bobbit-Session-Secret`) and routes to the job bound to that session (no submit proof). Cross-job and terminal-job submissions are rejected. It persists the submitted YAML (`submitted/<jobId>` + `binding.status = "submitted"`) and **stops there** — it does **not** dismiss the reviewer, stamp a `childTerminal` terminal marker, or write any owner `last/<sessionId>` pointer (the reviewer stays live; recovery is child-self only — see [Lifecycle](#lifecycle-no-auto-dismiss-restart-survival-and-termination)).
+- `POST /api/internal/pr-walkthrough/submit-yaml` and the durable chunk/finalize tool calls — internal tool endpoints authorize by the verified caller session id (`X-Bobbit-Session-Secret`) and route to the job bound to that session (no submit proof). Chunk submission writes `reviews/<jobId>/draft/chunks/<sectionId>`, status reads return bounded chunk/finalization state, and finalization writes `reviews/<jobId>/final/payload`. Compatibility `submit_pr_walkthrough_yaml` stores a `document` chunk and finalizes through the same path.
 - `POST /api/pr-walkthrough/resolve` — compatibility resolver for fixture/local/direct walkthrough payloads. Stores the resolved payload.
 - `POST /api/pr-walkthrough/<changeset-id>/export/preview` — build a provider review preview from a draft.
 - `POST /api/pr-walkthrough/<changeset-id>/export/submit` — submit a provider review only when `confirm: true` and export is available.
 
-The pack viewer's own data (the live `bundle` recompute and the `publish` card
-persistence) is served by the pack's `lib/routes.mjs` over the pack-namespaced
-`host.store`, reached via `host.callRoute` — **not** by any of the routes above. The
-former bespoke viewer-feed routes (`GET /api/pr-walkthrough/jobs/:id`, `/session/:id`,
+The pack viewer's own data (the live `bundle` recompute, compatibility `publish`,
+and finalized review payload reads) is served by the pack's `lib/routes.mjs` over
+the pack-namespaced `host.store`, reached via `host.callRoute` — **not** by any of
+the routes above. The former bespoke viewer-feed routes (`GET /api/pr-walkthrough/jobs/:id`, `/session/:id`,
 `/:id`) were **deleted**.
 
 ## Target scoping notes for credentials and configuration
@@ -1001,8 +1018,11 @@ differently from github.com:
 - **Cannot find the repository for a number-only target** — select a session whose worktree has a GitHub `origin` remote, or use the full PR URL.
 - **"No open GitHub PR for the current branch" (`NO_PR`)** — open a PR for the branch, then run the walkthrough again.
 - **Local changeset is unsupported (`LOCAL_UNSUPPORTED`)** — the Run gesture is GitHub-PR-only; use the compatibility resolver flow for `baseSha` / `headSha` walkthroughs instead.
-- **Panel stays empty** — the reviewer child has not successfully called `submit_pr_walkthrough_yaml`; check the reviewer session in the sidebar and its validation state.
-- **YAML validation failed** — fix the field-level errors returned by the tool and call `submit_pr_walkthrough_yaml` again from the same session.
+- **Panel stays in progress** — the reviewer child has not finalized a payload yet. Check the reviewer session, call `read_pr_walkthrough_submission_status`, save missing chunks, then call `finalize_pr_walkthrough_submission`.
+- **Panel shows saved draft state** — chunks exist under the review, but `reviews/<jobId>/final/payload` does not. The reviewer can resume from saved chunks.
+- **Walkthrough data expired or was cleaned up** — the reviewer session was archived/terminated and lifecycle cleanup removed the review-scoped payload. Start a new walkthrough.
+- **YAML validation failed** — fix the field-level errors returned by finalization, overwrite the relevant chunks, and call `finalize_pr_walkthrough_submission` again from the same session. For legacy prompts, `submit_pr_walkthrough_yaml` remains available only before section chunks exist.
+- **Quota or too-large review error** — the review exceeded a per-review draft/final quota. Split or shorten analysis; unrelated historical reviews no longer block new reviews.
 - **`PR_WALKTHROUGH_BUNDLE_MISSING` or unusable bundle** — the launch-time analysis bundle artifact is missing, corrupt, or no longer readable. This is retryable, but submission will not re-fetch the diff; rerun the walkthrough so Bobbit resolves and persists a fresh bundle.
 - **Private PR fails or shows permission errors** — set `GITHUB_TOKEN` or `GH_TOKEN` with repository read and pull request review permissions, then retry.
 - **Rate limited** — configure a token or wait for GitHub's rate limit reset.
@@ -1017,13 +1037,16 @@ differently from github.com:
 Coverage is split across unit, API E2E, and browser E2E tests:
 
 - YAML schema validation and YAML-to-card mapping (`src/shared/pr-walkthrough/yaml-to-cards.ts`);
-- read-only command policy and walkthrough tool metadata;
+- read-only command policy and durable walkthrough tool metadata;
+- pack-store delete/deletePrefix, scoped review quotas, emergency quota ceiling, and structured Host API errors (`tests/extension-host-pack-store.test.ts`, `tests/extension-host-server-host-api.test.ts`, `tests/client-host-api.spec.ts`);
+- durable route behavior: review-scoped run writes, chunk idempotency, finalization, compatibility conflicts, final-payload authorization, and trusted metadata overlay (`tests/pr-walkthrough-durable-routes.test.ts`);
+- lifecycle provider behavior: durable progress prompt block, bounded compaction checkpoint, and shutdown cleanup of review-scoped plus tied legacy keys (`tests/pr-walkthrough-lifecycle-provider.test.ts`);
 - session-list synchronization: visible session creation emits `session_created` or `sessions_changed` before the polling fallback (`tests/e2e/session-created-sync.spec.ts`), and the mobile landing page keeps an authenticated `/ws/viewer` listener that refreshes the session list without creating a `RemoteAgent` (`tests/e2e/ui/session-created-push-sync.spec.ts`);
-- the isolated reviewer child: `run` mints a `host-agents` / `pr-reviewer` read-only child with the `magnifier` accessory and the `PR Walkthrough` session title and the owner's agent is never prompted, the reviewer's allowlist is exactly the three walkthrough tools, always-fresh launch (two `run` calls for the same PR → two distinct reviewers), and owner-gone cascade cleanup (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
-- binding-routed submit/bundle authorization by `X-Bobbit-Session-Secret` (no submit proof anywhere in the tree), and submit/validation behavior;
+- the isolated reviewer child: `run` mints a `host-agents` / `pr-reviewer` read-only child with the `magnifier` accessory and the `PR Walkthrough` session title and the owner's agent is never prompted, the reviewer receives the durable PR Walkthrough toolset, always-fresh launch (two `run` calls for the same PR → two distinct reviewers), and owner-gone cascade cleanup (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
+- binding-routed chunk/finalize/bundle authorization by `X-Bobbit-Session-Secret` (no submit proof anywhere in the tree), and submission/validation behavior;
 - the agent-side resolve/export routes;
-- the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the three walkthrough tools and its system prompt carries the YAML schema, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + schema across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after submit the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
-- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
+- the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the PR Walkthrough tools and its system prompt carries the chunk/finalization guidance, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + prompt across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after finalization the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
+- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards after finalization, surviving reload via the child-self `recover`, and showing bounded draft/missing/quota/schema states; plus explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`, `tests/pr-walkthrough-panel-parity.spec.ts`);
 - pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.

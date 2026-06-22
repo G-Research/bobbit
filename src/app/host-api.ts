@@ -26,6 +26,8 @@ import {
 	type PostMessageInput,
 	type HostSessionEventName,
 	type HostSessionEventMap,
+	type StorePutOptions,
+	type StoreStats,
 } from "../shared/extension-host/host-api.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
@@ -44,6 +46,45 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
 	const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
 	if (sessionId) headers["x-bobbit-session-id"] = sessionId;
 	return { ...init, headers };
+}
+
+const compactDetails = (details: unknown): string | undefined => {
+	if (details == null) return undefined;
+	if (typeof details === "string") return details;
+	if (Array.isArray(details)) return details.slice(0, 3).map((item) => compactDetails(item)).filter(Boolean).join("; ") || undefined;
+	if (typeof details === "object") {
+		const record = details as Record<string, unknown>;
+		if (Array.isArray(record.errors)) return compactDetails(record.errors);
+		const path = typeof record.path === "string" ? record.path : undefined;
+		const message = typeof record.message === "string" ? record.message : undefined;
+		if (path || message) return [path, message].filter(Boolean).join(": ");
+		try { return JSON.stringify(details).slice(0, 240); }
+		catch { return undefined; }
+	}
+	return String(details);
+};
+
+async function routeHttpError(name: string, resp: Response): Promise<Error> {
+	let body: unknown;
+	try { body = await resp.clone().json(); }
+	catch { try { body = await resp.clone().text(); } catch { body = undefined; } }
+	const record = body && typeof body === "object" ? body as Record<string, unknown> : undefined;
+	const code = typeof record?.code === "string" ? record.code : undefined;
+	const routeError = typeof record?.error === "string" ? record.error : undefined;
+	const details = compactDetails(record?.details);
+	const textBody = typeof body === "string" ? body.trim() : undefined;
+	const parts = [`callRoute ${name} HTTP ${resp.status}`];
+	if (code) parts.push(code);
+	if (routeError) parts.push(routeError);
+	else if (textBody) parts.push(textBody.slice(0, 240));
+	if (details) parts.push(details);
+	const error = new Error(parts.join(" — ")) as Error & { status?: number; code?: string; routeError?: string; details?: unknown; body?: unknown };
+	error.status = resp.status;
+	if (code) error.code = code;
+	if (routeError) error.routeError = routeError;
+	if (record && "details" in record) error.details = record.details;
+	if (body !== undefined) error.body = body;
+	return error;
 }
 
 /** sha256 hex of `role + "\n" + text` — the content binding for a C2 session-write
@@ -171,7 +212,7 @@ export function getHostApi(
 	};
 	// Slice B1: POST a store op to /api/ext/store/:op carrying the SERVER-MINTED
 	// surface token (NOT a raw `tool`) so the server derives the trusted packId.
-	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {
+	const storeOp = async (op: "get" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
 		if (!surface) throw new Error("host.store requires a pack-served renderer context");
 		const resp = await scopedFetch((token) => ({
 			path: `/api/ext/store/${op}`,
@@ -243,7 +284,7 @@ export function getHostApi(
 				path: `/api/ext/route/${encodeURIComponent(name)}`,
 				init: { method: "POST", body: JSON.stringify({ sessionId, toolUseId, surfaceToken: token, init }) },
 			}));
-			if (!resp.ok) throw new Error(`callRoute ${name} HTTP ${resp.status}`);
+			if (!resp.ok) throw await routeHttpError(name, resp);
 			return resp.json() as Promise<TResult>;
 		},
 		session: {
@@ -347,10 +388,13 @@ export function getHostApi(
 		} as HostApi["ui"],
 		store: {
 			get: async (key: string) => (await storeOp("get", { key })) as never,
-			put: async (key: string, value: unknown) => {
-				await storeOp("put", { key, value });
+			put: async (key: string, value: unknown, opts?: StorePutOptions) => {
+				await storeOp("put", { key, value, opts });
 			},
 			list: async (prefix?: string) => (await storeOp("list", { prefix })) as string[],
+			delete: async (key: string) => (await storeOp("delete", { key })) as boolean,
+			deletePrefix: async (prefix: string) => (await storeOp("deletePrefix", { prefix })) as number,
+			stats: async (prefix?: string) => (await storeOp("stats", { prefix })) as StoreStats,
 		} as HostApi["store"],
 	};
 }
