@@ -44,6 +44,66 @@ async function ready(page: any) {
 	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 30_000 });
 }
 
+test.describe("RemoteAgent provider auth recovery", () => {
+	test("stores a redacted provider_auth_required event and clears it on retry, new prompt, model switch, and agent_start", async ({ page }) => {
+		await ready(page);
+		const r = await page.evaluate(async () => {
+			const w = window as any;
+			const makeEvent = () => ({
+				type: "provider_auth_required",
+				provider: "openrouter",
+				source: "direct prompt",
+				reason: "missing-api-key",
+				message: "OpenRouter API key is missing. Add or fix the API key in Settings, switch provider, then retry.",
+				error: "No API key found for openrouter: sk-or-secret-never-render",
+				actions: [
+					{ type: "open_settings", label: "Fix API key in Settings" },
+					{ type: "retry", label: "Retry after fixing credentials" },
+					{ type: "switch_provider", label: "Switch provider" },
+					{ type: "abort_respawn", label: "Abort/respawn agent" },
+				],
+			});
+
+			const retryAgent = w.__makeAgent(w.__OPEN);
+			w.__event(retryAgent, makeEvent());
+			const stored = w.__snapshot(retryAgent).providerAuthRequired;
+			retryAgent.retry();
+			const afterRetry = w.__snapshot(retryAgent);
+
+			const promptAgent = w.__makeAgent(w.__OPEN);
+			w.__event(promptAgent, makeEvent());
+			await promptAgent.prompt("after key fix");
+			const afterPrompt = w.__snapshot(promptAgent);
+
+			const modelAgent = w.__makeAgent(w.__OPEN);
+			w.__event(modelAgent, makeEvent());
+			modelAgent.setModel({ provider: "anthropic", id: "claude-test", contextWindow: 1 });
+			const afterModel = w.__snapshot(modelAgent);
+
+			const startAgent = w.__makeAgent(w.__OPEN);
+			w.__event(startAgent, makeEvent());
+			w.__event(startAgent, { type: "agent_start" });
+			const afterStart = w.__snapshot(startAgent);
+
+			return { stored, afterRetry, afterPrompt, afterModel, afterStart };
+		});
+
+		expect(r.stored).toMatchObject({
+			provider: "openrouter",
+			source: "direct prompt",
+			reason: "missing-api-key",
+		});
+		expect(JSON.stringify(r.stored)).not.toContain("sk-or-secret-never-render");
+		expect(r.afterRetry.providerAuthRequired).toBeNull();
+		expect(r.afterRetry.sent.at(-1)).toMatchObject({ type: "retry" });
+		expect(r.afterPrompt.providerAuthRequired).toBeNull();
+		expect(r.afterPrompt.sent.at(-1)).toMatchObject({ type: "prompt", text: "after key fix" });
+		expect(r.afterModel.providerAuthRequired).toBeNull();
+		expect(r.afterModel.sent.at(-1)).toMatchObject({ type: "set_model", provider: "anthropic", modelId: "claude-test" });
+		expect(r.afterStart.providerAuthRequired).toBeNull();
+	});
+});
+
 test.describe("RemoteAgent send outbox (S2)", () => {
 	test("offline prompt is queued as a pending pill (no drop, no false 'sent' bubble) and flushes on reconnect", async ({ page }) => {
 		await ready(page);

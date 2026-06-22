@@ -24,6 +24,28 @@ export interface AutoRetryCancelledEvent {
 	cancelledAt: number;
 }
 
+export type ProviderAuthRecoveryActionType = "open_settings" | "retry" | "switch_provider" | "abort_respawn";
+
+export interface ProviderAuthRecoveryAction {
+	type: ProviderAuthRecoveryActionType;
+	label: string;
+}
+
+/** Provider credential failure that needs operator action.
+ *  Wrapped as an agent event in `{ type: "event", data: ProviderAuthRequiredEvent }`. */
+export interface ProviderAuthRequiredEvent {
+	type: "provider_auth_required";
+	provider: string;
+	source: string;
+	reason: "missing-api-key";
+	message: string;
+	actions: ProviderAuthRecoveryAction[];
+	/** Diagnostic reason only. Clients must not render or persist this field. */
+	error?: string;
+}
+
+export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent;
+
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
 	id: string;

@@ -271,7 +271,8 @@ import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "./agent/thinking-level-clamp.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
 // `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
@@ -308,7 +309,7 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
@@ -469,8 +470,7 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	if (slash <= 0) return known;
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
-	const meta = inferMeta(modelId);
-	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
+	return clampThinkingLevelForModel(known, provider, modelId);
 }
 
 export function isMissingRemoteRefDeleteError(err: unknown): boolean {

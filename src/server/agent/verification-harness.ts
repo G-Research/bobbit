@@ -69,8 +69,9 @@ import { applyReviewModelOverrides, applyModelString } from "./review-model-over
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
-import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
-import { inferMeta } from "./aigw-manager.js";
+import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
@@ -93,8 +94,7 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	if (slash <= 0) return level;
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
-	const meta = inferMeta(modelId);
-	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+	return clampThinkingLevelForModel(level, provider, modelId);
 }
 
 export interface VerificationToolActivationDeps {
@@ -3554,6 +3554,9 @@ export class VerificationHarness {
 			? _preLegacyRoleModel
 			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
+			model: bridgeOptions.initialModel,
+		});
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 		const _legacyValidLevels = THINKING_LEVELS as readonly string[];

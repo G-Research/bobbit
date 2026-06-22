@@ -1497,6 +1497,45 @@ For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.
 
 ---
 
+## Host agent provider key bridge
+
+Settings-saved provider API keys live in global preferences as `providerKey.<provider>`. The model registry uses those keys to mark providers authenticated; direct host agent processes must receive the same credentials or the UI can show an authenticated model that the spawned agent cannot use.
+
+For direct/non-sandbox agents, Bobbit resolves Settings keys into the provider env vars pi-coding-agent expects before constructing `RpcBridgeOptions.env`. The bridge is intentionally in-memory only: key values are merged into the child process environment and are not written to session JSON, transcripts, EventBuffer entries, or logs. Existing call-site env values win over Settings-derived values so explicit tool/session env overrides keep working.
+
+Current built-in mappings include:
+
+| Settings key | Agent env var |
+|---|---|
+| `providerKey.anthropic` | `ANTHROPIC_API_KEY` |
+| `providerKey.openai` | `OPENAI_API_KEY` |
+| `providerKey.google` | `GEMINI_API_KEY` |
+| `providerKey.xai` | `XAI_API_KEY` |
+| `providerKey.groq` | `GROQ_API_KEY` |
+| `providerKey.mistral` | `MISTRAL_API_KEY` |
+| `providerKey.openrouter` | `OPENROUTER_API_KEY` |
+
+Sandboxed agents do **not** use this direct-host bridge. Their credential exposure remains governed by project `sandbox_tokens`: a sandbox only receives a provider env var when the project policy includes an enabled token row for that env var. If the row has no inline value, host-token resolution can source the value from Settings or host auth, but the explicit `sandbox_tokens` opt-in is still required. This keeps sandbox token policy as the least-privilege boundary.
+
+### Failure handling
+
+Provider-auth dispatch failures such as `No API key found for openrouter` are classified as `missing-api-key`. Bobbit redacts the raw provider error, re-enqueues any prompt rows that were not accepted by the agent, persists `wasStreaming: false`, clears `streamingStartedAt`, broadcasts `session_status: "idle"`, and emits a `provider_auth_required` recovery event. The client renders this as a provider-auth banner with actions to fix the key in Settings, retry, switch provider, or abort/respawn the agent.
+
+Key files and tests:
+
+| File | Role |
+|---|---|
+| `src/server/agent/host-tokens.ts` | `resolveHostAgentProviderEnv` / `mergeHostAgentProviderEnv`; direct-host provider env mapping and sandbox-token separation. |
+| `src/server/agent/session-setup.ts` | Normal direct session spawn path merges Settings provider keys into `RpcBridgeOptions.env`. |
+| `src/server/agent/session-manager.ts` | Restore, respawn, dispatch recovery, and `provider_auth_required` emission. |
+| `src/server/agent/verification-harness.ts` | Legacy direct `RpcBridge` reviewer fallback also merges host provider env. |
+| `src/ui/components/AgentInterface.ts` | Provider-auth banner and recovery actions. |
+| `tests/openrouter-key-bridge-repro.test.ts` | OpenRouter direct/restored spawn env, redaction, idle transition, retry recovery. |
+| `tests/spawn-env.test.ts` | Bridge env merge invariants and session-secret precedence. |
+| `tests/remote-agent-outbox.spec.ts` | Client-side provider-auth state and secret redaction. |
+
+---
+
 ## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
 Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:

@@ -699,6 +699,19 @@ Symptom: the model calls `activate_skill` autonomously and the tool result is `a
 
 Lesson for extension authors: never read tool params from the first `execute()` argument, and never gate UI error display on `isError` for tools that signal failure by *returning* an error result. See [docs/internals.md — Skill chip rendering & autonomous activation](internals.md#skill-chip-rendering--autonomous-activation).
 
+## OpenRouter sessions stuck after provider-auth failure
+
+- **Symptom**: OpenRouter appears authenticated in Settings/Models, but a direct or team agent reports `No API key found for openrouter`, remains shown as streaming, or accumulates queued prompts that never drain.
+- **Cause**: pre-fix direct/non-sandbox `RpcBridge` spawns did not receive `providerKey.openrouter` as `OPENROUTER_API_KEY`, even though model auth detection treated the Settings key as valid. Provider-auth dispatch failures also left stale streaming state in persisted sessions.
+- **Fixed behavior**: Settings-saved provider keys are bridged into direct/non-sandbox agent env (`providerKey.openrouter` → `OPENROUTER_API_KEY`, plus the other built-in API-key providers). Sandboxed agents are unchanged: provider env vars still require an enabled `sandbox_tokens` entry. Missing/invalid provider credentials now transition the session to idle, keep the rejected prompt recoverable at the front of the queue, and surface a provider-auth banner with **Fix API key**, **Retry**, **Switch provider**, and **Abort/respawn** actions. Raw key material is redacted from client frames, EventBuffer, logs, and session metadata.
+- **Operator recovery for existing stuck sessions**:
+  1. Deploy/restart onto a build that contains the host provider key bridge.
+  2. Confirm Settings → Models has a valid OpenRouter key, or switch the affected session/team agent to a known-working provider. For sandboxed agents, also confirm project `sandbox_tokens` explicitly enables `OPENROUTER_API_KEY` if OpenRouter should be available inside Docker.
+  3. For each affected direct/team session, use the banner's **Abort/respawn** action (or the session/team abort API) so the subprocess restarts with fresh env. If the session is already idle with a provider-auth banner, fixing/switching credentials and pressing **Retry** is enough.
+  4. Retry the queued prompt. The queue row should be consumed and `wasStreaming` should remain `false` unless a new turn is actively running.
+- **Where to look**: `src/server/agent/host-tokens.ts::mergeHostAgentProviderEnv`, `session-setup.ts::_resolveBridgeOptions`, `session-manager.ts::surfaceProviderAuthFailure`, `src/ui/components/AgentInterface.ts::renderProviderAuthRequired`, and [internals.md — Host agent provider key bridge](internals.md#host-agent-provider-key-bridge).
+- **Pinning tests**: `tests/openrouter-key-bridge-repro.test.ts`, `tests/spawn-env.test.ts`, `tests/remote-agent-outbox.spec.ts`.
+
 ## Multi-project / per-project state
 
 - State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
