@@ -1686,7 +1686,9 @@ async function handleGitFetch(): Promise<void> {
 
 async function handleGitStatusDropdownOpen(): Promise<void> {
 	if (!currentGoalId) return;
-	await refreshGoalGitStatus(currentGoalId, { untracked: true });
+	// Pill open combines remote fetch and full untracked loading in one request
+	// so the paired dropdown event cannot abort the fetch-only refresh.
+	await refreshGoalGitStatus(currentGoalId, { fetch: true, untracked: true });
 }
 
 // ============================================================================

@@ -15,7 +15,82 @@
  *  - Keyboard-only multi-question submission.
  */
 import { test, expect } from "./fixtures.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import type { Page } from "@playwright/test";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
+
+// Stable, identifiable marker embedded in every pre-submit draft-loss
+// assertion message. The reproducing-test gate matches a single error_pattern
+// against combined stdout+stderr, so a unique string (mirroring the composer
+// "composer draft lost" stories) is more meaningful than a generic Playwright
+// locator-timeout message. error_pattern: ask draft lost
+const ASK_DRAFT_LOST = "ask draft lost";
+
+/**
+ * Drive a freshly-rendered composite ask into a pending (un-submitted) state:
+ * pick `blue` on Q1 ("Favorite color?" -> auto-advances to Q2), then type the
+ * given Other text on Q2 ("Team size?", auto-selecting Other). Leaves the
+ * widget interactive and unsubmitted. Returns the resolved widget locator.
+ */
+async function fillPendingCompositeDraft(page: Page, otherText: string) {
+	const widget = page.locator("ask-user-choices-widget").first();
+	await expect(widget).toBeVisible({ timeout: 20_000 });
+	// Wait for streaming to settle so the 250ms auto-advance timer isn't dropped
+	// by a mid-stream widget re-render (see keyboard-only test for the rationale).
+	await page.waitForFunction(
+		() => (window as any).__bobbitState?.remoteAgent?.state?.isStreaming === false,
+		{ timeout: 15_000 },
+	);
+	// Q1: pick "blue" -> single-select auto-advances to Q2.
+	await widget.locator('[role="tab"][data-tab-index="0"]').click();
+	await widget.locator('label:has(input[value="blue"])').click();
+	await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
+		.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+	// Q2: type Other text -- auto-selects the Other option, no submit.
+	const other = widget.locator(".ask-other-input");
+	await expect(other).toBeVisible();
+	await other.fill(otherText);
+	await expect(widget.locator('input[type="radio"][value="__OTHER__"]')).toBeChecked();
+	return widget;
+}
+
+/**
+ * Assert the composite pre-submit draft was restored after the widget element
+ * was recreated (reload / cache-evicted switch): Q2 still holds the typed Other
+ * text, Q1 still shows `blue` selected, and the widget is still interactive
+ * (Submit present). On buggy builds the recreated widget comes back empty and
+ * these fail with the stable "ask draft lost" marker.
+ */
+async function expectCompositeDraftRestored(page: Page, otherText: string, scenario: string) {
+	const widget = page.locator("ask-user-choices-widget").first();
+	await expect(widget).toBeVisible({ timeout: 20_000 });
+	// Still interactive -- must not have flipped read-only (no answer envelope yet).
+	await expect(
+		widget.locator(".ask-submit"),
+		`${ASK_DRAFT_LOST}: widget not interactive after ${scenario}`,
+	).toBeVisible({ timeout: 10_000 });
+	// Only the active panel is in the DOM, so explicitly select each tab before
+	// asserting its restored state. Q2 Other text first (fails fast on buggy code).
+	await widget.locator('[role="tab"][data-tab-index="1"]').click();
+	await expect(
+		widget.locator(".ask-other-input"),
+		`${ASK_DRAFT_LOST}: Q2 Other text missing after ${scenario}`,
+	).toHaveValue(otherText, { timeout: 10_000 });
+	await expect(
+		widget.locator('input[type="radio"][value="__OTHER__"]'),
+		`${ASK_DRAFT_LOST}: Q2 Other selection missing after ${scenario}`,
+	).toBeChecked();
+	// Q1 selection survived.
+	await widget.locator('[role="tab"][data-tab-index="0"]').click();
+	await expect(
+		widget.locator('input[type="radio"][value="blue"]'),
+		`${ASK_DRAFT_LOST}: Q1 selection missing after ${scenario}`,
+	).toBeChecked({ timeout: 10_000 });
+	// Inputs remain enabled (interactive, not read-only).
+	await expect(
+		widget.locator('input[type="radio"][value="blue"]'),
+		`${ASK_DRAFT_LOST}: restored widget should still be editable after ${scenario}`,
+	).toBeEnabled();
+}
 
 test.describe("ask_user_choices widget (full-stack UI)", () => {
 	test("composite widget lifecycle — Other cleanup, reload persistence, and read-only restore", async ({ page, rec }) => {
@@ -368,5 +443,132 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// Confirm Q1 "red" survived as the recorded answer.
 		await widget.locator('[role="tab"][data-tab-index="0"]').click();
 		await expect(widget.locator('input[type="radio"][value="red"]')).toBeChecked();
+	});
+
+	// ---------------------------------------------------------------
+	// Pre-submit draft persistence (@repro) — these reproduce the
+	// transient-draft-loss bug described in
+	// docs/design/transient-draft-state.md §1. They are EXPECTED TO FAIL on
+	// the current (buggy) build: pre-submit selections live only in
+	// component-local Lit @state, so any event that recreates the widget
+	// element (reload, cache-evicted session switch) drops them. They pass
+	// once AskUserChoicesWidget seeds/persists its draft via the shared
+	// TransientDraftStore. All draft-loss assertions carry the stable
+	// "ask draft lost" marker for the reproducing-test gate.
+	// ---------------------------------------------------------------
+
+	test("pre-submit selections survive reload @repro", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices_composite");
+
+		const otherText = "draft-reload-7f3a";
+		await fillPendingCompositeDraft(page, otherText);
+
+		// Reload mid-flow WITHOUT submitting. The pending tool_use re-renders as a
+		// fresh interactive widget (no answer envelope follows it yet).
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+
+		await expectCompositeDraftRestored(page, otherText, "page reload");
+	});
+
+	test("pre-submit selections survive cache-evicted session switch @repro", async ({ page }) => {
+		// Cycling through >SESSION_CACHE_MAX (10) sessions to evict the origin from
+		// the LRU sessionCache is heavier than the default 30s budget.
+		test.setTimeout(120_000);
+
+		await openApp(page);
+		const originId = await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices_composite");
+
+		const otherText = "draft-evict-9b2c";
+		await fillPendingCompositeDraft(page, otherText);
+
+		// Visit 11 OTHER sessions so the origin is pushed out of the LRU
+		// sessionCache (SESSION_CACHE_MAX = 10). Caching happens on switch-AWAY:
+		// creating each new session caches the previous one, so after 11 new
+		// sessions the cache holds origin + 10 others (11 entries) and evicts the
+		// oldest (origin). Returning to origin then takes the slow path and
+		// recreates its <agent-interface> and the ask widget from the transcript.
+		for (let i = 0; i < 11; i++) {
+			await createSessionViaUI(page);
+		}
+
+		// Slow-path switch back to the (now evicted) origin session.
+		await navigateToHash(page, `#/session/${originId}`);
+
+		await expectCompositeDraftRestored(page, otherText, "cache-evicted session switch");
+	});
+
+	test("submit clears the draft — no resurrection after reload", async ({ page }) => {
+		// Guards the submit/answered cleanup path: once answers are submitted they
+		// are transcript-backed, and the cleared draft must NOT resurrect a stale
+		// interactive widget after a reload. (Passes on the current build because
+		// the submitted-answer transcript model is already durable; it pins that
+		// the new draft store's clear()/tombstone never re-creates scratch state.)
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices_composite");
+
+		const widget = await fillPendingCompositeDraft(page, "will-be-submitted");
+
+		// Submit from the last tab (Q2 is active after the helper).
+		const submit = widget.locator(".ask-submit");
+		await expect(submit).toBeEnabled({ timeout: 5_000 });
+		await submit.click();
+		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
+
+		// Reload: the persisted answer envelope restores read-only state and the
+		// cleared draft must not bring back an interactive (editable) widget.
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+		const readOnly = page.locator("ask-user-choices-widget").first();
+		await expect(readOnly).toBeVisible({ timeout: 20_000 });
+		await expect(
+			readOnly.locator(".ask-submit"),
+			"submitted ask draft must not resurrect an interactive widget after reload",
+		).toHaveCount(0, { timeout: 10_000 });
+		await expect(readOnly.locator('input[type="radio"]').first()).toBeDisabled();
+		// The submitted Q1 answer (blue) is restored from the transcript.
+		await readOnly.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(readOnly.locator('input[type="radio"][value="blue"]')).toBeChecked();
+	});
+
+	test("pre-submit drafts are per-tab isolated", async ({ page, context }) => {
+		// sessionStorage-backed drafts are intentionally per-tab: a draft typed in
+		// tab 1 must NOT leak into a second tab viewing the same pending ask. This
+		// guards against a regression where the draft is moved to localStorage
+		// (cross-tab) instead of sessionStorage. Passes on the current build (no
+		// persistence at all) and after the fix (per-tab sessionStorage).
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices_composite");
+
+		// Open a second tab on the same pending session BEFORE filling tab 1.
+		const pendingUrl = page.url();
+		const page2 = await context.newPage();
+		await page2.goto(pendingUrl);
+		const widget2 = page2.locator("ask-user-choices-widget").first();
+		await expect(widget2).toBeVisible({ timeout: 20_000 });
+		await expect(widget2.locator(".ask-submit")).toBeVisible();
+
+		// Fill a pending draft in tab 1.
+		await fillPendingCompositeDraft(page, "tab1-only-secret");
+
+		// Tab 2 must remain interactive with NO selections leaked from tab 1.
+		await expect(widget2.locator(".ask-submit")).toBeVisible();
+		await widget2.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(widget2.locator('input[type="radio"][value="blue"]')).not.toBeChecked();
+		await widget2.locator('[role="tab"][data-tab-index="1"]').click();
+		await expect(widget2.locator(".ask-other-input")).toHaveValue("");
+		await expect(widget2.locator('input[type="radio"][value="__OTHER__"]')).not.toBeChecked();
+
+		await page2.close();
 	});
 });

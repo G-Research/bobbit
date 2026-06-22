@@ -57,6 +57,29 @@ The per-project workflow availability is cached client-side (`_workflowCacheByPr
 
 To author workflows for a project, see [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) and run the project assistant from Settings → Components.
 
+#### Unified goal proposal tabs
+
+Every goal proposal surface uses the same tabbed form rendered by `renderGoalForm()` in `src/app/proposal-panels.ts`. This includes assistant proposal panels, the `+ New Goal` flow, historical proposal revision views, and project-scoped goal creation. The unified form keeps proposal editing predictable: fields no longer move between surfaces, and accept/dismiss/create footer actions stay available regardless of the selected tab.
+
+Guaranteed tab layout:
+
+- **Goal** is the default active tab.
+- **Goal**, **Workflow**, **Roles**, and **Metadata** are always visible for goal proposals.
+- **Sub-goals** appears only when the Settings sub-goals flag is enabled.
+- The footer is outside the tab panels, so submit/dismiss/create behavior is preserved across tabs.
+
+Tab ownership is strict:
+
+- The **Goal** tab owns title, project/directory, workflow picker shortcut, sandbox/team toggles, optional workflow-step toggles, and the spec editor/preview.
+- The **Workflow** tab owns workflow inspection and per-goal workflow customization. When no workflows are available, it renders a read-only empty state instead of disappearing.
+- The **Roles** tab owns role inspection and per-goal role customization. While roles are loading or unavailable, it renders loading/empty states instead of hiding the tab.
+- The **Metadata** tab is the only place the key/value metadata editor renders. The main Goal tab must never contain `renderGoalMetadataEditor()`.
+- The **Sub-goals** tab owns parent/child goal controls and is gated only by the system sub-goals setting.
+
+Metadata draft state is shared across tabs rather than stored in panel-local DOM. Seeded `propose_goal` metadata hydrates the Metadata tab, user edits survive tab switches, blank-key rows are dropped on submit, values are JSON-parsed where possible, and accepted/created goals persist the resulting `metadata` field. An empty metadata editor sends no override, preserving legacy goal records.
+
+Browser coverage lives in [`tests/e2e/ui/goal-metadata.spec.ts`](../tests/e2e/ui/goal-metadata.spec.ts). It pins the default Goal tab, required tab visibility, Metadata-tab-only editor placement, Sub-goals flag behavior, metadata edit persistence, and accepted-goal metadata persistence.
+
 #### `createGoal` failure preserves the assistant
 
 The goal-assistant accept flow (both the goal-preview panel handler and the `propose_goal` proposal-toast handler in `src/app/render.ts`) awaits `POST /api/goals` **before** tearing down any state. Disconnecting the remote agent, clearing the active assistant view, deleting the persisted draft, removing `gateway.sessionId`, and navigating to the goal dashboard all happen only on success.

@@ -129,9 +129,9 @@ Context compaction reduces token usage by summarising the conversation.
 
 ## System Prompt Assembly
 
-Each session's system prompt is assembled from a fixed set of ordered sections (numbered below) plus an optional provider-supplied tail. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time.
+Each session's system prompt is assembled from a fixed set of ordered sections (numbered below), including optional spawn-time provider context from `sessionSetup`. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time. Per-turn `beforePrompt` Dynamic Context is delivered separately as hidden `bobbit:dynamic-context` custom/user-side messages, not as a system-prompt tail.
 
-The sections are ordered so that the **stable prefix** (sections 1–5, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 6–8, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
+The sections are ordered so that the **stable prefix** (sections 1–5, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 6–9, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
 
 | # | Section | Volatile? | Source |
 |---|---------|-----------|--------|
@@ -145,7 +145,7 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | 8 | **Workflow upstream-gate context** | Yes | Passed gate content injected for context. Omitted when not in a workflow. |
 | 9 | **Dynamic Context** | Yes | Provider-supplied ambient context from the `sessionSetup` lifecycle hook, fenced in `<context-block>` envelopes. Appended last (freshest, lowest-authority). Omitted unless an active provider contributes blocks. See [lifecycle-hub.md](lifecycle-hub.md#session-setup-wiring-g13). |
 
-Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout.
+Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout. The same inspector section is refreshed best-effort for per-turn `beforePrompt` blocks, but those blocks reach the model through the hidden custom-message channel so provider cached system-prompt bytes stay stable across turns.
 
 ## Reconnection
 

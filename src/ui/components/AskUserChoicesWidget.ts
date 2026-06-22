@@ -35,6 +35,7 @@
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
+import { createTransientDraftStore } from "../storage/transient-draft-store.js";
 
 /**
  * Resolve the gateway auth token. Tries both storage keys used by the app
@@ -73,6 +74,27 @@ interface DraftEntry {
 	other_text: string;
 }
 
+/**
+ * Persisted shape for a pending (pre-submit) ask draft. Only user-authored
+ * content + the active tab survive recreation — focus, submit state, and
+ * read-only state are intentionally excluded (they are derived/transient).
+ */
+interface AskDraftRecord {
+	draft: DraftEntry[];
+	activeTab: number;
+}
+
+/**
+ * Module-level shared store for ask drafts. Backed by sessionStorage: pending
+ * selections are tiny, per-tab scratch state; submitted answers remain
+ * transcript-backed and cross-client. Keyed by `sessionId + "::" + toolUseId`
+ * (opaque scope key — never split/normalised).
+ */
+const askDraftStore = createTransientDraftStore<AskDraftRecord>({
+	namespace: "ask",
+	backend: "session",
+});
+
 function tabLetter(idx: number): string {
 	return String.fromCharCode(65 + idx);
 }
@@ -98,14 +120,29 @@ export class AskUserChoicesWidget extends LitElement {
 		return this;
 	}
 
+	/** Once true, we've already attempted a one-shot restore from the store. */
+	private _seeded = false;
+
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this._ensureDraft();
+		// If we mount already read-only (transcript-backed answers replayed on
+		// reload), the pending draft is moot — clear it so it can't resurrect.
+		if (Array.isArray(this.answers)) this._clearDraftStore();
 	}
 
 	override willUpdate(changed: Map<string, unknown>): void {
 		if (changed.has("questions")) {
 			this._ensureDraft();
+		}
+		// sessionId / toolUseId may arrive after questions; (re)try the one-shot seed.
+		if (changed.has("sessionId") || changed.has("toolUseId")) {
+			this._maybeSeedFromStore();
+		}
+		// Becoming read-only because a final answer arrived means the draft is
+		// done — clear it (tombstoned) so a late save can't bring it back.
+		if (changed.has("answers") && Array.isArray(this.answers)) {
+			this._clearDraftStore();
 		}
 	}
 
@@ -118,7 +155,87 @@ export class AskUserChoicesWidget extends LitElement {
 			}));
 			this._activeTab = Math.min(this._activeTab, Math.max(0, this.questions.length - 1));
 			this._focusedOption = 0;
+			// Question shape changed — allow a fresh restore attempt.
+			this._seeded = false;
 		}
+		this._maybeSeedFromStore();
+	}
+
+	/** Opaque scope key, or null when we lack the ids needed to key a draft. */
+	private _scopeKey(): string | null {
+		if (!this.sessionId || !this.toolUseId) return null;
+		return this.sessionId + "::" + this.toolUseId;
+	}
+
+	/**
+	 * One-shot synchronous restore of a pending draft. Runs at most once per
+	 * question shape, only when all keying inputs are present and the widget is
+	 * not read-only. Stale or mismatched stored drafts are ignored.
+	 */
+	private _maybeSeedFromStore(): void {
+		if (this._seeded) return;
+		if (this._isReadOnly()) return;
+		if (!Array.isArray(this.questions) || this.questions.length === 0) return;
+		if (this._draft.length !== this.questions.length) return;
+		const key = this._scopeKey();
+		if (!key) return; // not enough info yet — retry on a later update
+		this._seeded = true;
+		const stored = askDraftStore.load(key);
+		if (!stored) return;
+		const restored = this._sanitizeStored(stored);
+		if (!restored) return;
+		this._draft = restored.draft;
+		this._activeTab = restored.activeTab;
+	}
+
+	/**
+	 * Validate + sanitize a stored draft against the CURRENT questions. Returns
+	 * null when the shape no longer matches (question count differs, or a stored
+	 * entry's `selected` type disagrees with the question's multi flag). When the
+	 * shape matches, selections are filtered to the current option set (plus
+	 * OTHER_SENTINEL) and the active tab is clamped into range.
+	 */
+	private _sanitizeStored(stored: AskDraftRecord): AskDraftRecord | null {
+		if (!stored || !Array.isArray(stored.draft)) return null;
+		if (stored.draft.length !== this.questions.length) return null;
+		const draft: DraftEntry[] = [];
+		for (let i = 0; i < this.questions.length; i++) {
+			const q = this.questions[i];
+			const d = stored.draft[i];
+			if (!d || typeof d !== "object") return null;
+			const valid = new Set<string>([...q.options, OTHER_SENTINEL]);
+			const otherText = typeof d.other_text === "string" ? d.other_text : "";
+			if (q.multi) {
+				// Multi questions must store an array.
+				if (!Array.isArray(d.selected)) return null;
+				const sel = d.selected.filter((v) => typeof v === "string" && valid.has(v));
+				draft.push({ selected: sel, other_text: otherText });
+			} else {
+				// Single questions must store null or a string (never an array).
+				if (Array.isArray(d.selected)) return null;
+				if (d.selected !== null && typeof d.selected !== "string") return null;
+				const sel = typeof d.selected === "string" && valid.has(d.selected) ? d.selected : null;
+				draft.push({ selected: sel, other_text: otherText });
+			}
+		}
+		let activeTab = typeof stored.activeTab === "number" ? Math.floor(stored.activeTab) : 0;
+		activeTab = Math.min(Math.max(0, activeTab), Math.max(0, this.questions.length - 1));
+		return { draft, activeTab };
+	}
+
+	/** Persist the current pending draft + active tab. No-op when read-only or unkeyed. */
+	private _persistDraft(): void {
+		if (this._isReadOnly()) return;
+		const key = this._scopeKey();
+		if (!key) return;
+		if (this._draft.length !== this.questions.length) return;
+		askDraftStore.save(key, { draft: this._draft, activeTab: this._activeTab });
+	}
+
+	/** Clear (tombstone) the persisted draft once it is submitted or finalised. */
+	private _clearDraftStore(): void {
+		const key = this._scopeKey();
+		if (key) askDraftStore.clear(key);
 	}
 
 	private _optionCount(qIdx: number): number {
@@ -144,6 +261,7 @@ export class AskUserChoicesWidget extends LitElement {
 		if (this._activeTab !== idx) {
 			this._activeTab = idx;
 			this._focusedOption = 0;
+			this._persistDraft();
 		}
 	}
 
@@ -177,10 +295,12 @@ export class AskUserChoicesWidget extends LitElement {
 					: [...cur, option];
 				return { ...d, selected: next };
 			});
+			this._persistDraft();
 			// No auto-advance for multi-select.
 			return;
 		}
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, selected: option } : d);
+		this._persistDraft();
 		// Single-question, non-Other: auto-submit (no Submit button rendered).
 		if (option !== OTHER_SENTINEL && this.questions.length === 1) {
 			setTimeout(() => { void this._submit(); }, 50);
@@ -198,6 +318,7 @@ export class AskUserChoicesWidget extends LitElement {
 				if (this._activeTab === qIdx) {
 					this._activeTab = nextIdx;
 					this._focusedOption = 0;
+					this._persistDraft();
 				}
 			}, 250);
 		}
@@ -223,6 +344,7 @@ export class AskUserChoicesWidget extends LitElement {
 	private _setOtherText(qIdx: number, text: string): void {
 		if (this._isReadOnly()) return;
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, other_text: text } : d);
+		this._persistDraft();
 	}
 
 	/**
@@ -275,6 +397,7 @@ export class AskUserChoicesWidget extends LitElement {
 			if (this._isQuestionValid(this._activeTab)) {
 				this._activeTab = this._activeTab + 1;
 				this._focusedOption = 0;
+				this._persistDraft();
 			}
 			return;
 		}
@@ -292,6 +415,7 @@ export class AskUserChoicesWidget extends LitElement {
 				: d,
 		);
 		this._submitError = "";
+		this._persistDraft();
 	}
 
 	private async _submit(): Promise<void> {
@@ -332,6 +456,8 @@ export class AskUserChoicesWidget extends LitElement {
 			}
 			// Flip to read-only optimistically. The tool result will also arrive via the stream.
 			this.answers = answers;
+			// Pending draft is now committed — clear it so it can't resurrect.
+			this._clearDraftStore();
 		} catch (e: any) {
 			this._submitError = e?.message || String(e);
 		} finally {

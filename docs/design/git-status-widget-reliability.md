@@ -368,17 +368,17 @@ Both endpoints accept `?untracked=1`:
 - `GET /api/sessions/:id/git-status?untracked=1`
 - `GET /api/goals/:id/git-status?untracked=1`
 
-Default (no param) → summary, fast path. `?fetch=true` is orthogonal and composes.
+Default (no param) → summary, fast path. `?fetch=true` is orthogonal and composes; dropdown-open clients intentionally use `?fetch=true&untracked=1` so one request updates remote refs and loads the full file list.
 
 ### 6.4 Client behaviour
 
 - Session widget: initial load and safety poll fetch **summary** (no `untracked`). First-paint target < 300ms.
-- `GitStatusWidget._toggle` (dropdown open): fire a refetch with `untracked=1`. Add `ai.onGitFetchFull?.()` hook or extend `refreshGitStatusForSession` to accept `{ untracked: true }`. Dropdown already has a "refetch on open" pathway — extend it.
-- Goal dashboard: 60s poll uses summary; on dropdown open it triggers the same full-variant refetch.
+- `GitStatusWidget._toggle` (dropdown open): dispatch `git-status-dropdown-open`; the session handler refetches with `{ fetch: true, untracked: true }`, producing `?fetch=true&untracked=1` in one request. Combining the flags avoids an abort race between the paired fetch-only and full-status refreshes.
+- Goal dashboard: 60s poll uses summary; on dropdown open it triggers the same combined `?fetch=true&untracked=1` refresh.
 
 ### 6.5 `unpushed` / `summary` semantics
 
-`summary` string is still built from whatever `status` lines were returned. With `-uno`, untracked files contribute zero to the summary — acceptable since the dropdown immediately re-fetches the full variant when the user expands.
+`summary` string is still built from whatever `status` lines were returned. With `-uno`, untracked files contribute zero to the summary — acceptable since the dropdown immediately re-fetches the full variant with `?fetch=true&untracked=1` when the user expands.
 
 ---
 

@@ -577,18 +577,85 @@ export class AgentInterface extends LitElement {
 	};
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
+	/**
+	 * Per-session composer attachment draft, lifted out of the transient
+	 * <message-editor> element so it survives element recreation (slow-path
+	 * session switch, reload, readOnly/isPreparing re-render). Bound INTO the
+	 * editor via `.attachments` and updated back via `.onFilesChange`. Durable
+	 * across reload via the IndexedDB PromptDraftAttachmentsStore.
+	 * See docs/design/composer-draft-persistence.md.
+	 */
+	@state() private _attachments: Attachment[] = [];
+	/** Session id the currently-loaded `_attachments` belong to — guards against
+	 *  applying a stale async load after the session prop changed. */
+	private _attachmentDraftSessionId?: string;
+	/** Monotonic token bumped on every load/set/clear of the attachment draft.
+	 *  An in-flight async load captures this and only applies its result if the
+	 *  token is unchanged — so a clear-after-send (same session id, empty
+	 *  `_attachments`) cannot let a stale read resurrect sent attachments. */
+	private _attachmentDraftGen = 0;
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
 	private _cachedMessagesRef?: AgentMessage[];
 
 	public setInput(text: string, attachments?: Attachment[]) {
+		// Keep the lifted per-session draft in sync so the editor binding and the
+		// persisted store reflect the externally-supplied attachments.
+		this._setAttachmentDraft(attachments || []);
 		const update = () => {
 			if (!this._messageEditor) requestAnimationFrame(update);
 			else {
 				this._messageEditor.value = text;
-				this._messageEditor.attachments = attachments || [];
+				this._messageEditor.attachments = this._attachments;
 			}
 		};
 		update();
+	}
+
+	/** Load the persisted attachment draft for `sessionId` into `_attachments`.
+	 *  Fire-and-forget; ignores the result if the session changed meanwhile. */
+	private _loadAttachmentDraft(sessionId: string | undefined): void {
+		this._attachmentDraftSessionId = sessionId;
+		const gen = ++this._attachmentDraftGen;
+		this._attachments = [];
+		if (!sessionId) return;
+		void (async () => {
+			try {
+				const files = await getAppStorage().promptDraftAttachments.getAttachments(sessionId);
+				// Only apply if neither the session nor the draft generation changed
+				// since this load was scheduled. The generation guard catches a
+				// clear/set on the SAME session (e.g. send-then-clear) that the
+				// session-id check alone would miss, preventing a stale read from
+				// resurrecting cleared or replaced attachments.
+				if (this._attachmentDraftSessionId !== sessionId) return;
+				if (this._attachmentDraftGen !== gen) return;
+				if (files.length > 0 && this._attachments.length === 0) {
+					this._attachments = files;
+					this.requestUpdate();
+				}
+			} catch {
+				/* best effort */
+			}
+		})();
+	}
+
+	/** Update the lifted attachment draft and persist it (debounce-free; these
+	 *  events are user-initiated and infrequent). */
+	private _setAttachmentDraft(files: Attachment[]): void {
+		this._attachments = files;
+		++this._attachmentDraftGen;
+		const sid = this.session?.sessionId;
+		if (!sid) return;
+		this._attachmentDraftSessionId = sid;
+		void getAppStorage().promptDraftAttachments.setAttachments(sid, files).catch(() => {});
+	}
+
+	/** Clear the lifted attachment draft and remove it from the durable store.
+	 *  Called on successful send / compact so a sent attachment never resurrects. */
+	private _clearAttachmentDraft(): void {
+		this._attachments = [];
+		++this._attachmentDraftGen;
+		const sid = this.session?.sessionId;
+		if (sid) void getAppStorage().promptDraftAttachments.deleteAttachments(sid).catch(() => {});
 	}
 
 	public setAutoScroll(enabled: boolean) {
@@ -841,9 +908,15 @@ export class AgentInterface extends LitElement {
 		// Re-subscribe when session property changes
 		if (changedProperties.has("session")) {
 			this.setupSessionSubscription();
+			const newSid = this.session?.sessionId;
+			// Restore the per-session composer attachment draft (lifted out of the
+			// transient <message-editor>) whenever the bound session changes —
+			// covers slow-path switch, reload, and readOnly/isPreparing re-renders.
+			if (this._attachmentDraftSessionId !== newSid) {
+				this._loadAttachmentDraft(newSid);
+			}
 			// Reset cached proposal-type fetch — the next render's effect will
 			// refetch under the new session id (or no-op if the session is live).
-			const newSid = this.session?.sessionId;
 			if (this._archivedProposalsFetchedFor !== newSid) {
 				this._archivedProposalsFetchedFor = null;
 				this._archivedProposalTypes = [];
@@ -1526,6 +1599,7 @@ export class AgentInterface extends LitElement {
 			if ("compact" in session && typeof (session as any).compact === "function") {
 				this._messageEditor.value = "";
 				this._messageEditor.attachments = [];
+				this._clearAttachmentDraft();
 				// Show the command as a user message in chat
 				const userMsg = {
 					role: "user" as const,
@@ -1587,6 +1661,7 @@ export class AgentInterface extends LitElement {
 		// Only clear editor after we know we can send
 		this._messageEditor.value = "";
 		this._messageEditor.attachments = [];
+		this._clearAttachmentDraft();
 		// Snap to bottom when sending a message.
 		// Set flag and scroll immediately, then re-assert after render
 		// (scroll events from layout changes can race and unset the flag).
@@ -2335,6 +2410,10 @@ export class AgentInterface extends LitElement {
 							.showModelSelector=${this.enableModelSelector}
 							.showThinkingSelector=${this.enableThinkingSelector}
 							.queuedMessages=${this._serverQueue}
+							.attachments=${this._attachments}
+							.onFilesChange=${(files: Attachment[]) => {
+								this._setAttachmentDraft(files);
+							}}
 							.onSend=${(input: string, attachments: Attachment[]) => {
 								this.sendMessage(input, attachments);
 							}}

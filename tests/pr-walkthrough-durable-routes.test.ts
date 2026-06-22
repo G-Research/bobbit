@@ -49,6 +49,16 @@ function seedCtx() {
 	return { ctx: { sessionId, host: { store } }, store };
 }
 
+test("PR walkthrough status stops polling archived reviewer self sessions", async () => {
+	const { ctx } = seedCtx();
+	const running = await routes.status(ctx, { body: { childSessionId: sessionId, jobId } });
+	assert.equal(running.phase, "running", JSON.stringify(running));
+
+	const archived = await routes.status({ ...ctx, sessionArchived: true }, { body: { childSessionId: sessionId, jobId } });
+	assert.equal(archived.phase, "error", JSON.stringify(archived));
+	assert.equal(archived.code, "PRW_REVIEWER_ARCHIVED");
+});
+
 async function saveChunk(ctx: any, section_id: string, yaml: string) {
 	const result = await routes.publish(ctx, { body: { op: "submitChunk", section_id, yaml } });
 	assert.equal(result.ok, true, JSON.stringify(result));
