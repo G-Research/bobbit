@@ -69,9 +69,9 @@ import { applyReviewModelOverrides, applyModelString } from "./review-model-over
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
-import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
+import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { mergeHostAgentProviderEnv } from "./host-tokens.js";
-import { inferMeta } from "./aigw-manager.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
@@ -94,8 +94,7 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	if (slash <= 0) return level;
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
-	const meta = inferMeta(modelId);
-	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+	return clampThinkingLevelForModel(level, provider, modelId);
 }
 
 export interface VerificationToolActivationDeps {

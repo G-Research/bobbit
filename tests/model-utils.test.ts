@@ -119,6 +119,20 @@ describe("inferMeta()", () => {
 		assert.equal(meta.reasoning, false);
 	});
 
+	it("OpenRouter Z.ai GLM 5.x → reasoning=true", () => {
+		for (const id of ["z-ai/glm-5.2", "z-ai/glm-5-air"]) {
+			const meta = inferMeta(id);
+			assert.equal(meta.reasoning, true, `${id} should be reasoning-capable`);
+		}
+	});
+
+	it("older Z.ai GLM families remain non-reasoning by heuristic", () => {
+		for (const id of ["z-ai/glm-4.5", "z-ai/glm-130b", "glm-4-plus"]) {
+			const meta = inferMeta(id);
+			assert.equal(meta.reasoning, false, `${id} should not be marked reasoning-capable by the GLM 5.x rule`);
+		}
+	});
+
 	it("Qwen → 1M context", () => {
 		const meta = inferMeta("qwen3-coder-480b");
 		assert.equal(meta.contextWindow, 1_000_000);

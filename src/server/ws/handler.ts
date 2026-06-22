@@ -15,7 +15,8 @@ import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
@@ -703,12 +704,7 @@ export function handleWebSocketConnection(
 					let level: string = known;
 					const persisted = sessionManager.getPersistedSession(session.id);
 					if (persisted?.modelId) {
-						const meta = inferMeta(persisted.modelId);
-						const clamped = clampThinkingLevel(level, {
-							id: persisted.modelId,
-							provider: persisted.modelProvider,
-							reasoning: meta.reasoning,
-						});
+						const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
 						if (clamped) level = clamped;
 					}
 					await session.rpcClient.setThinkingLevel(level);
