@@ -300,16 +300,20 @@ the browser always imports it as ESM.)
 type ActionHandler = (ctx: ActionHandlerCtx, args: unknown) => Promise<unknown> | unknown;
 
 interface ActionHandlerCtx {
-  host: ServerHostApi;   // audited, scoped gateway access (see below)
-  sessionId: string;     // the verified calling session
-  toolUseId: string;     // the verified tool_use id being acted on
-  tool: string;          // == :tool
+  host: ServerHostApi;        // audited, scoped gateway access (see below)
+  sessionId: string;          // the verified calling session
+  toolUseId: string;          // the verified tool_use id being acted on
+  tool: string;               // == :tool
+  projectId?: string;         // resolved project for the calling session, when known
+  workingDir?: string;        // session worktree/cwd for route/action context, when known
+  sessionArchived?: boolean;  // true when the calling session is already archived
 }
 ```
 
 `ctx` is **verified by the endpoint** — `sessionId` and `toolUseId` have already passed the
-guard. `args` is **untrusted, LLM-influenced JSON** — validate / whitelist it; never `eval`,
-`exec`, `require`, or build filesystem/session paths from it.
+guard, and lifecycle fields such as `sessionArchived` are server-derived. `args` is
+**untrusted, LLM-influenced JSON** — validate / whitelist it; never `eval`, `exec`,
+`require`, or build filesystem/session paths from it.
 
 ```js
 // tools/demo/actions.mjs
@@ -678,6 +682,32 @@ await host.callRoute("publish", { method: "POST", body: { jobId, payload } });
   Cross-pack names never collide (the registry is keyed by `packId`).
 - **Route handlers run in the confined worker** — trusted code with full ambient parity, so a
   route may use `git`/`fs`/network directly.
+
+#### Archived sessions and polling routes
+
+Route calls can still arrive after the calling session is archived. A restored browser tab,
+persisted side panel, or delayed client retry may still have a valid pack surface token and call
+`host.callRoute(...)` even though the backing session is no longer live.
+
+Use `ctx.sessionArchived === true` as a terminal lifecycle signal in any route that backs a
+polling UI. Return a terminal response the panel already understands, such as:
+
+```js
+export const routes = {
+  status: async (ctx, req) => {
+    if (ctx.sessionArchived === true) {
+      return { phase: "error", code: "SESSION_ARCHIVED", error: "The session is archived." };
+    }
+    // Return "running", "draft", "complete", or another pack-specific state.
+  },
+};
+```
+
+Panels should stop their timer when a route returns a terminal phase (`error`, `complete`,
+`cancelled`, etc.). Do not rely on cleanup hooks alone: session shutdown cleanup is best-effort,
+and restored panels can outlive the websocket that originally mounted them. PR Walkthrough uses
+this pattern for its reviewer-child `status` route so an archived reviewer panel does not keep
+self-polling forever.
 
 #### Using ambient OS access inside a route
 
