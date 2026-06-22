@@ -94,6 +94,11 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 		}
 	});
 
+	it("actual AIGW clamp path keeps GLM 5.2 high and older GLM off", () => {
+		assert.equal(clampThinkingLevelForModel("high", "aigw", "z-ai/glm-5.2"), "high");
+		assert.equal(clampThinkingLevelForModel("high", "aigw", "z-ai/glm-4.5"), "off");
+	});
+
 	it("/api/models metadata marks sparse GLM 5.2 gateway entries as reasoning-capable", async () => {
 		await withAigwServer([
 			{ id: "z-ai/glm-5.2", context_length: 131_072, max_tokens: 32_768 },
