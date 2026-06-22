@@ -65,7 +65,7 @@ test.describe("Claude Code runtime session API", () => {
 		try {
 			setClaudeCodePrefs(gateway, {
 				"claudeCode.executablePath": wrapper.executable,
-				"claudeCode.defaultModel": "opus",
+				"claudeCode.defaultModel": "local-claude-opus-4-8",
 				"claudeCode.permissionMode": "acceptEdits",
 			});
 			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
@@ -76,7 +76,7 @@ test.describe("Claude Code runtime session API", () => {
 					cwd: nonGitCwd(),
 					worktree: false,
 					runtime: "claude-code",
-					model: { provider: "claude-code", id: "sonnet" },
+					model: { provider: "claude-code", id: "local-claude-sonnet-4-6" },
 				}),
 			});
 			expect(create.status).toBe(201);
@@ -85,25 +85,27 @@ test.describe("Claude Code runtime session API", () => {
 			expect(created.runtime).toBe("claude-code");
 			expect(created.claudeCodeExecutable).toBe(wrapper.executable);
 			expect(created.claudeCodePermissionMode).toBe("acceptEdits");
-			expect(created.claudeCodeModelAlias).toBe("sonnet");
+			expect(created.claudeCodeModelAlias).toBe("local-claude-sonnet-4-6");
 
 			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
 			expect(detail).toMatchObject({
 				runtime: "claude-code",
 				modelProvider: "claude-code",
-				modelId: "sonnet",
+				modelId: "local-claude-sonnet-4-6",
 				claudeCodeExecutable: wrapper.executable,
 				claudeCodePermissionMode: "acceptEdits",
-				claudeCodeModelAlias: "sonnet",
+				claudeCodeModelAlias: "local-claude-sonnet-4-6",
 			});
 
 			const list = await (await apiFetch("/api/sessions")).json();
 			const listed = list.sessions.find((s: any) => s.id === sessionId);
-			expect(listed).toMatchObject({ runtime: "claude-code", claudeCodeModelAlias: "sonnet" });
+			expect(listed).toMatchObject({ runtime: "claude-code", claudeCodeModelAlias: "local-claude-sonnet-4-6" });
 
 			const argv = await waitForSpawnArgv(recordPath);
 			expect(argv).toContain("--permission-mode");
 			expect(argv).toContain("acceptEdits");
+			expect(argv).toContain("--model");
+			expect(argv[argv.indexOf("--model") + 1]).toBe("claude-sonnet-4-6");
 		} finally {
 			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 			fs.rmSync(tmp, { recursive: true, force: true });
@@ -119,7 +121,7 @@ test.describe("Claude Code runtime session API", () => {
 		try {
 			setClaudeCodePrefs(gateway, {
 				"claudeCode.executablePath": wrapper.executable,
-				"claudeCode.defaultModel": "opus",
+				"claudeCode.defaultModel": "local-claude-opus-4-8",
 				"claudeCode.allowBypassPermissions": true,
 				"claudeCode.permissionMode": "bypassPermissions",
 			});
@@ -131,11 +133,13 @@ test.describe("Claude Code runtime session API", () => {
 			expect(create.status).toBe(201);
 			const created = await create.json();
 			sessionId = created.id;
-			expect(created.claudeCodeModelAlias).toBe("opus");
+			expect(created.claudeCodeModelAlias).toBe("local-claude-opus-4-8");
 			expect(created.claudeCodePermissionMode).toBe("bypassPermissions");
 			const argv = await waitForSpawnArgv(recordPath);
 			expect(argv).toContain("--permission-mode");
 			expect(argv).toContain("bypassPermissions");
+			expect(argv).toContain("--model");
+			expect(argv[argv.indexOf("--model") + 1]).toBe("claude-opus-4-8");
 		} finally {
 			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 			fs.rmSync(tmp, { recursive: true, force: true });
@@ -154,7 +158,7 @@ test.describe("Claude Code runtime session API", () => {
 			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
 			const create = await apiFetch("/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/sonnet" }),
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/local-claude-sonnet-4-6" }),
 			});
 			expect(create.status).toBe(201);
 			sessionId = (await create.json()).id;
@@ -162,10 +166,10 @@ test.describe("Claude Code runtime session API", () => {
 			conn.send({ type: "prompt", text: "capture Claude Code resume id" });
 			await conn.waitFor(agentEndPredicate());
 
-			conn.send({ type: "set_model", provider: "claude-code", modelId: "opus" });
+			conn.send({ type: "set_model", provider: "claude-code", modelId: "local-claude-opus-4-8" });
 			await expect.poll(async () => {
 				const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
-				return detail.modelProvider === "claude-code" && detail.modelId === "opus" && detail.claudeCodeModelAlias === "opus";
+				return detail.modelProvider === "claude-code" && detail.modelId === "local-claude-opus-4-8" && detail.claudeCodeModelAlias === "local-claude-opus-4-8";
 			}).toBe(true);
 
 			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
@@ -173,19 +177,19 @@ test.describe("Claude Code runtime session API", () => {
 			expect(detail.runtime).toBe("claude-code");
 			expect(detail.claudeCodeSessionId).toBe("fake-claude-session");
 			expect(detail.modelProvider).toBe("claude-code");
-			expect(detail.modelId).toBe("opus");
-			expect(detail.claudeCodeModelAlias).toBe("opus");
+			expect(detail.modelId).toBe("local-claude-opus-4-8");
+			expect(detail.claudeCodeModelAlias).toBe("local-claude-opus-4-8");
 
 			const argvs = await waitForSpawnArgvs(recordPath, 2);
 			expect(argvs[0]).toContain("--model");
-			expect(argvs[0][argvs[0].indexOf("--model") + 1]).toBe("sonnet");
+			expect(argvs[0][argvs[0].indexOf("--model") + 1]).toBe("claude-sonnet-4-6");
 			expect(argvs[1]).toContain("--model");
-			expect(argvs[1][argvs[1].indexOf("--model") + 1]).toBe("opus");
+			expect(argvs[1][argvs[1].indexOf("--model") + 1]).toBe("claude-opus-4-8");
 			expect(argvs[1]).toContain("--resume");
 			expect(argvs[1][argvs[1].indexOf("--resume") + 1]).toBe("fake-claude-session");
 
 			conn.send({ type: "get_state" });
-			await conn.waitFor((m: any) => m.type === "state" && m.data?.model?.id === "opus");
+			await conn.waitFor((m: any) => m.type === "state" && m.data?.model?.id === "local-claude-opus-4-8");
 			const transcript = await (await apiFetch(`/api/sessions/${sessionId}/transcript?verbose=1`)).json();
 			expect(JSON.stringify(transcript)).toContain("capture Claude Code resume id");
 			expect(JSON.stringify(transcript)).toContain("Hi there");
