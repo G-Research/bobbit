@@ -161,6 +161,10 @@ const INFER_RULES: InferRule[] = [
 	// ── OpenAI GPT-4 (catch-all for 4o, 4.1, 4-turbo, …) ────────────
 	{ test: /gpt-4/, meta: { contextWindow: 128_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] } },
 
+	// ── Z.ai GLM ────────────────────────────────────────────────────
+	// GLM 5.x models expose OpenRouter reasoning controls; older GLM families do not.
+	{ test: /(?:^|\/)glm-5(?:\b|[-.])/, meta: { contextWindow: 128_000, maxTokens: 16_384, reasoning: true, input: ["text"] } },
+
 	// ── Alibaba Qwen ────────────────────────────────────────────────
 	{ test: /qwen/, meta: { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: false, input: ["text"] } },
 ];

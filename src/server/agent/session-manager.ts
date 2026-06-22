@@ -66,7 +66,8 @@ import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-ma
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -5458,8 +5459,7 @@ export class SessionManager {
 			if (slash > 0) {
 				const provider = initialModelStr.slice(0, slash);
 				const modelId = initialModelStr.slice(slash + 1);
-				const meta = inferMeta(modelId);
-				return clampThinkingLevel(candidate, { id: modelId, provider, reasoning: meta.reasoning });
+				return clampThinkingLevelForModel(candidate, provider, modelId);
 			}
 		}
 		return candidate;
@@ -5637,12 +5637,7 @@ export class SessionManager {
 		try {
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
 			if (persisted?.modelId) {
-				const meta = inferMeta(persisted.modelId);
-				const clamped = clampThinkingLevel(level, {
-					id: persisted.modelId,
-					provider: persisted.modelProvider,
-					reasoning: meta.reasoning,
-				});
+				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
 				if (clamped) level = clamped;
 			}
 		} catch { /* best-effort */ }
