@@ -2082,7 +2082,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				gitStatusAgentInterface.removeEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
 			}
 			gitStatusAgentInterface.__gitStatusDropdownOpenHandler = () => {
-				refreshGitStatusForSession(sessionId, { untracked: true, source: "user" });
+				// Pill open combines remote fetch and full untracked loading in one request
+				// so the paired dropdown event cannot abort the fetch-only refresh.
+				refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
 			};
 			gitStatusAgentInterface.addEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
 			state.chatPanel.agentInterface.onGitPush = async () => {
@@ -3145,7 +3147,9 @@ async function refreshGitStatusForSession(
 
 /** Export for UI event wiring — callable from outside this module (dropdown open). */
 export function requestGitStatusUntrackedRefetch(sessionId: string): void {
-	refreshGitStatusForSession(sessionId, { untracked: true, source: "user" });
+	// Match pill open: fetch remotes and full untracked details together to avoid
+	// the paired event abort race.
+	refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
 }
 
 /** Abort and drop any in-flight refresh for `sessionId`. Called on session switch / disconnect. */

@@ -117,7 +117,8 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 	it("the pr-reviewer prompt requires durable chunked submission before finalization", () => {
 		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
 		const prompt = reviewer.promptTemplate ?? "";
-		assert.match(prompt, /Start by calling read_pr_walkthrough_bundle/);
+		assert.match(prompt, /Start by calling `?read_pr_walkthrough_bundle/);
+		assert.match(prompt, /format=compact|manifest\/summary/i, "prompt should steer reviewers to bounded bundle reads");
 		assert.match(prompt, /submit_pr_walkthrough_chunk/);
 		assert.match(prompt, /read_pr_walkthrough_submission_status/);
 		assert.match(prompt, /finalize_pr_walkthrough_submission/);
