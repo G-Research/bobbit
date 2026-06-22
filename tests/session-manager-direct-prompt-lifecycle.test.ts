@@ -9,6 +9,10 @@ process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../src/server/agent/event-buffer.ts");
+
+const AUTH_SECRET = "sk-or-retry-secret-never-leak";
+const AUTH_ERROR = `No API key found for openrouter: ${AUTH_SECRET}`;
 
 type TestClient = {
 	readyState: number;
@@ -69,7 +73,9 @@ function putSession(manager: any, overrides: Record<string, any> = {}): any {
 		lastActivity: Date.now(),
 		clients: new Set([client]),
 		promptQueue: new PromptQueue(),
+		eventBuffer: new EventBuffer(),
 		streamingStartedAt: undefined,
+		modelProvider: "openrouter",
 		rpcClient: { prompt: mock.fn(async () => ({ success: true })) },
 		...overrides,
 	};
@@ -123,6 +129,66 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-1).type, "queue_update");
 		assert.equal(client.sent.at(-2).type, "session_status");
 		assert.equal(client.sent.at(-2).status, "idle");
+	});
+
+	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			turnHadToolCalls: true,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), (err: any) => {
+			assert.match(err?.message ?? "", /OpenRouter provider authentication failure \(missing-api-key\)/);
+			assert.doesNotMatch(err?.message ?? "", new RegExp(AUTH_SECRET));
+			return true;
+		});
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /Please continue where you left off/);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
+		assert.match(JSON.stringify(client.sent), /provider_auth_required|Fix API key/i);
+	});
+
+	it("retryLastPrompt routes fallback provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastPromptText: undefined,
+			lastPromptImages: undefined,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /OpenRouter provider authentication failure \(missing-api-key\)/);
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /retry what you were doing/);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
+	});
+
+	it("retryLastPrompt routes blank-text recovery provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "The text field in the ContentBlock is blank",
+			lastPromptText: "",
+			lastPromptImages: [{ type: "image", data: "abc", mimeType: "image/png" }],
+			rpcClient: { prompt },
+		});
+		manager._recoverBlankTextPoison = mock.fn(async () => session);
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /OpenRouter provider authentication failure \(missing-api-key\)/);
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /Attachments:/i);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
 	});
 
 	it("dispatches a promoted queued steer immediately like a fresh live steer", async () => {

@@ -457,9 +457,6 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
 }
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	const directProviderEnv = plan.sandboxed
-		? undefined
-		: mergeHostAgentProviderEnv(undefined, ctx.preferencesStore);
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
@@ -474,7 +471,6 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
 		// unit test in tests/session-setup-env.test.ts.
 		env: {
-			...(directProviderEnv || {}),
 			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
 			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
@@ -511,6 +507,11 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	} else if (!plan.skipAutoModel) {
 		const pinned = ctx.resolveInitialModel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinned) plan.bridgeOptions.initialModel = pinned;
+	}
+	if (!plan.sandboxed) {
+		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
+			model: plan.bridgeOptions.initialModel,
+		});
 	}
 	if (plan.initialThinkingLevel) {
 		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
