@@ -21,6 +21,45 @@ See also:
 | Pack store API | `src/server/extension-host/pack-store.ts`, server/client Host API adapters |
 | Panel error states | `market-packs/pr-walkthrough/src/panel.js` and built `lib/panel.js` |
 
+## Reviewer tool output contract
+
+Reviewer tools are model-facing wrappers over the pack routes and internal bundle route. They keep the server and pack-store payloads authoritative, but shape tool text so the reviewer spends context on code and findings instead of repeated envelopes.
+
+### Bundle reads: legacy by default, compact by opt-in
+
+`read_pr_walkthrough_bundle` accepts `format` in addition to the existing bounded read parameters:
+
+- Omitted `format` preserves the legacy JSON result exactly. This is the compatibility path for existing callers.
+- `format="legacy"` is an explicit spelling of the same legacy output.
+- `format="compact"` returns a unified-diff-like text view generated inside the extension after it reads the existing internal bundle JSON. The compact formatter does not change the internal route, store schema, or source-of-truth payload.
+
+Use compact mode for normal review work:
+
+```text
+read_pr_walkthrough_bundle mode=manifest format=compact limit=50
+read_pr_walkthrough_bundle mode=file path=src/example.ts format=compact hunkOffset=0 hunkLimit=20
+```
+
+Compact output is lossless for the diff content the legacy bundle returned: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators are preserved. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
+
+The compact manifest remains the authoritative envelope read: target metadata, SHAs, stats, warnings, limits, export metadata, and file summaries appear there. Compact follow-up reads (`summary`, `files`, and `file`) include only a short bundle reference plus the requested file or hunk data, so repeated target/changeset/limits blocks do not re-enter the model context.
+
+### Chunk saves and status
+
+`submit_pr_walkthrough_chunk` still persists one idempotent section record, but successful tool output is intentionally small:
+
+```json
+{ "saved": true, "section_id": "context", "nextRequired": "merge_assessment", "missing": ["audit"] }
+```
+
+The save result is a progress hint, not the complete draft state. Call `read_pr_walkthrough_submission_status` after compaction, retry, restart, or before finalization to read the full saved chunk list, missing required sections, validation issues, and finalization status. This prevents chunk saves from growing with every prior section while keeping durable status available on demand.
+
+### Read-only shell guidance
+
+The persisted bundle is the authoritative source for the launched PR metadata and diff. `readonly_bash` exists only for narrow follow-up checks the bundle cannot answer, such as a targeted `git show` or a scoped search in a known file area.
+
+Do not use `readonly_bash` for broad repository exploration. Its policy intentionally rejects many expensive or unsafe shell patterns: multi-line commands, heredocs, pipes/chaining, command substitution, mutating commands, tests/builds/installs/servers, recursive searches from the repo root, hidden/ignore bypass flags, cross-PR or cross-repo GitHub reads, and reads of secrets or dot-directories. Treat a policy rejection as a boundary and return to the bundle/status tools instead of probing variants.
+
 ## Review-scoped store layout
 
 New PR Walkthrough writes are rooted by `jobId`:
@@ -243,4 +282,5 @@ Durable behavior is pinned by focused unit and browser tests:
 - `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum.
 - `tests/pr-walkthrough-lifecycle-provider.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.
 - `tests/pr-walkthrough-role-tools-policy.test.ts` and `tests/pr-walkthrough-tool-metadata.test.ts` — reviewer prompt/tool metadata for the durable chunk flow.
+- `tests/pr-walkthrough-compact-bundle-format.test.ts` — compact bundle formatting, preserved legacy/default output, envelope suppression, compact chunk-save output, and full status readback.
 - `tests/pr-walkthrough-panel-parity.spec.ts` and `tests/e2e/ui/pr-walkthrough-pack.spec.ts` — panel draft/missing/quota error states and pack launch/render behavior.

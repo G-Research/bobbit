@@ -1150,8 +1150,10 @@ render inside a `sandbox="allow-scripts"` iframe. Tests:
 is delivered as a built-in first-party pack, and the old bespoke viewer code is deleted. It is
 **not** a no-tools/UI-only pack anymore. It owns the reviewer tools under
 `tools/pr-walkthrough/`; `pack.yaml` declares `contents.tools: [pr-walkthrough]`, and the
-Marketplace installed catalogue expands that group into the concrete toggles
-`readonly_bash`, `read_pr_walkthrough_bundle`, and `submit_pr_walkthrough_yaml`.
+Marketplace installed catalogue expands that group into concrete toggles such as
+`readonly_bash`, `read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
+compatibility `submit_pr_walkthrough_yaml`.
 
 No-tools pack behavior is still supported and tested by fixture/litmus packs such as
 `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`. PR walkthrough is now the
@@ -1185,7 +1187,7 @@ pr-walkthrough/
 | Built-in piece | Pack contribution |
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
-| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The durable flow uses chunk submit, status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
+| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The bundle tool keeps legacy JSON as the omitted/default `format` while opt-in `format=compact` emits a unified-diff-like model-facing view. The durable flow uses compact chunk-save output, full status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
 | Launch — spawn-on-click, a real isolated reviewer | both launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | Durable review state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds `reviewers/<childSessionId>`, `reviews/<jobId>/binding/<childSessionId>`, draft chunks/status/checkpoints, and `reviews/<jobId>/final/payload`. Per-review quota scopes isolate draft/final payload size, and real `delete` / `deletePrefix` cleanup frees bytes on reviewer shutdown. Legacy `binding/<child>`, `submitted/<jobId>`, `job/<jobId>`, and `cards/<changesetId>` remain migration fallbacks only |

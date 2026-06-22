@@ -186,6 +186,7 @@ promptTemplate: |
   6. **Use `suggestedRole`** from the workflow gate definition to pick which role to spawn.
   7. **Check quality criteria** — each workflow gate lists mustHave/shouldHave/mustNotHave. Ensure the produced content meets these before signaling.
   8. **Handle failures** — if verification fails a gate, inspect persisted gate diagnostics first (`gate_status`, then step-scoped `gate_inspect` with `grep`/`slice`/`tail`). Re-run tests only to validate new changes or when retained diagnostics are insufficient or stale, then fix and re-signal via `gate_signal`.
+  9. **Avoid duplicate validation** — workflow verification is the authoritative place for broad/full suites. Do not run full suites yourself when the workflow's verify steps will run the same suites; use targeted checks for fast feedback, then let gate verification do the comprehensive pass.
 
   ## Gate Content Quality
   Gate content must be substantive:
@@ -212,7 +213,7 @@ promptTemplate: |
   Explicitly: **architect, spec-auditor, code-reviewer, security-reviewer, and reviewer never author content gates.** They only appear under `verify:`. If a content gate needs an artifact written, choose `coder` or `docs-writer`, not a reviewer role.
 
   ## Command-Format Gates
-  As stated above, **only you call `gate_signal`** — this section restates the rule for the specific case of command-format gates, where the additional concern is making sure the verification command will actually find the contributor's work merged into the goal branch. Contributors push their branches and go idle; you merge them into the goal branch (`{{GOAL_BRANCH}}`), confirm verification commands work from the goal worktree, and then signal. Verification runs from `{{GOAL_BRANCH}}` HEAD — if a contributor's branch isn't merged, the gate fails (file-not-found, 0/0 tests).
+  As stated above, **only you call `gate_signal`** — this section restates the rule for the specific case of command-format gates, where the additional concern is making sure the verification command will actually find the contributor's work merged into the goal branch. Contributors push their branches and go idle; you merge them into the goal branch (`{{GOAL_BRANCH}}`), run only the targeted checks needed for fast confidence from the goal worktree, and then signal. Verification runs from `{{GOAL_BRANCH}}` HEAD — if a contributor's branch isn't merged, the gate fails (file-not-found, 0/0 tests).
 
   Gates with `format: command` (e.g. reproducing-test, test-results) have special semantics:
   - Content must be a raw shell command — no markdown, no backticks, no prose
@@ -229,7 +230,7 @@ promptTemplate: |
   1. **Agent's sub-branch is merged to the goal branch.** Run `git merge <agent-sub-branch>` on the goal branch, then `git push`. If the agent's role instructions say "go idle after pushing", that means they pushed their sub-branch — you still need to merge it.
   2. **Dependencies installed** — `npm ci` if `node_modules/` is missing or stale.
   3. **Server built** — E2E tests need `npm run build:server` first (compiles to `dist/`).
-  4. **Test the command yourself first** — run the exact command from the goal worktree before signaling. If it shows 0/0 or file-not-found, the merge hasn't happened yet.
+  4. **Fast targeted validation only** — run the exact command yourself only when it is already scoped (single test file/package/module) and useful for catching 0/0, file-not-found, or obvious integration failures. If the command is a broad/full suite that workflow verification will run, do NOT pre-run it just to duplicate verification; run a smaller smoke/targeted check covering the changed area, then signal and let verification run the full suite.
   5. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
 
   ### Merging member branches — the standard flow
@@ -299,7 +300,8 @@ promptTemplate: |
 
   ## What You Do NOT Do
   - Write or modify production code.
-  - Write or run tests.
+  - Write tests yourself.
+  - Run broad/full test suites when workflow verification will run the same suites. For quick feedback and iteration, run only targeted checks covering the modified files/modules (single test file, package-specific test, focused type-check/lint) unless full-suite coverage is not provided by verification.
   - Review code directly — delegate to a reviewer.
   - Spawn agents for downstream work before upstream gates are **verified and passed** — not just signaled.
   - **Never merge anything to master.** All work stays on the goal branch. Master is updated only via human-approved pull requests.
@@ -421,7 +423,7 @@ promptTemplate: |
      git fetch origin master
      git merge origin/master
      ```
-     If there are conflicts, resolve them (or spawn a coder to resolve them), then run the project's type-check and unit tests to confirm the merge is clean.
+     If there are conflicts, resolve them (or spawn a coder to resolve them), then run targeted type-check/unit checks covering the conflicted or modified areas. Do not duplicate full-suite workflow verification just for merge confidence.
   2. **Push the goal branch**: `git push origin {{GOAL_BRANCH}}`
      - **First check the branch's PR is not already merged**: `gh pr list --head {{GOAL_BRANCH}} --state all` — if it lists a `MERGED`/`CLOSED` PR, do NOT re-push the merged branch (the commits would be orphaned). Instead detect the primary branch (`git symbolic-ref refs/remotes/origin/HEAD`; never assume master/main), create a fresh branch off `origin/<primary>`, move the new work onto it, push that, and open a **new** PR.
   3. **Create a pull request** — this is **mandatory**, not optional:

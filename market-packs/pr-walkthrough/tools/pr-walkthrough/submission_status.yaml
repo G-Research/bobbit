@@ -7,4 +7,4 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Call after compaction, retry, or restart to see which chunks are already saved and which required sections remain before finalization.
+  Call after compaction, retry, restart, or compact submit_pr_walkthrough_chunk saves to read the full saved-chunk state, missing required sections, next required work, validation issues, and finalization status. Compact chunk saves intentionally return only a small status object; this tool is the complete status read.

@@ -74,13 +74,17 @@ async function createDelegate(parentId: string): Promise<Record<string, any>> {
 	return resp.json();
 }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string }> {
+async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string; tail: string }> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
-	return { status: resp.status, content: typeof body.content === "string" ? body.content : "" };
+	return {
+		status: resp.status,
+		content: typeof body.content === "string" ? body.content : "",
+		tail: typeof body.tail === "string" ? body.tail : "",
+	};
 }
 
 test.describe.serial("provider hook endpoints resolve the effective goal (teamGoalId)", () => {
@@ -137,6 +141,7 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		const disabled = await callBeforePrompt(disabledDelegate.id, prompt);
 		expect(disabled.status).toBe(200);
 		expect(disabled.content, "demo must be filtered for a delegate whose teamGoalId-goal disables it").toBe("");
+		expect(disabled.tail).toBe("");
 
 		// Control delegate (metadata-less goal) still receives the demo block —
 		// proves the endpoint itself works and the filtering is goal-metadata-driven
@@ -144,5 +149,6 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		const control = await callBeforePrompt(controlDelegate.id, prompt);
 		expect(control.status).toBe(200);
 		expect(control.content).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
+		expect(control.tail).toContain(control.content);
 	});
 });

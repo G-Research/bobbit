@@ -189,7 +189,7 @@ async function readContextTrace(sessionId: string): Promise<TraceEntry[]> {
 	return [];
 }
 
-interface BeforePromptResult { status: number; content: string; blocks: Array<Record<string, unknown>> }
+interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
 async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
@@ -199,6 +199,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	return {
 		status: resp.status,
 		content: typeof body.content === "string" ? body.content : "",
+		tail: typeof body.tail === "string" ? body.tail : "",
 		blocks: Array.isArray(body.blocks) ? body.blocks : [],
 	};
 }
@@ -294,6 +295,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		expect(before.content).toContain("<context-block");
 		expect(before.content).toContain("source=\"Relevant memory\"");
 		expect(before.content).toContain("feature flag");
+		expect(before.tail).toContain(before.content);
 
 		const section = await dynamicContextSection(id);
 		expect(section, "Dynamic Context section present after beforePrompt recall").toBeTruthy();
@@ -350,6 +352,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		const before = await callBeforePrompt(id, "recall should fail non-fatally");
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
+		expect(before.tail).toBe("");
 		expect(before.blocks).toEqual([]);
 
 		// A non-fatal diagnostic is recorded against the memory provider.
@@ -369,6 +372,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.setHealthy(false);
 		const down = await callBeforePrompt(id, "memory while down");
 		expect(down.content).toBe("");
+		expect(down.tail).toBe("");
 
 		stub.setHealthy(true);
 		stub.seedMemories("bobbit", [{ text: "Recovered recall works.", id: "r1" }]);
@@ -449,6 +453,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		expect(section, "no Dynamic Context section when the provider is disabled").toBeUndefined();
 		const before = await callBeforePrompt(id, "anything");
 		expect(before.content).toBe("");
+		expect(before.tail).toBe("");
 		expect(before.blocks).toEqual([]);
 		// No recall was issued for the disabled provider.
 		expect(stub.calls.length).toBe(callsBefore);
