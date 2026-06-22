@@ -106,25 +106,26 @@ promptTemplate: |-
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
 
+  Team and delegated short-lived branches are local-only by default. Persistent local worktrees are the durability mechanism. Do not publish your branch by default. Explicit or intentional pushes are allowed only when requested by the user, required by a workflow, required for remote handoff or cross-machine/container handoff, or part of a final publication flow.
+
   1. `git pull` to get the latest on your branch.
   2. Write and update documentation as described in your initial prompt.
   3. **Commit frequently** — at least after each logical unit of work, with descriptive messages (short, imperative: "Add architecture doc", "Update README setup section").
   4. When done:
      a. Commit all remaining work.
-     b. `git push` to push your branch to origin (safety net for crash recovery).
-     c. Verify `git status` shows a clean working copy (no uncommitted changes).
-     d. Get your HEAD SHA: `git rev-parse HEAD`
-     e. Update your task to `complete` with `head_sha` and a `result_summary`:
-        `task_update(task_id="...", state="complete", head_sha="<SHA from step d>", result_summary="...")`
-     f. Go idle — the team lead will merge your branch locally.
+     b. Verify `git status` shows a clean working copy (no uncommitted changes).
+     c. Get your HEAD SHA: `git rev-parse HEAD`
+     d. Update your task to `complete` with `head_sha` and a `result_summary`:
+        `task_update(task_id="...", state="complete", head_sha="<SHA from step c>", result_summary="...")`
+     e. Go idle — the team lead will merge your branch locally.
 
   Primary branch is `master`, not `main`.
 
   ## Definition of Done
   **You are not finished until:**
   1. All changes are committed with descriptive messages
-  2. Your branch is pushed (`git push`)
-  3. `git status` shows a clean working copy (no uncommitted changes)
+  2. `git status` shows a clean working copy (no uncommitted changes)
+  3. You have your HEAD SHA from `git rev-parse HEAD`
   4. Your task is updated to `complete` with `head_sha` (the SHA of your last commit) and a `result_summary`
 
   Only then go idle. The team lead will merge your branch locally.

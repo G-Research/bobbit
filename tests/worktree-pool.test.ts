@@ -7,8 +7,7 @@
  *     `session/<id8>` name in one synchronous step
  *   - claim() returns null when the directory rename fails so the caller
  *     falls back to createWorktree (no half-renamed persistent state)
- *   - BOBBIT_TEST_NO_PUSH=1 skips push (asserted indirectly by ensuring
- *     no remote is configured and claim still succeeds)
+ *   - claim/freshen does not require a remote and still succeeds in no-push tests
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -164,7 +163,7 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 		}
 	});
 
-	it("claim returns null when pool is empty and never throws on push (BOBBIT_TEST_NO_PUSH=1)", async () => {
+	it("claim returns null when pool is empty and never throws in no-push mode", async () => {
 		const repo = await makeRepo();
 		try {
 			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
@@ -271,7 +270,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 			for (let i = 0; i < 100 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
-			assert.equal(pool.size, 1, "pool should still publish the entry (setup failure is non-fatal)");
+			assert.equal(pool.size, 1, "pool should still expose the entry (setup failure is non-fatal)");
 			const u = await pool.claim("session/abcd1234");
 			assert.ok(u);
 			assert.equal(

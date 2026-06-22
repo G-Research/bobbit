@@ -27,6 +27,7 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Number }) deletionsVsPrimary = 0;
     @property({ type: Boolean }) mergedIntoPrimary = false;
     @property({ type: Boolean }) unpushed = false;
+    @property() remotePublication?: 'local-only-policy';
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
     @property({ type: Boolean }) partial = false;
@@ -312,6 +313,13 @@ export class GitStatusWidget extends LitElement {
             }));
         }
         return segments;
+    }
+
+    private _renderLocalOnlyPolicyStatus() {
+        if (this.remotePublication !== 'local-only-policy') return nothing;
+        return html`<div class="text-muted-foreground" data-testid="git-local-only-policy">
+            Local-only by policy — this branch is not published automatically.
+        </div>`;
     }
 
     private _renderRemoteStatus() {
@@ -918,6 +926,7 @@ export class GitStatusWidget extends LitElement {
             <div class="flex flex-col gap-1 mb-2">
                 ${this._renderPrimaryStatus()}
                 ${this._renderRemoteStatus()}
+                ${this._renderLocalOnlyPolicyStatus()}
             </div>
 
             ${this._renderPrSection()}

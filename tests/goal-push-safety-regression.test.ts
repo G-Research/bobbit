@@ -3,6 +3,7 @@
  *
  * These tests intentionally fail on the vulnerable code path:
  * - claiming a pool worktree preserves `origin/master` as the renamed branch upstream
+ * - claiming a pool worktree publishes the short-lived branch by default
  * - the canonical ready-to-merge push step can update `origin/master` when the
  *   local goal branch tracks `origin/master` and `push.default=upstream`
  */
@@ -74,32 +75,6 @@ async function remoteRef(root: string, origin: string, ref: string): Promise<str
 async function upstream(cwd: string): Promise<string | null> {
 	const result = await gitMaybe(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
 	return result.ok ? result.stdout : null;
-}
-
-async function waitForPublishedUpstream(
-	root: string,
-	origin: string,
-	worktreePath: string,
-	branch: string,
-): Promise<{ upstreamName: string; remoteSha: string }> {
-	const expectedUpstream = `origin/${branch}`;
-	const deadline = Date.now() + 10_000;
-	let lastUpstream: string | null = null;
-	let lastRemoteSha: string | null = null;
-
-	while (Date.now() < deadline) {
-		lastUpstream = await upstream(worktreePath);
-		lastRemoteSha = await remoteRef(root, origin, `refs/heads/${branch}`);
-		if (lastUpstream === expectedUpstream && lastRemoteSha) {
-			return { upstreamName: lastUpstream, remoteSha: lastRemoteSha };
-		}
-		await new Promise(resolve => setTimeout(resolve, 100));
-	}
-
-	assert.fail(
-		`Timed out waiting for ${branch} to be published and track ${expectedUpstream}; ` +
-		`last upstream: ${lastUpstream ?? "<none>"}, last remote ref: ${lastRemoteSha ?? "<missing>"}`,
-	);
 }
 
 function cleanup(root: string): void {
@@ -179,12 +154,12 @@ describe("goal/session branch push safety regressions", () => {
 		}
 	});
 
-	it("claimed pool branch is published and repaired to origin/goal/foo upstream when push is enabled", async () => {
+	it("claimed pool branch stays local-only even when push is enabled", async () => {
 		const { root, repo, origin } = await makeRemoteBackedRepo();
 		const testNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		try {
-			const poolBranch = "pool/_pool-publish-repair";
-			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-publish-repair");
+			const poolBranch = "pool/_pool-local-only";
+			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-local-only");
 			await git(repo, ["worktree", "add", "-b", poolBranch, poolWorktree, "origin/master"]);
 			await git(poolWorktree, ["branch", "--set-upstream-to=origin/master", poolBranch]);
 			assert.equal(await upstream(poolWorktree), "origin/master", "fixture must start with an inherited origin/master upstream");
@@ -199,12 +174,12 @@ describe("goal/session branch push safety regressions", () => {
 			assert.notEqual(
 				await upstream(claim!.worktreePath),
 				"origin/master",
-				"claimed branch must synchronously drop inherited origin/master before background publish",
+				"claimed branch must synchronously drop inherited origin/master",
 			);
 
-			const repaired = await waitForPublishedUpstream(root, origin, claim!.worktreePath, "goal/foo");
-			assert.equal(repaired.upstreamName, "origin/goal/foo");
-			assert.ok(repaired.remoteSha, "background publish must create refs/heads/goal/foo on origin");
+			await new Promise(resolve => setTimeout(resolve, 500));
+			assert.equal(await remoteRef(root, origin, "refs/heads/goal/foo"), null, "pool freshen must not publish short-lived branches");
+			assert.notEqual(await upstream(claim!.worktreePath), "origin/goal/foo", "pool freshen must not set upstream to origin/goal/foo");
 		} finally {
 			if (testNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
 			else process.env.BOBBIT_TEST_NO_PUSH = testNoPush;

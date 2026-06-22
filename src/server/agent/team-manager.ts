@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests } from "../skills/git.js";
+import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
@@ -46,6 +46,22 @@ const execFile = promisify(execFileCb);
 function scanSlugDirForJsonls(worktreePath: string) {
 	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
 	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
+}
+
+async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
+	try {
+		await execFile("git", ["show-ref", "--verify", "--quiet", ref], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function resolveTeamMemberStartPoint(goal: PersistedGoal): Promise<string | undefined> {
+	if (!goal.branch || !goal.repoPath) return undefined;
+	if (await gitRefExists(goal.repoPath, `refs/heads/${goal.branch}`)) return goal.branch;
+	if (await gitRefExists(goal.repoPath, `refs/remotes/origin/${goal.branch}`)) return `origin/${goal.branch}`;
+	return undefined;
 }
 
 function splitWorkerResultSummary(resultSummary: string): { summary?: string; branch?: string; commit?: string; checks?: string } {
@@ -1700,19 +1716,14 @@ export class TeamManager {
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
+		let memberStartPoint: string | undefined;
 		const memberSandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
 		if (useWorktree) {
 			const goalId8 = goalId.slice(0, 8);
 			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
-			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point.
-			// Test harnesses may use repos with no origin; never contact real remotes there.
-			try {
-				if (!(await shouldSkipRemoteGitForTests(goal.repoPath!))) {
-					await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
-				}
-			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
+			memberStartPoint = await resolveTeamMemberStartPoint(goal);
 
 			// Compute subdirectory offset from the goal's worktree root to its cwd.
 			// If the project rootPath is a subdirectory of the repo, goal.cwd includes
@@ -1727,8 +1738,10 @@ export class TeamManager {
 				// via ProjectSandbox.createWorktree(). Use goal.cwd as placeholder.
 				agentCwd = goal.cwd; // placeholder — sandbox wiring overrides this
 			} else {
-				// Non-sandboxed: create worktree the traditional way
-				worktreeResult = await createWorktree(goal.repoPath!, branchName, { startPoint: goal.branch ? `origin/${goal.branch}` : undefined });
+				// Non-sandboxed: create a local-only member worktree. Goal branches may be
+				// unpublished, so prefer local refs before falling back to origin refs.
+				const worktreeOptions = { startPoint: memberStartPoint, pushPolicy: "local-only" as const };
+				worktreeResult = await createWorktree(goal.repoPath!, branchName, worktreeOptions);
 				// Apply subdirectory offset to member worktree cwd
 				agentCwd = memberSubdirOffset && memberSubdirOffset !== "."
 					? path.join(worktreeResult.worktreePath, memberSubdirOffset)
@@ -1783,9 +1796,10 @@ export class TeamManager {
 				undefined,
 				{
 					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
-					// Pass branch info so applySandboxWiring creates the worktree inside the container
+					// Pass branch info so applySandboxWiring creates the worktree inside the container.
+					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
-					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,
+					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
 					// Honour role-level model / thinking-level override (cascade-resolved above).
 					// Empty string falls through to undefined → system default.
 					initialModel: storedRoleDef.model || undefined,
@@ -1802,13 +1816,15 @@ export class TeamManager {
 			const roleAccessory = storedRoleDef.accessory;
 			// For sandboxed sessions, the actual worktree is session.cwd (set by ProjectSandbox.createWorktree)
 			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed ? session.cwd : undefined);
-			this.sessionManager.updateSessionMeta(session.id, {
+			const memberSessionMeta = {
 				role,
 				teamGoalId: goalId,
 				worktreePath: actualWorktreePath,
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
-			});
+				worktreePushPolicy: branchName ? "local-only" : undefined,
+			};
+			this.sessionManager.updateSessionMeta(session.id, memberSessionMeta as any);
 
 			// Resolve baseSha from the agent's working directory.
 			// For sandboxed sessions, run git inside the container.

@@ -58,7 +58,7 @@ class FakeView implements OrchestrationSessionView {
 		const id = `child-${++this.seq}`;
 		this.createSessionCalls.push({ cwd, opts });
 		this.live.set(id, { id, status: "idle" });
-		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, sandboxed: opts?.sandboxed, projectId: opts?.projectId, cwd });
+		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, sandboxed: opts?.sandboxed, projectId: opts?.projectId, worktreePushPolicy: opts?.worktreePushPolicy, cwd });
 		return { id };
 	}
 	async enqueuePrompt(sessionId: string, text: string, opts?: any): Promise<{ status: string }> {
@@ -152,6 +152,46 @@ describe("OrchestrationCore.spawn — sandbox/credential inheritance (no escalat
 		const { opts } = view.createSessionCalls[0];
 		assert.equal(opts.sandboxed, undefined, "unsandboxed owner ⇒ child sandboxed flag stays falsy");
 		assert.equal(opts.projectId, "proj-B");
+	});
+});
+
+describe("OrchestrationCore.spawn — delegated helper worktree push policy", () => {
+	it("marks full-lifecycle sub-branch children local-only", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { projectId: "proj-A", cwd: "/host/owner" });
+		const core = makeCore(view, "anthropic/claude-x");
+
+		await core.spawn({
+			ownerSessionId: "owner-1",
+			instructions: "x",
+			lifecycle: "full",
+			worktree: { mode: "sub-branch", repoPath: "/repo", goalId: "goal-1", branch: "goal/abcd/helper", cwd: "/repo" },
+		});
+
+		assert.equal(view.delegateCalls.length, 0, "sub-branch children must use createSession, not the bare delegate path");
+		assert.equal(view.createSessionCalls.length, 1);
+		const { opts } = view.createSessionCalls[0];
+		assert.deepEqual(opts.worktreeOpts, { repoPath: "/repo" });
+		assert.equal(opts.worktreePushPolicy, "local-only");
+		assert.equal(opts.sandboxBranch, "goal/abcd/helper");
+		assert.equal(view.persisted.get("child-1")?.worktreePushPolicy, "local-only");
+	});
+
+	it("bare and shared-cwd delegates do not request a worktree policy", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { cwd: "/host/owner" });
+		const core = makeCore(view, "anthropic/claude-x");
+
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "bare", worktree: { mode: "shared", cwd: "/host/owner" } });
+		assert.equal(view.delegateCalls.length, 1, "bare shared-cwd spawn stays on createDelegateSession");
+		assert.equal(view.createSessionCalls.length, 0);
+		assert.equal(view.delegateCalls[0].opts.worktreeOpts, undefined);
+		assert.equal(view.delegateCalls[0].opts.worktreePushPolicy, undefined);
+
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "full", lifecycle: "full", worktree: { mode: "shared", cwd: "/host/owner" } });
+		assert.equal(view.createSessionCalls.length, 1, "explicit full shared-cwd spawn is visible but branchless");
+		assert.equal(view.createSessionCalls[0].opts.worktreeOpts, undefined);
+		assert.equal(view.createSessionCalls[0].opts.worktreePushPolicy, undefined);
 	});
 });
 

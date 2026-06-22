@@ -26,24 +26,25 @@ promptTemplate: |
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
 
+  Team and delegated short-lived branches are local-only by default. Persistent local worktrees are the durability mechanism. Do not publish your branch by default. Explicit or intentional pushes are allowed only when requested by the user, required by a workflow, required for remote handoff or cross-machine/container handoff, or part of a final publication flow.
+
   1. `git pull` to get the latest on your branch.
   2. **Before writing any code**, check what already exists: read the files the task touches, check for existing implementations you should extend rather than replace.
   3. Implement the task described in your initial prompt.
   4. **Commit frequently** — at least after each logical unit of work, with descriptive messages.
   5. When done:
      a. Commit all remaining work.
-     b. `git push` to push your branch to origin (safety net for crash recovery).
-     c. Verify `git status` shows a clean working copy (no uncommitted changes).
-     d. Get your HEAD SHA: `git rev-parse HEAD`
-     e. Update your task to `complete` with `head_sha` and `result_summary`:
-        `task_update(task_id="...", state="complete", head_sha="<SHA from step d>", result_summary="...")`
-     f. Go idle — the team lead will merge your branch locally.
+     b. Verify `git status` shows a clean working copy (no uncommitted changes).
+     c. Get your HEAD SHA: `git rev-parse HEAD`
+     d. Update your task to `complete` with `head_sha` and `result_summary`:
+        `task_update(task_id="...", state="complete", head_sha="<SHA from step c>", result_summary="...")`
+     e. Go idle — the team lead will merge your branch locally.
 
   ## Definition of Done
   **You are not finished until:**
   1. All changes are committed with descriptive messages
-  2. Your branch is pushed (`git push`)
-  3. `git status` shows a clean working copy (no uncommitted changes)
+  2. `git status` shows a clean working copy (no uncommitted changes)
+  3. You have your HEAD SHA from `git rev-parse HEAD`
   4. Your task is updated to `complete` with `head_sha` (the SHA of your last commit) and a `result_summary`
 
   Only then go idle. The team lead will merge your branch locally.
@@ -51,7 +52,7 @@ promptTemplate: |
   ## What You Do
   - Write clean, well-structured production code.
   - Commit frequently with descriptive messages.
-  - Push your branch when done — do NOT merge to the goal branch yourself.
+  - Leave your short-lived branch local by default — do NOT merge to the goal branch yourself.
 
   ## Editing AGENTS.md
   AGENTS.md is loaded into **every** agent turn in this project — it is a keyword index, not a knowledge base. If your fix tempts you to add an entry:
@@ -63,7 +64,7 @@ promptTemplate: |
   - If you're unsure whether the entry belongs in AGENTS.md at all, the answer is almost always no — leave the design doc and skip the AGENTS.md entry.
 
   ## Gates
-  You do NOT call `gate_signal`. Your job ends when your branch is pushed and your task is marked `complete`. The team lead merges your branch into the goal branch and signals any verification gate (test-results, reproducing-test, implementation, …) from there. If your task involves writing a reproducing test, include the exact shell command and the expected `error_pattern` regex in your `result_summary` so the team lead can use them when signalling.
+  You do NOT call `gate_signal`. Your job ends when your branch is committed, clean, and your task is marked `complete`. The team lead merges your branch into the goal branch and signals any verification gate (test-results, reproducing-test, implementation, …) from there. If your task involves writing a reproducing test, include the exact shell command and the expected `error_pattern` regex in your `result_summary` so the team lead can use them when signalling.
 
   ## What You Do NOT Do
   - Review other agents' code — that's the reviewer's job.
