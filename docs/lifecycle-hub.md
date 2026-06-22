@@ -413,7 +413,7 @@ session id and `404` when the session is unknown (neither live nor persisted).
 
 | Method + path | Caller | Behaviour |
 |---|---|---|
-| `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks }`. |
+| `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
 | `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
 | `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
 
@@ -428,13 +428,14 @@ session id and `404` when the session is unknown (neither live nor persisted).
 
 `blocks` is **metadata-only** — each entry is `{ id, providerId, title, tokenEstimate }`. The
 full block text lives in `content`; the metadata array exists for the inspector and diagnostics
-without parsing the body. After dispatch the endpoint also refreshes the persisted
+without parsing the body. `tail` is a temporary legacy system-prompt-tail wrapper for old generated
+bridges; current generated bridges ignore it and consume `content` only. After dispatch the endpoint also refreshes the persisted
 prompt-sections snapshot **best-effort** (non-fatal: a failure is logged and the response still
 returns) so `GET /api/sessions/:id/prompt-sections` shows the turn's latest Dynamic Context
 snapshot even though that context is delivered through a hidden message rather than the system
 prompt.
 
-When no `LifecycleHub` is configured, `before-prompt` returns `{ content: "", blocks: [] }` and
+When no `LifecycleHub` is configured, `before-prompt` returns `{ content: "", tail: "", blocks: [] }` and
 `before-compact` returns `{}` — the turn proceeds unchanged.
 
 ## The provider-bridge extension
@@ -446,7 +447,7 @@ When no `LifecycleHub` is configured, `before-prompt` returns `{ content: "", bl
 written under `.bobbit/state/provider-bridge/<contentHash>/bridge.ts` and de-duplicated by
 hash.
 
-The generated extension subscribes to two pi events:
+The generated extension subscribes to three pi events:
 
 - **`before_agent_start`** (per turn) → POST `…/provider-hooks/before-prompt` with
   `{ prompt: event.prompt }`, with an `AbortController` timeout of **2500 ms**. On success, if the
@@ -454,9 +455,13 @@ The generated extension subscribes to two pi events:
   `{ message: { customType: "bobbit:dynamic-context", content, display: false } }`. On empty
   content or **any** failure (transport, timeout/abort, non-2xx, parse error), it returns
   `undefined` and the turn proceeds with the unmodified prompt and system prompt.
+- **`context`** → filters hidden `bobbit:dynamic-context` custom messages from future LLM
+  contexts. It removes stale dynamic-context messages before the latest real `user` message and
+  preserves current-turn dynamic context appended after that latest user.
 - **`session_before_compact`** → POST `…/provider-hooks/before-compact`, with a timeout of
-  **5000 ms**. The result is ignored (compaction output is not amended here); all failures are
-  swallowed. This `beforeCompact` behavior is unchanged.
+  **5000 ms**. The compacted span ignores `bobbit:dynamic-context` custom messages so summaries do
+  not retain stale recall. The result is ignored (compaction output is not amended here); all
+  failures are swallowed. This `beforeCompact` behavior is unchanged.
 
 Transport and auth are identical to the tool-guard: read `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`
 from the environment, falling back to `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and
@@ -485,11 +490,12 @@ If the gateway returns empty content, or the callback fails or times out, the br
 
 ### System-prompt stability
 
-The old per-turn system-prompt tail path is intentionally retired for `beforePrompt`. The only
-Dynamic Context that belongs in `systemPrompt` is `sessionSetup` output, assembled once at spawn
-time. Per-turn blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side messages;
-`beforeCompact` still only notifies providers before compaction and does not amend compaction
-output.
+The old per-turn system-prompt tail path is intentionally retired for the generated bridge; the
+`before-prompt` endpoint still returns a temporary legacy `tail` field only for old bridges. The
+only Dynamic Context that belongs in `systemPrompt` is `sessionSetup` output, assembled once at
+spawn time. Per-turn blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side
+messages, and stale persisted copies are filtered from future LLM contexts; `beforeCompact` still
+only notifies providers before compaction and does not amend compaction output.
 
 ### Activation — generated only when a provider wants it
 

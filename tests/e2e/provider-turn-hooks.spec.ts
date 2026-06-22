@@ -92,7 +92,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	};
 }
 
-async function registerGeneratedBeforeAgentStart(sessionId: string, tempDir: string): Promise<(event: any) => Promise<any>> {
+async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
 	const source = generateProviderBridgeExtension(sessionId);
 	const transpiled = ts.transpileModule(source, {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
@@ -102,11 +102,16 @@ async function registerGeneratedBeforeAgentStart(sessionId: string, tempDir: str
 	const mod = await import(pathToFileURL(file).href);
 	const extensionFactory = typeof mod.default === "function" ? mod.default : mod.default?.default;
 	expect(typeof extensionFactory, "generated bridge default export").toBe("function");
-	const handlers = new Map<string, (event: any) => Promise<any>>();
-	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any>) => handlers.set(event, handler) });
+	const handlers = new Map<string, (event: any) => Promise<any> | any>();
+	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	return handlers;
+}
+
+async function registerGeneratedBeforeAgentStart(sessionId: string, tempDir: string): Promise<(event: any) => Promise<any>> {
+	const handlers = await registerGeneratedBridgeHandlers(sessionId, tempDir);
 	const handler = handlers.get("before_agent_start");
 	expect(typeof handler, "generated bridge registered before_agent_start").toBe("function");
-	return handler!;
+	return handler as (event: any) => Promise<any>;
 }
 
 async function readContextTrace(sessionId: string, limit?: number): Promise<TraceEntry[]> {
@@ -237,7 +242,11 @@ test.describe("provider per-turn hooks", () => {
 	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async () => {
 		await setProviderDisabled(["slow"]);
 		const { id, cwd } = await newSession("bridge");
-		const beforeAgentStart = await registerGeneratedBeforeAgentStart(id, cwd);
+		const handlers = await registerGeneratedBridgeHandlers(id, cwd);
+		const beforeAgentStart = handlers.get("before_agent_start") as (event: any) => Promise<any>;
+		const filterContext = handlers.get("context") as (event: any) => any;
+		expect(typeof beforeAgentStart, "generated bridge registered before_agent_start").toBe("function");
+		expect(typeof filterContext, "generated bridge registered context").toBe("function");
 		const baseSystemPrompt = "BASE SYSTEM PROMPT\n(sessionSetup dynamic context is already stable here)";
 		let piSystemPrompt = baseSystemPrompt;
 		const prompts = ["turn A cache probe", "turn B cache probe"];
@@ -270,6 +279,19 @@ test.describe("provider per-turn hooks", () => {
 		expect(dynamicMessages[0].content).toContain("turn A cache probe");
 		expect(dynamicMessages[1].content).toContain("turn B cache probe");
 		expect(dynamicMessages[0].content).not.toBe(dynamicMessages[1].content);
+
+		const llmContextMessages = [
+			{ role: "user", content: [{ type: "text", text: prompts[0] }] },
+			dynamicMessages[0],
+			{ role: "assistant", content: [{ type: "text", text: "old answer" }] },
+			{ role: "user", content: [{ type: "text", text: prompts[1] }] },
+			dynamicMessages[1],
+		];
+		const filtered = filterContext({ type: "context", messages: llmContextMessages });
+		expect(filtered?.messages, "context hook must filter stale persisted dynamic context").toBeTruthy();
+		expect(JSON.stringify(filtered.messages)).not.toContain("DEMO_BEFORE_PROMPT turn A cache probe");
+		expect(JSON.stringify(filtered.messages)).toContain("DEMO_BEFORE_PROMPT turn B cache probe");
+		expect(filtered.messages.at(-1)).toBe(dynamicMessages[1]);
 	});
 
 	test("context-trace honours the limit query param", async () => {

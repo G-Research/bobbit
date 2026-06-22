@@ -5,7 +5,7 @@
  * Unlike the gateway-internal `afterTurn` / `sessionShutdown` dispatches, the
  * per-turn `beforePrompt` and `beforeCompact` hooks need to run *inside* the
  * agent process so they can observe / amend the outgoing turn. The generated
- * extension subscribes to pi's `before_agent_start`, `message_end`, and
+ * extension subscribes to pi's `before_agent_start`, `context`, and
  * `session_before_compact` events and calls back into the gateway, which
  * dispatches through the `LifecycleHub`.
  *
@@ -118,18 +118,49 @@ function stripDelimitedTail(systemPrompt) {
 // Bounds the hook payload; the memory provider trims further before retaining.
 const COMPACT_SPAN_CAP = 8000;
 
+function isDynamicContextMessage(message) {
+  return !!message && message.role === "custom" && message.customType === "bobbit:dynamic-context";
+}
+
+function latestRealUserMessageIndex(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i] && messages[i].role === "user") return i;
+  }
+  return -1;
+}
+
+// Remove stale dynamic-context custom messages from future provider contexts.
+// Current-turn dynamic context is appended after the latest real user message;
+// older persisted copies appear before it and must not be replayed.
+function filterStaleDynamicContextMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const latestUser = latestRealUserMessageIndex(messages);
+  let changed = false;
+  const filtered = messages.filter((message, index) => {
+    if (!isDynamicContextMessage(message)) return true;
+    const stale = latestUser === -1 || index < latestUser;
+    if (stale) {
+      changed = true;
+      return false;
+    }
+    return true;
+  });
+  return changed ? filtered : messages;
+}
+
 // Extract the about-to-be-lost conversation span from the pi
 // session_before_compact event so beforeCompact providers retain real content
 // instead of an empty body. Reads event.preparation.messagesToSummarize (the
-// messages compaction will discard), concatenating their text; falls back to a
-// prior summary. All failures degrade to "" so a turn never breaks.
+// messages compaction will discard), concatenating their text while skipping
+// Bobbit's hidden per-turn dynamic context; falls back to a prior summary. All
+// failures degrade to "" so a turn never breaks.
 function extractCompactSpan(event) {
   try {
     const prep = event && event.preparation;
     const msgs = prep && Array.isArray(prep.messagesToSummarize) ? prep.messagesToSummarize : [];
     const parts = [];
     for (const m of msgs) {
-      if (!m || typeof m !== "object") continue;
+      if (!m || typeof m !== "object" || isDynamicContextMessage(m)) continue;
       const role = typeof m.role === "string" ? m.role : "";
       const c = m.content;
       let text = "";
@@ -220,20 +251,15 @@ export default function(pi) {
     };
   });
 
-  // Pi persists custom messages when their message_end event fires. Dynamic
-  // context only belongs to the current LLM turn, so scrub the hidden message
-  // before persistence/compaction can rehydrate stale recall into a future turn.
-  // Current-turn delivery is already complete by this point.
-  pi.on("message_end", (event) => {
-    const msg = event && event.message;
-    if (!msg || msg.role !== "custom" || msg.customType !== "bobbit:dynamic-context") return undefined;
-    return {
-      message: {
-        ...msg,
-        content: [],
-        display: false,
-      },
-    };
+  // Context filtering: pi may persist hidden custom messages after a turn. Do
+  // not mutate message_end (that is too early for the current provider request);
+  // instead, filter only the future LLM context. Stale dynamic messages before
+  // the latest real user are removed, while current-turn dynamic messages after
+  // that user are preserved for the in-flight request.
+  pi.on("context", (event) => {
+    const messages = event && Array.isArray(event.messages) ? event.messages : [];
+    const filtered = filterStaleDynamicContextMessages(messages);
+    return filtered === messages ? undefined : { messages: filtered };
   });
 
   // beforeCompact: forward the about-to-be-lost span so providers can retain it
