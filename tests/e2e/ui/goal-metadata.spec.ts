@@ -24,6 +24,8 @@ import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
 
 const GOAL_TAB_TESTID = "[data-testid='goal-proposal-tab-goal']";
 const GOAL_PANEL_TESTID = "[data-testid='goal-proposal-panel-goal']";
+const WORKFLOW_TAB_TESTID = "[data-testid='goal-proposal-tab-workflow']";
+const ROLES_TAB_TESTID = "[data-testid='goal-proposal-tab-roles']";
 const METADATA_TAB_TESTID = "[data-testid='goal-proposal-tab-metadata']";
 const METADATA_PANEL_TESTID = "[data-testid='goal-proposal-panel-metadata']";
 const METADATA_TESTID = "[data-testid='goal-form-metadata']";
@@ -160,6 +162,23 @@ async function addMetadataRow(page: import("@playwright/test").Page, key: string
 }
 
 test.describe("Goal proposal — Metadata tab", () => {
+	test("New Goal assistant proposal renders unified tabs and keeps metadata out of Goal tab", async ({ page }) => {
+		await openGoalAssistant(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const goalTab = page.locator(GOAL_TAB_TESTID);
+		await expect(goalTab).toBeVisible({ timeout: 5_000 });
+		await expect(goalTab).toHaveAttribute("aria-selected", "true");
+		await expect(page.locator(WORKFLOW_TAB_TESTID)).toBeVisible();
+		await expect(page.locator(ROLES_TAB_TESTID)).toBeVisible();
+		await expect(page.locator(METADATA_TAB_TESTID)).toBeVisible();
+
+		await expect(page.locator(GOAL_PANEL_TESTID)).toBeVisible();
+		await expect(page.locator(`${GOAL_PANEL_TESTID} ${METADATA_TESTID}`)).toHaveCount(0);
+
+		await openMetadataTab(page);
+		await expect(page.locator(`${METADATA_PANEL_TESTID} ${METADATA_TESTID}`).first()).toBeVisible();
+	});
+
 	test("legacy worktree-setup controls are gone; metadata editor is present and empty by default", async ({ page }) => {
 		await openGoalAssistant(page, "Please create a GOAL_PROPOSAL for testing");
 
