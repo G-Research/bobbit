@@ -5,16 +5,22 @@ description: >-
   tag-scoped bank). Dormant until a Hindsight URL is configured. See
   docs/design/hindsight-pack-external.md and docs/design/agent-memory.md.
 version: 1.0.0
+# Ships DEFAULT-DISABLED: a fresh server lists this pack in the built-in band but
+# does NOT activate its tools/provider/entrypoints/runtime until the user enables
+# it (via the Marketplace toggle / guided setup) OR it is already configured
+# (a persisted Hindsight config with a non-empty externalUrl or a managed mode).
+# Resolution priority lives in src/server/agent/pack-default-activation.ts.
+defaultDisabled: true
 contents:
   roles: []
-  tools: [] # explicit hindsight_* tools land in G2.3
+  tools: [hindsight] # explicit hindsight_recall/retain/reflect/outcome/invalidate agent tools (P5)
   skills: []
-  entrypoints: [] # panel + deep link land in G2.3
+  entrypoints: [hindsight-session-menu, hindsight-route] # session-menu launcher + deep-link route for the embedded dashboard (use/view/query) panel
   providers: [memory] # → providers/memory.yaml
   hooks: []
   mcp: []
   pi-extensions: []
-  runtimes: [] # managed runtime lands in G3
+  runtimes: [hindsight] # P1 managed runtime descriptor → runtimes/hindsight.yaml
   workflows: []
 provides: []
 requires: []
@@ -25,4 +31,4 @@ requires: []
 # stays inside the pack root.
 routes:
   module: lib/routes.mjs
-  names: [status, recall, retain, reflect, banks, config]
+  names: [status, recall, retain, retain_outcome, reflect, invalidate, banks, config]

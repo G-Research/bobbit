@@ -247,6 +247,93 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	});
 });
 
+// ── Runtime contributions (P1 runtime manifest) ────────────────────
+
+describe("loadRuntimes (P1 runtime manifest)", () => {
+	it("loads runtimes/<name>.yaml + .yml ONLY for names listed in contents.runtimes, carrying listName/sourceFile/packRoot", () => {
+		const root = packRoot("rt1", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ntitle: Hindsight\ndescription: Managed runtime\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "alt.yml"), "id: alt\ncomposeFile: ../runtime/alt.yaml\n");
+		w(path.join(root, "runtimes", "unlisted.yaml"), "id: unlisted\ncomposeFile: ../runtime/unlisted.yaml\n");
+		const c = loadPackContributions(root, { ...manifest("runtime-pack", { runtimes: ["hindsight", "alt"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["hindsight", "alt"]);
+		assert.equal(c.runtimes[0].title, "Hindsight");
+		assert.equal(c.runtimes[0].description, "Managed runtime");
+		assert.equal(c.runtimes[0].listName, "hindsight");
+		assert.equal(c.runtimes[0].sourceFile, path.join(root, "runtimes", "hindsight.yaml"));
+		assert.equal(c.runtimes[0].packRoot, root);
+		assert.deepEqual(c.runtimes[0].manifest, { id: "hindsight", title: "Hindsight", description: "Managed runtime", composeFile: "../runtime/compose.yaml" });
+	});
+
+	it("defaults to no runtimes when contents.runtimes is absent/empty", () => {
+		const root = packRoot("rt2", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		assert.deepEqual(loadPackContributions(root, manifest("p")).runtimes, []);
+	});
+
+	it("drops missing / malformed / invalid-id runtime files without crashing the scan", () => {
+		const root = packRoot("rt3", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "ok.yaml"), "id: ok\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "badid.yaml"), "id: '1 bad'\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "notmap.yaml"), "['not', 'a', 'mapping']\n");
+		const c = loadPackContributions(root, { ...manifest("p", { runtimes: ["ok", "badid", "notmap", "missing"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["ok"]);
+	});
+
+	it("an unsafe runtime listName does not read/register a file outside runtimes/", () => {
+		const root = packRoot("rt4", "evil");
+		w(path.join(root, "pack.yaml"), "name: evil\n");
+		w(path.join(root, "outside.yaml"), "id: evil.escaped\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "ok.yaml"), "id: evil.ok\ncomposeFile: ../runtime/compose.yaml\n");
+		const c = loadPackContributions(root, { ...manifest("evil", { runtimes: ["../outside", "ok"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["evil.ok"]);
+	});
+
+	it("duplicate runtime id within a pack → PackContributionError", () => {
+		const root = packRoot("rt5", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "a.yaml"), "id: dup\ncomposeFile: a\n");
+		w(path.join(root, "runtimes", "b.yaml"), "id: dup\ncomposeFile: b\n");
+		assert.throws(() => loadPackContributions(root, { ...manifest("p", { runtimes: ["a", "b"] }), schema: 2 }), (e) => e instanceof PackContributionError && /runtime id "dup"/.test(e.message));
+	});
+
+	it("registry exposes runtimes via getRuntime / getPack", () => {
+		const root = packRoot("rt6", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		const m = { ...manifest("runtime-pack", { runtimes: ["hindsight"] }), schema: 2 };
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.equal(reg.getPack(undefined, "runtime-pack")!.runtimes.length, 1);
+		assert.equal(reg.getRuntime(undefined, "runtime-pack", "hindsight")!.listName, "hindsight");
+	});
+
+	it("activation filtering: a disabled runtime is dropped from getPack/getRuntime and re-enabled by removing the ref", () => {
+		const root = packRoot("rt7", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "other.yaml"), "id: other\ncomposeFile: ../runtime/compose.yaml\n");
+		const m = { ...manifest("runtime-pack", { runtimes: ["hindsight", "other"] }), schema: 2 };
+		// No activation override → both runtimes present.
+		const enabled = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(enabled.getPack(undefined, "runtime-pack")!.runtimes.map((r) => r.id).sort(), ["hindsight", "other"]);
+		// Disable `hindsight` by listName → absent from getPack().runtimes and getRuntime;
+		// the sibling runtime stays present.
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined,
+			(_scope, _pid, packName) => (packName === "runtime-pack" ? ["hindsight"] : []),
+		);
+		const pack = filtered.getPack(undefined, "runtime-pack")!;
+		assert.deepEqual(pack.runtimes.map((r) => r.id), ["other"]);
+		assert.equal(filtered.getRuntime(undefined, "runtime-pack", "hindsight"), undefined);
+		assert.equal(filtered.getRuntime(undefined, "runtime-pack", "other")!.listName, "other");
+		// Removing the ref restores it (no stale filtering between instances).
+		const restored = new PackContributionRegistry(() => [entry(root, "server", m)], undefined, undefined, undefined, () => []);
+		assert.equal(restored.getRuntime(undefined, "runtime-pack", "hindsight")!.listName, "hindsight");
+	});
+});
+
 // ── Hard conflicts (§5.4) ──────────────────────────────────────────
 
 describe("hard conflicts (§5.4)", () => {
@@ -389,6 +476,92 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		const active = configured.listProviders(undefined);
 		assert.deepEqual(active.map((p) => p.id), ["memory"]);
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
+	});
+
+	it("activeWhenConfig: a managed deployment mode activates the provider without requiresConfig (external still needs it)", () => {
+		const root = packRoot("act-mode", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// Default (external mode, no externalUrl) → dormant: activeWhenConfig unmatched,
+		// requiresConfig unsatisfied.
+		const dormant = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(dormant.listProviders(undefined).map((p) => p.id), []);
+
+		// managed mode override → active WITHOUT an externalUrl (deployment-mode linkage).
+		const managed = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "managed" }),
+		);
+		assert.deepEqual(managed.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// managed-external-postgres likewise activates without externalUrl.
+		const managedExt = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "managed-external-postgres" }),
+		);
+		assert.deepEqual(managedExt.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// external mode WITH an externalUrl → active via requiresConfig (unchanged path).
+		const external = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "external", externalUrl: "http://localhost:8888" }),
+		);
+		assert.deepEqual(external.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		// external mode WITHOUT an externalUrl → still dormant.
+		const externalUnset = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ mode: "external" }),
+		);
+		assert.deepEqual(externalUnset.listProviders(undefined).map((p) => p.id), []);
+	});
+
+	it("getRawPack returns a DORMANT provider that getPack/listProviders drop (deployment-surface classification)", () => {
+		const root = packRoot("raw-dormant", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// Fresh/default: external mode, no externalUrl → provider DORMANT.
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		// Activation-filtered views drop it (matches the Hindsight external-default case).
+		assert.deepEqual(reg.getPack(undefined, "memory-pack")!.providers.map((p) => p.id), []);
+		assert.deepEqual(reg.listProviders(undefined).map((p) => p.id), []);
+		// RAW view keeps the dormant provider WITH its schema-default flat config, so the
+		// runtime REST/capabilities surface can classify the external deployment mode.
+		const raw = reg.getRawPack(undefined, "memory-pack");
+		assert.deepEqual(raw!.providers.map((p) => p.id), ["memory"]);
+		assert.equal(raw!.providers[0].config?.mode, "external");
+		// Unknown packId → undefined (mirrors getPack).
+		assert.equal(reg.getRawPack(undefined, "no-such-pack"), undefined);
 	});
 
 	it("config overlay: store override wins over the schema default for an unconditional provider", () => {

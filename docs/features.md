@@ -106,6 +106,17 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 The PR walkthrough panel is a guided pull-request or changeset review surface. It ships as a **built-in first-party pack** (`market-packs/pr-walkthrough/`) that is auto-resolved active-by-default — there is no manual install. The pack owns the viewer surfaces and the reviewer tools under `tools/pr-walkthrough/`; `pack.yaml` advertises the `pr-walkthrough` tool group, and Market expands it into concrete tool toggles. Two pack launchers (composer-slash / session menu) do the **same** thing on click: they call the pack's `run` route, which mints a **separate, isolated, read-only reviewer child** (`host.agents.spawn`, role `pr-reviewer`, `title: "PR Walkthrough"`) — it never drives the user's current agent — and then **auto-switch the view to that child session**, opening the panel there. There is **no owner-session panel** and **no manual "Run PR walkthrough" / "Load walkthrough" buttons**. A no-PR / spawn failure surfaces through visible launcher feedback from the session menu, spawning nothing and not switching the view; every click is a fresh reviewer (no dedup). The reviewer publishes cards only through validated `submit_pr_walkthrough_yaml`, and on submit it is **not** dismissed — it stays live and selectable until the user terminates it. The run path is GitHub-PR-only. Disabling the pack from the Market built-in section makes the feature unavailable (the deep-link degrades to an empty state). See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract, [pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md) for the launch model, and [built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the pack model.
 
+## Hindsight Memory
+
+The **Hindsight** built-in first-party pack (`market-packs/hindsight/`) gives agents persistent,
+cross-session memory backed by a Hindsight instance: it recalls relevant past memories into the
+prompt and retains a compact summary of each turn. It ships with `defaultDisabled: true`, so fresh
+installs have no Hindsight tools, provider hooks, entrypoints, runtime, network calls, or prompt
+drift until the operator enables/configures it through Marketplace setup. Existing configured
+installations remain active.
+
+All configuration, setup, and re-configuration are performed directly inside the **Marketplace** (via the inline Configure form/wizard on the Marketplace page). The session actions overflow menu entry (**Hindsight Memory**) and deep link `#/ext/hindsight` now open the **live Hindsight dashboard embedded as a sandboxed iframe** (utilizing `uiUrl`) in a first-class in-app Bobbit tab/panel. This lets the user seamlessly use, view, and query the memory bank without leaving the application. When `uiUrl` is unset, the in-app tab directs the user to the Marketplace for configuration with a helpful Call-to-Action (CTA) and displays any available API/external status context. See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and [managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed Docker/Postgres runtime details.
+
 ## Assistant Registry
 
 A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Builtin definitions ship in `defaults/roles/assistant/` (user overrides in `.bobbit/config/roles/assistant/`), falling back to hardcoded defaults:
@@ -126,9 +137,9 @@ Context compaction reduces token usage by summarising the conversation.
 
 ## System Prompt Assembly
 
-Each session's system prompt is assembled from a fixed set of ordered sections (numbered below) plus an optional provider-supplied tail. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time.
+Each session's system prompt is assembled from a fixed set of ordered sections (numbered below), including optional spawn-time provider context from `sessionSetup`. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time. Per-turn `beforePrompt` Dynamic Context is delivered separately as hidden `bobbit:dynamic-context` custom/user-side messages, not as a system-prompt tail.
 
-The sections are ordered so that the **stable prefix** (sections 1–5, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 6–8, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
+The sections are ordered so that the **stable prefix** (sections 1–5, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 6–9, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
 
 | # | Section | Volatile? | Source |
 |---|---------|-----------|--------|
@@ -142,7 +153,7 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | 8 | **Workflow upstream-gate context** | Yes | Passed gate content injected for context. Omitted when not in a workflow. |
 | 9 | **Dynamic Context** | Yes | Provider-supplied ambient context from the `sessionSetup` lifecycle hook, fenced in `<context-block>` envelopes. Appended last (freshest, lowest-authority). Omitted unless an active provider contributes blocks. See [lifecycle-hub.md](lifecycle-hub.md#session-setup-wiring-g13). |
 
-Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout.
+Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout. The same inspector section is refreshed best-effort for per-turn `beforePrompt` blocks, but those blocks reach the model through the hidden custom-message channel so provider cached system-prompt bytes stay stable across turns.
 
 ## Reconnection
 

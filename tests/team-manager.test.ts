@@ -145,6 +145,7 @@ function createMockTaskManager() {
 	const tasks: any[] = [];
 	return {
 		getTasksByGoal: (_goalId: string) => tasks,
+		getTasksForGoal: (_goalId: string) => tasks,
 		getTasksForSession: (_sessionId: string) => tasks.filter((t: any) => t.assignedSessionId === _sessionId),
 		createTask: (_goalId: string, task: any) => { tasks.push(task); return task; },
 		getTask: (id: string) => tasks.find((t: any) => t.id === id),
@@ -165,7 +166,7 @@ const DEFAULT_CONFIG = {
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
 
 /** Create a TeamManager with a clean persisted state. */
-function createTeamManager(sm: any, config = DEFAULT_CONFIG): InstanceType<typeof TeamManager> {
+function createTeamManager(sm: any, config: any = DEFAULT_CONFIG): InstanceType<typeof TeamManager> {
 	clearTeamStore();
 	const tm = new TeamManager(sm, config);
 	_createdManagers.push(tm);
@@ -614,6 +615,77 @@ describe("TeamManager", () => {
 
 			// Team lead session should still be alive
 			assert.equal(sm._sessions.has(session.id), true);
+		});
+
+		it("dispatches goalCompleted once after marking the goal complete", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ id: "goal-completed-once", branch: "goal/test" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const calls: any[] = [];
+			const team = createTeamManager(sm, {
+				...DEFAULT_CONFIG,
+				goalCompletedDispatcher: async (ctx: any) => { calls.push(ctx); },
+				resolveGoalPullRequest: () => ({ url: "https://github.com/example/repo/pull/12", number: 12, state: "open" }),
+			});
+
+			const session = await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			await team.completeTeam(goal.id);
+
+			assert.equal(goal.state, "complete");
+			assert.equal(calls.length, 1, "same goal/head completion dispatches once");
+			assert.equal(calls[0].goalId, goal.id);
+			assert.equal(calls[0].branch, "goal/test");
+			assert.equal(calls[0].teamLeadSessionId, session.id);
+			assert.equal(calls[0].pullRequest.url, "https://github.com/example/repo/pull/12");
+		});
+
+		it("keeps completion successful when goalCompleted provider dispatch fails", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ id: "goal-completed-failure" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm, {
+				...DEFAULT_CONFIG,
+				goalCompletedDispatcher: async () => { throw new Error("provider failed"); },
+			});
+
+			await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+
+			assert.equal(goal.state, "complete");
+			assert.ok(team.getTeamState(goal.id), "team state remains after non-fatal provider failure");
+		});
+
+		it("collapses concurrent completion attempts to one goalCompleted dispatch", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ id: "goal-completed-concurrent" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			let release!: () => void;
+			const started: string[] = [];
+			const blocker = new Promise<void>((resolve) => { release = resolve; });
+			const team = createTeamManager(sm, {
+				...DEFAULT_CONFIG,
+				goalCompletedDispatcher: async (ctx: any) => {
+					started.push(ctx.goalId);
+					await blocker;
+				},
+			});
+
+			await team.startTeam(goal.id);
+			const first = team.completeTeam(goal.id);
+			const second = team.completeTeam(goal.id);
+			const deadline = Date.now() + 1_000;
+			while (started.length === 0 && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			assert.equal(started.length, 1, "concurrent calls share one in-flight dispatch");
+			release();
+			await Promise.all([first, second]);
+			assert.equal(started.length, 1);
+			assert.equal(goal.state, "complete");
 		});
 
 		it("should dismiss all role agents during completion", async () => {

@@ -53,8 +53,21 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
-import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import {
+	PackRuntimeSupervisor,
+	FilePortStore,
+	getOrCreatePackRuntimeServerIdentity,
+	encodePackRuntimeId,
+	decodePackRuntimeId,
+	PackRuntimeNotFoundError,
+	PackRuntimeBadRequestError,
+	PackRuntimeDockerUnavailableError,
+	readRuntimeStartPolicy,
+	type PackRuntimeStatus,
+	type PackRuntimeCapabilitySummary,
+} from "./runtimes/index.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
@@ -288,7 +301,8 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
+import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
@@ -423,6 +437,84 @@ export function readConcretePackToolsFromGroups(
 		}
 	}
 	return { tools, descriptions };
+}
+
+// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────────
+// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+// provider, entrypoints, runtime all absent) on a fresh server until the user
+// enables it OR it is "already configured" (live-setup preservation). The
+// overlay is injected into the SERVER-scope ProjectConfigStore so the single
+// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+// Marketplace endpoints) all observe the same effective state; it is never
+// persisted, so the dormancy invariant holds and an explicit user toggle (a
+// persisted record, or the force-enabled marker) always wins.
+//
+// These helpers are MODULE-scoped (not closed over createGateway) so the
+// activation PUT inside the top-level handleApiRoute shares them. The static
+// per-pack info is memoized and cleared on any pack-list mutation via
+// clearDefaultDisabledInfoCache(); the live gates (force-enabled marker +
+// persisted provider config) are read each call.
+interface DefaultDisabledInfo { allDisabled: DisabledRefs; packId: string; providerIds: string[] }
+const defaultDisabledInfoCache = new Map<string, DefaultDisabledInfo | null>();
+function clearDefaultDisabledInfoCache(): void { defaultDisabledInfoCache.clear(); }
+/** Resolve + memoize the default-disabled info for a SERVER-scope pack name, or
+ *  `null` when the pack is not default-disabled. An installed server market pack
+ *  wins over the built-in band (mirrors buildActivationCatalogue's resolution). */
+function getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStore): DefaultDisabledInfo | null {
+	const cached = defaultDisabledInfoCache.get(packName);
+	if (cached !== undefined) return cached;
+	let info: DefaultDisabledInfo | null = null;
+	const base = getProjectRoot();
+	let entry = scopeMarketPackEntries("server" as PackScope, base, serverStore.getPackOrder("server"))
+		.find((e) => e.manifest?.name === packName);
+	if (!entry || !entry.manifest) {
+		entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+	}
+	if (entry?.manifest?.defaultDisabled === true) {
+		const concrete = readConcretePackToolsFromGroups(entry.path, entry.manifest.contents.tools).tools;
+		let providerIds: string[] = [];
+		try { providerIds = loadPackContributions(entry.path, entry.manifest).providers.map((p) => p.id); }
+		catch { /* contributions optional; configured-check just sees no providers */ }
+		info = {
+			allDisabled: buildAllDisabledRefs(entry.manifest, concrete),
+			packId: packIdFromRoot(entry.path),
+			providerIds,
+		};
+	}
+	defaultDisabledInfoCache.set(packName, info);
+	return info;
+}
+/** Persisted marker key: pack names the user EXPLICITLY enabled. An explicit
+ *  enable clears all disabled refs (an empty record, indistinguishable from
+ *  "never touched"), so the marker disambiguates it from the default-disabled
+ *  baseline and makes the enable survive reboots. */
+const PACK_FORCE_ENABLED_KEY = "pack_force_enabled";
+/** Order-insensitive equality for two DisabledRefs (kinds present with non-empty
+ *  arrays must match as SETS). Used to detect when an activation PUT matches the
+ *  pack's current default so we persist a deviation only. */
+function disabledRefsEqual(a: DisabledRefs, b: DisabledRefs): boolean {
+	const kindsOf = (r: DisabledRefs): string[] =>
+		Object.keys(r).filter((k) => Array.isArray((r as Record<string, string[]>)[k]) && (r as Record<string, string[]>)[k].length > 0).sort();
+	const ka = kindsOf(a); const kb = kindsOf(b);
+	if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+	for (const k of ka) {
+		const sa = [...(a as Record<string, string[]>)[k]].sort();
+		const sb = [...(b as Record<string, string[]>)[k]].sort();
+		if (sa.length !== sb.length || sa.some((v, i) => v !== sb[i])) return false;
+	}
+	return true;
+}
+function readForceEnabledPacks(store: ProjectConfigStore): Set<string> {
+	try {
+		const raw = store.get(PACK_FORCE_ENABLED_KEY);
+		const arr = raw ? (JSON.parse(raw) as unknown) : [];
+		return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
+	} catch { return new Set(); }
+}
+function writeForceEnabledPacks(store: ProjectConfigStore, set: Set<string>): void {
+	if (set.size === 0) store.remove(PACK_FORCE_ENABLED_KEY);
+	else store.set(PACK_FORCE_ENABLED_KEY, JSON.stringify([...set].sort()));
 }
 
 export function buildMarketToolRootsForProject(options: {
@@ -965,6 +1057,152 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Pack managed-runtime supervisor seam (P2 — see docs design "P2
+// PackRuntimeSupervisor + REST"). The concrete Docker-backed supervisor + its
+// id encode/decode helpers + error classes live in ./runtimes (imported above).
+// The REST routes depend on the structural seam below so test harnesses can
+// inject a fully-mocked supervisor (no Docker daemon) via
+// registerPackRuntimeSupervisorFactory(); production builds the real
+// PackRuntimeSupervisor in start().
+
+/** The structural contract the REST routes depend on (the concrete
+ *  PackRuntimeSupervisor implements a superset). Unknown-runtime failures surface
+ *  as {@link PackRuntimeNotFoundError} (→ 404); malformed id/mode/tail as
+ *  {@link PackRuntimeBadRequestError} (→ 400); anything else → 500. */
+export interface PackRuntimeSupervisorLike {
+	list(projectId?: string): Promise<PackRuntimeStatus[]>;
+	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
+	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
+	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
+	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
+	down(packId: string, runtimeId: string, opts?: { projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<PackRuntimeStatus>;
+	capabilitySummary(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeCapabilitySummary>;
+	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
+}
+
+export interface PackRuntimeSupervisorDeps {
+	packContributionRegistry: PackContributionRegistry;
+	stateDir: string;
+	defaultCwd: string;
+}
+
+/**
+ * Map an effective Hindsight-style deployment config onto a runtime START plan —
+ * the SINGLE source of truth shared by the marketplace pack-activation enable
+ * path AND the `/api/pack-runtimes/:id/{start,restart}` REST routes, so the two
+ * can never diverge on how a deployment config becomes supervisor start args.
+ *
+ * - `mode` (deployment) maps to a runtime manifest mode: `managed` ⇒
+ *   `managed-postgres`, `managed-external-postgres` ⇒ `external-postgres`. The
+ *   external (and absent/default) deployment mode is a NON-Docker setup path, so
+ *   `start: false` and no container is brought up.
+ * - The provider's `externalDatabaseUrl` is remapped onto the manifest's
+ *   `HINDSIGHT_API_DATABASE_URL` env key, and `llmApiKey` onto
+ *   `HINDSIGHT_API_LLM_API_KEY`, so the supervisor's config overlay satisfies
+ *   those user-configured `secret:` env refs without seeding the global secret
+ *   store. A value already set directly under the env key wins.
+ */
+export function resolveRuntimeStartPlan(
+	deploymentConfig: Record<string, unknown>,
+): { start: boolean; mode?: string; config: Record<string, unknown> } {
+	const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
+	const config: Record<string, unknown> = { ...deploymentConfig };
+	if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0
+		&& !(typeof config.HINDSIGHT_API_DATABASE_URL === "string" && (config.HINDSIGHT_API_DATABASE_URL as string).length > 0)) {
+		config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
+	}
+	if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0
+		&& !(typeof config.HINDSIGHT_API_LLM_API_KEY === "string" && (config.HINDSIGHT_API_LLM_API_KEY as string).length > 0)) {
+		config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
+	}
+	switch (mode) {
+		case "managed": return { start: true, mode: "managed-postgres", config };
+		case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
+		default: return { start: false, config };
+	}
+}
+
+/**
+ * Whether a pack exposes a managed-runtime DEPLOYMENT SURFACE — i.e. a provider
+ * whose EFFECTIVE config actually carries a deployment `mode` (external / managed
+ * / managed-external-postgres), or whose activation links to that mode
+ * (`activeWhenConfig.mode`). Merely HAVING a provider is NOT enough: a pack with an
+ * unrelated provider (one with no deployment mode) has no external/managed concept,
+ * so it must behave EXACTLY like a provider-less runtime pack — its `on-enable`
+ * runtime starts in the manifest DEFAULT (Docker) mode and the consent disclosure
+ * shows that default, rather than being suppressed to / disclosed as the external
+ * (no-Docker) setup path. Shared by the marketplace activation path, the REST
+ * `/api/pack-runtimes/:id/start` guard, and the `/capabilities` disclosure so the
+ * three can never diverge.
+ */
+export function providerCarriesDeploymentMode(
+	provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
+	effectiveConfig?: Record<string, unknown>,
+): boolean {
+	const config = effectiveConfig ?? provider.config ?? {};
+	if (typeof config.mode === "string" && config.mode.length > 0) return true;
+	const activeWhen = provider.activation?.activeWhenConfig;
+	return !!activeWhen && Object.prototype.hasOwnProperty.call(activeWhen, "mode");
+}
+
+/**
+ * P3 managed-runtime context resolution — the SINGLE source of truth shared by
+ * BOTH the LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE
+ * dispatch path (`/api/ext/route/:name`), so a managed provider and its sibling
+ * routes always agree on the runtime linkage they receive.
+ *
+ * For a provider/route in a MANAGED deployment mode (`managed` /
+ * `managed-external-postgres`), it READS the supervisor's runtime status + the
+ * already-persisted API host port (from the pure capability summary) and builds
+ * the `ctx.runtime` linkage `{ baseUrl, headers, status }`. It NEVER starts
+ * Docker. External mode / no supervisor / a stopped runtime / an unknown API
+ * port ⇒ `undefined`, and the consumer stays dormant via its own gate.
+ */
+export async function resolveManagedRuntimeContext(
+	supervisor: PackRuntimeSupervisorLike | undefined,
+	opts: { packId: string; runtimeId: string; projectId?: string; config: Record<string, unknown> },
+): Promise<RuntimeContext | undefined> {
+	const { packId, runtimeId, projectId, config: providerConfig } = opts;
+	const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
+	if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
+	if (!supervisor) return undefined;
+	let status: PackRuntimeStatus;
+	try {
+		status = await supervisor.status(packId, runtimeId, projectId);
+	} catch {
+		return undefined;
+	}
+	let apiPort: number | undefined;
+	try {
+		const cap = await supervisor.capabilitySummary(packId, runtimeId, { projectId });
+		const apiSpec =
+			cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
+			cap.ports[0];
+		if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
+	} catch {
+		return undefined;
+	}
+	if (apiPort === undefined) return undefined;
+	const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
+	const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+	return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
+}
+
+export type PackRuntimeSupervisorFactory = (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike | undefined;
+
+let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
+
+/**
+ * Register an alternative pack-runtime-supervisor factory. Called by test
+ * harnesses to inject a fully-mocked supervisor (no Docker daemon) so the
+ * /api/pack-runtimes/* routes can be exercised end-to-end. Pass `null` to clear.
+ * When unset, production builds the real PackRuntimeSupervisor in start().
+ */
+export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {
+	_packRuntimeSupervisorFactory = factory;
+}
+
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -1285,7 +1523,24 @@ export function createGateway(config: GatewayConfig) {
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
+		// Disabled-runtime activation override (DisabledRefs.runtimes): a runtime
+		// disabled via pack_activation is dropped from the pack's contributions, so the
+		// supervisor's registry lookup 404s and runtime listings omit it.
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
+	// P2 pack managed-runtime supervisor handle (Docker-backed). Declared HERE — before
+	// the LifecycleHub — so the hub's runtime-context resolver can consult it lazily at
+	// dispatch time. The production instance is built lazily in start(); a registered
+	// test factory is consulted FRESH per call so registerPackRuntimeSupervisorFactory(null)
+	// reverts cleanly with no stale mock cached. Boot/install/update/list/status never
+	// start Docker (see the design invariants); the runtime resolver only READS status
+	// + the already-persisted API host port to inject ctx.runtime for managed providers.
+	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
+	const getActivePackRuntimeSupervisor = (): PackRuntimeSupervisorLike | undefined =>
+		_packRuntimeSupervisorFactory
+			? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
+			: realPackRuntimeSupervisor;
+
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -1323,8 +1578,26 @@ export function createGateway(config: GatewayConfig) {
 				return { baseUrl: "", token: "" };
 			}
 		},
+		// P3 — managed-runtime context injection. For a provider declaring a `runtime`
+		// linkage in a MANAGED deployment mode, resolve ctx.runtime from the supervisor
+		// WITHOUT starting Docker: read the runtime status + the already-persisted API
+		// host port (from the pure capability summary). External mode / a stopped runtime
+		// / an unknown port ⇒ undefined, and the provider stays dormant via its own gate.
+		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) =>
+			resolveManagedRuntimeContext(getActivePackRuntimeSupervisor(), { packId, runtimeId, projectId, config: providerConfig }),
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
+
+	// P2: pack managed-runtime supervisor (Docker-backed). Built from the same
+	// pack-contribution registry. This closure holds ONLY the production (real)
+	// supervisor; a registered test factory is consulted FRESH per-request below
+	// and never cached here. That way registerPackRuntimeSupervisorFactory(null)
+	// immediately reverts to the production instance (or 503) with no stale mock
+	// left in the closure across in-process E2E tests. The real supervisor is
+	// loaded lazily in start() (dynamic import keeps this wiring compilable even
+	// before the supervisor module is merged — routes then return 503). The handle
+	// itself + the getActivePackRuntimeSupervisor() resolver are declared above (before
+	// the LifecycleHub, which consults the resolver for ctx.runtime injection).
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -1332,6 +1605,44 @@ export function createGateway(config: GatewayConfig) {
 		disabled(scope, projectId, packName) {
 			return packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 		},
+	});
+
+	// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────
+	// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+	// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+	// provider, entrypoints, runtime all absent) on a fresh server until the user
+	// enables it OR it is "already configured" (live-setup preservation). We inject
+	// a READ-TIME overlay into the SERVER-scope activation store so the single
+	// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+	// Marketplace endpoints) all observe the same effective state. The overlay is
+	// never persisted, so the dormancy invariant holds and an explicit user toggle
+	// (a persisted record, or the force-enabled marker) always wins.
+	//
+	// The static per-pack info + force-enabled marker live in module-scope helpers
+	// (getDefaultDisabledInfo / readForceEnabledPacks / writeForceEnabledPacks) so
+	// the activation PUT in handleApiRoute (a top-level function) shares them. Here
+	// we only INJECT the overlay resolver into the SERVER-scope store: it consults
+	// the memoized static info plus the live gates (force-enabled marker + persisted
+	// provider config) on each call (cheap, and only for default-disabled packs).
+	projectConfigStore.setDefaultActivationResolver((scope, packName, stored): DisabledRefs | undefined => {
+		if (scope !== "server") return undefined;
+		const info = getDefaultDisabledInfo(packName, projectConfigStore);
+		if (!info) return undefined;
+		const isForceEnabled = readForceEnabledPacks(projectConfigStore).has(packName);
+		let isConfigured = false;
+		if (!isForceEnabled && Object.keys(stored).length === 0) {
+			for (const pid of info.providerIds) {
+				const cfg = getPackStore().getSync<Record<string, unknown>>(info.packId, providerConfigStoreKey(pid));
+				if (isProviderConfigConfigured(cfg)) { isConfigured = true; break; }
+			}
+		}
+		return resolveDefaultActivationOverlay({
+			scope, packName, stored,
+			isDefaultDisabled: true,
+			isForceEnabled,
+			isConfigured,
+			allDisabledRefs: info.allDisabled,
+		});
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -1448,6 +1759,29 @@ export function createGateway(config: GatewayConfig) {
 		taskManager: new TaskManager(taskStore),
 		roleStore,
 		projectContextManager,
+		goalCompletedDispatcher: async (ctx) => {
+			const hub = sessionManager.lifecycleHub as unknown as {
+				dispatchGoalCompleted?: (c: typeof ctx) => Promise<unknown>;
+			} | undefined;
+			if (hub && typeof hub.dispatchGoalCompleted === "function") {
+				await hub.dispatchGoalCompleted(ctx);
+			}
+		},
+		hasGoalCompletedProviders: (goalId, projectId) => {
+			const hub = sessionManager.lifecycleHub;
+			return !!hub?.hasProvidersForHooks(projectId, ["goalCompleted"], goalId);
+		},
+		resolveGoalPullRequest: (goalId) => {
+			const pr = prStatusStore.get(goalId) as any;
+			if (!pr) return undefined;
+			return {
+				url: typeof pr.url === "string" ? pr.url : undefined,
+				number: typeof pr.number === "string" || typeof pr.number === "number" ? pr.number : undefined,
+				title: typeof pr.title === "string" ? pr.title : undefined,
+				state: typeof pr.state === "string" ? pr.state : undefined,
+				headSha: typeof pr.headSha === "string" ? pr.headSha : undefined,
+			};
+		},
 		toolManager,
 		orchestrationCore,
 	});
@@ -1599,7 +1933,14 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			// P2: a registered pack-runtime-supervisor factory is authoritative — in-
+			// process test harnesses register a (mocked) one AFTER gateway start, so it
+			// must override the real supervisor built in start(). Derived FRESH each
+			// request (never cached), so clearing the factory reverts to the production
+			// instance with no stale mock. No-op in production (factory stays null). Shares
+			// the same resolver the LifecycleHub uses so the route + ctx.runtime paths agree.
+			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = getActivePackRuntimeSupervisor();
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2023,6 +2364,31 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
+			// P2: build the real pack-runtime supervisor unless a test factory already
+			// supplied a (mocked) one. All Docker execution is encapsulated in the
+			// supervisor; rendered env files live under the server state dir.
+			if (!realPackRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
+				try {
+					const { SecretsStore } = await import("./agent/secrets-store.js");
+					const runtimeDataDir = path.join(stateDir, "pack-runtimes");
+					// Production-safe resolver context: declared generated secrets are
+					// created+persisted via SecretsStore and declared host ports via a
+					// file-backed FilePortStore, so real pack runtimes (e.g. Hindsight)
+					// resolve their env refs instead of throwing before Docker starts.
+					realPackRuntimeSupervisor = new PackRuntimeSupervisor({
+						registry: packContributionRegistry,
+						runtimeDataDir,
+						// STABLE across gateway restarts (persisted under the state dir): a
+						// random per-process suffix would change the compose project name on
+						// every restart and orphan the still-running containers.
+						serverIdentitySuffix: getOrCreatePackRuntimeServerIdentity(stateDir),
+						secretsStore: new SecretsStore(stateDir),
+						portStore: new FilePortStore(path.join(runtimeDataDir, "ports.json")),
+					});
+				} catch (err) {
+					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
+				}
+			}
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
 
@@ -2634,6 +3000,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -2661,7 +3028,7 @@ async function handleApiRoute(
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); clearDefaultDisabledInfoCache(); };
 	// Host-owned activation-cache invalidation: a pack persisting provider config
 	// (key `provider-config:*`) must drop the activation-filtered provider index so
 	// a dormant provider (e.g. Hindsight gaining an externalUrl) activates WITHOUT a
@@ -4378,11 +4745,6 @@ async function handleApiRoute(
 	// sessionShutdown are gateway-internal dispatches and intentionally have NO
 	// public endpoint.
 	//
-	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
-	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
-	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
-
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
 	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
@@ -4420,7 +4782,7 @@ async function handleApiRoute(
 		}
 		const hub = sessionManager.lifecycleHub;
 		if (!hub) {
-			json({ tail: "", blocks: [] });
+			json({ content: "", blocks: [] });
 			return;
 		}
 		try {
@@ -4430,11 +4792,9 @@ async function handleApiRoute(
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			});
-			const tail = blocks.length
-				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
-				: "";
+			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
 			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -4445,7 +4805,7 @@ async function handleApiRoute(
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
 			json({
-				tail,
+				content,
 				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
 			});
 		} catch (err: any) {
@@ -5991,6 +6351,293 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── P2: pack managed-runtime (Docker-backed) supervisor REST surface ──────
+	// GET  /api/pack-runtimes?projectId=          → { runtimes: PackRuntimeStatus[] }
+	// POST /api/pack-runtimes/:id/start           → status (after ensure/start)
+	// POST /api/pack-runtimes/:id/stop            → status (after stop)
+	// POST /api/pack-runtimes/:id/restart         → status (after restart)
+	// GET  /api/pack-runtimes/:id/logs?tail=      → { logs, status? }
+	// The `:id` is the URL-safe encodePackRuntimeId(packId, runtimeId). Admin-bearer
+	// only (gated before handleApiRoute). All Docker execution lives in the
+	// supervisor; tests inject a fully-mocked supervisor (no daemon).
+	if (url.pathname === "/api/pack-runtimes" && req.method === "GET") {
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		try {
+			const statuses = await packRuntimeSupervisor.list(projectId);
+			// Re-derive the API id from {packId, runtimeId} so it always round-trips
+			// through decodePackRuntimeId regardless of the supervisor's internal id.
+			const runtimes = statuses.map((s) => ({ ...s, id: encodePackRuntimeId(s.packId, s.runtimeId) }));
+			json({ runtimes });
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// GET  /api/pack-runtimes/:id/capabilities?projectId=&mode= → capability summary
+	//   Pre-start consent disclosure (P3 §8): images/services, host ports, the
+	//   managed data/volume path, the start policy, and the memory/trust copy. Pure
+	//   (no Docker), so the Market UI can render it BEFORE the user consents.
+	const packRuntimeCapMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/capabilities$/);
+	if (packRuntimeCapMatch) {
+		if (req.method !== "GET") { json({ error: "method not allowed" }, 405); return; }
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		let packId: string, runtimeId: string;
+		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeCapMatch[1])); }
+		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const rawMode = url.searchParams.get("mode");
+		const requestedMode = rawMode !== null && rawMode.trim().length > 0 ? rawMode.trim() : undefined;
+		// The disclosure is DEPLOYMENT-mode aware (external / managed / managed-external-
+		// postgres). The caller may pass an explicit mode; absent that, resolve the
+		// EFFECTIVE deployment mode from the pack's provider config so the external
+		// (no-Docker) setup path is reachable even when the UI does not know the mode.
+		// Build the EFFECTIVE deployment config the SAME way the activation path does
+		// (each provider's flat schema defaults overlaid with its persisted store
+		// config), so the consent disclosure reflects custom settings — most importantly
+		// a custom `dataDir` bind path — rather than schema defaults that would diverge
+		// from what activation actually mounts.
+		//
+		// Read RAW (activation-UNFILTERED) contributions, NOT `getPack` — the latter
+		// drops a provider whose activation gate is still unsatisfied (e.g. Hindsight's
+		// external-mode `memory` provider before `externalUrl` is set), which would
+		// misclassify fresh/default Hindsight as provider-less and disclose the Docker
+		// default mode instead of the external (no-Docker) setup path. Mirrors the
+		// activation path's raw `loadPackContributions` derivation.
+		const deploymentConfig: Record<string, unknown> = {};
+		let hasDeploymentSurface = false;
+		{
+			const pack = packContributionRegistry.getRawPack(projectId, packId);
+			for (const p of pack?.providers ?? []) {
+				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
+				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+				Object.assign(deploymentConfig, merged);
+				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
+			}
+		}
+		// Resolve the EFFECTIVE deployment mode. With NO deployment surface (a provider-
+		// less runtime pack, or a pack whose only provider carries no deployment mode)
+		// there is no external/managed concept to honour, so the disclosure must show the
+		// runtime's manifest DEFAULT (Docker) mode/services/ports — the SAME no-surface
+		// fallback the activation/start paths use (they start such runtimes in the
+		// manifest default mode). Only fall back to `external` when a deployment surface
+		// exists but selects no managed mode.
+		const deploymentMode = requestedMode
+			?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
+				? deploymentConfig.mode
+				: (hasDeploymentSurface ? "external" : undefined));
+		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
+		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
+			managed: "managed-postgres",
+			"managed-external-postgres": "external-postgres",
+		};
+		try {
+			if (deploymentMode === undefined) {
+				// No deployment surface: disclose the runtime's manifest DEFAULT (Docker)
+				// mode/services/ports (capabilitySummary with no mode picks the first
+				// manifest mode). dockerRequired:true mirrors the start path bringing this
+				// runtime up in its default mode.
+				const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, config: deploymentConfig });
+				json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
+				return;
+			}
+			if (deploymentMode === "external") {
+				// External: derive descriptor/trust from the default manifest mode but disclose
+				// NO services/ports and flag dockerRequired:false, so the UI shows setup
+				// guidance instead of a Docker start disclosure. Works without Docker.
+				const base = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId });
+				json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
+				return;
+			}
+			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
+			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
+			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
+		} catch (err) {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/pack-runtimes/:id/down { volumes?: boolean, removeState?: boolean }
+	//   `docker compose down`. Default (no volumes/removeState) preserves bind-mounted
+	//   data — the uninstall primitive. `volumes: true` + `removeState: true` is the
+	//   explicit purge. Admin-bearer only (gated before handleApiRoute).
+	const packRuntimeDownMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/down$/);
+	if (packRuntimeDownMatch) {
+		if (req.method !== "POST") { json({ error: "method not allowed" }, 405); return; }
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		let packId: string, runtimeId: string;
+		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeDownMatch[1])); }
+		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const bodyText = await readBodyText(req);
+		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+		let body: Record<string, unknown> = {};
+		const trimmed = bodyText.trim();
+		if (trimmed.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(trimmed); } catch { json({ error: "malformed JSON body" }, 400); return; }
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
+			body = parsed as Record<string, unknown>;
+		}
+		const volumes = body.volumes === true;
+		const removeState = body.removeState === true;
+		try {
+			const status = await packRuntimeSupervisor.down(packId, runtimeId, { projectId, volumes, removeState });
+			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+		} catch (err) {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
+	if (packRuntimeMatch) {
+		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
+		const wantsGet = action === "logs";
+		if (wantsGet ? req.method !== "GET" : req.method !== "POST") {
+			json({ error: "method not allowed" }, 405);
+			return;
+		}
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+
+		// Map supervisor failures to status codes: NotFound → 404, BadRequest → 400.
+		const handleErr = (err: unknown): void => {
+			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+			jsonError(500, err);
+		};
+
+		// Decode the URL-safe id (raw path segment — decodePackRuntimeId percent-
+		// decodes the halves itself). Malformed → PackRuntimeBadRequestError → 400.
+		let packId: string;
+		let runtimeId: string;
+		try {
+			({ packId, runtimeId } = decodePackRuntimeId(packRuntimeMatch[1]));
+		} catch (err) { handleErr(err); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		if (action === "logs") {
+			// Tail validation/clamping is owned by the supervisor (clampTail): a
+			// non-numeric tail throws PackRuntimeBadRequestError → 400; out-of-range
+			// values are clamped. Pass the raw query value through.
+			const rawTail = url.searchParams.get("tail");
+			const tail = rawTail !== null && rawTail !== "" ? (Number(rawTail) as number) : undefined;
+			try {
+				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
+				json({ logs });
+			} catch (err) {
+				// Surface a missing-Docker install as a consistent docker-unavailable
+				// shape (200 with empty logs + status) rather than hiding it behind an
+				// empty body or a generic 500.
+				if (err instanceof PackRuntimeDockerUnavailableError) {
+					json({ logs: "", status: "docker-unavailable", message: err.message });
+					return;
+				}
+				handleErr(err);
+			}
+			return;
+		}
+
+		// start | stop | restart — optional `mode` from the POST body. An EMPTY body
+		// is valid (default mode); a NON-EMPTY but malformed-JSON body is a client
+		// error — answer 400 and do NOT invoke the supervisor (never silently treat
+		// garbage as `{}` and mutate the default mode).
+		const bodyText = await readBodyText(req);
+		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+		let body: Record<string, unknown> = {};
+		const trimmedBody = bodyText.trim();
+		if (trimmedBody.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(trimmedBody); } catch { json({ error: "malformed JSON body" }, 400); return; }
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
+			body = parsed as Record<string, unknown>;
+		}
+		let mode: string | undefined;
+		let explicitMode = false;
+		let startConfig: Record<string, unknown> | undefined;
+		if (action !== "stop") {
+			const rawMode = (body as { mode?: unknown }).mode;
+			if (rawMode !== undefined && rawMode !== null) {
+				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
+				mode = rawMode;
+				explicitMode = true;
+			}
+			// Derive the saved provider deployment config and remap it onto the
+			// runtime's env keys EXACTLY like marketplace activation start does
+			// (resolveRuntimeStartPlan — the shared source of truth). Without this the
+			// route would forward only {projectId, mode} and a managed start would fail
+			// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
+			const deploymentConfig: Record<string, unknown> = {};
+			let hasDeploymentSurface = false;
+			{
+				// RAW (activation-UNFILTERED) contributions — NOT `getPack`. A dormant
+				// provider (e.g. Hindsight's external-mode `memory` provider before
+				// `externalUrl` is configured) is dropped from `getPack().providers`,
+				// which would hide the deployment surface and let the no-surface fallback
+				// start Docker in the runtime's default (managed) mode. Reading raw keeps
+				// the external-mode guard below in force for fresh/default Hindsight.
+				const pack = packContributionRegistry.getRawPack(projectId, packId);
+				for (const p of pack?.providers ?? []) {
+					const merged: Record<string, unknown> = { ...(p.config ?? {}) };
+					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+					if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+					Object.assign(deploymentConfig, merged);
+					// A deployment surface requires a provider that ACTUALLY carries a
+					// deployment mode — an unrelated provider (no mode) must behave like a
+					// provider-less runtime so the no-surface fallback below applies.
+					if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
+				}
+			}
+			const plan = resolveRuntimeStartPlan(deploymentConfig);
+			startConfig = plan.config;
+			// Respect a saved EXTERNAL (or default/unset) deployment mode: that is the
+			// non-Docker setup path (plan.start === false), so there is NO managed
+			// runtime to bring up. Without an explicit body mode the route must NOT
+			// silently fall through to the runtime's first manifest mode (managed) and
+			// start Docker — activation already gates on plan.start, and the REST surface
+			// must agree. Answer 409 with a clear external/no-runtime shape; a caller that
+			// genuinely wants to start a managed stack must pass an explicit `mode`.
+			//
+			// The guard applies ONLY when the pack actually exposes a deployment-config
+			// surface (a provider whose config carries the mode). A runtime with no such
+			// surface has no external/managed concept to honor, so it keeps the legacy
+			// supervisor-default-mode behaviour and an unknown pack still reaches the
+			// supervisor (→ 404) rather than being masked by this 409.
+			if (hasDeploymentSurface && !plan.start && !explicitMode) {
+				const deploymentMode = typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
+					? deploymentConfig.mode
+					: "external";
+				json({
+					error: "runtime is configured for external (non-managed) mode; no Docker runtime to start",
+					mode: deploymentMode,
+					status: "stopped",
+					started: false,
+					id: encodePackRuntimeId(packId, runtimeId),
+				}, 409);
+				return;
+			}
+			// An explicit body mode (a runtime manifest mode) overrides the
+			// deployment-derived plan mode; otherwise use the plan's mapped mode.
+			if (mode === undefined) mode = plan.mode;
+		}
+		try {
+			const status = action === "stop"
+				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
+				: action === "start"
+					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode, config: startConfig })
+					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode, config: startConfig });
+			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+		} catch (err) { handleErr(err); }
+		return;
+	}
+
 	// Fix B: there is NO server-side own-session message poster — driving the agent
 	// is a client-only, user-activation + session-secret gated capability. A server
 	// route/action handler has no user gesture, so the server Host API exposes no
@@ -6407,10 +7054,9 @@ async function handleApiRoute(
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? sessionManager.getPersistedSession(routeHeaderSid)?.projectId)
-			: undefined;
+		const routeHeaderLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
+		const routeHeaderPersisted = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		const routeSessionProjectId = routeHeaderLive?.projectId ?? routeHeaderPersisted?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -6485,17 +7131,53 @@ async function handleApiRoute(
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
+		// P3/P4 — managed-runtime context injection for pack ROUTES. Mirror the
+		// LifecycleHub provider-hook path: if the routed pack has a provider declaring a
+		// `runtime` linkage and its EFFECTIVE config selects a managed deployment mode,
+		// resolve `ctx.runtime` from the supervisor WITHOUT starting Docker so the route
+		// handlers reach the locally-running managed runtime (e.g. Hindsight status/recall).
+		// External mode / no runtime / a stopped runtime ⇒ undefined, and the route stays
+		// dormant via its own `isActive(cfg, ctx.runtime)` gate. Resolution failure is
+		// non-fatal (the route just runs without runtime).
+		let routeRuntime: RuntimeContext | undefined;
+		try {
+			const pack = packContributionRegistry.getPack(routeSessionProjectId, ident.packId);
+			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
+			if (runtimeProvider?.runtime) {
+				routeRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
+					packId: ident.packId,
+					runtimeId: runtimeProvider.runtime,
+					projectId: routeSessionProjectId,
+					config: runtimeProvider.config ?? {},
+				});
+			}
+		} catch {
+			routeRuntime = undefined; // non-fatal — the route runs without ctx.runtime
+		}
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
+			const routeLive = sessionManager.getSession(guard.sessionId);
 			const routePs = sessionManager.getPersistedSession(guard.sessionId);
 			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeGoalId = routeLive?.goalId ?? routeLive?.teamGoalId ?? routePs?.goalId ?? routePs?.teamGoalId;
+			const routeRoleName = routeLive?.role ?? routePs?.role;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir },
+				{
+					host,
+					sessionId: guard.sessionId,
+					toolUseId: toolUseId ?? "",
+					tool: ident.contributionId,
+					projectId: routeSessionProjectId,
+					...(routeGoalId ? { goalId: routeGoalId } : {}),
+					...(routeRoleName ? { roleName: routeRoleName } : {}),
+					workingDir: routeWorkingDir,
+					...(routeRuntime ? { runtime: routeRuntime } : {}),
+				},
 				{ method, query, body: init.body },
 			);
 			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
@@ -6504,6 +7186,118 @@ async function handleApiRoute(
 			const status = err instanceof ActionError ? err.status : 500;
 			const message = err instanceof Error ? err.message : String(err);
 			console.warn(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, status);
+		}
+		return;
+	}
+
+	// GET/POST /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin access to a
+	// BUILT-IN pack's route (Hindsight UX polish). The Marketplace must read built-in
+	// Hindsight config/status, AND write Hindsight config, after `#/market` navigation
+	// when there is no active chat session, so the surface-token path
+	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
+	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
+	// so it cannot widen the extension threat model:
+	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
+	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
+	//     this sessionless seam to read or write another pack's route output.
+	//   • GET → any route (pure read). POST → ALLOWLISTED to the `config` route name
+	//     ONLY (the built-in config write); any other routeName under POST is rejected
+	//     403, so this is NOT a general write seam — it is purely the GET seam's
+	//     config-write sibling. The `config` route validates + persists to the pack
+	//     store (CONFIG_INVALID for bad input) and returns the redacted effective
+	//     config.
+	// CRITICAL: this path NEVER starts Docker and works with NO session — POST only
+	// persists config to the pack store. `ctx.runtime` is resolved WITHOUT starting
+	// Docker (mirrors `/api/ext/route`), preserving the no-Docker-auto-start invariant.
+	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
+	if (packRouteMatch && (req.method === "GET" || req.method === "POST")) {
+		const reqPackId = decodeURIComponent(packRouteMatch[1]);
+		const routeName = decodeURIComponent(packRouteMatch[2]);
+		const isWrite = req.method === "POST";
+		const projectId = url.searchParams.get("projectId") || undefined;
+		// POST is allowlisted to the `config` route ONLY — never a general write seam.
+		if (isWrite && routeName !== "config") {
+			json({ error: "sessionless pack-route writes are available only for the 'config' route" }, 403);
+			return;
+		}
+		// Parse the JSON body for the config write. An empty body is rejected for POST
+		// (a config write must carry overrides); malformed JSON is a 400 client error.
+		let writeBody: Record<string, unknown> = {};
+		if (isWrite) {
+			const bodyText = await readBodyText(req);
+			if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
+			const trimmed = bodyText.trim();
+			if (trimmed.length === 0) { json({ error: "config write requires a JSON body" }, 400); return; }
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					json({ error: "config write body must be a JSON object" }, 400);
+					return;
+				}
+				writeBody = parsed as Record<string, unknown>;
+			} catch {
+				json({ error: "config write body must be valid JSON" }, 400);
+				return;
+			}
+		}
+		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
+		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
+		const builtinPackIds = new Set(
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir())
+				.filter((e) => e.manifest)
+				.map((e) => packIdFromRoot(e.path)),
+		);
+		if (!builtinPackIds.has(reqPackId)) {
+			json({ error: "sessionless pack-route access is available only to built-in packs" }, 403);
+			return;
+		}
+		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
+		if (!resolved) {
+			json({ error: `pack "${reqPackId}" declares no route "${routeName}"` }, 404);
+			return;
+		}
+		const host = createServerHostApi({
+			sessionId: "",
+			toolUseId: undefined,
+			packId: reqPackId,
+			contributionId: "",
+			packStore: getPackStore(),
+			orchestrationCore,
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			onStoreWrite: notePackStoreWrite,
+		});
+		// Managed-runtime context injection (NO Docker start) — mirror `/api/ext/route`.
+		let packRouteRuntime: RuntimeContext | undefined;
+		try {
+			const pack = packContributionRegistry.getPack(projectId, reqPackId);
+			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
+			if (runtimeProvider?.runtime) {
+				packRouteRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
+					packId: reqPackId,
+					runtimeId: runtimeProvider.runtime,
+					projectId,
+					config: runtimeProvider.config ?? {},
+				});
+			}
+		} catch {
+			packRouteRuntime = undefined; // non-fatal — the route runs without ctx.runtime
+		}
+		const start = Date.now();
+		try {
+			const result = await routeDispatcher.dispatch(
+				resolved.modulePath,
+				resolved.packRoot,
+				routeName,
+				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
+				isWrite ? { method: "POST", body: writeBody } : { method: "GET" },
+			);
+			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} method=${isWrite ? "POST" : "GET"} sessionless outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const status = err instanceof ActionError ? err.status : 500;
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
 		return;
@@ -6823,6 +7617,57 @@ async function handleApiRoute(
 			return ctxs;
 		};
 
+		// ── Managed-runtime activation/consent wiring (P3) ─────────
+		// Resolve a pack's SERVER-DERIVED packId + its runtime contributions + the
+		// effective deployment config carried by its providers, so the supervisor
+		// (start/stop/down) can be addressed by {packId, runtimeId}. Mirrors
+		// buildActivationCatalogue's on-disk entry resolution (works for built-in
+		// first-party packs too). Returns null when the pack is not resolvable.
+		const resolvePackRuntimeContext = (
+			scope: InstallScope,
+			projectBase: string | undefined,
+			store: PackOrderStore,
+			packName: string,
+		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown>; hasDeploymentSurface: boolean } | null => {
+			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
+			if (base === undefined) return null;
+			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
+			let entry = entries.find((e) => e.manifest?.name === packName);
+			if ((!entry || !entry.manifest) && scope === "server") {
+				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+			}
+			if (!entry || !entry.manifest) return null;
+			const packId = packIdFromRoot(entry.path);
+			if (!packId) return null;
+			let contribs;
+			try { contribs = loadPackContributions(entry.path, entry.manifest); }
+			catch { return { packId, runtimes: [], deploymentConfig: {}, hasDeploymentSurface: false }; }
+			// Effective deployment config = each provider's FLAT schema defaults
+			// (ProviderContribution.config) overlaid with its persisted store config.
+			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
+			const deploymentConfig: Record<string, unknown> = {};
+			let hasDeploymentSurface = false;
+			for (const p of contribs.providers) {
+				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
+				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
+				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
+				Object.assign(deploymentConfig, merged);
+				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
+			}
+			// `hasDeploymentSurface` = the pack exposes a provider whose config ACTUALLY
+			// carries the deployment mode (external/managed/…). A runtime-only pack with NO
+			// provider — OR a pack whose only provider has no deployment mode — has no
+			// external/managed concept, so its `on-enable` runtime starts in the runtime's
+			// default mode rather than being suppressed by the external-default start plan
+			// (mirrors the REST start path's no-surface fallback so activation and
+			// `/api/pack-runtimes/:id/start` never diverge).
+			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface };
+		};
+
+		// Deployment-mode → runtime start plan mapping is the module-level
+		// resolveRuntimeStartPlan() (the SINGLE source of truth shared with the
+		// /api/pack-runtimes/:id/{start,restart} REST routes — see finding #2).
+
 		// ── Sources ───────────────────────────────────────────────
 		// GET /api/marketplace/sources
 		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
@@ -6962,6 +7807,44 @@ async function handleApiRoute(
 			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			// P3 — tear down this pack's managed runtimes BEFORE removing it, preserving
+			// bind-mounted data (no `-v`, no state removal). A missing Docker install is
+			// tolerated (down returns a docker-unavailable STATUS, never throws), so an
+			// uninstall on a Docker-less host still proceeds. A REAL teardown failure (down
+			// throws) is reported and the uninstall is ABORTED — never silently swallowed.
+			if (packRuntimeSupervisor) {
+				const teardownFailures: string[] = [];
+				try {
+					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
+					if (rtCtx && rtCtx.runtimes.length > 0) {
+						const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+						// Tear down EVERY runtime contribution unconditionally — do NOT gate on the
+						// CURRENT saved deployment mode (resolveRuntimeStartPlan). A pack started in a
+						// managed mode and later reconfigured to `external` would otherwise skip
+						// teardown and leak its still-running containers. `down` is read-only/minimal
+						// and idempotent (it never resolves start-only inputs like
+						// HINDSIGHT_API_LLM_API_KEY, reuses an already-rendered .env only when one
+						// exists, and maps a missing Docker install to a docker-unavailable STATUS
+						// rather than throwing), so calling it for an external-only never-started
+						// runtime is a harmless no-op (`compose down` on an absent project exits 0).
+						for (const rc of rtCtx.runtimes) {
+							try {
+								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
+							} catch (err) {
+								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+							}
+						}
+					}
+				} catch (err) {
+					// Resolving the pack's runtime context failed (e.g. the pack is no longer
+					// resolvable on disk) — there is nothing to tear down; proceed.
+					console.warn(`[pack-runtimes] uninstall runtime teardown skipped: ${(err as Error)?.message ?? err}`);
+				}
+				if (teardownFailures.length > 0) {
+					json({ error: "runtime teardown failed; pack not uninstalled", details: teardownFailures }, 502);
+					return;
+				}
+			}
 			try {
 				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
@@ -6979,6 +7862,11 @@ async function handleApiRoute(
 				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
 					scope: "server" as InstallScope,
 					packName: e.manifest!.name,
+					// Structural id (the shipped `market-packs/<dir>` segment) the
+					// runtime/panel APIs key by — can DIVERGE from the manifest name for a
+					// built-in whose directory differs. The UI addresses runtime REST with
+					// this, not `packName`.
+					packId: packIdFromRoot(e.path),
 					manifest: e.manifest!,
 					meta: e.meta,
 					status: "ok" as const,
@@ -6987,6 +7875,12 @@ async function handleApiRoute(
 					// "update available" (they update with the app upgrade, §4.2).
 					updateAvailable: false,
 					sourceStatus: "ok" as const,
+					// Default-disabled built-in packs (manifest `defaultDisabled: true`, e.g.
+					// Hindsight) ship dormant. Surface BOTH a stable structural flag
+					// (`defaultDisabled`) and the UI intent alias (`requiresGuidedSetup`) so the
+					// Marketplace can launch the guided setup wizard when the user enables it.
+					defaultDisabled: e.manifest!.defaultDisabled === true,
+					requiresGuidedSetup: e.manifest!.defaultDisabled === true,
 				}));
 				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
 			} catch (err) { jsonError(500, err); }
@@ -7139,9 +8033,177 @@ async function handleApiRoute(
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			const prevActivation = cfgStore.getPackActivation(scope as PackOrderScope, packName);
+			const prevDisabledRuntimes = new Set(prevActivation.runtimes ?? []);
+
+			// P3 — managed-runtime activation side effects. Enabling a
+			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit
+			// user start action; disabling (enabled → disabled) stops it. The external
+			// (non-Docker) deployment mode never starts a container. Toggling any other
+			// entity — or a pack with no runtimes — is inert here, so install/update/
+			// list/status never start Docker.
+			//
+			// CRITICAL ordering: the Docker side effects run BEFORE the activation state
+			// is persisted, and a side effect that MATTERS (start/stop throwing, or a
+			// start that fails to come up) aborts the whole PUT WITHOUT persisting — so
+			// Bobbit never records "enabled"/"disabled" while Docker did the opposite. A
+			// graceful `docker-unavailable` status is TOLERATED (there is nothing to
+			// start/stop on a Docker-less host; the provider is defensive and the toggle
+			// is just metadata), so it persists and is reported, not treated as a hard
+			// failure. Stop is best-effort: only a thrown stop blocks a disable.
+			const runtimeStatuses: Array<Record<string, unknown>> = [];
+			const sideEffectFailures: string[] = [];
+			if (packRuntimeSupervisor && (catalogue.runtimes?.length ?? 0) > 0) {
+				const nextDisabledRuntimes = new Set(normalized.runtimes);
+				const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, packName);
+				if (rtCtx && rtCtx.runtimes.length > 0) {
+					const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
+					// A runtime-only pack with NO provider deployment-config surface has no
+					// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
+					// external (start:false) and would wrongly suppress its `on-enable` start.
+					// Mirror the REST start path's no-surface fallback: enabling such a runtime
+					// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
+					// the manifest default). When a deployment surface exists, honour plan.start.
+					const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
+					const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
+					for (const rc of rtCtx.runtimes) {
+						const ref = rc.listName;
+						const wasDisabled = prevDisabledRuntimes.has(ref);
+						const nowDisabled = nextDisabledRuntimes.has(ref);
+						const policy = readRuntimeStartPolicy(rc.manifest);
+						try {
+							if (wasDisabled && !nowDisabled) {
+								// disabled → enabled: explicit enable. Only `on-enable` runtimes
+								// auto-start, and only when the deployment mode is a managed
+								// (Docker) mode — external mode avoids the Docker start entirely.
+								// A provider-less runtime pack has no such gate (startWhenEnabled).
+								if (policy === "on-enable" && startWhenEnabled) {
+									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: startMode, config: plan.config });
+									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+									// A managed enable that does not come up running (and is not a
+									// tolerated docker-unavailable) is a real failure: don't persist
+									// "enabled" while the container is unhealthy/down.
+									if (status.status !== "running" && status.status !== "starting" && status.status !== "docker-unavailable") {
+										sideEffectFailures.push(`${rtCtx.packId}:${rc.id} failed to start (${status.status}${status.message ? `: ${status.message}` : ""})`);
+									}
+								}
+							} else if (!wasDisabled && nowDisabled) {
+								// enabled → disabled: stop the managed container UNCONDITIONALLY — do NOT
+								// gate on the CURRENT saved deployment mode (plan.start). A runtime started
+								// in a managed mode and later reconfigured to `external` would otherwise
+								// skip the stop and leak its still-running container. `stop` is
+								// read-only/minimal and idempotent: it never resolves start-only inputs
+								// (e.g. HINDSIGHT_API_LLM_API_KEY), reuses an already-rendered .env only
+								// when one exists, and maps a missing Docker install to a
+								// docker-unavailable STATUS rather than throwing — so calling it for an
+								// external-only never-started runtime is a harmless no-op (`compose stop`
+								// on an absent project exits 0) and never 502s the disable.
+								const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
+								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+							}
+						} catch (err) {
+							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
+							// failure: abort the PUT so persisted state matches Docker reality.
+							runtimeStatuses.push({
+								id: encodePackRuntimeId(rtCtx.packId, rc.id),
+								packId: rtCtx.packId,
+								runtimeId: rc.id,
+								status: "error",
+								message: (err as Error)?.message ?? String(err),
+							});
+							sideEffectFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
+						}
+					}
+				}
+			}
+
+			// A side effect that matters failed → do NOT persist (state is unchanged) and
+			// surface the failure with the prior activation so the client/UI reverts the
+			// toggle instead of believing the change took effect.
+			if (sideEffectFailures.length > 0) {
+				json({
+					scope,
+					packName,
+					catalogue,
+					disabled: prevActivation,
+					runtimes: runtimeStatuses,
+					error: `runtime activation failed: ${sideEffectFailures.join("; ")}`,
+				}, 502);
+				return;
+			}
+
+			// Default-disabled built-in packs (e.g. Hindsight) persist only DEVIATIONS
+			// from the pack's current default, keeping the dormancy invariant byte-clean
+			// and giving a deterministic way to return to the default (no stored record,
+			// no marker). The default itself depends on whether the pack is "already
+			// configured" (live-setup rule): configured ⇒ enabled ({}), else ⇒ all-disabled.
+			//   • request == default              → clear the stored record + drop the marker
+			//   • request all-enabled, NOT default → explicit ENABLE: drop the record, SET the
+			//                                         force-enable marker (an empty record is
+			//                                         indistinguishable from "never touched", so
+			//                                         the marker is what makes the enable stick)
+			//   • anything else                    → persist the record verbatim (explicit
+			//                                         per-entity / disable choice wins), drop marker
+			const ddInfo = scope === "server" ? getDefaultDisabledInfo(packName, cfgStore) : null;
+			if (ddInfo) {
+				let configured = false;
+				for (const pid of ddInfo.providerIds) {
+					if (isProviderConfigConfigured(getPackStore().getSync<Record<string, unknown>>(ddInfo.packId, providerConfigStoreKey(pid)))) { configured = true; break; }
+				}
+				const defaultDisabled: DisabledRefs = configured ? {} : ddInfo.allDisabled;
+				const nowAllEnabled = Object.keys(normalized).every((k) => (normalized as Record<string, string[]>)[k].length === 0);
+				const marker = readForceEnabledPacks(cfgStore);
+				if (disabledRefsEqual(normalized, defaultDisabled)) {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.delete(packName);
+				} else if (nowAllEnabled) {
+					// all-enabled but the default is disabled (pack not configured) → explicit enable.
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
+					marker.add(packName);
+				} else {
+					cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+					marker.delete(packName);
+				}
+				writeForceEnabledPacks(cfgStore, marker);
+			} else {
+				cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			}
 			invalidateResolverCaches();
-			json({ scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) });
+
+			const activationResponse: Record<string, unknown> = { scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) };
+			if (runtimeStatuses.length > 0) activationResponse.runtimes = runtimeStatuses;
+			json(activationResponse);
+			return;
+		}
+
+		// ── purge a managed runtime (P3 explicit purge) ───────────
+		// POST /api/marketplace/purge-runtime { packName, scope, runtimeId, projectId? }
+		//   `compose down -v` + remove supervisor-owned runtime state (rendered env,
+		//   persisted generated secrets + allocated ports). Bind-mounted DATA is
+		//   preserved by the supervisor — only Docker volumes + bookkeeping are removed.
+		if (url.pathname === "/api/marketplace/purge-runtime" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string" || !body.packName) { json({ error: "packName is required" }, 400); return; }
+			if (typeof body?.runtimeId !== "string" || !body.runtimeId) { json({ error: "runtimeId is required" }, 400); return; }
+			if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
+			if (!rtCtx) { json({ error: "pack not installed at this scope" }, 404); return; }
+			const rc = rtCtx.runtimes.find((r) => r.id === body.runtimeId || r.listName === body.runtimeId);
+			if (!rc) { json({ error: `unknown runtime ${body.runtimeId}` }, 404); return; }
+			const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
+			try {
+				const status = await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: true, removeState: true });
+				json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+			} catch (err) {
+				if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
+				if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
+				jsonError(500, err);
+			}
 			return;
 		}
 
@@ -14059,15 +15121,22 @@ export function bodyLimitExceeded(
 	return Number.isFinite(len) && len > maxBytes;
 }
 
-export function readBody(
+/**
+ * Read the raw request body as text. Resolves the decoded string for a complete
+ * body (the empty string when no body was sent), or `null` when the body was
+ * oversized/aborted/errored. Unlike {@link readBody} it does NOT attempt to
+ * JSON-parse, so callers can distinguish an EMPTY body (valid — treat as `{}`)
+ * from a NON-EMPTY but malformed-JSON body (client error → 400).
+ */
+export function readBodyText(
 	req: http.IncomingMessage,
 	maxBytes: number = MAX_REQUEST_BODY_BYTES,
-): Promise<any> {
+): Promise<string | null> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
 		let settled = false;
-		const finish = (value: any): void => {
+		const finish = (value: string | null): void => {
 			if (settled) return;
 			settled = true;
 			resolve(value);
@@ -14076,12 +15145,11 @@ export function readBody(
 			if (settled) return;
 			total += chunk.length;
 			if (total > maxBytes) {
-				// Oversized body: reject BEFORE Buffer.concat()/JSON.parse() so a
-				// huge payload is never fully materialised in memory. Drop buffered
-				// chunks, tear down the stream, and resolve null — handlers treat a
-				// null body as a malformed request (400); the request-handler's
-				// Content-Length precheck returns a definitive 413 for the common
-				// case where the length is declared up front.
+				// Oversized body: reject BEFORE Buffer.concat() so a huge payload is
+				// never fully materialised in memory. Drop buffered chunks, tear down
+				// the stream, and resolve null — handlers treat a null body as a
+				// malformed request (400); the request-handler's Content-Length
+				// precheck returns a definitive 413 when the length is declared up front.
 				chunks.length = 0;
 				try { req.destroy(); } catch { /* best-effort */ }
 				finish(null);
@@ -14089,15 +15157,26 @@ export function readBody(
 			}
 			chunks.push(chunk);
 		});
-		req.on("end", () => {
-			try {
-				finish(JSON.parse(Buffer.concat(chunks).toString()));
-			} catch {
-				finish(null);
-			}
-		});
+		req.on("end", () => finish(Buffer.concat(chunks).toString()));
 		req.on("error", () => finish(null));
 		req.on("aborted", () => finish(null));
+	});
+}
+
+export function readBody(
+	req: http.IncomingMessage,
+	maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<any> {
+	return readBodyText(req, maxBytes).then((text) => {
+		// Preserve the historical contract: a null (oversized/aborted) OR
+		// unparseable/empty body resolves to null. Callers that must distinguish an
+		// empty body from a malformed one read the raw text via readBodyText instead.
+		if (text === null) return null;
+		try {
+			return JSON.parse(text);
+		} catch {
+			return null;
+		}
 	});
 }
 

@@ -1,0 +1,44 @@
+name: hindsight_invalidate
+description: "Invalidate a stale or incorrect Hindsight memory without deleting history."
+summary: "Invalidate a memory"
+params: [id, reason]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Hindsight
+docs: |-
+  Required: `id` and `reason`.
+
+  Marks a specific Hindsight memory as invalidated with a reason. This is
+  reversible curation, not deletion: history remains available through the direct
+  Hindsight API.
+detail_docs: >-
+  ## Purpose
+
+
+  `hindsight_invalidate` retires a known-stale or incorrect memory without
+  permanently deleting it. Use it only when you have the exact memory id and a
+  concrete reason.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `id` | string | **Yes** | Hindsight memory id to invalidate. |
+
+  | `reason` | string | **Yes** | Why the memory is stale or incorrect. |
+
+
+  ## Notes
+
+
+  - The tool dispatches the pack's `invalidate` route, which uses Hindsight's
+  `PATCH /memories/{id}` invalidation flow.
+
+  - It never calls the destructive delete endpoint.
+
+  - Unconfigured Hindsight returns a not-configured error (dormant).

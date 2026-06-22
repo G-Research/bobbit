@@ -9,6 +9,8 @@
 //                                  manifest.contents.entrypoints[])
 //   - `providers/<id>.yaml`     → ProviderContribution[] (filtered by
 //                                  manifest.contents.providers[])
+//   - `runtimes/<id>.yaml`      → RuntimeContribution[] (filtered by
+//                                  manifest.contents.runtimes[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -19,7 +21,8 @@
 //   2. (duplicate host-global routeId — detected at registry build, cross-pack);
 //   3. duplicate panel id within a pack;
 //   4. duplicate entrypoint id within a pack;
-//   5. duplicate provider id within a pack.
+//   5. duplicate provider id within a pack;
+//   6. duplicate runtime id within a pack.
 //
 // Each contribution carries its declaring `sourceFile` + the absolute `packRoot`
 // so the serve/import sites can resolve a path-bearing field RELATIVE to the
@@ -36,6 +39,7 @@ import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const RUNTIME_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
 const PROVIDER_HOOKS = new Set([
@@ -49,6 +53,10 @@ const PROVIDER_HOOKS = new Set([
 	// provider apply per-goal filesystem treatments (content-addressed marker/
 	// cache) without per-turn cost. See docs/design/goal-metadata.md.
 	"goalProvisioned",
+	// Goal completion hook: fired once per completed goal/head after team_complete
+	// succeeds so memory providers can retain an outcome digest without affecting
+	// the completion path.
+	"goalCompleted",
 ]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
@@ -100,6 +108,24 @@ export interface RouteContribution {
 	packRoot: string;
 }
 
+/** A pack-scoped managed-runtime descriptor (runtimes/<file>.yaml) loaded ONLY
+ *  for basenames listed in contents.runtimes[] (P1 runtime manifest design).
+ *
+ *  The loader is intentionally shallow: it enforces a valid `id` and intra-pack
+ *  id uniqueness, then carries the raw parsed YAML as {@link manifest}. Deep
+ *  manifest validation (compose-path containment, env/secrets/ports/modes) is
+ *  the runtime manifest parser's responsibility (`src/server/runtime/manifest.ts`),
+ *  applied by later orchestration phases — NOT here, keeping this phase pure. */
+export interface RuntimeContribution {
+	id: string;
+	title?: string;
+	description?: string;
+	manifest: Record<string, unknown>;
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 export interface ProviderContribution {
 	id: string;
 	kind: "memory" | "selector" | "generic";
@@ -118,11 +144,16 @@ export interface ProviderContribution {
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
 	/** Config-gated activation: the provider is omitted from the active provider
-	 *  listing until the EFFECTIVE flat config has a non-empty value for every
-	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
-	 *  truly dormant install — no provider bridge, no per-turn hook routes, no
-	 *  network — until configured. */
-	activation?: { requiresConfig: string[] };
+	 *  listing until its EFFECTIVE flat config satisfies the gate (DisabledRefs/pack
+	 *  activation still wins). Enables a truly dormant install — no provider bridge,
+	 *  no per-turn hook routes, no network — until configured.
+	 *
+	 *  - `requiresConfig`: every listed key must be present + (for strings) non-empty.
+	 *  - `activeWhenConfig`: an OR escape hatch for deployment-mode / runtime linkage
+	 *    — when the effective value of ANY listed key is in its allowed-value list the
+	 *    provider activates regardless of `requiresConfig`. Lets a managed deployment
+	 *    mode activate without an external URL while external mode still requires one. */
+	activation?: ProviderActivation;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -156,16 +187,41 @@ export function resolveProviderConfigDefaults(schema: Record<string, unknown>): 
 	return out;
 }
 
-/** Parse a provider `activation` block. Only `requiresConfig: string[]` is
- *  recognised; anything else is dropped (tolerant). Returns `undefined` when no
- *  usable gating keys are present so the provider stays unconditionally active. */
-function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | undefined {
+/** Provider activation gate (config-gated dormancy). See {@link ProviderContribution.activation}. */
+export interface ProviderActivation {
+	/** AND gate: every listed key must be present + (for strings) non-empty. */
+	requiresConfig?: string[];
+	/** OR escape hatch keyed by config key → allowed-value list (deployment-mode /
+	 *  runtime linkage). A match activates the provider regardless of `requiresConfig`. */
+	activeWhenConfig?: Record<string, string[]>;
+}
+
+/** Parse a provider `activation` block. `requiresConfig: string[]` and
+ *  `activeWhenConfig: { key: string|string[] }` are recognised; anything else is
+ *  dropped (tolerant). Returns `undefined` when no usable gating remains so the
+ *  provider stays unconditionally active. */
+function parseProviderActivation(raw: unknown): ProviderActivation | undefined {
 	if (!isPlainObject(raw)) return undefined;
+	const out: ProviderActivation = {};
 	const rc = raw.requiresConfig;
-	if (!Array.isArray(rc)) return undefined;
-	const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
-	if (keys.length === 0) return undefined;
-	return { requiresConfig: keys };
+	if (Array.isArray(rc)) {
+		const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
+		if (keys.length > 0) out.requiresConfig = keys;
+	}
+	if (isPlainObject(raw.activeWhenConfig)) {
+		const map: Record<string, string[]> = {};
+		for (const [key, value] of Object.entries(raw.activeWhenConfig)) {
+			const values = Array.isArray(value)
+				? value.filter((v): v is string => typeof v === "string" && v.length > 0)
+				: typeof value === "string" && value.length > 0
+					? [value]
+					: [];
+			if (values.length > 0) map[key] = values;
+		}
+		if (Object.keys(map).length > 0) out.activeWhenConfig = map;
+	}
+	if (!out.requiresConfig && !out.activeWhenConfig) return undefined;
+	return out;
 }
 
 /** All pack-scoped contributions for ONE installed pack. */
@@ -176,6 +232,7 @@ export interface PackContributions {
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
+	runtimes: RuntimeContribution[];
 	routes?: RouteContribution;
 }
 
@@ -207,6 +264,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
+		runtimes: loadRuntimes(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
@@ -312,6 +370,61 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 		}
 		seenId.add(base.id);
 		out.push({ ...base, listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+/** Load `runtimes/<name>.yaml` ONLY for names listed in contents.runtimes[].
+ *  Mirrors the entrypoint/provider contribution loader pattern: safe-basename +
+ *  realpath containment before read, tolerant warn+drop of missing/malformed
+ *  files, and a hard {@link PackContributionError} on duplicate runtime ids
+ *  within the pack. Accepts either `.yaml` or `.yml`. */
+function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribution[] {
+	const listNames = manifest.contents.runtimes ?? [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: RuntimeContribution[] = [];
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		let sourceFile = path.join(dir, `${listName}.yaml`);
+		if (!fs.existsSync(sourceFile)) {
+			const alt = path.join(dir, `${listName}.yml`);
+			if (fs.existsSync(alt)) sourceFile = alt;
+		}
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (typeof id !== "string" || !RUNTIME_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid/missing id; dropping`);
+			continue;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares runtime id "${id}" more than once; runtime ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		const contribution: RuntimeContribution = { id, manifest: data, listName, sourceFile, packRoot };
+		if (typeof data.title === "string" && data.title.length > 0) contribution.title = data.title;
+		if (typeof data.description === "string" && data.description.length > 0) contribution.description = data.description;
+		out.push(contribution);
 	}
 	return out;
 }

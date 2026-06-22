@@ -43,6 +43,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
 that hold a `host`.
@@ -90,6 +91,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+
   lib/                            # shared implementation modules, NOT entities
     SharedRenderer.js
     ArtifactViewerPanel.js
@@ -798,7 +800,7 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
   packs declaring the same `routeId` is a hard rejection at registry build). Panel ids referenced
   by `target.panelId` are pack-local.
 
-### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
+### Providers (`providers/<id>.yaml`) — schema 2; lifecycle hooks wired
 
 **Status:** a `schema: 2` pack may ship **provider** contributions — a pack-scoped
 contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes.
@@ -810,18 +812,24 @@ worker tier with a per-provider timeout, collects the returned `ContextBlock`s, 
 budgets, fences the content, and records a trace. See [docs/lifecycle-hub.md](lifecycle-hub.md)
 for the full Hub contract.
 
-**The `sessionSetup` hook is now wired into the session runtime.** When a new session is
-created, the Hub dispatches `sessionSetup` and the returned blocks render as a final
-**Dynamic Context** prompt section (visible in the prompt-sections inspector with
-`source: "providers"` provenance) — so a provider that declares `sessionSetup` and is installed +
-active + enabled for the session's scope contributes context today. A provider fault never blocks
-the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforePrompt` /
-`beforeCompact` fire via a generated provider-bridge pi extension, and `afterTurn` /
-`sessionShutdown` fire server-side from the gateway's agent-event stream. The first built-in
-production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the built-in
-band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box install
-still produces no Dynamic Context section. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
+**Provider lifecycle hooks are wired.** When a new session is created, the Hub dispatches
+`sessionSetup` and the returned blocks render as a final **Dynamic Context** prompt section
+(visible in the prompt-sections inspector with `source: "providers"` provenance) — so a provider
+that declares `sessionSetup` and is installed + active + enabled for the session's scope contributes
+context today. A provider fault never blocks the spawn. Per-turn `beforePrompt` / `beforeCompact`
+fire via a generated provider-bridge pi extension, `afterTurn` / `sessionShutdown` fire server-side
+from the gateway's agent-event stream, and `goalCompleted` fires after successful goal completion
+for non-blocking outcome/cleanup side effects.
+
+`beforePrompt` blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side messages,
+not appended to `systemPrompt`, so provider cached system-prompt bytes stay stable across turns;
+`sessionSetup` blocks remain spawn-time system-prompt context and `beforeCompact` is unchanged.
+
+The first built-in production provider — the [Hindsight memory pack](hindsight-memory.md) — ships
+with `defaultDisabled: true`, so a fresh unconfigured install contributes no tools, provider hooks,
+entrypoints, runtime, or Dynamic Context until setup enables/configures it; existing configured
+installs remain active. See [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
+and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
@@ -840,10 +848,12 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 - `module` resolves relative to the provider YAML and is containment-checked against the pack
   root — the same guard as routes/entrypoints.
 - `hooks` must be a subset of `sessionSetup` / `beforePrompt` / `afterTurn` / `beforeCompact` /
-  `sessionShutdown` / `goalProvisioned`; an unknown hook drops *that* provider (warn) and the rest
-  of the pack still loads. `goalProvisioned` is a fire-and-forget **filesystem-treatment** hook
-  (returns no context blocks) dispatched at every worktree provisioning in a goal's subtree with
-  the goal's resolved metadata; it must be cheap and idempotent. See
+  `sessionShutdown` / `goalProvisioned` / `goalCompleted`; an unknown hook drops *that* provider
+  (warn) and the rest of the pack still loads. `goalProvisioned` is a fire-and-forget
+  **filesystem-treatment** hook (returns no context blocks) dispatched at every worktree
+  provisioning in a goal's subtree with the goal's resolved metadata; it must be cheap and
+  idempotent. `goalCompleted` fires after successful goal/team completion for non-blocking outcome
+  side effects and cannot roll back completion. See
   [Hierarchical goal metadata](design/goal-metadata.md#6-extension-goal-lifecycle-hook) and
   [lifecycle-hub.md](lifecycle-hub.md).
 - `budget` (`{ maxTokens, timeoutMs }`) bounds dispatch: `maxTokens` is clamped to `[64, 8192]`
@@ -855,8 +865,8 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 
 A provider `module` is authored as a **default-export object** whose members are the hook
 handlers — **not** a named `providers` export (this is what distinguishes the provider worker
-path from routes/actions). Each handler is `async (ctx) => ({ blocks: [...] })` and returns
-`ContextBlock`s (a bare `ContextBlock[]` is also accepted):
+path from routes/actions). Context-producing hooks return `async (ctx) => ({ blocks: [...] })`
+(or a bare `ContextBlock[]`); side-effect-only hooks such as `goalCompleted` may return nothing:
 
 ```js
 // providers/memory.mjs
@@ -877,6 +887,9 @@ export default {
     };
   },
   async beforePrompt(ctx) { /* … */ },
+  async goalCompleted(ctx) {
+    // Side effects only: retain outcome summaries, cleanup, etc. Returned blocks are ignored.
+  },
 };
 ```
 

@@ -56,6 +56,15 @@ export interface PackManifest {
 	/** Capability names this pack depends on (schema 2+ metadata). */
 	requires?: string[];
 	/**
+	 * When `true`, this (built-in, server-scope) pack ships DEFAULT-DISABLED: a
+	 * fresh server resolves it as if every contributed entity were de-activated
+	 * (tools/provider/entrypoints/runtime all absent) UNTIL the user explicitly
+	 * enables it OR it is already configured (live-setup preservation). Absent ⇒
+	 * default-enabled (the normal pack behavior). See
+	 * src/server/agent/pack-default-activation.ts for the resolution priority.
+	 */
+	defaultDisabled?: boolean;
+	/**
 	 * Authoritative advertised contents. v1 keys are REQUIRED but each MAY be
 	 * empty. Schema 2 adds optional pack-scoped catalogues; only `providers` has
 	 * a loader in G1.1, the other keys are activation/catalogue metadata for later
@@ -75,7 +84,7 @@ export interface PackManifest {
 		hooks?: string[]; // hook contribution basenames (accepted, loader later)
 		mcp?: string[]; // MCP contribution basenames (schema 2+, loader later)
 		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
-		runtimes?: string[]; // runtime contribution basenames (accepted, loader later)
+		runtimes?: string[]; // runtimes/<name>.yaml basenames; managed-runtime descriptors
 		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { validateManifest } from "../src/server/agent/pack-manifest.ts";
+import { readManifest, validateManifest } from "../src/server/agent/pack-manifest.ts";
 import { loadPackContributions, loadProviders, PackContributionError } from "../src/server/agent/pack-contributions.ts";
 import type { PackManifest } from "../src/server/agent/pack-types.ts";
 
@@ -59,6 +59,19 @@ function validProviderYaml(id = "memory", extras = ""): string {
 }
 
 describe("loadProviders (schema v2)", () => {
+	it("real Hindsight memory provider declares goalCompleted", () => {
+		const root = path.resolve("market-packs", "hindsight");
+		const manifest = readManifest(root);
+		assert.ok(manifest, "real Hindsight pack manifest should parse");
+		assert.ok(manifest.contents.providers?.includes("memory"), "pack manifest should list the memory provider");
+
+		const memory = loadPackContributions(root, manifest).providers.find((p) => p.id === "memory");
+		assert.ok(memory, "memory provider contribution should load");
+		assert.ok(memory.hooks.includes("goalCompleted"), "goalCompleted must be declared or LifecycleHub.dispatchGoalCompleted skips the provider");
+		assert.equal(memory.budget.timeoutMs, 4500, "memory recall budget must cover observed 1–3.4s Hindsight recall latency");
+		assert.equal(memory.config?.timeoutMs, 4000, "default Hindsight client timeout must stay below the provider budget");
+	});
+
 	it("loads a valid listed provider and clamps its budget", () => {
 		const root = packRoot("valid");
 		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory", "budget:\n  maxTokens: 99999\n  timeoutMs: 5"));
@@ -114,6 +127,47 @@ describe("loadProviders (schema v2)", () => {
 		assert.deepEqual((p.configSchema as Record<string, any>).mode, { type: "enum", values: ["external", "managed"], default: "external" });
 		// Activation gating parsed.
 		assert.deepEqual(p.activation, { requiresConfig: ["externalUrl"] });
+	});
+
+	it("parses activeWhenConfig (deployment-mode linkage) alongside requiresConfig", () => {
+		const root = packRoot("activation-mode");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode: { type: enum, values: [external, managed, managed-external-postgres], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"  activeWhenConfig:",
+			"    mode: [managed, managed-external-postgres]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [p] = loadProviders(root, manifest(["memory"]));
+		assert.deepEqual(p.activation, {
+			requiresConfig: ["externalUrl"],
+			activeWhenConfig: { mode: ["managed", "managed-external-postgres"] },
+		});
+	});
+
+	it("accepts a scalar activeWhenConfig value and normalises it to a one-element list", () => {
+		const root = packRoot("activation-scalar");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"activation:",
+			"  activeWhenConfig:",
+			"    mode: managed",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [p] = loadProviders(root, manifest(["memory"]));
+		assert.deepEqual(p.activation, { activeWhenConfig: { mode: ["managed"] } });
 	});
 
 	it("omits config/configSchema/activation when the provider declares none", () => {

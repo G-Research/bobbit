@@ -80,9 +80,9 @@ shipped first-party packs directory, and resolve those packs *in place* as a
 dedicated band in `buildPackList()`.** They are NOT copied into any scope's
 `.bobbit/config/market-packs/`.
 
-"Auto-installed" therefore means **present + active by default**: a built-in pack
-is always resolvable; the only opt-out is **disable** via the #734 activation
-overrides (default = enabled). Updates ride the app upgrade for free (the shipped
+"Auto-installed" therefore means **present in the built-in band**: most built-in packs are
+active by default, while a pack that declares `defaultDisabled: true` resolves with all of its
+contributions disabled until explicitly enabled or already configured. Updates ride the app upgrade for free (the shipped
 dir is replaced on install/upgrade).
 
 ### Rejected alternative — copy-install + opt-out ledger

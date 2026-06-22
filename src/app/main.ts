@@ -228,7 +228,12 @@ async function evaluateActiveExtRoute(): Promise<void> {
 		if (cur.params) for (const key of entry.paramKeys) if (key in cur.params) openParams[key] = cur.params[key];
 		// The target panel is resolved within the SAME pack — thread the route's
 		// owning packId so the {packId, panelId} lookup is exact (pack schema V1 §8.1).
-		openPackPanel({ panelId: entry.targetPanelId, params: openParams }, entry.packId);
+		// Hindsight's #/ext/hindsight route is a use surface for an in-app dashboard
+		// tab, so thread a restored session when possible. Other extension routes
+		// (notably PR Walkthrough) intentionally remain on the #/ext route overlay.
+		const wantsSessionTab = entry.packId === "hindsight" && entry.targetPanelId === "hindsight.dashboard";
+		const sessionId = wantsSessionTab ? state.selectedSessionId || state.remoteAgent?.gatewaySessionId || state.gatewaySessions[0]?.id || undefined : undefined;
+		openPackPanel({ panelId: entry.targetPanelId, params: openParams, ...(sessionId ? { sessionId } : {}) }, entry.packId);
 	} catch { /* non-fatal — a bad deep-link must never break the app */ }
 }
 

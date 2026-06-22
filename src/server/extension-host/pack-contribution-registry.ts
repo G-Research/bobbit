@@ -21,6 +21,7 @@ import {
 	type PanelContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
+	type RuntimeContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -36,6 +37,8 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
+	/** Resolve a managed-runtime descriptor within a pack. */
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean;
 }
@@ -79,12 +82,17 @@ export class PackContributionRegistry implements PackContributionResolver {
 	 *                   scope, low→high precedence, already deduped-on-path
 	 *                   (mirrors `marketToolRoots`).
 	 * @param disabledEntrypoints  Activation override lookup (§7). Absent ⇒ all enabled.
+	 * @param disabledRuntimes  Disabled-runtime activation override lookup (DisabledRefs.runtimes).
+	 *                          A disabled runtime is dropped from `getPack().runtimes` /
+	 *                          `getRuntime`, so the supervisor's registry lookup 404s and
+	 *                          runtime listings omit it. Absent ⇒ all enabled.
 	 */
 	constructor(
 		private readonly enumerate: (projectId: string | undefined) => PackEntry[],
 		private readonly disabledEntrypoints?: DisabledEntrypointsLookup,
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
+		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -100,6 +108,44 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).byId.get(packId);
 	}
 
+	/**
+	 * A single pack's RAW (activation-UNFILTERED) contributions, or undefined when
+	 * the pack is not installed. Unlike {@link getPack}, this does NOT drop dormant
+	 * providers (those whose `activation` gate is unsatisfied), disabled entrypoints,
+	 * or disabled runtimes — it returns exactly what `loadPackContributions` parses
+	 * from disk for the WINNING pack entry (highest precedence per packId).
+	 *
+	 * Used by the managed-runtime REST surface (`/api/pack-runtimes/:id/{capabilities,
+	 * start,restart}`) to CLASSIFY the deployment mode/config from a pack whose
+	 * provider is still dormant — e.g. Hindsight's external-mode `memory` provider,
+	 * which only activates once `externalUrl` is configured. Reading the
+	 * activation-filtered `getPack` there would misclassify fresh/default Hindsight as
+	 * provider-less and disclose / start the Docker default mode instead of the
+	 * external (no-Docker) setup path. Actual runtime availability (disabled-runtime
+	 * filtering) stays enforced by the supervisor's activation-filtered registry
+	 * lookups, NOT by this method. Providers carry their SCHEMA-DEFAULT flat config
+	 * (`config`); callers overlay persisted store config themselves.
+	 */
+	getRawPack(projectId: string | undefined, packId: string): PackContributions | undefined {
+		const entries = this.enumerate(projectId);
+		let winning: PackEntry | undefined;
+		for (const e of entries) {
+			if (!e.manifest) continue;
+			if (packIdFromRoot(e.path) !== packId) continue;
+			winning = e; // last wins (highest precedence)
+		}
+		if (!winning?.manifest) return undefined;
+		try {
+			return loadPackContributions(winning.path, winning.manifest);
+		} catch (err) {
+			if (err instanceof PackContributionError) {
+				console.error(`[pack-contributions] rejecting pack at ${winning.path}: ${err.message}`);
+				return undefined;
+			}
+			throw err;
+		}
+	}
+
 	getPanel(projectId: string | undefined, packId: string, panelId: string): PanelContribution | undefined {
 		return this.getPack(projectId, packId)?.panels.find((p) => p.id === panelId);
 	}
@@ -110,6 +156,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listProviders(projectId: string | undefined): ProviderContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
+	}
+
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
+		return this.getPack(projectId, packId)?.runtimes.find((r) => r.id === runtimeId);
 	}
 
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean {
@@ -182,6 +232,18 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
+			// Runtimes: drop entries disabled via pack_activation (DisabledRefs.runtimes
+			// kill-switch), keyed by listName — mirrors the entrypoint/provider toggles.
+			// A disabled managed runtime is absent from `getPack().runtimes` /
+			// `getRuntime`, so the PackRuntimeSupervisor's registry lookup 404s
+			// (start/stop/capabilities reject) and runtime listings omit it; managed
+			// runtime dormancy is a deliberate activation decision.
+			const disabledRuntimes = this.disabledRuntimes
+				? new Set(this.disabledRuntimes(e.scope, projectId, contrib.packName))
+				: undefined;
+			if (disabledRuntimes && disabledRuntimes.size > 0) {
+				contrib = { ...contrib, runtimes: contrib.runtimes.filter((r) => !disabledRuntimes.has(r.listName)) };
+			}
 			loaded.push(contrib);
 		}
 
@@ -220,14 +282,34 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 }
 
-/** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
- *  flat config — every required key present and, for a string, non-empty after
- *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
+/** True when a provider's `activation` gate is satisfied by its EFFECTIVE flat
+ *  config. No `activation` ⇒ unconditionally active. Otherwise, in priority order:
+ *
+ *    1. `activeWhenConfig` (OR escape hatch / deployment-mode linkage): if ANY
+ *       listed key's effective value is in its allowed-value list, the provider is
+ *       active — this is what lets a managed deployment mode activate without an
+ *       external URL.
+ *    2. `requiresConfig` (AND gate): every listed key present and, for a string,
+ *       non-empty after trimming.
+ *
+ *  When `activeWhenConfig` is declared but unmatched AND there is no `requiresConfig`
+ *  to fall back on, the provider stays dormant (the gate was declared for a reason). */
 function providerActivationSatisfied(provider: ProviderContribution): boolean {
-	const required = provider.activation?.requiresConfig;
-	if (!required || required.length === 0) return true;
+	const activation = provider.activation;
+	if (!activation) return true;
 	const config = provider.config ?? {};
-	return required.every((key) => {
+	const { activeWhenConfig, requiresConfig } = activation;
+	if (activeWhenConfig) {
+		for (const [key, allowed] of Object.entries(activeWhenConfig)) {
+			const value = config[key];
+			if (typeof value === "string" && allowed.includes(value)) return true;
+		}
+	}
+	if (!requiresConfig || requiresConfig.length === 0) {
+		// No AND gate: an unmatched `activeWhenConfig` means dormant; otherwise active.
+		return !activeWhenConfig;
+	}
+	return requiresConfig.every((key) => {
 		const value = config[key];
 		if (value === undefined || value === null) return false;
 		if (typeof value === "string") return value.trim().length > 0;

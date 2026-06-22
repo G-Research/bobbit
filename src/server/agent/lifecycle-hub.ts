@@ -9,7 +9,7 @@ import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
 
-export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalCompleted";
 
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
@@ -36,6 +36,48 @@ export interface GoalProvisionedCtx {
 	metadata: GoalMetadata;
 }
 
+/** Compact server-owned summary handed to goal-completion lifecycle providers. */
+export interface GoalCompletedCtx {
+	goalId: string;
+	projectId?: string;
+	cwd: string;
+	branch?: string;
+	mergeTarget?: string;
+	parentGoalId?: string;
+	rootGoalId?: string;
+	headSha?: string;
+	teamLeadSessionId?: string;
+	completedAt: string;
+	pullRequest?: {
+		url?: string;
+		number?: string | number;
+		title?: string;
+		state?: string;
+		headSha?: string;
+	};
+	gates: Array<{
+		gateId: string;
+		name?: string;
+		status: string;
+		signalCount: number;
+		updatedAt?: number;
+		metadata?: Record<string, string>;
+		content?: string;
+		latestCommitSha?: string;
+	}>;
+	tasks: Array<{
+		id: string;
+		title: string;
+		type?: string;
+		state?: string;
+		branch?: string;
+		headSha?: string;
+		resultSummary?: string;
+	}>;
+	touchedFiles: string[];
+	metadata: GoalMetadata;
+}
+
 export interface HookCtx {
 	sessionId: string;
 	projectId?: string;
@@ -59,6 +101,24 @@ export interface HookCtx {
 	runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
 	gateway: { baseUrl: string; token: string };
 }
+
+/** Managed-runtime context injected into `ctx.runtime` for an ACTIVE managed
+ *  provider invocation. Resolved by the host WITHOUT starting Docker. */
+export interface RuntimeContext {
+	baseUrl: string;
+	headers: Record<string, string>;
+	status: string;
+}
+
+/** Resolves the managed-runtime context for a provider declaring `runtime`. Returns
+ *  `undefined` when there is no managed runtime to link (external mode, supervisor
+ *  unavailable, runtime not running / API port unknown). NEVER starts Docker. */
+export type RuntimeContextResolver = (opts: {
+	packId: string;
+	runtimeId: string;
+	projectId?: string;
+	config: Record<string, unknown>;
+}) => Promise<RuntimeContext | undefined> | RuntimeContext | undefined;
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -88,6 +148,7 @@ export class LifecycleHub {
 	private readonly globalMaxTokens: number;
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
+	private readonly runtimeResolver?: RuntimeContextResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -105,6 +166,10 @@ export class LifecycleHub {
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
 		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Resolves `ctx.runtime` for providers declaring a `runtime` linkage (managed
+	 *  deployment modes). Consulted per provider invocation; NEVER starts Docker.
+	 *  Omitted ⇒ providers run without `ctx.runtime` (managed modes stay dormant). */
+		runtimeResolver?: RuntimeContextResolver;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -113,6 +178,24 @@ export class LifecycleHub {
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
+		this.runtimeResolver = deps.runtimeResolver;
+	}
+
+	private async resolveProviderRuntime(
+		provider: { runtime?: string; config?: Record<string, unknown>; packRoot: string },
+		projectId: string | undefined,
+	): Promise<RuntimeContext | undefined> {
+		if (!provider.runtime || !this.runtimeResolver) return undefined;
+		try {
+			return (await this.runtimeResolver({
+				packId: packIdFromRoot(provider.packRoot),
+				runtimeId: provider.runtime,
+				projectId,
+				config: provider.config ?? {},
+			})) ?? undefined;
+		} catch {
+			return undefined; // resolution failure is non-fatal — provider stays dormant
+		}
 	}
 
 	/**
@@ -196,6 +279,56 @@ export class LifecycleHub {
 		}
 	}
 
+	/**
+	 * Fire the `goalCompleted` lifecycle hook after a goal is marked complete.
+	 * Non-fatal: provider errors/timeouts are logged into diagnostics and swallowed
+	 * so goal completion can never be rolled back by an extension provider.
+	 */
+	async dispatchGoalCompleted(ctx: GoalCompletedCtx): Promise<{ diagnostics: HubDiagnostic[] }> {
+		const disabled = this.disabledProviders(ctx.goalId, ctx.projectId);
+		const providers = this.registry.listProviders(ctx.projectId).filter(
+			(p) => !disabled.has(p.id) && p.hooks.includes("goalCompleted"),
+		);
+		const diagnostics: HubDiagnostic[] = [];
+
+		for (const provider of providers) {
+			const packId = packIdFromRoot(provider.packRoot);
+			const runtime = await this.resolveProviderRuntime(provider, ctx.projectId);
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId });
+			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
+			const t0 = performance.now();
+			try {
+				await this.moduleHost.invoke({
+					url,
+					packRoot: provider.packRoot,
+					epoch: 0,
+					exportKind: "providers",
+					member: "goalCompleted",
+					ctx: {
+						...ctx,
+						workingDir: ctx.cwd,
+						config: provider.config ?? {},
+						gateway: this.gatewayInfo(),
+						host: providerHost,
+						...(runtime ? { runtime } : {}),
+					} as unknown as InvokeRequest["ctx"],
+					arg: undefined,
+					workingDir: ctx.cwd,
+				}, provider.budget.timeoutMs);
+			} catch (err) {
+				const ms = Math.round(performance.now() - t0);
+				const message = err instanceof Error ? err.message : String(err);
+				if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
+					diagnostics.push({ providerId: provider.id, hook: "goalCompleted", timeout: true, ms });
+				} else {
+					diagnostics.push({ providerId: provider.id, hook: "goalCompleted", error: message, ms });
+				}
+				console.warn(`[lifecycle-hub] goalCompleted hook for provider ${provider.id} failed (non-fatal): ${message}`);
+			}
+		}
+		return { diagnostics };
+	}
+
 	async dispatch(
 		hook: LifecycleHook,
 		base: Omit<HookCtx, "budget" | "config" | "gateway">,
@@ -207,17 +340,24 @@ export class LifecycleHub {
 		const traceStates = new Map<string, ProviderTraceState>();
 
 		for (const provider of providers) {
+			const packId = packIdFromRoot(provider.packRoot);
+			// Managed-runtime context (P3): for a provider linked to a runtime, resolve
+			// `ctx.runtime` (baseUrl/headers/status) WITHOUT starting Docker. Absent for
+			// external mode / a stopped runtime / when no resolver is wired — the provider
+			// then stays dormant via its own isActive(cfg, ctx.runtime) gate.
+			const runtime = await this.resolveProviderRuntime(provider, base.projectId);
 			const hookCtx: HookCtx = {
 				...base,
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
+				...(runtime ? { runtime } : {}),
 			};
 			// Provider-scoped, store-only host (least privilege). The LIVE object stays
 			// in the parent (module-host-worker strips it before serialization) and
 			// services the worker's proxied store calls — the durable retain queue /
 			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot) });
+			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;

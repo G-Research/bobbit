@@ -1,0 +1,10 @@
+id: hindsight.route
+kind: route
+routeId: hindsight
+target:
+  panelId: hindsight.dashboard
+# Deep-link: #/ext/hindsight resolves through the client pack-route registry and
+# reopens the singleton embedded-dashboard panel (the USE surface, NOT config). No
+# params are carried — the panel rehydrates its state entirely from the
+# config/status routes on mount, so paramKeys is empty.
+paramKeys: []

@@ -63,6 +63,35 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { via: "default" });
 	});
+
+	// P3/P4 — the managed-runtime linkage the route endpoint resolves
+	// (`{ baseUrl, headers, status }`) must survive the worker serialization
+	// boundary (module-host-worker route ctx → bootstrap reconstruction) and reach
+	// the handler as `ctx.runtime`. Without the forwarding it arrives undefined and a
+	// managed-mode pack (e.g. Hindsight) can never reach its running runtime.
+	it("forwards ctx.runtime to the route handler across the worker boundary", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "runtime"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ runtime: ctx.runtime ?? null }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		const runtime = { baseUrl: "http://127.0.0.1:54321", headers: { Authorization: "Bearer tok" }, status: "running" };
+		const result = await d.dispatch(modulePath, packRoot, "bundle", { ...ctx(), runtime }, { method: "GET" });
+		assert.deepEqual(result, { runtime });
+	});
+
+	it("omits ctx.runtime when none is resolved (external mode / no runtime)", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "no-runtime"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ hasRuntime: ctx.runtime !== undefined }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { hasRuntime: false });
+	});
+
+	it("forwards trusted goal and role context to route handlers", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "trusted-context"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ goalId: ctx.goalId, roleName: ctx.roleName }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		const result = await d.dispatch(modulePath, packRoot, "bundle", { ...ctx(), goalId: "goal-1", roleName: "coder" }, { method: "GET" });
+		assert.deepEqual(result, { goalId: "goal-1", roleName: "coder" });
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {
@@ -104,7 +133,16 @@ describe("RouteDispatcher — error isolation + blast-radius", () => {
 
 	it("handler exceeding the per-call timeout → 504", async () => {
 		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "timeout"), "p", "lib/routes.mjs", `export const routes = { bundle: () => new Promise(() => {}) };`);
-		const d = new RouteDispatcher({ rate: null, timeoutMs: 40 });
+		// Timeout GENEROUSLY larger than worker spawn+load (mirrors the action-dispatcher
+		// hung-eval convention) so the terminate bounds the HUNG HANDLER, not spawn/parse
+		// latency. A short cap (≈40ms < the ~70-110ms worker load) fires `worker.terminate()`
+		// while the worker is still SYNCHRONOUSLY inside the native CJS lexer
+		// (`node::cjs_lexer::Parse` during ESM `syncLink`), which on Node 26 crashes the
+		// whole process with `v8::ToLocalChecked Empty MaybeLocal` — and never even reaches
+		// the handler, so it wasn't proving the intended 504-on-hung-handler semantic. With
+		// the larger cap the worker loads, invokes the (never-resolving) handler, and the
+		// terminate lands on an idle event-loop-parked worker (the safe termination path).
+		const d = new RouteDispatcher({ rate: null, timeoutMs: 800 });
 		await assert.rejects(() => d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), (e) => e instanceof ActionError && e.status === 504);
 	});
 

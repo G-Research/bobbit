@@ -1,0 +1,13 @@
+id: hindsight.dashboard
+title: Hindsight Memory
+# Singleton EMBEDDED-DASHBOARD panel — the USE/VIEW/QUERY surface opened by the
+# session-menu entry and the #/ext/hindsight deep link (NOT a config surface;
+# configuration lives in the Marketplace). One per session view (no instanceParam),
+# so the deep link needs no params and rehydrates entirely from the config/status
+# routes. `entry` resolves relative to THIS yaml (panels/) and stays inside the
+# pack root; the built bundle lives in the shared lib/ dir and is lazy-imported by
+# the client pack-panels registry, opened via host.ui.openPanel({ panelId }). It
+# reads ONLY through the Host API (host.callRoute config|status) — never a raw
+# fetch — and renders the configured human dashboard `uiUrl` in a SANDBOXED iframe.
+# `uiUrl` is display/open-only: Bobbit JS never dials it.
+entry: ../lib/HindsightDashboardPanel.js

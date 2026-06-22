@@ -212,6 +212,25 @@ describe("ModuleHost — ambient parity (trusted pack = tool/MCP tier; acceptanc
 			mh.dispose();
 		}
 	});
+
+	it("ctx.projectId reaches a ROUTE handler through the real worker/bootstrap path", async () => {
+		// REGRESSION: the worker serializes projectId into the route ctx, but the
+		// bootstrap previously reconstructed the non-provider (actions/routes) handler
+		// ctx WITHOUT projectId — silently dropping the project scope a Hindsight route
+		// uses for project-scoped recall. This exercises the genuine worker+bootstrap
+		// route invocation seam (not a direct route unit call) and asserts projectId is
+		// plumbed all the way to the route handler ctx.
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const ctx: ActionHandlerCtx = { ...bareCtx(), projectId: "proj-xyz" };
+			const url = writeModule(`export const routes = { recall: async (ctx, req) => ({ projectId: ctx.projectId ?? null, body: req }) };`);
+			const r = (await mh.invoke({ url, packRoot: tmp, epoch: 0, exportKind: "routes", member: "recall", ctx, arg: { q: "marker" } })) as { projectId: unknown; body: unknown };
+			assert.equal(r.projectId, "proj-xyz", "projectId must reach the reconstructed route handler ctx");
+			assert.deepEqual(r.body, { q: "marker" }, "the route request arg still round-trips");
+		} finally {
+			mh.dispose();
+		}
+	});
 });
 
 describe("ModuleHost — CPU / wall-time termination (design §9: terminate-on-timeout IS the CPU control)", () => {

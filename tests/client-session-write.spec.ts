@@ -23,10 +23,33 @@
  * file:// fixture loads it, and we drive helpers via window globals.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
+
+// esbuild's direct outfile write is not atomic. With fullyParallel enabled the
+// four tests in this file can split across workers, so multiple beforeAll hooks
+// may cold-build the SHARED bundle concurrently — a sibling page then loads a
+// partial bundle and waits forever for `window.__ready` (TimeoutError in
+// gotoAndWait). Build to a unique temp path, then atomically replace the shared
+// bundle. Mirrors marketplace-active-project.spec.ts.
+async function renameWithRetry(src: string, dest: string): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	let lastErr: unknown;
+	while (Date.now() < deadline) {
+		try {
+			fs.renameSync(src, dest);
+			return;
+		} catch (err) {
+			lastErr = err;
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+	throw lastErr;
+}
 
 const FIXTURE = path.resolve("tests/fixtures/client-session-write.html");
 const BUNDLE = path.resolve("tests/fixtures/client-session-write-bundle.js");
@@ -37,7 +60,7 @@ const BRIDGE_SRC = path.resolve("src/app/session-write-bridge.ts");
 const BUS_SRC = path.resolve("src/app/session-event-bus.ts");
 const SHARED_SRC = path.resolve("src/shared/extension-host/host-api.ts");
 
-test.beforeAll(() => {
+test.beforeAll(async () => {
 	const entryMtime = Math.max(
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(HOST_SRC).mtimeMs,
@@ -49,17 +72,24 @@ test.beforeAll(() => {
 	const bundleExists = fs.existsSync(BUNDLE);
 	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
 	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
+		const tmpDir = fs.mkdtempSync(path.join(path.dirname(BUNDLE), ".bundle-tmp-"));
+		const tmpOut = path.join(tmpDir, path.basename(BUNDLE));
+		try {
+			await esbuild.build({
+				entryPoints: [ENTRY],
+				bundle: true,
+				format: "iife",
+				target: "es2022",
+				outfile: tmpOut,
+				tsconfig: "tsconfig.web.json",
+				alias: { "pdfjs-dist": "./tests/fixtures/empty-shim" },
+				define: { "import.meta.url": '"http://localhost/"' },
+				loader: { ".ts": "ts" },
+			});
+			await renameWithRetry(tmpOut, BUNDLE);
+		} finally {
+			try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+		}
 	}
 });
 
