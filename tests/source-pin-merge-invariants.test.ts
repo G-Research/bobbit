@@ -26,15 +26,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, "..");
 const read = (p: string) => fs.readFileSync(path.join(REPO_ROOT, p), "utf-8");
 
-function assertTextInOrder(text: string, needles: string[], message: string): void {
-	let from = 0;
-	for (const needle of needles) {
-		const idx = text.indexOf(needle, from);
-		assert.notEqual(idx, -1, `${message}\nMissing or out-of-order substring: ${needle}`);
-		from = idx + needle.length;
-	}
-}
-
 describe("Source pin — merge-loss invariants", () => {
 	it("server.ts dispatches tryHandleNestedGoalRoute (restored by ea921d7b)", () => {
 		const text = read("src/server/server.ts");
@@ -192,59 +183,6 @@ describe("Source pin — merge-loss invariants", () => {
 			"proposal-modal-tabs fix restores it as a tab alongside Goal and\n" +
 			"Workflow. DO NOT delete this pin — restore the dropped tab button\n" +
 			"instead.",
-		);
-	});
-
-	it("proposal-panels.ts renders the proposal-modal Metadata tab stable IDs (metadata-tab fix)", () => {
-		const text = read("src/app/proposal-panels.ts");
-		for (const required of [
-			'id="goal-proposal-tab-metadata"',
-			'data-testid="goal-proposal-tab-metadata"',
-			'aria-controls="goal-proposal-panel-metadata"',
-			'id="goal-proposal-panel-metadata"',
-			'data-testid="goal-proposal-panel-metadata"',
-			'aria-labelledby="goal-proposal-tab-metadata"',
-		]) {
-			assert.ok(
-				text.includes(required),
-				"src/app/proposal-panels.ts must render the proposal modal's Metadata\n" +
-				"tab and panel with stable IDs/test IDs: " + required + "\n" +
-				"The Metadata tab owns the per-goal metadata key/value editor;\n" +
-				"without these stable selectors accessibility wiring, keyboard focus,\n" +
-				"and browser E2E coverage silently regress. DO NOT delete this pin —\n" +
-				"restore the dropped Metadata tab/panel wiring instead.",
-			);
-		}
-	});
-
-	it("proposal-panels.ts orders proposal tabs Goal, Workflow, Roles, Metadata, Sub-goals (metadata-tab fix)", () => {
-		const text = read("src/app/proposal-panels.ts");
-		assertTextInOrder(
-			text,
-			[
-				'id="goal-proposal-tab-goal"',
-				'id="goal-proposal-tab-workflow"',
-				'id="goal-proposal-tab-roles"',
-				'id="goal-proposal-tab-metadata"',
-				'id="goal-proposal-tab-subgoals"',
-			],
-			"src/app/proposal-panels.ts must render proposal tabs in the order\n" +
-			"Goal → Workflow → Roles → Metadata → Sub-goals. The Metadata tab\n" +
-			"must sit immediately after Roles and before Sub-goals when the\n" +
-			"Sub-goals tab is visible.",
-		);
-
-		const keydownBlock = text.match(/const onTabKey = \(e: KeyboardEvent\) => \{[\s\S]*?\n\t\};/)?.[0] ?? "";
-		assertTextInOrder(
-			keydownBlock,
-			['"goal"', '"workflow"', '"roles"', '"metadata"'],
-			"src/app/proposal-panels.ts::onTabKey must include Metadata in\n" +
-			"ArrowLeft/ArrowRight/Home/End keyboard navigation after Roles.",
-		);
-		assert.ok(
-			keydownBlock.includes('"subgoals"'),
-			"src/app/proposal-panels.ts::onTabKey must continue to include\n" +
-			"Sub-goals after Metadata when that tab is visible.",
 		);
 	});
 

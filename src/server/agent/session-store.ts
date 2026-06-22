@@ -30,6 +30,9 @@ export function shouldKeepDespiteOrphan(
 	return recentTranscript;
 }
 
+export type SessionRuntime = "pi" | "claude-code";
+export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+
 /** Persisted metadata for a single gateway session */
 export interface PersistedSession {
 	id: string;
@@ -124,6 +127,16 @@ export interface PersistedSession {
 	modelProvider?: string;
 	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
 	modelId?: string;
+	/** Session runtime. Omitted legacy sessions are Pi-backed. */
+	runtime?: SessionRuntime;
+	/** Claude Code CLI session id, distinct from Bobbit's session id. */
+	claudeCodeSessionId?: string;
+	/** Claude Code executable/path used at spawn time. */
+	claudeCodeExecutable?: string;
+	/** Claude Code permission mode used at spawn time. */
+	claudeCodePermissionMode?: ClaudeCodePermissionMode;
+	/** Claude Code model alias used at spawn time (e.g. default, sonnet, opus). */
+	claudeCodeModelAlias?: string;
 	/** Image generation model provider for this session, if overridden from the default. */
 	imageModelProvider?: string;
 	/** Image generation model ID for this session, if overridden from the default. */
@@ -179,6 +192,11 @@ export type UpdatableSessionFields = Pick<
 	| "reattemptGoalId"
 	| "modelProvider"
 	| "modelId"
+	| "runtime"
+	| "claudeCodeSessionId"
+	| "claudeCodeExecutable"
+	| "claudeCodePermissionMode"
+	| "claudeCodeModelAlias"
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
@@ -537,7 +555,8 @@ export class SessionStore {
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
-		"modelProvider", "modelId",
+		"modelProvider", "modelId", "runtime", "claudeCodeSessionId",
+		"claudeCodeExecutable", "claudeCodePermissionMode", "claudeCodeModelAlias",
 		"inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];

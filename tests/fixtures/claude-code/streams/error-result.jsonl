@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"claude-sess-err","model":"opus"}
+{"type":"result","subtype":"error_during_execution","session_id":"claude-sess-err","is_error":true,"result":"Claude Code authentication required"}

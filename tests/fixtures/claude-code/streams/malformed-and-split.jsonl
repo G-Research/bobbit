@@ -1,0 +1,5 @@
+diagnostic: starting Claude Code
+{"type":"system","subtype":"init","session_id":"claude-sess-split","model":"sonnet"}
+not-json { nope
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"日本語 🚀"}]}}
+{"type":"result","subtype":"success","session_id":"claude-sess-split","result":"日本語 🚀","is_error":false}

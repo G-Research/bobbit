@@ -7,15 +7,16 @@
 │  Browser UI  │◄──WS──►│     Bobbit Gateway        │
 │  (any device)│         │                           │
 └─────────────┘         │  ┌──────────────────────┐ │
-                        │  │ pi-coding-agent (RPC) │ │
-                        │  │  stdin/stdout JSONL    │ │
+                        │  │ session runtime       │ │
+                        │  │ Pi RPC or Claude Code │ │
+                        │  │ stdin/stdout JSONL    │ │
                         │  └──────────────────────┘ │
                         └──────────────────────────┘
 ```
 
 Bobbit has three layers:
 
-1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
+1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. The default runtime is Pi-backed; sessions can also use alternate runtimes such as local Claude Code when selected. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
 
 2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
@@ -98,4 +99,5 @@ dist/
 - [Security](security.md) — auth, TLS, and threat model
 - [Networking](networking.md) — remote access and multi-device setup
 - [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model
+- [Claude Code local runtime](claude-code-runtime.md) — alternate host-local session runtime, model picker behavior, resume semantics, and safety notes
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — model catalog, ranking, spawn pinning, transcript, and regression-test notes for the Pi upgrade

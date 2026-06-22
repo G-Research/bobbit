@@ -4,9 +4,12 @@
 
 `POST /api/sessions/:archivedId/continue` creates a new live session from an
 archived source without summarising, truncating, or re-rendering the archived
-transcript. It clones the source agent `.jsonl` into the new session's slot and
-lets the agent CLI rehydrate from that file through `switch_session`, matching
-the restart/resume model used for live sessions.
+transcript. For Pi-backed sessions, it clones the source agent `.jsonl` into the
+new session's slot and lets the agent CLI rehydrate from that file through
+`switch_session`, matching the restart/resume model used for live sessions. For
+Claude Code sessions, it preserves `claudeCodeSessionId` and resumes through the
+local Claude Code CLI with `--resume`; see
+[Claude Code local runtime](../claude-code-runtime.md#continue-fork-restart-and-resume).
 
 This matters because archived sessions can be large and can contain structured
 message content that is not faithfully represented by a prompt string. The
@@ -15,6 +18,8 @@ losslessly, so tool results, long messages, proposal context, and model history
 survive unchanged. Runtime-only Pi metadata inside the JSONL, such as
 system/init cwd or session-path records, may still be rewritten when it points
 at the archived runtime; those fields are not part of the visible conversation.
+Claude Code does not use the Pi JSONL rehydration path, so `switch_session` and
+Pi cwd metadata rebasing do not apply to that runtime.
 
 ## Scope and invariants
 
@@ -23,11 +28,12 @@ runtime filesystem state.
 
 Preserved in the new session:
 
-- cloned agent `.jsonl` transcript
+- cloned agent `.jsonl` transcript for Pi-backed sources
+- `claudeCodeSessionId` for Claude Code sources
 - copied proposal draft directory, including history snapshots
 - copied lazy tool-content directory if one exists
 - title prefix: `Continued: <source title>`
-- role, accessory, assistant type, sandbox flag, and persisted model selection
+- role, accessory, assistant type, sandbox flag, persisted model selection, and runtime metadata
 
 Fresh runtime state:
 
@@ -54,11 +60,14 @@ The continue endpoint lives in the server REST route for
    - Goal, delegate, and team sessions return `422`.
    - A source whose project is no longer registered returns `410`.
    - Assistant sessions are allowed and keep assistant metadata.
-2. Resolve the source `.jsonl` path.
-   - Prefer `PersistedSession.agentSessionFile`.
-   - Fall back to `SessionManager.recoverSessionFile` for legacy records.
-   - Missing or empty non-sandboxed files return `404` with
+2. Resolve the source runtime context.
+   - Pi-backed sources resolve the `.jsonl` path, preferring
+     `PersistedSession.agentSessionFile` and falling back to
+     `SessionManager.recoverSessionFile` for legacy records.
+   - Missing or empty non-sandboxed Pi files return `404` with
      `archived transcript missing or empty`.
+   - Claude Code sources require a persisted `claudeCodeSessionId`; Bobbit
+     passes it to the bridge so the local CLI resumes with `--resume`.
 3. Resolve fresh worktree intent from current project state.
    - If the archived source had `worktreePath`, continue treats that only as
      evidence that the source was worktree-backed.
@@ -86,13 +95,15 @@ The continue endpoint lives in the server REST route for
    - Non-sandboxed worktree-backed continues use the normal worktree-pool
      claim path first. Sandboxed continues explicitly bypass the host-side pool
      because their worktrees are created inside the project sandbox container.
-8. Rehydrate the agent from the cloned `.jsonl`.
-   - Non-worktree sessions switch directly to the cloned file.
-   - Worktree-backed sessions first claim or create a fresh worktree, then
+8. Rehydrate the agent.
+   - Pi non-worktree sessions switch directly to the cloned file.
+   - Pi worktree-backed sessions first claim or create a fresh worktree, then
      rebase the cloned file into the final worktree-cwd slug directory.
    - After the file is in that final slug path and before `switch_session`, the
      setup pipeline rebases runtime-only Pi cwd metadata from archived
      cwd/worktree values to the fresh session cwd.
+   - Claude Code sessions skip `switch_session`; the bridge starts the local CLI
+     with `--resume <claudeCodeSessionId>` when available.
 9. Persist title and model metadata, then return `201` with the new session id,
    cwd, status, title, and assistant type.
 
@@ -112,11 +123,11 @@ Where:
 - The parser in `SessionManager.recoverSessionFile` uses the same timestamp
   shape, so formatter and recovery stay round-trippable.
 
-The continue endpoint can compute only the project-root path before session
-creation. For worktree-backed continues, `executeWorktreeAsync` later knows the
-final worktree cwd. It moves the cloned JSONL from the project-root slug
-directory into the worktree-cwd slug directory and updates
-`PersistedSession.agentSessionFile` before `switch_session`.
+For Pi-backed sessions, the continue endpoint can compute only the project-root
+path before session creation. For worktree-backed continues,
+`executeWorktreeAsync` later knows the final worktree cwd. It moves the cloned
+JSONL from the project-root slug directory into the worktree-cwd slug directory
+and updates `PersistedSession.agentSessionFile` before `switch_session`.
 
 This worktree-cwd rebase is required because the agent CLI discovers session
 files relative to its actual cwd. A clone left under the project-root slug would
@@ -211,7 +222,7 @@ sufficient; no id rewriting is needed.
 ## Cleanup and failure handling
 
 Continue creates cloned artifacts before the new session is fully live. On copy,
-create-session, worktree setup, or `switch_session` failure, cleanup removes:
+create-session, worktree setup, or Pi `switch_session` failure, cleanup removes:
 
 - the initial cloned `.jsonl`
 - any rebased `.jsonl` path persisted during worktree setup
@@ -229,14 +240,15 @@ diagnostics, but the cloned continue artifacts are removed.
 | Source is not archived | `409` | `source not archived` |
 | Goal, delegate, or team source | `422` | `goal, delegate, or team sessions cannot be continued` |
 | Project no longer registered | `410` | `source project no longer registered` |
-| Source transcript missing or empty | `404` | `archived transcript missing or empty` |
+| Pi source transcript missing or empty | `404` | `archived transcript missing or empty` |
+| Claude Code source missing `claudeCodeSessionId` | `500` | Clear create-session error; Bobbit transcript-only resume is not supported for Claude Code MVP |
 | Current project worktree support cannot be resolved | `500` | Fresh worktree creation error for the current project |
 | Worktree pool is empty, returns `null`, or claim throws | n/a | Not an API error; continue falls back to cold `createWorktree` / `createWorktreeSet` |
 | Cold worktree creation fails after pool fallback | `500` | Fresh worktree creation error for the current project |
 | Cross-realm transcript copy | `422` | `cross-realm continue not supported` |
 | Transcript clone fails | `500` | `failed to clone session file: <message>` |
 | Fresh worktree or create-session fails | `500` | `failed to create session: <message>` with copied artifacts cleaned up |
-| `switch_session` fails | `500` | `failed to create session: switch_session failed: <message>` |
+| Pi `switch_session` fails | `500` | `failed to create session: switch_session failed: <message>` |
 
 ## Resolved design decisions
 
@@ -275,10 +287,12 @@ implementation details:
   session creation
 - invalid current project repo/base-ref returns a synchronous fresh-worktree
   creation error
-- worktree-backed continues rebase the cloned JSONL to the final worktree-cwd
-  slug path before `switch_session`
-- worktree-backed continues rebase stale runtime-only Pi cwd metadata to the
+- Pi worktree-backed continues rebase the cloned JSONL to the final
+  worktree-cwd slug path before `switch_session`
+- Pi worktree-backed continues rebase stale runtime-only Pi cwd metadata to the
   fresh worktree cwd before `switch_session`
+- Claude Code continues preserve `claudeCodeSessionId` and resume through the
+  local CLI rather than Pi `switch_session`
 - non-worktree continues preserve conversation content without summary mode or
   prompt seeding
 - proposal/tool-content helper behavior is covered by unit tests

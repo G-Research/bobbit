@@ -57,6 +57,7 @@ export interface GatewayInfo {
 	bobbitDir: string;
 	sessionManager?: any;
 	teamManager?: any;
+	preferencesStore?: any;
 	/** Server-side log ring buffer (last 200 lines), populated by the harness's
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
@@ -382,6 +383,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			bobbitDir,
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
+			preferencesStore: (gw as any).preferencesStore,
 			logs: _serverLogs,
 			async crash() {
 				await gw.shutdown();
@@ -426,6 +428,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				);
 				info.sessionManager = gw.sessionManager;
 				info.teamManager = gw.teamManager;
+				info.preferencesStore = (gw as any).preferencesStore;
 			},
 		};
 

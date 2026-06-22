@@ -6,7 +6,7 @@ import { setConfigScope } from "../../src/app/config-scope.js";
 import { setProjects, setRenderApp, state, type Project } from "../../src/app/state.js";
 import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 
-type FetchLogEntry = { url: string; method: string; body: any };
+type FetchLogEntry = { url: string; method: string; body: any; credentials?: RequestCredentials };
 type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
 
@@ -29,7 +29,21 @@ const DEFAULT_MODELS = [
 	{ id: "claude-opus-4-1", provider: "anthropic", reasoning: true },
 	{ id: "claude-sonnet", provider: "anthropic", reasoning: true },
 	{ id: "gpt-4o", provider: "openai", reasoning: false },
+	{ id: "sonnet", name: "Claude Code Sonnet", provider: "claude-code", reasoning: true, runtime: "claude-code", localRuntime: true, runtimeLabel: "Claude Code (local)" },
 ];
+
+let claudeCodeStatus = {
+	available: true,
+	authenticated: false,
+	ready: false,
+	checking: false,
+	commandPath: "claude",
+	version: "1.2.3",
+	modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
+	permissionMode: "default",
+	reason: "auth_required",
+	message: "Claude Code is installed but not authenticated.",
+};
 
 function defaultRoles(): RoleData[] {
 	return [
@@ -200,7 +214,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const params = new URLSearchParams(query);
 	const method = (init?.method || "GET").toUpperCase();
 	const body = parseBody(init);
-	fetchLog.push({ url, method, body });
+	fetchLog.push({ url, method, body, credentials: init?.credentials });
+
+	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
+		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });
+	}
 
 	if (pathname === "/api/preferences") {
 		if (method === "GET") {
@@ -215,6 +233,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 
 	if (pathname === "/api/aigw/status") return response({ configured: false, url: "", models: [] });
+	if (pathname === "/api/claude-code/status") return response(claudeCodeStatus);
+	if (pathname === "/api/claude-code/status/refresh" && method === "POST") {
+		claudeCodeStatus = { ...claudeCodeStatus, checking: false };
+		return response(claudeCodeStatus);
+	}
 	if (pathname === "/api/models") return response(DEFAULT_MODELS);
 	if (pathname === "/api/image-models") return response(DEFAULT_IMAGE_MODELS);
 	if (pathname === "/api/models/test") return response({ ok: true, latencyMs: 1 });
@@ -303,6 +326,7 @@ updatePlayFinishDataset();
 	workflows?: Workflow[];
 	structuredProjects?: Record<string, StructuredProject>;
 	oauthStatus?: OAuthStatus;
+	claudeCodeStatus?: typeof claudeCodeStatus;
 } = {}) => {
 	localStorage.removeItem(PREFS_KEY);
 	localStorage.removeItem(ROLES_KEY);
@@ -317,6 +341,18 @@ updatePlayFinishDataset();
 		anthropic: { authenticated: true },
 		"openai-codex": { authenticated: false },
 		...(opts.oauthStatus || {}),
+	};
+	claudeCodeStatus = opts.claudeCodeStatus || {
+		available: true,
+		authenticated: false,
+		ready: false,
+		checking: false,
+		commandPath: "claude",
+		version: "1.2.3",
+		modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
+		permissionMode: "default",
+		reason: "auth_required",
+		message: "Claude Code is installed but not authenticated.",
 	};
 	fetchLog = [];
 	setConfigScope("system");

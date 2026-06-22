@@ -454,21 +454,16 @@ if (metadata && typeof metadata === "object" && !Array.isArray(metadata)
 - Proposal draft frontmatter carries `metadata` (YAML object) — extend the goal
   proposal field set so the draft round-trips it.
 - `src/app/proposal-parsers.ts` / proposal-panels initialisation: parse the
-  `metadata` object from the proposal and seed the shared metadata row state
-  (`_proposalMetadataRows`) so agent-seeded proposals pre-fill the editor.
+  `metadata` object from the proposal and seed the dialog state
+  (`_proposalGoalMetadata`).
 
 ### 7.4 Metadata value parsing & string preservation (UI editor)
 
 The goal-creation / proposal dialog exposes a simple key/value metadata editor.
-In the tabbed goal-proposal panel, the editor lives on the dedicated **Metadata**
-tab so the main **Goal** tab stays focused on title, cwd, workflow, and spec. The
-tab is ordered after **Roles** and before **Sub-goals** when sub-goals are
-available. The non-tabbed new-goal form still renders the same editor inline.
-
-Internally the editor stores ordered `[key, value]` **string** rows for direct
-`<input>` round-tripping; the conversion helpers live in
-`src/app/proposal-helpers.ts` and are shared by the editor, the submit path, and
-the proposal-mirror seeding so every surface converts identically.
+Internally it stores ordered `[key, value]` **string** rows for direct `<input>`
+round-tripping; the conversion helpers live in `src/app/proposal-helpers.ts` and
+are shared by the editor, the submit path, and the proposal-mirror seeding so
+every surface converts identically.
 
 - **Rows → object** (`metadataRowsToObject`, at submit): blank keys are dropped;
   each value is JSON-parsed when it parses (numbers, booleans, arrays, objects,
@@ -491,18 +486,18 @@ unit tests.
 
 ### 7.5 Goal-creation UI dialog
 
-- `src/app/state.ts`: stores preview metadata as ordered string rows
-  (`previewMetadataRows`) for the non-tabbed new-goal surface.
-- `src/app/proposal-panels.ts` `GoalFormConfig`: carries the shared
-  `metadataRows` editor model plus an updater callback. The tabbed proposal
-  panel renders these rows in `goal-proposal-panel-metadata`, controlled by
-  `goal-proposal-tab-metadata`; the non-tabbed form renders the same
-  `renderGoalMetadataEditor` inline.
-- `src/app/api.ts::createGoal`: accepts `metadata?: Record<string, unknown>` and
-  forwards `body.metadata` only when non-empty.
-- Proposal mirror paths (`src/app/session-manager.ts` and proposal panel
-  initialization) carry `metadata` through accept so a `propose_goal`-seeded
-  proposal pre-fills the Metadata tab editor.
+- `src/app/state.ts`: add `previewGoalMetadata?: Record<string, unknown>` (or a
+  raw key/value editor model — array of `{ key, value }` rows like the existing
+  component config editors).
+- `src/app/proposal-panels.ts` `GoalFormConfig`: add a **simple key/value editor**
+  (string key → JSON-parsed value; fall back to string when not valid JSON),
+  mirroring the `worktreeSetupCommand` control. Empty editor ⇒ no `metadata`
+  field forwarded (so empty = no override).
+- `src/app/api.ts::createGoal`: add `metadata?: Record<string, unknown>` to opts;
+  forward `body.metadata` only when non-empty (mirrors `worktreeSetupCommand`).
+- `mirrorGoalSetupFields` / proposal mirror paths (`src/app/session-manager.ts`)
+  carry `metadata` through accept so a `propose_goal`-seeded proposal pre-fills
+  the editor.
 
 ## 8. Test matrix
 
@@ -549,12 +544,9 @@ no error).
 
 ### 8.4 Browser E2E (`tests/e2e/ui/*.spec.ts`)
 
-Goal-creation dialog: open the Metadata tab in the tabbed goal-proposal panel,
-add/edit/remove metadata rows, switch tabs, create the goal, reload, and assert
-the value persists (goal detail / inspector reflects it). Empty editor ⇒ no
-`metadata` on the created goal (no override). A seeded `propose_goal(...,
-metadata)` proposal must pre-fill the Metadata tab and retain edits across tab
-switches.
+Goal-creation dialog: add a metadata key/value row, create the goal, reload, and
+assert the value persists (goal detail / inspector reflects it). Empty editor ⇒
+no `metadata` on the created goal (no override).
 
 ### 8.5 Commands
 
@@ -577,8 +569,8 @@ worktree provisioning + the extension host, also `npm run test:manual`.
 | `src/server/server.ts` | parse `body.metadata` in goal route; wire hub `goalMetadataResolver` + pipeline `resolveGoalMetadata` closures per project |
 | `defaults/tools/.../propose_goal` schema | optional `metadata` object |
 | `src/app/api.ts` | `createGoal` opts `metadata`, forward `body.metadata` |
-| `src/app/state.ts` | `previewMetadataRows` editor model |
-| `src/app/proposal-panels.ts` | key/value editor in `GoalFormConfig`; dedicated tabbed proposal Metadata panel; forward at submit |
+| `src/app/state.ts` | `previewGoalMetadata` editor model |
+| `src/app/proposal-panels.ts` | key/value editor in `GoalFormConfig`; forward at submit |
 | `src/app/proposal-parsers.ts` / `src/app/session-manager.ts` | parse + mirror `metadata` through proposal accept |
 
 ## 10. Out of scope
