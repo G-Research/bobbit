@@ -174,6 +174,13 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		}
 
 		if (!entry || entry.type !== "message" || !entry.message) {
+			// A `compaction` entry marks a fresh retained-context boundary: the
+			// assistant turns before it have been summarized away and are no
+			// longer in the retained context rehydrated for the provider. Clear
+			// the retained tool-call ids so a post-compaction `toolResult` cannot
+			// incorrectly match a pre-compaction assistant tool call (which would
+			// rehydrate an orphan `function_call_output` with no matching call).
+			if (entry?.type === "compaction") seenToolCallIds.clear();
 			outputLines.push(raw);
 			continue;
 		}

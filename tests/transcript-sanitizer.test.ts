@@ -227,6 +227,43 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(sanitized.content, [user, compaction].join("\n"));
 	});
 
+	it("drops a post-compaction toolResult whose matching assistant tool call was before the compaction marker", () => {
+		// Regression (PR #845): seenToolCallIds used to persist across the
+		// `compaction` marker, so a post-compaction toolResult could incorrectly
+		// match a pre-compaction assistant tool call that is no longer in the
+		// retained context — rehydrating an orphan function_call_output.
+		const assistant = assistantToolCall("pre-compact-call", "assistant-pre-compact");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const result = toolResultRow("pre-compact-call", "late-result-after-compaction");
+		const after = msg("user", "after", "after");
+		const file = [assistant, compaction, result, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.filteredToolResultBlocks, 0);
+		assert.equal(sanitized.content, [assistant, compaction, after].join("\n"));
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "compaction-boundary orphan repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("keeps a valid toolCall + toolResult pair when both are after the compaction marker", () => {
+		// A post-compaction assistant tool call matched by a post-compaction
+		// toolResult is valid retained history and must stay byte-identical.
+		const preUser = msg("user", "retained prompt", "retained-user");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const assistant = assistantToolCall("post-compact-call", "assistant-post-compact");
+		const result = toolResultRow("post-compact-call", "post-compact-result");
+		const file = [preUser, compaction, assistant, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, false, "valid post-compaction pair must stay unchanged");
+		assert.equal(sanitized.content, file, "valid post-compaction pair must stay byte-identical");
+		assert.equal(sanitized.droppedToolResultRows, 0);
+	});
+
 	it("filters orphan user/content tool_result blocks while preserving valid blocks and other content", () => {
 		const assistant = assistantToolCall("valid-block");
 		const userLine = msg("user", [
