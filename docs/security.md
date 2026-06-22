@@ -3,7 +3,7 @@
 **This tool grants full shell access to the host machine.** The auth token is equivalent to an SSH key.
 
 - 256-bit cryptographically random token generated on first run, persisted at `.bobbit/state/token` with mode `0600`
-- All API routes and WebSocket connections require the token
+- Most API routes and WebSocket connections require the token. Host-sensitive operator flows are stricter: Claude Code preference confirmation uses an operator-capable browser session, and bearer/query-token traffic alone cannot mint or consume that confirmation.
 - Constant-time token comparison prevents timing attacks
 - IP-based rate limiting on failed auth attempts (automatic lockout)
 - 5-second auth timeout on WebSocket connections

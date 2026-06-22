@@ -1,6 +1,8 @@
 # REST API
 
-All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
+Most REST routes require `Authorization: Bearer <token>`; general API calls may also pass the token as `?token=`.
+
+Host-sensitive operator flows are stricter. Claude Code preference confirmation must be minted and consumed by the same operator browser session, and bearer/query-token traffic alone is intentionally insufficient.
 
 ### Error response shape
 
@@ -45,7 +47,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
-| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
+| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Accepts `runtime: "claude-code"` or `model: "claude-code/<alias>"` for local Claude Code runtime sessions. |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
@@ -54,7 +56,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new session from an archived source. Pi sessions rehydrate from a cloned `.jsonl`; Claude Code sessions preserve `claudeCodeSessionId` and resume through the local CLI. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
@@ -74,6 +76,17 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Session runtime metadata
+
+`POST /api/sessions` selects the runtime from `runtime` or `model`: `runtime: "claude-code"` and `model: "claude-code/<alias>"` create a host-local Claude Code session; omitted runtime and API-backed models keep the Pi runtime. The Claude Code runtime is host-only and uses the configured local CLI/login; see [Claude Code local runtime](claude-code-runtime.md).
+
+`GET /api/sessions`, `GET /api/sessions/:id`, and archived rows include runtime metadata when present. Create-session responses include the runtime and Claude Code fields needed for immediate UI hydration.
+
+- `runtime` — `"pi"` or `"claude-code"`; missing legacy rows are treated as Pi.
+- `modelProvider` / `modelId` — persisted model provider and id in list/detail/archive responses. Claude Code rows use `modelProvider: "claude-code"` and the selected alias as `modelId`.
+- `claudeCodeSessionId` — Claude Code CLI session id, separate from Bobbit's session id.
+- `claudeCodeExecutable`, `claudeCodePermissionMode`, `claudeCodeModelAlias` — local runtime command/config metadata persisted for restore and UI state.
 
 ### Archived session list and query search
 
@@ -142,7 +155,7 @@ Success returns `200`:
 { "ok": true, "sessionId": "session-id" }
 ```
 
-Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, reattaches clients, and switches the new process back to the existing transcript file. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
+Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, and reattaches clients. Pi-backed sessions switch the new process back to the existing transcript file; Claude Code sessions restart the local `claude` process and resume with `--resume <claudeCodeSessionId>` when available. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
 
 For normal role-derived sessions, restart recomputes allowed tools from the current role/tool/group/MCP policy cascade instead of reusing the previous live allow-list. This is why an MCP group changed from `never` to `ask` or `allow` takes effect after `Refresh agent`. Persisted session allow-list constraints and live `session-only` / `one-time` grants are still carried across where appropriate, and explicit role-level `never` policies still take precedence over group defaults.
 
@@ -161,7 +174,7 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from the source's conversation history**. Pi-backed sessions use the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint); Claude Code sessions preserve `claudeCodeSessionId` and resume through Claude Code's `--resume` path. It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
 
 Request body (optional):
 
@@ -187,7 +200,7 @@ Success returns `201`:
 
 `goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
 
-The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
+The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, selected model, and runtime metadata. For Claude Code, that metadata includes the source `claudeCodeSessionId`; Pi `switch_session` is not used for Claude Code runtime sessions.
 
 Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
 
@@ -689,12 +702,19 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 |---|---|---|
 | `GET` | `/api/preferences` | Get all preferences |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
+| `POST` | `/api/preferences/claude-code/confirmation` | Mint a short-lived operator confirmation token required before sensitive Claude Code preference writes, such as executable-path changes or permission bypass. |
+
+`POST /api/preferences/claude-code/confirmation` accepts the same preference patch shape the caller intends to pass to `PUT /api/preferences`. It returns `{ confirmationRequired: false, sensitiveKeys: [] }` for non-sensitive patches, or `{ confirmationRequired: true, confirmationToken, expiresAt, sensitiveKeys }` for host-runtime changes.
+
+Sensitive writes must then call `PUT /api/preferences` from the same operator browser session with header `X-Bobbit-Operator-Confirmation: <confirmationToken>`. Without that confirmation, or if the confirmation is expired/mismatched, `PUT /api/preferences` returns `403` with `{ confirmationRequired: true, sensitiveKeys }`. The confirmation route and the follow-up sensitive write reject bearer/query-token-only traffic; do not send `Authorization`, `?token=`, or session-bound agent headers for this operator-browser flow.
 
 ### Models
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
+| `GET` | `/api/models` | List currently available models (`ApiModel[]`), including synthetic `claude-code/*` local-runtime rows. |
+| `GET` | `/api/claude-code/status` | Probe local Claude Code CLI readiness. Optional project scoping validates project config; the executable remains user/admin preference only. |
+| `POST` | `/api/claude-code/status/refresh` | Invalidate Claude Code status/model caches and re-probe readiness. |
 | `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
 | `GET` | `/api/pi-ai/providers` | List built-in pi-ai provider IDs through a browser-safe server boundary |
 | `POST` | `/api/pi-ai/provider-key-test` | Test a built-in provider API key without persisting it |
@@ -702,6 +722,10 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
 `GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`. For AI Gateway models, Bobbit derives this from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+
+Claude Code rows are synthetic `ApiModel` entries, not API-billed model catalog rows. They use `provider: "claude-code"`, `api: "claude-code-runtime"`, `runtime: "claude-code"`, `localRuntime: true`, `runtimeLabel: "Claude Code (local)"`, `sessionSelectable`, and optional `sessionUnavailableReason`. Cost/context fields are compatibility metadata only; the UI labels limits and billing as Claude Code managed.
+
+`GET /api/claude-code/status`, `POST /api/claude-code/status/refresh`, and `GET /api/models` accept optional `projectId` or `cwd` query parameters to resolve project-scoped Claude Code default alias/permission config. Status responses include `{ available, authenticated, ready, executablePath, version?, reason?, message?, authenticationStatus?, modelAliases? }`. A normal installed CLI can be `ready: true` with `authenticationStatus: "unknown"`; login failures may still surface at session start.
 
 `GET /api/pi-ai/providers` and `POST /api/pi-ai/provider-key-test` are an internal browser-safe pi-ai boundary. Browser UI uses them instead of runtime bare value imports from `@earendil-works/pi-ai`, because the package index traverses Node-only exports such as environment API-key probing and causes browser builds to externalize `node:fs`. Keep provider catalog reads and key tests behind these server endpoints unless pi-ai exposes a browser-safe package export.
 
@@ -1475,9 +1499,9 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new session from an archived, non-goal, non-delegate source. Pi-backed sources rehydrate from a clone of the archived `.jsonl`; Claude Code sources preserve `claudeCodeSessionId` and use Claude Code's own `--resume` support instead of Pi `switch_session`. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless user-visible transcript content, no byte budget, no system-prompt injection.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. Pi sessions rehydrate the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions. Claude Code sessions pass the persisted `claudeCodeSessionId` to the local CLI and let Claude Code own resume. See [Claude Code local runtime](claude-code-runtime.md#continue-fork-restart-and-resume).
 
 For archived worktree-backed sources, the persisted `worktreePath` is only a provenance marker that enables worktree mode for the continued session. The endpoint does not require that path or the archived `branch` to exist, and it does not reuse them. The continued session gets its own `session/<new-id8>` branch/worktree from the currently registered project repo and configured base ref. Archived cwd/worktree values may be used only as old values when rebasing runtime-only Pi cwd metadata in the cloned transcript.
 
@@ -1501,7 +1525,7 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over. If the source was worktree-backed, the returned `cwd` points at the newly claimed or cold-created worktree path, not the archived source path.
 
-Before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
+For Pi-backed sessions, before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Claude Code sessions do not use `switch_session`; they carry `claudeCodeSessionId` into the new session and resume through the CLI. Message content and user-visible transcript text are preserved losslessly where the runtime supports resume.
 
 **Error responses**:
 

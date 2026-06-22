@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeStreamLimitError, ClaudeCodeStreamTranslator, normalizeClaudeCodeUsage } from "../src/server/agent/claude-code-stream.ts";
+import { ClaudeCodeStreamLimitError, ClaudeCodeStreamTranslator, normalizeClaudeCodeTiming, normalizeClaudeCodeUsage } from "../src/server/agent/claude-code-stream.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.join(__dirname, "fixtures", "claude-code", "streams");
@@ -168,7 +168,7 @@ describe("Claude Code stream translation", () => {
 			}),
 			...translator.translate({
 				type: "user",
-				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_1", content: "Answer questions?" }] },
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_1", content: "Answer questions?", is_error: true }] },
 			}),
 		];
 		const expectedInput = {
@@ -199,9 +199,13 @@ describe("Claude Code stream translation", () => {
 		assert.equal(toolEnd?.toolName, "ask_user_choices");
 		assert.equal(toolEnd?.result, postedStub);
 		assert.deepEqual(toolEnd?.content, postedStubContent);
+		assert.equal(toolEnd?.isError, false);
+		assert.equal(toolEnd?.error, undefined);
 		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
 		assert.equal(toolResultMessage?.message.toolCallId, "toolu_ask_1");
 		assert.equal(toolResultMessage?.message.toolName, "ask_user_choices");
+		assert.equal(toolResultMessage?.message.isError, false);
+		assert.equal(toolResultMessage?.message.error, undefined);
 		assert.deepEqual(toolResultMessage?.message.content, postedStubContent);
 		assert.deepEqual(JSON.parse(toolResultMessage?.message.content[0].text), { status: "posted", tool_use_id: "toolu_ask_1" });
 	});
@@ -229,13 +233,40 @@ describe("Claude Code stream translation", () => {
 			}),
 			...translator.translate({
 				type: "user",
-				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_normalized", content: "Answer questions?" }] },
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_normalized", content: "Answer questions?", is_error: true }] },
 			}),
 		];
 		const postedStub = JSON.stringify({ status: "posted", tool_use_id: "toolu_ask_normalized" });
+		const postedStubContent = [{ type: "text", text: postedStub }];
+		const toolEnd = out.find((event) => event.type === "tool_execution_end");
+		assert.equal(toolEnd?.toolName, "ask_user_choices");
+		assert.equal(toolEnd?.result, postedStub);
+		assert.deepEqual(toolEnd?.content, postedStubContent);
+		assert.equal(toolEnd?.isError, false);
+		assert.equal(toolEnd?.error, undefined);
 		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
 		assert.equal(toolResultMessage?.message.toolName, "ask_user_choices");
-		assert.deepEqual(toolResultMessage?.message.content, [{ type: "text", text: postedStub }]);
+		assert.equal(toolResultMessage?.message.isError, false);
+		assert.equal(toolResultMessage?.message.error, undefined);
+		assert.deepEqual(toolResultMessage?.message.content, postedStubContent);
+	});
+
+	it("maps Claude Code result timing to assistant messages and agent end", () => {
+		const { out, state } = translateAll([
+			{ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Done" }] } },
+			{ type: "result", subtype: "success", session_id: "claude-timing", result: "Done", is_error: false, duration_ms: 4321, duration_api_ms: 3210 },
+		]);
+		const expectedTiming = { durationMs: 4321, apiDurationMs: 3210 };
+		assert.deepEqual(normalizeClaudeCodeTiming({ duration_ms: 4321, duration_api_ms: 3210 }), expectedTiming);
+		assert.deepEqual(state.lastTiming, expectedTiming);
+		const assistantEnd = out.find((event) => event.type === "message_end" && event.message.role === "assistant");
+		assert.equal(assistantEnd?.durationMs, 4321);
+		assert.deepEqual(assistantEnd?.timing, expectedTiming);
+		assert.equal(assistantEnd?.message.durationMs, 4321);
+		assert.deepEqual(assistantEnd?.message.timing, expectedTiming);
+		const agentEnd = out.find((event) => event.type === "agent_end");
+		assert.equal(agentEnd?.durationMs, 4321);
+		assert.deepEqual(agentEnd?.timing, expectedTiming);
 	});
 
 	it("preserves errored tool_result pairing", () => {
@@ -252,6 +283,21 @@ describe("Claude Code stream translation", () => {
 		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
 		assert.equal(toolResultMessage?.message.toolCallId, "toolu_error");
 		assert.equal(toolResultMessage?.message.isError, true);
+	});
+
+	it("preserves real ask_user_choices errors", () => {
+		const translator = new ClaudeCodeStreamTranslator(undefined, { messageIdPrefix: "test" });
+		const out = [
+			...translator.translate({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_ask_error", name: "ask_user_choices", input: { questions: [] } }] } }),
+			...translator.translate({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ask_error", content: "Widget failed", is_error: true }] } }),
+		];
+		const toolEnd = out.find((event) => event.type === "tool_execution_end");
+		assert.equal(toolEnd?.toolName, "ask_user_choices");
+		assert.equal(toolEnd?.isError, true);
+		assert.equal(toolEnd?.error, "Widget failed");
+		const toolResultMessage = out.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		assert.equal(toolResultMessage?.message.isError, true);
+		assert.deepEqual(toolResultMessage?.message.content, [{ type: "text", text: "Widget failed" }]);
 	});
 
 	it("maps error results to visible assistant error and agent_end", () => {

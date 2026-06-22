@@ -1,6 +1,6 @@
 # Claude Code Runtime UX
 
-**Status:** Design artifact only. No production code or tests changed in this task.
+**Status:** Historical design reference, reconciled with the implemented Claude Code runtime. Canonical as-built behavior lives in [`docs/claude-code-runtime.md`](../claude-code-runtime.md).
 **Scope:** Model/runtime picker UX, Settings UI, readiness/auth states, existing-session runtime switching, reload metadata, and browser E2E coverage for adding a local Claude Code session runtime.
 
 ---
@@ -49,8 +49,8 @@ Use this language consistently:
   authenticated: status.ready,
   sessionSelectable: status.ready,
   sessionUnavailableReason: status.reason,
-  contextWindow: 200_000,
-  maxTokens: 8192,
+  contextWindow: undefined, // Claude Code managed
+  maxTokens: undefined,     // Claude Code managed
   reasoning: true,
   input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -107,12 +107,13 @@ type ClaudeCodeStatus = {
   authenticated: boolean;    // lightweight auth probe succeeded, if feasible
   ready: boolean;            // available && authenticated
   checking: boolean;
-  commandPath: string;       // resolved preference, default "claude"
+  executablePath: string;    // resolved preference, default "claude"
   version?: string;
   modelAliases: string[];    // e.g. ["claude-opus-4-8", "default", "sonnet", "opus"]
   permissionMode: "default" | "acceptEdits" | "bypassPermissions";
-  reason?: "cli_missing" | "auth_required" | "probe_failed";
+  reason?: string;           // safe unavailable reason, e.g. CLI missing, login required, probe failed
   message?: string;          // safe, user-facing explanation
+  authenticationStatus?: "verified" | "login-required" | "unknown";
   checkedAt?: number;
 };
 ```
@@ -120,16 +121,16 @@ type ClaudeCodeStatus = {
 Probe behavior:
 
 1. Run configured executable with `--version`.
-2. If version succeeds, run the lightest feasible authenticated check with a short timeout and no tools. If this is too costly or unreliable, return `authenticated: false`, `reason: "auth_required"`, and guide the user to run `claude login` / open Claude Code locally.
-3. Cache status briefly (30–60s) so opening the picker does not repeatedly spawn probes.
+2. If version succeeds, do not force a fake authenticated no-op probe. Claude Code does not expose a stable low-cost authenticated readiness check, so the implemented behavior returns `authenticationStatus: "unknown"`, keeps rows selectable, and lets auth failures surface at session start.
+3. Cache status briefly so opening the picker does not repeatedly spawn probes.
 
 Picker copy by state:
 
 | State | Picker row | Tooltip |
 |---|---|---|
-| Ready | Enabled, `Claude Code (local)` provider label | `Runs through your local Claude Code CLI and existing Claude Code login.` |
+| Ready / auth unknown | Enabled, `Claude Code (local)` provider label | `Runs through your local Claude Code CLI and existing Claude Code login. Auth is checked when the session starts.` |
 | CLI missing | Disabled, `CLI missing` badge | `Claude Code CLI was not found. Set the executable path in Settings → Models → Claude Code.` |
-| Not authenticated | Disabled, `Login required` badge | `Claude Code is installed but not authenticated. Run Claude Code login locally, then refresh status.` |
+| Login failure detected | Disabled, `Login required` badge | `Claude Code reported an authentication failure. Run Claude Code login locally, then refresh status.` |
 | Probe failed | Disabled, `Probe failed` badge | Server-provided safe `message`, with Settings path. |
 
 ---
@@ -234,7 +235,7 @@ Add runtime metadata to `PersistedSession` in `src/server/agent/session-store.ts
 runtime?: "pi" | "claude-code";
 claudeCodeSessionId?: string;
 claudeCodeModelAlias?: string;
-claudeCodeCommandPath?: string;
+claudeCodeExecutable?: string;
 claudeCodePermissionMode?: "default" | "acceptEdits" | "bypassPermissions";
 ```
 
@@ -310,10 +311,10 @@ Add browser E2E coverage under `tests/e2e/ui/`.
    - Stub status/models with `sessionSelectable: false`, reason `cli_missing`.
    - Assert row is disabled, has `CLI missing`, and click does not select it.
 
-3. **Not-authenticated state in Settings**
+3. **Auth-unknown state in Settings**
    - Navigate to `#/settings/system/models`.
-   - Stub `/api/claude-code/status` as `available: true`, `authenticated: false`.
-   - Assert status card says `Claude Code login required` and `Refresh status` is visible.
+   - Stub `/api/claude-code/status` as `available: true`, `ready: true`, `authenticationStatus: "unknown"`.
+   - Assert status card explains that auth is checked at session start and `Refresh status` is visible.
 
 4. **Settings save**
    - Edit executable path, model alias, and permission mode.

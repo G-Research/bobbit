@@ -2017,6 +2017,19 @@ export class AgentInterface extends LitElement {
 			: this._usageNumber(usage?.cost?.total);
 	}
 
+	private _messageDurationMs(msg: any): number | undefined {
+		const value = msg?.durationMs ?? msg?.duration_ms ?? msg?.timing?.durationMs ?? msg?.timing?.duration_ms;
+		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+	}
+
+	private _formatDurationMs(ms: number): string {
+		if (ms < 1000) return `${Math.round(ms)}ms`;
+		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+		const minutes = Math.floor(ms / 60_000);
+		const seconds = Math.round((ms % 60_000) / 1000);
+		return `${minutes}m ${seconds}s`;
+	}
+
 	private renderStats() {
 		if (!this.session) return html`<div class="text-xs h-5"></div>`;
 
@@ -2053,6 +2066,19 @@ export class AgentInterface extends LitElement {
 			? serverCost.totalCost
 			: undefined;
 		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
+
+		let lastAssistantWithTiming: any | undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i] as any;
+			if (msg.role === "assistant" && this._messageDurationMs(msg) !== undefined) {
+				lastAssistantWithTiming = msg;
+				break;
+			}
+		}
+		const lastTurnDurationMs = this._messageDurationMs(lastAssistantWithTiming);
+		const durationHtml = lastTurnDurationMs !== undefined
+			? html`<span title="Last turn duration" class="tabular-nums">${this._formatDurationMs(lastTurnDurationMs)}</span>`
+			: html``;
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
@@ -2267,13 +2293,16 @@ export class AgentInterface extends LitElement {
 						` : usageStale ? html`<div style="color:var(--muted-foreground)">Updating after compaction…</div>` : nothing}
 					</div>
 
-					${lastUsage ? html`
+					${lastUsage || lastTurnDurationMs !== undefined ? html`
 						<div style="border-top:1px solid var(--border);padding-top:8px;">
 							<div style="font-weight:600;margin-bottom:6px;">Last Turn</div>
-							${row("Input tokens", formatTokenCount(this._usageNumber(lastUsage.input)))}
-							${row("Output tokens", formatTokenCount(this._usageNumber(lastUsage.output)))}
-							${this._usageNumber(lastUsage.cacheRead) ? row("Cache read", formatTokenCount(this._usageNumber(lastUsage.cacheRead))) : nothing}
-							${this._usageNumber(lastUsage.cacheWrite) ? row("Cache write", formatTokenCount(this._usageNumber(lastUsage.cacheWrite))) : nothing}
+							${lastTurnDurationMs !== undefined ? row("Duration", this._formatDurationMs(lastTurnDurationMs)) : nothing}
+							${lastUsage ? html`
+								${row("Input tokens", formatTokenCount(this._usageNumber(lastUsage.input)))}
+								${row("Output tokens", formatTokenCount(this._usageNumber(lastUsage.output)))}
+								${this._usageNumber(lastUsage.cacheRead) ? row("Cache read", formatTokenCount(this._usageNumber(lastUsage.cacheRead))) : nothing}
+								${this._usageNumber(lastUsage.cacheWrite) ? row("Cache write", formatTokenCount(this._usageNumber(lastUsage.cacheWrite))) : nothing}
+							` : nothing}
 						</div>
 					` : nothing}
 
@@ -2316,9 +2345,9 @@ export class AgentInterface extends LitElement {
 				${cwdHtml && !this._isNarrow ? html`<div class="flex items-center pl-4">${cwdHtml}</div>` : ""}
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
-					<span class="cursor-pointer hover:text-foreground transition-colors"
+					<span class="cursor-pointer hover:text-foreground transition-colors flex items-center gap-2"
 						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
-						${contextHtml}
+						${contextHtml}${durationHtml}
 					</span>
 					${costText ? html`
 						<span style="position:relative;">

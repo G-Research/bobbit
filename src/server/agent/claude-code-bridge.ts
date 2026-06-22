@@ -148,6 +148,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 	private expectedModelSwitchExit = false;
 	private switchingModel = false;
 	private turnActive = false;
+	private turnStartedAtMs: number | null = null;
 
 	constructor(private readonly options: ClaudeCodeBridgeOptions = {}) {
 		this.translator = new ClaudeCodeStreamTranslator(
@@ -233,6 +234,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		if (this.pendingPrompt || this.turnActive) throw new Error("Claude Code runtime is already processing a prompt");
 		this.lastResultCompleted = false;
 		this.turnActive = true;
+		this.turnStartedAtMs = Date.now();
 
 		const effectiveText = synthesizeClaudeCodeAttachmentText(text, images);
 		const content: any[] = [{ type: "text", text: effectiveText }];
@@ -249,6 +251,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 				if (this.pendingPrompt?.resolve === resolve) {
 					this.pendingPrompt = null;
 					this.turnActive = false;
+					this.turnStartedAtMs = null;
 				}
 				reject(new Error("Command timed out: prompt"));
 			}, timeoutMs);
@@ -258,6 +261,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 				if (this.pendingPrompt?.resolve === resolve) {
 					this.pendingPrompt = null;
 					this.turnActive = false;
+					this.turnStartedAtMs = null;
 				}
 				clearTimeout(timeout);
 				reject(error);
@@ -482,9 +486,10 @@ export class ClaudeCodeBridge implements IRpcBridge {
 
 	private handleClaudeEvent(rawEvent: any): void {
 		if (rawEvent?.type === "user") this.resolvePendingPrompt(rawEvent);
+		const translatedEvent = this.withInferredTurnTiming(rawEvent);
 		let events: any[];
 		try {
-			events = this.translator.translate(rawEvent);
+			events = this.translator.translate(translatedEvent);
 		} catch (err: any) {
 			this.handleStreamFailure(err);
 			return;
@@ -493,8 +498,16 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		if (rawEvent?.type === "result") {
 			this.lastResultCompleted = true;
 			this.turnActive = false;
+			this.turnStartedAtMs = null;
 			if (this.pendingPrompt) this.resolvePendingPrompt(rawEvent);
 		}
+	}
+
+	private withInferredTurnTiming(rawEvent: any): any {
+		if (rawEvent?.type !== "result") return rawEvent;
+		const hasDuration = typeof rawEvent.duration_ms === "number" || typeof rawEvent.durationMs === "number";
+		if (hasDuration || this.turnStartedAtMs === null) return rawEvent;
+		return { ...rawEvent, duration_ms: Math.max(0, Date.now() - this.turnStartedAtMs) };
 	}
 
 	private resolvePendingPrompt(rawEvent: any): void {
@@ -510,11 +523,13 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		const pending = this.pendingPrompt;
 		if (!pending) {
 			this.turnActive = false;
+			this.turnStartedAtMs = null;
 			return;
 		}
 		clearTimeout(pending.timeout);
 		this.pendingPrompt = null;
 		this.turnActive = false;
+		this.turnStartedAtMs = null;
 		pending.reject(error);
 	}
 
@@ -535,6 +550,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		});
 		this.emit({ type: "agent_end", stopReason: "error", runtime: "claude-code", error: message });
 		this.turnActive = false;
+		this.turnStartedAtMs = null;
 		this.process?.kill("SIGTERM");
 	}
 
@@ -565,5 +581,6 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		this.emit({ type: "message_end", message });
 		this.emit({ type: "agent_end", stopReason: "abort", runtime: "claude-code" });
 		this.turnActive = false;
+		this.turnStartedAtMs = null;
 	}
 }
