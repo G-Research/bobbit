@@ -33,7 +33,11 @@ for (const role of scopedWorkerRoles) {
 		assert.match(prompt, /remote handoff/i);
 		assert.match(prompt, /cross-machine\/container handoff/i);
 		assert.match(prompt, /final publication flow/i);
+		assert.match(prompt, /Verify your current branch and `git status`/i);
+		assert.match(prompt, /Only fetch\/pull if an upstream exists/i);
 
+		assert.doesNotMatch(prompt, /\bgit pull\b\s+to get the latest on your branch/i, `${role} must not require unconditional worker git pull`);
+		assert.doesNotMatch(prompt, /^\s*1\.\s*`git pull`/im, `${role} must not start local-only workflow with unconditional git pull`);
 		assert.doesNotMatch(prompt, /\bgit push\b/i, `${role} must not require worker git push`);
 		assert.doesNotMatch(prompt, /branch is pushed/i, `${role} must not require a pushed branch for DoD`);
 		assert.doesNotMatch(prompt, /safety net for crash recovery/i, `${role} must not cite remote pushes as durability`);

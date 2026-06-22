@@ -546,9 +546,9 @@ For each repo in the pool entry, in parallel:
 2. Clear any inherited upstream unless it already points at `origin/<targetBranch>`. This happens before the caller receives the claimed worktree, so a pool branch that tracked `origin/master` cannot leak that upstream into a goal/session branch.
 3. `git worktree move <pool-path> <target-path>` — atomic since git 2.17. On failure (typically Windows file locks), **degraded fallback**: skip the move; log `[worktree-pool] degraded: dir kept at pool path for <repo>`. The branch rename succeeded so the agent can still work; only the directory name is stale. The boot sweeper will reclaim it later.
 
-4. **Hand control to the caller now.** The remaining steps run in the background:
-   - `git fetch origin` then `git reset --hard <base-ref>`.
-   - `git push origin <targetBranch>:refs/heads/<targetBranch>` (fire-and-forget, skipped under `BOBBIT_TEST_NO_PUSH=1`), then fetch the remote-tracking ref and set upstream to `origin/<targetBranch>`.
+4. **Hand control to the caller now.** The remaining reset runs in the background:
+   - Reset the claimed local worktree to the current base ref.
+   - Do not publish `<targetBranch>`, fetch `origin/<targetBranch>`, or set an upstream by default. Claimed pool/session branches are local-only unless a workflow or user explicitly requests remote handoff/publication.
 
 Replenishment kicks off immediately. Pool target is `worktree_pool_size` × number of distinct repos (so pool slot count is per-set, not per-repo).
 

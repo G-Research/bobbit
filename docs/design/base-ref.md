@@ -242,11 +242,13 @@ A fresh `git init` repo has an **unborn** `HEAD`: the symbolic name exists, but 
 
 Configured `base_ref` remains an explicit start point. A valid configured ref can create worktrees even while local `HEAD` is unborn. A stale configured ref is **not** downgraded to no-worktree; it surfaces the configured-base error above so the user fixes or removes the setting.
 
-**Out of scope:** `src/server/agent/team-manager.ts:885` is **deliberately
-unchanged**. Team members branch off `origin/<goal-branch>` by hierarchical
-design — there is an explicit `git fetch origin <goal-branch>` immediately
-preceding the `createWorktree` call. This is a different base concept (the
-goal's branch, not the project's integration target).
+Team-member worktrees use the goal branch as their start point, but they do
+not require that branch to be published. `src/server/agent/team-manager.ts`
+resolves local goal branch refs first, so unpublished local goal branches can
+spawn member worktrees. Remote refs are used only as intentional handoff or
+fallback inputs when the local goal branch is unavailable; publication to
+`origin/<goal-branch>` remains an explicit workflow/user action, not a
+prerequisite for `createWorktree`.
 
 ### 2. Upstream tracking and safe publication
 
