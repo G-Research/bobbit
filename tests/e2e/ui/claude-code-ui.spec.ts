@@ -17,8 +17,8 @@ async function seedFakeClaudeCodePrefs(gateway: any): Promise<void> {
 	chmodSync(FAKE_CLAUDE_CLI, 0o755);
 	setClaudeCodePrefs(gateway, {
 		"claudeCode.executablePath": FAKE_CLAUDE_CLI,
-		"claudeCode.defaultModel": "sonnet",
-		"claudeCode.permissionMode": "default",
+		"claudeCode.defaultModel": "local-claude-sonnet-4-6",
+		"claudeCode.permissionMode": "acceptEdits",
 		"claudeCode.allowBypassPermissions": null,
 	});
 	await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
@@ -100,24 +100,24 @@ test.describe("Claude Code local-runtime UI", () => {
 			const footer = page.locator("[data-testid='footer-model-id']");
 			await expect(footer).toBeVisible({ timeout: 15_000 });
 			await footer.click();
-			await page.locator('agent-model-selector [data-model-id="sonnet"]').click();
+			await page.locator('agent-model-selector [data-model-id="local-claude-sonnet-4-6"]').click();
 
 			await expect(page.getByText("Start a Claude Code session?")).toBeVisible({ timeout: 10_000 });
 			const responsePromise = page.waitForResponse((resp) => new URL(resp.url()).pathname === "/api/sessions" && resp.request().method() === "POST");
 			await page.getByRole("button", { name: "Start new session" }).click();
 			const response = await responsePromise;
 			const requestBody = JSON.parse(response.request().postData() || "{}");
-			expect(requestBody).toMatchObject({ runtime: "claude-code", model: "claude-code/sonnet" });
+			expect(requestBody).toMatchObject({ runtime: "claude-code", model: "claude-code/local-claude-sonnet-4-6" });
 			expect(response.status()).toBe(201);
 			const created = await response.json();
 			newSessionId = created.id;
-			expect(created).toMatchObject({ runtime: "claude-code", claudeCodeModelAlias: "sonnet" });
+			expect(created).toMatchObject({ runtime: "claude-code", claudeCodeModelAlias: "local-claude-sonnet-4-6" });
 			const detail = await (await apiFetch(`/api/sessions/${newSessionId}`)).json();
-			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "sonnet", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
+			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "local-claude-sonnet-4-6", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "local-claude-sonnet-4-6" });
 
 			await expect.poll(async () => page.evaluate(() => (window as any).__bobbitState?.selectedSessionId)).toBe(newSessionId);
-			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
+			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("local-claude-sonnet-4-6", { timeout: 15_000 });
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · local-claude-sonnet-4-6");
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 			if (newSessionId) await apiFetch(`/api/sessions/${newSessionId}`, { method: "DELETE" }).catch(() => {});
@@ -131,30 +131,30 @@ test.describe("Claude Code local-runtime UI", () => {
 			const project = await defaultProject();
 			const resp = await apiFetch("/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: project.rootPath, projectId: project.id, worktree: false, model: "claude-code/sonnet", runtime: "claude-code" }),
+				body: JSON.stringify({ cwd: project.rootPath, projectId: project.id, worktree: false, model: "claude-code/local-claude-sonnet-4-6", runtime: "claude-code" }),
 			});
 			expect(resp.status).toBe(201);
 			const session = await resp.json();
 			sessionId = session.id;
-			expect(session).toMatchObject({ runtime: "claude-code", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
+			expect(session).toMatchObject({ runtime: "claude-code", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "local-claude-sonnet-4-6" });
 			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
-			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "sonnet", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "sonnet" });
+			expect(detail).toMatchObject({ runtime: "claude-code", modelProvider: "claude-code", modelId: "local-claude-sonnet-4-6", claudeCodeExecutable: FAKE_CLAUDE_CLI, claudeCodeModelAlias: "local-claude-sonnet-4-6" });
 			await openApp(page);
 			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
+			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("local-claude-sonnet-4-6", { timeout: 15_000 });
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · local-claude-sonnet-4-6");
 			await expect.poll(async () => page.evaluate(() => ({
 				runtime: (window as any).__bobbitState?.chatPanel?.agentInterface?.sessionRuntime,
 				alias: (window as any).__bobbitState?.chatPanel?.agentInterface?.claudeCodeModelAlias,
-			}))).toEqual({ runtime: "claude-code", alias: "sonnet" });
+			}))).toEqual({ runtime: "claude-code", alias: "local-claude-sonnet-4-6" });
 
 			await page.reload();
-			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("sonnet", { timeout: 15_000 });
-			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · sonnet");
+			await expect(page.locator("[data-testid='footer-model-id']")).toHaveText("local-claude-sonnet-4-6", { timeout: 15_000 });
+			await expect(page.locator("[data-testid='footer-runtime-label']")).toHaveText("Claude Code (local) · local-claude-sonnet-4-6");
 			await expect.poll(async () => page.evaluate(() => ({
 				runtime: (window as any).__bobbitState?.chatPanel?.agentInterface?.sessionRuntime,
 				alias: (window as any).__bobbitState?.chatPanel?.agentInterface?.claudeCodeModelAlias,
-			}))).toEqual({ runtime: "claude-code", alias: "sonnet" });
+			}))).toEqual({ runtime: "claude-code", alias: "local-claude-sonnet-4-6" });
 		} finally {
 			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}

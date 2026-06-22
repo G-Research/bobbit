@@ -970,7 +970,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		runtime,
 		claudeCodeSessionId: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId || existing?.claudeCodeSessionId) : undefined,
 		claudeCodeExecutable: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
-		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodePermissionMode: runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "acceptEdits") : undefined,
 		claudeCodeModelAlias,
 	});
 }
@@ -1200,7 +1200,7 @@ export async function executeWorktreeAsync(
 	ctx.store.update(session.id, {
 		runtime: plan.runtime ?? "pi",
 		claudeCodeExecutable: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeExecutable || "claude") : undefined,
-		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "default") : undefined,
+		claudeCodePermissionMode: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodePermissionMode || "acceptEdits") : undefined,
 		claudeCodeModelAlias: plan.runtime === "claude-code" ? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || "default") : undefined,
 	});
 	resolveGoalExtensions(plan, ctx);

@@ -1486,7 +1486,7 @@ let claudeCodeStatusLoading = false;
 let claudeCodeStatusError = "";
 let prefClaudeCodeExecutable = "claude";
 let prefClaudeCodeDefaultModel = "local-claude-opus-4-8";
-let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "default";
+let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "acceptEdits";
 let prefClaudeCodeAllowBypass = false;
 
 // Per-row Test-button state. Keyed by the pref value ("provider/id").
@@ -1497,7 +1497,8 @@ let modelTestInFlight: Record<string, boolean> = {};
 const MODEL_TEST_TTL_MS = 30_000;
 
 function normalizeClaudeCodePermissionMode(value: unknown): ClaudeCodePermissionMode {
-	return value === "acceptEdits" || value === "bypassPermissions" ? value : "default";
+	if (value === "default" || value === "acceptEdits" || value === "bypassPermissions") return value;
+	return "acceptEdits";
 }
 
 function claudeCodeStatusTitle(status: ClaudeCodeStatus | null): string {
@@ -1608,7 +1609,7 @@ function loadModelsState(): void {
 				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "local-claude-opus-4-8";
 				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
 				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
-				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "default";
+				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "acceptEdits";
 				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
 			}
 			if (modelsRes.ok) {
@@ -1782,7 +1783,7 @@ async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
 	}
 	prefClaudeCodeAllowBypass = value;
 	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
-		prefClaudeCodePermissionMode = "default";
+		prefClaudeCodePermissionMode = "acceptEdits";
 		await savePref("claudeCode.permissionMode", null);
 	}
 	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
@@ -2195,7 +2196,7 @@ function renderClaudeCodeSection() {
 				</label>
 			</div>
 			<p class="text-xs text-muted-foreground">
-				default uses acceptEdits for normal sessions and plan for read-only sessions; bypassPermissions disables normal prompts and is gated below.
+				Bobbit uses acceptEdits for normal fresh sessions and plan for read-only sessions. Select default only to use Claude Code's own permission default; bypassPermissions disables normal prompts and is gated below.
 			</p>
 			<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
 				<input

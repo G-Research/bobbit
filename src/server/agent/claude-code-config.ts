@@ -18,7 +18,7 @@ export interface ClaudeCodeConfig {
 export const CLAUDE_CODE_DEFAULT_CONFIG: ClaudeCodeConfig = {
 	executablePath: "claude",
 	defaultModel: "local-claude-opus-4-8",
-	permissionMode: "default",
+	permissionMode: "acceptEdits",
 	allowBypassPermissions: false,
 };
 

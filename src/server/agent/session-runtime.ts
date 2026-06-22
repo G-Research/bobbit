@@ -84,7 +84,7 @@ export function hydrateRuntimeOptions(options: SessionBridgeOptions, defaults?: 
 		...options,
 		runtime,
 		claudeCodeExecutable: options.claudeCodeExecutable || defaults?.executablePath || "claude",
-		claudeCodePermissionMode: options.claudeCodePermissionMode || defaults?.permissionMode || "default",
+		claudeCodePermissionMode: options.claudeCodePermissionMode || defaults?.permissionMode || "acceptEdits",
 		claudeCodeAllowBypassPermissions: options.claudeCodeAllowBypassPermissions ?? defaults?.allowBypassPermissions ?? false,
 		claudeCodeModelAlias: options.claudeCodeModelAlias || initialModelAlias || defaults?.defaultModel || "default",
 		readOnly: options.readOnly,

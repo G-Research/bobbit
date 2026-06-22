@@ -36,7 +36,7 @@ describe("session runtime selection", () => {
 		const options = runtime.hydrateRuntimeOptions({ cwd: "/tmp/x", initialModel: "claude-code/local-claude-sonnet-4-6" });
 		assert.equal(options.runtime, "claude-code");
 		assert.equal(options.claudeCodeExecutable, "claude");
-		assert.equal(options.claudeCodePermissionMode, "default");
+		assert.equal(options.claudeCodePermissionMode, "acceptEdits");
 		assert.equal(options.claudeCodeModelAlias, "local-claude-sonnet-4-6");
 	});
 

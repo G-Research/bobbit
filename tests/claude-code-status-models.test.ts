@@ -68,6 +68,16 @@ describe("Claude Code config", () => {
 		}
 	});
 
+	it("preserves an explicitly stored Claude Code default permission mode", () => {
+		const { prefs, dir } = makePrefs();
+		try {
+			prefs.set(CLAUDE_CODE_PREF_KEYS.permissionMode, "default");
+			assert.equal(readClaudeCodeConfig(prefs).permissionMode, "default");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("validates executable, model alias, permission mode, and bypass opt-in", () => {
 		const { prefs, dir } = makePrefs();
 		try {
@@ -139,7 +149,7 @@ describe("Claude Code config", () => {
 			});
 			assert.equal(config.executablePath, "/user/bin/claude");
 			assert.equal(config.allowBypassPermissions, false);
-			assert.equal(config.permissionMode, "default");
+			assert.equal(config.permissionMode, "acceptEdits");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

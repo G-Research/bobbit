@@ -49,6 +49,11 @@ function readRecord(recordPath: string): any[] {
 		.map((line) => JSON.parse(line));
 }
 
+function permissionModeArg(args: string[]): string | undefined {
+	const index = args.indexOf("--permission-mode");
+	return index >= 0 ? args[index + 1] : undefined;
+}
+
 function withPatchedEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
 	const previous = new Map<string, string | undefined>();
 	for (const [key, value] of Object.entries(patch)) {
@@ -473,11 +478,17 @@ process.stdin.on('data', () => {
 		}
 	});
 
-	it("passes explicit permission mode, read-only plan mode, and effort while downgrading bypass without opt-in", () => {
-		assert.deepEqual(buildClaudeCodeArgs({}).slice(-2), ["--permission-mode", "acceptEdits"]);
-		assert.deepEqual(buildClaudeCodeArgs({ readOnly: true }).slice(-2), ["--permission-mode", "plan"]);
-		assert.equal(buildClaudeCodeArgs({ claudeCodePermissionMode: "bypassPermissions" }).includes("bypassPermissions"), false);
-		assert.deepEqual(buildClaudeCodeArgs({ claudeCodePermissionMode: "bypassPermissions", claudeCodeAllowBypassPermissions: true }).slice(-2), ["--permission-mode", "bypassPermissions"]);
+	it("preserves configured Claude Code permission defaults while applying Bobbit fresh/read-only defaults", () => {
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({})), "acceptEdits");
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ claudeCodePermissionMode: "default" })), "default");
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ readOnly: true, claudeCodePermissionMode: "default" })), "plan");
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ readOnly: true, claudeCodePermissionMode: "bypassPermissions", claudeCodeAllowBypassPermissions: true })), "plan");
+	});
+
+	it("passes explicit permission mode and effort while downgrading bypass without opt-in", () => {
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ claudeCodePermissionMode: "acceptEdits" })), "acceptEdits");
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ claudeCodePermissionMode: "bypassPermissions" })), "default");
+		assert.equal(permissionModeArg(buildClaudeCodeArgs({ claudeCodePermissionMode: "bypassPermissions", claudeCodeAllowBypassPermissions: true })), "bypassPermissions");
 		const effortArgs = buildClaudeCodeArgs({ initialThinkingLevel: "minimal" });
 		assert.deepEqual(effortArgs.slice(-4), ["--permission-mode", "acceptEdits", "--effort", "low"]);
 		assert.equal(normalizeClaudeCodeEffort("off"), "low");

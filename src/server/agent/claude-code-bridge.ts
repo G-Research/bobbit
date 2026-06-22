@@ -93,8 +93,8 @@ export function normalizePermissionMode(mode: unknown, allowBypass = false): Cla
 
 export function resolveClaudeCodePermissionMode(options: ClaudeCodeBridgeOptions = {}): ClaudeCodeEffectivePermissionMode {
 	if (options.readOnly) return "plan";
-	const configured = normalizePermissionMode(options.claudeCodePermissionMode, options.claudeCodeAllowBypassPermissions);
-	return configured === "default" ? "acceptEdits" : configured;
+	if (options.claudeCodePermissionMode === undefined) return "acceptEdits";
+	return normalizePermissionMode(options.claudeCodePermissionMode, options.claudeCodeAllowBypassPermissions);
 }
 
 export function normalizeClaudeCodeEffort(level: unknown): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
