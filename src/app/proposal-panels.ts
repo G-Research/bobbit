@@ -1518,6 +1518,8 @@ function goalPreviewPanel() {
 	}
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	const subgoalsEnabled = isSubgoalsEnabled();
+	const maxNestingDepth = getSystemMaxNestingDepth();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1547,6 +1549,22 @@ function goalPreviewPanel() {
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
+		const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
+		const subgoalSubmission = proposalSubgoalSubmission({
+			subgoalsEnabled,
+			parentGoalId: parentGoalIdField,
+			systemCap: maxNestingDepth,
+			allowedValue: _proposalSubgoalsAllowed,
+			configuredValue: _proposalMaxNestingDepth,
+		});
+		const isRootProposal = !parentGoalIdField;
+		const allowsChildren = subgoalSubmission.allowsChildren;
+		const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
+			? _proposalDivergencePolicy
+			: undefined;
+		const maxConcurrentChildrenField = isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
+			? _proposalMaxConcurrentChildren
+			: undefined;
 
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
@@ -1561,6 +1579,11 @@ function goalPreviewPanel() {
 				projectId,
 				enabledOptionalSteps,
 				autoStartTeam,
+				parentGoalId: parentGoalIdField,
+				subgoalsAllowed: subgoalSubmission.subgoalsAllowed,
+				maxNestingDepth: subgoalSubmission.maxNestingDepth,
+				divergencePolicy: divergencePolicyField,
+				maxConcurrentChildren: maxConcurrentChildrenField,
 				metadata: metadataRowsToObject(state.previewMetadataRows),
 			});
 		} catch (err) {
@@ -1592,6 +1615,11 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
+		_proposalParentGoalId = "";
+		_proposalSubgoalsAllowed = null;
+		_proposalMaxNestingDepth = null;
+		_proposalDivergencePolicy = null;
+		_proposalMaxConcurrentChildren = null;
 		state.previewMetadataRows = [];
 		state.previewMetadataEdited = false;
 		resetProposalTabsState();
@@ -1709,6 +1737,30 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+				createDisabled: (() => {
+					if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
+						const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
+						if (pDepth + 1 > maxNestingDepth) return true;
+					}
+					return false;
+				})(),
+				parentGoalId: _proposalParentGoalId || undefined,
+				onParentGoalChange: (id) => {
+					_proposalParentGoalId = id || "";
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+					renderApp();
+				},
+				subgoalsEnabled,
+				maxNestingDepth,
+				subgoalsAllowedValue: _proposalSubgoalsAllowed,
+				maxNestingDepthValue: _proposalMaxNestingDepth,
+				onSubgoalsAllowedChange: (value: boolean) => { _proposalSubgoalsAllowed = value; renderApp(); },
+				onMaxNestingDepthChange: (value: number | null) => { _proposalMaxNestingDepth = value; renderApp(); },
+				divergencePolicyValue: _proposalDivergencePolicy,
+				maxConcurrentChildrenValue: _proposalMaxConcurrentChildren,
+				onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
+				onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
 				activeTab: _proposalActiveTab,
 				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
 			})}
