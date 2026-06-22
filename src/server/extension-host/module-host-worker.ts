@@ -214,6 +214,7 @@ export class ModuleHost {
 				// The calling session's project id (when resolvable) so a route handler
 				// can scope to the real project instead of fabricating one.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,

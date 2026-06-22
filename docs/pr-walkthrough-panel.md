@@ -88,15 +88,18 @@ The current end-to-end flow:
   with real `deletePrefix`. See
   [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md).
 
-The **agent-side toolchain** that actually produces the YAML now uses durable
-incremental submission: `readonly_bash`, `read_pr_walkthrough_bundle`,
-`submit_pr_walkthrough_chunk`, `read_pr_walkthrough_submission_status`,
-`finalize_pr_walkthrough_submission`, and compatibility
-`submit_pr_walkthrough_yaml`. The tools ship from the pack under
+The **agent-side toolchain** that actually produces the YAML now uses compact
+bundle reads and durable incremental submission: `readonly_bash`,
+`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`,
+and compatibility `submit_pr_walkthrough_yaml`. Compact bundle output is opt-in
+with `format=compact`; omitted `format` and `format=legacy` preserve the legacy
+JSON result for exact line metadata. The tools ship from the pack under
 `market-packs/pr-walkthrough/tools/pr-walkthrough/` and run inside a dedicated
 **reviewer child session**, not the user's own agent (see
-[Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child)
-and [Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)).
+[Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child),
+[Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained),
+and [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md#reviewer-tool-output-contract)).
 `pack.yaml` advertises the `pr-walkthrough` tool group; Marketplace expands that
 group into concrete tool toggles, and `DisabledRefs.tools` is keyed by concrete
 tool name. The legacy `WalkthroughAgentManager` launcher, the

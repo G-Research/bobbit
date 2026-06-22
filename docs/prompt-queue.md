@@ -112,7 +112,14 @@ The client receives `queue_update` events and stores them in `_serverQueue`. The
 
 ### Draft persistence
 
-The message editor saves drafts to the server so unsent text survives page reloads and session switches. Drafts are saved via debounced `_flushDraft()` calls on input events, and loaded via `loadDraftFromServer()` when switching to a session.
+The message editor saves drafts so unsent composer state (both text and attached files) survives page reloads, session switches, and WebSocket reconnects.
+
+- **Prompt Text**: Saved to the server session via debounced `_flushDraft()` calls on input events, and loaded via `loadDraftFromServer()` when switching sessions. A synchronous mirror in `sessionStorage` avoids cursor and text clobbering during Lit component re-renders.
+- **Attachments (Images/Files)**: Stored client-side in IndexedDB via `PromptDraftAttachmentsStore` to avoid bloating the server-side `sessions.json` with large base64 blobs. State is lifted into `AgentInterface` and bound into `<message-editor>`, surviving slow-path cache-evicted session switching and page reloads.
+- **Text Generation-Counter Staleness Guard**: The **prompt text** draft employs a persistent monotonic generation (`gen`) counter, stored on the server draft, to reject out-of-order writes (e.g., late debounced autosaves landing after a message send). The client synchronously seeds `_draftGen` from `sessionStorage` or the server draft on load to prevent post-round-trip edits from being rejected as stale.
+- **Attachment In-Flight Guard**: Attachment drafts carry **no persistent gen** — IndexedDB records have no generation field. A stale async load resurrecting cleared/sent attachments is prevented by an in-memory in-flight async-load generation token (`_attachmentDraftGen`) in `AgentInterface`, bumped on every load/set/clear so an in-flight read that is no longer current is discarded on resolve.
+
+For a comprehensive explanation of the persistence model, safety caps/evictions, state lifting, and synchronization guards, see [docs/design/composer-draft-persistence.md](design/composer-draft-persistence.md).
 
 **Race protection on session switch**: `_flushDraft()` returns a promise and stores it in `_pendingSave`. When switching sessions, `_setupPromptDraftHandlers()` awaits `_pendingSave` before loading the new session's draft. This prevents a stale save from the old session from clobbering the newly loaded draft. The teardown path (`_teardownDraftHandlers`) does not abort in-flight saves — it lets them complete so no data is lost.
 

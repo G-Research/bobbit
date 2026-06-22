@@ -3,9 +3,8 @@
  *
  * Exercises the gateway surfaces that wire provider lifecycle hooks for a turn:
  *   - POST /api/sessions/:id/provider-hooks/before-prompt  (beforePrompt dispatch
- *     + system-prompt-tail synthesis; the production provider-bridge pi extension
- *     calls this — here the test plays the bridge because the E2E mock agent does
- *     not load pi extensions).
+ *     + dynamic-context message content synthesis; the generated provider-bridge
+ *     pi extension turns this into a hidden custom/user-side message).
  *   - GET  /api/sessions/:id/context-trace                 (per-turn diagnostics).
  *   - afterTurn        — fired server-side from the agent_end lifecycle seam.
  *   - sessionShutdown  — fired server-side from the archive seam.
@@ -16,8 +15,8 @@
  * specs sharing the worker-scoped in-process gateway).
  *
  * NON-NEGOTIABLE invariant pinned here: the user's message text is never mutated
- * by the per-turn hooks — recall lands only in the system-prompt tail. The turn
- * echoes back the exact submitted bytes.
+ * by the per-turn hooks — recall lands in a hidden custom/user-side message, not
+ * the cached system prompt. The turn echoes back the exact submitted bytes.
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -33,17 +32,17 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
+import {
+	DYNAMIC_CONTEXT_END,
+	DYNAMIC_CONTEXT_START,
+	generateProviderBridgeExtension,
+} from "../../dist/server/agent/provider-bridge-extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
 const PACK_NAME = "provider-demo";
-
-// Delimiters that fence the Bobbit dynamic-context region in the system-prompt
-// tail. These are the design's idempotency markers — pinned here so a drift in
-// the delimiter format is caught by E2E as well as the codegen unit test.
-const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
 
 interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
 interface TraceEntry { ts: number; hook: string; sessionId: string; providers: TraceProviderRow[] }
@@ -77,7 +76,7 @@ async function setProviderDisabled(providers: string[]): Promise<void> {
 	expect(resp.status).toBe(200);
 }
 
-interface BeforePromptResult { status: number; tail: string; blocks: Array<Record<string, unknown>> }
+interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
 
 async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
@@ -87,9 +86,32 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	const body = resp.status === 200 ? await resp.json() : {};
 	return {
 		status: resp.status,
+		content: typeof body.content === "string" ? body.content : "",
 		tail: typeof body.tail === "string" ? body.tail : "",
 		blocks: Array.isArray(body.blocks) ? body.blocks : [],
 	};
+}
+
+async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
+	const source = generateProviderBridgeExtension(sessionId);
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+	});
+	const file = path.join(tempDir, `provider-bridge-${Date.now()}-${Math.random().toString(16).slice(2)}.cjs`);
+	fs.writeFileSync(file, transpiled.outputText, "utf-8");
+	const mod = await import(pathToFileURL(file).href);
+	const extensionFactory = typeof mod.default === "function" ? mod.default : mod.default?.default;
+	expect(typeof extensionFactory, "generated bridge default export").toBe("function");
+	const handlers = new Map<string, (event: any) => Promise<any> | any>();
+	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	return handlers;
+}
+
+async function registerGeneratedBeforeAgentStart(sessionId: string, tempDir: string): Promise<(event: any) => Promise<any>> {
+	const handlers = await registerGeneratedBridgeHandlers(sessionId, tempDir);
+	const handler = handlers.get("before_agent_start");
+	expect(typeof handler, "generated bridge registered before_agent_start").toBe("function");
+	return handler as (event: any) => Promise<any>;
 }
 
 async function readContextTrace(sessionId: string, limit?: number): Promise<TraceEntry[]> {
@@ -163,7 +185,7 @@ test.describe("provider per-turn hooks", () => {
 		for (const cwd of cwds.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 	});
 
-	test("beforePrompt injects a delimited system-prompt tail, then afterTurn fires; both appear in the context trace", async () => {
+	test("beforePrompt returns dynamic-context message content, then afterTurn fires; both appear in the context trace", async () => {
 		// demo + boom enabled; slow disabled so the happy path stays deterministic.
 		await setProviderDisabled(["slow"]);
 		const { id, cwd } = await newSession("happy");
@@ -175,11 +197,14 @@ test.describe("provider per-turn hooks", () => {
 		const before = await callBeforePrompt(id, promptText);
 		expect(before.status).toBe(200);
 
-		// The tail is a single delimited dynamic-context region carrying the demo
-		// block — and it must NOT leak into the user's message text.
-		expect(before.tail).toContain(DYNAMIC_CONTEXT_START);
+		// The endpoint returns message content carrying the demo block — and a
+		// temporary legacy tail for older generated bridges. New bridges ignore tail
+		// and must NOT leak dynamic context into or rewrite the user's message text.
+		expect(before.content, "beforePrompt must return custom-message content").toContain("<context-block");
+		expect(before.content).toContain(`DEMO_BEFORE_PROMPT ${promptText}`);
+		expect(before.tail, "beforePrompt must retain a temporary legacy tail for old bridges").toContain(DYNAMIC_CONTEXT_START);
+		expect(before.tail).toContain(before.content);
 		expect(before.tail).toContain(DYNAMIC_CONTEXT_END);
-		expect(before.tail).toContain(`DEMO_BEFORE_PROMPT ${promptText}`);
 
 		// Metadata-only block summary (no raw content field leaked).
 		const demoBlock = before.blocks.find((b) => b.id === "demo:turn");
@@ -214,6 +239,61 @@ test.describe("provider per-turn hooks", () => {
 		expect(at!.providers.some((p) => p.id === "demo")).toBe(true);
 	});
 
+	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async () => {
+		await setProviderDisabled(["slow"]);
+		const { id, cwd } = await newSession("bridge");
+		const handlers = await registerGeneratedBridgeHandlers(id, cwd);
+		const beforeAgentStart = handlers.get("before_agent_start") as (event: any) => Promise<any>;
+		const filterContext = handlers.get("context") as (event: any) => any;
+		expect(typeof beforeAgentStart, "generated bridge registered before_agent_start").toBe("function");
+		expect(typeof filterContext, "generated bridge registered context").toBe("function");
+		const baseSystemPrompt = "BASE SYSTEM PROMPT\n(sessionSetup dynamic context is already stable here)";
+		let piSystemPrompt = baseSystemPrompt;
+		const prompts = ["turn A cache probe", "turn B cache probe"];
+		const systemPromptSnapshots: string[] = [];
+		const dynamicMessages: any[] = [];
+
+		for (const prompt of prompts) {
+			const result = await beforeAgentStart({ prompt, systemPrompt: piSystemPrompt });
+			expect(result, "before_agent_start must return a hidden bobbit:dynamic-context custom message, not systemPrompt")
+				.toMatchObject({
+					message: {
+						customType: "bobbit:dynamic-context",
+						display: false,
+					},
+				});
+			expect(result).not.toHaveProperty("systemPrompt");
+			expect(result).not.toHaveProperty("prompt");
+			expect(result.message.content).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
+			dynamicMessages.push({ role: "custom", ...result.message });
+			if (typeof result.systemPrompt === "string") piSystemPrompt = result.systemPrompt;
+			systemPromptSnapshots.push(piSystemPrompt);
+		}
+
+		expect(dynamicMessages).toEqual([
+			expect.objectContaining({ role: "custom", customType: "bobbit:dynamic-context", display: false }),
+			expect.objectContaining({ role: "custom", customType: "bobbit:dynamic-context", display: false }),
+		]);
+		expect(systemPromptSnapshots, "changing beforePrompt blocks must not change cached system prompt bytes")
+			.toEqual([baseSystemPrompt, baseSystemPrompt]);
+		expect(dynamicMessages[0].content).toContain("turn A cache probe");
+		expect(dynamicMessages[1].content).toContain("turn B cache probe");
+		expect(dynamicMessages[0].content).not.toBe(dynamicMessages[1].content);
+
+		const llmContextMessages = [
+			{ role: "user", content: [{ type: "text", text: prompts[0] }] },
+			dynamicMessages[0],
+			{ role: "assistant", content: [{ type: "text", text: "old answer" }] },
+			{ role: "user", content: [{ type: "text", text: prompts[1] }] },
+			dynamicMessages[1],
+		];
+		const filtered = filterContext({ type: "context", messages: llmContextMessages });
+		expect(filtered?.messages, "context hook must filter stale persisted dynamic context").toBeTruthy();
+		expect(JSON.stringify(filtered.messages)).not.toContain("DEMO_BEFORE_PROMPT turn A cache probe");
+		expect(JSON.stringify(filtered.messages)).toContain("DEMO_BEFORE_PROMPT turn B cache probe");
+		expect(filtered.messages.at(-1)).toBe(dynamicMessages[1]);
+	});
+
 	test("context-trace honours the limit query param", async () => {
 		await setProviderDisabled(["slow"]);
 		const { id } = await newSession("limit");
@@ -235,6 +315,7 @@ test.describe("provider per-turn hooks", () => {
 
 		const before = await callBeforePrompt(id, "anything");
 		expect(before.status).toBe(200);
+		expect(before.content).toBe("");
 		expect(before.tail).toBe("");
 		expect(before.blocks).toEqual([]);
 
@@ -248,7 +329,7 @@ test.describe("provider per-turn hooks", () => {
 		});
 	});
 
-	test("a hanging provider is bounded by its timeout — endpoint returns an empty tail with a timeout trace row", async () => {
+	test("a hanging provider is bounded by its timeout — endpoint returns empty content with a timeout trace row", async () => {
 		// Only the slow (hanging) provider is enabled.
 		await setProviderDisabled(["demo", "boom"]);
 		const { id } = await newSession("hang");
@@ -258,6 +339,7 @@ test.describe("provider per-turn hooks", () => {
 		const elapsed = Date.now() - t0;
 
 		expect(before.status).toBe(200);
+		expect(before.content).toBe("");
 		expect(before.tail).toBe("");
 		// slow.yaml budget.timeoutMs is 300ms; the endpoint must respond well
 		// within a few seconds rather than the provider's 30s sleep.
