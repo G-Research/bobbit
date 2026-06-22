@@ -12,7 +12,7 @@
  * transcript is to repair the `.jsonl` Bobbit owns at the rehydration boundary
  * (before `switch_session`).
  *
- * This module is a pure, idempotent, one-pass sanitizer: it rewrites a
+ * This module is a pure, idempotent sanitizer: it rewrites a
  * persisted `user` message whose effective text is blank/whitespace-only to the
  * synthetic `ATTACHMENT_ONLY_TEXT` ("Attachments:"), covering BOTH the
  * image-adjacent case (`[{text:""},{image}]`) AND the standalone empty/blank
@@ -152,13 +152,26 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 	// identical. Dropped orphan result rows are omitted from the output.
 	const lines = content.split("\n");
 	const outputLines: string[] = [];
-	const seenToolCallIds = new Set<string>();
+	const lineIndexByEntryId = new Map<string, number>();
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const trimmed = lines[lineIndex].trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			const id = stringField(parsed?.id);
+			if (id && !lineIndexByEntryId.has(id)) lineIndexByEntryId.set(id, lineIndex);
+		} catch {
+			// non-JSON line — no entry id to index
+		}
+	}
+	const seenToolCallIds = new Map<string, number>();
 	let changed = false;
 	let rewritten = 0;
 	let droppedToolResultRows = 0;
 	let filteredToolResultBlocks = 0;
 
-	for (const raw of lines) {
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const raw = lines[lineIndex];
 		const trimmed = raw.trim();
 		if (!trimmed) {
 			outputLines.push(raw);
@@ -174,13 +187,22 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		}
 
 		if (!entry || entry.type !== "message" || !entry.message) {
-			// A `compaction` entry marks a fresh retained-context boundary: the
-			// assistant turns before it have been summarized away and are no
-			// longer in the retained context rehydrated for the provider. Clear
-			// the retained tool-call ids so a post-compaction `toolResult` cannot
-			// incorrectly match a pre-compaction assistant tool call (which would
-			// rehydrate an orphan `function_call_output` with no matching call).
-			if (entry?.type === "compaction") seenToolCallIds.clear();
+			if (entry?.type === "compaction") {
+				const firstKeptEntryId = stringField(entry.firstKeptEntryId);
+				const firstKeptLineIndex = firstKeptEntryId ? lineIndexByEntryId.get(firstKeptEntryId) : undefined;
+				if (firstKeptLineIndex === undefined) {
+					// Legacy fallback: without a resolvable exact retained-range boundary,
+					// the marker itself is the only safe split point.
+					seenToolCallIds.clear();
+				} else {
+					// Pi's `firstKeptEntryId` can name any retained entry (user,
+					// assistant-without-tools, or assistant-with-tools). Drop only tool-call
+					// ids whose originating assistant line is before that retained range.
+					for (const [id, originLineIndex] of seenToolCallIds) {
+						if (originLineIndex < firstKeptLineIndex) seenToolCallIds.delete(id);
+					}
+				}
+			}
 			outputLines.push(raw);
 			continue;
 		}
@@ -191,7 +213,7 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 			if (stopReason !== "aborted" && stopReason !== "error" && Array.isArray(message.content)) {
 				for (const block of message.content) {
 					const id = toolCallIdFromAssistantBlock(block);
-					if (id) seenToolCallIds.add(id);
+					if (id) seenToolCallIds.set(id, lineIndex);
 				}
 			}
 			outputLines.push(raw);

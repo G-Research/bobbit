@@ -30,7 +30,7 @@ Then it repairs result shapes against that retained set:
 - If filtering removes every content block from a user row, the row is dropped.
 - If filtering leaves non-tool content, the existing blank-user-message sanitizer still runs so image/attachment-only prompts are repaired in the same pass.
 
-A compaction boundary naturally creates a new retained context: if the assistant call was compacted away but a later result row remains, the call id is not in the seen set, so the result is treated as orphaned and dropped.
+Compaction uses the exact retained range when Pi provides one. If an inline `type: "compaction"` entry has a resolvable `firstKeptEntryId`, the sanitizer resolves that id against parsed JSONL entry ids and drops only tracked tool-call ids whose originating assistant line is before that first-kept entry. Tool calls at or after the first-kept entry remain valid even when they appear before the inline marker. If `firstKeptEntryId` is absent or cannot be resolved, the sanitizer uses the legacy marker fallback and clears tracked tool-call ids at the compaction marker, so later result rows cannot match calls from the discarded pre-marker history.
 
 ## Valid-pair preservation and idempotence
 
