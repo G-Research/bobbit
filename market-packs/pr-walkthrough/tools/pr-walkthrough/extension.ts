@@ -693,6 +693,176 @@ function formatGatewayResponse(data: unknown): string {
 	return JSON.stringify(data, null, 2);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function compactJson(value: unknown): string {
+	return JSON.stringify(value ?? null);
+}
+
+function bundleRef(data: Record<string, unknown>): string {
+	const bundle = isRecord(data.bundle) ? data.bundle : {};
+	const jobId = stringValue(bundle.job_id) ?? stringValue(data.job_id) ?? "unknown";
+	const kind = stringValue(bundle.kind) ?? stringValue(data.kind) ?? "bundle";
+	const version = String(bundle.schema_version ?? data.schema_version ?? "?");
+	return `${jobId} (${kind} v${version})`;
+}
+
+function additionDeletionSuffix(file: Record<string, unknown>): string {
+	const additions = numberValue(file.additions);
+	const deletions = numberValue(file.deletions);
+	if (additions === undefined && deletions === undefined) return "";
+	return ` (+${additions ?? 0}/-${deletions ?? 0})`;
+}
+
+function formatFileSummary(file: unknown, index?: number): string {
+	if (!isRecord(file)) return `- ${index !== undefined ? `[${index}] ` : ""}${compactJson(file)}`;
+	const filePath = stringValue(file.path) ?? "<unknown>";
+	const prefix = index !== undefined ? `- [${index}] ` : "- ";
+	const parts = [`${prefix}${filePath}`];
+	const oldPath = stringValue(file.old_path);
+	if (oldPath && oldPath !== filePath) parts.push(`previous_path=${oldPath}`);
+	parts.push(`status=${stringValue(file.status) ?? "unknown"}${additionDeletionSuffix(file)}`);
+	if (numberValue(file.hunks) !== undefined) parts.push(`hunks=${numberValue(file.hunks)}`);
+	parts.push(`truncated=${Boolean(file.is_truncated ?? file.truncated)}`);
+	parts.push(`binary=${Boolean(file.is_binary)}`);
+	parts.push(`generated=${Boolean(file.is_generated)}`);
+	return parts.join(" ");
+}
+
+function appendWarnings(lines: string[], warnings: unknown): void {
+	if (!Array.isArray(warnings) || warnings.length === 0) return;
+	lines.push("warnings:");
+	for (const warning of warnings) lines.push(`- ${typeof warning === "string" ? warning : compactJson(warning)}`);
+}
+
+function formatCompactManifest(data: Record<string, unknown>, mode: string): string {
+	const files = Array.isArray(data.files) ? data.files : [];
+	const lines = [
+		`PR walkthrough bundle ${mode} (compact)`,
+		`bundle: ${bundleRef(data)}`,
+		`target: ${compactJson(isRecord(data.bundle) && isRecord(data.bundle.target) ? data.bundle.target : data.target)}`,
+		`changeset: ${compactJson(data.changeset)}`,
+		`limits: ${compactJson(data.limits)}`,
+	];
+	if (data.export !== undefined) lines.push(`export: ${compactJson(data.export)}`);
+	lines.push(`files: ${data.fileOffset ?? data.offset ?? 0}-${files.length ? Number(data.fileOffset ?? data.offset ?? 0) + files.length - 1 : Number(data.fileOffset ?? data.offset ?? 0)} of ${data.totalFiles ?? files.length} (truncated=${Boolean(data.truncated)})`);
+	appendWarnings(lines, data.warnings);
+	if (files.length > 0) {
+		lines.push("file_summaries:");
+		const base = numberValue(data.fileOffset) ?? numberValue(data.offset) ?? 0;
+		files.forEach((file, i) => lines.push(formatFileSummary(file, base + i)));
+	}
+	return lines.join("\n");
+}
+
+function formatCompactFileList(data: Record<string, unknown>, mode: string): string {
+	const files = Array.isArray(data.files) ? data.files : [];
+	const offset = numberValue(data.fileOffset) ?? numberValue(data.offset) ?? 0;
+	const lines = [
+		`PR walkthrough bundle ${mode} (compact)`,
+		`bundle: ${bundleRef(data)}`,
+		`files: ${offset}-${files.length ? offset + files.length - 1 : offset} of ${data.totalFiles ?? files.length} (truncated=${Boolean(data.truncated)})`,
+	];
+	if (files.length > 0) {
+		lines.push("file_summaries:");
+		files.forEach((file, i) => lines.push(formatFileSummary(file, offset + i)));
+	}
+	return lines.join("\n");
+}
+
+function compactLineMarker(kind: unknown): "+" | "-" | " " | undefined {
+	if (kind === "add") return "+";
+	if (kind === "del") return "-";
+	if (kind === "context") return " ";
+	return undefined;
+}
+
+function formatCompactFile(data: Record<string, unknown>): string {
+	const file = isRecord(data.file) ? data.file : {};
+	const hunks = Array.isArray(file.hunks) ? file.hunks : [];
+	const formatterWarnings: string[] = [];
+	const hunkOffset = numberValue(data.hunkOffset) ?? 0;
+	const totalHunks = numberValue(data.totalHunks) ?? hunks.length;
+	const hunkEnd = hunks.length ? hunkOffset + hunks.length - 1 : hunkOffset;
+	const lines = [
+		"PR walkthrough bundle file (compact)",
+		`bundle: ${bundleRef(data)}`,
+		`file: ${stringValue(file.path) ?? "<unknown>"}`,
+	];
+	const oldPath = stringValue(file.old_path);
+	if (oldPath && oldPath !== stringValue(file.path)) lines.push(`previous_path: ${oldPath}`);
+	lines.push(
+		`status: ${stringValue(file.status) ?? "unknown"}${additionDeletionSuffix(file)}`,
+		`flags: truncated=${Boolean(file.is_truncated ?? file.truncated)} binary=${Boolean(file.is_binary)} generated=${Boolean(file.is_generated)}`,
+		`hunks: ${hunkOffset}-${hunkEnd} of ${totalHunks} (hunkOffset=${hunkOffset} hunkLimit=${data.hunkLimit ?? hunks.length} truncated=${Boolean(data.truncated)})`,
+		"anchoring: Use format=legacy for exact line ids/old_line/new_line metadata.",
+		"",
+	);
+
+	hunks.forEach((hunk, hunkIndex) => {
+		const warningHunk = hunkOffset + hunkIndex + 1;
+		if (!isRecord(hunk)) {
+			formatterWarnings.push(`hunk ${warningHunk} was not an object; omitted because no legacy lines were present`);
+			return;
+		}
+		if (typeof hunk.header === "string") lines.push(hunk.header);
+		else formatterWarnings.push(`hunk ${warningHunk} had missing header`);
+		const hunkLines = Array.isArray(hunk.lines) ? hunk.lines : [];
+		hunkLines.forEach((line, lineIndex) => {
+			const warningLine = lineIndex + 1;
+			if (!isRecord(line)) {
+				lines.push(" ");
+				formatterWarnings.push(`hunk ${warningHunk} line ${warningLine} was not an object; preserved as blank context marker`);
+				return;
+			}
+			const marker = compactLineMarker(line.kind);
+			const text = typeof line.text === "string" ? line.text : "";
+			if (!marker) formatterWarnings.push(`hunk ${warningHunk} line ${warningLine} had unknown kind; preserved as context marker`);
+			lines.push(`${marker ?? " "}${text}`);
+		});
+		if (hunkIndex < hunks.length - 1) lines.push("");
+	});
+
+	if (formatterWarnings.length > 0) {
+		lines.push("", "formatter_warnings:");
+		for (const warning of formatterWarnings) lines.push(`- ${warning}`);
+	}
+	return lines.join("\n").replace(/\n+$/, "");
+}
+
+export function formatCompactPrWalkthroughBundleRead(data: unknown, args: { mode?: unknown; path?: unknown; index?: unknown } = {}): string {
+	if (!isRecord(data)) return `PR walkthrough bundle read (compact)\n${formatGatewayResponse(data)}`;
+	const mode = stringValue(data.mode) ?? stringValue(args.mode) ?? (isRecord(data.file) ? "file" : Array.isArray(data.files) ? "manifest" : "read");
+	if (mode === "file" || isRecord(data.file)) return formatCompactFile(data);
+	if (mode === "manifest") return formatCompactManifest(data, mode);
+	if (mode === "summary" || mode === "files") return formatCompactFileList(data, mode);
+	return `PR walkthrough bundle ${mode} (compact)\nbundle: ${bundleRef(data)}\n${formatGatewayResponse(data)}`;
+}
+
+export function compactPrWalkthroughChunkResult(data: unknown): unknown {
+	if (!isRecord(data)) return data;
+	if (data.ok === false) return data;
+	const chunkSummary = isRecord(data.chunkSummary) ? data.chunkSummary : {};
+	const sectionId = data.section_id ?? data.sectionId ?? chunkSummary.section_id ?? chunkSummary.sectionId;
+	const nextRequired = data.nextRequired ?? chunkSummary.nextRequired;
+	const missing = Array.isArray(data.missing) ? data.missing : Array.isArray(chunkSummary.missing) ? chunkSummary.missing : undefined;
+	const compact: Record<string, unknown> = { saved: true };
+	if (typeof sectionId === "string" && sectionId) compact.section_id = sectionId;
+	if (typeof nextRequired === "string" || Array.isArray(nextRequired)) compact.nextRequired = nextRequired;
+	if (missing) compact.missing = missing;
+	return compact;
+}
+
 async function parseJsonResponse(response: any): Promise<unknown> {
 	const text = await response.text();
 	let data: unknown = text;
@@ -864,9 +1034,10 @@ const extension: ExtensionFactory = (pi) => {
 		name: "read_pr_walkthrough_bundle",
 		label: "Read PR Walkthrough Bundle",
 		description: "Read the scoped persisted launch-time PR metadata and diff bundle for this walkthrough job with bounded output.",
-		promptSnippet: "Start PR walkthrough analysis by reading the authoritative persisted bundle. Use manifest/summary first, then read individual files by path or index with limits.",
+		promptSnippet: "Start PR walkthrough analysis with mode=manifest format=compact, then read individual files by path or index with format=compact. Use format=legacy only for exact line ids/old_line/new_line metadata.",
 		parameters: Type.Object({
 			mode: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("manifest"), Type.Literal("files"), Type.Literal("file")], { description: "Bounded read mode. Default manifest." })),
+			format: Type.Optional(Type.Union([Type.Literal("compact"), Type.Literal("legacy")], { description: "Output format. Omitted or legacy preserves the legacy JSON result exactly; compact returns a concise unified-diff-like model-facing view." })),
 			path: Type.Optional(Type.String({ description: "File path for mode=file." })),
 			index: Type.Optional(Type.Number({ description: "File index for mode=file when path is omitted." })),
 			offset: Type.Optional(Type.Number({ description: "File or hunk offset. Default 0." })),
@@ -906,6 +1077,9 @@ const extension: ExtensionFactory = (pi) => {
 				let data: unknown = text;
 				try { data = JSON.parse(text); } catch { /* keep text */ }
 				if (!response.ok) return toolText(formatGatewayResponse(data), true, data);
+				if (args.format === "compact") {
+					return toolText(formatCompactPrWalkthroughBundleRead(data, args), false, { format: "compact", mode: stringValue(isRecord(data) ? data.mode : undefined) ?? args.mode ?? readArgs.mode ?? "manifest" });
+				}
 				return toolText(formatGatewayResponse(data), false, data);
 			} catch (err: any) {
 				return toolText(`read_pr_walkthrough_bundle failed: ${err?.message || err}`, true);
@@ -917,7 +1091,7 @@ const extension: ExtensionFactory = (pi) => {
 		name: "submit_pr_walkthrough_chunk",
 		label: "Submit PR Walkthrough Chunk",
 		description: "Persist one idempotent PR walkthrough YAML chunk under a stable section id.",
-		promptSnippet: "Save each completed walkthrough section immediately. Re-sending the same section_id overwrites that chunk safely.",
+		promptSnippet: "Save each completed walkthrough section immediately. Re-sending the same section_id overwrites that chunk safely. Save output is compact; read_pr_walkthrough_submission_status returns full status.",
 		parameters: Type.Object({
 			section_id: Type.String({ description: "metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, or chunk:<id>." }),
 			yaml: Type.String({ description: "YAML value for this section." }),
@@ -925,7 +1099,7 @@ const extension: ExtensionFactory = (pi) => {
 		async execute(_toolCallId, { section_id, yaml }) {
 			try {
 				const data = await callPrWalkthroughRoute("submit_pr_walkthrough_chunk", { op: "submitChunk", section_id, yaml }, sessionId);
-				return routeToolResult("submit_pr_walkthrough_chunk", data);
+				return routeToolResult("submit_pr_walkthrough_chunk", compactPrWalkthroughChunkResult(data));
 			} catch (err: any) {
 				return routeToolError("submit_pr_walkthrough_chunk", err);
 			}

@@ -300,16 +300,20 @@ the browser always imports it as ESM.)
 type ActionHandler = (ctx: ActionHandlerCtx, args: unknown) => Promise<unknown> | unknown;
 
 interface ActionHandlerCtx {
-  host: ServerHostApi;   // audited, scoped gateway access (see below)
-  sessionId: string;     // the verified calling session
-  toolUseId: string;     // the verified tool_use id being acted on
-  tool: string;          // == :tool
+  host: ServerHostApi;        // audited, scoped gateway access (see below)
+  sessionId: string;          // the verified calling session
+  toolUseId: string;          // the verified tool_use id being acted on
+  tool: string;               // == :tool
+  projectId?: string;         // resolved project for the calling session, when known
+  workingDir?: string;        // session worktree/cwd for route/action context, when known
+  sessionArchived?: boolean;  // true when the calling session is already archived
 }
 ```
 
 `ctx` is **verified by the endpoint** — `sessionId` and `toolUseId` have already passed the
-guard. `args` is **untrusted, LLM-influenced JSON** — validate / whitelist it; never `eval`,
-`exec`, `require`, or build filesystem/session paths from it.
+guard, and lifecycle fields such as `sessionArchived` are server-derived. `args` is
+**untrusted, LLM-influenced JSON** — validate / whitelist it; never `eval`, `exec`,
+`require`, or build filesystem/session paths from it.
 
 ```js
 // tools/demo/actions.mjs
@@ -679,6 +683,32 @@ await host.callRoute("publish", { method: "POST", body: { jobId, payload } });
 - **Route handlers run in the confined worker** — trusted code with full ambient parity, so a
   route may use `git`/`fs`/network directly.
 
+#### Archived sessions and polling routes
+
+Route calls can still arrive after the calling session is archived. A restored browser tab,
+persisted side panel, or delayed client retry may still have a valid pack surface token and call
+`host.callRoute(...)` even though the backing session is no longer live.
+
+Use `ctx.sessionArchived === true` as a terminal lifecycle signal in any route that backs a
+polling UI. Return a terminal response the panel already understands, such as:
+
+```js
+export const routes = {
+  status: async (ctx, req) => {
+    if (ctx.sessionArchived === true) {
+      return { phase: "error", code: "SESSION_ARCHIVED", error: "The session is archived." };
+    }
+    // Return "running", "draft", "complete", or another pack-specific state.
+  },
+};
+```
+
+Panels should stop their timer when a route returns a terminal phase (`error`, `complete`,
+`cancelled`, etc.). Do not rely on cleanup hooks alone: session shutdown cleanup is best-effort,
+and restored panels can outlive the websocket that originally mounted them. PR Walkthrough uses
+this pattern for its reviewer-child `status` route so an archived reviewer panel does not keep
+self-polling forever.
+
 #### Using ambient OS access inside a route
 
 A route (or action) handler may use ambient OS surfaces directly. Example: the PR-walkthrough
@@ -817,11 +847,14 @@ created, the Hub dispatches `sessionSetup` and the returned blocks render as a f
 active + enabled for the session's scope contributes context today. A provider fault never blocks
 the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforePrompt` /
 `beforeCompact` fire via a generated provider-bridge pi extension, and `afterTurn` /
-`sessionShutdown` fire server-side from the gateway's agent-event stream. The first built-in
-production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the built-in
-band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box install
-still produces no Dynamic Context section. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
+`sessionShutdown` fire server-side from the gateway's agent-event stream. `beforePrompt` blocks
+are delivered as hidden `bobbit:dynamic-context` custom/user-side messages, not appended to
+`systemPrompt`, so provider cached system-prompt bytes stay stable across turns; `sessionSetup`
+blocks remain spawn-time system-prompt context and `beforeCompact` is unchanged. The first
+built-in production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
+built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
+install still produces no Dynamic Context section. See
+[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13) and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
@@ -1137,8 +1170,10 @@ render inside a `sandbox="allow-scripts"` iframe. Tests:
 is delivered as a built-in first-party pack, and the old bespoke viewer code is deleted. It is
 **not** a no-tools/UI-only pack anymore. It owns the reviewer tools under
 `tools/pr-walkthrough/`; `pack.yaml` declares `contents.tools: [pr-walkthrough]`, and the
-Marketplace installed catalogue expands that group into the concrete toggles
-`readonly_bash`, `read_pr_walkthrough_bundle`, and `submit_pr_walkthrough_yaml`.
+Marketplace installed catalogue expands that group into concrete toggles such as
+`readonly_bash`, `read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
+compatibility `submit_pr_walkthrough_yaml`.
 
 No-tools pack behavior is still supported and tested by fixture/litmus packs such as
 `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`. PR walkthrough is now the
@@ -1172,7 +1207,7 @@ pr-walkthrough/
 | Built-in piece | Pack contribution |
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
-| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The durable flow uses chunk submit, status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
+| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The bundle tool keeps legacy JSON as the omitted/default `format` while opt-in `format=compact` emits a unified-diff-like model-facing view. The durable flow uses compact chunk-save output, full status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
 | Launch — spawn-on-click, a real isolated reviewer | both launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | Durable review state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds `reviewers/<childSessionId>`, `reviews/<jobId>/binding/<childSessionId>`, draft chunks/status/checkpoints, and `reviews/<jobId>/final/payload`. Per-review quota scopes isolate draft/final payload size, and real `delete` / `deletePrefix` cleanup frees bytes on reviewer shutdown. Legacy `binding/<child>`, `submitted/<jobId>`, `job/<jobId>`, and `cards/<changesetId>` remain migration fallbacks only |

@@ -150,4 +150,139 @@ test.describe("Draft persistence bugs", () => {
 			await Promise.all([sessionA, sessionB, sessionC, sessionD].map((id) => deleteSession(id).catch(() => { /* best-effort */ })));
 		}
 	});
+
+	// PR #830: in a fresh tab (no sessionStorage gen mirror, _draftGen starts at
+	// 0), if the user types BEFORE the delayed server GET returns, the 100ms
+	// debounced save fires at gen 1. When the server already holds a higher-gen
+	// draft, that save is REJECTED by the staleness guard. The delayed restore
+	// then reseeds _draftGen to the server's gen but — before the fix — never
+	// retried the rejected local text, so the server kept the stale draft and a
+	// later navigate/reload silently lost the typed text. The fix re-flushes the
+	// local mirror at the corrected gen so the server converges to the typed text.
+	test("fresh-tab typed draft is re-flushed after delayed restore reseeds gen (PR #830)", async ({ page }) => {
+		const session = await createSession();
+		let release: (() => void) | undefined;
+		let released = false;
+		const releaseIfNeeded = () => { if (!released) { released = true; release?.(); } };
+		try {
+			await waitForSessionStatus(session, "idle");
+
+			// Pre-seed the server with a stale draft at a HIGH gen so the fresh
+			// client's first (gen 1) save is genuinely rejected as stale.
+			const staleText = "stale server draft at high gen";
+			const typedText = "freshly typed draft that must survive";
+			const serverGen = 9;
+			await apiFetch(`/api/sessions/${session}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: staleText, gen: serverGen } }),
+			});
+
+			// Open a FRESH tab so sessionStorage carries no gen mirror.
+			await openApp(page);
+
+			// Observe draft PUT/POST saves so we can deterministically gate on the
+			// rejected low-gen save BEFORE releasing the restore. This is the key
+			// to making the bug deterministic: if we released the restore while the
+			// 100ms debounce save were still pending, that save would naturally
+			// carry the reseeded (gen 10) value and converge even without the fix.
+			// We must guarantee the local save fires + is rejected FIRST, leaving no
+			// pending timer, so only the fix's explicit re-flush can converge it.
+			let lowGenSaveLanded = false;
+			const draftPath = `/api/sessions/${session}/draft`;
+			const onResponse = (resp: import("@playwright/test").Response) => {
+				const req = resp.request();
+				if (req.method() === "GET") return;
+				if (new URL(req.url()).pathname !== draftPath) return;
+				try {
+					const body = JSON.parse(req.postData() || "{}") as { data?: { text?: string; gen?: number } };
+					if (body.data?.text === typedText && (body.data?.gen ?? 0) < serverGen) lowGenSaveLanded = true;
+				} catch { /* ignore */ }
+			};
+			page.on("response", onResponse);
+
+			// Delay the prompt-draft GET until the rejected low-gen save has landed.
+			let getSeen = false;
+			let getHandled = false;
+			let resolveResponse!: () => void;
+			const responseDone = new Promise<void>((resolve) => { resolveResponse = resolve; });
+			const gate = new Promise<void>((resolve) => { release = resolve; });
+			const matchGet = (url: URL) =>
+				url.pathname === draftPath && url.searchParams.get("type") === "prompt";
+			const route = async (
+				r: import("@playwright/test").Route,
+				req: import("@playwright/test").Request,
+			) => {
+				if (req.method() !== "GET" || getHandled) { await r.fallback(); return; }
+				getHandled = true;
+				getSeen = true;
+				try {
+					await gate;
+					await r.fulfill({
+						status: 200,
+						contentType: "application/json",
+						body: JSON.stringify({ type: "prompt", data: { text: staleText, gen: serverGen } }),
+					});
+				} finally { resolveResponse(); }
+			};
+			await page.route(matchGet, route);
+
+			await navigateToSession(page, session);
+			const textarea = page.locator("textarea").first();
+			await expect(textarea).toBeEditable({ timeout: 15_000 });
+
+			// Set the value + dispatch a SINGLE input event so exactly one debounced
+			// save fires (Playwright fill() can clear-then-type, masking the bug).
+			await page.evaluate((text) => {
+				const ta = document.querySelector("message-editor textarea") as HTMLTextAreaElement | null;
+				if (!ta) throw new Error("composer textarea not found");
+				ta.value = text;
+				ta.dispatchEvent(new Event("input", { bubbles: true }));
+			}, typedText);
+
+			// The delayed GET must be in flight (restore is parked awaiting it).
+			await expect(async () => { expect(getSeen).toBe(true); }).toPass({ intervals: [100, 250, 500, 1000], timeout: 10_000 });
+
+			// Wait until the debounced low-gen save has been sent AND processed
+			// (its response observed) by the server — i.e. silently rejected by the
+			// staleness guard. The server still holds the stale high-gen draft.
+			await expect(async () => { expect(lowGenSaveLanded).toBe(true); }).toPass({ intervals: [50, 100, 250, 500, 1000], timeout: 10_000 });
+			await expect(async () => {
+				const resp = await apiFetch(`/api/sessions/${session}/draft?type=prompt`);
+				const body = await resp.json() as { data?: { text?: string } };
+				expect(body.data?.text).toBe(staleText);
+			}).toPass({ intervals: [50, 100, 250, 500], timeout: 5_000 });
+
+			// Release the delayed restore — it reseeds _draftGen to the server's gen
+			// and (with the fix) re-flushes the local mirror at the corrected gen.
+			// With no pending debounce timer, ONLY the fix can converge the server.
+			releaseIfNeeded();
+			await responseDone;
+			await page.unroute(matchGet, route);
+			page.off("response", onResponse);
+
+			// The editor must still show the typed text (never clobbered).
+			await expect(textarea).toHaveValue(typedText, { timeout: 5_000 });
+
+			// The differentiator: the SERVER draft must converge to the typed text.
+			// Before the fix this stays at `staleText` forever and a reload loses it.
+			await expect(async () => {
+				const resp = await apiFetch(`/api/sessions/${session}/draft?type=prompt`);
+				expect(resp.ok).toBe(true);
+				const body = await resp.json() as { data?: { text?: string } };
+				expect(body.data?.text).toBe(typedText);
+			}).toPass({ intervals: [250, 500, 1000, 1000, 2000], timeout: 15_000 });
+
+			// And it must survive a reload (the symptom the bug actually produced).
+			await page.reload();
+			await waitForAppShell(page);
+			await navigateToSession(page, session);
+			await expect(async () => {
+				const val = await page.locator("textarea").first().inputValue();
+				expect(val).toBe(typedText);
+			}).toPass({ intervals: [250, 500, 1000, 1000, 2000], timeout: 15_000 });
+		} finally {
+			releaseIfNeeded();
+			await deleteSession(session).catch(() => { /* best-effort */ });
+		}
+	});
 });

@@ -57,6 +57,7 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
+import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -4378,11 +4379,6 @@ async function handleApiRoute(
 	// sessionShutdown are gateway-internal dispatches and intentionally have NO
 	// public endpoint.
 	//
-	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
-	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
-	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
-
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
 	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
@@ -4420,7 +4416,7 @@ async function handleApiRoute(
 		}
 		const hub = sessionManager.lifecycleHub;
 		if (!hub) {
-			json({ tail: "", blocks: [] });
+			json({ content: "", tail: "", blocks: [] });
 			return;
 		}
 		try {
@@ -4430,11 +4426,12 @@ async function handleApiRoute(
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			});
-			const tail = blocks.length
-				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
-				: "";
+			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
+			// Temporary back-compat for generated bridges from the system-prompt-tail era.
+			// New bridges consume `content` only and must never return systemPrompt.
+			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
 			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -4445,6 +4442,7 @@ async function handleApiRoute(
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
 			json({
+				content,
 				tail,
 				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
 			});
@@ -6405,11 +6403,12 @@ async function handleApiRoute(
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
 		const routeSessionProjectId = routeHeaderSid
 			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? sessionManager.getPersistedSession(routeHeaderSid)?.projectId)
+				?? routePs?.projectId)
 			: undefined;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
@@ -6489,16 +6488,21 @@ async function handleApiRoute(
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routePs = sessionManager.getPersistedSession(guard.sessionId);
 			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir },
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
 				{ method, query, body: init.body },
 			);
-			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
+			const durationMs = Date.now() - start;
+			// PR Walkthrough status is a browser polling route; keep slow successes and
+			// all catch-branch errors visible, but do not flood logs with fast ticks.
+			const suppressNoisyOk = ident.packId === "pr-walkthrough" && routeName === "status" && durationMs < 1_000;
+			if (!suppressNoisyOk) {
+				console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${durationMs}`);
+			}
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;

@@ -1,5 +1,6 @@
 import type { CommandHistoryStore } from "./stores/command-history-store.js";
 import type { CustomProvidersStore } from "./stores/custom-providers-store.js";
+import type { PromptDraftAttachmentsStore } from "./stores/prompt-draft-attachments-store.js";
 import type { ProviderKeysStore } from "./stores/provider-keys-store.js";
 import type { SessionsStore } from "./stores/sessions-store.js";
 import type { SettingsStore } from "./stores/settings-store.js";
@@ -18,6 +19,7 @@ export class AppStorage {
 	readonly customProviders: CustomProvidersStore;
 	readonly commandHistory: CommandHistoryStore;
 	readonly shortcutBindings: ShortcutBindingsStore;
+	readonly promptDraftAttachments: PromptDraftAttachmentsStore;
 
 	constructor(
 		settings: SettingsStore,
@@ -26,6 +28,7 @@ export class AppStorage {
 		customProviders: CustomProvidersStore,
 		commandHistory: CommandHistoryStore,
 		shortcutBindings: ShortcutBindingsStore,
+		promptDraftAttachments: PromptDraftAttachmentsStore,
 		backend: StorageBackend,
 	) {
 		this.settings = settings;
@@ -34,6 +37,7 @@ export class AppStorage {
 		this.customProviders = customProviders;
 		this.commandHistory = commandHistory;
 		this.shortcutBindings = shortcutBindings;
+		this.promptDraftAttachments = promptDraftAttachments;
 		this.backend = backend;
 	}
 

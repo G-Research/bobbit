@@ -310,6 +310,9 @@ export const routes = {
 		if (!binding || binding.jobId !== requestedJobId || !(isOwner || isChild)) {
 			return { phase: "error", error: "unknown or mismatched binding", code: "PRW_MISSING_BINDING" };
 		}
+		if (ctx?.sessionArchived === true) {
+			return { phase: "error", code: "PRW_REVIEWER_ARCHIVED", error: "The reviewer session is archived.", jobId: binding.jobId };
+		}
 
 		const finalPayload = await store.get(finalPayloadKey(binding.jobId));
 		if (isFinalPayload(finalPayload)) {
