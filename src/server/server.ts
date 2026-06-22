@@ -57,6 +57,7 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
+import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -4415,7 +4416,7 @@ async function handleApiRoute(
 		}
 		const hub = sessionManager.lifecycleHub;
 		if (!hub) {
-			json({ content: "", blocks: [] });
+			json({ content: "", tail: "", blocks: [] });
 			return;
 		}
 		try {
@@ -4426,6 +4427,9 @@ async function handleApiRoute(
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			});
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
+			// Temporary back-compat for generated bridges from the system-prompt-tail era.
+			// New bridges consume `content` only and must never return systemPrompt.
+			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
 			// Best-effort: refresh the persisted prompt-sections snapshot so the
 			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
@@ -4439,6 +4443,7 @@ async function handleApiRoute(
 			}
 			json({
 				content,
+				tail,
 				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
 			});
 		} catch (err: any) {

@@ -34,7 +34,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
-import { generateProviderBridgeExtension } from "../../dist/server/agent/provider-bridge-extension.js";
+import {
+	DYNAMIC_CONTEXT_END,
+	DYNAMIC_CONTEXT_START,
+	generateProviderBridgeExtension,
+} from "../../dist/server/agent/provider-bridge-extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
@@ -72,7 +76,7 @@ async function setProviderDisabled(providers: string[]): Promise<void> {
 	expect(resp.status).toBe(200);
 }
 
-interface BeforePromptResult { status: number; content: string; blocks: Array<Record<string, unknown>> }
+interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
 
 async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
@@ -83,6 +87,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	return {
 		status: resp.status,
 		content: typeof body.content === "string" ? body.content : "",
+		tail: typeof body.tail === "string" ? body.tail : "",
 		blocks: Array.isArray(body.blocks) ? body.blocks : [],
 	};
 }
@@ -187,10 +192,14 @@ test.describe("provider per-turn hooks", () => {
 		const before = await callBeforePrompt(id, promptText);
 		expect(before.status).toBe(200);
 
-		// The endpoint returns message content carrying the demo block — and it must
-		// NOT leak into or rewrite the user's message text.
+		// The endpoint returns message content carrying the demo block — and a
+		// temporary legacy tail for older generated bridges. New bridges ignore tail
+		// and must NOT leak dynamic context into or rewrite the user's message text.
 		expect(before.content, "beforePrompt must return custom-message content").toContain("<context-block");
 		expect(before.content).toContain(`DEMO_BEFORE_PROMPT ${promptText}`);
+		expect(before.tail, "beforePrompt must retain a temporary legacy tail for old bridges").toContain(DYNAMIC_CONTEXT_START);
+		expect(before.tail).toContain(before.content);
+		expect(before.tail).toContain(DYNAMIC_CONTEXT_END);
 
 		// Metadata-only block summary (no raw content field leaked).
 		const demoBlock = before.blocks.find((b) => b.id === "demo:turn");
@@ -285,6 +294,7 @@ test.describe("provider per-turn hooks", () => {
 		const before = await callBeforePrompt(id, "anything");
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
+		expect(before.tail).toBe("");
 		expect(before.blocks).toEqual([]);
 
 		await driveTurn(id, "anything");
@@ -308,6 +318,7 @@ test.describe("provider per-turn hooks", () => {
 
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
+		expect(before.tail).toBe("");
 		// slow.yaml budget.timeoutMs is 300ms; the endpoint must respond well
 		// within a few seconds rather than the provider's 30s sleep.
 		expect(elapsed).toBeLessThan(5_000);
