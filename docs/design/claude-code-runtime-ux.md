@@ -41,8 +41,8 @@ Use this language consistently:
 ```ts
 {
   provider: "claude-code",
-  id: "sonnet",
-  name: "Claude Code Sonnet",
+  id: "local-claude-sonnet-4-6",
+  name: "local-claude-sonnet-4-6",
   api: "claude-code-runtime",
   runtime: "claude-code",
   localRuntime: true,
@@ -57,7 +57,7 @@ Use this language consistently:
 }
 ```
 
-Recommended MVP aliases: `sonnet`, `opus`, and `default` if Claude Code can resolve its own default. The stored pref/session value is `claude-code/sonnet` etc.
+Implemented visible aliases are `local-claude-opus-4-8` and `local-claude-sonnet-4-6`. The stored pref/session value is `claude-code/local-claude-sonnet-4-6` etc.; Bobbit strips only the `local-` prefix before passing `--model` to the Claude CLI.
 
 ### 3.2 Picker row
 
@@ -65,8 +65,8 @@ Change `src/ui/dialogs/ModelSelector.ts` only; reuse the existing row structure.
 
 For Claude Code rows:
 
-- Main label: `Claude Code Sonnet`
-- Secondary/metadata label: `sonnet`
+- Main label: `local-claude-sonnet-4-6`
+- Secondary/metadata label: `local-claude-sonnet-4-6`
 - Badges, right side:
   - Provider label `Claude Code (local)`; no separate `Local runtime` pill.
   - `Claude Code (local)` using `Badge(..., "outline")`
@@ -109,7 +109,7 @@ type ClaudeCodeStatus = {
   checking: boolean;
   executablePath: string;    // resolved preference, default "claude"
   version?: string;
-  modelAliases: string[];    // e.g. ["claude-opus-4-8", "default", "sonnet", "opus"]
+  modelAliases: string[];    // e.g. ["local-claude-opus-4-8", "local-claude-sonnet-4-6"]
   permissionMode: "default" | "acceptEdits" | "bypassPermissions";
   reason?: string;           // safe unavailable reason, e.g. CLI missing, login required, probe failed
   message?: string;          // safe, user-facing explanation
@@ -177,7 +177,7 @@ Persist via existing `PUT /api/preferences`:
 | Field | Preference key | UI |
 |---|---|---|
 | Executable path | `claudeCode.executablePath` | Text input, placeholder `claude` |
-| Default model alias | `claudeCode.defaultModel` | Select: `claude-opus-4-8`, `default`, `sonnet`, `opus` |
+| Default model alias | `claudeCode.defaultModel` | Select: `local-claude-opus-4-8`, `local-claude-sonnet-4-6` |
 | Permission mode | `claudeCode.permissionMode` | Select: `default`, `acceptEdits`, `bypassPermissions` |
 | Allow bypass mode | `claudeCode.allowBypassPermissions` | Explicit checkbox/confirmation gate |
 
@@ -187,7 +187,7 @@ Permission mode copy:
 - `acceptEdits`: `Accept edit operations when Claude Code requests them.`
 - `bypassPermissions`: `Bypasses Claude Code permission prompts. Only enable if you understand the local-machine risk.`
 
-`bypassPermissions` must be disabled unless `claudeCode.allowBypassPermissions === true`. Selecting/turning on bypass should show an explicit warning; never default to it.
+Fresh/default editable Bobbit Claude Code sessions use `acceptEdits`. An explicitly stored/configured `default` still passes `--permission-mode default` so Claude Code keeps its own default prompting behavior. Read-only Bobbit sessions force Claude Code `plan` mode across create, restore, and respawn. `bypassPermissions` must be disabled unless `claudeCode.allowBypassPermissions === true`; selecting/turning on bypass should show an explicit warning and never happen silently.
 
 ---
 
@@ -217,7 +217,7 @@ On confirm, call `POST /api/sessions` with:
   "cwd": "<current cwd>",
   "projectId": "<current projectId>",
   "runtime": "claude-code",
-  "model": "claude-code/sonnet"
+  "model": "claude-code/local-claude-sonnet-4-6"
 }
 ```
 
@@ -303,9 +303,9 @@ Acceptance: after browser reload, a Claude Code session still shows `Claude Code
 Add browser E2E coverage under `tests/e2e/ui/`.
 
 1. **Picker visibility / labeling**
-   - Stub `/api/models` with ready `claude-code/sonnet`.
+   - Stub `/api/models` with ready `claude-code/local-claude-sonnet-4-6`.
    - Open active-session model picker.
-   - Assert row contains `Claude Code Opus 4.8` and `Claude Code (local)`, and does not contain a separate `Local runtime` pill or numeric local limits.
+   - Assert row contains `local-claude-sonnet-4-6` and `Claude Code (local)`, and does not contain a separate `Local runtime` pill or numeric local limits.
 
 2. **Unavailable CLI state**
    - Stub status/models with `sessionSelectable: false`, reason `cli_missing`.
@@ -323,15 +323,15 @@ Add browser E2E coverage under `tests/e2e/ui/`.
 
 5. **Existing Pi session requires new session**
    - Open a Pi-backed session.
-   - Pick `claude-code/sonnet`.
+   - Pick `claude-code/local-claude-sonnet-4-6`.
    - Assert no WS `set_model` frame is sent.
    - Assert confirmation dialog appears.
-   - Confirm and assert `POST /api/sessions` includes `runtime: "claude-code"` and `model: "claude-code/sonnet"`.
+   - Confirm and assert `POST /api/sessions` includes `runtime: "claude-code"` and `model: "claude-code/local-claude-sonnet-4-6"`.
 
 6. **Reload metadata preservation**
-   - Create/open a session whose REST metadata includes `runtime: "claude-code"`, `modelProvider: "claude-code"`, `modelId: "sonnet"`.
+   - Create/open a session whose REST metadata includes `runtime: "claude-code"`, `modelProvider: "claude-code"`, `modelId: "local-claude-sonnet-4-6"`.
    - Reload page.
-   - Assert footer still identifies `Claude Code (local)` and the selected model remains `sonnet`.
+   - Assert footer still identifies `Claude Code (local)` and the selected model remains `local-claude-sonnet-4-6`.
 
 7. **Status refresh**
    - In Settings, click `Refresh status`.
