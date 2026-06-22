@@ -54,6 +54,11 @@ still named **`delegateOf`** — only the *tool* name changed, not the data mode
 a workflow gate — it is the team-lead's tool and is unchanged. `team_delegate` works
 anywhere `delegate` was granted and runs the child in *your* worktree.
 
+When `OrchestrationCore` is asked to create a child on its own sub-branch worktree
+(for example a team member or full-lifecycle helper/session child), that branch is
+local-only by default. The persisted worktree is the durability boundary; remote
+publication happens only through explicit user/workflow handoff or final PR flows.
+
 ### `team_delegate`
 
 Launch a child agent in your worktree. The child has **no conversation context** — it

@@ -675,7 +675,9 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. Those safety-net publishes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+Team-member and delegated helper/session sub-agent branches are local-only by default. Bobbit does not push them to origin as a default safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
+
+Remote publication is still allowed when it is intentional: a user-requested push, a workflow/cross-machine/container handoff that needs a remote branch, or the final Ready-to-Merge / PR publication of the goal integration branch. Intentional Bobbit-owned pushes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only routine PR in the workflow is the final goal-to-primary-branch PR for human review.
 
 #### Multi-repo git handoff
 
@@ -688,7 +690,7 @@ task.gitHandoff: { [repoName]: { baseSha: string, headSha?: string, branch: stri
 
 The single-repo flat shape (`task.baseSha` / `task.headSha` / `task.branch` directly on the task) is preserved for back-compat — read helpers transparently project a single-repo task into the same shape so callers don't need to special-case mode.
 
-Goal `git-status` and `git-diff` endpoints aggregate across all repos; the git-status widget shows per-repo collapsible sections. Cleanup tears down all per-repo worktrees and deletes all matching remote branches. PR/merge tooling (gh integration) operates per-repo; a multi-repo goal opens N PRs (one per repo with commits), all titled with the goal's branch.
+Goal `git-status` and `git-diff` endpoints aggregate across all repos; the git-status widget shows per-repo collapsible sections. Cleanup tears down all per-repo worktrees and deletes matching remote branches when they exist; missing remotes for local-only sub-agent branches are expected. PR/merge tooling (gh integration) operates per-repo; a multi-repo goal opens N PRs (one per repo with commits), all titled with the goal's branch.
 
 Multi-repo invariant: all repos in a worktree set sit on the same branch name. There is no per-repo branch divergence within a goal.
 

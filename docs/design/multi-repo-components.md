@@ -957,7 +957,7 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 
 The handler in `src/server/server.ts` (the `/api/sessions/:id/git-status` branch) mirrors the goal handler's envelope:
 
-- **Single-repo / no `repoWorktrees`** → unchanged flat shape plus back-compat keys: `{ ...result, aggregate: result, repos: { ".": result } }`. The existing 400 `{ error: "Not a git repository" }` and 500 paths are preserved, and the auto-push of unpushed feature/`session/…` branches still runs on `result`.
+- **Single-repo / no `repoWorktrees`** → unchanged flat shape plus back-compat keys: `{ ...result, aggregate: result, repos: { ".": result } }`. The existing 400 `{ error: "Not a git repository" }` and 500 paths are preserved. Status-triggered publication still runs for legacy publishable sessions, but is suppressed when persisted session metadata marks the branch local-only.
 - **Multi-repo** (`session.repoWorktrees.length > 1`) → `{ ...aggregate, aggregate, repos }`, where `repos` is keyed by **repo name** and each entry is a full `GitStatusResult`.
 
 **Shape note.** In-memory `session.repoWorktrees` is an **array** `Array<{ repo, repoPath, worktreePath }>` (see `session-manager.ts`), unlike the goal's `Record<string, string>` (`goal.repoWorktrees`). The session handler iterates the array and statuses each entry's `worktreePath` (sandboxed sessions route through the container via the `containerId` argument, exactly as the flat path does). Per-repo failures are swallowed (`try/catch`, skip the entry) so one broken sub-repo cannot 500 the whole status. Each per-repo `batchGitStatus` call honours the project `base_ref` config (`configuredBaseRef`), matching the goal handler and `docs/design/base-ref.md` §5.
@@ -973,7 +973,7 @@ If neither a root `result` nor any per-repo result is available, the handler ret
 
 **Why synthesize rather than 400.** Without the synthesized aggregate, a polyrepo session whose container is non-git would have no top-level status object at all, so the pill would fall back to rendering only the branch name — the exact gap this work closes. Synthesizing lets the pill show real aggregated stats even though the directory the agent's `cwd` points at is not a git repo.
 
-**Auto-push** only runs when the root `result` exists. For a non-git-container polyrepo there is no root repo to push, and the individual session branches are already published at worktree-claim time (§5.2 / `docs/design/remove-session-worktree-rename.md`), so skipping container auto-push is correct.
+**Status-triggered publication** only runs when the root `result` exists and the session is not marked local-only by policy. For a non-git-container polyrepo there is no root repo to push; for scoped local-only sub-agent branches the persistent per-repo worktrees are the durability and handoff mechanism, so skipping container publication is correct.
 
 ### 13.3 Per-repo diff routing (`GET /api/sessions/:id/git-diff`)
 
