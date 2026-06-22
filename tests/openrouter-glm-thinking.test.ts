@@ -57,7 +57,7 @@ async function withAigwServer(models: unknown[], run: (baseUrl: string) => Promi
 	}
 }
 
-describe("OpenRouter GLM 5.x thinking clamp", () => {
+describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 	it("spawn-time initial thinking resolution keeps high for openrouter/z-ai/glm-5.2", () => {
 		const manager: any = new SessionManager({ preferencesStore: prefsFor("openrouter/z-ai/glm-5.2", "high") });
 		managers.push(manager);
@@ -65,20 +65,33 @@ describe("OpenRouter GLM 5.x thinking clamp", () => {
 		assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "high");
 	});
 
-	it("spawn-time initial thinking resolution still clamps older GLM families to off", () => {
-		const manager: any = new SessionManager({ preferencesStore: prefsFor("openrouter/z-ai/glm-4.5", "high") });
+	it("spawn-time initial thinking resolution keeps high for aigw/z-ai/glm-5.2", () => {
+		const manager: any = new SessionManager({ preferencesStore: prefsFor("aigw/z-ai/glm-5.2", "high") });
 		managers.push(manager);
 
-		assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "off");
+		assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "high");
 	});
 
-	it("runtime persisted OpenRouter GLM 5.2 clamp accepts high", () => {
-		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-5.2"), "high");
-		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "high");
+	it("spawn-time initial thinking resolution still clamps older GLM families to off", () => {
+		for (const model of ["openrouter/z-ai/glm-4.5", "aigw/z-ai/glm-4.5"]) {
+			const manager: any = new SessionManager({ preferencesStore: prefsFor(model, "high") });
+			managers.push(manager);
+
+			assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "off", `${model} should remain non-reasoning`);
+		}
+	});
+
+	it("runtime persisted OpenRouter and AIGW GLM 5.2 clamps accept high", () => {
+		for (const provider of ["openrouter", "aigw"]) {
+			assert.equal(clampThinkingLevelForModel("high", provider, "z-ai/glm-5.2"), "high", `${provider} GLM 5.2 high should stay high`);
+			assert.equal(clampThinkingLevelForModel("xhigh", provider, "z-ai/glm-5.2"), "high", `${provider} GLM 5.2 xhigh should clamp to high`);
+		}
 	});
 
 	it("runtime persisted older GLM clamp remains non-reasoning", () => {
-		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-4.5"), "off");
+		for (const provider of ["openrouter", "aigw"]) {
+			assert.equal(clampThinkingLevelForModel("high", provider, "z-ai/glm-4.5"), "off", `${provider} older GLM should remain non-reasoning`);
+		}
 	});
 
 	it("/api/models metadata marks sparse GLM 5.2 gateway entries as reasoning-capable", async () => {
