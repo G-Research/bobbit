@@ -295,24 +295,54 @@ function nonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/** Selects the minimal provider credentials a direct host agent is allowed to receive. */
+export interface HostAgentProviderEnvOptions {
+	/** Active provider selected for this direct host agent. */
+	provider?: string;
+	/** Active model id in provider/model form; used when provider is absent. */
+	model?: string;
+	/** Explicit minimal provider allowlist for callers that cannot express a single active model. */
+	providers?: string[];
+}
+
+function providerFromModel(model: string | undefined): string | undefined {
+	if (!model || !model.includes("/")) return undefined;
+	const provider = model.split("/", 1)[0]?.trim();
+	return provider || undefined;
+}
+
+function allowedHostAgentProviders(options?: HostAgentProviderEnvOptions): Set<string> {
+	const allowed = new Set<string>();
+	const activeProvider = nonEmptyString(options?.provider) ?? providerFromModel(options?.model);
+	if (activeProvider) allowed.add(activeProvider);
+	for (const provider of options?.providers || []) {
+		const normalized = nonEmptyString(provider);
+		if (normalized) allowed.add(normalized);
+	}
+	return allowed;
+}
+
 /**
  * Resolve Settings-saved provider API keys into env vars for direct host agents.
  * Values stay in-memory only: callers must merge this into RpcBridgeOptions.env,
  * never persist or log it. Sandbox agents intentionally do NOT use this helper;
  * their credential forwarding remains governed by sandbox_tokens.
  */
-export function resolveHostAgentProviderEnv(prefs?: PreferencesStore | null): Record<string, string> {
+export function resolveHostAgentProviderEnv(prefs?: PreferencesStore | null, options?: HostAgentProviderEnvOptions): Record<string, string> {
 	if (!prefs) return {};
+	const allowed = allowedHostAgentProviders(options);
+	if (allowed.size === 0) return {};
 	const result: Record<string, string> = {};
 	for (const { provider, envVar } of HOST_AGENT_PROVIDER_ENV) {
+		if (!allowed.has(provider)) continue;
 		const storedKey = nonEmptyString(prefs.get(`providerKey.${provider}`));
 		if (storedKey) result[envVar] = storedKey;
 	}
 	return result;
 }
 
-export function mergeHostAgentProviderEnv(existing: Record<string, string> | undefined, prefs?: PreferencesStore | null): Record<string, string> | undefined {
-	const providerEnv = resolveHostAgentProviderEnv(prefs);
+export function mergeHostAgentProviderEnv(existing: Record<string, string> | undefined, prefs?: PreferencesStore | null, options?: HostAgentProviderEnvOptions): Record<string, string> | undefined {
+	const providerEnv = resolveHostAgentProviderEnv(prefs, options);
 	if (Object.keys(providerEnv).length === 0) return existing;
 	return { ...providerEnv, ...(existing || {}) };
 }

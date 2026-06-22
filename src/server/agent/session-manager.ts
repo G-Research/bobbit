@@ -622,9 +622,14 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 		}
 	}
 
-	const safeTopLevelError = sanitizeErrorText(ev.errorMessage);
-	if (safeTopLevelError && safeTopLevelError !== ev.errorMessage) {
-		clone().errorMessage = safeTopLevelError;
+	const safeTopLevelErrorMessage = sanitizeErrorText(ev.errorMessage);
+	if (safeTopLevelErrorMessage && safeTopLevelErrorMessage !== ev.errorMessage) {
+		clone().errorMessage = safeTopLevelErrorMessage;
+	}
+
+	const safeTopLevelError = sanitizeErrorText(ev.error);
+	if (safeTopLevelError && safeTopLevelError !== ev.error) {
+		clone().error = safeTopLevelError;
 	}
 
 	return next;
@@ -2678,9 +2683,12 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined): void {
+	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): void {
 		if (sandboxed) return;
-		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore);
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
+			provider,
+			model: bridgeOptions.initialModel,
+		});
 	}
 
 	private safeDispatchError(session: SessionInfo, reason: string): Error {
@@ -3490,14 +3498,14 @@ export class SessionManager {
 				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
 				target.lastPromptText = retryText;
 				target.lastPromptImages = savedPromptImages;
-				await target.rpcClient.prompt(retryText, savedPromptImages);
+				await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
 				return;
 			}
 		}
 
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt
-			await session.rpcClient.prompt(
+			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
 				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
@@ -3517,7 +3525,7 @@ export class SessionManager {
 			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
-			await session.rpcClient.prompt(
+			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"
 			);
@@ -4503,7 +4511,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed);
+		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, ps.modelProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -6215,7 +6223,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
@@ -7527,7 +7535,7 @@ export class SessionManager {
 			}
 			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
+			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;

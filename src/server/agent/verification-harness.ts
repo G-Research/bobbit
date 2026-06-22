@@ -3542,7 +3542,7 @@ export class VerificationHarness {
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
 			args: toolActivation.args,
-			env: mergeHostAgentProviderEnv(toolActivation.env, this.preferencesStore),
+			env: toolActivation.env,
 			toolManager: toolActivation.toolManager,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
@@ -3555,6 +3555,9 @@ export class VerificationHarness {
 			? _preLegacyRoleModel
 			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
+			model: bridgeOptions.initialModel,
+		});
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 		const _legacyValidLevels = THINKING_LEVELS as readonly string[];
