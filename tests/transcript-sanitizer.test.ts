@@ -289,6 +289,22 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(second.content, sanitized.content);
 	});
 
+	it("keeps a toolCall before the marker when firstKeptEntryId names an earlier retained user row", () => {
+		// Pi's exact retained-range boundary can point to any retained entry, not
+		// just an assistant tool-call row. A later retained assistant tool call before
+		// the inline compaction marker is still valid for post-marker results.
+		const retainedUser = msg("user", "retained prompt", "retained-user");
+		const assistant = assistantToolCall("kept-before-marker-call", "assistant-kept-before-marker");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1", firstKeptEntryId: "retained-user" });
+		const result = toolResultRow("kept-before-marker-call", "result-after-marker");
+		const file = [retainedUser, assistant, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, false, "valid retained-range pair must stay unchanged");
+		assert.equal(sanitized.content, file, "valid retained-range pair must stay byte-identical");
+		assert.equal(sanitized.droppedToolResultRows, 0);
+	});
+
 	it("keeps a valid toolCall + toolResult pair when both are after the compaction marker", () => {
 		// A post-compaction assistant tool call matched by a post-compaction
 		// toolResult is valid retained history and must stay byte-identical.

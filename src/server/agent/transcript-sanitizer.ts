@@ -12,7 +12,7 @@
  * transcript is to repair the `.jsonl` Bobbit owns at the rehydration boundary
  * (before `switch_session`).
  *
- * This module is a pure, idempotent, one-pass sanitizer: it rewrites a
+ * This module is a pure, idempotent sanitizer: it rewrites a
  * persisted `user` message whose effective text is blank/whitespace-only to the
  * synthetic `ATTACHMENT_ONLY_TEXT` ("Attachments:"), covering BOTH the
  * image-adjacent case (`[{text:""},{image}]`) AND the standalone empty/blank
@@ -97,54 +97,6 @@ function messageStopReason(entry: any): unknown {
 }
 
 /**
- * Apply a compaction-boundary reset to the retained tool-call id map.
- *
- * Models the retained range precisely instead of blindly clearing every id:
- *  - If the compaction entry carries a resolvable `firstKeptEntryId` (a
- *    non-empty string matching the `id` of an assistant entry whose tool call
- *    is still tracked), drop only the tool-call ids registered strictly before
- *    that kept entry (summarized away); keep those at/after it (still retained).
- *  - If `firstKeptEntryId` is absent, non-string, or unresolvable (no tracked
- *    tool call carries that entry id), fall back to clearing the whole set at
- *    the marker — the legacy conservative behaviour.
- *
- * A kept-range assistant tool call registered before the marker can therefore
- * still validate a later result, while a call before `firstKeptEntryId` cannot.
- */
-function resetSeenAtCompaction(
-	entry: any,
-	seenToolCalls: Map<string, { entryId: string | null; lineIdx: number }>,
-): void {
-	const firstKept = stringField(entry?.firstKeptEntryId);
-	if (!firstKept) {
-		seenToolCalls.clear();
-		return;
-	}
-
-	// Resolve the kept boundary: the tracked tool call whose originating entry id
-	// matches `firstKeptEntryId`. Everything strictly before its line index is
-	// summarized away; everything at/after is retained.
-	let boundaryIdx = -1;
-	for (const meta of seenToolCalls.values()) {
-		if (meta.entryId === firstKept) {
-			boundaryIdx = meta.lineIdx;
-			break;
-		}
-	}
-	if (boundaryIdx < 0) {
-		// firstKeptEntryId did not resolve to any tracked retained tool call — fall
-		// back to clearing at the marker so a post-compaction result cannot match
-		// a summarized pre-compaction call.
-		seenToolCalls.clear();
-		return;
-	}
-
-	for (const [toolCallId, meta] of seenToolCalls) {
-		if (meta.lineIdx < boundaryIdx) seenToolCalls.delete(toolCallId);
-	}
-}
-
-/**
  * Rewrite a `user` message's `content` so it carries the synthetic
  * `ATTACHMENT_ONLY_TEXT`. Returns the new content value.
  *
@@ -205,18 +157,26 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 	// identical. Dropped orphan result rows are omitted from the output.
 	const lines = content.split("\n");
 	const outputLines: string[] = [];
-	// Track each retained tool-call id alongside the document position (line index)
-	// and entry id at which it was registered, so a compaction boundary can drop
-	// only the tool-call ids whose originating assistant turn was summarized away
-	// while preserving those still inside the retained range.
-	const seenToolCalls: Map<string, { entryId: string | null; lineIdx: number }> = new Map();
+	const lineIndexByEntryId = new Map<string, number>();
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const trimmed = lines[lineIndex].trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			const id = stringField(parsed?.id);
+			if (id && !lineIndexByEntryId.has(id)) lineIndexByEntryId.set(id, lineIndex);
+		} catch {
+			// non-JSON line — no entry id to index
+		}
+	}
+	const seenToolCallIds = new Map<string, number>();
 	let changed = false;
 	let rewritten = 0;
 	let droppedToolResultRows = 0;
 	let filteredToolResultBlocks = 0;
 
-	for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-		const raw = lines[lineIdx];
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const raw = lines[lineIndex];
 		const trimmed = raw.trim();
 		if (!trimmed) {
 			outputLines.push(raw);
@@ -232,19 +192,22 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		}
 
 		if (!entry || entry.type !== "message" || !entry.message) {
-			// A `compaction` entry marks a retained-context boundary: the assistant
-			// turns before it have been summarized away and are no longer in the
-			// retained context rehydrated for the provider. Model the retained range
-			// precisely so a post-compaction `toolResult` cannot incorrectly match a
-			// pre-compaction assistant tool call (which would rehydrate an orphan
-			// `function_call_output` with no matching call):
-			//   - If the compaction entry carries a resolvable `firstKeptEntryId`
-			//     (a non-empty string matching the id of a kept assistant entry seen
-			//     before the marker), drop only the tool-call ids registered strictly
-			//     before that kept entry; keep those at/after it (still retained).
-			//   - If `firstKeptEntryId` is absent or unresolvable, fall back to
-			//     clearing the whole retained set at the marker (legacy/edge case).
-			if (entry?.type === "compaction") resetSeenAtCompaction(entry, seenToolCalls);
+			if (entry?.type === "compaction") {
+				const firstKeptEntryId = stringField(entry.firstKeptEntryId);
+				const firstKeptLineIndex = firstKeptEntryId ? lineIndexByEntryId.get(firstKeptEntryId) : undefined;
+				if (firstKeptLineIndex === undefined) {
+					// Legacy fallback: without a resolvable exact retained-range boundary,
+					// the marker itself is the only safe split point.
+					seenToolCallIds.clear();
+				} else {
+					// Pi's `firstKeptEntryId` can name any retained entry (user,
+					// assistant-without-tools, or assistant-with-tools). Drop only tool-call
+					// ids whose originating assistant line is before that retained range.
+					for (const [id, originLineIndex] of seenToolCallIds) {
+						if (originLineIndex < firstKeptLineIndex) seenToolCallIds.delete(id);
+					}
+				}
+			}
 			outputLines.push(raw);
 			continue;
 		}
@@ -253,10 +216,9 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		if (message.role === "assistant") {
 			const stopReason = messageStopReason(entry);
 			if (stopReason !== "aborted" && stopReason !== "error" && Array.isArray(message.content)) {
-				const entryId = typeof entry.id === "string" ? entry.id : null;
 				for (const block of message.content) {
 					const id = toolCallIdFromAssistantBlock(block);
-					if (id) seenToolCalls.set(id, { entryId, lineIdx });
+					if (id) seenToolCallIds.set(id, lineIndex);
 				}
 			}
 			outputLines.push(raw);
@@ -265,7 +227,7 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 
 		if (message.role === "toolResult") {
 			const id = stringField(message.toolCallId);
-			if (!id || !seenToolCalls.has(id)) {
+			if (!id || !seenToolCallIds.has(id)) {
 				changed = true;
 				droppedToolResultRows++;
 				continue;
@@ -283,7 +245,7 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 			const filteredContent = (message.content as unknown[]).filter((block) => {
 				if (!isToolResultBlock(block)) return true;
 				const id = toolResultIdFromBlock(block);
-				const keep = !!id && seenToolCalls.has(id);
+				const keep = !!id && seenToolCallIds.has(id);
 				if (!keep) filteredToolResultBlocks++;
 				return keep;
 			});
