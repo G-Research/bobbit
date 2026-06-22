@@ -408,7 +408,7 @@ status: [];
 
 ### 7.3 Response shape
 
-Add two optional fields to the existing response (non-breaking — old clients ignore):
+Add optional fields to the existing response (non-breaking — old clients ignore):
 
 ```ts
 {
@@ -427,17 +427,24 @@ Add two optional fields to the existing response (non-breaking — old clients i
   unpushed: boolean;
 
   // NEW
-  partial?: boolean;              // true if porcelain was skipped/timed-out
-  untrackedIncluded?: boolean;    // true only when ?untracked=1 was passed
+  partial?: boolean;                          // true if porcelain was skipped/timed-out
+  untrackedIncluded?: boolean;                // true only when ?untracked=1 was passed
+  remotePublication?: "local-only-policy";    // branch is intentionally not auto-published
 }
 ```
 
-### 7.4 Client handling of `partial`
+`GET /api/sessions/:id/git-status` sets `remotePublication: "local-only-policy"`
+for scoped worker sessions whose branches are durable locally and should not be
+published just because status was queried. The field distinguishes intentional
+local-only policy from a push failure or missing remote.
+
+### 7.4 Client handling of status hints
 
 In `GitStatusWidget`:
 - When `partial === true`: render the pill with a faint yellow dot (distinct from the blue refresh dot) next to the branch. Tooltip "Status scan timed out — showing partial data." Dropdown shows branch/ahead/behind fields but hides the file list with a "Re-scan" button that triggers an `?untracked=1` refetch.
+- When `remotePublication === "local-only-policy"`: show "Local-only by policy" in the dropdown. This means Bobbit intentionally kept the scoped worker branch local; it is not an error and does not imply that a push was attempted.
 
-Add `@property({ type: Boolean }) partial = false;` to `GitStatusWidget`. Wired from `AgentInterface.ts` as `.partial=${this.gitStatus?.partial ?? false}`.
+Add `@property({ type: Boolean }) partial = false;` and `remotePublication?: "local-only-policy"` to `GitStatusWidget`. Wire them from `AgentInterface.ts`.
 
 ---
 
@@ -454,6 +461,7 @@ Playwright file:// fixture rendering the widget.
 | Normal state | `loading=false`, `branch="foo"` | No dot, normal rendering |
 | Hidden when no data + not loading | `loading=false`, no branch | `render()` returns `nothing` |
 | Partial flag renders warning | `partial=true`, `branch="foo"` | Warning dot present, dropdown on open shows "Re-scan" button |
+| Local-only policy hint | `remotePublication="local-only-policy"`, `branch="foo"` | Dropdown explains "Local-only by policy" and does not show it as a push failure |
 
 ### 8.2 Unit — `tests/git-status-refresh.spec.ts` (new)
 

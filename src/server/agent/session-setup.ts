@@ -21,7 +21,7 @@ import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } fro
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
-import type { SessionStore } from "./session-store.js";
+import type { SessionStore, WorktreePushPolicy } from "./session-store.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -170,6 +170,7 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
+	worktreePushPolicy?: WorktreePushPolicy;
 	repoPath?: string;
 	branch?: string;
 	sandboxed?: boolean;
@@ -898,6 +899,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
+		worktreePushPolicy: plan.worktreePushPolicy,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		taskId: plan.taskId,
@@ -1036,11 +1038,17 @@ export async function executeWorktreeAsync(
 		// single-repo paths thread it into worktree creation. Empty/undefined
 		// falls back to today's `resolveRemotePrimary`. See docs/design/base-ref.md.
 		const configuredBaseRef = ctx.projectConfigStore?.get("base_ref") || undefined;
+		type WorktreeCreationOptions = {
+			worktreeRoot?: string;
+			configuredBaseRef?: string;
+			pushPolicy?: WorktreePushPolicy;
+		};
 		if (isMulti) {
 			const { createWorktreeSet } = await import("../skills/git.js");
 			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
+			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, pushPolicy: plan.worktreePushPolicy };
 			const result = await withRetry(
-				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, { worktreeRoot, configuredBaseRef }),
+				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, worktreeOptions),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
 			);
 			if (result.worktrees.length === 0) {
@@ -1060,7 +1068,8 @@ export async function executeWorktreeAsync(
 			try {
 				worktreeCwd = await withRetry(
 					async () => {
-						const result = await createWorktree(plan.repoPath!, plan.branch!, { configuredBaseRef });
+						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, pushPolicy: plan.worktreePushPolicy };
+						const result = await createWorktree(plan.repoPath!, plan.branch!, worktreeOptions);
 						return result.worktreePath;
 					},
 					{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },

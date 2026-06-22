@@ -31,6 +31,8 @@ interface MockGoal {
 	worktreePath?: string;
 	branch?: string;
 	repoPath?: string;
+	projectId?: string;
+	sandboxed?: boolean;
 	team?: boolean;
 	teamLeadSessionId?: string;
 }
@@ -79,6 +81,7 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 				status: "idle" as const,
 				titleGenerated: false,
 				goalId,
+				createOpts: opts,
 				rpcClient: {
 					prompt: mock.fn(async () => {}),
 					onEvent: mock.fn(() => {}),
@@ -103,6 +106,8 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			sessions.delete(id);
 			return true;
 		}),
+		isSandboxEnabled: false,
+		getSandboxManager: () => undefined,
 		// Goal-metadata: team-manager dispatches the goalProvisioned lifecycle hook
 		// for each member worktree it creates directly (finding 1). Mocked here so
 		// the spawn path can invoke it and tests can assert it was called.
@@ -1233,7 +1238,8 @@ describe("TeamManager", () => {
 		let repoPath: string;
 		let cleanup: () => void;
 
-		function createTempGitRepo(): { repoPath: string; cleanup: () => void } {
+		function createTempGitRepo(opts: { publishGoalBranch?: boolean } = {}): { repoPath: string; originPath: string; cleanup: () => void } {
+			const publishGoalBranch = opts.publishGoalBranch ?? true;
 			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "team-test-"));
 			execSync("git init", { cwd: tmp, stdio: "pipe" });
 			execSync('git config user.email "test@test.com"', { cwd: tmp, stdio: "pipe" });
@@ -1241,18 +1247,22 @@ describe("TeamManager", () => {
 			fs.writeFileSync(path.join(tmp, "README.md"), "# test");
 			execSync("git add . && git commit -m init", { cwd: tmp, stdio: "pipe" });
 
-			// Create a bare clone to act as "origin" so that `origin/feat/test` exists
+			// Create a bare clone to act as "origin".
 			const bare = `${tmp}-bare`;
 			execSync(`git clone --bare "${tmp}" "${bare}"`, { stdio: "pipe" });
 			execSync(`git remote add origin "${bare}"`, { cwd: tmp, stdio: "pipe" });
-			// Create the feat/test branch and push it to origin
+			// Create the feat/test branch locally. Most tests publish it so origin/feat/test
+			// exists; local-only branch tests leave it unpublished on purpose.
 			execSync("git checkout -b feat/test", { cwd: tmp, stdio: "pipe" });
-			execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
+			if (publishGoalBranch) {
+				execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
+			}
 			// Return to default branch so worktree creation doesn't conflict
 			execSync("git checkout -", { cwd: tmp, stdio: "pipe" });
 
 			return {
 				repoPath: tmp,
+				originPath: bare,
 				cleanup: () => {
 					// Also remove any sibling worktrees and the bare clone
 					const parent = path.dirname(tmp);
@@ -1323,6 +1333,101 @@ describe("TeamManager", () => {
 			assert.ok(agent!.branch, "branch should be populated");
 			assert.equal(typeof agent!.branch, "string");
 		});
+
+		it("spawns from an unpublished local goal branch without publishing the member branch", async () => {
+			cleanup();
+			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
+			repoPath = unpublishedRepo.repoPath;
+			cleanup = unpublishedRepo.cleanup;
+
+			assert.throws(
+				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"origin must not have the goal branch before spawn",
+			);
+
+			const goalId = "12345678-abcd-4000-8000-000000000001";
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				id: goalId,
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
+			assert.match(
+				source,
+				/const worktreeOptions = \{ startPoint: memberStartPoint, pushPolicy: "local-only" as const \};\s*worktreeResult = await createWorktree\(goal\.repoPath!, branchName, worktreeOptions\);/,
+				"team member worktree creation must request local-only push policy",
+			);
+
+			await team.startTeam(goalId);
+			const previousNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+			process.env.BOBBIT_TEST_NO_PUSH = "1";
+			let result: Awaited<ReturnType<typeof team.spawnRole>>;
+			try {
+				result = await team.spawnRole(goalId, "coder", "Implement from local branch");
+			} finally {
+				if (previousNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+				else process.env.BOBBIT_TEST_NO_PUSH = previousNoPush;
+			}
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent?.branch, "agent branch should be recorded");
+			assert.match(agent.branch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
+			assert.ok(fs.existsSync(result.worktreePath), "member worktree should be created from the local goal branch");
+			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
+			assert.throws(
+				() => execSync(`git show-ref --verify --quiet refs/heads/${agent.branch}`, { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"local-only team member branch must not be published to origin",
+			);
+		});
+
+		it("passes a local sandbox base branch for unpublished sandboxed goal branches", async () => {
+			cleanup();
+			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
+			repoPath = unpublishedRepo.repoPath;
+			cleanup = unpublishedRepo.cleanup;
+
+			assert.throws(
+				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"origin must not have the goal branch before sandboxed member spawn",
+			);
+
+			const goalId = "12345678-abcd-4000-8000-000000000001";
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				id: goalId,
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+				projectId: "project-1",
+				sandboxed: true,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			sm.getSandboxManager = () => ({
+				get: () => ({
+					exec: mock.fn(async () => "0123456789abcdef0123456789abcdef01234567\n"),
+				}),
+			});
+			const team = createTeamManager(sm);
+
+			await team.startTeam(goalId);
+			const result = await team.spawnRole(goalId, "coder", "Implement in sandbox from local branch");
+			const session = sm.getSession(result.sessionId);
+			assert.ok(session, "member session should exist");
+			assert.equal(session.createOpts.sandboxBaseBranch, "feat/test");
+			assert.notEqual(session.createOpts.sandboxBaseBranch, "origin/feat/test");
+			assert.match(session.createOpts.sandboxBranch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
+			assert.equal(session.worktreePushPolicy, "local-only");
+		});
+
 
 		it("should create a worktree and session for a coder role", async () => {
 			const goals = new Map<string, MockGoal>();

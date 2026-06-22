@@ -31,7 +31,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
-import { SessionStore, type PersistedSession } from "./session-store.js";
+import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
@@ -356,6 +356,10 @@ export interface SessionInfo {
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
 	branch?: string;
+	/** Worktree branch publication policy; scoped sub-agent branches are local-only by default. */
+	worktreePushPolicy?: "local-only" | "publish";
+	/** Back-compat alias for persisted publication policy metadata. */
+	remotePublicationPolicy?: "local-only" | "publish";
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	/**
@@ -4385,6 +4389,8 @@ export class SessionManager {
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
+			worktreePushPolicy: ps.worktreePushPolicy,
+			remotePublicationPolicy: ps.remotePublicationPolicy,
 			repoWorktrees: ps.repoWorktrees && ps.repoPath
 				? Object.entries(ps.repoWorktrees).map(([repo, worktreePath]) => ({
 					repo,
@@ -4510,7 +4516,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4600,6 +4606,7 @@ export class SessionManager {
 				role: opts?.role ?? opts?.roleName,
 				accessory: opts?.accessory,
 				worktreePath,
+				worktreePushPolicy: opts?.worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -4637,6 +4644,7 @@ export class SessionManager {
 				readOnly: opts?.readOnly,
 				sessionScopedAllowedTools,
 				worktreePath,
+				worktreePushPolicy: opts?.worktreePushPolicy,
 				repoPath,
 				branch,
 				sandboxed: opts?.sandboxed,
@@ -4717,6 +4725,7 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
+			worktreePushPolicy: opts?.worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.

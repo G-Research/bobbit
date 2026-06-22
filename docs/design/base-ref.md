@@ -242,16 +242,20 @@ A fresh `git init` repo has an **unborn** `HEAD`: the symbolic name exists, but 
 
 Configured `base_ref` remains an explicit start point. A valid configured ref can create worktrees even while local `HEAD` is unborn. A stale configured ref is **not** downgraded to no-worktree; it surfaces the configured-base error above so the user fixes or removes the setting.
 
-**Out of scope:** `src/server/agent/team-manager.ts:885` is **deliberately
-unchanged**. Team members branch off `origin/<goal-branch>` by hierarchical
-design — there is an explicit `git fetch origin <goal-branch>` immediately
-preceding the `createWorktree` call. This is a different base concept (the
-goal's branch, not the project's integration target).
+Team-member worktrees use the goal branch as their start point, but they do
+not require that branch to be published. `src/server/agent/team-manager.ts`
+resolves local goal branch refs first, so unpublished local goal branches can
+spawn member worktrees. Remote refs are used only as intentional handoff or
+fallback inputs when the local goal branch is unavailable; publication to
+`origin/<goal-branch>` remains an explicit workflow/user action, not a
+prerequisite for `createWorktree`.
 
 ### 2. Upstream tracking and safe publication
 
-After the worktree is created, `createWorktree` publishes the branch with an
-explicit destination refspec and then fetches the matching remote-tracking ref:
+`createWorktree` separates branch creation from publication. Scoped sub-agent
+and pool worktrees pass a local-only push policy, so they are not published on
+creation. Publication paths that intentionally need a remote branch still push
+with an explicit destination refspec and then fetch/set matching tracking:
 
 ```bash
 git -C <worktree> push origin <branch>:refs/heads/<branch>
@@ -259,8 +263,9 @@ git -C <worktree> fetch origin refs/heads/<branch>:refs/remotes/origin/<branch>
 git -C <worktree> branch --set-upstream-to=origin/<branch> <branch>
 ```
 
-If `base_ref` is configured, `createWorktree` then points `@{u}` at that base
-for status/ahead-behind semantics:
+If `base_ref` is configured, non-pool `createWorktree` callers point `@{u}` at
+that base for status/ahead-behind semantics, even when the branch itself stays
+local-only:
 
 ```bash
 git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
@@ -271,14 +276,16 @@ Effect:
 - Branch publication never depends on the local upstream or `push.default`.
   Bobbit-owned publishes target `refs/heads/<branch>` directly, so an inherited
   upstream such as `origin/master` cannot redirect the push.
+- Scoped local-only branches rely on the local worktree/ref for durability and
+  are not pushed merely because they were created or committed.
 - Local base → local upstream for non-pool worktrees. `git status` ahead/behind
   compares against the local base after the override.
 - Remote base (`origin/X`) → remote upstream for non-pool worktrees. Workflow
-  variables and merge-base checks still use `{{baseBranch}}` explicitly; the
-  push destination remains the work branch, not the base branch.
-- Pool-claimed worktrees are the exception: claim clears any inherited upstream
-  synchronously, then background publish repairs tracking to `origin/<branch>`.
-  The pool still resets to the current configured base before handoff.
+  variables and merge-base checks still use `{{baseBranch}}` explicitly; any
+  intentional push destination remains the work branch, not the base branch.
+- Pool-claimed worktrees clear inherited upstream synchronously on claim. The
+  background freshen path fetches/resets to the current configured base, but the
+  claimed branch remains local-only unless an explicit publication path runs.
 
 Save-time validation guarantees the base is a branch ref, so `--set-upstream-to`
 never fails on tag/SHA at runtime. Defence-in-depth error if it does fail
@@ -461,12 +468,15 @@ new WorktreePool(
 - Pool entries auto-adopt the current base whenever they're touched.
 
 On claim, a pool branch may have inherited upstream tracking from its prebuilt
-`pool/_pool-*` branch. `claim()` synchronously unsets any upstream that is not
-already `origin/<targetBranch>` before returning the worktree. The background
-freshen path then publishes with `git push origin <targetBranch>:refs/heads/<targetBranch>`,
-fetches the remote-tracking ref, and sets upstream to `origin/<targetBranch>`.
+`pool/_pool-*` branch. `claim()` synchronously clears inherited upstream before
+returning the worktree, so the claimed branch is local-only by policy. The
+background freshen path fetches `origin`, resolves the current configured base,
+and hard-resets the worktree to that base. It does not publish the claimed
+branch or set tracking to `origin/<targetBranch>`.
+
 This keeps claim fast while preventing a stale `origin/master` upstream from
-influencing later Bobbit-owned pushes.
+influencing later Bobbit-owned pushes. Claimed branches stay local-only unless
+an explicit publication path runs later.
 
 The unconditional `git fetch origin` in `freshenInBackground` stays — harmless
 when base is local, useful for refreshing any other tracking branches the

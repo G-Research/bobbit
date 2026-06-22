@@ -23,7 +23,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs } from "./docker-args.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
-import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
+import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
@@ -332,20 +332,12 @@ export class ProjectSandbox {
 			}
 		}
 
-		// Install post-commit hook for push-to-remote durability
-		await this._installPostCommitHook(containerId, worktreePath);
-
-		// Publish with an explicit destination refspec, then set upstream tracking
-		// only after that safe publish succeeds (non-fatal).
-		if (!shouldSkipRemotePush()) {
-			try {
-				await this._publishBranchToOrigin(containerId, worktreePath, branch, true);
-			} catch { /* push may fail with no remote, auth issues, or offline */ }
-		}
+		// Sandbox worktrees are local-only by default. Do not publish the branch
+		// or install a post-commit push hook during worktree creation.
 
 		// When the project has a configured `base_ref`, override the per-branch
 		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
-		// integration target rather than `origin/<branch>` created above.
+		// integration target.
 		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
 		// Non-fatal in the sandbox — host-side save-time validation already
 		// guarantees the ref resolves; this is defence-in-depth.
@@ -441,13 +433,8 @@ export class ProjectSandbox {
 				}
 			}
 
-			await this._installPostCommitHook(containerId, wtPath);
-
-			if (!shouldSkipRemotePush()) {
-				try {
-					await this._publishBranchToOrigin(containerId, wtPath, branch, true);
-				} catch { /* push may fail with no remote, auth issues, or offline */ }
-			}
+			// Sandbox worktrees are local-only by default. Do not publish the branch
+			// or install a post-commit push hook during worktree creation.
 
 			// Override per-branch upstream to the configured `base_ref` when set,
 			// mirroring host-side `createWorktreeSet` (see `docs/design/base-ref.md` §2).
@@ -966,47 +953,6 @@ export class ProjectSandbox {
 		}
 
 		console.log(`[project-sandbox] Multi-repo init sequence complete for project ${this.options.projectId}`);
-	}
-
-	// ── Private: Post-commit hook ──────────────────────────────────────
-
-	private async _publishBranchToOrigin(containerId: string, worktreePath: string, branch: string, setUpstream: boolean): Promise<void> {
-		await this._dockerExec(containerId, ["git", "push", "origin", `${branch}:refs/heads/${branch}`], {
-			cwd: worktreePath,
-			timeout: 30_000,
-		});
-		if (!setUpstream) return;
-		await this._dockerExec(containerId, ["git", "fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
-			cwd: worktreePath,
-			timeout: 15_000,
-		});
-		await this._dockerExec(containerId, ["git", "branch", `--set-upstream-to=origin/${branch}`, branch], {
-			cwd: worktreePath,
-			timeout: 10_000,
-		});
-	}
-
-	private async _installPostCommitHook(containerId: string, worktreePath: string): Promise<void> {
-		if (shouldSkipRemotePush()) return; // No push hook in test mode
-
-		// Determine the .git dir for this worktree (may be a file pointing to the main repo)
-		const hookScript = [
-			"#!/bin/sh",
-			'branch=$(git symbolic-ref --short HEAD 2>/dev/null)',
-			'[ -n "$branch" ] && git push origin "HEAD:refs/heads/$branch" 2>/dev/null &',
-		].join("\n");
-
-		try {
-			// Create hooks directory and write the hook
-			await this._dockerExec(containerId, ["sh", "-c", `
-				gitdir=$(git rev-parse --git-dir) &&
-				mkdir -p "$gitdir/hooks" &&
-				printf '%s\\n' '${hookScript.replace(/'/g, "'\\''")}' > "$gitdir/hooks/post-commit" &&
-				chmod +x "$gitdir/hooks/post-commit"
-			`], { cwd: worktreePath });
-		} catch (err: any) {
-			console.warn(`[project-sandbox] Failed to install post-commit hook in ${worktreePath}:`, err?.message || err);
-		}
 	}
 
 	// ── Private: Docker helpers ────────────────────────────────────────

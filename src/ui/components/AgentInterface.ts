@@ -2117,6 +2117,7 @@ export class AgentInterface extends LitElement {
 								.deletionsVsPrimary=${this.gitStatus?.deletionsVsPrimary ?? 0}
 								.mergedIntoPrimary=${this.gitStatus?.mergedIntoPrimary ?? false}
 								.unpushed=${this.gitStatus?.unpushed ?? false}
+								.remotePublication=${(this.gitStatus as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 								.statusFiles=${this.gitStatus?.status ?? []}
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
