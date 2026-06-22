@@ -16,7 +16,8 @@ process.env.BOBBIT_AGENT_DIR = agentDir;
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../src/server/agent/model-registry.ts");
-const { clampThinkingLevelForModel } = await import("../src/server/agent/thinking-level-clamp.ts");
+const { getModel } = await import("@earendil-works/pi-ai");
+const { clampThinkingLevelForModel, resolveThinkingClampModel } = await import("../src/server/agent/thinking-level-clamp.ts");
 
 const managers: any[] = [];
 
@@ -72,26 +73,51 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 		assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "high");
 	});
 
-	it("spawn-time initial thinking resolution still clamps older GLM families to off", () => {
-		for (const model of ["openrouter/z-ai/glm-4.5", "aigw/z-ai/glm-4.5"]) {
-			const manager: any = new SessionManager({ preferencesStore: prefsFor(model, "high") });
-			managers.push(manager);
+	it("spawn-time initial thinking resolution follows catalog for OpenRouter but inferMeta for older AIGW GLM", () => {
+		const openrouterManager: any = new SessionManager({ preferencesStore: prefsFor("openrouter/z-ai/glm-4.5", "high") });
+		managers.push(openrouterManager);
+		assert.equal(openrouterManager.resolveInitialThinkingLevel(undefined, undefined), "high");
 
-			assert.equal(manager.resolveInitialThinkingLevel(undefined, undefined), "off", `${model} should remain non-reasoning`);
-		}
+		const aigwManager: any = new SessionManager({ preferencesStore: prefsFor("aigw/z-ai/glm-4.5", "high") });
+		managers.push(aigwManager);
+		assert.equal(aigwManager.resolveInitialThinkingLevel(undefined, undefined), "off", "older AIGW GLM should remain non-reasoning by inferMeta fallback");
 	});
 
-	it("runtime persisted OpenRouter and AIGW GLM 5.2 clamps accept high", () => {
-		for (const provider of ["openrouter", "aigw"]) {
-			assert.equal(clampThinkingLevelForModel("high", provider, "z-ai/glm-5.2"), "high", `${provider} GLM 5.2 high should stay high`);
-			assert.equal(clampThinkingLevelForModel("xhigh", provider, "z-ai/glm-5.2"), "high", `${provider} GLM 5.2 xhigh should clamp to high`);
-		}
+	it("runtime persisted OpenRouter GLM 5.2 clamp uses pi-ai catalog metadata", () => {
+		const catalogModel = getModel("openrouter" as any, "z-ai/glm-5.2") as any;
+		assert.equal(catalogModel?.reasoning, true, "pi-ai catalog should mark OpenRouter GLM 5.2 as reasoning-capable");
+
+		const resolved = resolveThinkingClampModel("openrouter", "z-ai/glm-5.2");
+		assert.equal(resolved.metadataSource, "pi-ai-catalog");
+		assert.equal(resolved.reasoning, true);
+		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-5.2"), "high");
+		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "high");
 	});
 
-	it("runtime persisted older GLM clamp remains non-reasoning", () => {
-		for (const provider of ["openrouter", "aigw"]) {
-			assert.equal(clampThinkingLevelForModel("high", provider, "z-ai/glm-4.5"), "off", `${provider} older GLM should remain non-reasoning`);
-		}
+	it("runtime persisted AIGW GLM 5.2 clamp keeps inferMeta fallback", () => {
+		const throwingCatalogLookup = () => {
+			throw new Error("AIGW must not consult the built-in catalog");
+		};
+		const resolved = resolveThinkingClampModel("aigw", "z-ai/glm-5.2", { catalogLookup: throwingCatalogLookup });
+		assert.equal(resolved.metadataSource, "inferMeta");
+		assert.equal(resolved.reasoning, true);
+		assert.equal(clampThinkingLevelForModel("high", "aigw", "z-ai/glm-5.2", { catalogLookup: throwingCatalogLookup }), "high");
+		assert.equal(clampThinkingLevelForModel("xhigh", "aigw", "z-ai/glm-5.2", { catalogLookup: throwingCatalogLookup }), "high");
+	});
+
+	it("catalog thinkingLevelMap metadata is passed through to xhigh support", () => {
+		const catalogLookup = () => ({ reasoning: true, thinkingLevelMap: { xhigh: "xhigh" as const } });
+		const resolved = resolveThinkingClampModel("openrouter", "vendor/future-reasoner", { catalogLookup });
+		assert.equal(resolved.metadataSource, "pi-ai-catalog");
+		assert.deepEqual(resolved.thinkingLevelMap, { xhigh: "xhigh" });
+		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "vendor/future-reasoner", { catalogLookup }), "xhigh");
+	});
+
+	it("runtime persisted older GLM clamp follows catalog for OpenRouter but inferMeta for AIGW", () => {
+		const catalogModel = getModel("openrouter" as any, "z-ai/glm-4.5") as any;
+		assert.equal(catalogModel?.reasoning, true, "pi-ai catalog should drive built-in OpenRouter metadata when present");
+		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-4.5"), "high");
+		assert.equal(clampThinkingLevelForModel("high", "aigw", "z-ai/glm-4.5"), "off", "older AIGW GLM should remain non-reasoning by inferMeta fallback");
 	});
 
 	it("/api/models metadata marks sparse GLM 5.2 gateway entries as reasoning-capable", async () => {
