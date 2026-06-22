@@ -172,7 +172,7 @@ describe("Claude Code restart/restore without Pi agentSessionFile", () => {
 		];
 		fs.writeFileSync(
 			transcript,
-			persistedMessages.map((message) => JSON.stringify({ type: "message", message })).join("\n") + "\n",
+			persistedMessages.map((message, index) => JSON.stringify({ type: "message", ts: `2026-06-22T00:00:0${index}.000Z`, message })).join("\n") + "\n",
 		);
 		const ps = makePersisted({ id: "claude-snapshot", agentSessionFile: transcript });
 		const store = makeStore([ps]);
@@ -180,7 +180,10 @@ describe("Claude Code restart/restore without Pi agentSessionFile", () => {
 
 		const hydrated = await manager.hydrateClaudeCodeSnapshotMessages(ps.id, { messages: [] });
 
-		assert.deepEqual(hydrated.messages, persistedMessages);
+		assert.deepEqual(hydrated.messages, persistedMessages.map((message, index) => ({
+			...message,
+			timestamp: Date.parse(`2026-06-22T00:00:0${index}.000Z`),
+		})));
 	});
 
 	it("does not hydrate Pi snapshots from persisted transcripts", async () => {

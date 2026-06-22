@@ -14,6 +14,8 @@ import {
 	getClaudeCodeProbeCwd,
 	isValidModelAlias as isValidClaudeCodeModelAliasToken,
 	resolveClaudeCodeExecutable,
+	toClaudeCodeCliModelAlias,
+	toClaudeCodeDisplayModelAlias,
 } from "./claude-code-config.js";
 
 const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
@@ -28,6 +30,7 @@ function synthesizeClaudeCodeAttachmentText(text: string, images?: Array<unknown
 }
 
 export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+export type ClaudeCodeEffectivePermissionMode = ClaudeCodePermissionMode | "plan";
 
 export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	claudeCodeExecutable?: string;
@@ -35,6 +38,7 @@ export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	claudeCodePermissionMode?: ClaudeCodePermissionMode;
 	claudeCodeAllowBypassPermissions?: boolean;
 	claudeCodeSessionId?: string;
+	readOnly?: boolean;
 }
 
 export function buildClaudeCodeArgs(options: ClaudeCodeBridgeOptions = {}): string[] {
@@ -59,10 +63,11 @@ export function buildClaudeCodeArgs(options: ClaudeCodeBridgeOptions = {}): stri
 		args.push("--append-system-prompt", appendSystemPrompt);
 	}
 
-	const permissionMode = normalizePermissionMode(options.claudeCodePermissionMode, options.claudeCodeAllowBypassPermissions);
-	if (permissionMode !== "default") {
-		args.push("--permission-mode", permissionMode);
-	}
+	const permissionMode = resolveClaudeCodePermissionMode(options);
+	args.push("--permission-mode", permissionMode);
+
+	const effort = normalizeClaudeCodeEffort(options.initialThinkingLevel);
+	if (effort) args.push("--effort", effort);
 
 	const resumeSessionId = normalizeResumeSessionId(options.claudeCodeSessionId);
 	if (resumeSessionId) {
@@ -86,24 +91,36 @@ export function normalizePermissionMode(mode: unknown, allowBypass = false): Cla
 	return "default";
 }
 
+export function resolveClaudeCodePermissionMode(options: ClaudeCodeBridgeOptions = {}): ClaudeCodeEffectivePermissionMode {
+	if (options.readOnly) return "plan";
+	const configured = normalizePermissionMode(options.claudeCodePermissionMode, options.claudeCodeAllowBypassPermissions);
+	return configured === "default" ? "acceptEdits" : configured;
+}
+
+export function normalizeClaudeCodeEffort(level: unknown): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+	if (level === "off" || level === "minimal" || level === "low") return "low";
+	if (level === "medium" || level === "high" || level === "xhigh" || level === "max") return level;
+	return undefined;
+}
+
 export function resolveClaudeCodeModelAlias(options: ClaudeCodeBridgeOptions = {}): string {
 	const direct = options.claudeCodeModelAlias;
-	if (isValidClaudeCodeModelAlias(direct)) return direct;
+	if (isValidClaudeCodeModelAlias(direct)) return toClaudeCodeDisplayModelAlias(direct) ?? direct;
 	const initial = options.initialModel;
 	if (initial?.startsWith("claude-code/")) {
 		const alias = initial.slice("claude-code/".length);
-		if (isValidClaudeCodeModelAlias(alias)) return alias;
+		if (isValidClaudeCodeModelAlias(alias)) return toClaudeCodeDisplayModelAlias(alias) ?? alias;
 	}
-	return "sonnet";
+	return "local-claude-sonnet-4-6";
 }
 
 export function resolveClaudeCodeCliModelAlias(options: ClaudeCodeBridgeOptions = {}): string | undefined {
 	const direct = options.claudeCodeModelAlias;
-	if (isValidClaudeCodeModelAlias(direct)) return direct === "default" ? undefined : direct;
+	if (isValidClaudeCodeModelAlias(direct)) return toClaudeCodeCliModelAlias(direct);
 	const initial = options.initialModel;
 	if (initial?.startsWith("claude-code/")) {
 		const alias = initial.slice("claude-code/".length);
-		if (isValidClaudeCodeModelAlias(alias)) return alias === "default" ? undefined : alias;
+		if (isValidClaudeCodeModelAlias(alias)) return toClaudeCodeCliModelAlias(alias);
 	}
 	return undefined;
 }
@@ -297,6 +314,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 				runtime: "claude-code",
 				model: { provider: "claude-code", id: this.translator.state.modelAlias ?? resolveClaudeCodeModelAlias(this.options) },
 				claudeCodeSessionId: this.translator.state.claudeCodeSessionId,
+				thinkingLevel: this.options.initialThinkingLevel,
 				running: this.running,
 			},
 		};
@@ -314,7 +332,8 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			return { success: false, error: "Invalid Claude Code model alias" };
 		}
 		const previousAlias = this.translator.state.modelAlias ?? resolveClaudeCodeModelAlias(this.options);
-		if (modelId === previousAlias) return { success: true };
+		const nextAlias = toClaudeCodeDisplayModelAlias(modelId) ?? modelId;
+		if (nextAlias === previousAlias) return { success: true };
 		if (this.switchingModel) {
 			return { success: false, error: "Claude Code model switch already in progress" };
 		}
@@ -335,25 +354,57 @@ export class ClaudeCodeBridge implements IRpcBridge {
 		const wasRunning = !!this.process;
 		try {
 			if (this.process) await this.stopForModelSwitch();
-			this.options.claudeCodeModelAlias = modelId;
-			this.options.initialModel = `claude-code/${modelId}`;
+			this.options.claudeCodeModelAlias = nextAlias;
+			this.options.initialModel = `claude-code/${nextAlias}`;
 			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
-			this.translator.state.modelAlias = modelId;
+			this.translator.state.modelAlias = nextAlias;
 			if (wasRunning || resumeSessionId || hasConversation) await this.start();
-			return { success: true, runtime: "claude-code", model: { provider: "claude-code", id: modelId }, claudeCodeSessionId: resumeSessionId };
+			return { success: true, runtime: "claude-code", model: { provider: "claude-code", id: nextAlias }, claudeCodeSessionId: resumeSessionId };
 		} catch (err: any) {
 			this.options.claudeCodeModelAlias = previousAlias;
 			this.options.initialModel = `claude-code/${previousAlias}`;
 			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
 			this.translator.state.modelAlias = previousAlias;
-			return { success: false, error: `Failed to restart Claude Code with model alias "${modelId}": ${err?.message || err}` };
+			return { success: false, error: `Failed to restart Claude Code with model alias "${nextAlias}": ${err?.message || err}` };
 		} finally {
 			this.switchingModel = false;
 		}
 	}
 
-	async setThinkingLevel(_level: string): Promise<any> {
-		return { success: false, error: "Thinking level changes are not supported by Claude Code runtime in the MVP" };
+	async setThinkingLevel(level: string): Promise<any> {
+		const effort = normalizeClaudeCodeEffort(level);
+		if (!effort) return { success: false, error: `Invalid Claude Code effort level: ${level}` };
+		const previousLevel = this.options.initialThinkingLevel;
+		if (normalizeClaudeCodeEffort(previousLevel) === effort) {
+			this.options.initialThinkingLevel = level;
+			return { success: true, runtime: "claude-code", thinkingLevel: level, effort };
+		}
+		if (this.switchingModel) return { success: false, error: "Claude Code restart already in progress" };
+		if (this.pendingPrompt || this.turnActive || this.translator.state.assistantOpen) {
+			return { success: false, error: "Cannot change Claude Code effort while a turn is active; wait for the turn to finish first" };
+		}
+
+		const resumeSessionId = normalizeResumeSessionId(this.translator.state.claudeCodeSessionId ?? this.options.claudeCodeSessionId);
+		const hasConversation = this.translator.state.messages.length > 0;
+		if (!resumeSessionId && hasConversation) {
+			return { success: false, error: "Cannot change Claude Code effort because no Claude Code session id is available for resume" };
+		}
+
+		this.switchingModel = true;
+		const wasRunning = !!this.process;
+		try {
+			if (this.process) await this.stopForModelSwitch();
+			this.options.initialThinkingLevel = level;
+			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
+			if (wasRunning || resumeSessionId || hasConversation) await this.start();
+			return { success: true, runtime: "claude-code", thinkingLevel: level, effort, claudeCodeSessionId: resumeSessionId };
+		} catch (err: any) {
+			this.options.initialThinkingLevel = previousLevel;
+			if (resumeSessionId) this.options.claudeCodeSessionId = resumeSessionId;
+			return { success: false, error: `Failed to restart Claude Code with effort "${effort}": ${err?.message || err}` };
+		} finally {
+			this.switchingModel = false;
+		}
 	}
 
 	async compact(_timeoutMs = 120_000): Promise<any> {
@@ -575,6 +626,7 @@ export class ClaudeCodeBridge implements IRpcBridge {
 			id: `claude-code-abort-${Date.now().toString(36)}`,
 			role: "assistant",
 			content: [{ type: "text", text: "Claude Code turn aborted." }],
+			timestamp: Date.now(),
 			stopReason: "error",
 			errorMessage: "Claude Code turn aborted.",
 		};

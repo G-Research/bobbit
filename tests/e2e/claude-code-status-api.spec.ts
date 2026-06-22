@@ -66,7 +66,7 @@ test.describe("Claude Code status/model APIs", () => {
 		expect(modelsResp.status).toBe(200);
 		const models = await modelsResp.json();
 		const claudeCodeModels = models.filter((m: any) => m.provider === "claude-code");
-		expect(claudeCodeModels.map((m: any) => m.id)).toEqual(["claude-opus-4-8", "default", "sonnet", "opus"]);
+		expect(claudeCodeModels.map((m: any) => m.id)).toEqual(["local-claude-opus-4-8", "local-claude-sonnet-4-6"]);
 		for (const model of claudeCodeModels) {
 			expect(model).toMatchObject({
 				api: "claude-code-runtime",

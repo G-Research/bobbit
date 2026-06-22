@@ -1485,7 +1485,7 @@ let claudeCodeStatus: ClaudeCodeStatus | null = null;
 let claudeCodeStatusLoading = false;
 let claudeCodeStatusError = "";
 let prefClaudeCodeExecutable = "claude";
-let prefClaudeCodeDefaultModel = "claude-opus-4-8";
+let prefClaudeCodeDefaultModel = "local-claude-opus-4-8";
 let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "default";
 let prefClaudeCodeAllowBypass = false;
 
@@ -1605,7 +1605,7 @@ function loadModelsState(): void {
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
 				prefClaudeCodeExecutable = prefs["claudeCode.executablePath"] || "claude";
-				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "claude-opus-4-8";
+				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "local-claude-opus-4-8";
 				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
 				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
 				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "default";
@@ -1740,7 +1740,7 @@ async function setClaudeCodeExecutable(value: string): Promise<void> {
 }
 
 async function setClaudeCodeDefaultModel(value: string): Promise<void> {
-	prefClaudeCodeDefaultModel = value || "claude-opus-4-8";
+	prefClaudeCodeDefaultModel = value || "local-claude-opus-4-8";
 	await savePref("claudeCode.defaultModel", value || null);
 	renderApp();
 }
@@ -2122,7 +2122,7 @@ function renderClaudeCodeSection() {
 	const commandPath = status?.commandPath || status?.executablePath || prefClaudeCodeExecutable || "claude";
 	const aliases = Array.isArray(status?.modelAliases) && status!.modelAliases!.length
 		? status!.modelAliases!
-		: ["claude-opus-4-8", "default", "sonnet", "opus"];
+		: ["local-claude-opus-4-8", "local-claude-sonnet-4-6"];
 	const statusClass = tone === "ready"
 		? "bg-green-500/10 border-green-500/20"
 		: tone === "checking"
@@ -2195,7 +2195,7 @@ function renderClaudeCodeSection() {
 				</label>
 			</div>
 			<p class="text-xs text-muted-foreground">
-				default asks normally; acceptEdits accepts edit operations when Claude Code requests them; bypassPermissions disables normal prompts and is gated below.
+				default uses acceptEdits for normal sessions and plan for read-only sessions; bypassPermissions disables normal prompts and is gated below.
 			</p>
 			<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
 				<input
@@ -2299,7 +2299,7 @@ export function __testResetModelsTab(opts: {
 	claudeCodeStatusLoading = false;
 	claudeCodeStatusError = "";
 	prefClaudeCodeExecutable = opts.prefClaudeCodeExecutable ?? "claude";
-	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "claude-opus-4-8";
+	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "local-claude-opus-4-8";
 	prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(opts.prefClaudeCodePermissionMode);
 	prefClaudeCodeAllowBypass = opts.prefClaudeCodeAllowBypass ?? false;
 	prefSessionThinking = "";

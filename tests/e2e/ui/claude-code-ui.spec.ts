@@ -35,8 +35,8 @@ async function resetClaudeCodePrefs(gateway: any): Promise<void> {
 }
 
 const CLAUDE_CODE_MODEL = {
-	id: "sonnet",
-	name: "Claude Code Sonnet",
+	id: "local-claude-sonnet-4-6",
+	name: "local-claude-sonnet-4-6",
 	provider: "claude-code",
 	api: "claude-code-runtime",
 	runtime: "claude-code",
@@ -53,8 +53,8 @@ const CLAUDE_CODE_MODEL = {
 
 const CLAUDE_CODE_OPUS_MODEL = {
 	...CLAUDE_CODE_MODEL,
-	id: "claude-opus-4-8",
-	name: "Claude Code Opus 4.8",
+	id: "local-claude-opus-4-8",
+	name: "local-claude-opus-4-8",
 };
 
 test.describe("Claude Code local-runtime UI", () => {
@@ -74,9 +74,9 @@ test.describe("Claude Code local-runtime UI", () => {
 			await expect(footer).toBeVisible({ timeout: 15_000 });
 			await footer.click();
 
-			const row = page.locator('agent-model-selector [data-model-id="claude-opus-4-8"]');
+			const row = page.locator('agent-model-selector [data-model-id="local-claude-opus-4-8"]');
 			await expect(row).toBeVisible({ timeout: 10_000 });
-			await expect(row).toContainText("Claude Code Opus 4.8");
+			await expect(row).toContainText("local-claude-opus-4-8");
 			await expect(row).not.toContainText("Local runtime");
 			await expect(row).toContainText("Claude Code (local)");
 			await expect(row).toContainText("Claude Code managed");
@@ -173,7 +173,7 @@ test.describe("Claude Code local-runtime UI", () => {
 					checking: false,
 					commandPath: "claude",
 					version: "1.2.3",
-					modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
+					modelAliases: ["local-claude-opus-4-8", "local-claude-sonnet-4-6"],
 					permissionMode: "default",
 					reason: "auth_required",
 					message: "Claude Code is installed but not authenticated.",
@@ -204,11 +204,11 @@ test.describe("Claude Code local-runtime UI", () => {
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
 		await page.getByRole("button", { name: "Change executable" }).click();
-		await section.locator("[data-testid='claude-code-default-model']").selectOption("claude-opus-4-8");
+		await section.locator("[data-testid='claude-code-default-model']").selectOption("local-claude-opus-4-8");
 		await section.locator("[data-testid='claude-code-permission-mode']").selectOption("acceptEdits");
 
 		await expect.poll(() => writes.some((w) => w["claudeCode.executablePath"] === "/opt/bin/claude")).toBe(true);
-		await expect.poll(() => writes.some((w) => w["claudeCode.defaultModel"] === "claude-opus-4-8")).toBe(true);
+		await expect.poll(() => writes.some((w) => w["claudeCode.defaultModel"] === "local-claude-opus-4-8")).toBe(true);
 		await expect.poll(() => writes.some((w) => w["claudeCode.permissionMode"] === "acceptEdits")).toBe(true);
 	});
 });

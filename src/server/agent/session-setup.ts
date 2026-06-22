@@ -479,6 +479,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
+		readOnly: plan.readOnly,
 		claudeCodeSessionId: plan.claudeCodeSessionId,
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see

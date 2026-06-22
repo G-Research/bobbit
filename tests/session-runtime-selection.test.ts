@@ -10,9 +10,9 @@ describe("session runtime selection", () => {
 	});
 
 	it("selects Claude Code from provider/model strings", () => {
-		assert.equal(runtime.runtimeFromModelString("claude-code/sonnet"), "claude-code");
-		assert.equal(runtime.resolveSessionRuntime({ initialModel: "claude-code/opus" }), "claude-code");
-		assert.equal(runtime.modelAliasFromModelString("claude-code/opus"), "opus");
+		assert.equal(runtime.runtimeFromModelString("claude-code/local-claude-sonnet-4-6"), "claude-code");
+		assert.equal(runtime.resolveSessionRuntime({ initialModel: "claude-code/local-claude-opus-4-8" }), "claude-code");
+		assert.equal(runtime.modelAliasFromModelString("claude-code/local-claude-opus-4-8"), "local-claude-opus-4-8");
 	});
 
 	it("rejects silent pi to Claude Code live switches", () => {
@@ -33,19 +33,19 @@ describe("session runtime selection", () => {
 	});
 
 	it("hydrates Claude Code bridge metadata defaults", () => {
-		const options = runtime.hydrateRuntimeOptions({ cwd: "/tmp/x", initialModel: "claude-code/sonnet" });
+		const options = runtime.hydrateRuntimeOptions({ cwd: "/tmp/x", initialModel: "claude-code/local-claude-sonnet-4-6" });
 		assert.equal(options.runtime, "claude-code");
 		assert.equal(options.claudeCodeExecutable, "claude");
 		assert.equal(options.claudeCodePermissionMode, "default");
-		assert.equal(options.claudeCodeModelAlias, "sonnet");
+		assert.equal(options.claudeCodeModelAlias, "local-claude-sonnet-4-6");
 	});
 
 	it("does not derive Claude Code aliases from API-backed model strings", () => {
 		const options = runtime.hydrateRuntimeOptions(
 			{ cwd: "/tmp/x", runtime: "claude-code", initialModel: "anthropic/claude-opus-4-1" },
-			{ executablePath: "claude", defaultModel: "sonnet", permissionMode: "default", allowBypassPermissions: false },
+			{ executablePath: "claude", defaultModel: "local-claude-sonnet-4-6", permissionMode: "default", allowBypassPermissions: false },
 		);
 		assert.equal(options.runtime, "claude-code");
-		assert.equal(options.claudeCodeModelAlias, "sonnet");
+		assert.equal(options.claudeCodeModelAlias, "local-claude-sonnet-4-6");
 	});
 });

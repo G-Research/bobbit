@@ -304,15 +304,14 @@ function buildClaudeCodeModelsFromStatus(status: { ready: boolean; authenticated
 
 function claudeCodeContextWindow(alias: string): number {
 	if (alias === "sonnet" || alias === "opus") return 1_000_000;
-	if (/^claude-(?:opus|sonnet)/i.test(alias)) return Math.max(inferMeta(alias).contextWindow, 1_000_000);
+	const cliAlias = alias.startsWith("local-") ? alias.slice("local-".length) : alias;
+	if (/^claude-(?:opus|sonnet)/i.test(cliAlias)) return Math.max(inferMeta(cliAlias).contextWindow, 1_000_000);
 	return 200_000;
 }
 
 function claudeCodeModelName(alias: string): string {
-	if (alias === "claude-opus-4-8") return "Claude Code Opus 4.8";
-	if (alias === "default") return "Claude Code Default";
-	if (alias === "sonnet") return "Claude Code Sonnet";
-	if (alias === "opus") return "Claude Code Opus";
+	if (alias === "local-claude-opus-4-8") return "local-claude-opus-4-8";
+	if (alias === "local-claude-sonnet-4-6") return "local-claude-sonnet-4-6";
 	return `Claude Code ${alias}`;
 }
 

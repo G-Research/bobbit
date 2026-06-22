@@ -10,6 +10,7 @@ export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	claudeCodePermissionMode?: ClaudeCodePermissionMode;
 	claudeCodeModelAlias?: string;
 	claudeCodeAllowBypassPermissions?: boolean;
+	readOnly?: boolean;
 }
 
 export type SessionBridgeOptions = RpcBridgeOptions & {
@@ -19,6 +20,7 @@ export type SessionBridgeOptions = RpcBridgeOptions & {
 	claudeCodePermissionMode?: ClaudeCodePermissionMode;
 	claudeCodeModelAlias?: string;
 	claudeCodeAllowBypassPermissions?: boolean;
+	readOnly?: boolean;
 };
 
 export class RuntimeSwitchError extends Error {
@@ -85,6 +87,7 @@ export function hydrateRuntimeOptions(options: SessionBridgeOptions, defaults?: 
 		claudeCodePermissionMode: options.claudeCodePermissionMode || defaults?.permissionMode || "default",
 		claudeCodeAllowBypassPermissions: options.claudeCodeAllowBypassPermissions ?? defaults?.allowBypassPermissions ?? false,
 		claudeCodeModelAlias: options.claudeCodeModelAlias || initialModelAlias || defaults?.defaultModel || "default",
+		readOnly: options.readOnly,
 	};
 }
 
@@ -124,7 +127,7 @@ class LazyClaudeCodeBridge implements IRpcBridge {
 	async promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any> { return (await this.load()).promptWhenReady(text, images, opts); }
 	async steer(text: string): Promise<any> { return (await this.load()).steer(text); }
 	async abort(): Promise<any> { return this.bridge ? this.bridge.abort() : { success: true }; }
-	async getState(): Promise<any> { return this.bridge ? this.bridge.getState() : { success: true, data: { runtime: "claude-code", model: { provider: "claude-code", id: this.options.claudeCodeModelAlias }, claudeCodeSessionId: this.options.claudeCodeSessionId, claudeCodeModelAlias: this.options.claudeCodeModelAlias, claudeCodePermissionMode: this.options.claudeCodePermissionMode } }; }
+	async getState(): Promise<any> { return this.bridge ? this.bridge.getState() : { success: true, data: { runtime: "claude-code", model: { provider: "claude-code", id: this.options.claudeCodeModelAlias }, claudeCodeSessionId: this.options.claudeCodeSessionId, claudeCodeModelAlias: this.options.claudeCodeModelAlias, claudeCodePermissionMode: this.options.claudeCodePermissionMode, thinkingLevel: this.options.initialThinkingLevel } }; }
 	async getMessages(): Promise<any> { return this.bridge ? this.bridge.getMessages() : { success: true, data: { messages: [] } }; }
 	async setModel(provider: string, modelId: string): Promise<any> { return (await this.load()).setModel(provider, modelId); }
 	async setThinkingLevel(level: string): Promise<any> { return (await this.load()).setThinkingLevel(level); }

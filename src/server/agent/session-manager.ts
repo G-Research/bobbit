@@ -670,6 +670,17 @@ type RestoreCoordinator = {
 	promise: Promise<SessionInfo | undefined>;
 };
 
+function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
+	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
+	let timestamp: number | undefined;
+	if (typeof envelopeTs === "number" && Number.isFinite(envelopeTs)) timestamp = envelopeTs < 10_000_000_000 ? envelopeTs * 1000 : envelopeTs;
+	else if (typeof envelopeTs === "string") {
+		const parsed = Date.parse(envelopeTs);
+		if (Number.isFinite(parsed)) timestamp = parsed;
+	}
+	return timestamp === undefined ? message : { ...message, timestamp };
+}
+
 function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
 	const askToolIds = new Set<string>();
 	for (const message of messages as any[]) {
@@ -4441,6 +4452,7 @@ export class SessionManager {
 			claudeCodeExecutable: ps.claudeCodeExecutable,
 			claudeCodePermissionMode: ps.claudeCodePermissionMode,
 			claudeCodeModelAlias: ps.claudeCodeModelAlias,
+			readOnly: ps.readOnly,
 		}, this.readClaudeCodeConfigForProject(ps.projectId)));
 
 		const rpcClient = createSessionBridge(bridgeOptions);
@@ -5163,7 +5175,7 @@ export class SessionManager {
 				if (!line.trim()) continue;
 				try {
 					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) messages.push(entry.message);
+					if (entry.type === "message" && entry.message) messages.push(isClaudeCode ? withPersistedClaudeCodeMessageTimestamp(entry.message, entry.ts) : entry.message);
 				} catch { /* skip malformed line */ }
 			}
 			return isClaudeCode ? normalizePersistedClaudeCodeAskMessages(messages) : messages;
@@ -6250,7 +6262,7 @@ export class SessionManager {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
 		}
-		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
+		const initThinking = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
 		assertRuntimeAllowedForSession(runtime, session.sandboxed);
@@ -6261,6 +6273,7 @@ export class SessionManager {
 			claudeCodeExecutable: respawnPersisted?.claudeCodeExecutable,
 			claudeCodePermissionMode: respawnPersisted?.claudeCodePermissionMode,
 			claudeCodeModelAlias: respawnPersisted?.claudeCodeModelAlias,
+			readOnly: respawnPersisted?.readOnly ?? session.readOnly,
 		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
 		const rpcClient = createSessionBridge(bridgeOptions);
@@ -7567,7 +7580,7 @@ export class SessionManager {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;
 			}
-			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
+			const initThinking = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: forceRespawnPersisted?.modelProvider });
 			assertRuntimeAllowedForSession(runtime, session.sandboxed);
@@ -7578,6 +7591,7 @@ export class SessionManager {
 				claudeCodeExecutable: forceRespawnPersisted?.claudeCodeExecutable,
 				claudeCodePermissionMode: forceRespawnPersisted?.claudeCodePermissionMode,
 				claudeCodeModelAlias: forceRespawnPersisted?.claudeCodeModelAlias,
+				readOnly: forceRespawnPersisted?.readOnly ?? session.readOnly,
 			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
 			const rpcClient = createSessionBridge(bridgeOptions);
