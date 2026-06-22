@@ -5,9 +5,9 @@
  * Unlike the gateway-internal `afterTurn` / `sessionShutdown` dispatches, the
  * per-turn `beforePrompt` and `beforeCompact` hooks need to run *inside* the
  * agent process so they can observe / amend the outgoing turn. The generated
- * extension subscribes to pi's `before_agent_start` and `session_before_compact`
- * events and calls back into the gateway, which dispatches through the
- * `LifecycleHub`.
+ * extension subscribes to pi's `before_agent_start`, `message_end`, and
+ * `session_before_compact` events and calls back into the gateway, which
+ * dispatches through the `LifecycleHub`.
  *
  * NON-NEGOTIABLE invariant: the user's message text is NEVER mutated. Per-turn
  * recall is injected as a hidden custom/user-side message, never by amending
@@ -215,6 +215,22 @@ export default function(pi) {
       message: {
         customType: "bobbit:dynamic-context",
         content,
+        display: false,
+      },
+    };
+  });
+
+  // Pi persists custom messages when their message_end event fires. Dynamic
+  // context only belongs to the current LLM turn, so scrub the hidden message
+  // before persistence/compaction can rehydrate stale recall into a future turn.
+  // Current-turn delivery is already complete by this point.
+  pi.on("message_end", (event) => {
+    const msg = event && event.message;
+    if (!msg || msg.role !== "custom" || msg.customType !== "bobbit:dynamic-context") return undefined;
+    return {
+      message: {
+        ...msg,
+        content: [],
         display: false,
       },
     };

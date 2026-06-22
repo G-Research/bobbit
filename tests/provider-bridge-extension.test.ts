@@ -4,8 +4,9 @@
  * Covers:
  *   1. Codegen string shape — delimiters, gateway URL/token reads with
  *      state-file fallback, AbortController + 2500/5000 timeout paths,
- *      `before_agent_start` + `session_before_compact` subscriptions, and the
- *      hidden custom-message dynamic context path (never event.prompt).
+ *      `before_agent_start` + `message_end` + `session_before_compact`
+ *      subscriptions, hidden custom-message dynamic context path (never
+ *      event.prompt), and persistence-time scrub of hidden dynamic context.
  *   2. Parse-validity + round-trip import of the generated source.
  *   3. `stripDelimitedTail` legacy idempotency for any stale dynamic-context tail.
  *   4. The no-provider helper: bridge is only warranted when an enabled provider
@@ -44,13 +45,25 @@ async function loadGeneratedBridge(source: string): Promise<any> {
 	return import(pathToFileURL(file).href);
 }
 
-async function registerBeforeAgentStart(source: string): Promise<(event: any) => Promise<any>> {
+async function registerGeneratedHandlers(source: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
 	const mod = await loadGeneratedBridge(source);
-	const handlers = new Map<string, (event: any) => Promise<any>>();
-	mod.default({ on: (event: string, handler: (event: any) => Promise<any>) => handlers.set(event, handler) });
+	const handlers = new Map<string, (event: any) => Promise<any> | any>();
+	mod.default({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	return handlers;
+}
+
+async function registerBeforeAgentStart(source: string): Promise<(event: any) => Promise<any>> {
+	const handlers = await registerGeneratedHandlers(source);
 	const handler = handlers.get("before_agent_start");
 	assert.equal(typeof handler, "function", "expected before_agent_start handler to be registered");
-	return handler!;
+	return handler as (event: any) => Promise<any>;
+}
+
+async function registerMessageEnd(source: string): Promise<(event: any) => any> {
+	const handlers = await registerGeneratedHandlers(source);
+	const handler = handlers.get("message_end");
+	assert.equal(typeof handler, "function", "expected message_end handler to be registered");
+	return handler as (event: any) => any;
 }
 
 describe("generateProviderBridgeExtension", () => {
@@ -88,8 +101,9 @@ describe("generateProviderBridgeExtension", () => {
 		);
 	});
 
-	it("subscribes before_agent_start and session_before_compact", () => {
+	it("subscribes before_agent_start, message_end, and session_before_compact", () => {
 		assert.ok(source.includes('pi.on("before_agent_start"'), "expected before_agent_start subscription");
+		assert.ok(source.includes('pi.on("message_end"'), "expected message_end subscription");
 		assert.ok(source.includes('pi.on("session_before_compact"'), "expected session_before_compact subscription");
 	});
 
@@ -128,7 +142,11 @@ describe("generateProviderBridgeExtension", () => {
 			process.env.BOBBIT_TOKEN = "unit-token";
 			globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
 				postedBody = JSON.parse(String(init?.body ?? "{}"));
-				return new Response(JSON.stringify({ content: "<context-block>turn A</context-block>", blocks: [{ id: "demo:turn" }] }), {
+				return new Response(JSON.stringify({
+					content: "<context-block>turn A</context-block>",
+					tail: "<!-- legacy tail must be ignored -->STALE_SYSTEM_TAIL",
+					blocks: [{ id: "demo:turn" }],
+				}), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
@@ -151,6 +169,7 @@ describe("generateProviderBridgeExtension", () => {
 					display: false,
 				},
 			}, "before_agent_start must return hidden custom dynamic-context message, not systemPrompt");
+			assert.ok(!JSON.stringify(result).includes("STALE_SYSTEM_TAIL"), "new bridge must ignore legacy tail");
 			assert.ok(!("systemPrompt" in (result ?? {})), "before_agent_start must not return systemPrompt");
 			assert.ok(!("prompt" in (result ?? {})), "must NOT return a mutated prompt");
 		} finally {
@@ -160,6 +179,34 @@ describe("generateProviderBridgeExtension", () => {
 			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
 			else process.env.BOBBIT_TOKEN = originalToken;
 		}
+	});
+
+	it("scrubs hidden dynamic-context custom messages before pi persists them", async () => {
+		const messageEnd = await registerMessageEnd(source);
+		const dynamicMessage = {
+			role: "custom",
+			customType: "bobbit:dynamic-context",
+			content: "STALE_DYNAMIC_CONTEXT_SHOULD_NOT_PERSIST",
+			display: false,
+			timestamp: 123,
+		};
+
+		const result = await messageEnd({ type: "message_end", message: dynamicMessage });
+
+		assert.equal(result.message.role, "custom", "message_end replacement must keep role for pi");
+		assert.equal(result.message.customType, "bobbit:dynamic-context");
+		assert.deepEqual(result.message.content, [], "persisted replacement must not carry dynamic context content");
+		assert.equal(result.message.display, false);
+		assert.ok(
+			!JSON.stringify(result).includes("STALE_DYNAMIC_CONTEXT_SHOULD_NOT_PERSIST"),
+			"stale dynamic context must not be persisted or rehydrated",
+		);
+	});
+
+	it("does not rewrite unrelated message_end events", async () => {
+		const messageEnd = await registerMessageEnd(source);
+		assert.equal(await messageEnd({ type: "message_end", message: { role: "custom", customType: "other", content: "keep" } }), undefined);
+		assert.equal(await messageEnd({ type: "message_end", message: { role: "user", content: "keep" } }), undefined);
 	});
 
 	it("returns undefined when beforePrompt produces empty or missing content", async () => {
