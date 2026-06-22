@@ -546,11 +546,9 @@ interface GoalFormConfig {
 	/** Invoked when the user changes the concurrency cap. */
 	onMaxConcurrentChildrenChange?: (value: number) => void;
 
-	// ---- Proposal-modal tabs (Goal / Workflow / Roles) ----
-	/** When true, wrap the form body in a tabbed surface with Workflow + Roles
-	 *  tabs alongside Goal. The footer stays outside the panels so submit/dismiss
-	 *  remain visible on every tab. */
-	tabbed?: boolean;
+	// ---- Goal proposal tabs (Goal / Workflow / Roles / Metadata) ----
+	/** Active tab for the always-tabbed goal proposal form. The footer stays
+	 *  outside the panels so submit/dismiss remain visible on every tab. */
 	activeTab?: ProposalTab;
 	onTabChange?: (tab: ProposalTab) => void;
 
@@ -663,8 +661,7 @@ function proposalSubgoalSubmission(opts: {
 }
 
 // ── Shared sub-goal UI fragments ────────────────────────────────────────────
-// Rendered inline on the non-tabbed +New Goal preview, and collated into the
-// dedicated "Sub-goals" tab of the tabbed goal-proposal panel.
+// Collated into the dedicated "Sub-goals" tab when the Subgoals setting is on.
 
 /** Parent-goal picker row. */
 function renderParentPickerRow(config: GoalFormConfig, lblCls: string): TemplateResult {
@@ -959,15 +956,15 @@ function renderGoalForm(config: GoalFormConfig) {
 	// When viewing a historical Goal (vN) tab, show that revision's number
 	// in the panel header instead of the live slot's latest rev.
 	const goalRev = (_proposalOverride?.type === "goal" ? _proposalOverride.rev : state.activeProposals.goal?.rev) ?? 0;
-	const tabbed = !!config.tabbed;
-	const activeTab: ProposalTab = config.activeTab ?? "goal";
+	const subgoalsTab = showSubgoalsTab(config);
+	const requestedActiveTab: ProposalTab = config.activeTab ?? "goal";
+	const activeTab: ProposalTab = requestedActiveTab === "subgoals" && !subgoalsTab ? "goal" : requestedActiveTab;
 	const goalBody = html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5"
-			role=${tabbed ? "tabpanel" : nothing}
-			id=${tabbed ? "goal-proposal-panel-goal" : nothing}
-			aria-labelledby=${tabbed ? "goal-proposal-tab-goal" : nothing}
-			data-testid=${tabbed ? "goal-proposal-panel-goal" : nothing}>
-			${!tabbed && goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
+			role="tabpanel"
+			id="goal-proposal-panel-goal"
+			aria-labelledby="goal-proposal-tab-goal"
+			data-testid="goal-proposal-panel-goal">
 			${noWorkflows ? html`
 				<div
 					class="rounded-md border p-3 flex flex-col gap-2"
@@ -1016,8 +1013,6 @@ function renderGoalForm(config: GoalFormConfig) {
 					</div>
 				` : ""}
 			</div>
-			${!tabbed && config.subgoalsEnabled ? renderParentPickerRow(config, lblCls) : ""}
-			${!tabbed ? renderSubgoalBreadcrumb(config) : ""}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
 					<span class="${lblCls} w-20 md:w-16">Worktree</span>
@@ -1096,9 +1091,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						` : ''}
 					</label>
 				`;})}
-				${!tabbed ? renderSubgoalsToggle(config) : ""}
 			</div>
-			${!tabbed ? renderGoalMetadataEditor(config) : ""}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<div class="flex items-center gap-1">
@@ -1185,10 +1178,6 @@ function renderGoalForm(config: GoalFormConfig) {
 			</div>
 		</div>
 	`;
-	if (!tabbed) {
-		return html`${goalBody}${footer}`;
-	}
-	const subgoalsTab = showSubgoalsTab(config);
 	const onTabChange = (t: ProposalTab) => config.onTabChange?.(t);
 	const onTabKey = (e: KeyboardEvent) => {
 		const order: ProposalTab[] = subgoalsTab ? ["goal", "workflow", "roles", "metadata", "subgoals"] : ["goal", "workflow", "roles", "metadata"];
@@ -1276,7 +1265,7 @@ function renderGoalForm(config: GoalFormConfig) {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — WORKFLOW TAB
+// GOAL PROPOSAL — WORKFLOW TAB
 //
 // A workflow <select> (synced to the Goal tab's picker via the shared
 // config.workflowId / config.onWorkflowChange) with a Customise/Revert toggle
@@ -1344,7 +1333,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — ROLES TAB
+// GOAL PROPOSAL — ROLES TAB
 //
 // Reuses renderRoleList / renderRoleInspector / renderRoleEditor exported
 // from src/app/role-manager-page.ts. Customisations are kept in a
@@ -1434,10 +1423,10 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — METADATA TAB
+// GOAL PROPOSAL — METADATA TAB
 //
-// Reuses the goal metadata editor so tabbed proposals share the same draft rows
-// and submit semantics as the non-tabbed Goal form.
+// Reuses the goal metadata editor so every goal proposal surface shares the
+// same draft rows and submit semantics.
 // ============================================================================
 function renderProposalMetadataTab(config: GoalFormConfig): TemplateResult {
 	return html`
@@ -1452,7 +1441,7 @@ function renderProposalMetadataTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — SUB-GOALS TAB
+// GOAL PROPOSAL — SUB-GOALS TAB
 //
 // Collates the per-goal nesting controls: parent picker, breadcrumb, and the
 // allow-subgoals toggle + max-depth control.
@@ -1605,6 +1594,7 @@ function goalPreviewPanel() {
 		_assistantEnabledOptionalSteps = [];
 		state.previewMetadataRows = [];
 		state.previewMetadataEdited = false;
+		resetProposalTabsState();
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1719,6 +1709,8 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+				activeTab: _proposalActiveTab,
+				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
 			})}
 		</div>
 	`;
@@ -2807,7 +2799,7 @@ let _proposalDivergencePolicy: "strict" | "balanced" | "autonomous" | null = nul
 let _proposalMaxConcurrentChildren: number | null = null;
 
 // ----------------------------------------------------------------------------
-// Proposal-modal tabs state (Goal / Workflow / Roles).
+// Goal proposal tab state (Goal / Workflow / Roles / Metadata / Sub-goals).
 //
 // `_proposalInlineWorkflow` is the draft-scoped customised workflow — when
 // non-null, the submit path forwards it as `workflow` instead of
@@ -3321,8 +3313,7 @@ function goalProposalPanel() {
 		onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
 		onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
 
-		// ---- Proposal-modal tabs wiring ----
-		tabbed: true,
+		// ---- Goal proposal tabs wiring ----
 		activeTab: _proposalActiveTab,
 		onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
 
