@@ -57,6 +57,7 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
+import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -4378,11 +4379,6 @@ async function handleApiRoute(
 	// sessionShutdown are gateway-internal dispatches and intentionally have NO
 	// public endpoint.
 	//
-	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
-	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
-	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
-
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
 	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
@@ -4420,7 +4416,7 @@ async function handleApiRoute(
 		}
 		const hub = sessionManager.lifecycleHub;
 		if (!hub) {
-			json({ tail: "", blocks: [] });
+			json({ content: "", tail: "", blocks: [] });
 			return;
 		}
 		try {
@@ -4430,11 +4426,12 @@ async function handleApiRoute(
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			});
-			const tail = blocks.length
-				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
-				: "";
+			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
+			// Temporary back-compat for generated bridges from the system-prompt-tail era.
+			// New bridges consume `content` only and must never return systemPrompt.
+			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
 			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -4445,6 +4442,7 @@ async function handleApiRoute(
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
 			json({
+				content,
 				tail,
 				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
 			});

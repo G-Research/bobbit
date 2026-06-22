@@ -445,12 +445,14 @@ Field rules and defaults:
 **All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
 indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
 `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
-is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
-section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
-extension and `afterTurn` / `sessionShutdown` fire server-side. The first built-in
-production provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped in the
-built-in band but **dormant until a Hindsight URL is configured**, so a fresh install still
-contributes nothing until you opt in.
+is installed + active + enabled for the session's scope contributes a spawn-time **Dynamic
+Context** system-prompt section. Per-turn `beforePrompt` blocks fire via the generated
+provider-bridge pi extension and are delivered as hidden `bobbit:dynamic-context`
+custom/user-side messages, not appended to `systemPrompt`; `beforeCompact` also fires through the
+bridge but does not amend prompt content. `afterTurn` / `sessionShutdown` fire server-side. The
+first built-in production provider is the **[Hindsight memory pack](hindsight-memory.md)** —
+shipped in the built-in band but **dormant until a Hindsight URL is configured**, so a fresh
+install still contributes nothing until you opt in.
 #### Why providers are pack-scoped, *not* name-merged
 
 Provider contributions are keyed `(packId, contributionId)` and loaded through the pack-contribution path —

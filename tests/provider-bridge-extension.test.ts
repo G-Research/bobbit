@@ -4,10 +4,11 @@
  * Covers:
  *   1. Codegen string shape — delimiters, gateway URL/token reads with
  *      state-file fallback, AbortController + 2500/5000 timeout paths,
- *      `before_agent_start` + `session_before_compact` subscriptions, and the
- *      systemPrompt-only mutation (never event.prompt).
+ *      `before_agent_start` + `context` + `session_before_compact`
+ *      subscriptions, hidden custom-message dynamic context path (never
+ *      event.prompt), and future-context filtering of stale hidden dynamic context.
  *   2. Parse-validity + round-trip import of the generated source.
- *   3. `stripDelimitedTail` idempotency (no dynamic-context growth turn-over-turn).
+ *   3. `stripDelimitedTail` legacy idempotency for any stale dynamic-context tail.
  *   4. The no-provider helper: bridge is only warranted when an enabled provider
  *      declares `beforePrompt` or `beforeCompact`.
  */
@@ -29,10 +30,48 @@ import {
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pbx-"));
+let bridgeImportCounter = 0;
 
 after(() => {
 	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
 });
+
+async function loadGeneratedBridge(source: string): Promise<any> {
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+	});
+	const file = path.join(tmpDir, `provider-bridge-${bridgeImportCounter++}.cjs`);
+	fs.writeFileSync(file, transpiled.outputText, "utf-8");
+	return import(pathToFileURL(file).href);
+}
+
+async function registerGeneratedHandlers(source: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
+	const mod = await loadGeneratedBridge(source);
+	const handlers = new Map<string, (event: any) => Promise<any> | any>();
+	mod.default({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	return handlers;
+}
+
+async function registerBeforeAgentStart(source: string): Promise<(event: any) => Promise<any>> {
+	const handlers = await registerGeneratedHandlers(source);
+	const handler = handlers.get("before_agent_start");
+	assert.equal(typeof handler, "function", "expected before_agent_start handler to be registered");
+	return handler as (event: any) => Promise<any>;
+}
+
+async function registerContext(source: string): Promise<(event: any) => any> {
+	const handlers = await registerGeneratedHandlers(source);
+	const handler = handlers.get("context");
+	assert.equal(typeof handler, "function", "expected context handler to be registered");
+	return handler as (event: any) => any;
+}
+
+async function registerBeforeCompact(source: string): Promise<(event: any) => Promise<any>> {
+	const handlers = await registerGeneratedHandlers(source);
+	const handler = handlers.get("session_before_compact");
+	assert.equal(typeof handler, "function", "expected session_before_compact handler to be registered");
+	return handler as (event: any) => Promise<any>;
+}
 
 describe("generateProviderBridgeExtension", () => {
 	const source = generateProviderBridgeExtension("sess-123");
@@ -69,9 +108,11 @@ describe("generateProviderBridgeExtension", () => {
 		);
 	});
 
-	it("subscribes before_agent_start and session_before_compact", () => {
+	it("subscribes before_agent_start, context, and session_before_compact", () => {
 		assert.ok(source.includes('pi.on("before_agent_start"'), "expected before_agent_start subscription");
+		assert.ok(source.includes('pi.on("context"'), "expected context subscription");
 		assert.ok(source.includes('pi.on("session_before_compact"'), "expected session_before_compact subscription");
+		assert.ok(!source.includes('pi.on("message_end"'), "must not scrub dynamic context in message_end");
 	});
 
 	it("posts to the per-turn provider-hook routes", () => {
@@ -88,11 +129,171 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(!/before-compact\",\s*\{\}/.test(source), "must NOT post an empty {} before-compact body");
 	});
 
-	it("mutates only systemPrompt and forwards prompt read-only", () => {
-		// The non-negotiable invariant: the user's message text is never rewritten.
-		assert.ok(source.includes("systemPrompt:"), "expected to return a systemPrompt field");
-		assert.ok(source.includes("event.prompt"), "expected event.prompt forwarded as read-only input");
-		assert.ok(!/return\s*\{\s*prompt:/.test(source), "must NOT return a mutated prompt");
+	it("returns dynamic context as a hidden custom message, never as systemPrompt", () => {
+		assert.ok(
+			!/return\s*\{\s*systemPrompt:/.test(source),
+			"before_agent_start dynamic context must not return systemPrompt (prompt-cache churn regression)",
+		);
+		assert.ok(source.includes('customType: "bobbit:dynamic-context"'), "expected bobbit dynamic-context customType");
+		assert.ok(source.includes("display: false"), "dynamic context message must be hidden");
+		assert.ok(source.includes("content"), "expected endpoint content to become message content");
+		assert.ok(!source.includes("resp.tail"), "before_agent_start must not consume a system-prompt tail");
+	});
+
+	it("forwards event.prompt read-only and returns a hidden custom dynamic-context message", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		let postedBody: any;
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+				postedBody = JSON.parse(String(init?.body ?? "{}"));
+				return new Response(JSON.stringify({
+					content: "<context-block>turn A</context-block>",
+					tail: "<!-- legacy tail must be ignored -->STALE_SYSTEM_TAIL",
+					blocks: [{ id: "demo:turn" }],
+				}), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch;
+
+			const beforeAgentStart = await registerBeforeAgentStart(source);
+			const prompt = "Exact user prompt bytes\nwith unicode ☃";
+			const event: any = {};
+			Object.defineProperty(event, "prompt", { value: prompt, writable: false, enumerable: true });
+			Object.defineProperty(event, "systemPrompt", { value: "BASE SYSTEM", writable: false, enumerable: true });
+
+			const result = await beforeAgentStart(event);
+
+			assert.deepEqual(postedBody, { prompt }, "event.prompt must be forwarded byte-identically");
+			assert.equal(event.prompt, prompt, "event.prompt must remain unchanged after the hook");
+			assert.deepEqual(result, {
+				message: {
+					customType: "bobbit:dynamic-context",
+					content: "<context-block>turn A</context-block>",
+					display: false,
+				},
+			}, "before_agent_start must return hidden custom dynamic-context message, not systemPrompt");
+			assert.ok(!JSON.stringify(result).includes("STALE_SYSTEM_TAIL"), "new bridge must ignore legacy tail");
+			assert.ok(!("systemPrompt" in (result ?? {})), "before_agent_start must not return systemPrompt");
+			assert.ok(!("prompt" in (result ?? {})), "must NOT return a mutated prompt");
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
+	});
+
+	it("filters stale persisted dynamic-context messages from future LLM context", async () => {
+		const context = await registerContext(source);
+		const staleBeforeCurrentUser = {
+			role: "custom",
+			customType: "bobbit:dynamic-context",
+			content: "STALE_DYNAMIC_CONTEXT_SHOULD_NOT_REPLAY",
+			display: false,
+			timestamp: 123,
+		};
+		const currentTurnDynamic = {
+			role: "custom",
+			customType: "bobbit:dynamic-context",
+			content: "CURRENT_DYNAMIC_CONTEXT_MUST_REACH_MODEL",
+			display: false,
+			timestamp: 456,
+		};
+		const unrelatedCustom = { role: "custom", customType: "other", content: "keep unrelated" };
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "old turn" }] },
+			staleBeforeCurrentUser,
+			{ role: "assistant", content: [{ type: "text", text: "old answer" }] },
+			{ role: "user", content: [{ type: "text", text: "current turn" }] },
+			currentTurnDynamic,
+			unrelatedCustom,
+		];
+
+		const result = await context({ type: "context", messages });
+
+		assert.deepEqual(messages[1], staleBeforeCurrentUser, "context filtering must not mutate the live input array");
+		assert.ok(result?.messages, "stale dynamic context should produce a replacement message array");
+		assert.ok(!JSON.stringify(result.messages).includes("STALE_DYNAMIC_CONTEXT_SHOULD_NOT_REPLAY"));
+		assert.ok(JSON.stringify(result.messages).includes("CURRENT_DYNAMIC_CONTEXT_MUST_REACH_MODEL"));
+		assert.ok(result.messages.includes(currentTurnDynamic), "current-turn dynamic context after latest user must be preserved");
+		assert.ok(result.messages.includes(unrelatedCustom), "unrelated custom messages must be preserved");
+	});
+
+	it("leaves context unchanged when only current-turn dynamic context is present", async () => {
+		const context = await registerContext(source);
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "current turn" }] },
+			{ role: "custom", customType: "bobbit:dynamic-context", content: "CURRENT_ONLY", display: false },
+		];
+		assert.equal(await context({ type: "context", messages }), undefined);
+	});
+
+	it("omits dynamic-context custom messages from beforeCompact spans", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		let postedBody: any;
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+				postedBody = JSON.parse(String(init?.body ?? "{}"));
+				return new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } });
+			}) as typeof fetch;
+
+			const beforeCompact = await registerBeforeCompact(source);
+			await beforeCompact({
+				type: "session_before_compact",
+				preparation: {
+					messagesToSummarize: [
+						{ role: "user", content: [{ type: "text", text: "real user text" }] },
+						{ role: "custom", customType: "bobbit:dynamic-context", content: "STALE_DYNAMIC_CONTEXT_SHOULD_NOT_BE_SUMMARIZED", display: false },
+						{ role: "assistant", content: [{ type: "text", text: "real assistant text" }] },
+					],
+				},
+			});
+
+			assert.equal(postedBody.span.includes("real user text"), true);
+			assert.equal(postedBody.span.includes("real assistant text"), true);
+			assert.equal(postedBody.span.includes("STALE_DYNAMIC_CONTEXT_SHOULD_NOT_BE_SUMMARIZED"), false);
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
+	});
+
+	it("returns undefined when beforePrompt produces empty or missing content", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		const replies = [{ content: "" }, {}];
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async () => new Response(JSON.stringify(replies.shift() ?? {}), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})) as typeof fetch;
+
+			const beforeAgentStart = await registerBeforeAgentStart(source);
+			assert.equal(await beforeAgentStart({ prompt: "empty", systemPrompt: "BASE" }), undefined);
+			assert.equal(await beforeAgentStart({ prompt: "missing", systemPrompt: "BASE" }), undefined);
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
 	});
 
 	it("embeds the session id", () => {
@@ -110,12 +311,7 @@ describe("generateProviderBridgeExtension", () => {
 	});
 
 	it("transpiled module loads and default-exports a function", async () => {
-		const transpiled = ts.transpileModule(source, {
-			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-		});
-		const file = path.join(tmpDir, "provider-bridge.cjs");
-		fs.writeFileSync(file, transpiled.outputText, "utf-8");
-		const mod = await import(pathToFileURL(file).href);
+		const mod = await loadGeneratedBridge(source);
 		assert.equal(typeof mod.default, "function");
 	});
 });
