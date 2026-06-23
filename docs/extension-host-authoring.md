@@ -508,6 +508,12 @@ await host.store.put(`reviews/${jobId}/final/payload`, payload, {
 });
 ```
 
+Server modules, routes, and providers run through `ModuleHost` workers, so `host.store.*`
+methods are proxied back to the parent gateway process. The proxy forwards the optional
+third `host.store.put(key, value, opts)` argument unchanged; scoped quota options therefore
+reach the parent `ServerHostApi` / `PackStore` instead of falling back to an unscoped write.
+Authorization and server-derived `packId` binding remain parent-side.
+
 - **Backend:** one JSON file per key under `<state>/ext-store/<packId>/<encodedKey>.json`. Keys
   are percent-encoded and the resolved path is re-validated to stay inside the `packId` dir.
 - **Cross-pack reads/deletes are rejected by construction** — the `packId` comes from the
