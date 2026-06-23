@@ -2136,8 +2136,16 @@ export function showProjectDialog(): void {
 			onEffectivePathChange(createdPath, true);
 			requestAnimationFrame(() => pickerEl.focusInput());
 		} catch (err) {
-			createErrorMessage = createDirectoryErrorMessage(err);
+			const { code } = errorDetails(err);
 			creatingDirectory = false;
+			if (code === "already_exists") {
+				pathValue = trimmed;
+				setPickerCompletedPath(trimmed);
+				onEffectivePathChange(trimmed, true);
+				requestAnimationFrame(() => pickerEl.focusInput());
+				return;
+			}
+			createErrorMessage = createDirectoryErrorMessage(err);
 			renderDialog();
 			requestAnimationFrame(() => pickerEl.focusInput());
 		}

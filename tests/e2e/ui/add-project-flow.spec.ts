@@ -164,6 +164,90 @@ test.describe("Add Project flow (UI)", () => {
 		}
 	});
 
+	test("already-existing create response refreshes detection so continue can be used", async ({ page }) => {
+		const parent = uniqueDir("create-already-exists");
+		const target = join(parent, "existing-project");
+		const createRoute = "**/api/create-directory";
+
+		try {
+			await openApp(page);
+			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
+			await expect(pathInput).toBeVisible({ timeout: 5_000 });
+			await pathInput.fill(target);
+
+			const createButton = createDirectoryButton(page);
+			await expect(createButton).toBeVisible({ timeout: 10_000 });
+			await page.route(createRoute, async (route) => {
+				if (route.request().method() !== "POST") return route.fallback();
+				mkdirSync(target, { recursive: true });
+				await route.fulfill({
+					status: 409,
+					contentType: "application/json",
+					body: JSON.stringify({ error: "Already exists", code: "already_exists" }),
+				});
+			});
+			await createButton.click();
+
+			await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+			expect(existsSync(target)).toBe(true);
+			await expect(createButton).not.toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(ADD_PROJECT.createError)).toHaveCount(0);
+			await expect(page.locator("button").filter({ has: page.locator(ADD_PROJECT.continue) }).first()).toBeEnabled({ timeout: 10_000 });
+		} finally {
+			await page.unroute(createRoute).catch(() => {});
+			rmSync(parent, { recursive: true, force: true });
+		}
+	});
+
+	test("create directory surfaces routed server errors without closing the dialog", async ({ page }) => {
+		const parent = uniqueDir("create-routed-errors");
+		const deniedTarget = join(parent, "permission-denied");
+		const failedTarget = join(parent, "create-failed");
+		const routePath = "**/api/create-directory";
+		const responses = new Map([
+			[deniedTarget, { status: 403, error: "Permission denied", code: "permission_denied", message: "Permission denied creating this directory." }],
+			[failedTarget, { status: 500, error: "Disk exploded", code: "create_failed", message: "Could not create directory: Disk exploded" }],
+		]);
+
+		try {
+			await page.route(routePath, async (route) => {
+				if (route.request().method() !== "POST") return route.fallback();
+				let requestedPath = "";
+				try {
+					requestedPath = JSON.parse(route.request().postData() || "{}").path || "";
+				} catch {
+					requestedPath = "";
+				}
+				const response = responses.get(requestedPath);
+				if (!response) return route.fallback();
+				await route.fulfill({
+					status: response.status,
+					contentType: "application/json",
+					body: JSON.stringify({ error: response.error, code: response.code }),
+				});
+			});
+
+			await openApp(page);
+			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
+			await expect(pathInput).toBeVisible({ timeout: 5_000 });
+			const createButton = createDirectoryButton(page);
+
+			for (const [value, { message }] of responses) {
+				await pathInput.fill(value);
+				await expect(createButton).toBeVisible({ timeout: 10_000 });
+				await expect(createButton).toBeEnabled();
+				await createButton.click();
+				await expect(page.locator(ADD_PROJECT.createError)).toHaveText(message, { timeout: 5_000 });
+				await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+			}
+		} finally {
+			await page.unroute(routePath).catch(() => {});
+			rmSync(parent, { recursive: true, force: true });
+		}
+	});
+
 	test("create directory surfaces structured errors without closing the dialog", async ({ page }) => {
 		const parent = uniqueDir("create-errors");
 		const fileTarget = join(parent, "file-target");
