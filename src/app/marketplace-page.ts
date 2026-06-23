@@ -864,7 +864,7 @@ function renderSourcesPanel(): TemplateResult {
 						class="market-source-kind-option ${newSourceType === "mcp-registry" ? "market-source-kind-option--active" : ""}"
 						data-testid="market-source-kind-mcp-registry"
 						@click=${() => { newSourceType = "mcp-registry"; newSourceRef = ""; renderApp(); }}
-					>MCP registry / discovery URL</button>
+					>Official MCP registry URL</button>
 				</div>
 				<div class="market-trust-warning" data-testid="market-trust-warning">
 					${icon(AlertTriangle, "xs")}
@@ -885,12 +885,12 @@ function renderSourcesPanel(): TemplateResult {
 					type="text"
 					data-testid="market-source-url"
 					class="market-input"
-					placeholder=${newSourceType === "mcp-registry" ? "https://registry.example.com/mcp/servers.json" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
+					placeholder=${newSourceType === "mcp-registry" ? "https://registry.modelcontextprotocol.io/v0/servers" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
 					.value=${newSourceUrl}
 					@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
 					@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
 				/>
-				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper" data-testid="market-mcp-source-helper">You will review and install individual servers after sync; installing a stdio server may start a host process.</div>` : ""}
+				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper" data-testid="market-mcp-source-helper">Bobbit reads official MCP Registry <code>servers[].server</code> entries, shows supported remote/package servers, and skips unsupported transports or packages with diagnostics. Installing a stdio package may start a host process.</div>` : ""}
 				<div class="flex items-center gap-2">
 					<input
 						type="text"
@@ -909,7 +909,7 @@ function renderSourcesPanel(): TemplateResult {
 						@click=${handleAddSource}
 					>${icon(Plus, "xs")} ${addingSource ? "Adding…" : "Add"}</button>
 				</div>
-				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper">Registry sources are synced from their discovery URL; refs apply only to git sources.</div>` : ""}
+				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper">Official registry sources are synced from their URL; refs apply only to git sources.</div>` : ""}
 			</div>
 		</section>
 	`;
@@ -937,7 +937,7 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 					<span class="market-source-type-chip" data-kind=${kind} data-testid="market-source-type-chip">${kind === "mcp-registry" ? "MCP registry" : "Pack source"}</span>
 					${isBuiltin ? html`<span class="market-builtin-badge" data-testid="market-source-builtin-badge">Built-in</span>` : ""}
 				</div>
-				<div class="text-[11px] text-muted-foreground truncate">${kind === "mcp-registry" ? "Discovery URL: " : ""}${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
+				<div class="text-[11px] text-muted-foreground truncate">${kind === "mcp-registry" ? "Registry URL: " : ""}${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
 				${isBuiltin
 					? html`<div class="text-[10px] text-muted-foreground/80">Shipped core features — always available, enable/disable per pack.</div>`
 					: kind === "mcp-registry"
@@ -1008,7 +1008,7 @@ function renderBrowsePanel(): TemplateResult {
 					: browseError
 						? html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`
 						: browsePacks.length === 0
-							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-registry" ? "This registry did not return any installable MCP servers." : "This source has no packs."}</p>`
+							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-registry" ? "This registry has no supported MCP servers." : "This source has no packs."}</p>`
 							: html`<div class="flex flex-col gap-2">${browsePacks.map(renderBrowsePackCard)}</div>`}
 		</section>
 	`;
