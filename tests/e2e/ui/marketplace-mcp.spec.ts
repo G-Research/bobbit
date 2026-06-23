@@ -14,9 +14,12 @@ test.describe.configure({ mode: "serial" });
 type Source = { id: string; url: string; type?: "pack" | "mcp-registry"; addedAt: string; lastSyncedAt?: string; mcpServerCount?: number };
 type Disabled = { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[]; mcp?: string[] };
 
+const OFFICIAL_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers";
 const SOURCE_ID = "mcp-registry-1";
-const PACK = "mcp-github";
-const MCP_REF = "github";
+const INSTALL_ID = "io-modelcontextprotocol-everything-2025-01-01-remote-1-r4f8c2b9a";
+const PACK = `mcp-${INSTALL_ID}`;
+const MCP_REF = INSTALL_ID;
+const RUNTIME_SERVER = "io-modelcontextprotocol-everything-r4f8c2b9a";
 
 async function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
 	await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -30,7 +33,7 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 
 	const source = (): Source => ({
 		id: SOURCE_ID,
-		url: "https://registry.example.com/mcp/servers.json",
+		url: OFFICIAL_REGISTRY_URL,
 		type: "mcp-registry",
 		addedAt: new Date(0).toISOString(),
 		lastSyncedAt: new Date(1000).toISOString(),
@@ -39,26 +42,24 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 	const browsePack = () => ({
 		name: PACK,
 		dirName: PACK,
-		description: "GitHub MCP server from registry",
-		version: "1.0.0",
+		description: "Everything MCP Server from the official MCP Registry",
+		version: "2025.1.1",
 		hasTools: false,
 		contents: { roles: [], tools: [], skills: [], mcp: [MCP_REF] },
-		descriptions: { mcp: { [MCP_REF]: "GitHub repository operations" } },
+		descriptions: { mcp: { [MCP_REF]: "Official streamable HTTP demo server" } },
 		mcp: [{
 			ref: MCP_REF,
-			serverName: MCP_REF,
-			label: "GitHub",
-			transport: "stdio",
-			command: "npx",
-			args: ["-y", "@modelcontextprotocol/server-github"],
-			env: ["GITHUB_TOKEN"],
+			serverName: RUNTIME_SERVER,
+			label: "Everything MCP Server",
+			transport: "http",
+			url: "https://mcp.example.test/mcp",
 		}],
 	});
 	const installedPack = () => ({
 		scope: "server",
 		packName: PACK,
 		manifest: browsePack(),
-		meta: { sourceUrl: source().url, sourceRef: "", commit: "registry", packName: PACK, version: "1.0.0", installedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), scope: "server" },
+		meta: { sourceUrl: source().url, sourceRef: "", commit: "registry", packName: PACK, version: "2025.1.1", installedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), scope: "server", sourceKey: "r4f8c2b9a", officialName: "io.modelcontextprotocol/everything" },
 		status: "ok",
 		updateAvailable: false,
 		sourceStatus: "ok",
@@ -71,8 +72,8 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 			tools: [],
 			skills: [],
 			entrypoints: [],
-			mcp: [{ ref: MCP_REF, serverName: MCP_REF, label: "GitHub", transport: "stdio", status: disabled.mcp?.includes(MCP_REF) ? "disabled" : "active-owner" }],
-			descriptions: { mcp: { [MCP_REF]: "GitHub repository operations" } },
+			mcp: [{ ref: MCP_REF, serverName: RUNTIME_SERVER, label: "Everything MCP Server", transport: "http", status: disabled.mcp?.includes(MCP_REF) ? "disabled" : "active-owner" }],
+			descriptions: { mcp: { [MCP_REF]: "Official streamable HTTP demo server" } },
 		},
 		disabled,
 	});
@@ -119,7 +120,7 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 	await page.route(/\/api\/mcp-servers(?:\?.*)?$/, async (route) => {
 		if (route.request().method() !== "GET") return route.fallback();
 		const active = installed && !(disabled.mcp ?? []).includes(MCP_REF);
-		return fulfillJson(route, active ? [{ name: MCP_REF, status: "connected", toolCount: 12, tools: [] }] : []);
+		return fulfillJson(route, active ? [{ name: RUNTIME_SERVER, status: "connected", toolCount: 12, tools: [] }] : []);
 	});
 	return { posts };
 }
@@ -138,8 +139,10 @@ test("add registry source, browse/install MCP server, toggle disable/re-enable, 
 
 	await page.locator('[data-testid="market-source-kind-mcp-registry"]').click();
 	await expect(page.locator('[data-testid="market-source-ref"]')).toBeDisabled();
-	await expect(page.locator('[data-testid="market-mcp-source-helper"]')).toContainText("installing a stdio server may start a host process");
-	await page.locator('[data-testid="market-source-url"]').fill("https://registry.example.com/mcp/servers.json");
+	await expect(page.locator('[data-testid="market-source-url"]')).toHaveAttribute("placeholder", OFFICIAL_REGISTRY_URL);
+	await expect(page.locator('[data-testid="market-mcp-source-helper"]')).toContainText("servers[].server");
+	await expect(page.locator('[data-testid="market-mcp-source-helper"]')).toContainText("skips unsupported transports or packages");
+	await page.locator('[data-testid="market-source-url"]').fill(OFFICIAL_REGISTRY_URL);
 	await page.locator('[data-testid="market-add-source"]').click();
 	await expect.poll(() => posts.addSource.length, { timeout: 10_000 }).toBe(1);
 	await expect(JSON.stringify(posts.addSource[0])).toContain('"type":"mcp-registry"');
@@ -147,8 +150,9 @@ test("add registry source, browse/install MCP server, toggle disable/re-enable, 
 	await expect(page.locator('[data-testid="market-browse-panel"]')).toBeVisible({ timeout: 15_000 });
 	const browseCard = page.locator(`[data-testid="market-browse-pack"][data-pack-name="${PACK}"]`);
 	await expect(browseCard).toBeVisible({ timeout: 15_000 });
-	await expect(browseCard.locator('[data-kind="mcp"]')).toContainText("mcp: github");
-	await expect(browseCard.locator('[data-testid="market-mcp-transport"]').first()).toContainText(/stdio|Command:/i);
+	await expect(browseCard.locator('[data-kind="mcp"]')).toContainText(`mcp: ${MCP_REF}`);
+	await expect(browseCard).toContainText("Everything MCP Server from the official MCP Registry");
+	await expect(browseCard.locator('[data-testid="market-mcp-transport"]').first()).toContainText(/HTTP|Endpoint:/i);
 	await browseCard.locator('[data-testid="market-install-pack"]').click();
 
 	await goToTab(page, "installed");

@@ -34,7 +34,7 @@ The MCP design should reuse these primitives rather than introduce a separate MC
 Keep the existing add-source block, but add a source-kind segmented control above the URL input:
 
 - `Pack repo / local dir`
-- `MCP registry / discovery URL`
+- `Official MCP registry URL`
 
 Default: `Pack repo / local dir`, preserving current behavior.
 
@@ -45,9 +45,10 @@ For pack repos:
 
 For MCP registries:
 
-- URL placeholder: `https://registry.example.com/mcp/servers.json`
-- Hide or disable the `ref` input with helper text: `Registry sources are synced from their discovery URL; refs apply only to git sources.`
+- URL placeholder: `https://registry.modelcontextprotocol.io/v0/servers`
+- Hide or disable the `ref` input with helper text: `Registry sources are synced from the official MCP Registry API URL; refs apply only to git sources.`
 - Primary button label remains `Add`.
+- If the URL returns the old Bobbit `schemaVersion: 1` registry JSON or any non-`servers[].server` shape, show the registry validation error instead of treating it as a pack source.
 
 Recommended test ids:
 
@@ -60,12 +61,12 @@ Recommended test ids:
 Extend `renderSourceRow` visually with a kind chip next to the source id:
 
 - `Pack source` for git/local pack collections.
-- `MCP registry` for discovery sources.
+- `MCP registry` for official registry sources.
 - Existing `Built-in` badge remains for the synthetic built-in source.
 
 For MCP registry rows, secondary metadata should show:
 
-- Discovery URL.
+- Official registry URL.
 - Last synced time or commit-equivalent if available.
 - Count summary when known: `12 MCP servers discovered`.
 
@@ -81,7 +82,7 @@ Extend the existing `Why?` disclosure with a fourth row:
 
 - **MCP servers** — stdio servers run trusted commands on the host; HTTP servers are trusted remote endpoints that may receive prompts, tool arguments, headers, and project-derived data depending on use.
 
-When the source-kind control is set to `MCP registry / discovery URL`, show one inline sentence below the URL input:
+When the source-kind control is set to `Official MCP registry URL`, show one inline sentence below the URL input:
 
 > You will review and install individual servers after sync; installing a stdio server may start a host process.
 
@@ -89,7 +90,7 @@ Do not add a second install confirmation for every MCP card. The trust decision 
 
 ## Browse UX for MCP server packs
 
-Registry-discovered MCP servers should render as normal `market-pack-card` cards in the Browse tab. Treat each discovered server as a virtual pack until installed.
+Official-registry MCP servers should render as normal `market-pack-card` cards in the Browse tab. Treat each supported `servers[].server` candidate as a virtual pack until installed.
 
 ### Card content
 
@@ -130,9 +131,9 @@ Recommended test ids:
 ### Browse states
 
 - Loading: reuse `Loading packs…`; for MCP registry sources, prefer `Loading MCP servers…` if source kind is known.
-- Empty registry: `This registry did not return any installable MCP servers.`
+- Empty registry: `This registry did not return any supported MCP servers.`
 - Registry error: use `market-error`; include server-provided message and keep the source row visible for re-sync/remove.
-- Invalid entry within a registry: do not fail the whole browse list; show valid cards and a compact warning row: `3 registry entries were skipped because they were invalid.`
+- Invalid entry within a registry: do not fail the whole browse list; show valid cards and a compact warning row: `3 registry entries were skipped because they were unsupported.` The expandable detail should surface server-provided diagnostics such as unsupported transport, secret-marked remote header, non-default npm registry URL, missing/ranged npm version, variables/templates, prompt-required value, or unsafe package argument.
 
 ## Installed UX for MCP contributions
 
@@ -317,7 +318,7 @@ If the backend keeps `mcp: string[]` initially, the UI should still render funct
 
 Add a dedicated browser E2E covering:
 
-1. Add MCP registry/discovery URL as a source.
+1. Add the official MCP Registry API URL as a source.
 2. Browse multiple discovered MCP server cards.
 3. Install one into a dedicated project scope.
 4. See MCP chip, activation toggle, and runtime status on Installed.

@@ -45,6 +45,16 @@ function w(file: string, content: string) {
 	fs.writeFileSync(file, content, "utf-8");
 }
 
+function parseFlatYamlScalars(file: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const line of fs.readFileSync(file, "utf-8").split(/\r?\n/)) {
+		const match = /^([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line);
+		if (!match || line.startsWith(" ")) continue;
+		out[match[1]!] = (match[2] ?? "").replace(/^['\"]|['\"]$/g, "");
+	}
+	return out;
+}
+
 /** Build a source-repo fixture with two packs (research = no tools, qa = tools). */
 function makeSourceRepo(root: string, opts: { researcherMarker?: string; version?: string } = {}) {
 	const marker = opts.researcherMarker ?? "v1";
@@ -128,9 +138,10 @@ describe("#8 MarketplaceSourceStore CRUD + YAML persistence", () => {
 	});
 });
 
-async function withJsonServer(body: unknown, fn: (url: string) => Promise<void>): Promise<void> {
+async function withJsonServer(body: unknown, fn: (url: string, setBody: (next: unknown) => void) => Promise<void>): Promise<void> {
+	let currentBody = body;
 	const server = http.createServer((_req, res) => {
-		const text = JSON.stringify(body);
+		const text = JSON.stringify(currentBody);
 		res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
 		res.end(text);
 	});
@@ -138,22 +149,56 @@ async function withJsonServer(body: unknown, fn: (url: string) => Promise<void>)
 	try {
 		const address = server.address();
 		assert.ok(address && typeof address === "object");
-		await fn(`http://127.0.0.1:${address.port}/registry.json`);
+		await fn(`http://127.0.0.1:${address.port}/registry.json`, (next) => { currentBody = next; });
 	} finally {
 		await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
 	}
 }
 
-describe("Marketplace MCP registry diagnostics", () => {
-	it("surfaces skipped registry entries on browse and sync results", async () => {
+function officialRegistryBody(url: string, opts: { description?: string; includeUnsupported?: boolean; includePackage?: boolean } = {}): Record<string, unknown> {
+	return {
+		servers: [
+			{
+				server: {
+					name: "acme/docs",
+					title: "Docs MCP",
+					description: opts.description ?? "Remote docs MCP",
+					version: "1.0.0",
+					websiteUrl: "https://docs.example.com",
+					license: "MIT",
+					repository: { url: "https://github.com/acme/docs-mcp", source: "github" },
+					remotes: [{ type: "streamable-http", url }],
+					...(opts.includePackage ? { packages: [{ registryType: "npm", identifier: "acme-docs-mcp", version: "1.0.0", transport: { type: "stdio" } }] } : {}),
+					_meta: { serverMeta: true },
+				},
+				_meta: { registryMeta: true },
+			},
+			...(opts.includeUnsupported ? [{
+				server: {
+					name: "acme/legacy-sse",
+					title: "Legacy SSE MCP",
+					description: "Unsupported SSE MCP",
+					version: "1.0.0",
+					remotes: [{ type: "sse", url: "https://mcp.example.com/sse" }],
+				},
+			}] : []),
+		],
+	};
+}
+
+function legacySchemaRegistryBody(): Record<string, unknown> {
+	return {
+		schemaVersion: 1,
+		servers: [
+			{ id: "legacy", name: "legacy", transport: { type: "stdio", command: "node" } },
+		],
+	};
+}
+
+describe("Marketplace MCP registry integration", () => {
+	it("browses official registry entries and surfaces skipped-candidate diagnostics", async () => {
 		const root = fs.mkdtempSync(path.join(TMP, "mcp-diag-"));
-		await withJsonServer({
-			schemaVersion: 1,
-			servers: [
-				{ id: "ok", name: "ok", transport: { type: "stdio", command: "node" } },
-				{ id: "bad", name: "bad__name", transport: { type: "stdio", command: "node" } },
-			],
-		}, async (url) => {
+		await withJsonServer(officialRegistryBody("https://mcp.example.com/mcp", { includeUnsupported: true }), async (url) => {
 			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
 			const source = store.add({ url, type: "mcp-registry" });
 			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
@@ -161,35 +206,114 @@ describe("Marketplace MCP registry diagnostics", () => {
 			const packs = await inst.browseSourcePacks(source.id);
 			assert.equal(packs.length, 1);
 			const firstPack = packs[0]!;
-			assert.deepEqual(firstPack.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.id), ["bad"]);
-			assert.match(firstPack.mcpRegistryDiagnostics!.skippedEntries[0]!.reason, /unsafe/);
+			assert.equal(firstPack.virtual, true);
+			assert.equal(firstPack.sourceType, "mcp-registry");
+			assert.match(firstPack.name, /^mcp-acme-docs-1-0-0-/);
+			assert.notEqual(firstPack.name, "mcp-docs");
+			assert.deepEqual(firstPack.contents.mcp, [firstPack.registryId]);
+			assert.match(firstPack.serverName, /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/);
+			assert.ok(!firstPack.serverName.includes("/"));
+			assert.deepEqual(firstPack.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.name), ["acme/legacy-sse"]);
+			assert.match(firstPack.mcpRegistryDiagnostics!.skippedEntries[0]!.reason, /unsupported remote transport: sse/i);
 
 			const synced = await inst.syncMarketplaceSource(source.id);
-			assert.deepEqual(synced.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.name), ["bad__name"]);
+			assert.deepEqual(synced.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.name), ["acme/legacy-sse"]);
 		});
 	});
 
-	it("keeps installed registry packs sourceStatus ok when listed after reload", async () => {
-		const root = fs.mkdtempSync(path.join(TMP, "mcp-reg-list-"));
-		await withJsonServer({
-			schemaVersion: 1,
-			servers: [
-				{ id: "ok", name: "ok", version: "1.0.0", transport: { type: "stdio", command: "node" } },
-			],
-		}, async (url) => {
+	it("rejects the old Bobbit schema-1 registry document", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-old-schema-"));
+		await withJsonServer(legacySchemaRegistryBody(), async (url) => {
 			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
 			const source = store.add({ url, type: "mcp-registry" });
 			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
 
-			await inst.installMarketplacePack({ sourceId: source.id, dirName: "mcp-ok", scope: "server" });
-			const row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
+			await assert.rejects(
+				() => inst.browseSourcePacks(source.id),
+				/unsupported MCP registry format|official MCP Registry|servers\[\]\.server/i,
+			);
+		});
+	});
+
+	it("installs and updates official registry packs while preserving materialized metadata", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-reg-list-"));
+		await withJsonServer(officialRegistryBody("https://mcp.example.com/mcp"), async (url, setBody) => {
+			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+			const source = store.add({ url, type: "mcp-registry" });
+			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+			const [pack] = await inst.browseSourcePacks(source.id);
+			assert.ok(pack);
+			const installed = await inst.installMarketplacePack({ sourceId: source.id, dirName: pack.dirName, scope: "server" });
+			assert.equal(installed.packName, pack.name);
+			assert.deepEqual(installed.manifest.contents.mcp, [pack.registryId]);
+			let row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === pack.name);
 			assert.equal(row?.sourceStatus, "ok");
 			assert.equal(row?.updateAvailable, false);
 
-			store.update(source.id, { lastCommit: "different-registry-fingerprint" });
-			const stale = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
-			assert.equal(stale?.sourceStatus, "ok");
-			assert.equal(stale?.updateAvailable, true);
+			const { marketPacksRoot } = scopePaths("server", root);
+			const dest = path.join(marketPacksRoot, pack.name);
+			let rawMeta = parseFlatYamlScalars(path.join(dest, ".pack-meta.yaml"));
+			assert.equal(rawMeta.sourceType, "mcp-registry");
+			assert.equal(rawMeta.officialName, "acme/docs");
+			assert.equal(typeof rawMeta.sourceKey, "string");
+			assert.equal(rawMeta.packName, pack.name);
+			assert.equal(rawMeta.commit, installed.meta.commit);
+
+			setBody(officialRegistryBody("https://mcp.example.com/mcp?v=2", { description: "Remote docs MCP v2", includePackage: true }));
+			await inst.syncMarketplaceSource(source.id);
+			row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === pack.name);
+			assert.equal(row?.sourceStatus, "ok");
+			assert.equal(row?.updateAvailable, true);
+
+			const updated = await inst.updateMarketplacePack({ packName: pack.name, scope: "server" });
+			assert.equal(updated.packName, pack.name);
+			assert.notEqual(updated.meta.commit, installed.meta.commit);
+			rawMeta = parseFlatYamlScalars(path.join(dest, ".pack-meta.yaml"));
+			assert.equal(rawMeta.officialName, "acme/docs");
+			assert.equal(rawMeta.description, "Remote docs MCP v2");
+		});
+	});
+
+	it("installs same official name/version from two sources without collisions", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-cross-source-"));
+		await withJsonServer(officialRegistryBody("https://mcp-one.example.com/mcp"), async (url1) => {
+			await withJsonServer(officialRegistryBody("https://mcp-two.example.com/mcp"), async (url2) => {
+				const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+				const source1 = store.add({ url: url1, type: "mcp-registry" });
+				const source2 = store.add({ url: url2, type: "mcp-registry" });
+				const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+				const [pack1] = await inst.browseSourcePacks(source1.id);
+				const [pack2] = await inst.browseSourcePacks(source2.id);
+				assert.ok(pack1);
+				assert.ok(pack2);
+				assert.notEqual(pack1.name, pack2.name);
+				assert.notEqual(pack1.registryId, pack2.registryId);
+				assert.notEqual(pack1.serverName, pack2.serverName);
+
+				const installed1 = await inst.installMarketplacePack({ sourceId: source1.id, dirName: pack1.dirName, scope: "server" });
+				const installed2 = await inst.installMarketplacePack({ sourceId: source2.id, dirName: pack2.dirName, scope: "server" });
+				assert.notEqual(installed1.packName, installed2.packName);
+				assert.notEqual(installed1.manifest.contents.mcp[0], installed2.manifest.contents.mcp[0]);
+
+				const { marketPacksRoot } = scopePaths("server", root);
+				const dest1 = path.join(marketPacksRoot, installed1.packName);
+				const dest2 = path.join(marketPacksRoot, installed2.packName);
+				const meta1 = parseFlatYamlScalars(path.join(dest1, ".pack-meta.yaml"));
+				const meta2 = parseFlatYamlScalars(path.join(dest2, ".pack-meta.yaml"));
+				assert.equal(meta1.officialName, "acme/docs");
+				assert.equal(meta2.officialName, "acme/docs");
+				assert.notEqual(meta1.sourceKey, meta2.sourceKey);
+
+				const ref1 = installed1.manifest.contents.mcp[0]!;
+				const ref2 = installed2.manifest.contents.mcp[0]!;
+				const mcp1 = parseFlatYamlScalars(path.join(dest1, "mcp", `${ref1}.yaml`));
+				const mcp2 = parseFlatYamlScalars(path.join(dest2, "mcp", `${ref2}.yaml`));
+				assert.notEqual(mcp1.server, mcp2.server);
+				assert.ok(typeof mcp1.server === "string" && !mcp1.server.includes("/"));
+				assert.ok(typeof mcp2.server === "string" && !mcp2.server.includes("/"));
+			});
 		});
 	});
 });
