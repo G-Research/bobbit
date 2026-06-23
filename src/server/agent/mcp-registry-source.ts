@@ -471,7 +471,9 @@ function candidateFromRemote(raw: unknown, index: number): Candidate {
 	const remote = raw as Record<string, unknown>;
 	const type = typeof remote.type === "string" ? remote.type.trim() : "";
 	if (type !== "streamable-http") throw new McpRegistryError(`unsupported remote transport: ${type || String(remote.type)} (Bobbit currently supports streamable-http)`);
+	if (hasPromptOrVariableMarker(remote)) throw new McpRegistryError("remote variables/prompts are not supported; Marketplace registry installs require concrete remote settings");
 	if (typeof remote.url !== "string" || !remote.url.trim()) throw new McpRegistryError("remote url is required for streamable-http transport");
+	if (hasTemplateMarker(remote.url)) throw new McpRegistryError("remote url contains variables/templates; Marketplace registry installs require a concrete URL");
 	const url = normalizeHttpUrl(remote.url);
 	const headers = normalizeRemoteHeaders(remote.headers);
 	const transport: McpRegistryHttpTransport = { type: "http", url };
@@ -515,19 +517,24 @@ function normalizeRemoteHeaders(raw: unknown): Record<string, string> | undefine
 			const header = entry as Record<string, unknown>;
 			const name = requiredNonEmptyString(header.name, "remote header name");
 			validateHeaderName(name, "remote header");
+			if (hasPromptOrVariableMarker(header)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
 			if (typeof header.value !== "string") throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
+			if (hasTemplateMarker(header.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
 			out[name] = header.value;
 		}
 	} else if (raw && typeof raw === "object") {
 		for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
 			validateHeaderName(name, "remote header");
 			if (typeof value === "string") {
+				if (hasTemplateMarker(value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
 				out[name] = value;
 				continue;
 			}
 			if (value && typeof value === "object" && !Array.isArray(value)) {
 				const descriptor = value as Record<string, unknown>;
+				if (hasPromptOrVariableMarker(descriptor)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
 				if (typeof descriptor.value === "string") {
+					if (hasTemplateMarker(descriptor.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
 					out[name] = descriptor.value;
 					continue;
 				}
@@ -585,18 +592,19 @@ function normalizePackageEnvironment(raw: unknown): Record<string, string> | und
 			const entry = item as Record<string, unknown>;
 			const name = requiredNonEmptyString(entry.name, "environment variable name");
 			validateEnvName(name);
-			let value = entry.default ?? entry.value;
-			if (value === undefined && typeof entry.variable === "string" && ENV_NAME_RE.test(entry.variable)) value = `\${${entry.variable}}`;
+			if (hasPromptOrVariableMarker(entry)) throw new McpRegistryError(`environment variable ${name} contains variables/prompts; only literal defaults or whole-value \${NAME} placeholders are supported`);
+			const value = entry.default ?? entry.value;
 			if (typeof value !== "string") throw new McpRegistryError(`environment variable ${name} requires a default or safe placeholder value`);
 			if ((entry.isSecret === true || entry.secret === true) && !SAFE_PLACEHOLDER_RE.test(value)) throw new McpRegistryError(`environment variable ${name} is secret and must use a safe placeholder value`);
-			if (value.includes("${") && !SAFE_PLACEHOLDER_RE.test(value)) throw new McpRegistryError(`environment variable ${name} uses an unsafe placeholder value`);
+			if (hasTemplateMarker(value, { allowWholeEnvPlaceholder: true })) throw new McpRegistryError(`environment variable ${name} contains variables/templates; use a literal value or a whole-value \${NAME} placeholder`);
 			env[name] = value;
 		}
 	} else if (raw && typeof raw === "object") {
 		for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
 			validateEnvName(name);
+			if (value && typeof value === "object" && !Array.isArray(value) && hasPromptOrVariableMarker(value as Record<string, unknown>)) throw new McpRegistryError(`environment variable ${name} contains variables/prompts; only literal defaults or whole-value \${NAME} placeholders are supported`);
 			if (typeof value !== "string") throw new McpRegistryError(`environment variable ${name} requires a string value`);
-			if (value.includes("${") && !SAFE_PLACEHOLDER_RE.test(value)) throw new McpRegistryError(`environment variable ${name} uses an unsafe placeholder value`);
+			if (hasTemplateMarker(value, { allowWholeEnvPlaceholder: true })) throw new McpRegistryError(`environment variable ${name} contains variables/templates; use a literal value or a whole-value \${NAME} placeholder`);
 			env[name] = value;
 		}
 	} else {
@@ -609,6 +617,11 @@ function hasPromptOrVariableMarker(arg: Record<string, unknown>): boolean {
 	if (arg.variables !== undefined || arg.variable !== undefined || arg.prompt !== undefined || arg.prompts !== undefined || arg.valueHint !== undefined) return true;
 	if (arg.isRequired === true && arg.value === undefined && arg.default === undefined) return true;
 	return false;
+}
+
+function hasTemplateMarker(value: string, opts: { allowWholeEnvPlaceholder?: boolean } = {}): boolean {
+	if (opts.allowWholeEnvPlaceholder && SAFE_PLACEHOLDER_RE.test(value)) return false;
+	return value.includes("${") || /\{[^}]+\}/.test(value) || value.includes("}");
 }
 
 function packageVariant(pkg: unknown, index: number): string {

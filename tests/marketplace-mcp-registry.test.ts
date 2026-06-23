@@ -225,6 +225,54 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.ok(parsed.skipped.some((s) => /packageArguments contain variables\/prompts/.test(s.reason)));
 	});
 
+	it("skips remote variables and template URLs while keeping valid candidates", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "diagnostics/remotes",
+					version: "1.0.0",
+					remotes: [
+						{ type: "streamable-http", url: "https://{tenant}.example.com/mcp" },
+						{ type: "streamable-http", url: "https://mcp.example.com/${TENANT}/mcp" },
+						{ type: "streamable-http", url: "https://mcp.example.com/mcp", variables: [{ name: "TENANT" }] },
+						{ type: "streamable-http", url: "https://mcp.example.com/valid" },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 1);
+		assert.equal(parsed.servers[0].transport.type, "http");
+		assert.equal(parsed.servers[0].transport.url, "https://mcp.example.com/valid");
+		assert.equal(parsed.skipped.length, 3);
+		assert.equal(parsed.skipped.filter((s) => /remote url contains variables\/templates/.test(s.reason)).length, 2);
+		assert.ok(parsed.skipped.some((s) => /remote variables\/prompts are not supported/.test(s.reason)));
+	});
+
+	it("skips package environment variable descriptors and templates while keeping valid candidates", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "diagnostics/env",
+					version: "1.0.0",
+					remotes: [{ type: "streamable-http", url: "https://mcp.example.com/valid" }],
+					packages: [
+						{ registryType: "npm", identifier: "env-vars-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TOKEN", variables: [{ name: "TOKEN" }] }] },
+						{ registryType: "npm", identifier: "env-curly-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TENANT_URL", default: "https://{tenant}.example.com" }] },
+						{ registryType: "npm", identifier: "env-template-mcp", transport: { type: "stdio" }, environmentVariables: { TOKEN_URL: "https://mcp.example.com/${TOKEN}" } },
+						{ registryType: "npm", identifier: "env-safe-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TOKEN", default: "${TOKEN}", isSecret: true }] },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 2);
+		assert.deepEqual(parsed.servers.map((server) => server.transport.type), ["http", "stdio"]);
+		assert.deepEqual(parsed.servers[1].config, { command: "npx", args: ["-y", "env-safe-mcp"], env: { TOKEN: "${TOKEN}" } });
+		assert.equal(parsed.skipped.length, 3);
+		assert.ok(parsed.skipped.some((s) => /environment variable TOKEN contains variables\/prompts/.test(s.reason)));
+		assert.ok(parsed.skipped.some((s) => /environment variable TENANT_URL contains variables\/templates/.test(s.reason)));
+		assert.ok(parsed.skipped.some((s) => /environment variable TOKEN_URL contains variables\/templates/.test(s.reason)));
+	});
+
 	it("skips npm package versions and fixed args with Windows shell metacharacters", () => {
 		const parsed = parseMcpRegistryDocument({
 			servers: [{
