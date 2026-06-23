@@ -1806,16 +1806,49 @@ export class SessionManager {
 		return mgr;
 	}
 
-	getMcpManagerForSession(sessionId: string): McpManager | null {
+	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
 		const live = this.sessions.get(sessionId);
-		const projectId = live?.projectId ?? this.getPersistedSession(sessionId)?.projectId;
-		return projectId ? (this.getMcpManager({ projectId }) ?? this.mcpManager) : this.mcpManager;
+		const persisted = live ? null : this.getPersistedSession(sessionId);
+		return { projectId: live?.projectId ?? persisted?.projectId, cwd: live?.cwd ?? persisted?.cwd };
+	}
+
+	getMcpManagerForSession(sessionId: string): McpManager | null {
+		const { projectId } = this.getMcpSessionScope(sessionId);
+		return projectId ? this.getMcpManager({ projectId }) : this.mcpManager;
 	}
 
 	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
-		const live = this.sessions.get(sessionId);
-		const projectId = live?.projectId ?? this.getPersistedSession(sessionId)?.projectId;
-		return projectId ? (await this.ensureMcpManager({ projectId }) ?? this.mcpManager) : this.mcpManager;
+		const { projectId } = this.getMcpSessionScope(sessionId);
+		return projectId ? await this.ensureMcpManager({ projectId }) : this.mcpManager;
+	}
+
+	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
+		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
+		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
+		const cwdScopeKey = cwd ? this.mcpScopeKey({ cwd }) : undefined;
+		if (!projectId && cwd && scopeKey === cwdScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ cwd, scopeKey });
+		return null;
+	}
+
+	private aggregateMcpReloadResults(results: McpReloadResult[]): McpReloadResult | undefined {
+		if (results.length === 0) return undefined;
+		const connected = results.flatMap(r => r.connected);
+		const disconnected = results.flatMap(r => r.disconnected);
+		const unchanged = results.flatMap(r => r.unchanged);
+		const skippedErrored = results.flatMap(r => r.skippedErrored);
+		const failed = results.flatMap(r => r.failed);
+		const statuses = results.flatMap(r => r.statuses);
+		let status: McpReloadResult["status"] = "ok";
+		if (results.some(r => r.status === "pending")) {
+			status = "pending";
+		} else if (results.every(r => r.status === "error")) {
+			status = "error";
+		} else if (results.some(r => r.status === "error" || r.status === "partial")) {
+			status = "partial";
+		}
+		return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses };
 	}
 
 	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
@@ -1827,12 +1860,24 @@ export class SessionManager {
 			if (this.mcpManager) managers.add(this.mcpManager);
 			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
 		}
-		let first: McpReloadResult | undefined;
+		const results: McpReloadResult[] = [];
 		for (const mgr of managers) {
-			const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
-			if (!first) first = result;
+			try {
+				results.push(await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 }));
+			} catch (err) {
+				const scopeKey = mgr.getScopeKey();
+				results.push({
+					status: "error",
+					connected: [],
+					disconnected: [],
+					unchanged: [],
+					skippedErrored: [],
+					failed: [{ name: scopeKey, error: err instanceof Error ? err.message : String(err) }],
+					statuses: [],
+				});
+			}
 		}
-		return first;
+		return this.aggregateMcpReloadResults(results);
 	}
 
 	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {

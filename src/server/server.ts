@@ -13484,8 +13484,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
+		const ensure = url.searchParams.get("ensure") === "true";
 		const mcpManager = projectId || cwd
-			? await sessionManager.ensureMcpManager({ projectId, cwd })
+			? (ensure ? await sessionManager.ensureMcpManager({ projectId, cwd }) : sessionManager.getMcpManager({ projectId, cwd }))
 			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json([]);
@@ -13556,7 +13557,9 @@ async function handleApiRoute(
 				req.on("data", (chunk: Buffer) => data += chunk.toString());
 				req.on("end", () => resolve(data));
 			});
-			const { tool, args } = JSON.parse(body);
+			const parsedBody = JSON.parse(body);
+			const { tool, args } = parsedBody;
+			const scopeKey = typeof parsedBody?.scopeKey === "string" && parsedBody.scopeKey ? parsedBody.scopeKey : undefined;
 			parsedToolForError = typeof tool === "string" ? tool : undefined;
 			if (!tool) {
 				json({ error: "Missing 'tool' field" }, 400);
@@ -13582,7 +13585,7 @@ async function handleApiRoute(
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
 			}
-			let mcpManager = await sessionManager.ensureMcpManagerForSession(mcpSessionId);
+			const mcpManager = await sessionManager.resolveMcpManagerForSession(mcpSessionId, scopeKey);
 			if (!mcpManager) {
 				json({ error: "MCP not initialized" }, 500);
 				return;
@@ -13612,17 +13615,6 @@ async function handleApiRoute(
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
 					return;
-				}
-			}
-
-			const parsedForManager = parseMcpToolName(toolStr);
-			if (parsedForManager && !mcpManager.getServerStatuses().some(s => s.name === parsedForManager.server)) {
-				const defaultManager = sessionManager.getMcpManager();
-				if (defaultManager && defaultManager !== mcpManager && defaultManager.getServerStatuses().some(s => s.name === parsedForManager.server)) {
-					// Back-compat for legacy/default MCP sessions and tests that seed the
-					// singleton manager directly. If the scoped/session manager owns the
-					// server name, even in an error state, it remains authoritative.
-					mcpManager = defaultManager;
 				}
 			}
 
@@ -13657,6 +13649,7 @@ async function handleApiRoute(
 			const parsed = JSON.parse(body || "{}");
 			const server: string | undefined = parsed?.server;
 			const operation: string | undefined = parsed?.operation;
+			const scopeKey = typeof parsed?.scopeKey === "string" && parsed.scopeKey ? parsed.scopeKey : undefined;
 			if (!server || typeof server !== "string") {
 				json({ error: "Missing 'server' field" }, 400);
 				return;
@@ -13676,19 +13669,10 @@ async function handleApiRoute(
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
 				return;
 			}
-			let mcpManager = await sessionManager.ensureMcpManagerForSession(describeSessionId);
+			const mcpManager = await sessionManager.resolveMcpManagerForSession(describeSessionId, scopeKey);
 			if (!mcpManager) {
 				json({ error: "MCP not initialized" }, 500);
 				return;
-			}
-			if (!mcpManager.getServerStatuses().some(s => s.name === server)) {
-				const defaultManager = sessionManager.getMcpManager();
-				if (defaultManager && defaultManager !== mcpManager && defaultManager.getServerStatuses().some(s => s.name === server)) {
-					// Back-compat for legacy/default MCP sessions and tests that seed the
-					// singleton manager directly. If the scoped/session manager owns the
-					// server name, even in an error state, it remains authoritative.
-					mcpManager = defaultManager;
-				}
 			}
 
 			const statuses = mcpManager.getServerStatuses();

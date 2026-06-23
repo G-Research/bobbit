@@ -14,7 +14,7 @@
  * (clients/toolDefs/configs) — mirrors `tests/mcp-failure-isolation.test.ts`.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, base, readE2EToken, createSession } from "./e2e-setup.js";
+import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "./e2e-setup.js";
 import type { GatewayInfo } from "./in-process-harness.js";
 
 // ─── Stub MCP plumbing ─────────────────────────────────────────────────
@@ -58,21 +58,33 @@ const STUB_OPS = [
  * known operations. Returns the manager so the test can clear state in
  * teardown.
  */
-async function seedFakeMcpManager(gw: GatewayInfo, serverName = "fake-server") {
+async function makeFakeMcpManager(gw: GatewayInfo, serverName = "fake-server", opts?: Record<string, unknown>) {
 	const { McpManager } = await import("../../dist/server/mcp/mcp-manager.js");
-	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined);
+	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, opts);
 	const client = new FakeMcpClient(serverName);
 	client.connected = true;
 	(mgr as any).clients.set(serverName, client);
 	(mgr as any).toolDefs.set(serverName, STUB_OPS);
 	(mgr as any).configs.set(serverName, { command: "stub" });
+	return mgr;
+}
 
+async function seedFakeMcpManager(gw: GatewayInfo, serverName = "fake-server") {
+	const mgr = await makeFakeMcpManager(gw, serverName);
 	(gw.sessionManager as any).mcpManager = mgr;
+	return mgr;
+}
+
+async function seedFakeScopedMcpManager(gw: GatewayInfo, projectId: string, serverName = "fake-server") {
+	const scopeKey = `project:${projectId}`;
+	const mgr = await makeFakeMcpManager(gw, serverName, { projectId, scopeKey });
+	(gw.sessionManager as any).scopedMcpManagers.set(scopeKey, mgr);
 	return mgr;
 }
 
 function clearFakeMcpManager(gw: GatewayInfo) {
 	(gw.sessionManager as any).mcpManager = null;
+	(gw.sessionManager as any).scopedMcpManagers.clear();
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -101,6 +113,60 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(fake.status).toBe("connected");
 		expect(typeof fake.toolCount).toBe("number");
 		expect(fake.toolCount).toBe(2);
+	});
+
+	test("GET /api/mcp-servers scoped reads do not create managers unless ensure=true", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		clearFakeMcpManager(gateway);
+		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
+
+		const readOnly = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
+		expect(readOnly.status).toBe(200);
+		expect(await readOnly.json()).toEqual([]);
+		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
+
+		const cwdReadOnly = await apiFetch(`/api/mcp-servers?cwd=${encodeURIComponent(gateway.bobbitDir)}`);
+		expect(cwdReadOnly.status).toBe(200);
+		expect(await cwdReadOnly.json()).toEqual([]);
+		expect(gateway.sessionManager.getMcpManager({ cwd: gateway.bobbitDir })).toBeNull();
+
+		const ensured = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}&ensure=true`);
+		expect(ensured.status).toBe(200);
+		expect(Array.isArray(await ensured.json())).toBe(true);
+		expect(gateway.sessionManager.getMcpManager({ projectId })).not.toBeNull();
+	});
+
+	test("reloadMcpAfterMarketplaceMutation aggregates scoped manager failures", async ({ gateway }) => {
+		(gateway.sessionManager as any).mcpManager = {
+			getScopeKey: () => "default",
+			reloadDiscoveredServers: async () => ({
+				status: "ok",
+				connected: ["default-ok"],
+				disconnected: [],
+				unchanged: [],
+				skippedErrored: [],
+				failed: [],
+				statuses: [],
+			}),
+		};
+		(gateway.sessionManager as any).scopedMcpManagers.set("project:broken", {
+			getScopeKey: () => "project:broken",
+			reloadDiscoveredServers: async () => ({
+				status: "error",
+				connected: [],
+				disconnected: [],
+				unchanged: [],
+				skippedErrored: [],
+				failed: [{ name: "broken", error: "boom" }],
+				statuses: [],
+			}),
+		});
+
+		const result = await gateway.sessionManager.reloadMcpAfterMarketplaceMutation("server");
+		expect(result?.status).toBe("partial");
+		expect(result?.connected).toEqual(["default-ok"]);
+		expect(result?.failed).toEqual([{ name: "broken", error: "boom" }]);
 	});
 
 	// 2. mcp-describe header enforcement
@@ -157,10 +223,32 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(body.error).toMatch(/not connected/);
 	});
 
+	test("POST /api/internal/mcp-describe does not fall back from project manager to default", async ({ gateway }) => {
+		await seedFakeMcpManager(gateway);
+		const projectId = await defaultProjectId();
+		const sessionId = await createSession({ projectId });
+		const token = readE2EToken();
+
+		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"X-Bobbit-Session-Id": sessionId,
+			},
+			body: JSON.stringify({ server: "fake-server" }),
+		});
+		expect(resp.status).toBe(503);
+		const body = await resp.json();
+		expect(body.error).toMatch(/fake-server/);
+		expect(body.error).toMatch(/not connected/);
+	});
+
 	// 4. happy path
 	test("POST /api/internal/mcp-describe lists ops and returns single op detail", async ({ gateway }) => {
-		await seedFakeMcpManager(gateway);
-		const sessionId = await createSession();
+		const projectId = await defaultProjectId();
+		await seedFakeScopedMcpManager(gateway, projectId!);
+		const sessionId = await createSession({ projectId });
 		const token = readE2EToken();
 
 		const headers = {
@@ -209,9 +297,33 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(missBody.error).toMatch(/operation not found/i);
 	});
 
+	test("POST /api/internal/mcp-call does not fall back from project manager to default", async ({ gateway }) => {
+		await seedFakeMcpManager(gateway);
+		const projectId = await defaultProjectId();
+		const sessionId = await createSession({ projectId });
+		const token = readE2EToken();
+
+		const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"X-Bobbit-Session-Id": sessionId,
+			},
+			body: JSON.stringify({
+				tool: "mcp__fake-server__echo",
+				args: { message: "must not reach default manager" },
+			}),
+		});
+		expect(callResp.status).toBe(500);
+		const body = await callResp.json();
+		expect(body.error).toMatch(/fake-server/);
+	});
+
 	// 5. mcp-call never-policy enforcement (Layer B)
 	test("POST /api/internal/mcp-call denies per-op `never` policy via role", async ({ gateway }) => {
-		await seedFakeMcpManager(gateway);
+		const projectId = await defaultProjectId();
+		await seedFakeScopedMcpManager(gateway, projectId!);
 		const token = readE2EToken();
 		const roleName = "mcp-meta-deny-role";
 
@@ -234,7 +346,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 		try {
 			// Create a session and bind the role.
-			const sessionId = await createSession();
+			const sessionId = await createSession({ projectId });
 			const assignResp = await apiFetch(`/api/sessions/${sessionId}`, {
 				method: "PATCH",
 				body: JSON.stringify({ roleId: roleName }),
