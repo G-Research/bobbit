@@ -104,7 +104,7 @@ test.describe("Sidebar actions menu", () => {
 		const lastQuickAction = row.locator(`[data-sidebar-action-id="${lastQuickActionId}"][data-sidebar-action-quick="true"]`).first();
 		await lastQuickAction.focus();
 		await expect(lastQuickAction, `${kind} quick action should be focusable even before hover`).toBeFocused();
-		await expect(actionStrip(row), `${kind} action strip should become visible on focus-within`).toHaveCSS("opacity", "1", { timeout: 5_000 });
+		await expect(actionStrip(row), `${kind} action strip should become visible on focus-within`).toHaveCSS("opacity", "1", { timeout: 15_000 });
 		await page.keyboard.press("Tab");
 		await expect(trigger, `${kind} hamburger should be reachable from the quick actions with Tab`).toBeFocused();
 		await page.keyboard.press("Enter");

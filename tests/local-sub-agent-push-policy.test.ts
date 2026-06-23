@@ -98,7 +98,7 @@ function restoreEnv(key: string, value: string | undefined): void {
 }
 
 function cleanup(root: string): void {
-	fs.rmSync(root, { recursive: true, force: true });
+	fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 describe("host worktree push policy", () => {

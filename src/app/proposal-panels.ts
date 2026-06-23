@@ -1313,7 +1313,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 									variant: "secondary",
 									size: "sm",
 									onClick: () => config.onCustomizeWorkflow?.(),
-									disabled: !selectedLibrary,
+									disabled: !selectedLibrary || !config.onCustomizeWorkflow,
 									children: html`<span data-testid="goal-proposal-workflow-customize">Customise for this goal</span>`,
 							  })}
 					</div>
@@ -1392,6 +1392,7 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 								variant: "secondary",
 								size: "sm",
 								onClick: () => config.onCustomizeRole?.(),
+								disabled: !config.onCustomizeRole,
 								children: html`<span data-testid="goal-proposal-role-customize">Customize for this goal</span>`,
 						  })) : nothing}
 				</div>
@@ -1516,8 +1517,12 @@ function goalPreviewPanel() {
 			state.previewProjectId = candidate;
 		}
 	}
+	useGoalProposalTabsContext(goalProposalTabsContextKey("preview"));
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	ensureProposalRolesLoaded();
+	ensureProposalGroupPoliciesLoaded();
+	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
 
@@ -1543,7 +1548,11 @@ function goalPreviewPanel() {
 		// title between attempts).
 		const sessionId = activeSessionId();
 		const projectId = state.previewProjectId || undefined;
-		const workflowId = _selectedWorkflowId || undefined;
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
+			? _proposalInlineRoles as Record<string, unknown>
+			: undefined;
+		const workflowId = inlineWorkflowField ? undefined : (_selectedWorkflowId || undefined);
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
@@ -1574,6 +1583,8 @@ function goalPreviewPanel() {
 			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
 				spec: state.previewSpec,
 				workflowId,
+				workflow: inlineWorkflowField,
+				inlineRoles: inlineRolesField,
 				reattemptOf: reattemptGoalId || undefined,
 				sandboxed,
 				projectId,
@@ -1712,7 +1723,14 @@ function goalPreviewPanel() {
 					if (sid) saveGoalDraft(sid);
 					renderApp();
 				},
-				onWorkflowChange: (e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+				onWorkflowChange: (e: Event) => {
+					_selectedWorkflowId = (e.target as HTMLSelectElement).value;
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					clearWorkflowEditorController();
+					commitGoalProposalTabsState();
+					renderApp();
+				},
 				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
@@ -1761,8 +1779,7 @@ function goalPreviewPanel() {
 				maxConcurrentChildrenValue: _proposalMaxConcurrentChildren,
 				onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
 				onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
-				activeTab: _proposalActiveTab,
-				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
+				...goalProposalTabsConfig(_selectedWorkflowId, (id) => { _selectedWorkflowId = id; }),
 			})}
 		</div>
 	`;
@@ -2865,6 +2882,35 @@ let _proposalMaxConcurrentChildren: number | null = null;
 // tests/source-pin-merge-invariants.test.ts.
 // ----------------------------------------------------------------------------
 type ProposalTab = "goal" | "workflow" | "roles" | "metadata" | "subgoals";
+
+interface GoalProposalTabsState {
+	activeTab: ProposalTab;
+	inlineWorkflow: Workflow | null;
+	inlineRoles: Record<string, RoleData>;
+	selectedRoleName: string | null;
+	customizingWorkflow: boolean;
+	customizingRole: boolean;
+	roleEditTab: "prompt" | "tools" | "model";
+	roleCollapsedGroups: Set<string>;
+	tabsInitializedFrom: string | null;
+}
+
+function freshGoalProposalTabsState(): GoalProposalTabsState {
+	return {
+		activeTab: "goal",
+		inlineWorkflow: null,
+		inlineRoles: {},
+		selectedRoleName: null,
+		customizingWorkflow: false,
+		customizingRole: false,
+		roleEditTab: "prompt",
+		roleCollapsedGroups: new Set<string>(),
+		tabsInitializedFrom: null,
+	};
+}
+
+const _proposalTabsStateByContext = new Map<string, GoalProposalTabsState>();
+let _proposalTabsContextKey = "goal:default";
 let _proposalActiveTab: ProposalTab = "goal";
 let _proposalInlineWorkflow: Workflow | null = null;
 let _proposalInlineRoles: Record<string, RoleData> = {};
@@ -2881,6 +2927,59 @@ const _proposalRolesCacheByProject = new Map<string, RoleData[]>();
 const _proposalRolesLoadingByProject = new Set<string>();
 let _proposalGroupPoliciesCache: Record<string, string> | null = null;
 let _proposalGroupPoliciesLoading = false;
+
+function activeGoalProposalTabsState(): GoalProposalTabsState {
+	let st = _proposalTabsStateByContext.get(_proposalTabsContextKey);
+	if (!st) {
+		st = freshGoalProposalTabsState();
+		_proposalTabsStateByContext.set(_proposalTabsContextKey, st);
+	}
+	return st;
+}
+
+function syncGlobalsFromGoalProposalTabsState(st: GoalProposalTabsState): void {
+	_proposalActiveTab = st.activeTab;
+	_proposalInlineWorkflow = st.inlineWorkflow;
+	_proposalInlineRoles = st.inlineRoles;
+	_proposalSelectedRoleName = st.selectedRoleName;
+	_proposalCustomizingWorkflow = st.customizingWorkflow;
+	_proposalCustomizingRole = st.customizingRole;
+	_proposalRoleEditTab = st.roleEditTab;
+	_proposalRoleCollapsedGroups = st.roleCollapsedGroups;
+	_proposalTabsInitializedFrom = st.tabsInitializedFrom;
+}
+
+function commitGoalProposalTabsState(): void {
+	const st = activeGoalProposalTabsState();
+	st.activeTab = _proposalActiveTab;
+	st.inlineWorkflow = _proposalInlineWorkflow;
+	st.inlineRoles = _proposalInlineRoles;
+	st.selectedRoleName = _proposalSelectedRoleName;
+	st.customizingWorkflow = _proposalCustomizingWorkflow;
+	st.customizingRole = _proposalCustomizingRole;
+	st.roleEditTab = _proposalRoleEditTab;
+	st.roleCollapsedGroups = _proposalRoleCollapsedGroups;
+	st.tabsInitializedFrom = _proposalTabsInitializedFrom;
+}
+
+function useGoalProposalTabsContext(key: string): GoalProposalTabsState {
+	_proposalTabsContextKey = key;
+	const st = activeGoalProposalTabsState();
+	syncGlobalsFromGoalProposalTabsState(st);
+	return st;
+}
+
+function goalProposalTabsContextKey(surface: "preview" | "proposal"): string {
+	if (_proposalOverride?.type === "goal") {
+		const title = typeof _proposalOverride.fields.title === "string" ? _proposalOverride.fields.title : "";
+		return `goal:historical:${_proposalOverride.rev}:${title}`;
+	}
+	const sid = state.activeProposals.goal?.sessionId ?? activeSessionId() ?? "no-session";
+	const sess = state.gatewaySessions.find(s => s.id === sid);
+	const projectId = state.previewProjectId || sess?.projectId || "no-project";
+	const reattempt = sess?.reattemptGoalId || "";
+	return `goal:${surface}:${sid}:${projectId}:${reattempt}`;
+}
 
 function proposalRolesProjectKey(): string {
 	return state.previewProjectId || "";
@@ -2905,6 +3004,7 @@ function ensureProposalRolesLoaded(): void {
 			_proposalRolesLoadingByProject.delete(key);
 			if (proposalRolesProjectKey() === key && !_proposalSelectedRoleName && list.length > 0) {
 				_proposalSelectedRoleName = list[0].name;
+				commitGoalProposalTabsState();
 			}
 			renderApp();
 		})
@@ -2950,18 +3050,109 @@ function cloneRole(r: RoleData): RoleData {
 	};
 }
 
+function goalProposalTabsConfig(
+	workflowId: string,
+	setWorkflowId: (id: string) => void,
+): Pick<GoalFormConfig,
+	"activeTab" | "onTabChange" |
+	"inlineWorkflow" | "customizingWorkflow" | "onInlineWorkflowChange" | "onCustomizeWorkflow" | "onResetWorkflow" |
+	"inlineRoles" | "selectedRoleName" | "onSelectRole" | "customizingRole" | "onCustomizeRole" | "onResetRole" |
+	"onRoleDraftChange" | "onRoleEditorTabChange" | "onRoleToggleToolGroup" | "roleEditTab" | "roleCollapsedGroups" |
+	"roleList" | "roleListLoading" | "availableTools" | "groupPolicies"
+> {
+	return {
+		activeTab: _proposalActiveTab,
+		onTabChange: (tab) => { _proposalActiveTab = tab; commitGoalProposalTabsState(); renderApp(); },
+
+		inlineWorkflow: _proposalInlineWorkflow,
+		customizingWorkflow: _proposalCustomizingWorkflow,
+		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; commitGoalProposalTabsState(); renderApp(); },
+		onCustomizeWorkflow: () => {
+			const src = _cachedWorkflows.find((w) => w.id === workflowId) ?? _cachedWorkflows[0];
+			if (!src) return;
+			_proposalInlineWorkflow = cloneWorkflow(src);
+			_proposalCustomizingWorkflow = true;
+			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onResetWorkflow: () => {
+			_proposalInlineWorkflow = null;
+			_proposalCustomizingWorkflow = false;
+			if (!_cachedWorkflows.some((w) => w.id === workflowId)) {
+				setWorkflowId(_cachedWorkflows[0]?.id ?? "");
+			}
+			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+
+		inlineRoles: _proposalInlineRoles,
+		selectedRoleName: _proposalSelectedRoleName,
+		onSelectRole: (name) => {
+			_proposalSelectedRoleName = name;
+			_proposalCustomizingRole = !!_proposalInlineRoles[name];
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
+		onCustomizeRole: () => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			const src = proposalRolesList().find((r) => r.name === name);
+			if (!src) return;
+			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
+			_proposalCustomizingRole = true;
+			_proposalRoleEditTab = "prompt";
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onResetRole: () => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			delete _proposalInlineRoles[name];
+			_proposalCustomizingRole = false;
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onRoleDraftChange: (patch) => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			const current = _proposalInlineRoles[name];
+			if (!current) return;
+			const next: RoleData = { ...current };
+			if (patch.label !== undefined) next.label = patch.label;
+			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
+			if (patch.accessory !== undefined) next.accessory = patch.accessory;
+			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
+			if (patch.model !== undefined) next.model = patch.model;
+			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
+			_proposalInlineRoles[name] = next;
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; commitGoalProposalTabsState(); renderApp(); },
+		onRoleToggleToolGroup: (group) => {
+			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
+			else _proposalRoleCollapsedGroups.add(group);
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		roleEditTab: _proposalRoleEditTab,
+		roleCollapsedGroups: _proposalRoleCollapsedGroups,
+		roleList: proposalRolesList(),
+		roleListLoading: proposalRolesLoading(),
+		availableTools: _availableTools,
+		groupPolicies: _proposalGroupPoliciesCache ?? {},
+	};
+}
+
 /** Reset all proposal-tab module state. Called when the proposal is dismissed
  *  or successfully accepted, and when syncing from a new proposal payload. */
 function resetProposalTabsState(): void {
-	_proposalActiveTab = "goal";
-	_proposalInlineWorkflow = null;
-	_proposalInlineRoles = {};
-	_proposalSelectedRoleName = null;
-	_proposalCustomizingWorkflow = false;
-	_proposalCustomizingRole = false;
-	_proposalRoleEditTab = "prompt";
-	_proposalRoleCollapsedGroups = new Set<string>();
-	_proposalTabsInitializedFrom = null;
+	const st = freshGoalProposalTabsState();
+	_proposalTabsStateByContext.set(_proposalTabsContextKey, st);
+	syncGlobalsFromGoalProposalTabsState(st);
 	clearWorkflowEditorController();
 }
 
@@ -3058,6 +3249,7 @@ function syncProposalFormState(): void {
 			const firstCustomized = Object.keys(_proposalInlineRoles)[0];
 			if (firstCustomized) _proposalSelectedRoleName = firstCustomized;
 		}
+		commitGoalProposalTabsState();
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
@@ -3122,6 +3314,7 @@ function goalProposalPanel() {
 			state.previewProjectId = candidate;
 		}
 	}
+	useGoalProposalTabsContext(goalProposalTabsContextKey("proposal"));
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
@@ -3322,6 +3515,7 @@ function goalProposalPanel() {
 			_proposalInlineWorkflow = null;
 			_proposalCustomizingWorkflow = false;
 			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
 			renderApp();
 		},
 		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
@@ -3366,84 +3560,7 @@ function goalProposalPanel() {
 		onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
 
 		// ---- Goal proposal tabs wiring ----
-		activeTab: _proposalActiveTab,
-		onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
-
-		inlineWorkflow: _proposalInlineWorkflow,
-		customizingWorkflow: _proposalCustomizingWorkflow,
-		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
-		onCustomizeWorkflow: () => {
-			const src = _cachedWorkflows.find((w) => w.id === _proposalWorkflowId) ?? _cachedWorkflows[0];
-			if (!src) return;
-			_proposalInlineWorkflow = cloneWorkflow(src);
-			_proposalCustomizingWorkflow = true;
-			clearWorkflowEditorController();
-			renderApp();
-		},
-		onResetWorkflow: () => {
-			_proposalInlineWorkflow = null;
-			_proposalCustomizingWorkflow = false;
-			// Normalize a stale inline-only id back to a real library workflow so
-			// submit doesn't forward a discarded inline workflow's id as `workflowId`.
-			if (!_cachedWorkflows.some((w) => w.id === _proposalWorkflowId)) {
-				_proposalWorkflowId = _cachedWorkflows[0]?.id ?? "";
-			}
-			clearWorkflowEditorController();
-			renderApp();
-		},
-
-		inlineRoles: _proposalInlineRoles,
-		selectedRoleName: _proposalSelectedRoleName,
-		onSelectRole: (name) => {
-			_proposalSelectedRoleName = name;
-			_proposalCustomizingRole = !!_proposalInlineRoles[name];
-			renderApp();
-		},
-		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
-		onCustomizeRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const src = proposalRolesList().find((r) => r.name === name);
-			if (!src) return;
-			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
-			_proposalCustomizingRole = true;
-			_proposalRoleEditTab = "prompt";
-			renderApp();
-		},
-		onResetRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			delete _proposalInlineRoles[name];
-			_proposalCustomizingRole = false;
-			renderApp();
-		},
-		onRoleDraftChange: (patch) => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const current = _proposalInlineRoles[name];
-			if (!current) return;
-			const next: RoleData = { ...current };
-			if (patch.label !== undefined) next.label = patch.label;
-			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
-			if (patch.accessory !== undefined) next.accessory = patch.accessory;
-			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
-			if (patch.model !== undefined) next.model = patch.model;
-			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
-			_proposalInlineRoles[name] = next;
-			renderApp();
-		},
-		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
-		onRoleToggleToolGroup: (group) => {
-			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
-			else _proposalRoleCollapsedGroups.add(group);
-			renderApp();
-		},
-		roleEditTab: _proposalRoleEditTab,
-		roleCollapsedGroups: _proposalRoleCollapsedGroups,
-		roleList: proposalRolesList(),
-		roleListLoading: proposalRolesLoading(),
-		availableTools: _availableTools,
-		groupPolicies: _proposalGroupPoliciesCache ?? {},
+		...goalProposalTabsConfig(_proposalWorkflowId, (id) => { _proposalWorkflowId = id; }),
 	});
 }
 
