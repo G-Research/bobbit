@@ -244,8 +244,12 @@ function normalizeRegistryServer(raw: unknown): McpRegistryServer {
 	return server;
 }
 
-function registryPackName(id: string): string {
+export function registryPackNameForId(id: string): string {
 	return `mcp-${id}`;
+}
+
+function registryPackName(id: string): string {
+	return registryPackNameForId(id);
 }
 
 function normalizeRegistryId(raw: unknown): string {

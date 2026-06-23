@@ -59,7 +59,7 @@ import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
-import { McpManager } from "../mcp/mcp-manager.js";
+import { McpManager, type MarketplaceMcpResolver } from "../mcp/mcp-manager.js";
 import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
@@ -778,6 +778,7 @@ export class SessionManager {
 	private projectContextManager: ProjectContextManager | null = null;
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
+	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -1761,6 +1762,11 @@ export class SessionManager {
 		return this.mcpManager;
 	}
 
+	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
+		this.marketplaceMcpResolver = resolver ?? null;
+		this.mcpManager?.setMarketplaceResolver(this.marketplaceMcpResolver);
+	}
+
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
@@ -1821,7 +1827,7 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir());
+			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir(), { marketplaceResolver: this.marketplaceMcpResolver ?? undefined });
 
 			// Register additional projects for multi-project MCP discovery
 			if (this.projectContextManager) {
