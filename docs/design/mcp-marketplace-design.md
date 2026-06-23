@@ -94,11 +94,11 @@ Relevant files:
   - `tests/e2e/mcp-integration.spec.ts`
   - `tests/e2e/mcp-meta-call.spec.ts`
   - `tests/e2e/mcp-tool-permission.spec.ts`
-- Docs that must be updated when implementation lands:
-  - `docs/marketplace.md` still says MCP installs are out of scope.
-  - `docs/extension-host-authoring.md` still says `contents.mcp` is rejected.
-  - `docs/design/pack-based-marketplace.md` has the original MVP boundary.
-  - `docs/debugging.md` and `docs/internals.md` contain MCP runtime/policy guidance.
+- Reference docs updated with implementation behavior:
+  - `docs/marketplace.md` documents the MCP contribution schema, registry sources, activation/status split, trust model, and manual-over-Marketplace precedence.
+  - `docs/extension-host-authoring.md` points `contents.mcp` authors to Marketplace MCP because it is schema-2-only and not an Extension-Host surface.
+  - `docs/design/pack-based-marketplace.md` includes an MCP addendum that revises the original MVP boundary.
+  - `docs/mcp-meta-tools.md` documents Marketplace activation vs Tools policy and scoped manager behavior.
 
 ## 2. Target model
 
@@ -1073,7 +1073,7 @@ After install/update/uninstall/activation/pack-order changes, reuse existing Mar
 The documentation gate must update:
 
 - `docs/marketplace.md`: final MCP contribution schema, registry source flow, activation/status behavior, trust model, and manual-over-Marketplace precedence.
-- `docs/extension-host-authoring.md`: replace "`contents.mcp` is rejected" with schema-2 MCP contribution authoring rules.
+- `docs/extension-host-authoring.md`: document that `contents.mcp` is schema-2-only and link authors to Marketplace MCP contribution rules.
 - `docs/mcp-meta-tools.md`: explain Marketplace activation vs Tools policy and server/sub-namespace toggle granularity.
 - `docs/design/pack-based-marketplace.md`: revise the old MVP/out-of-scope boundary or point to the new Marketplace MCP design.
 - Any MCP/runtime docs that list discovery precedence: add Marketplace as the lowest-priority installed layer and document the disabled/manual same-name exception.

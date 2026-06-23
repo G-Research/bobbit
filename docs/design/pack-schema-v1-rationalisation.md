@@ -1066,7 +1066,7 @@ tools.
 
 | Test | Asserts |
 |---|---|
-| manifest validation | `contents.entrypoints` accepted (string[]); `routes:{module,names}` accepted; `contents.mcp` still rejected; no `stores`/`permissions` schema |
+| manifest validation | `contents.entrypoints` accepted (string[]); `routes:{module,names}` accepted; schema-1 `contents.mcp` rejected while schema-2 handles MCP in Marketplace docs; no `stores`/`permissions` schema |
 | pack-contribution parsing | `panels/*.yaml` + `entrypoints/*.yaml` (single-file) + `pack.yaml.routes` parse to the §5.1 shapes; malformed file warned + dropped; `listName` carried |
 | tool-contribution parsing | tool YAML parses ONLY `renderer`+`actions`; `panels`/`routes`/`entrypoints`/`stores` keys on a tool YAML are ignored (not parsed into contributions). The test asserts ONLY non-registration — NOT any old-schema-specific diagnostic, since the old schema is treated as if it never existed (§1.3) |
 | registry precedence collapse (§5.2.1) | same pack name installed at global-user + project scope yields exactly ONE `getPack(packId)` (the project/winning variant); shadowed variant contributes nothing and raises no self-conflict |

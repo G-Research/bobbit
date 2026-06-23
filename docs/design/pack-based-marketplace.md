@@ -1,8 +1,8 @@
 # Pack-Based Marketplace — Design Document
 
-Status: **design** (MVP implementation to follow)
-Owner: Pack-Based Marketplace goal (`goal/pack-based-mar-6828576e`)
-Scope: unify the **installable-entity resolvers** (roles, tools, skills) into **one pack resolver over one ordered list of packs**, and add a **Market** surface to register sources and install/uninstall/update packs.
+Status: **implemented baseline + MCP extension**
+Owner: Pack-Based Marketplace goal (`goal/pack-based-mar-6828576e`) plus Marketplace MCP goal
+Scope: unify installable pack entities into one pack model, add the Market surface, and extend schema-2 packs/Marketplace sources to install MCP server contributions without replacing manual MCP config.
 
 > This document is implementable on its own. It encodes the goal's *locked decisions verbatim* and is deliberately precise about the **legacy → unified-list mapping** (§6), which is the highest regression risk.
 
@@ -10,7 +10,7 @@ Scope: unify the **installable-entity resolvers** (roles, tools, skills) into **
 
 ## 0. TL;DR / mental model
 
-- A **pack is a directory** laid out like `defaults/`: `roles/`, `tools/`, `skills/` (and a future `mcp/`).
+- A **pack is a directory** laid out like `defaults/`: `roles/`, `tools/`, `skills/`, plus schema-2 pack-scoped contributions such as `mcp/`, `providers/`, `entrypoints/`, and panels/routes.
 - There is **ONE resolver** that walks **ONE ordered list of packs** low→high priority and produces resolved entities, each tagged with the pack it came from. **Precedence = position in the list.**
 - **Everything is a pack** in that list:
   - **Builtin pack** — shipped `dist/server/defaults/` (read-only, lowest priority).
@@ -18,7 +18,7 @@ Scope: unify the **installable-entity resolvers** (roles, tools, skills) into **
   - **Market packs** — installed from a source into a scope's `market-packs/<pack-name>/`.
   - **Legacy-implicit packs** — the hard-coded skill scan dirs and user-registered `config_directories` mapped into list entries (back-compat).
 - **Install** = copy a pack dir into a scope's `market-packs/` + write `.pack-meta.yaml`. **Uninstall** = delete the dir. **Update** = re-copy/re-pull.
-- **Out of scope, untouched:** `mcp-manager.ts` (MCP servers) and `system-prompt.ts` (AGENTS.md). Leave loader seams only.
+- **MCP is now additive:** schema-2 packs may ship `mcp/<name>.yaml|yml|json`, and MCP registry/discovery sources browse as virtual packs that materialize to the same layout. Manual `.mcp.json` and Claude-compatible MCP config remain supported and override Marketplace by runtime server name. AGENTS/CLAUDE.md prompt assembly remains out of scope.
 
 The reframe must produce **byte-for-byte identical resolution** for roles/tools/skills versus today's `ConfigCascade` + `slash-skills.ts` + `config_directories`. The existing tests pin this.
 
@@ -36,14 +36,17 @@ A pack is a directory containing a **required `pack.yaml`** manifest plus an ent
   roles/<name>.yaml
   tools/<group>/{*.yaml, extension.ts, _shared/...}
   skills/<name>/SKILL.md
-  (mcp/ ...)                      # future — loader seam reserved, not loaded in MVP
+  mcp/<name>.yaml                 # schema-2 MCP server contributions listed in contents.mcp
+  providers/<name>.yaml           # schema-2 provider contributions
+  entrypoints/<name>.yaml         # pack-scoped launchers/deep-links
+  panels/<name>.yaml              # auto-discovered support surfaces
 ```
 
 **Discovery rule (single source of truth):** a directory is a pack **iff** it contains `pack.yaml`. Directories without one are ignored (e.g. a source repo's `README.md`, a `docs/` folder). The **builtin pack** and **legacy-implicit packs** are the only exceptions — they have an *implicit* manifest synthesised in code (no file on disk).
 
 ### 1.2 Marketplace source repo layout
 
-A source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs.
+A pack source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs. MCP registry/discovery sources are a second source type: they browse a JSON registry as virtual schema-2 packs and materialize selected servers into normal installed pack directories.
 
 ```
 <source-repo-root>/
@@ -141,22 +144,40 @@ export interface PackManifest {
   version: string;
   author?: string;
   homepage?: string;
-  // REQUIRED object; the roles/tools/skills array keys REQUIRED but MAY be empty.
-  // NO `mcp` key in a publishable manifest — packs may NOT ship/install MCP
-  // configs (goal MVP boundary). `mcp` exists only as a reserved code-level
-  // EntityType (§2.2) for the future loader seam, never in a published pack.yaml.
+  schema?: number;            // absent/1 = baseline schema; 2 enables pack-scoped contribution keys
   contents: {
     roles: string[];
     tools: string[];          // tool group dir names
     skills: string[];
-    entrypoints?: string[];   // V1: Extension-Host entrypoints/<name>.yaml basenames
+    entrypoints?: string[];   // Extension-Host entrypoints/<name>.yaml basenames
+    providers?: string[];     // schema 2: providers/<name>.yaml
+    mcp?: string[];           // schema 2: mcp/<name>.yaml|yml|json
+    hooks?: string[];
+    piExtensions?: string[];
+    runtimes?: string[];
+    workflows?: string[];
   };
   // V1: optional Extension-Host pack-level routes (see pack-schema-v1-rationalisation.md).
   routes?: { module?: string; names?: string[] };
 }
 ```
 
-Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. `contents` REQUIRED with the `roles`/`tools`/`skills` array keys present (each may be empty); `contents.entrypoints` and the top-level `routes:` block are optional (V1). A `contents.mcp` key in a published manifest is **rejected** in MVP (MCP installs out of scope). Other unknown top-level keys ignored (forward-compat). A pack whose `pack.yaml` is missing or fails validation is **skipped with a warning**, not fatal.
+Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. `contents` REQUIRED with the `roles`/`tools`/`skills` array keys present (each may be empty); `contents.entrypoints` and the top-level `routes:` block are optional. Schema 1 disallows `contents.mcp`; schema 2 accepts it and each basename loads `mcp/<name>.yaml|yml|json` through strict Marketplace MCP validation. Other unknown top-level keys ignored (forward-compat). A pack whose `pack.yaml` is missing or fails validation is **skipped with a warning**, not fatal.
+
+### 1.4.1 Marketplace MCP addendum
+
+Marketplace MCP extends this design without changing the pack-as-directory invariant:
+
+- Authored pack sources declare `schema: 2`, `contents.mcp: [<listName>]`, and one contribution file at `mcp/<listName>.yaml|yml|json`.
+- MCP registry/discovery sources (`type: "mcp-registry"`) fetch a bounded JSON document with `schemaVersion: 1` and `servers[]`. Each valid server browses as a virtual pack named `mcp-<id>` and installs by materializing `pack.yaml`, `mcp/<id>.yaml`, and `.pack-meta.yaml` into the selected scope.
+- `listName` / registry `id` is the activation identity (`DisabledRefs.mcp`), materialized file basename, and pack suffix. Runtime `server` / registry `name` is the MCP server key used by `McpManager`, policy keys, and model-facing meta-tools.
+- Transports normalize to existing `McpServerConfig`: stdio accepts `command`, `args`, `env`, `cwd`; HTTP accepts `url`, `headers`. Names, cwd containment, URL shape, env/header key/value types, and unknown keys are validated strictly.
+- Marketplace MCP is lower priority than manual config. Existing custom config directories, Claude-compatible files, project `.mcp.json`, and project `.bobbit/config/mcp.json` are still read by `McpManager`; manual definitions override Marketplace definitions with the same runtime server name.
+- Activation is server/sub-namespace level. `DisabledRefs.mcp` omits the pack-local contribution before connection. A flat contribution owns a whole server; a `subNamespace` contribution owns one `mcp_<server>__<sub>` meta-tool. Raw operations are parameters discovered by `mcp_describe`, not Market activation rows.
+- Runtime managers are scoped by default/project/cwd context. Marketplace mutations reload affected managers, disconnect removed servers, keep unchanged connections, refresh ToolManager external MCP registrations, and return contextual `mcpReload` status. `GET /api/mcp-servers` is status only; toggle state comes from the unfiltered activation catalogue.
+- Trust remains source-level: stdio MCP is host-tier code, HTTP MCP is a trusted remote endpoint, and status payloads redact secret values.
+
+See [Marketplace MCP](../marketplace.md#marketplace-mcp) and [MCP meta-tool aggregation](../mcp-meta-tools.md#marketplace-mcp-and-scoped-managers) for the current user/developer reference.
 
 ### 1.5 `.pack-meta.yaml` schema
 
@@ -784,20 +805,20 @@ This is read from the **same authoritative pack dir** the activation catalogue r
 ## 11. Extensibility seams
 
 The design is additive along three axes:
-- **Entity-type set:** add an `EntityLoader<T>` and register it; the pipeline (`PackResolver`) is type-agnostic. `mcp/` and `panels/` slot in here. `mcp` is reserved only as a code-level `EntityType` for the future loader — it is **not** a publishable `PackManifest.contents` key in MVP (a manifest declaring `contents.mcp` is rejected, §1.4).
+- **Entity-type set:** add a loader/registry path for each contribution type while keeping ordering and activation centralized. `mcp/` now loads through the Marketplace MCP resolver rather than the role/tool/skill name-merging resolver; panels/providers/entrypoints load through pack-scoped contribution registries.
 - **Pack/source format:** `pack.yaml`/`.pack-meta.yaml` parsers ignore unknown keys; new layouts add a `PackEntry.layout` variant + loader support.
-- **Install pipeline:** `installPack`/`updatePack` are source-backend-agnostic (git or local dir today); a hosted-registry backend implements the same sync→copy contract.
+- **Install pipeline:** install/update/uninstall remain directory-based. Git/local sources copy authored pack dirs; MCP registry sources materialize virtual server rows into normal pack dirs before the same install semantics apply.
 
 **Future UI-panel/plugin bundle (the headline future use case):** a panel pack would ship a `panels/<name>/` subtree (manifest + entry HTML/JS + a panel descriptor). The seam: (a) a `PanelLoader` plugged into the resolver, (b) `PackManifest.contents.panels`, (c) a panel host that mounts resolved panels (PR-Walkthrough generalised). Nothing is built now, but the resolver and pack format already accommodate it without redesign.
 
 ### Deferred (explicit seams left)
 
-- **MCP server installs** — `mcp/` loader seam reserved; `mcp-manager.ts` untouched and still resolves existing `.mcp.json`. Revisit with a parameterization/secrets model. Packs may NOT install `mcp/` in MVP.
+- **MCP registry search and secret parameterization** — MCP registry URLs are supported, but there is no hosted searchable catalogue or first-class secret-binding UI. MCP contribution files may reference environment/header placeholders; users must still manage the actual secrets out of band.
 - **AGENTS/CLAUDE.md installs** — not installable; `system-prompt.ts::readAllAgentFiles` untouched. Existing AGENTS.md resolution preserved.
 - **Portable/parameterised workflow bundles** — workflows stay project-scoped inline in `project.yaml`; note what'd change (decouple from component/command pairs) but build nothing.
 - **Staff templates** as exportable packs — gap noted.
 - **Trust / sandboxing / signing** of code-bearing packs — MVP copies tool code as-is with a UI warning; sketch where a permission/trust gate slots into `installPack`.
-- **Hosted/remote registry with search** — `MarketplaceSource` abstraction kept open to a registry backend.
+- **Hosted pack registry with search** — generic pack sources remain git/local. MCP registry/discovery URLs are a specific source type, not a general hosted pack marketplace.
 - **Per-conflict pinning (`pack_conflicts`)** — deferred; MVP resolves same-name conflicts solely via `pack_order` (§3.3) plus user-pack customization (§3.2). The future schema (additive, no migration needed) would be a `pack_conflicts` list in `project.yaml`/server config:
   ```yaml
   pack_conflicts:
@@ -891,7 +912,7 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 - `src/server/server.ts` — add `/api/marketplace/*`, `/api/marketplace/pack-order` (GET/PUT, §9.2), and `/api/packs/conflicts` routes (§9); wire resolver-cache + slash-skills TTL invalidation on install/uninstall/update/reorder; `/api/roles|tools|skills` now read from `PackResolver` and emit `originPackId`/`originPackName` + `user` origin.
 - `src/server/agent/config-directories.ts` — **unchanged behaviour**; its helpers are now consumed by `buildPackList` (legacy keys still read).
 
-**Untouched (explicit non-goals):** `src/server/mcp/mcp-manager.ts`, `src/server/agent/system-prompt.ts`.
+**Explicit non-goal still untouched:** `src/server/agent/system-prompt.ts` (AGENTS/CLAUDE.md prompt assembly). MCP is now integrated through `McpManager` as an additive Marketplace layer; manual config loaders remain.
 
 **New (UI):**
 - `src/app/marketplace-page.ts` — the Market surface (sources / browse / installed / conflicts), reusing `config-scope.ts` helpers.

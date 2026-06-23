@@ -130,7 +130,7 @@ Rules:
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
   server routes from `module`, gated by the `names` allowlist. Absent ⇒ no routes.
-- **`contents.mcp` is rejected** — MCP installs are out of scope.
+- **`contents.mcp` is schema-2 only** — it lists `mcp/<name>.yaml|yml|json` Marketplace MCP contributions. It is not an Extension-Host surface; see [Marketplace MCP](marketplace.md#marketplace-mcp). Schema-1 packs still reject it.
 - **No `stores` key** — stores are implicit (see [Stores](#stores--implicit-pack-scoped-persistence-hoststore)).
 - **No `permissions` key** — there is no permission system; trusted pack server code has
   ambient OS access (see [Server-module confinement](#server-module-confinement)).
