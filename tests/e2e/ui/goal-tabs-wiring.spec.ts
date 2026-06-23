@@ -176,7 +176,22 @@ test.describe("Goal proposal — tab wiring repro", () => {
 		await page.locator(WORKFLOW_TAB).click();
 		await expect(page.locator(WORKFLOW_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
 
+		const expectedProjectId = await page.evaluate(() => {
+			const st = (window as any).bobbitState;
+			const sid = st?.selectedSessionId;
+			return st?.gatewaySessions?.find((s: any) => s.id === sid)?.projectId || st?.projects?.[0]?.id || "";
+		});
+		expect(expectedProjectId, "test fixture should have a concrete source project").toBeTruthy();
+		await page.evaluate(() => {
+			(window as any).bobbitState.previewProjectId = "stale-project-id";
+			(window as any).__bobbitRenderApp?.();
+		});
+
 		await clickProposalOpenButtonForRev(page, 1, "GOAL_HISTORICAL_TAB_WIRING");
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.previewProjectId || ""),
+			{ timeout: 10_000, message: "historical goal revision must replace stale previewProjectId with its source project" },
+		).toBe(expectedProjectId);
 		await expect(
 			page.locator('[data-testid="proposal-panel-rev"]').first(),
 			"rev 1 should render in the active historical goal proposal panel",
