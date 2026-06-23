@@ -26,6 +26,30 @@ function makeLocalGitRepoWithoutOrigin(): string {
 	return root;
 }
 
+function makeCloneWithLocalOnlyGoalBranch(): { root: string; repoDir: string; goalBranch: string } {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-local-only-origin-regression-"));
+	const remoteDir = path.join(root, "remote.git");
+	const seedDir = path.join(root, "seed");
+	const repoDir = path.join(root, "repo");
+	const goalBranch = "goal/local-only-regression";
+
+	execFileSync("git", ["init", "--bare", remoteDir], { stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: remoteDir, stdio: "ignore" });
+	execFileSync("git", ["init", seedDir], { stdio: "ignore" });
+	execFileSync("git", ["checkout", "-B", "master"], { cwd: seedDir, stdio: "ignore" });
+	fs.writeFileSync(path.join(seedDir, "README.md"), "published master only\n");
+	execFileSync("git", ["add", "README.md"], { cwd: seedDir, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Bobbit Test", "-c", "user.email=bobbit@example.test", "commit", "-m", "Initial commit"], { cwd: seedDir, stdio: "ignore" });
+	execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: seedDir, stdio: "ignore" });
+	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: seedDir, stdio: "ignore" });
+
+	execFileSync("git", ["clone", remoteDir, repoDir], { stdio: "ignore" });
+	execFileSync("git", ["checkout", "-b", goalBranch], { cwd: repoDir, stdio: "ignore" });
+	assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: repoDir, encoding: "utf8" }).trim(), goalBranch);
+	assert.throws(() => execFileSync("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch], { cwd: repoDir, stdio: "pipe" }));
+	return { root, repoDir, goalBranch };
+}
+
 function makeProjectConfigStore(baseRef: string) {
 	return {
 		get: (key: string) => key === "base_ref" ? baseRef : "",
@@ -148,6 +172,50 @@ test("local-only verification does not warn when origin remote is absent", async
 		warningOutput,
 		/Failed to sync worktree from origin\/|Failed to fetch origin\/|fatal: 'origin' does not appear to be a git repository|does not appear to be a git repository/i,
 		`NO_ORIGIN_VERIFICATION_REPRO: local-only verification without origin emitted noisy git remote sync warnings:\n${warningOutput}`,
+	);
+});
+
+test("local-only goal branch with origin does not warn when remote goal ref is missing", async () => {
+	const { root, repoDir, goalBranch } = makeCloneWithLocalOnlyGoalBranch();
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/master");
+	const warnings: string[] = [];
+	const originalWarn = console.warn;
+	(harness as any).runCommandStep = async (command: string) => ({ passed: true, output: `executed ${command}` });
+	console.warn = (...args: any[]) => {
+		warnings.push(args.map(arg => typeof arg === "string" ? arg : inspect(arg)).join(" "));
+	};
+
+	try {
+		await harness.verifyGateSignal(
+			signal as any,
+			{
+				id: "ready-to-merge",
+				name: "Ready to Merge",
+				dependsOn: [],
+				verify: [{
+					name: "Local command still runs",
+					type: "command",
+					run: "echo local-only-goal-branch-with-origin",
+				}],
+			} as any,
+			repoDir,
+			goalBranch,
+			"master",
+			new Map(),
+			"Reproduce local-only goal branch remote-ref warning regression",
+		);
+	} finally {
+		console.warn = originalWarn;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+
+	const verification = gateStore._gateState.signals[0].verification;
+	const warningOutput = warnings.join("\n");
+	assert.equal(verification?.status, "passed");
+	assert.doesNotMatch(
+		warningOutput,
+		/Failed to sync worktree from origin\/|couldn't find remote ref|fatal: couldn't find remote ref|remote ref .* not found/i,
+		`LOCAL_ONLY_GOAL_BRANCH_ORIGIN_REPRO: verification of unpublished goal branch with origin emitted noisy remote-ref sync warnings:\n${warningOutput}`,
 	);
 });
 
