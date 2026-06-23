@@ -89,9 +89,14 @@ type ResolverCtx = {
 	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 };
 
+const RUNNABLE_RESOLVER_BLOCK = `
+const mergeHostAgentProviderEnv = (env) => env;
+${RESOLVER_BLOCK}
+`;
+
 const runResolver: (plan: ResolverPlan, ctx: ResolverCtx) => void = new Function(
 	"plan", "ctx",
-	RESOLVER_BLOCK,
+	RUNNABLE_RESOLVER_BLOCK,
 ) as any;
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
