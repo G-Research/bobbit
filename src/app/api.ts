@@ -2453,9 +2453,14 @@ export interface McpServerInfo {
 }
 
 /** GET /api/mcp-servers — returns one entry per registered MCP server with its operations. */
-export async function fetchMcpServers(): Promise<McpServerInfo[]> {
+export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
-		const res = await gatewayFetch("/api/mcp-servers");
+		const params = new URLSearchParams();
+		if (opts?.projectId) params.set("projectId", opts.projectId);
+		if (opts?.cwd) params.set("cwd", opts.cwd);
+		if (opts?.ensure) params.set("ensure", "true");
+		const qs = params.toString();
+		const res = await gatewayFetch(`/api/mcp-servers${qs ? `?${qs}` : ""}`);
 		if (!res.ok) return [];
 		const data = await res.json();
 		if (!Array.isArray(data)) return [];
@@ -2905,6 +2910,9 @@ export interface PackManifest {
 		/** Entrypoint `listName` basenames (pack-schema-v1 §1.2). Optional on the
 		 *  client wire — present on browse/installed payloads that declare them. */
 		entrypoints?: string[];
+		/** MCP contribution `listName` basenames (schema 2). Optional so older
+		 *  pack/source responses keep parsing while MCP-aware catalogues render chips. */
+		mcp?: string[];
 	};
 }
 
@@ -2919,13 +2927,20 @@ export interface PackMeta {
 	scope: MarketScope;
 }
 
+export type MarketplaceSourceType = "pack" | "mcp-registry";
+
 export interface MarketplaceSource {
 	id: string;
 	url: string;
 	ref?: string;
+	/** Source backend type. Omitted means the original pack git/local source. */
+	type?: MarketplaceSourceType;
 	addedAt: string;
 	lastSyncedAt?: string;
 	lastCommit?: string;
+	/** Optional summary metadata for MCP registry sources. */
+	mcpServerCount?: number;
+	discoveredMcpServers?: number;
 	/** Response-only: marks the synthetic, non-removable built-in source (§4.4). */
 	builtin?: boolean;
 }
@@ -2940,6 +2955,36 @@ export interface PackEntityDescriptions {
 	tools?: Record<string, string>;
 	skills?: Record<string, string>;
 	entrypoints?: Record<string, string>;
+	mcp?: Record<string, string>;
+}
+
+export interface PackMcpContributionWire {
+	ref?: string;
+	listName?: string;
+	serverName?: string;
+	subNamespace?: string;
+	label?: string;
+	description?: string;
+	transport?: "stdio" | "http";
+	command?: string;
+	args?: string[];
+	cwd?: string;
+	env?: string[] | Record<string, unknown>;
+	url?: string;
+	headers?: string[] | Record<string, unknown>;
+	status?: string;
+	ownerStatus?: string;
+	overriddenBy?: string;
+	winningPack?: string;
+	error?: string;
+	toolCount?: number;
+}
+
+export interface PackActivationMcpEntry extends PackMcpContributionWire {
+	/** Stable DisabledRefs.mcp key, usually the contents.mcp basename. */
+	ref: string;
+	/** Runtime MCP server name. Older servers may omit it; the UI falls back to ref. */
+	serverName?: string;
 }
 
 export interface BrowsePackWire extends PackManifest {
@@ -2950,6 +2995,9 @@ export interface BrowsePackWire extends PackManifest {
 	/** Response-only: resolved in place (not copy-installed). */
 	provided?: boolean;
 	descriptions?: PackEntityDescriptions;
+	/** Optional MCP details for registry virtual packs or authored schema-2 packs. */
+	mcp?: PackMcpContributionWire[];
+	mcpServers?: PackMcpContributionWire[];
 }
 
 export interface InstalledPackWire {
@@ -3025,8 +3073,13 @@ export function listMarketplaceSources(): Promise<MarketResult<{ sources: Market
 	return marketFetch("/api/marketplace/sources");
 }
 
-export function addMarketplaceSource(url: string, ref?: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
-	return marketFetch("/api/marketplace/sources", jsonInit("POST", ref ? { url, ref } : { url }));
+export function addMarketplaceSource(url: string, ref?: string, type?: MarketplaceSourceType): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	const body: { url: string; ref?: string; type?: MarketplaceSourceType } = { url };
+	if (ref) body.ref = ref;
+	// Preserve legacy pack-source behavior against older servers by omitting the
+	// default type; MCP registry sources need the explicit discriminator.
+	if (type && type !== "pack") body.type = type;
+	return marketFetch("/api/marketplace/sources", jsonInit("POST", body));
 }
 
 export function removeMarketplaceSource(id: string): Promise<MarketResult<void>> {
@@ -3090,6 +3143,7 @@ export interface DisabledRefs {
 	tools?: string[];
 	skills?: string[];
 	entrypoints?: string[];
+	mcp?: string[];
 }
 
 /** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
@@ -3104,6 +3158,9 @@ export interface PackActivationCatalogue {
 		kind?: PackEntrypointWire["kind"];
 		routeId?: string;
 	}>;
+	/** MCP activation refs. Rich entries are preferred, but older backends may
+	 *  return string refs; the UI normalizes both. */
+	mcp?: Array<string | PackActivationMcpEntry>;
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }
