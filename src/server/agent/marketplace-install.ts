@@ -639,7 +639,7 @@ export class MarketplaceInstaller {
 		};
 		try {
 			materializeRegistryPack(server, staging, { sourceUrl: source.url, materializedAt: now });
-			writeMeta(staging, meta);
+			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
@@ -755,7 +755,7 @@ export class MarketplaceInstaller {
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		try {
 			materializeRegistryPack(server, staging, { sourceUrl: source.url, materializedAt: now });
-			writeMeta(staging, meta);
+			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(dest, backup);
 			try {
 				fs.renameSync(staging, dest);
@@ -850,6 +850,14 @@ export class MarketplaceInstaller {
 		const order = ctx.packOrderStore.getPackOrder(ctx.scope).filter((n) => n !== packName);
 		ctx.packOrderStore.setPackOrder(ctx.scope, order);
 	}
+}
+
+function writeMetaPreservingMaterializedDetails(dir: string, meta: PackMeta): void {
+	// Registry materialization writes official-registry provenance (sourceKey,
+	// officialName, metadata) before install provenance is known. Keep those
+	// safe diagnostic keys when writing the install record consumed by pack list.
+	const existing = readYamlMapping(path.join(dir, ".pack-meta.yaml")) ?? {};
+	writeMeta(dir, { ...existing, ...meta } as PackMeta);
 }
 
 function mcpRegistryDiagnostics(skipped: McpRegistrySkippedEntry[]): MarketplaceMcpRegistryDiagnostics | undefined {
