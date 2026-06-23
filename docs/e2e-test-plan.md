@@ -82,7 +82,7 @@ Keep these browser journeys intact when making future reductions:
 - Proposal opening/parity — browser proposal smokes retain normal-session opening while `tests/ui-fixtures/proposal-review-fixture.spec.ts` owns per-type renderer persistence.
 - `ask_user_choices` — `tests/e2e/ui/ask-user-choices-ui.spec.ts` retains interactive pending state, Other handling, submitted read-only restore, keyboard submission, and cross-client finalization.
 - Base-ref settings — `tests/e2e/ui/base-ref-settings.spec.ts` retains persistence and user-visible validation errors.
-- Add Project preflight/symlink — `tests/e2e/ui/add-project-preflight.spec.ts` and `tests/e2e/ui/add-project-symlink.spec.ts` retain directory picker, preflight panel, symlink cancel, canonical storage, and reload persistence.
+- Add Project UX — `tests/e2e/ui/add-project-typeahead.spec.ts`, `add-project-browse-modal.spec.ts`, `add-project-flow.spec.ts`, `add-project-preflight.spec.ts`, and `add-project-symlink.spec.ts` retain typeahead intent gating, completed-path suppression, trailing-separator child suggestions, Browse focus behavior, directory creation, preflight panel, symlink cancel, canonical storage, and reload persistence. API coverage for create-directory errors and browse prefix/limit lives in `tests/e2e/project-detect-browse.spec.ts`.
 - Project drag reorder — `tests/e2e/ui/project-drag-reorder.spec.ts` retains desktop/mobile reorder, persistence, sync, cancel, and collapsed-sidebar order.
 - Proposal tools — `tests/e2e/ui/proposal-tools.spec.ts` retains the completed tool-card lifecycle and reopen path.
 
