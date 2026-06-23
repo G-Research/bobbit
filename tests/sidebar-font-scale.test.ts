@@ -16,8 +16,8 @@ import {
 const SIDEBAR_FONT_BASE_PX = 12;
 const SIDEBAR_FONT_MIN_PX = 10;
 const SIDEBAR_FONT_MAX_PX = 32;
-const SIDEBAR_FONT_DEFAULT_SCALE = 1.22;
-const SIDEBAR_FONT_DEFAULT_PX = SIDEBAR_FONT_BASE_PX * SIDEBAR_FONT_DEFAULT_SCALE;
+const SIDEBAR_FONT_DEFAULT_PX = 14;
+const SIDEBAR_FONT_DEFAULT_SCALE = SIDEBAR_FONT_DEFAULT_PX / SIDEBAR_FONT_BASE_PX;
 
 function scaleForPx(px: number): number {
 	return px / SIDEBAR_FONT_BASE_PX;
@@ -45,10 +45,10 @@ function installLocalStorageShim(): { reset: () => void } {
 }
 
 describe("sidebar-font-scale: numeric pixel bounds", () => {
-	it("defaults to the former largest preset scale, which renders as about 15px from the 12px base", () => {
+	it("defaults to 14px from the 12px sidebar base", () => {
 		assert.equal(SIDEBAR_FONT_SCALE_DEFAULT, SIDEBAR_FONT_DEFAULT_SCALE);
-		assert.equal(SIDEBAR_FONT_DEFAULT_PX, 14.64);
-		assert.equal(Math.round(SIDEBAR_FONT_DEFAULT_PX), 15);
+		assert.equal(SIDEBAR_FONT_DEFAULT_SCALE, 14 / 12);
+		assert.equal(SIDEBAR_FONT_DEFAULT_PX, 14);
 	});
 
 	it("clamps invalid and out-of-range scales to the pixel input bounds", () => {
@@ -98,7 +98,7 @@ describe("loadSidebarFontScale", () => {
 	beforeEach(() => { shim = installLocalStorageShim(); });
 	afterEach(() => { shim.reset(); delete (globalThis as any).localStorage; });
 
-	it("returns the new default when localStorage is empty", () => {
+	it("returns the 14px default when localStorage is empty", () => {
 		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});
 
@@ -120,12 +120,12 @@ describe("loadSidebarFontScale", () => {
 		assertClose(loadSidebarFontScale(), scaleForPx(SIDEBAR_FONT_MIN_PX));
 	});
 
-	it("falls back to the new default for an invalid (non-numeric) persisted value", () => {
+	it("falls back to the 14px default for an invalid (non-numeric) persisted value", () => {
 		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "garbage");
 		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});
 
-	it("falls back to the new default when localStorage is absent (SSR-safe)", () => {
+	it("falls back to the 14px default when localStorage is absent (SSR-safe)", () => {
 		delete (globalThis as any).localStorage;
 		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});

@@ -7,7 +7,7 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const SCALE_KEY = "bobbit:sidebar-font-scale";
 const BASE_PX = 12;
-const DEFAULT_SCALE = 1.22;
+const DEFAULT_SCALE = 14 / BASE_PX;
 const MIN_PX = 10;
 const MAX_PX = 32;
 const FONT_SIZE_INPUT_SELECTOR = [
@@ -115,19 +115,19 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 		expect(await input.getAttribute("min")).toBe(String(MIN_PX));
 		expect(await input.getAttribute("max")).toBe(String(MAX_PX));
 		expect(await input.getAttribute("step")).toBe("1");
-		expect(await inputValueAsNumber(page)).toBeCloseTo(Math.round(BASE_PX * DEFAULT_SCALE), 0);
+		expect(await inputValueAsNumber(page)).toBe(14);
 
 		const baseline = await measureSidebar(page);
 		expect(parseFloat(baseline.cssVar)).toBeCloseTo(DEFAULT_SCALE, 2);
-		expect(baseline.rootSize).toBeCloseTo(BASE_PX * DEFAULT_SCALE, 1);
+		expect(baseline.rootSize).toBeCloseTo(14, 1);
 		expect(baseline.emChildSize ?? 0).toBeGreaterThan(0);
 		const baselineChild = baseline.emChildSize!;
 		const baselineChat = await page.locator("h1").first().evaluate(
 			(el) => parseFloat(getComputedStyle(el).fontSize),
 		);
 		const baselineDot = await activityDotSize(page);
-		expect(baselineDot).toBeGreaterThan(7);
-		expect(baselineDot).toBeLessThan(8);
+		expect(baselineDot).toBeGreaterThan(6.5);
+		expect(baselineDot).toBeLessThan(7.5);
 
 		await setFontSizePx(page, "24");
 		await waitForScale(page, scaleForPx(24));
@@ -164,9 +164,9 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 
 		await page.locator("[data-testid='sidebar-font-scale-reset']").click();
 		await waitForScale(page, DEFAULT_SCALE);
-		expect(await inputValueAsNumber(page)).toBeCloseTo(Math.round(BASE_PX * DEFAULT_SCALE), 0);
+		expect(await inputValueAsNumber(page)).toBe(14);
 		const reset = await measureSidebar(page);
-		expect(reset.rootSize).toBeCloseTo(BASE_PX * DEFAULT_SCALE, 1);
+		expect(reset.rootSize).toBeCloseTo(14, 1);
 		expect(await persistedScale(page)).toBeCloseTo(DEFAULT_SCALE, 2);
 	});
 
