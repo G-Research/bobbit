@@ -129,6 +129,46 @@ test.describe("Add Project — directory picker typeahead", () => {
 		}
 	});
 
+	test("Windows drive-root prefix browses the drive root, not the bare drive", async ({ page }) => {
+		const requestedPaths: string[] = [];
+		const driveRoot = "C:\\";
+
+		try {
+			await page.route("**/api/browse-directory?**", async (route) => {
+				const url = new URL(route.request().url());
+				const requestedPath = url.searchParams.get("path") ?? "";
+				requestedPaths.push(requestedPath);
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						current: requestedPath,
+						parent: null,
+						entries: requestedPath === driveRoot
+							? [{ name: "Users", path: "C:\\Users" }]
+							: [],
+					}),
+				});
+			});
+
+			await openAddProjectDialog(page);
+			const input = page.locator(ADD_PROJECT.pickerInput);
+			await expect(input).toBeFocused();
+
+			await input.fill("C:\\Us");
+			await expect.poll(() => requestedPaths.includes(driveRoot)).toBe(true);
+			expect(requestedPaths).not.toContain("C:");
+
+			const overlay = page.locator(ADD_PROJECT.pickerSuggestions);
+			await expect(overlay).toBeVisible({ timeout: 5_000 });
+			await expect(
+				overlay.locator(ADD_PROJECT.pickerSuggestion).filter({ hasText: "Users" }).first(),
+			).toBeVisible();
+		} finally {
+			await page.unroute("**/api/browse-directory?**").catch(() => {});
+		}
+	});
+
 	test("blur invalidates in-flight suggestions", async ({ page }, testInfo) => {
 		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
 

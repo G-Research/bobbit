@@ -89,6 +89,7 @@ const TRAILING_SEPARATOR_REGEX = /[\\/]$/;
  *   "/foo/bar/"     → { parent: "/foo/bar", basename: "" }
  *   "/foo/bar"      → { parent: "/foo",     basename: "bar" }
  *   "C:\\Users\\j"  → { parent: "C:\\Users", basename: "j" }
+ *   "C:\\Us"       → { parent: "C:\\",      basename: "Us" }
  *   "/"             → { parent: "/",         basename: "" }
  *   ""              → { parent: null,        basename: "" }
  */
@@ -123,7 +124,11 @@ function splitPath(raw: string): { parent: string | null; basename: string } {
 		// No separator at all — typed bare word, no useful parent.
 		return { parent: null, basename: value };
 	}
-	const parent = lastSep === 0 ? "/" : value.slice(0, lastSep);
+	const parent = lastSep === 0
+		? "/"
+		: lastSep === 2 && /^[A-Za-z]:[\\/]$/.test(value.slice(0, 3))
+			? value.slice(0, 3)
+			: value.slice(0, lastSep);
 	const basename = value.slice(lastSep + 1);
 	return { parent, basename };
 }
