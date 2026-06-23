@@ -2159,8 +2159,9 @@ export function showProjectDialog(): void {
 			void confirmScanAndContinue();
 			return;
 		}
-		// Block when preflight reports a hard fail (matches legacy behavior).
-		if (preflightReport?.hasFail) return;
+		// Block when preflight reports a hard fail (matches legacy behavior),
+		// and require inline creation before continuing with a missing directory.
+		if (visiblePreflightReport()?.hasFail || shouldShowInlineCreate()) return;
 		busy = true;
 		errorMessage = null;
 		renderDialog();
@@ -2219,6 +2220,14 @@ export function showProjectDialog(): void {
 					}
 					throw e;
 				}
+				return;
+			}
+
+			if (!detection.exists) {
+				detectionResult = detection;
+				detectionLoading = false;
+				busy = false;
+				renderDialog();
 				return;
 			}
 
@@ -2300,20 +2309,55 @@ export function showProjectDialog(): void {
 		renderDialog();
 	};
 
-	// --- detection-status one-liner (reserved height) -----------------------
+	const shouldShowInlineCreate = (): boolean => {
+		const trimmed = pathValue.trim();
+		return !!trimmed && !detectionLoading && detectionResult?.exists === false;
+	};
+
+	const visiblePreflightReport = (): PreflightReport | null => {
+		if (!preflightReport || !shouldShowInlineCreate()) return preflightReport;
+		const checks = preflightReport.checks.filter((check) => check.id !== "path.exists");
+		return {
+			...preflightReport,
+			checks,
+			hasFail: checks.some((check) => check.level === "fail"),
+		};
+	};
+
+	const renderCreateDirectoryButton = () => Button({
+		variant: "default",
+		onClick: createTypedDirectory,
+		disabled: busy || archiving || creatingDirectory,
+		children: html`<span data-testid="add-project-create-directory">${creatingDirectory ? "Creating…" : "Create Directory"}</span>`,
+	});
+
+	// --- detection-status slot (reserved height) ----------------------------
 	const renderStatusLine = () => {
 		const trimmed = pathValue.trim();
 		if (errorMessage) {
 			return html`<span class="text-red-500 text-xs">${errorMessage}</span>`;
 		}
 		if (createErrorMessage) {
-			return html`<span class="text-red-500 text-xs" data-testid="add-project-create-error">${createErrorMessage}</span>`;
+			return html`
+				<div class="flex flex-col items-center justify-center gap-2 py-2 text-center">
+					<span class="text-red-500 text-xs" data-testid="add-project-create-error">${createErrorMessage}</span>
+					${shouldShowInlineCreate() ? renderCreateDirectoryButton() : ""}
+				</div>
+			`;
 		}
 		if (!trimmed) {
-			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory.</span>`;
+			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory, or type a path of a new directory to create it</span>`;
 		}
 		if (!detectionResult || detectionLoading) {
 			return html`<span class="text-muted-foreground text-xs">Checking directory…</span>`;
+		}
+		if (shouldShowInlineCreate()) {
+			return html`
+				<div class="flex flex-col items-center justify-center gap-2 py-2 text-center" data-testid="add-project-inline-create">
+					<span class="text-muted-foreground text-xs font-medium">Directory doesn't exist</span>
+					${renderCreateDirectoryButton()}
+				</div>
+			`;
 		}
 		if (detectionResult.hasBobbit) {
 			return html`<span class="text-green-600 dark:text-green-400 text-xs">An existing Bobbit project was found. Click <strong>Continue</strong> to register it.</span>`;
@@ -2325,24 +2369,27 @@ export function showProjectDialog(): void {
 	};
 
 	// --- path step body -----------------------------------------------------
-	const renderPathBody = () => html`
-		<div class="flex flex-col gap-3 h-full min-h-0">
-			<label class="text-xs text-muted-foreground block shrink-0">Project Directory</label>
-			<div class="shrink-0">${pickerEl}</div>
-			<div class="shrink-0 min-h-[20px]" data-testid="add-project-status-slot">${renderStatusLine()}</div>
-			<div class="flex-1 min-h-0 overflow-y-auto" data-testid="add-project-preflight-slot">
-				${pathValue.trim() && !preflightUnavailable
-					? renderPreflightPanel({
-						report: preflightReport,
-						loading: preflightLoading,
-						error: preflightError,
-						archiving,
-						onArchive: openArchiveConfirm,
-					})
-					: ""}
+	const renderPathBody = () => {
+		const report = visiblePreflightReport();
+		return html`
+			<div class="flex flex-col gap-3 h-full min-h-0">
+				<label class="text-xs text-muted-foreground block shrink-0">Project Directory</label>
+				<div class="shrink-0">${pickerEl}</div>
+				<div class="shrink-0 min-h-[20px]" data-testid="add-project-status-slot">${renderStatusLine()}</div>
+				<div class="flex-1 min-h-0 overflow-y-auto" data-testid="add-project-preflight-slot">
+					${pathValue.trim() && !preflightUnavailable
+						? renderPreflightPanel({
+							report,
+							loading: preflightLoading,
+							error: preflightError,
+							archiving,
+							onArchive: openArchiveConfirm,
+						})
+						: ""}
+				</div>
 			</div>
-		</div>
-	`;
+		`;
+	};
 
 	// --- scan step body -----------------------------------------------------
 	const renderScanBody = () => {
@@ -2431,19 +2478,11 @@ export function showProjectDialog(): void {
 		}
 		const trimmed = pathValue.trim();
 		const continueDisabled =
-			busy || archiving || creatingDirectory || !trimmed || (preflightReport?.hasFail === true);
+			busy || archiving || creatingDirectory || !trimmed || shouldShowInlineCreate() || (visiblePreflightReport()?.hasFail === true);
 		const continueLabel = busy ? "Detecting…" : archiving ? "Archiving…" : "Continue";
-		const showCreateDirectory = !!trimmed && !detectionLoading && detectionResult?.exists !== true;
-		const createDisabled = busy || archiving || creatingDirectory;
 		return html`
 			<div class="flex gap-2 justify-end">
 				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel", disabled: creatingDirectory })}
-				${showCreateDirectory ? Button({
-					variant: "secondary" as any,
-					onClick: createTypedDirectory,
-					disabled: createDisabled,
-					children: html`<span data-testid="add-project-create-directory">${creatingDirectory ? "Creating…" : "Create directory"}</span>`,
-				}) : ""}
 				${Button({
 					variant: "default",
 					onClick: doContinue,
