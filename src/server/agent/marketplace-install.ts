@@ -499,17 +499,23 @@ export class MarketplaceInstaller {
 
 	/**
 	 * Compute the source-update state for an installed pack WITHOUT any network
-	 * sync (R2). Resolves the source's readable root from the EXISTING local
-	 * cache only: a local-dir source is read at `localSourcePath(url)` if it
-	 * exists; a git source is read at `cacheDirFor(source.id)` if already cloned.
-	 * `syncSource()` is NEVER called here. Any miss (source removed, never
-	 * synced, root absent, pack not found, no version) ⇒ `sourceStatus:"unknown"`.
+	 * sync (R2). Resolves authored pack sources from the EXISTING local cache only:
+	 * a local-dir source is read at `localSourcePath(url)` if it exists; a git
+	 * source is read at `cacheDirFor(source.id)` if already cloned. Registry MCP
+	 * sources do not have a pack-tree cache, so a still-registered source is enough
+	 * to report `sourceStatus:"ok"`; `lastCommit` fingerprints give a best-effort
+	 * stale check after the registry has been browsed/synced.
 	 */
 	private computeSourceState(meta: PackMeta): { updateAvailable: boolean; sourceStatus: "ok" | "unknown" } {
 		const unknown = { updateAvailable: false, sourceStatus: "unknown" as const };
 		if (!meta.sourceUrl || !meta.packName) return unknown;
 		const source = this.opts.sourceStore.getByUrl(meta.sourceUrl);
 		if (!source) return unknown;
+		if (isMcpRegistrySource(source)) {
+			const currentFingerprints = new Set((source.lastCommit ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+			const updateAvailable = Boolean(meta.commit && currentFingerprints.size > 0 && !currentFingerprints.has(meta.commit));
+			return { updateAvailable, sourceStatus: "ok" };
+		}
 		const root = isLocalDirSource(source.url) ? localSourcePath(source.url) : this.cacheDirFor(source.id);
 		try {
 			if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return unknown;

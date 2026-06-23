@@ -113,6 +113,46 @@ describe("McpManager marketplace discovery primitives", () => {
       "mcp__gateway__beta__two",
     ]);
     assert.deepEqual(mgr.getServerStatuses()[0].activeSubNamespaces, ["alpha", "beta"]);
+    assert.equal(mgr.getToolDocsRelativePath("gateway", "alpha"), mgr.getToolDocsRelativePath("gateway"));
+    assert.ok(fs.existsSync(path.join(stateDir, ...mgr.getToolDocsRelativePath("gateway", "alpha").split("/"))));
+  });
+
+  it("redacts secret-bearing config values in server statuses", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const localConfig = {
+      command: "node",
+      args: ["--token", "stdio-secret"],
+      env: { API_TOKEN: "stdio-secret", PLAIN: "visible-value" },
+      cwd: ".",
+    };
+    const remoteConfig = {
+      url: "https://user:pass@example.test/mcp?token=http-secret#frag",
+      headers: { Authorization: "Bearer http-secret", "X-Plain": "visible-value" },
+    };
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("local", "local", localConfig),
+      contrib("remote", "remote", remoteConfig),
+    ];
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["local", new StubMcpClient("local")],
+      ["remote", new StubMcpClient("remote")],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    const statuses = mgr.getServerStatuses();
+    const local = statuses.find((s: any) => s.name === "local")!;
+    const remote = statuses.find((s: any) => s.name === "remote")!;
+
+    assert.deepEqual(local.config.env, { API_TOKEN: "<redacted>", PLAIN: "<redacted>" });
+    assert.deepEqual(local.config.args, ["<redacted>", "<redacted>"]);
+    assert.deepEqual(local.ownerContributions[0].config.env, local.config.env);
+    assert.deepEqual(remote.config.headers, { Authorization: "<redacted>", "X-Plain": "<redacted>" });
+    assert.equal(remote.config.url, "https://example.test/mcp");
+    assert.deepEqual(remote.ownerContributions[0].config.headers, remote.config.headers);
+    assert.ok(!JSON.stringify(statuses).includes("stdio-secret"));
+    assert.ok(!JSON.stringify(statuses).includes("http-secret"));
+    assert.ok(!JSON.stringify(statuses).includes("visible-value"));
   });
 
   it("passes project scope to marketplace resolver", () => {

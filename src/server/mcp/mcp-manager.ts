@@ -48,6 +48,20 @@ export interface ResolvedMcpConnectionGroup {
   activeSubNamespaces?: Set<string>;
 }
 
+export interface RedactedMcpServerConfig {
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  url?: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+}
+
+export type RedactedResolvedMcpContribution = Omit<ResolvedMcpContribution, "config"> & {
+  config: RedactedMcpServerConfig;
+};
+
 export type MarketplaceMcpResolver = (scope: McpDiscoveryScope) => ResolvedMcpContribution[];
 
 export type McpReloadStatus = "ok" | "partial" | "error" | "pending";
@@ -74,9 +88,9 @@ export interface McpServerStatus {
   status: "connected" | "disconnected" | "error" | "reconnecting";
   toolCount: number;
   error?: string;
-  config?: McpServerConfig;
+  config?: RedactedMcpServerConfig;
   origin?: ResolvedMcpOrigin;
-  ownerContributions?: ResolvedMcpContribution[];
+  ownerContributions?: RedactedResolvedMcpContribution[];
   activeSubNamespaces?: string[];
 }
 
@@ -134,6 +148,45 @@ function safeScopeSegment(scopeKey: string): string {
 
 function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
   return stableFingerprint(a) === stableFingerprint(b);
+}
+
+const REDACTED = "<redacted>";
+
+function redactRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!record) return undefined;
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(record).sort()) out[key] = REDACTED;
+  return out;
+}
+
+function redactUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return REDACTED;
+  }
+}
+
+function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServerConfig {
+  const out: RedactedMcpServerConfig = { transport: config.url ? "http" : "stdio" };
+  if (config.command) out.command = config.command;
+  if (config.args) out.args = config.args.map(() => REDACTED);
+  if (config.cwd) out.cwd = config.cwd;
+  if (config.url) out.url = redactUrl(config.url);
+  const env = redactRecord(config.env);
+  if (env) out.env = env;
+  const headers = redactRecord(config.headers);
+  if (headers) out.headers = headers;
+  return out;
+}
+
+function redactMcpContribution(contribution: ResolvedMcpContribution): RedactedResolvedMcpContribution {
+  return { ...contribution, config: redactMcpServerConfig(contribution.config) };
 }
 
 function flatManualContribution(name: string, config: McpServerConfig): ResolvedMcpContribution {
@@ -242,9 +295,11 @@ export class McpManager {
     return this.scopeKey === "default" ? "mcp-tool-docs" : path.join("mcp-tool-docs", safeScopeSegment(this.scopeKey));
   }
 
-  getToolDocsRelativePath(serverName: string, sub?: string): string {
-    const docsKey = sub ? `${serverName}__${sub}` : serverName;
-    return path.join(this.getToolDocsRelativeDir(), `${path.basename(docsKey)}.md`).replace(/\\/g, "/");
+  getToolDocsRelativePath(serverName: string, _sub?: string): string {
+    // _updateDocCache writes one flat docs file per runtime server. Sub-namespace
+    // meta-tools deliberately point at that existing file instead of advertising
+    // non-existent <server>__<sub>.md paths.
+    return path.join(this.getToolDocsRelativeDir(), `${path.basename(serverName)}.md`).replace(/\\/g, "/");
   }
 
   // ── Discovery ──────────────────────────────────────────────────────
@@ -862,14 +917,15 @@ export class McpManager {
       }
 
       const group = this.connectionGroups.get(name) ?? this.discoveredConnectionGroups.get(name);
+      const ownerContributions = group?.ownerContributions.map(redactMcpContribution);
       statuses.push({
         name,
         status,
         toolCount: tools?.length ?? 0,
         ...(error ? { error } : {}),
-        config,
+        config: redactMcpServerConfig(config),
         ...(group?.ownerContributions[0]?.origin ? { origin: group.ownerContributions[0].origin } : {}),
-        ...(group?.ownerContributions ? { ownerContributions: group.ownerContributions } : {}),
+        ...(ownerContributions ? { ownerContributions } : {}),
         ...(group?.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
       });
     }
