@@ -228,21 +228,35 @@ client still defensively filters the returned names.
 
 ### D12. Directory creation stays inside Add Project
 
-When detection says the typed path does not exist, the footer shows a secondary
-**Create directory** action. Successful creation keeps the dialog mounted,
-sets the canonical created path via `setCompletedPath()`, refreshes detection
-and preflight, and leaves **Continue** on the normal scaffolding path.
+The empty path hint reads exactly: `Type a path or click Browse to pick a directory, or type a path of a new directory to create it`.
 
-Failures remain inline in the dialog. The API returns structured `code` values
-so the UI can show stable messages for invalid paths, missing parents,
-file-at-target conflicts, permission errors, already-existing directories, and
-unexpected create failures. An `already_exists` response is recoverable: the
-UI refreshes detection/preflight and lets the user continue if the directory is
-usable.
+When detection says the typed path does not exist, `add-project-status-slot`
+shows a centered neutral validation state with `Directory doesn't exist` and a
+directly adjacent **Create Directory** button. The action is deliberately not
+rendered in the footer; the footer remains limited to **Cancel** and
+**Continue**.
+
+Successful creation keeps the dialog mounted, sets the canonical created path
+via `setCompletedPath()`, refreshes detection and preflight, and leaves
+**Continue** on the normal scaffolding path. Because the created path is marked
+completed, typeahead does not automatically reopen child suggestions; users can
+still request children by typing a trailing separator or editing the path.
+
+Failures remain inline in the same status slot and keep the dialog open. The API
+returns structured `code` values so the UI can show stable messages for invalid
+paths, missing parents, file-at-target conflicts, permission errors,
+already-existing directories, and unexpected create failures. An
+`already_exists` response is recoverable: the UI refreshes detection/preflight
+and lets the user continue if the directory is usable.
 
 **Why:** The scaffolding assistant already handled empty directories, but users
 had to create the target folder outside Bobbit first. Keeping creation in the
-same modal removes that round trip without changing the assistant handoff.
+same modal removes that round trip. Moving the action into the status slot makes
+creation discoverable where users scan validation results, without destabilizing
+the footer or autocomplete overlay.
+
+See [Add Project inline directory creation UX](add-project-inline-create.md) for
+the shipped behavior and test references.
 
 ## Where it lives
 
