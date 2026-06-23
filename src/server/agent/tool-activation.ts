@@ -615,10 +615,11 @@ export function generateMcpMetaExtension(
 	ops: McpToolDef[],
 	unavailableReason?: string,
 	sub?: string,
+	docsRelPathOverride?: string,
 ): string {
 	const metaName = makeMetaToolName(serverName, sub);
 	const docsKey = sub ? `${serverName}__${sub}` : serverName;
-	const docsRelPath = `mcp-tool-docs/${docsKey}.md`;
+	const docsRelPath = docsRelPathOverride ?? `mcp-tool-docs/${docsKey}.md`;
 
 	const isStub = unavailableReason !== undefined || ops.length === 0;
 
@@ -921,8 +922,11 @@ export function writeMcpProxyExtensions(
 	// deleted externally we fall through and regenerate. The disabled-tools set
 	// is included ONLY when non-empty so the empty case keeps today's key (and
 	// thus byte-identical reuse).
+	const managerScopeKey = mcpManager.getScopeKey();
+	const scopeSegment = managerScopeKey === "default" ? "" : createHash("sha256").update(managerScopeKey).digest("hex").slice(0, 12);
 	const cacheKey = hashKey({
 		kind: 'mcpProxy_v2',
+		managerScopeKey,
 		infos: infos.map(i => ({
 			name: i.name,
 			server: i.serverName,
@@ -953,7 +957,9 @@ export function writeMcpProxyExtensions(
 		: undefined;
 
 	// Choose output directory: hash-based subdir for filtered, root for unrestricted
-	const baseExtDir = path.join(bobbitStateDir(), "mcp-extensions");
+	const baseExtDir = scopeSegment
+		? path.join(bobbitStateDir(), "mcp-extensions", scopeSegment)
+		: path.join(bobbitStateDir(), "mcp-extensions");
 	let extDir: string;
 	if (filtering) {
 		// Collect only the MCP tool names from allowedTools for the hash
@@ -1054,7 +1060,7 @@ export function writeMcpProxyExtensions(
 		// locked-down session would still see `mcp_<server>` for every failed
 		// server even though no MCP tool is permitted.
 		if (allowedSet && !allowedSet.has(metaLower)) continue;
-		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state");
+		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state", undefined, mcpManager.getToolDocsRelativePath(status.name));
 		writeFile(status.name, undefined, code);
 		handled.add(`${status.name}\u0000`);
 		handledServersErrored.add(status.name);
@@ -1072,7 +1078,7 @@ export function writeMcpProxyExtensions(
 			description: info.description,
 			inputSchema: info.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
 		}));
-		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub);
+		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub, mcpManager.getToolDocsRelativePath(entry.server, entry.sub));
 		writeFile(entry.server, entry.sub, code);
 		handled.add(k);
 	}

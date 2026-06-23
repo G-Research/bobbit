@@ -130,6 +130,8 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(pack.schema, 2);
 		assert.equal(pack.hasTools, false);
 		assert.deepEqual(pack.contents, { roles: [], tools: [], skills: [], entrypoints: [], mcp: ["context7"] });
+		assert.deepEqual(pack.mcp, [{ ref: "context7", listName: "context7", serverName: "runtime.context7", description: "Fetch docs", transport: "stdio", command: "npx" }]);
+		assert.deepEqual(pack.mcpServers, pack.mcp);
 	});
 
 	it("materializes a registry server into a safe schema-2 pack directory", () => {
@@ -162,6 +164,16 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(meta.registryVersion, "2.0.0");
 		assert.equal(meta.materializedAt, "2026-06-23T00:00:00.000Z");
 		assert.match(String(meta.registryFingerprint), /^[a-f0-9]{64}$/);
+	});
+
+	it("materializes registry stdio cwd directories so contribution loading keeps cwd", () => {
+		const [server] = parseMcpRegistryDocument({
+			schemaVersion: 1,
+			servers: [{ id: "stdio-docs", name: "stdio_docs", transport: { type: "stdio", command: "node", cwd: "fixtures/runtime" } }],
+		}).servers;
+		const dest = path.join(dir, "mcp-stdio-docs");
+		materializeRegistryPack(server, dest);
+		assert.ok(fs.statSync(path.join(dest, "fixtures", "runtime")).isDirectory());
 	});
 
 	it("rejects registry ids whose generated pack name cannot be installed safely", () => {

@@ -73,6 +73,9 @@ export interface BrowsePack extends PackManifest {
 	sourceType?: "mcp-registry";
 	registryId?: string;
 	serverName?: string;
+	/** Rich MCP transport previews used by the Market browse UI. */
+	mcp?: Array<Record<string, unknown>>;
+	mcpServers?: Array<Record<string, unknown>>;
 }
 
 /** Installed-pack listing row for the REST layer. */

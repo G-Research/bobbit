@@ -115,6 +115,19 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(mgr.getServerStatuses()[0].activeSubNamespaces, ["alpha", "beta"]);
   });
 
+  it("passes project scope to marketplace resolver", () => {
+    const { cwd, stateDir } = tmpDirs();
+    const seen: any[] = [];
+    const resolver: MarketplaceMcpResolver = (scope) => {
+      seen.push(scope);
+      return [contrib("project", "project_server", { command: "project" })];
+    };
+    const mgr = new TestMcpManager(cwd, stateDir, new Map(), { marketplaceResolver: resolver, projectId: "project-1" }) as any;
+
+    assert.deepEqual(mgr.discoverServers(), { project_server: { command: "project" } });
+    assert.deepEqual(seen, [{ cwd, projectId: "project-1" }]);
+  });
+
   it("overlays manual MCP config over marketplace contributions", () => {
     const { cwd, stateDir } = tmpDirs();
     fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({

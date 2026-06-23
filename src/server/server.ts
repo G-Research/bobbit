@@ -1566,7 +1566,8 @@ export function createGateway(config: GatewayConfig) {
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
 			const role = roleManager.getRole(roleName);
 			if (!role) return undefined;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+			const mcpManager = sessionManager.getMcpManager({ projectId: session?.projectId ?? ps?.projectId }) ?? sessionManager.getMcpManager();
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
 		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
@@ -1579,7 +1580,8 @@ export function createGateway(config: GatewayConfig) {
 			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
 			const role = cascadeRole ?? roleManager.getRole(roleName);
 			if (!role) return undefined;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+			const mcpManager = sessionManager.getMcpManager({ projectId }) ?? sessionManager.getMcpManager();
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
@@ -2816,11 +2818,9 @@ async function handleApiRoute(
 			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
 		})));
 	};
-	const reloadMcpAfterMarketplaceMutation = async (): Promise<McpReloadResult | undefined> => {
-		const mgr = sessionManager.getMcpManager();
-		if (!mgr) return undefined;
-		const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
-		registerMcpExternalTools(mgr);
+	const reloadMcpAfterMarketplaceMutation = async (scope?: InstallScope, projectId?: string): Promise<McpReloadResult | undefined> => {
+		const result = await sessionManager.reloadMcpAfterMarketplaceMutation(scope, projectId);
+		registerMcpExternalTools(sessionManager.getMcpManager());
 		return result;
 	};
 	// Host-owned activation-cache invalidation: a pack persisting provider config
@@ -7086,7 +7086,7 @@ async function handleApiRoute(
 			try {
 				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation() : undefined;
+				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
 			return;
@@ -7109,7 +7109,7 @@ async function handleApiRoute(
 			try {
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation() : undefined;
+				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
 			} catch (err) { handleMarketErr(err, 409); }
 			return;
@@ -7133,7 +7133,7 @@ async function handleApiRoute(
 				const prior = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).find((p) => p.scope === scope && p.packName === body.packName);
 				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation();
+				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(scope, body?.projectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
 			return;
@@ -7191,7 +7191,7 @@ async function handleApiRoute(
 			st.target.store.setPackOrder(scope, normalized);
 			invalidateResolverCaches();
 			const hasMcp = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).some((p) => p.scope === scope && (p.manifest.contents.mcp?.length ?? 0) > 0);
-			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation() : undefined;
+			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
 			json({ scope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
@@ -7207,6 +7207,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
+			projectId?: string,
 		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
@@ -7236,7 +7237,7 @@ async function handleApiRoute(
 				for (const ep of contributions.entrypoints) {
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
-				const statuses = sessionManager.getMcpManager()?.getServerStatuses() ?? [];
+				const statuses = (scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager())?.getServerStatuses() ?? [];
 				for (const mcp of contributions.mcp ?? []) {
 					const transport = mcp.config.url ? "http" : "stdio";
 					const status = statuses.find((s) => s.name === mcp.serverName);
@@ -7303,7 +7304,7 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName);
+			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, projectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const disabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
@@ -7318,7 +7319,7 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName);
+			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, body?.projectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			// Normalize the requested disabled refs against the pack's declared
 			// catalogue (drop refs for entities the pack does not declare).
@@ -7347,8 +7348,8 @@ async function handleApiRoute(
 			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort());
-			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation() : undefined;
-			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName) ?? catalogue : catalogue;
+			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
+			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, body?.projectId) ?? catalogue : catalogue;
 			json({ scope, packName, catalogue: refreshedCatalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
@@ -13481,7 +13482,11 @@ async function handleApiRoute(
 
 	// GET /api/mcp-servers
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
-		const mcpManager = sessionManager.getMcpManager();
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const cwd = url.searchParams.get("cwd") || undefined;
+		const mcpManager = projectId || cwd
+			? await sessionManager.ensureMcpManager({ projectId, cwd })
+			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json([]);
 			return;
@@ -13507,7 +13512,11 @@ async function handleApiRoute(
 	// POST /api/mcp-servers/:name/restart
 	const mcpRestartMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/restart$/);
 	if (mcpRestartMatch && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const cwd = url.searchParams.get("cwd") || undefined;
+		const mcpManager = projectId || cwd
+			? await sessionManager.ensureMcpManager({ projectId, cwd })
+			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;
@@ -13540,11 +13549,6 @@ async function handleApiRoute(
 
 	// POST /api/internal/mcp-call
 	if (url.pathname === "/api/internal/mcp-call" && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
-		if (!mcpManager) {
-			json({ error: "MCP not initialized" }, 500);
-			return;
-		}
 		let parsedToolForError: string | undefined;
 		try {
 			const body = await new Promise<string>((resolve) => {
@@ -13576,6 +13580,11 @@ async function handleApiRoute(
 			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
+				return;
+			}
+			const mcpManager = await sessionManager.ensureMcpManagerForSession(mcpSessionId);
+			if (!mcpManager) {
+				json({ error: "MCP not initialized" }, 500);
 				return;
 			}
 			// Enforce allowedTools for non-MCP tools on live sessions.
@@ -13628,11 +13637,6 @@ async function handleApiRoute(
 
 	// POST /api/internal/mcp-describe — discovery endpoint for the `mcp_describe` tool (§3.3)
 	if (url.pathname === "/api/internal/mcp-describe" && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
-		if (!mcpManager) {
-			json({ error: "MCP not initialized" }, 500);
-			return;
-		}
 		try {
 			const body = await new Promise<string>((resolve) => {
 				let data = "";
@@ -13659,6 +13663,11 @@ async function handleApiRoute(
 			);
 			if (!liveSession && !persistedSession) {
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
+				return;
+			}
+			const mcpManager = await sessionManager.ensureMcpManagerForSession(describeSessionId);
+			if (!mcpManager) {
+				json({ error: "MCP not initialized" }, 500);
 				return;
 			}
 
