@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { McpClient } from "./mcp-client.js";
-import { isValidOperationSchema } from "./mcp-meta.js";
+import { isValidOperationSchema, parseMcpToolName } from "./mcp-meta.js";
 import type {
   McpServerConfig,
   McpToolDef,
@@ -14,13 +14,70 @@ import { bobbitConfigDir, bobbitStateDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
 
+export interface McpDiscoveryScope {
+  cwd: string;
+  projectId?: string;
+}
+
+export type McpContributionScope = "server" | "global-user" | "project" | "manual" | string;
+
+export interface ResolvedMcpOrigin {
+  scope: McpContributionScope;
+  packName?: string;
+  packId?: string;
+  sourceUrl?: string;
+  path?: string;
+}
+
+export interface ResolvedMcpContribution {
+  /** Pack-local contents.mcp basename and DisabledRefs.mcp key. */
+  listName: string;
+  /** Runtime mcpServers key. */
+  serverName: string;
+  /** Optional gateway sub-namespace owned by this contribution. */
+  subNamespace?: string;
+  config: McpServerConfig;
+  origin: ResolvedMcpOrigin;
+}
+
+export interface ResolvedMcpConnectionGroup {
+  serverName: string;
+  config: McpServerConfig;
+  ownerContributions: ResolvedMcpContribution[];
+  /** undefined means a flat contribution owns all namespaces. */
+  activeSubNamespaces?: Set<string>;
+}
+
+export type MarketplaceMcpResolver = (scope: McpDiscoveryScope) => ResolvedMcpContribution[];
+
+export type McpReloadStatus = "ok" | "partial" | "error" | "pending";
+
+export interface McpReloadResult {
+  status: McpReloadStatus;
+  connected: string[];
+  disconnected: string[];
+  unchanged: string[];
+  skippedErrored: string[];
+  failed: Array<{ name: string; error: string }>;
+  statuses: McpServerStatus[];
+}
+
+export interface McpToolRegistrationRefresh {
+  /** Remove these external-tool prefixes before registering toolInfos. */
+  removePrefixes: string[];
+  toolInfos: McpToolInfo[];
+}
+
 /** Status of an MCP server */
 export interface McpServerStatus {
   name: string;
-  status: "connected" | "disconnected" | "error";
+  status: "connected" | "disconnected" | "error" | "reconnecting";
   toolCount: number;
   error?: string;
   config?: McpServerConfig;
+  origin?: ResolvedMcpOrigin;
+  ownerContributions?: ResolvedMcpContribution[];
+  activeSubNamespaces?: string[];
 }
 
 /** Bobbit-compatible tool info produced from MCP tool defs */
@@ -50,11 +107,52 @@ const DEFAULT_LIST_TOOLS_TIMEOUT_MS = 10_000;
 /** Per-call timeout for `tools/call` (failure isolation, design §5.1). */
 const DEFAULT_CALL_TOOL_TIMEOUT_MS = 30_000;
 
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v !== undefined) out[key] = stableValue(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+function stableFingerprint(value: unknown): string {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(stableValue(value)))
+    .digest("hex");
+}
+
+function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
+  return stableFingerprint(a) === stableFingerprint(b);
+}
+
+function flatManualContribution(name: string, config: McpServerConfig): ResolvedMcpContribution {
+  return {
+    listName: name,
+    serverName: name,
+    config,
+    origin: { scope: "manual" },
+  };
+}
+
 export class McpManager {
   private clients = new Map<string, McpClient>();
   private toolDefs = new Map<string, McpToolDef[]>();
   private configs = new Map<string, McpServerConfig>();
   private errors = new Map<string, string>();
+  /** Desired group from the latest discovery pass (marketplace + manual override). */
+  private discoveredConnectionGroups = new Map<string, ResolvedMcpConnectionGroup>();
+  /** Active/errored runtime group for each known server. */
+  private connectionGroups = new Map<string, ResolvedMcpConnectionGroup>();
+  private serverFingerprints = new Map<string, string>();
+  private reloadPromise: Promise<McpReloadResult> | undefined;
+  private marketplaceResolver: MarketplaceMcpResolver | null = null;
+  private readonly discoveryScope: McpDiscoveryScope;
   /** Maps truncated Bobbit tool names back to original MCP tool names. */
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
   /** In-memory cache: serverName → toolName → summary */
@@ -72,12 +170,19 @@ export class McpManager {
     private cwd: string,
     projectConfigStore?: ProjectConfigReader,
     stateDir?: string,
-    opts?: { listToolsTimeoutMs?: number; callToolTimeoutMs?: number },
+    opts?: {
+      listToolsTimeoutMs?: number;
+      callToolTimeoutMs?: number;
+      projectId?: string;
+      marketplaceResolver?: MarketplaceMcpResolver;
+    },
   ) {
     this.projectConfigStore = projectConfigStore ?? null;
     this.stateDir = stateDir;
     if (opts?.listToolsTimeoutMs !== undefined) this.listToolsTimeoutMs = opts.listToolsTimeoutMs;
     if (opts?.callToolTimeoutMs !== undefined) this.callToolTimeoutMs = opts.callToolTimeoutMs;
+    if (opts?.marketplaceResolver) this.marketplaceResolver = opts.marketplaceResolver;
+    this.discoveryScope = { cwd: this.cwd, ...(opts?.projectId ? { projectId: opts.projectId } : {}) };
   }
 
   /**
@@ -109,6 +214,16 @@ export class McpManager {
     this.additionalProjects = projects;
   }
 
+  /** Bind or replace the scoped Marketplace MCP resolver. */
+  setMarketplaceResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
+    this.marketplaceResolver = resolver ?? null;
+  }
+
+  /** Runtime discovery scope supplied to the Marketplace resolver seam. */
+  getDiscoveryScope(): McpDiscoveryScope {
+    return { ...this.discoveryScope };
+  }
+
   // ── Discovery ──────────────────────────────────────────────────────
 
   /**
@@ -123,6 +238,86 @@ export class McpManager {
    *   5. .bobbit/config/mcp.json → mcpServers
    */
   discoverServers(): Record<string, McpServerConfig> {
+    const groups = this.discoverConnectionGroups();
+    const merged: Record<string, McpServerConfig> = {};
+    for (const group of groups) {
+      merged[group.serverName] = group.config;
+    }
+    return merged;
+  }
+
+  /**
+   * Discover active connection groups from Marketplace first, then overlay the
+   * unchanged manual MCP cascade. Manual config wins for same serverName.
+   */
+  discoverConnectionGroups(): ResolvedMcpConnectionGroup[] {
+    const byServer = new Map<string, ResolvedMcpConnectionGroup>();
+
+    for (const group of this.resolveMarketplaceConnectionGroups()) {
+      byServer.set(group.serverName, group);
+    }
+
+    const manual = this._discoverManualServers();
+    for (const [name, config] of Object.entries(manual)) {
+      byServer.set(name, {
+        serverName: name,
+        config,
+        ownerContributions: [flatManualContribution(name, config)],
+      });
+    }
+
+    this.discoveredConnectionGroups = new Map(byServer);
+    return [...byServer.values()];
+  }
+
+  /** Resolve Marketplace MCP contributions for this manager's scope. */
+  resolveMarketplaceContributions(): ResolvedMcpContribution[] {
+    if (!this.marketplaceResolver) return [];
+    try {
+      return this.marketplaceResolver(this.getDiscoveryScope()).filter((c) => {
+        return !!c && typeof c.listName === "string" && typeof c.serverName === "string" && !!c.config;
+      });
+    } catch (err) {
+      console.error("[mcp] Marketplace MCP resolver failed:", (err as Error).message);
+      return [];
+    }
+  }
+
+  /**
+   * Group ordered Marketplace contributions into runtime MCP client connections.
+   * Later entries override earlier same-server entries when the config differs;
+   * same-config sub-namespaces share one client. A flat contribution owns all
+   * namespaces and therefore leaves activeSubNamespaces undefined.
+   */
+  resolveMarketplaceConnectionGroups(): ResolvedMcpConnectionGroup[] {
+    return McpManager.groupMarketplaceContributions(this.resolveMarketplaceContributions());
+  }
+
+  static groupMarketplaceContributions(contributions: ResolvedMcpContribution[]): ResolvedMcpConnectionGroup[] {
+    const byServer = new Map<string, ResolvedMcpConnectionGroup>();
+    for (const contrib of contributions) {
+      const existing = byServer.get(contrib.serverName);
+      if (!existing || !sameConfig(existing.config, contrib.config)) {
+        byServer.set(contrib.serverName, {
+          serverName: contrib.serverName,
+          config: contrib.config,
+          ownerContributions: [contrib],
+          activeSubNamespaces: contrib.subNamespace ? new Set([contrib.subNamespace]) : undefined,
+        });
+        continue;
+      }
+
+      existing.ownerContributions.push(contrib);
+      if (!contrib.subNamespace) {
+        existing.activeSubNamespaces = undefined;
+      } else if (existing.activeSubNamespaces) {
+        existing.activeSubNamespaces.add(contrib.subNamespace);
+      }
+    }
+    return [...byServer.values()];
+  }
+
+  private _discoverManualServers(): Record<string, McpServerConfig> {
     const merged: Record<string, McpServerConfig> = {};
 
     // 0. Custom directories (lowest priority — merged first, overridden by everything)
@@ -136,35 +331,22 @@ export class McpManager {
 
     // 0b. Additional registered projects (low priority — overridden by user and primary project)
     for (const proj of this.additionalProjects) {
-      // Custom directories from the project's config
       const projCustomDirs = parseCustomDirectories(proj.configStore)
         .filter(d => d.types.includes("mcp"));
       for (const dir of projCustomDirs) {
         this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
       }
-      // Project-scoped built-in MCP locations
       this._mergeConfigFile(merged, path.join(proj.cwd, ".mcp.json"), "mcpServers");
       this._mergeConfigFile(merged, path.join(proj.cwd, ".claude", ".mcp.json"), "mcpServers");
       this._mergeConfigFile(merged, path.join(proj.cwd, ".bobbit", "config", "mcp.json"), "mcpServers");
     }
 
-    // Discovery mirrors the same root directories used for skills.
-    // Later entries override earlier ones (lowest → highest priority):
-    //   1. ~/.claude.json          — legacy Claude Code user config
-    //   2. ~/.claude/.mcp.json     — Claude Code user-level MCP
-    //   3. ~/.bobbit/.mcp.json     — Bobbit user-level MCP
-    //   4. <project>/.mcp.json     — project scope (shared via git)
-    //   5. <project>/.claude/.mcp.json — Claude Code project-level MCP
-    //   6. <project>/.bobbit/config/mcp.json — Bobbit project overrides
-
     const home = os.homedir();
-    // User scope
     this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
     this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"));
     this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
 
-    // Project scope
     this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
@@ -252,12 +434,20 @@ export class McpManager {
    * Creates a client, performs the initialize handshake, and caches tool definitions.
    */
   async connectServer(name: string, config: McpServerConfig): Promise<void> {
+    const desiredGroup = this.discoveredConnectionGroups.get(name) ?? {
+      serverName: name,
+      config,
+      ownerContributions: [flatManualContribution(name, config)],
+    };
+
     // Disconnect existing client for this server if any
     if (this.clients.has(name)) {
       await this.disconnectServer(name);
     }
 
     this.configs.set(name, config);
+    this.connectionGroups.set(name, desiredGroup);
+    this.serverFingerprints.set(name, this._fingerprintGroup(desiredGroup));
     this.errors.delete(name);
 
     const client = this._createClient(name);
@@ -329,27 +519,105 @@ export class McpManager {
     }
   }
 
+  private _fingerprintGroup(group: ResolvedMcpConnectionGroup): string {
+    return stableFingerprint({
+      config: group.config,
+      activeSubNamespaces: group.activeSubNamespaces ? [...group.activeSubNamespaces].sort() : null,
+    });
+  }
+
   /**
    * Discover all MCP servers and connect to them.
    * Partial failure is tolerated — failed servers are logged and skipped.
    */
   async connectAll(): Promise<void> {
-    const servers = this.discoverServers();
-    const names = Object.keys(servers);
-    if (names.length === 0) {
-      console.log("[mcp] No MCP servers discovered");
-      return;
+    const result = await this.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    if (result.status === "pending") {
+      await this.reloadPromise;
+    }
+  }
+
+  async reloadDiscoveredServers(opts?: { force?: boolean; timeoutMs?: number }): Promise<McpReloadResult> {
+    if (!this.reloadPromise) {
+      this.reloadPromise = this._reloadDiscoveredServers(opts?.force === true)
+        .finally(() => {
+          this.reloadPromise = undefined;
+        });
     }
 
-    console.log(`[mcp] Discovered ${names.length} MCP server(s): ${names.join(", ")}`);
+    const timeoutMs = opts?.timeoutMs ?? 30_000;
+    if (timeoutMs <= 0) return this.reloadPromise;
 
-    await Promise.all(
-      names.map((name) => this.connectServer(name, servers[name])),
-    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = new Promise<McpReloadResult>((resolve) => {
+      timer = setTimeout(() => resolve(this._pendingReloadResult()), timeoutMs);
+    });
+    return Promise.race([this.reloadPromise, pending]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  private _pendingReloadResult(): McpReloadResult {
+    return {
+      status: "pending",
+      connected: [],
+      disconnected: [],
+      unchanged: [],
+      skippedErrored: [],
+      failed: [],
+      statuses: this.getServerStatuses().map((s) => ({ ...s, status: s.status === "error" ? "reconnecting" : s.status })),
+    };
+  }
+
+  private async _reloadDiscoveredServers(force: boolean): Promise<McpReloadResult> {
+    const groups = this.discoverConnectionGroups();
+    const desired = new Map(groups.map((g) => [g.serverName, g]));
+    const connected: string[] = [];
+    const disconnected: string[] = [];
+    const unchanged: string[] = [];
+    const skippedErrored: string[] = [];
+    const failed: Array<{ name: string; error: string }> = [];
+
+    for (const name of [...this.configs.keys()]) {
+      if (!desired.has(name)) {
+        await this.disconnectServer(name, { forget: true });
+        disconnected.push(name);
+      }
+    }
+
+    await Promise.all([...desired.values()].map(async (group) => {
+      const name = group.serverName;
+      const fp = this._fingerprintGroup(group);
+      const unchangedConfig = this.serverFingerprints.get(name) === fp;
+      if (!force && unchangedConfig) {
+        if (this.errors.has(name)) {
+          skippedErrored.push(name);
+          return;
+        }
+        if (this.clients.get(name)?.connected) {
+          unchanged.push(name);
+          return;
+        }
+      }
+      this.discoveredConnectionGroups.set(name, group);
+      await this.connectServer(name, group.config);
+      if (this.errors.has(name)) {
+        failed.push({ name, error: this.errors.get(name)! });
+      } else {
+        connected.push(name);
+      }
+    }));
+
+    let status: McpReloadStatus = "ok";
+    if (failed.length > 0) {
+      status = connected.length > 0 || unchanged.length > 0 || skippedErrored.length > 0 || disconnected.length > 0 ? "partial" : "error";
+    }
+
+    return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses: this.getServerStatuses() };
   }
 
   /** Disconnect a specific server and remove its cached state. */
-  async disconnectServer(name: string): Promise<void> {
+  async disconnectServer(name: string, opts?: { forget?: boolean }): Promise<void> {
     const client = this.clients.get(name);
     if (client) {
       try {
@@ -364,13 +632,26 @@ export class McpManager {
     }
     this.toolDefs.delete(name);
     this.errors.delete(name);
+    if (opts?.forget) {
+      this.configs.delete(name);
+      this.connectionGroups.delete(name);
+      this.discoveredConnectionGroups.delete(name);
+      this.serverFingerprints.delete(name);
+      for (const key of [...this._toolNameMap.keys()]) {
+        if (this._toolNameMap.get(key)?.serverName === name) this._toolNameMap.delete(key);
+      }
+      this._summaryCache.delete(name);
+    }
   }
 
   /** Disconnect all connected servers. */
   async disconnectAll(): Promise<void> {
-    const names = [...this.clients.keys()];
-    await Promise.all(names.map((name) => this.disconnectServer(name)));
+    const names = [...new Set([...this.clients.keys(), ...this.configs.keys()])];
+    await Promise.all(names.map((name) => this.disconnectServer(name, { forget: true })));
     this.configs.clear();
+    this.connectionGroups.clear();
+    this.discoveredConnectionGroups.clear();
+    this.serverFingerprints.clear();
   }
 
   // ── Tool queries ───────────────────────────────────────────────────
@@ -381,9 +662,17 @@ export class McpManager {
    */
   getToolInfos(): McpToolInfo[] {
     const infos: McpToolInfo[] = [];
+    this._toolNameMap.clear();
 
     for (const [serverName, tools] of this.toolDefs) {
+      const group = this.connectionGroups.get(serverName);
       for (const tool of tools) {
+        const name = this._makeBobbitToolName(serverName, tool.name);
+        const parsed = parseMcpToolName(name);
+        if (group?.activeSubNamespaces && (!parsed?.sub || !group.activeSubNamespaces.has(parsed.sub))) {
+          continue;
+        }
+
         const summary = this._summaryCache.get(serverName)?.get(tool.name);
         // Compact inline docs — description is already in the summary line,
         // so docs only carry parameter names. Full tables live in the MD file.
@@ -391,7 +680,7 @@ export class McpManager {
         const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
 
         infos.push({
-          name: this._makeBobbitToolName(serverName, tool.name),
+          name,
           description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
           group: `MCP: ${serverName}`,
           docs,
@@ -404,6 +693,11 @@ export class McpManager {
     }
 
     return infos;
+  }
+
+  /** Helper for callers that refresh external MCP tools without leaving stale rows. */
+  getToolRegistrationRefresh(): McpToolRegistrationRefresh {
+    return { removePrefixes: ["mcp__"], toolInfos: this.getToolInfos() };
   }
 
   /** Return a compact comma-separated list of parameter names, or empty string. */
@@ -544,12 +838,16 @@ export class McpManager {
         status = "disconnected";
       }
 
+      const group = this.connectionGroups.get(name) ?? this.discoveredConnectionGroups.get(name);
       statuses.push({
         name,
         status,
         toolCount: tools?.length ?? 0,
         ...(error ? { error } : {}),
         config,
+        ...(group?.ownerContributions[0]?.origin ? { origin: group.ownerContributions[0].origin } : {}),
+        ...(group?.ownerContributions ? { ownerContributions: group.ownerContributions } : {}),
+        ...(group?.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
       });
     }
 
@@ -567,6 +865,11 @@ export class McpManager {
     args: Record<string, unknown>,
   ): Promise<McpToolResult> {
     const { serverName, toolName } = this._parseToolName(bobbitToolName);
+    const parsed = parseMcpToolName(bobbitToolName);
+    const group = this.connectionGroups.get(serverName);
+    if (group?.activeSubNamespaces && (!parsed?.sub || !group.activeSubNamespaces.has(parsed.sub))) {
+      throw new Error(`MCP server "${serverName}" sub-namespace is not active for tool "${bobbitToolName}"`);
+    }
 
     const client = this.clients.get(serverName);
     if (!client) {
