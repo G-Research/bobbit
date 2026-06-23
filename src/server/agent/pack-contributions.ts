@@ -30,8 +30,9 @@ import path from "node:path";
 import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
-import { isSafeBasename } from "./pack-manifest.js";
+import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import type { McpServerConfig } from "../mcp/mcp-types.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -59,6 +60,43 @@ export class PackContributionError extends Error {
 		super(message);
 		this.name = "PackContributionError";
 	}
+}
+
+/** A strict validation failure for a single MCP contribution file. Loaders catch
+ *  this and drop the malformed file with a warning; callers using the exported
+ *  normalizer can surface the precise reason directly. */
+export class McpContributionValidationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "McpContributionValidationError";
+	}
+}
+
+/** A pack-owned MCP server contribution (mcp/<listName>.yaml|json). */
+export interface McpPackContribution {
+	/** Pack-local activation key from contents.mcp[] and DisabledRefs.mcp. */
+	listName: string;
+	/** Runtime MCP server key in the merged mcpServers map. */
+	serverName: string;
+	/** Optional model-facing sub-namespace owner for shared MCP clients. */
+	subNamespace?: string;
+	/** Optional catalogue/display metadata. */
+	label?: string;
+	description?: string;
+	/** Transport normalized to the existing MCP runtime config shape. */
+	config: McpServerConfig;
+	/** Absolute path of the declaring mcp/<listName>.yaml|json file. */
+	sourceFile: string;
+	/** Absolute pack root (market-packs/<name>). */
+	packRoot: string;
+}
+
+export type McpContributionTransportType = "stdio" | "http";
+
+export interface NormalizeMcpContributionOptions {
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
 }
 
 /** A pack-scoped panel (panels/<file>.yaml). */
@@ -176,6 +214,8 @@ export interface PackContributions {
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
+	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
+	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
 }
 
@@ -207,6 +247,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
+		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
@@ -418,6 +459,219 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
 		out.push(provider);
+	}
+	return out;
+}
+
+const MCP_LIST_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const MCP_SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+const WINDOWS_DEVICE_NAME_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const MCP_TOP_LEVEL_KEYS = new Set(["server", "label", "description", "subNamespace", "transport"]);
+const MCP_STDIO_KEYS = new Set(["type", "command", "args", "env", "cwd"]);
+const MCP_HTTP_KEYS = new Set(["type", "url", "headers"]);
+
+function failMcp(message: string): never {
+	throw new McpContributionValidationError(message);
+}
+
+function hasPathSyntax(value: string): boolean {
+	return value.includes("\0") || value.includes("/") || value.includes("\\") || path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function isWindowsDeviceName(value: string): boolean {
+	return WINDOWS_DEVICE_NAME_RE.test(value);
+}
+
+/** Strict pack-local MCP basename guard. This is intentionally tighter than the
+ *  historical manifest basename guard: MCP refs are also install/materialization
+ *  identities and must not use leading dots or Windows device names. */
+export function isSafeMcpListName(name: unknown): name is string {
+	if (typeof name !== "string") return false;
+	if (!MCP_LIST_NAME_RE.test(name)) return false;
+	if (name.includes("..") || name.startsWith(".") || hasPathSyntax(name)) return false;
+	if (isWindowsDeviceName(name)) return false;
+	return true;
+}
+
+/** Runtime MCP server names become model-facing meta-tool names and policy keys,
+ *  so keep them display-safe and stable. */
+export function isValidMcpServerName(name: unknown): name is string {
+	if (typeof name !== "string") return false;
+	if (!MCP_SERVER_NAME_RE.test(name)) return false;
+	if (name === "." || name === ".." || name.includes("__") || hasPathSyntax(name)) return false;
+	return true;
+}
+
+/** Registry/discovery entries materialize to pack name `mcp-${id}`. */
+export function mcpGeneratedPackNameForId(id: string): string {
+	if (!isSafeMcpListName(id)) failMcp(`invalid MCP id/listName ${JSON.stringify(id)}`);
+	const packName = `mcp-${id}`;
+	if (!isValidPackName(packName)) failMcp(`generated MCP pack name ${JSON.stringify(packName)} is not a valid marketplace pack name`);
+	return packName;
+}
+
+function ensureOnlyKeys(obj: Record<string, unknown>, allowed: Set<string>, where: string): void {
+	for (const key of Object.keys(obj)) {
+		if (!allowed.has(key)) failMcp(`${where} has unknown key ${JSON.stringify(key)}`);
+	}
+}
+
+function optionalString(obj: Record<string, unknown>, key: "label" | "description" | "subNamespace"): string | undefined {
+	const value = obj[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || value.length === 0) failMcp(`${key} must be a non-empty string when present`);
+	return value;
+}
+
+function stringArray(value: unknown, where: string): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) {
+		failMcp(`${where} must be an array of strings`);
+	}
+	return [...value];
+}
+
+function stringRecord(value: unknown, where: string): Record<string, string> | undefined {
+	if (value === undefined) return undefined;
+	if (!isPlainObject(value)) failMcp(`${where} must be a string map`);
+	const out: Record<string, string> = {};
+	for (const [key, item] of Object.entries(value)) {
+		if (typeof item !== "string") failMcp(`${where}.${key} must be a string`);
+		out[key] = item;
+	}
+	return out;
+}
+
+function resolvePackCwd(cwd: unknown, packRoot: string): string | undefined {
+	if (cwd === undefined) return undefined;
+	if (typeof cwd !== "string" || cwd.length === 0) failMcp("transport.cwd must be a non-empty relative string");
+	if (!isSafeRelativePath(cwd)) failMcp("transport.cwd must be relative and must not contain NUL bytes");
+	const resolved = path.resolve(packRoot, cwd);
+	const rel = path.relative(packRoot, resolved);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) failMcp("transport.cwd resolves outside the pack root");
+	let rootReal: string;
+	let cwdReal: string;
+	try {
+		rootReal = fs.realpathSync(packRoot);
+		cwdReal = fs.realpathSync(resolved);
+	} catch {
+		failMcp("transport.cwd must resolve to an existing path inside the pack root");
+	}
+	const realRel = path.relative(rootReal, cwdReal);
+	if (realRel.startsWith("..") || path.isAbsolute(realRel)) failMcp("transport.cwd realpath resolves outside the pack root");
+	return resolved;
+}
+
+function normalizeHttpUrl(value: unknown): string {
+	if (typeof value !== "string" || value.length === 0) failMcp("transport.url must be a non-empty string");
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		failMcp("transport.url must be a valid URL");
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") failMcp("transport.url must use http: or https:");
+	if (parsed.username || parsed.password) failMcp("transport.url must not include credentials");
+	if (parsed.hash) failMcp("transport.url must not include a fragment");
+	return parsed.toString();
+}
+
+function normalizeMcpTransport(raw: unknown, packRoot: string): McpServerConfig {
+	if (!isPlainObject(raw)) failMcp("transport is required and must be a mapping");
+	const type = raw.type;
+	if (type === "stdio") {
+		ensureOnlyKeys(raw, MCP_STDIO_KEYS, "stdio transport");
+		if (typeof raw.command !== "string" || raw.command.length === 0) failMcp("stdio transport.command must be a non-empty string");
+		const config: McpServerConfig = { command: raw.command };
+		const args = stringArray(raw.args, "stdio transport.args");
+		if (args !== undefined) config.args = args;
+		const env = stringRecord(raw.env, "stdio transport.env");
+		if (env !== undefined) config.env = env;
+		const cwd = resolvePackCwd(raw.cwd, packRoot);
+		if (cwd !== undefined) config.cwd = cwd;
+		return config;
+	}
+	if (type === "http") {
+		ensureOnlyKeys(raw, MCP_HTTP_KEYS, "http transport");
+		const config: McpServerConfig = { url: normalizeHttpUrl(raw.url) };
+		const headers = stringRecord(raw.headers, "http transport.headers");
+		if (headers !== undefined) config.headers = headers;
+		return config;
+	}
+	failMcp("transport.type must be either 'stdio' or 'http'");
+}
+
+/** Strictly validate and normalize one already-parsed MCP contribution object. */
+export function normalizeMcpContribution(raw: unknown, opts: NormalizeMcpContributionOptions): McpPackContribution {
+	if (!isSafeMcpListName(opts.listName)) failMcp(`invalid MCP listName ${JSON.stringify(opts.listName)}`);
+	if (!isPlainObject(raw)) failMcp("MCP contribution must be a mapping");
+	ensureOnlyKeys(raw, MCP_TOP_LEVEL_KEYS, "MCP contribution");
+	const serverName = raw.server === undefined ? opts.listName : raw.server;
+	if (!isValidMcpServerName(serverName)) failMcp(`invalid MCP server name ${JSON.stringify(serverName)}`);
+	const label = optionalString(raw, "label");
+	const description = optionalString(raw, "description");
+	const subNamespace = optionalString(raw, "subNamespace");
+	if (subNamespace !== undefined && !isValidMcpServerName(subNamespace)) failMcp(`invalid MCP subNamespace ${JSON.stringify(subNamespace)}`);
+	const contribution: McpPackContribution = {
+		listName: opts.listName,
+		serverName,
+		config: normalizeMcpTransport(raw.transport, opts.packRoot),
+		sourceFile: opts.sourceFile,
+		packRoot: opts.packRoot,
+	};
+	if (label !== undefined) contribution.label = label;
+	if (description !== undefined) contribution.description = description;
+	if (subNamespace !== undefined) contribution.subNamespace = subNamespace;
+	return contribution;
+}
+
+function readMcpContributionFile(file: string): unknown {
+	const raw = fs.readFileSync(file, "utf-8");
+	if (file.endsWith(".json")) return JSON.parse(raw);
+	return parse(raw);
+}
+
+function resolveMcpContributionFile(dir: string, listName: string): string {
+	const candidates = [
+		path.join(dir, `${listName}.yaml`),
+		path.join(dir, `${listName}.yml`),
+		path.join(dir, `${listName}.json`),
+	];
+	return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
+}
+
+/** Load `mcp/<name>.yaml|json` ONLY for names listed in contents.mcp[]. */
+export function loadMcpContributions(packRoot: string, manifest: PackManifest): McpPackContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.mcp ?? [];
+	const dir = path.join(packRoot, "mcp");
+	const out: McpPackContribution[] = [];
+	const seenListName = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeMcpListName(listName)) {
+			console.warn(`[pack-contributions] MCP listName ${JSON.stringify(listName)} is not a safe MCP basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares MCP listName "${listName}" more than once; MCP listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveMcpContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] MCP '${listName}' resolves outside mcp/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readMcpContributionFile(sourceFile);
+			out.push(normalizeMcpContribution(data, { listName, sourceFile, packRoot }));
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed MCP '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
 	}
 	return out;
 }
