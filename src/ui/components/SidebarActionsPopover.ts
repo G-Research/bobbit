@@ -99,6 +99,13 @@ export class SidebarActionsPopover extends LitElement {
 	private _rowStrip: HTMLElement | null = null;
 	private _listenersBound = false;
 	private _animations: Animation[] = [];
+	private _sourceButtonState = new Map<HTMLElement, {
+		opacity: string;
+		visibility: string;
+		pointerEvents: string;
+		ariaHidden: string | null;
+		tabindex: string | null;
+	}>();
 	private _closeRequested = false;
 	private _openedToken = 0;
 	private _finishingInternalClose = false;
@@ -310,25 +317,70 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	/**
-	 * The row's on-screen quick-action strip. While the menu blooms we fade ONLY
-	 * the quick-action buttons inside it so their icons read as travelling into
-	 * the popover (shared element). The hamburger trigger stays fully visible the
-	 * entire time the menu is open. The strip lives in the light DOM next to the
-	 * trigger; visibility is otherwise governed by group-hover/focus CSS.
+	 * The row's on-screen action strip. While the menu blooms we hide the source
+	 * buttons represented by `sourceRects` so their icons read as travelling into
+	 * the popover (shared element). Sidebar callers still pass quick-action rects
+	 * only; header callers may pass every visible direct action.
 	 */
 	private _resolveRowStrip(): HTMLElement | null {
 		const root = this.anchorEl?.closest<HTMLElement>("[data-sidebar-actions-row-root]") ?? null;
 		return root?.querySelector<HTMLElement>(".sidebar-actions") ?? null;
 	}
 
-	/** Quick-action buttons inside the row strip (excludes the hamburger trigger). */
-	private _rowQuickButtons(): HTMLElement[] {
+	private _sourceActionIds(): Set<string> {
+		return new Set(this.sourceRects.map((source) => source.actionId));
+	}
+
+	private _rowSourceButtons(): HTMLElement[] {
 		if (!this._rowStrip) return [];
-		return [...this._rowStrip.querySelectorAll<HTMLElement>("[data-sidebar-action-quick='true']")];
+		const sourceIds = this._sourceActionIds();
+		if (sourceIds.size === 0) return [];
+		return [...this._rowStrip.querySelectorAll<HTMLElement>("[data-sidebar-action-id]")]
+			.filter((button) => sourceIds.has(button.dataset.sidebarActionId || ""));
+	}
+
+	private _rememberSourceButtonState(btn: HTMLElement): void {
+		if (this._sourceButtonState.has(btn)) return;
+		this._sourceButtonState.set(btn, {
+			opacity: btn.style.opacity,
+			visibility: btn.style.visibility,
+			pointerEvents: btn.style.pointerEvents,
+			ariaHidden: btn.getAttribute("aria-hidden"),
+			tabindex: btn.getAttribute("tabindex"),
+		});
+	}
+
+	private _hideSourceButton(btn: HTMLElement): void {
+		this._rememberSourceButtonState(btn);
+		btn.style.opacity = "0";
+		btn.style.visibility = "hidden";
+		btn.style.pointerEvents = "none";
+		btn.setAttribute("aria-hidden", "true");
+		btn.setAttribute("tabindex", "-1");
+	}
+
+	private _restoreSourceButton(btn: HTMLElement): void {
+		const previous = this._sourceButtonState.get(btn);
+		if (!previous) {
+			btn.style.removeProperty("opacity");
+			btn.style.removeProperty("visibility");
+			btn.style.removeProperty("pointer-events");
+			btn.removeAttribute("aria-hidden");
+			btn.removeAttribute("tabindex");
+			return;
+		}
+		btn.style.opacity = previous.opacity;
+		btn.style.visibility = previous.visibility;
+		btn.style.pointerEvents = previous.pointerEvents;
+		if (previous.ariaHidden === null) btn.removeAttribute("aria-hidden");
+		else btn.setAttribute("aria-hidden", previous.ariaHidden);
+		if (previous.tabindex === null) btn.removeAttribute("tabindex");
+		else btn.setAttribute("tabindex", previous.tabindex);
 	}
 
 	private _restoreRowStrip(): void {
-		for (const btn of this._rowQuickButtons()) btn.style.removeProperty("opacity");
+		for (const btn of this._rowSourceButtons()) this._restoreSourceButton(btn);
+		this._sourceButtonState.clear();
 		this._rowStrip = null;
 	}
 
@@ -489,21 +541,27 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	private _animateOpen(): void {
-		if (this._prefersReducedMotion()) return;
 		this._cancelAnimations();
 
-		// Fade ONLY the row's quick-action buttons out so their icons appear to leave
-		// the row and arrive in the menu (shared-element illusion). The hamburger
-		// trigger stays fully visible while the menu is open.
-		for (const btn of this._rowQuickButtons()) {
-			if (typeof btn.animate !== "function") { btn.style.opacity = "0"; continue; }
+		if (this._prefersReducedMotion()) {
+			for (const btn of this._rowSourceButtons()) this._hideSourceButton(btn);
+			return;
+		}
+
+		// Fade the row's source buttons out so their icons appear to leave the row
+		// and arrive in the menu (shared-element illusion). The hamburger trigger is
+		// not a source button, so it stays fully visible while the menu is open.
+		for (const btn of this._rowSourceButtons()) {
+			this._rememberSourceButtonState(btn);
+			if (typeof btn.animate !== "function") { this._hideSourceButton(btn); continue; }
 			btn.style.opacity = "1";
+			btn.style.visibility = "visible";
 			const btnAnim = btn.animate([{ opacity: 1 }, { opacity: 0 }], {
 				duration: OPEN_DURATION,
 				easing: "ease-out",
 				fill: "forwards",
 			});
-			btnAnim.finished.then(() => { btn.style.opacity = "0"; }).catch(() => undefined);
+			btnAnim.finished.then(() => { this._hideSourceButton(btn); }).catch(() => undefined);
 			this._animations.push(btnAnim);
 		}
 
@@ -517,12 +575,12 @@ export class SidebarActionsPopover extends LitElement {
 			], { duration: OPEN_DURATION, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "backwards" }));
 		}
 
-		// Shared-element FLIP: each quick icon travels from its row position into
+		// Shared-element FLIP: each source icon travels from its row position into
 		// its menu slot. Compounding with the menu scale is negligible at this size.
-		const targets = this._targetQuickIconRects();
+		const targets = this._targetSourceIconRects();
 		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
 		for (const delta of deltas) {
-			const icon = this._quickIcon(delta.actionId);
+			const icon = this._sourceIcon(delta.actionId);
 			if (!icon || typeof icon.animate !== "function") continue;
 			const animation = icon.animate([
 				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})` },
@@ -531,8 +589,8 @@ export class SidebarActionsPopover extends LitElement {
 			this._animations.push(animation);
 		}
 
-		// Labels of quick rows catch up to the arriving icons.
-		this._quickRowLabels().forEach((label) => {
+		// Labels of source rows catch up to the arriving icons.
+		this._sourceRowLabels().forEach((label) => {
 			if (typeof label.animate !== "function") return;
 			this._animations.push(label.animate([
 				{ opacity: 0 },
@@ -555,10 +613,10 @@ export class SidebarActionsPopover extends LitElement {
 		const animations: Animation[] = [];
 
 		// Reverse FLIP: icons travel back toward their row positions.
-		const targets = this._targetQuickIconRects();
+		const targets = this._targetSourceIconRects();
 		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
 		for (const delta of deltas) {
-			const icon = this._quickIcon(delta.actionId);
+			const icon = this._sourceIcon(delta.actionId);
 			if (!icon || typeof icon.animate !== "function") continue;
 			animations.push(icon.animate([
 				{ transform: "translate(0, 0) scale(1, 1)" },
@@ -583,17 +641,22 @@ export class SidebarActionsPopover extends LitElement {
 			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
 		}
 
-		// Bring the row's quick-action buttons back as the popover unwinds. The
-		// hamburger trigger was never faded, so it needs no restore here.
-		for (const btn of this._rowQuickButtons()) {
-			if (typeof btn.animate !== "function") { btn.style.removeProperty("opacity"); continue; }
+		// Bring the row's source buttons back as the popover unwinds. The hamburger
+		// trigger was never faded, so it needs no restore here.
+		for (const btn of this._rowSourceButtons()) {
+			if (typeof btn.animate !== "function") { this._restoreSourceButton(btn); continue; }
+			this._rememberSourceButtonState(btn);
 			btn.style.opacity = "0";
+			btn.style.visibility = "visible";
+			btn.style.pointerEvents = "none";
+			btn.setAttribute("aria-hidden", "true");
+			btn.setAttribute("tabindex", "-1");
 			const btnAnim = btn.animate([{ opacity: 0 }, { opacity: 1 }], {
 				duration: CLOSE_DURATION,
 				easing: "ease-in",
 				fill: "forwards",
 			});
-			btnAnim.finished.then(() => btn.style.removeProperty("opacity")).catch(() => undefined);
+			btnAnim.finished.then(() => this._restoreSourceButton(btn)).catch(() => undefined);
 			animations.push(btnAnim);
 		}
 
@@ -608,27 +671,38 @@ export class SidebarActionsPopover extends LitElement {
 		this._animations = [];
 	}
 
-	private _targetQuickIconRects(): SidebarActionsFlipRect[] {
-		return this._quickIcons().map((icon) => ({
+	private _targetSourceIconRects(): SidebarActionsFlipRect[] {
+		return this._sourceIcons().map((icon) => ({
 			actionId: icon.dataset.sidebarActionId!,
 			rect: icon.getBoundingClientRect(),
 		}));
 	}
 
-	private _quickIcons(): HTMLElement[] {
-		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-popover-icon][data-sidebar-action-quick='true'][data-sidebar-action-id]")];
+	private _sourceIcons(): HTMLElement[] {
+		const sourceIds = this._sourceActionIds();
+		if (sourceIds.size === 0) return [];
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-popover-icon][data-sidebar-action-id]")]
+			.filter((icon) => sourceIds.has(icon.dataset.sidebarActionId || ""));
 	}
 
-	private _quickIcon(actionId: string): HTMLElement | null {
-		return this._quickIcons().find((icon) => icon.dataset.sidebarActionId === actionId) ?? null;
+	private _sourceIcon(actionId: string): HTMLElement | null {
+		return this._sourceIcons().find((icon) => icon.dataset.sidebarActionId === actionId) ?? null;
 	}
 
 	private _menuOnlyRows(): HTMLElement[] {
-		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-quick='false']")];
+		const sourceIds = this._sourceActionIds();
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-id]")]
+			.filter((row) => !sourceIds.has(row.dataset.sidebarActionId || ""));
 	}
 
-	private _quickRowLabels(): HTMLElement[] {
-		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-quick='true'] [data-sidebar-actions-label]")];
+	private _sourceRowLabels(): HTMLElement[] {
+		const sourceIds = this._sourceActionIds();
+		if (sourceIds.size === 0) return [];
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-id] [data-sidebar-actions-label]")]
+			.filter((label) => {
+				const row = label.closest<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-id]");
+				return sourceIds.has(row?.dataset.sidebarActionId || "");
+			});
 	}
 
 	override render() {

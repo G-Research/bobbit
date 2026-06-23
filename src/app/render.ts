@@ -34,7 +34,7 @@ import {
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildSessionActions, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
-import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
+import { captureHeaderSessionActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 // Lazy wrapper for the proposal-panels chunk. Static import here keeps
 // the wrapper itself in the entry bundle while the ~80 kB body of
 // goal/role/tool/staff/project preview panels lands on first view.
@@ -832,8 +832,6 @@ function renderHeaderSessionActions(input: {
 	const actions = buildActions();
 	if (!actions.length) return html``;
 	const { directActions, overflowActions } = partitionHeaderSessionActions(actions, input.mobile);
-	const hideDirectActions = input.mobile && isHeaderSessionActionsPopoverOpen(input.session.id);
-	const visibleDirectActions = hideDirectActions ? [] : directActions;
 	const showOverflow = input.mobile || overflowActions.length > 0;
 	const openFromTrigger = (event: Event) => {
 		event.preventDefault();
@@ -841,19 +839,19 @@ function renderHeaderSessionActions(input: {
 		const trigger = event.currentTarget as HTMLElement;
 		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
 		resetSessionForkNewWorktree();
-		const currentOverflowActions = () => partitionHeaderSessionActions(buildActions(), input.mobile).overflowActions;
+		const currentMenuActions = () => buildActions();
 		void openHeaderSessionActionsPopover({
 			sessionId: input.session.id,
 			trigger,
-			actions: currentOverflowActions(),
-			refresh: currentOverflowActions,
-			sourceRects: row ? captureSidebarActionSourceRects(row) : [],
+			actions: currentMenuActions(),
+			refresh: currentMenuActions,
+			sourceRects: row ? captureHeaderSessionActionSourceRects(row) : [],
 		});
 	};
 	return html`
 		<div class="flex items-center gap-1 shrink-0 relative" data-session-action-surface="header" data-sidebar-actions-row-root>
 			<div class="sidebar-actions flex items-center gap-1">
-				${visibleDirectActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
+				${directActions.map((action) => renderHeaderSessionActionButton(action, input.mobile))}
 				${showOverflow ? html`
 					<button
 						type="button"
