@@ -10,6 +10,9 @@ import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import type { PackManifest } from "./pack-types.js";
 
 const MCP_SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+// Registry ids become schema-2 `contents.mcp` list names, so they must satisfy
+// pack-contributions' MCP_LIST_NAME_RE length limit as well as pack-dir safety.
+const MAX_REGISTRY_INSTALL_ID_LENGTH = 64;
 const DEFAULT_REGISTRY_FETCH_TIMEOUT_MS = 10_000;
 const DEFAULT_REGISTRY_MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_SOURCE_URL = "https://registry.modelcontextprotocol.io/v0/servers";
@@ -368,7 +371,7 @@ export function officialRegistryInstallId(input: { officialName: string; version
 	let id = `${human}-${sourceKey}`;
 	if (isSafeInstallId(id)) return id;
 	const hash = crypto.createHash("sha256").update(stableStringify(input)).digest("hex").slice(0, 8);
-	const maxHuman = Math.max(8, 80 - sourceKey.length - hash.length - 2);
+	const maxHuman = Math.max(8, MAX_REGISTRY_INSTALL_ID_LENGTH - sourceKey.length - hash.length - 2);
 	id = `${truncateSlug(human, maxHuman)}-${hash}-${sourceKey}`;
 	if (!isSafeInstallId(id)) throw new McpRegistryError(`generated registry install id is unsafe: ${id}`);
 	return id;
@@ -653,7 +656,7 @@ function truncateSlug(slug: string, maxLength: number): string {
 }
 
 function isSafeInstallId(id: string): boolean {
-	return isSafeBasename(id) && isValidPackName(registryPackNameForId(id));
+	return id.length <= MAX_REGISTRY_INSTALL_ID_LENGTH && isSafeBasename(id) && isValidPackName(registryPackNameForId(id));
 }
 
 function normalizeHttpUrl(raw: string): string {

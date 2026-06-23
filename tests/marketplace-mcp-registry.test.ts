@@ -184,7 +184,14 @@ describe("Marketplace MCP registry source primitives", () => {
 
 		const longId = officialRegistryInstallId({ officialName: "@scope/" + "very.".repeat(30) + "server", version: "2026.06.23", sourceUrl: sourceA, variant: "remote-1" });
 		assert.match(longId, /^[a-z0-9][a-z0-9-]*$/);
+		assert.ok(longId.length <= 64, `registry install id must fit contents.mcp list-name limit: ${longId}`);
 		assert.equal(registryPackNameForId(longId).startsWith("mcp-"), true);
+
+		const [longServer] = parseMcpRegistryDocument({
+			servers: [{ server: { name: "io." + "long-segment.".repeat(18) + "server", version: "2026.06.23-build.abcdef", remotes: [{ type: "streamable-http", url: "https://mcp.example.com/long" }] } }],
+		}, sourceA).servers;
+		assert.ok(longServer.id.length <= 64, `materialized registry id must fit contents.mcp list-name limit: ${longServer.id}`);
+		assert.deepEqual(registryServerToVirtualPack(longServer).contents.mcp, [longServer.id]);
 	});
 
 	it("rejects the old Bobbit schemaVersion 1 registry format", () => {
