@@ -22,7 +22,43 @@ function uniqueDir(label: string): string {
 	return realpathSync(dir);
 }
 
-const createDirectoryButton = (page: Page) => page.locator("button").filter({ has: page.locator(ADD_PROJECT.createDirectory) }).first();
+const PATH_HINT = "Type a path or click Browse to pick a directory, or type a path of a new directory to create it";
+
+const createDirectoryButton = (page: Page) =>
+	page.locator("button").filter({ has: page.locator(ADD_PROJECT.createDirectory) }).first();
+const inlineCreate = (page: Page) => page.locator(ADD_PROJECT.statusSlot).locator(ADD_PROJECT.inlineCreate);
+const footerCreateButton = (page: Page) => page.locator(ADD_PROJECT.footer).locator(ADD_PROJECT.createDirectory);
+
+async function expectInlineCreateCentered(page: Page): Promise<void> {
+	const slot = page.locator(ADD_PROJECT.statusSlot);
+	const inline = inlineCreate(page);
+	await expect(inline).toBeVisible({ timeout: 10_000 });
+	await expect(inline).toContainText("Directory doesn't exist");
+	await expect(inline.locator(ADD_PROJECT.createDirectory)).toHaveText("Create Directory");
+	await expect(footerCreateButton(page)).toHaveCount(0);
+	await expect(page.locator(ADD_PROJECT.footer).getByRole("button", { name: "Create Directory" })).toHaveCount(0);
+
+	const centering = await inline.evaluate((el) => {
+		const slotEl = el.closest('[data-testid="add-project-status-slot"]') as HTMLElement | null;
+		const style = window.getComputedStyle(el);
+		const rect = el.getBoundingClientRect();
+		const slotRect = slotEl?.getBoundingClientRect();
+		return {
+			alignItems: style.alignItems,
+			justifyContent: style.justifyContent,
+			textAlign: style.textAlign,
+			centerDelta: slotRect
+				? Math.abs((rect.left + rect.width / 2) - (slotRect.left + slotRect.width / 2))
+				: Number.POSITIVE_INFINITY,
+		};
+	});
+	expect(centering.centerDelta).toBeLessThanOrEqual(4);
+	expect(
+		centering.textAlign === "center"
+			|| centering.justifyContent === "center"
+			|| centering.alignItems === "center",
+	).toBe(true);
+}
 
 test.describe("Add Project flow (UI)", () => {
 	// Tests in this spec create projects (provisional + promoted) that persist
@@ -53,9 +89,10 @@ test.describe("Add Project flow (UI)", () => {
 		// Dialog should appear with the "Add Project" title
 		await expect(page.getByText("Add Project", { exact: true }).first()).toBeVisible({ timeout: 5_000 });
 
-		// Should have a path input with placeholder
+		// Should have a path input with placeholder and the exact extended guidance copy.
 		const pathInput = page.locator('input[placeholder="/path/to/project"]');
 		await expect(pathInput).toBeVisible();
+		await expect(page.locator(ADD_PROJECT.statusSlot)).toHaveText(PATH_HINT);
 
 		// Should have a Browse button
 		await expect(page.locator("button").filter({ hasText: "Browse" }).first()).toBeVisible();
@@ -132,15 +169,31 @@ test.describe("Add Project flow (UI)", () => {
 			await expect(pathInput).toBeVisible({ timeout: 5_000 });
 			await pathInput.fill(target);
 
+			await expectInlineCreateCentered(page);
+			await expect(page.locator('[data-testid="preflight-check"][data-check-id="path.exists"]')).toHaveCount(0);
 			const createButton = createDirectoryButton(page);
 			await expect(createButton).toBeVisible({ timeout: 10_000 });
 			await expect(createButton).toBeEnabled();
+
+			const refreshedDetection = page.waitForResponse((resp) => {
+				if (!resp.url().includes("/api/projects/detect") || resp.request().method() !== "POST") return false;
+				try {
+					const body = resp.request().postDataJSON?.() ?? JSON.parse(resp.request().postData() || "{}");
+					return body?.path === target && existsSync(target);
+				} catch {
+					return false;
+				}
+			});
 			await createButton.click();
+			await refreshedDetection;
 
 			await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
 			await expect(pathInput).toHaveValue(target);
 			expect(existsSync(target)).toBe(true);
-			await expect(createButton).not.toBeVisible({ timeout: 10_000 });
+			await expect(inlineCreate(page)).toHaveCount(0, { timeout: 10_000 });
+			await expect(page.locator(ADD_PROJECT.statusSlot)).not.toContainText("Directory doesn't exist");
+			await expect(page.locator(ADD_PROJECT.createError)).toHaveCount(0);
+			await expect(page.locator(ADD_PROJECT.pickerSuggestions)).toHaveCount(0);
 			const continueButton = page.locator("button").filter({ has: page.locator(ADD_PROJECT.continue) }).first();
 			await expect(continueButton).toBeEnabled({ timeout: 10_000 });
 
@@ -176,6 +229,7 @@ test.describe("Add Project flow (UI)", () => {
 			await expect(pathInput).toBeVisible({ timeout: 5_000 });
 			await pathInput.fill(target);
 
+			await expectInlineCreateCentered(page);
 			const createButton = createDirectoryButton(page);
 			await expect(createButton).toBeVisible({ timeout: 10_000 });
 			await page.route(createRoute, async (route) => {
@@ -191,8 +245,9 @@ test.describe("Add Project flow (UI)", () => {
 
 			await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
 			expect(existsSync(target)).toBe(true);
-			await expect(createButton).not.toBeVisible({ timeout: 10_000 });
+			await expect(inlineCreate(page)).toHaveCount(0, { timeout: 10_000 });
 			await expect(page.locator(ADD_PROJECT.createError)).toHaveCount(0);
+			await expect(footerCreateButton(page)).toHaveCount(0);
 			await expect(page.locator("button").filter({ has: page.locator(ADD_PROJECT.continue) }).first()).toBeEnabled({ timeout: 10_000 });
 		} finally {
 			await page.unroute(createRoute).catch(() => {});
@@ -236,11 +291,16 @@ test.describe("Add Project flow (UI)", () => {
 
 			for (const [value, { message }] of responses) {
 				await pathInput.fill(value);
+				await expectInlineCreateCentered(page);
 				await expect(createButton).toBeVisible({ timeout: 10_000 });
 				await expect(createButton).toBeEnabled();
 				await createButton.click();
-				await expect(page.locator(ADD_PROJECT.createError)).toHaveText(message, { timeout: 5_000 });
+				const inlineError = page.locator(ADD_PROJECT.statusSlot).locator(ADD_PROJECT.createError);
+				await expect(inlineError).toHaveText(message, { timeout: 5_000 });
+				await expect(page.locator(ADD_PROJECT.footer).locator(ADD_PROJECT.createError)).toHaveCount(0);
+				await expect(footerCreateButton(page)).toHaveCount(0);
 				await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+				await expect(pathInput).toHaveValue(value);
 			}
 		} finally {
 			await page.unroute(routePath).catch(() => {});
@@ -248,32 +308,72 @@ test.describe("Add Project flow (UI)", () => {
 		}
 	});
 
-	test("create directory surfaces structured errors without closing the dialog", async ({ page }) => {
+	test("create directory surfaces structured errors inline without closing the dialog", async ({ page }) => {
 		const parent = uniqueDir("create-errors");
-		const fileTarget = join(parent, "file-target");
-		writeFileSync(fileTarget, "not a directory");
-		const missingParentTarget = join(parent, "missing-parent", "child");
+		const routePath = "**/api/create-directory";
+		const cases = [
+			{
+				value: join(parent, "invalid-path"),
+				status: 400,
+				code: "invalid_path",
+				error: "Enter an absolute directory path.",
+				message: "Enter an absolute directory path.",
+			},
+			{
+				value: join(parent, "missing-parent"),
+				status: 404,
+				code: "parent_not_found",
+				error: "The parent directory does not exist",
+				message: "The parent directory does not exist.",
+			},
+			{
+				value: join(parent, "file-target"),
+				status: 409,
+				code: "exists_as_file",
+				error: "A file already exists at that path",
+				message: "A file already exists at that path.",
+			},
+		];
 
 		try {
+			await page.route(routePath, async (route) => {
+				if (route.request().method() !== "POST") return route.fallback();
+				let requestedPath = "";
+				try {
+					requestedPath = JSON.parse(route.request().postData() || "{}").path || "";
+				} catch {
+					requestedPath = "";
+				}
+				const response = cases.find((entry) => entry.value === requestedPath);
+				if (!response) return route.fallback();
+				await route.fulfill({
+					status: response.status,
+					contentType: "application/json",
+					body: JSON.stringify({ error: response.error, code: response.code }),
+				});
+			});
+
 			await openApp(page);
 			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 			const pathInput = page.locator('input[placeholder="/path/to/project"]');
 			await expect(pathInput).toBeVisible({ timeout: 5_000 });
 			const createButton = createDirectoryButton(page);
 
-			for (const { value, message } of [
-				{ value: "relative-project", message: "Enter an absolute directory path." },
-				{ value: missingParentTarget, message: "The parent directory does not exist." },
-				{ value: fileTarget, message: "A file already exists at that path." },
-			]) {
+			for (const { value, message } of cases) {
 				await pathInput.fill(value);
+				await expectInlineCreateCentered(page);
 				await expect(createButton).toBeVisible({ timeout: 10_000 });
 				await expect(createButton).toBeEnabled();
 				await createButton.click();
-				await expect(page.locator(ADD_PROJECT.createError)).toHaveText(message, { timeout: 5_000 });
+				const inlineError = page.locator(ADD_PROJECT.statusSlot).locator(ADD_PROJECT.createError);
+				await expect(inlineError).toHaveText(message, { timeout: 5_000 });
+				await expect(page.locator(ADD_PROJECT.footer).locator(ADD_PROJECT.createError)).toHaveCount(0);
+				await expect(footerCreateButton(page)).toHaveCount(0);
 				await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+				await expect(pathInput).toHaveValue(value);
 			}
 		} finally {
+			await page.unroute(routePath).catch(() => {});
 			rmSync(parent, { recursive: true, force: true });
 		}
 	});

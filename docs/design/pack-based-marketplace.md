@@ -18,7 +18,7 @@ Scope: unify installable pack entities into one pack model, add the Market surfa
   - **Market packs** — installed from a source into a scope's `market-packs/<pack-name>/`.
   - **Legacy-implicit packs** — the hard-coded skill scan dirs and user-registered `config_directories` mapped into list entries (back-compat).
 - **Install** = copy a pack dir into a scope's `market-packs/` + write `.pack-meta.yaml`. **Uninstall** = delete the dir. **Update** = re-copy/re-pull.
-- **MCP is now additive:** schema-2 packs may ship `mcp/<name>.yaml|yml|json`, and MCP registry/discovery sources browse as virtual packs that materialize to the same layout. Manual `.mcp.json` and Claude-compatible MCP config remain supported and override Marketplace by runtime server name. AGENTS/CLAUDE.md prompt assembly remains out of scope.
+- **MCP is now additive:** schema-2 packs may ship `mcp/<name>.yaml|yml|json`, and official MCP Registry API sources browse as virtual packs that materialize to the same layout. Manual `.mcp.json` and Claude-compatible MCP config remain supported and override Marketplace by runtime server name. AGENTS/CLAUDE.md prompt assembly remains out of scope.
 
 The reframe must produce **byte-for-byte identical resolution** for roles/tools/skills versus today's `ConfigCascade` + `slash-skills.ts` + `config_directories`. The existing tests pin this.
 
@@ -46,7 +46,7 @@ A pack is a directory containing a **required `pack.yaml`** manifest plus an ent
 
 ### 1.2 Marketplace source repo layout
 
-A pack source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs. MCP registry/discovery sources are a second source type: they browse a JSON registry as virtual schema-2 packs and materialize selected servers into normal installed pack directories.
+A pack source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs. Official MCP Registry API sources are a second source type: they browse `https://registry.modelcontextprotocol.io/v0/servers`-style JSON as virtual schema-2 packs and materialize selected supported servers into normal installed pack directories.
 
 ```
 <source-repo-root>/
@@ -169,9 +169,9 @@ Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name
 Marketplace MCP extends this design without changing the pack-as-directory invariant:
 
 - Authored pack sources declare `schema: 2`, `contents.mcp: [<listName>]`, and one contribution file at `mcp/<listName>.yaml|yml|json`.
-- MCP registry/discovery sources (`type: "mcp-registry"`) fetch a bounded JSON document with `schemaVersion: 1` and `servers[]`. Each valid server browses as a virtual pack named `mcp-<id>` and installs by materializing `pack.yaml`, `mcp/<id>.yaml`, and `.pack-meta.yaml` into the selected scope.
-- `listName` / registry `id` is the activation identity (`DisabledRefs.mcp`), materialized file basename, and pack suffix. Runtime `server` / registry `name` is the MCP server key used by `McpManager`, policy keys, and model-facing meta-tools.
-- Transports normalize to existing `McpServerConfig`: stdio accepts `command`, `args`, `env`, `cwd`; HTTP accepts `url`, `headers`. Names, cwd containment, URL shape, env/header key/value types, and unknown keys are validated strictly.
+- MCP registry sources (`type: "mcp-registry"`) fetch a bounded official MCP Registry API document with `servers[].server`; the canonical URL is `https://registry.modelcontextprotocol.io/v0/servers`. Each supported server candidate browses as a virtual pack named `mcp-<id>` and installs by materializing `pack.yaml`, `mcp/<id>.yaml`, and `.pack-meta.yaml` into the selected scope. The old Bobbit-specific flat `schemaVersion: 1` registry document is rejected by the public registry source path.
+- `listName` / generated registry `id` is the activation identity (`DisabledRefs.mcp`), materialized file basename, and pack suffix. Registry ids are source-keyed and variant-stable, derived from official name/version/source URL plus the selected remote/package candidate. The exact official `server.name` is preserved as metadata, while runtime `server` names are generated safely for `McpManager`, policy keys, and model-facing meta-tools.
+- Official `remotes[]` with `type: "streamable-http"` normalize to Bobbit HTTP MCP config when URLs and headers are concrete and non-secret. Safe npm package entries with `registryType: "npm"`, stdio transport, pinned concrete semver versions from the default npm registry, fixed package arguments, and literal/safe-placeholder environment variables normalize to Bobbit stdio config. Unsupported transports, secret-marked remote headers, non-default npm registries, missing/ranged package versions, package managers, runtime arguments, prompts, variables/templates, and unsafe package arguments are skipped with diagnostics. Names, cwd containment, URL shape, env/header key/value types, and unknown authored keys are validated strictly.
 - Marketplace MCP is lower priority than manual config. Existing custom config directories, Claude-compatible files, project `.mcp.json`, and project `.bobbit/config/mcp.json` are still read by `McpManager`; manual definitions override Marketplace definitions with the same runtime server name.
 - Activation is server/sub-namespace level. `DisabledRefs.mcp` omits the pack-local contribution before connection. A flat contribution owns a whole server; a `subNamespace` contribution owns one `mcp_<server>__<sub>` meta-tool. Raw operations are parameters discovered by `mcp_describe`, not Market activation rows.
 - Runtime managers are scoped by default/project/cwd context. Marketplace mutations reload affected managers, disconnect removed servers, keep unchanged connections, refresh ToolManager external MCP registrations, and return contextual `mcpReload` status. `GET /api/mcp-servers` is status only; toggle state comes from the unfiltered activation catalogue.
@@ -538,7 +538,7 @@ Steps (low→high):
 
 ### 7.1 Persistence
 
-Marketplace **source URLs** are a small registry. Sources are **global** to the server (not per-project): a registered source can be browsed and installed into any scope. A source is either a pack source (git/local pack collection) or an MCP registry/discovery source. Persist in a new store file:
+Marketplace **source URLs** are a small registry. Sources are **global** to the server (not per-project): a registered source can be browsed and installed into any scope. A source is either a pack source (git/local pack collection) or an official MCP Registry API source. Persist in a new store file:
 
 ```
 <server-cwd>/.bobbit/config/marketplace-sources.yaml
@@ -554,9 +554,9 @@ sources:
     addedAt: 2026-06-03T10:00:00Z
     lastSyncedAt: 2026-06-03T10:05:00Z
     lastCommit: 9f3c1a8            # pack git sources only
-  - id: mcp-registry
+  - id: official-mcp-registry
     type: mcp-registry
-    url: https://registry.example.com/mcp.json      # HTTP(S) discovery URL
+    url: https://registry.modelcontextprotocol.io/v0/servers
     addedAt: 2026-06-03T10:10:00Z
     lastSyncedAt: 2026-06-03T10:11:00Z
     registry:
@@ -564,7 +564,7 @@ sources:
       serverCount: 4
       skippedCount: 1
       diagnostics:
-        - skipped server "bad/id": unsafe id
+        - skipped server "example/legacy": unsupported remote transport: sse (Bobbit currently supports streamable-http)
 ```
 
 ```ts
@@ -597,7 +597,7 @@ export class MarketplaceSourceStore { /* CRUD + load/save YAML, mirrors RoleStor
   ```
 - **Local-dir pack sources** (`type: "pack"`, `url` is an absolute path): no clone; read directly. `commit` recorded as empty.
 - **Git pack sources:** **shallow clone** (`git clone --depth 1 --branch <ref> <url> <cache-dir>`); re-sync via `git fetch --depth 1 && git reset --hard origin/<ref>` (or re-clone if the cache is dirty/missing). Resolve and record `lastCommit` via `git rev-parse HEAD`.
-- **MCP registry sources:** bounded HTTP(S) JSON fetch; validate `schemaVersion: 1` and `servers[]`; compute/store a content fingerprint plus `serverCount`, `skippedCount`, and human-readable diagnostics. Invalid registry documents fail sync/browse. Invalid individual server entries are skipped and reported in diagnostics.
+- **MCP registry sources:** bounded HTTP(S) JSON fetch; validate the official MCP Registry API response shape with `servers[].server`; compute/store a content fingerprint plus `serverCount`, `skippedCount`, and human-readable diagnostics. Invalid official registry documents fail sync/browse. Invalid individual server candidates are skipped and reported in diagnostics, including unsupported transports, secret-marked remote headers, non-default npm registry URLs, missing/ranged npm versions, variables/templates, prompts, and unsafe package arguments. The old flat Bobbit `schemaVersion: 1` registry format is unsupported.
 - **Private repos:** rely on the user's ambient git credentials (credential helper / SSH agent) exactly as Bobbit's worktree/clone code does today. No credential storage in the marketplace. Registry sources must not persist secrets in diagnostics.
 - Sync is invoked on: add-source, explicit "re-sync", and implicitly before browse if the cache/fingerprint is missing. Surface source-specific errors to the UI (`git` stderr for pack git sources; registry validation/fetch errors for MCP registry sources).
 
@@ -606,7 +606,7 @@ export class MarketplaceSourceStore { /* CRUD + load/save YAML, mirrors RoleStor
 `browsePacks(sourceId)`: sync (if needed), then branch by source type:
 
 - **Pack sources:** scan the cache/source root one level deep → for each subdir with a `pack.yaml`, parse the manifest → return `BrowsePackWire[]` with `dirName` equal to the source directory name. Directories without `pack.yaml` are ignored.
-- **MCP registry sources:** map each valid registry server to a virtual `BrowsePackWire` with `dirName = "mcp-<id>"`, a generated schema-2 manifest whose `contents.mcp = [id]`, and registry diagnostics attached to the source/browse response. Installing that row materializes a normal pack directory before copying it into the target scope.
+- **MCP registry sources:** map each supported official registry candidate to a virtual `BrowsePackWire` with `dirName = "mcp-<id>"`, a generated schema-2 manifest whose `contents.mcp = [id]`, and registry diagnostics attached to the source/browse response. Installing that row materializes a normal pack directory before copying it into the target scope.
 
 ---
 
@@ -659,7 +659,7 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 | Method & path | Purpose |
 |---|---|
 | `GET /api/marketplace/sources` | List registered sources (`MarketplaceSource[]`) including `type`, pack sync metadata, and registry diagnostics where applicable. |
-| `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` → syncs + returns the created source. Omitted/`"pack"` means git/local pack source; `"mcp-registry"` means MCP discovery URL. |
+| `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` → syncs + returns the created source. Omitted/`"pack"` means git/local pack source; `"mcp-registry"` means official MCP Registry API URL. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir / registry cache). |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (clone/fetch/read for pack sources; bounded JSON fetch/fingerprint update for MCP registries); returns updated source metadata. |
 | `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: BrowsePackWire[], diagnostics? }`. Pack sources return authored pack dirs; MCP registry sources return virtual packs with `dirName = "mcp-<id>"`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. `descriptions?` carries optional one-line per-entity copy (§9.1/§10.4 R3). |
@@ -864,7 +864,7 @@ The design is additive along three axes:
 - **Portable/parameterised workflow bundles** — workflows stay project-scoped inline in `project.yaml`; note what'd change (decouple from component/command pairs) but build nothing.
 - **Staff templates** as exportable packs — gap noted.
 - **Trust / sandboxing / signing** of code-bearing packs — MVP copies tool code as-is with a UI warning; sketch where a permission/trust gate slots into `installPack`.
-- **Hosted pack registry with search** — generic pack sources remain git/local. MCP registry/discovery URLs are a specific source type, not a general hosted pack marketplace.
+- **Hosted pack registry with search** — generic pack sources remain git/local. Official MCP Registry API URLs are a specific MCP source type, not a general hosted pack marketplace.
 - **Per-conflict pinning (`pack_conflicts`)** — deferred; MVP resolves same-name conflicts solely via `pack_order` (§3.3) plus user-pack customization (§3.2). The future schema (additive, no migration needed) would be a `pack_conflicts` list in `project.yaml`/server config:
   ```yaml
   pack_conflicts:

@@ -124,6 +124,57 @@ async function expectQuickActionHiddenAndNonInteractive(action: Locator, descrip
 	expect(interactiveTargets, `${description} should not leave clickable or focusable targets`).toEqual([]);
 }
 
+async function expectHeaderDirectActionHiddenAndNonInteractive(page: Page, actionId: string, description: string): Promise<void> {
+	const action = headerDirectAction(page, actionId);
+	await expect(action, `${description} should remain mounted while the hamburger menu is open so FLIP can own its visibility`).toHaveCount(1);
+	await expectQuickActionHiddenAndNonInteractive(action, description);
+}
+
+async function visibleHeaderDirectActionIds(page: Page): Promise<string[]> {
+	return page.locator(HEADER_ACTION_SELECTOR).evaluateAll((els) => els
+		.filter((el) => {
+			const target = el as HTMLElement;
+			const style = getComputedStyle(target);
+			const rect = target.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+		})
+		.map((el) => (el as HTMLElement).dataset.sessionActionId || "")
+		.filter(Boolean));
+}
+
+async function popoverSourceActionIds(page: Page): Promise<string[]> {
+	return page.locator("sidebar-actions-popover").first().evaluate((el) => ((el as any).sourceRects || []).map((rect: { actionId: string }) => rect.actionId));
+}
+
+async function installActionAnimationRecorder(page: Page, key: string): Promise<void> {
+	await page.evaluate((recorderKey) => {
+		const win = window as any;
+		const original = win.__sessionActionOriginalAnimate || Element.prototype.animate;
+		win.__sessionActionOriginalAnimate = original;
+		win[recorderKey] = [];
+		Element.prototype.animate = function(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
+			const el = this as HTMLElement;
+			const row = el.closest<HTMLElement>("[role='menuitem'][data-session-action-id],[role='menuitemcheckbox'][data-session-action-id]");
+			win[recorderKey].push({
+				actionId: el.dataset.sidebarActionId || el.dataset.sessionActionId || row?.dataset.sessionActionId || "",
+				rowActionId: row?.dataset.sessionActionId || "",
+				quick: el.dataset.sidebarActionQuick || row?.dataset.sidebarActionQuick || "",
+				keyframes,
+				keyframesText: JSON.stringify(keyframes),
+				options,
+			});
+			return original.call(this, keyframes, options);
+		};
+	}, key);
+}
+
+async function expectPopoverTranslateAnimationsForActionIds(page: Page, recorderKey: string, actionIds: readonly string[], description: string): Promise<void> {
+	await expect.poll(() => page.evaluate(({ key, ids }) => {
+		const calls = ((window as any)[key] || []) as Array<{ actionId: string; rowActionId: string; keyframesText: string }>;
+		return ids.filter((id) => calls.some((call) => call.actionId === id && call.rowActionId === id && call.keyframesText.includes("translate")));
+	}, { key: recorderKey, ids: actionIds }), { timeout: 5_000, message: description }).toEqual([...actionIds]);
+}
+
 async function popoverActionIds(page: Page): Promise<string[]> {
 	return page.locator(POPOVER_ACTION_SELECTOR).evaluateAll((els) =>
 		els.map((el) => (el as HTMLElement).dataset.sessionActionId || "").filter(Boolean),
@@ -244,6 +295,8 @@ test.describe("unified session actions", () => {
 
 		await openSidebarActions(page, sessionId);
 		const sidebarIds = await popoverActionIds(page);
+		const sidebarSourceIds = await popoverSourceActionIds(page);
+		expect(sidebarSourceIds, "sidebar session menus should keep quick-only FLIP sources").toEqual(["modify", "terminate"]);
 		await closePopover(page);
 
 		const headerIds = await headerActionIds(page);
@@ -291,27 +344,42 @@ test.describe("unified session actions", () => {
 		await closePopover(page);
 	});
 
-	test("desktop header overflows lower-priority actions into the hamburger at constrained width", async ({ page }) => {
-		await page.setViewportSize({ width: 820, height: 900 });
+	test("constrained desktop header hamburger opens the full menu and FLIP-animates every visible direct action", async ({ page }) => {
+		await page.setViewportSize({ width: 1_000, height: 900 });
 		const sessionId = await createSession();
 		sessionsToDelete.add(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
 		await openSession(page, sessionId);
 
-		const directIds = await page.locator(HEADER_ACTION_SELECTOR).evaluateAll((els) =>
-			els.map((el) => (el as HTMLElement).dataset.sessionActionId || "").filter(Boolean),
-		);
+		const directIds = await visibleHeaderDirectActionIds(page);
+		expect(directIds.length, "constrained desktop should render more than two direct actions before overflowing the rest").toBeGreaterThan(2);
 		expect(directIds.length, "constrained desktop should not render every action directly").toBeLessThan(CANONICAL_SESSION_ACTION_IDS.length);
 		expectCanonicalOrder(directIds);
+		expect(directIds, "the constrained desktop reproducer must include a non-quick direct action").toContain("refresh-agent");
 
-		await expect(headerTrigger(page), "overflow trigger should expose hidden header actions").toBeVisible({ timeout: 5_000 });
+		await installActionAnimationRecorder(page, "__desktopHeaderActionAnimations");
+		await expect(headerTrigger(page), "overflow trigger should expose the complete header action menu").toBeVisible({ timeout: 5_000 });
 		await openHeaderActions(page);
-		const overflowIds = await popoverActionIds(page);
-		const combinedIds = uniqueInOrder([...directIds, ...overflowIds]);
-		expectCanonicalActionsPresentInPriorityOrder(combinedIds);
-		expect(overflowIds, "overflow should contain actions that were not direct buttons").toEqual(
-			expect.arrayContaining(CANONICAL_SESSION_ACTION_IDS.filter((id) => !directIds.includes(id))),
+		const popoverIds = await popoverActionIds(page);
+		expect(
+			canonicalSessionActionIds(popoverIds),
+			"header hamburger popover should contain the full canonical session action list, including direct buttons",
+		).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		expect(await popoverSourceActionIds(page), "desktop header hamburger should capture every visible direct action as a FLIP source").toEqual(expect.arrayContaining(directIds));
+		await expectPopoverTranslateAnimationsForActionIds(
+			page,
+			"__desktopHeaderActionAnimations",
+			directIds,
+			"desktop header hamburger should animate each visible direct action into its matching popover row",
 		);
+		for (const actionId of directIds) {
+			await expectHeaderDirectActionHiddenAndNonInteractive(page, actionId, `desktop header ${actionId} direct action`);
+		}
+
+		await closePopover(page);
+		for (const actionId of directIds) {
+			await expect(headerDirectAction(page, actionId), `desktop header ${actionId} direct action should return after close`).toBeVisible({ timeout: 5_000 });
+		}
 	});
 
 	test("mobile session header shows icon-only quick actions and opens the remaining menu with FLIP sources", async ({ page }) => {
@@ -359,31 +427,24 @@ test.describe("unified session actions", () => {
 			expect(visibleLabelText, `${actionId} quick action should not expose a visible text label on mobile`).toBe("");
 		}
 
-		await page.evaluate(() => {
-			const original = Element.prototype.animate;
-			(window as any).__mobileHeaderActionAnimations = [];
-			Element.prototype.animate = function(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
-				const el = this as HTMLElement;
-				(window as any).__mobileHeaderActionAnimations.push({
-					actionId: el.dataset.sidebarActionId || el.dataset.sessionActionId || "",
-					quick: el.dataset.sidebarActionQuick || "",
-					keyframes,
-					options,
-				});
-				return original.call(this, keyframes, options);
-			};
-		});
+		await installActionAnimationRecorder(page, "__mobileHeaderActionAnimations");
 
 		await openHeaderActions(page);
-		const overflowIds = await popoverActionIds(page);
-		expectCanonicalActionsPresentInPriorityOrder(overflowIds);
-		await expectQuickActionHiddenAndNonInteractive(quickButtons.modify, "mobile header modify quick action");
-		await expectQuickActionHiddenAndNonInteractive(quickButtons.terminate, "mobile header terminate quick action");
-		const sourceIds = await page.locator("sidebar-actions-popover").first().evaluate((el) => ((el as any).sourceRects || []).map((rect: { actionId: string }) => rect.actionId));
+		const popoverIds = await popoverActionIds(page);
+		expect(
+			canonicalSessionActionIds(popoverIds),
+			"mobile header hamburger popover should contain the full canonical session action list",
+		).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		await expectHeaderDirectActionHiddenAndNonInteractive(page, "modify", "mobile header modify quick action");
+		await expectHeaderDirectActionHiddenAndNonInteractive(page, "terminate", "mobile header terminate quick action");
+		const sourceIds = await popoverSourceActionIds(page);
 		expect(sourceIds, "mobile header hamburger should capture quick-action source rects for FLIP").toEqual(expect.arrayContaining(["modify", "terminate"]));
-		await expect.poll(() => page.evaluate(() => (window as any).__mobileHeaderActionAnimations
-			.filter((call: any) => ["modify", "terminate"].includes(call.actionId) && call.quick === "true" && JSON.stringify(call.keyframes).includes("translate"))
-			.map((call: any) => call.actionId)), { timeout: 5_000 }).toEqual(expect.arrayContaining(["modify", "terminate"]));
+		await expectPopoverTranslateAnimationsForActionIds(
+			page,
+			"__mobileHeaderActionAnimations",
+			["modify", "terminate"],
+			"mobile header hamburger should animate visible quick actions into their matching popover rows",
+		);
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow, "mobile header must not create horizontal document overflow").toBeLessThanOrEqual(1);
 

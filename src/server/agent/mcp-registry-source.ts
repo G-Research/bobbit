@@ -10,13 +10,20 @@ import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import type { PackManifest } from "./pack-types.js";
 
 const MCP_SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
-const WINDOWS_DEVICE_NAMES = new Set(["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]);
-const TOP_KEYS = new Set(["schemaVersion", "generatedAt", "servers"]);
-const SERVER_KEYS = new Set(["id", "name", "label", "description", "version", "homepage", "license", "publisher", "transport"]);
-const STDIO_KEYS = new Set(["type", "command", "args", "env", "cwd"]);
-const HTTP_KEYS = new Set(["type", "url", "headers"]);
+// Registry ids become schema-2 `contents.mcp` list names, so they must satisfy
+// pack-contributions' MCP_LIST_NAME_RE length limit as well as pack-dir safety.
+const MAX_REGISTRY_INSTALL_ID_LENGTH = 64;
 const DEFAULT_REGISTRY_FETCH_TIMEOUT_MS = 10_000;
 const DEFAULT_REGISTRY_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_SOURCE_URL = "https://registry.modelcontextprotocol.io/v0/servers";
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const NPM_PACKAGE_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
+const NPM_PINNED_VERSION_RE = /^[vV]?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const DEFAULT_NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org/";
+const DEFAULT_NPM_REGISTRY_ARG = `--registry=${DEFAULT_NPM_REGISTRY_BASE_URL}`;
+const WINDOWS_SHELL_UNSAFE_ARG_RE = /[\x00-\x1F\x7F&|<>^%"'`!()]/;
+const SAFE_PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
 export interface McpRegistryStdioTransport {
 	type: "stdio";
@@ -34,15 +41,26 @@ export interface McpRegistryHttpTransport {
 
 export type McpRegistryTransport = McpRegistryStdioTransport | McpRegistryHttpTransport;
 
+export interface OfficialRepository {
+	url?: string;
+	source?: string;
+	id?: string;
+	[key: string]: unknown;
+}
+
 export interface McpRegistryServer {
 	id: string;
+	sourceKey: string;
+	officialName: string;
 	name: string;
 	label?: string;
 	description?: string;
 	version?: string;
 	homepage?: string;
 	license?: string;
-	publisher?: string;
+	repository?: OfficialRepository;
+	registryMeta?: Record<string, unknown>;
+	serverMeta?: Record<string, unknown>;
 	transport: McpRegistryTransport;
 	/** Exact runtime config produced from transport. */
 	config: McpServerConfig;
@@ -77,6 +95,25 @@ export type McpRegistryBrowsePack = BrowsePack & {
 export interface MaterializeRegistryPackOptions {
 	sourceUrl?: string;
 	materializedAt?: string;
+}
+
+interface Candidate {
+	variant: string;
+	transport: McpRegistryTransport;
+	config: McpServerConfig;
+	descriptor: Record<string, unknown>;
+}
+
+interface NormalizedOfficialMetadata {
+	officialName: string;
+	label?: string;
+	description?: string;
+	version?: string;
+	homepage?: string;
+	license?: string;
+	repository?: OfficialRepository;
+	registryMeta?: Record<string, unknown>;
+	serverMeta?: Record<string, unknown>;
 }
 
 export class McpRegistryError extends Error {
@@ -129,7 +166,7 @@ export async function fetchMcpRegistryWithDiagnostics(source: MarketplaceSource,
 			if (controller.signal.aborted) throw new McpRegistryError(`registry fetch timed out after ${timeoutMs}ms`);
 			throw new McpRegistryError(`registry response is not valid JSON: ${String(err)}`);
 		}
-		return parseMcpRegistryDocument(body);
+		return parseMcpRegistryDocument(body, source.url);
 	} catch (err) {
 		if (err instanceof McpRegistryError) throw err;
 		if (controller.signal.aborted) throw new McpRegistryError(`registry fetch timed out after ${timeoutMs}ms`);
@@ -168,49 +205,58 @@ async function readResponseTextBounded(response: Response, maxBytes: number): Pr
 	return new TextDecoder().decode(body);
 }
 
-export function parseMcpRegistryDocument(raw: unknown): McpRegistryParseResult {
+export function parseMcpRegistryDocument(raw: unknown, sourceUrl = DEFAULT_SOURCE_URL): McpRegistryParseResult {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		throw new McpRegistryError("registry document must be a JSON object");
 	}
 	const doc = raw as Record<string, unknown>;
-	for (const key of Object.keys(doc)) {
-		if (!TOP_KEYS.has(key)) throw new McpRegistryError(`registry document has unknown key: ${key}`);
+	if (doc.schemaVersion === 1) throw unsupportedFormatError();
+	if (!Array.isArray(doc.servers)) throw unsupportedFormatError();
+	for (const entry of doc.servers) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry) || !("server" in entry) || !(entry as Record<string, unknown>).server || typeof (entry as Record<string, unknown>).server !== "object" || Array.isArray((entry as Record<string, unknown>).server)) {
+			throw unsupportedFormatError();
+		}
 	}
-	if (doc.schemaVersion !== 1) throw new McpRegistryError("registry document must declare schemaVersion: 1");
-	if (!Array.isArray(doc.servers)) throw new McpRegistryError("registry document must include servers[]");
 
 	const servers: McpRegistryServer[] = [];
 	const skipped: McpRegistrySkippedEntry[] = [];
 	const seenIds = new Set<string>();
 	const seenNames = new Map<string, string>();
 	for (const entry of doc.servers) {
-		let server: McpRegistryServer;
+		let normalized: McpRegistryServer[];
 		try {
-			server = normalizeRegistryServer(entry);
+			const result = normalizeOfficialEntry(entry, sourceUrl);
+			normalized = result.servers;
+			skipped.push(...result.skipped);
 		} catch (err) {
-			const e = entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+			const server = (entry as Record<string, unknown>).server as Record<string, unknown>;
 			skipped.push({
-				id: typeof e.id === "string" ? e.id : undefined,
-				name: typeof e.name === "string" ? e.name : undefined,
+				name: typeof server.name === "string" ? server.name : undefined,
 				reason: err instanceof Error ? err.message : String(err),
 			});
 			continue;
 		}
-		if (seenIds.has(server.id)) {
-			skipped.push({ id: server.id, name: server.name, reason: `duplicate registry id: ${server.id}` });
-			continue;
+		for (const server of normalized) {
+			if (seenIds.has(server.id)) {
+				skipped.push({ id: server.id, name: server.officialName, reason: `duplicate registry id: ${server.id}` });
+				continue;
+			}
+			const configFingerprint = stableStringify(server.config);
+			const priorConfigFingerprint = seenNames.get(server.name);
+			if (priorConfigFingerprint && priorConfigFingerprint !== configFingerprint) {
+				skipped.push({ id: server.id, name: server.officialName, reason: `duplicate runtime server name with different config: ${server.name}` });
+				continue;
+			}
+			seenIds.add(server.id);
+			seenNames.set(server.name, configFingerprint);
+			servers.push(server);
 		}
-		const configFingerprint = stableStringify(server.config);
-		const priorConfigFingerprint = seenNames.get(server.name);
-		if (priorConfigFingerprint && priorConfigFingerprint !== configFingerprint) {
-			skipped.push({ id: server.id, name: server.name, reason: `duplicate runtime server name with different config: ${server.name}` });
-			continue;
-		}
-		seenIds.add(server.id);
-		seenNames.set(server.name, configFingerprint);
-		servers.push(server);
 	}
 	return { servers, skipped };
+}
+
+function unsupportedFormatError(): McpRegistryError {
+	return new McpRegistryError("unsupported MCP registry format: expected official MCP Registry API response with servers[].server");
 }
 
 export function registryServerToVirtualPack(server: McpRegistryServer): McpRegistryBrowsePack {
@@ -220,7 +266,7 @@ export function registryServerToVirtualPack(server: McpRegistryServer): McpRegis
 	return {
 		schema: 2,
 		name: packName,
-		description: server.description || server.label || `${server.name} MCP server`,
+		description: server.description || server.label || `${server.officialName} MCP server`,
 		version: server.version || "0.0.0",
 		homepage: server.homepage,
 		contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: [server.id] },
@@ -290,8 +336,10 @@ export function materializeRegistryPack(server: McpRegistryServer, destOrStaging
 	fs.writeFileSync(metaPath, stringify(stripUndefined({
 		sourceType: "mcp-registry",
 		sourceUrl: opts.sourceUrl,
+		sourceKey: server.sourceKey,
 		registryId: server.id,
 		registryName: server.name,
+		officialName: server.officialName,
 		registryVersion: server.version,
 		registryFingerprint: server.fingerprint,
 		materializedAt: opts.materializedAt || new Date().toISOString(),
@@ -299,37 +347,11 @@ export function materializeRegistryPack(server: McpRegistryServer, destOrStaging
 		description: server.description,
 		homepage: server.homepage,
 		license: server.license,
-		publisher: server.publisher,
+		repository: server.repository,
+		registryMeta: server.registryMeta,
+		serverMeta: server.serverMeta,
 	})), "utf-8");
 	return manifest;
-}
-
-function normalizeRegistryServer(raw: unknown): McpRegistryServer {
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError("registry server entry must be an object");
-	const r = raw as Record<string, unknown>;
-	for (const key of Object.keys(r)) {
-		if (!SERVER_KEYS.has(key)) throw new McpRegistryError(`registry server has unknown key: ${key}`);
-	}
-	const id = normalizeRegistryId(r.id);
-	const packName = registryPackName(id);
-	if (!isValidPackName(packName)) throw new McpRegistryError(`generated pack name is unsafe: ${packName}`);
-	const name = normalizeServerName(r.name);
-	const { transport, config } = normalizeTransport(r.transport);
-	const server: McpRegistryServer = {
-		id,
-		name,
-		transport,
-		config,
-		fingerprint: "",
-	};
-	for (const key of ["label", "description", "version", "homepage", "license", "publisher"] as const) {
-		if (r[key] !== undefined) {
-			if (typeof r[key] !== "string" || !(r[key] as string).trim()) throw new McpRegistryError(`registry server ${key} must be a non-empty string`);
-			(server as unknown as Record<string, string>)[key] = (r[key] as string).trim();
-		}
-	}
-	server.fingerprint = fingerprintRegistryServer(server);
-	return server;
 }
 
 export function registryPackNameForId(id: string): string {
@@ -340,55 +362,315 @@ function registryPackName(id: string): string {
 	return registryPackNameForId(id);
 }
 
-function normalizeRegistryId(raw: unknown): string {
-	if (typeof raw !== "string") throw new McpRegistryError("registry server id is required");
-	const id = raw.trim();
-	if (id.length < 1 || id.length > 64) throw new McpRegistryError("registry server id length must be 1-64");
-	if (!isSafeBasename(id) || id === "." || id === ".." || id.startsWith(".")) throw new McpRegistryError(`registry server id is not a safe basename: ${JSON.stringify(raw)}`);
-	if (WINDOWS_DEVICE_NAMES.has(id.split(".")[0].toUpperCase())) throw new McpRegistryError(`registry server id uses a Windows device name: ${id}`);
+export function officialRegistrySourceKey(sourceUrl: string): string {
+	return crypto.createHash("sha256").update(canonicalSourceUrl(sourceUrl)).digest("hex").slice(0, 9);
+}
+
+export function officialRegistryInstallId(input: { officialName: string; version?: string; sourceUrl: string; variant?: string }): string {
+	const sourceKey = officialRegistrySourceKey(input.sourceUrl);
+	const parts = [input.officialName, input.version, input.variant].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+	const human = slugify(parts.join("-"));
+	let id = `${human}-${sourceKey}`;
+	if (isSafeInstallId(id)) return id;
+	const hash = crypto.createHash("sha256").update(stableStringify(input)).digest("hex").slice(0, 8);
+	const maxHuman = Math.max(8, MAX_REGISTRY_INSTALL_ID_LENGTH - sourceKey.length - hash.length - 2);
+	id = `${truncateSlug(human, maxHuman)}-${hash}-${sourceKey}`;
+	if (!isSafeInstallId(id)) throw new McpRegistryError(`generated registry install id is unsafe: ${id}`);
 	return id;
 }
 
-function normalizeServerName(raw: unknown): string {
-	if (typeof raw !== "string") throw new McpRegistryError("registry server name is required");
-	const name = raw.trim();
-	if (!MCP_SERVER_NAME_RE.test(name) || name.includes("__") || name.includes("/") || name.includes("\\") || name.includes("\0") || name === "." || name === "..") {
-		throw new McpRegistryError(`registry server name is unsafe: ${JSON.stringify(raw)}`);
-	}
-	if (name.replace(/[^A-Za-z0-9]+/g, "").length === 0) throw new McpRegistryError(`registry server name normalizes to an empty tool name: ${name}`);
-	return name;
+export function officialRegistryRuntimeName(input: { officialName: string; version?: string; sourceUrl: string; installId: string }): string {
+	const suffix = crypto.createHash("sha256").update(`${input.installId}:${canonicalSourceUrl(input.sourceUrl)}`).digest("hex").slice(0, 8);
+	const base = slugify([input.officialName, input.version].filter(Boolean).join("-"));
+	const runtime = `${truncateSlug(base, 63 - suffix.length - 1)}-${suffix}`;
+	if (!MCP_SERVER_NAME_RE.test(runtime)) throw new McpRegistryError(`generated runtime server name is unsafe: ${runtime}`);
+	return runtime;
 }
 
-function normalizeTransport(raw: unknown): { transport: McpRegistryTransport; config: McpServerConfig } {
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError("transport is required");
-	const t = raw as Record<string, unknown>;
-	if (t.type === "stdio") {
-		for (const key of Object.keys(t)) if (!STDIO_KEYS.has(key)) throw new McpRegistryError(`stdio transport has unknown key: ${key}`);
-		if (typeof t.command !== "string" || !t.command.trim()) throw new McpRegistryError("stdio transport command is required");
-		const transport: McpRegistryStdioTransport = { type: "stdio", command: t.command.trim() };
-		const args = optionalStringArray(t.args, "stdio transport args");
-		if (args) transport.args = args;
-		const env = optionalStringRecord(t.env, "stdio transport env");
-		if (env) transport.env = env;
-		if (t.cwd !== undefined) transport.cwd = normalizeRelativeCwd(t.cwd);
-		const config: McpServerConfig = { command: transport.command };
-		if (transport.args) config.args = transport.args;
-		if (transport.env) config.env = transport.env;
-		if (transport.cwd) config.cwd = transport.cwd;
-		return { transport, config };
+function normalizeOfficialEntry(entry: unknown, sourceUrl: string): { servers: McpRegistryServer[]; skipped: McpRegistrySkippedEntry[] } {
+	const wrapper = entry as Record<string, unknown>;
+	const serverRaw = wrapper.server as Record<string, unknown>;
+	const metadata = normalizeOfficialMetadata(serverRaw, wrapper);
+	const candidates: Candidate[] = [];
+	const skipped: McpRegistrySkippedEntry[] = [];
+
+	const remotes = serverRaw.remotes === undefined ? [] : asArray(serverRaw.remotes, "remotes");
+	remotes.forEach((remote, index) => {
+		try {
+			candidates.push(candidateFromRemote(remote, index));
+		} catch (err) {
+			const variant = `remote-${index + 1}`;
+			skipped.push({
+				id: officialRegistryInstallId({ officialName: metadata.officialName, version: metadata.version, sourceUrl, variant }),
+				name: metadata.officialName,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	});
+
+	const packages = serverRaw.packages === undefined ? [] : asArray(serverRaw.packages, "packages");
+	packages.forEach((pkg, index) => {
+		try {
+			candidates.push(candidateFromPackage(pkg, index));
+		} catch (err) {
+			const variant = packageVariant(pkg, index);
+			skipped.push({
+				id: officialRegistryInstallId({ officialName: metadata.officialName, version: metadata.version, sourceUrl, variant }),
+				name: metadata.officialName,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	});
+
+	if (candidates.length === 0 && skipped.length === 0) {
+		skipped.push({ name: metadata.officialName, reason: "official registry server has no remotes[] or packages[] candidates" });
 	}
-	if (t.type === "http") {
-		for (const key of Object.keys(t)) if (!HTTP_KEYS.has(key)) throw new McpRegistryError(`http transport has unknown key: ${key}`);
-		if (typeof t.url !== "string" || !t.url.trim()) throw new McpRegistryError("http transport url is required");
-		const url = normalizeHttpUrl(t.url);
-		const headers = optionalStringRecord(t.headers, "http transport headers");
-		const transport: McpRegistryHttpTransport = { type: "http", url };
-		if (headers) transport.headers = headers;
-		const config: McpServerConfig = { url };
-		if (headers) config.headers = headers;
-		return { transport, config };
+
+	const sourceKey = officialRegistrySourceKey(sourceUrl);
+	const servers = candidates.map((candidate) => {
+		const id = officialRegistryInstallId({ officialName: metadata.officialName, version: metadata.version, sourceUrl, variant: candidate.variant });
+		const packName = registryPackName(id);
+		if (!isValidPackName(packName)) throw new McpRegistryError(`generated pack name is unsafe: ${packName}`);
+		const name = officialRegistryRuntimeName({ officialName: metadata.officialName, version: metadata.version, sourceUrl, installId: id });
+		const server: McpRegistryServer = {
+			id,
+			sourceKey,
+			officialName: metadata.officialName,
+			name,
+			label: metadata.label,
+			description: metadata.description,
+			version: metadata.version,
+			homepage: metadata.homepage,
+			license: metadata.license,
+			repository: metadata.repository,
+			registryMeta: metadata.registryMeta,
+			serverMeta: metadata.serverMeta,
+			transport: candidate.transport,
+			config: candidate.config,
+			fingerprint: "",
+		};
+		server.fingerprint = fingerprintRegistryServer(server, sourceUrl, candidate.descriptor);
+		return server;
+	});
+	return { servers, skipped };
+}
+
+function normalizeOfficialMetadata(server: Record<string, unknown>, wrapper: Record<string, unknown>): NormalizedOfficialMetadata {
+	const officialName = requiredNonEmptyString(server.name, "official server name");
+	const repository = normalizeRepository(server.repository);
+	return {
+		officialName,
+		label: optionalNonEmptyString(server.title, "official server title"),
+		description: optionalNonEmptyString(server.description, "official server description"),
+		version: optionalNonEmptyString(server.version, "official server version"),
+		homepage: optionalNonEmptyString(server.websiteUrl, "official server websiteUrl") || optionalNonEmptyString(repository?.url, "official server repository.url"),
+		license: normalizeLicense(server.license),
+		repository,
+		registryMeta: normalizeMeta(wrapper._meta, "registry _meta"),
+		serverMeta: normalizeMeta(server._meta, "server _meta"),
+	};
+}
+
+function candidateFromRemote(raw: unknown, index: number): Candidate {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError("remote entry must be an object");
+	const remote = raw as Record<string, unknown>;
+	const type = typeof remote.type === "string" ? remote.type.trim() : "";
+	if (type !== "streamable-http") throw new McpRegistryError(`unsupported remote transport: ${type || String(remote.type)} (Bobbit currently supports streamable-http)`);
+	if (hasPromptOrVariableMarker(remote)) throw new McpRegistryError("remote variables/prompts are not supported; Marketplace registry installs require concrete remote settings");
+	if (typeof remote.url !== "string" || !remote.url.trim()) throw new McpRegistryError("remote url is required for streamable-http transport");
+	if (hasTemplateMarker(remote.url)) throw new McpRegistryError("remote url contains variables/templates; Marketplace registry installs require a concrete URL");
+	const url = normalizeHttpUrl(remote.url);
+	const headers = normalizeRemoteHeaders(remote.headers);
+	const transport: McpRegistryHttpTransport = { type: "http", url };
+	if (headers) transport.headers = headers;
+	const config: McpServerConfig = { url };
+	if (headers) config.headers = headers;
+	return { variant: `remote-${index + 1}`, transport, config, descriptor: { kind: "remote", index, type, url, headers: headers ? Object.keys(headers).sort() : [] } };
+}
+
+function candidateFromPackage(raw: unknown, index: number): Candidate {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError("package entry must be an object");
+	const pkg = raw as Record<string, unknown>;
+	const registryType = typeof pkg.registryType === "string" ? pkg.registryType.trim().toLowerCase() : "";
+	if (registryType !== "npm") throw new McpRegistryError(`unsupported package registryType: ${registryType || String(pkg.registryType)} (supported: npm)`);
+	const transportRaw = pkg.transport;
+	if (!transportRaw || typeof transportRaw !== "object" || Array.isArray(transportRaw) || (transportRaw as Record<string, unknown>).type !== "stdio") {
+		throw new McpRegistryError("unsupported package transport: Bobbit currently supports npm packages with stdio transport");
 	}
-	throw new McpRegistryError(`unsupported transport type: ${String(t.type)}`);
+	if (pkg.runtimeHint !== undefined && pkg.runtimeHint !== "npx") throw new McpRegistryError(`unsupported npm runtimeHint: ${String(pkg.runtimeHint)} (supported: npx)`);
+	if (Array.isArray(pkg.runtimeArguments) ? pkg.runtimeArguments.length > 0 : pkg.runtimeArguments !== undefined) throw new McpRegistryError("runtimeArguments are not supported for Marketplace registry installs yet");
+	const registryBaseUrl = normalizeNpmRegistryBaseUrl(pkg.registryBaseUrl);
+	const identifier = requiredNonEmptyString(pkg.identifier, "npm package identifier");
+	if (!NPM_PACKAGE_RE.test(identifier)) throw new McpRegistryError(`npm package identifier is invalid: ${identifier}`);
+	const packageArgs = normalizePackageArguments(pkg.packageArguments);
+	const env = normalizePackageEnvironment(pkg.environmentVariables);
+	const version = optionalNonEmptyString(pkg.version, "npm package version");
+	validateNpmVersionSpec(version);
+	const identifierWithVersion = `${identifier}@${version}`;
+	const args = ["-y", DEFAULT_NPM_REGISTRY_ARG, identifierWithVersion, ...packageArgs];
+	const transport: McpRegistryStdioTransport = { type: "stdio", command: "npx", args };
+	if (env) transport.env = env;
+	const config: McpServerConfig = { command: transport.command, args: transport.args };
+	if (env) config.env = env;
+	return { variant: packageVariant(pkg, index), transport, config, descriptor: { kind: "package", index, registryType, registryBaseUrl: registryBaseUrl ?? DEFAULT_NPM_REGISTRY_BASE_URL, identifier, version, args: packageArgs, env: env ? Object.keys(env).sort() : [] } };
+}
+
+function normalizeRemoteHeaders(raw: unknown): Record<string, string> | undefined {
+	if (raw === undefined) return undefined;
+	const out: Record<string, string> = {};
+	if (Array.isArray(raw)) {
+		for (const entry of raw) {
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new McpRegistryError("remote headers must be concrete string values or descriptors with literal values");
+			const header = entry as Record<string, unknown>;
+			const name = requiredNonEmptyString(header.name, "remote header name");
+			validateHeaderName(name, "remote header");
+			if (hasSecretMarker(header)) throw secretRemoteHeaderError(name);
+			if (hasPromptOrVariableMarker(header)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
+			if (typeof header.value !== "string") throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
+			if (hasTemplateMarker(header.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
+			out[name] = header.value;
+		}
+	} else if (raw && typeof raw === "object") {
+		for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+			validateHeaderName(name, "remote header");
+			if (typeof value === "string") {
+				if (hasTemplateMarker(value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
+				out[name] = value;
+				continue;
+			}
+			if (value && typeof value === "object" && !Array.isArray(value)) {
+				const descriptor = value as Record<string, unknown>;
+				if (hasSecretMarker(descriptor)) throw secretRemoteHeaderError(name);
+				if (hasPromptOrVariableMarker(descriptor)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
+				if (typeof descriptor.value === "string") {
+					if (hasTemplateMarker(descriptor.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
+					out[name] = descriptor.value;
+					continue;
+				}
+			}
+			throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
+		}
+	} else {
+		throw new McpRegistryError("remote headers must be an object or array");
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+function normalizePackageArguments(raw: unknown): string[] {
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) throw new McpRegistryError("packageArguments must be an array; only fixed value arguments are supported");
+	const args: string[] = [];
+	for (const item of raw) {
+		if (typeof item === "string") {
+			if (item.includes("${")) throw variablePackageArgumentsError();
+			validateFixedPackageArgString(item, "packageArguments value");
+			args.push(item);
+			continue;
+		}
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw variablePackageArgumentsError();
+		const arg = item as Record<string, unknown>;
+		if (hasPromptOrVariableMarker(arg)) throw variablePackageArgumentsError();
+		const value = arg.value ?? arg.default;
+		if (value === undefined) throw variablePackageArgumentsError();
+		if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") throw variablePackageArgumentsError();
+		const stringValue = String(value);
+		if (stringValue.includes("${")) throw variablePackageArgumentsError();
+		validateFixedPackageArgString(stringValue, "packageArguments value");
+		const name = optionalNonEmptyString(arg.name, "package argument name");
+		if (name) {
+			validateCliArgName(name);
+			if (value === true) args.push(name);
+			else if (value !== false) args.push(name, stringValue);
+		} else if (value !== false) {
+			args.push(stringValue);
+		}
+	}
+	return args;
+}
+
+function variablePackageArgumentsError(): McpRegistryError {
+	return new McpRegistryError("packageArguments contain variables/prompts; only fixed value arguments are supported");
+}
+
+function secretRemoteHeaderError(name: string): McpRegistryError {
+	return new McpRegistryError(`remote ${name} header is marked secret; Marketplace registry installs do not materialize secret header values`);
+}
+
+function normalizePackageEnvironment(raw: unknown): Record<string, string> | undefined {
+	if (raw === undefined) return undefined;
+	const env: Record<string, string> = {};
+	if (Array.isArray(raw)) {
+		for (const item of raw) {
+			if (!item || typeof item !== "object" || Array.isArray(item)) throw new McpRegistryError("environmentVariables entries must be objects");
+			const entry = item as Record<string, unknown>;
+			const name = requiredNonEmptyString(entry.name, "environment variable name");
+			validateEnvName(name);
+			if (hasPromptOrVariableMarker(entry)) throw new McpRegistryError(`environment variable ${name} contains variables/prompts; only literal defaults or whole-value \${NAME} placeholders are supported`);
+			const value = entry.default ?? entry.value;
+			if (typeof value !== "string") throw new McpRegistryError(`environment variable ${name} requires a default or safe placeholder value`);
+			if ((entry.isSecret === true || entry.secret === true) && !SAFE_PLACEHOLDER_RE.test(value)) throw new McpRegistryError(`environment variable ${name} is secret and must use a safe placeholder value`);
+			if (hasTemplateMarker(value, { allowWholeEnvPlaceholder: true })) throw new McpRegistryError(`environment variable ${name} contains variables/templates; use a literal value or a whole-value \${NAME} placeholder`);
+			env[name] = value;
+		}
+	} else if (raw && typeof raw === "object") {
+		for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+			validateEnvName(name);
+			if (value && typeof value === "object" && !Array.isArray(value) && hasPromptOrVariableMarker(value as Record<string, unknown>)) throw new McpRegistryError(`environment variable ${name} contains variables/prompts; only literal defaults or whole-value \${NAME} placeholders are supported`);
+			if (typeof value !== "string") throw new McpRegistryError(`environment variable ${name} requires a string value`);
+			if (hasTemplateMarker(value, { allowWholeEnvPlaceholder: true })) throw new McpRegistryError(`environment variable ${name} contains variables/templates; use a literal value or a whole-value \${NAME} placeholder`);
+			env[name] = value;
+		}
+	} else {
+		throw new McpRegistryError("environmentVariables must be an array or object");
+	}
+	return Object.keys(env).length ? env : undefined;
+}
+
+function hasPromptOrVariableMarker(arg: Record<string, unknown>): boolean {
+	if (arg.variables !== undefined || arg.variable !== undefined || arg.prompt !== undefined || arg.prompts !== undefined || arg.valueHint !== undefined) return true;
+	if (arg.isRequired === true && arg.value === undefined && arg.default === undefined) return true;
+	return false;
+}
+
+function hasSecretMarker(arg: Record<string, unknown>): boolean {
+	return arg.isSecret === true || arg.secret === true;
+}
+
+function hasTemplateMarker(value: string, opts: { allowWholeEnvPlaceholder?: boolean } = {}): boolean {
+	if (opts.allowWholeEnvPlaceholder && SAFE_PLACEHOLDER_RE.test(value)) return false;
+	return value.includes("${") || /\{[^}]+\}/.test(value) || value.includes("}");
+}
+
+function packageVariant(pkg: unknown, index: number): string {
+	const identifier = pkg && typeof pkg === "object" && !Array.isArray(pkg) && typeof (pkg as Record<string, unknown>).identifier === "string" ? (pkg as Record<string, unknown>).identifier as string : "";
+	const identifierSlug = identifier ? slugify(identifier) : "";
+	return identifierSlug ? `npm-${identifierSlug}` : `npm-${index + 1}`;
+}
+
+function canonicalSourceUrl(sourceUrl: string): string {
+	try {
+		const url = new URL(sourceUrl);
+		url.hash = "";
+		url.protocol = url.protocol.toLowerCase();
+		url.hostname = url.hostname.toLowerCase();
+		return url.toString();
+	} catch {
+		return sourceUrl.trim();
+	}
+}
+
+function slugify(value: string): string {
+	const slug = value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+	return slug || "server";
+}
+
+function truncateSlug(slug: string, maxLength: number): string {
+	if (slug.length <= maxLength) return slug;
+	return slug.slice(0, maxLength).replace(/-+$/g, "") || "server";
+}
+
+function isSafeInstallId(id: string): boolean {
+	return id.length <= MAX_REGISTRY_INSTALL_ID_LENGTH && isSafeBasename(id) && isValidPackName(registryPackNameForId(id));
 }
 
 function normalizeHttpUrl(raw: string): string {
@@ -404,48 +686,108 @@ function normalizeHttpUrl(raw: string): string {
 	return url.toString();
 }
 
-function normalizeRelativeCwd(raw: unknown): string {
-	if (typeof raw !== "string" || !raw.trim()) throw new McpRegistryError("stdio transport cwd must be a non-empty string");
-	const cwd = raw.trim();
-	if (cwd.includes("\0") || cwd.includes("..") || path.isAbsolute(cwd) || /^[A-Za-z]:[\\/]/.test(cwd) || /^[a-z][a-z0-9+.-]*:/i.test(cwd)) {
-		throw new McpRegistryError(`stdio transport cwd must be relative and contained: ${JSON.stringify(raw)}`);
-	}
-	const normalized = path.posix.normalize(cwd.replace(/\\/g, "/"));
-	if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) throw new McpRegistryError(`stdio transport cwd escapes pack root: ${raw}`);
-	return normalized;
+function asArray(raw: unknown, label: string): unknown[] {
+	if (!Array.isArray(raw)) throw new McpRegistryError(`official registry ${label} must be an array`);
+	return raw;
 }
 
-function optionalStringArray(raw: unknown, label: string): string[] | undefined {
+function requiredNonEmptyString(raw: unknown, label: string): string {
+	if (typeof raw !== "string" || !raw.trim()) throw new McpRegistryError(`${label} is required`);
+	return raw.trim();
+}
+
+function optionalNonEmptyString(raw: unknown, label: string): string | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "string" || !raw.trim()) throw new McpRegistryError(`${label} must be a non-empty string`);
+	return raw.trim();
+}
+
+function normalizeRepository(raw: unknown): OfficialRepository | undefined {
 	if (raw === undefined) return undefined;
-	if (!Array.isArray(raw)) throw new McpRegistryError(`${label} must be an array of strings`);
-	return raw.map((item) => {
-		if (typeof item !== "string") throw new McpRegistryError(`${label} must be an array of strings`);
-		return item;
-	});
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError("official server repository must be an object");
+	return raw as OfficialRepository;
 }
 
-function optionalStringRecord(raw: unknown, label: string): Record<string, string> | undefined {
-	if (raw === undefined) return undefined;
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError(`${label} must be an object of string values`);
-	const out: Record<string, string> = {};
-	for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-		if (!key || key.includes("\0") || key.includes("\n") || key.includes("\r")) throw new McpRegistryError(`${label} contains an invalid key`);
-		if (typeof value !== "string") throw new McpRegistryError(`${label} values must be strings`);
-		out[key] = value;
+function normalizeLicense(raw: unknown): string | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw === "string") return raw.trim() || undefined;
+	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+		const license = raw as Record<string, unknown>;
+		return optionalNonEmptyString(license.name, "official server license.name") || optionalNonEmptyString(license.id, "official server license.id");
 	}
-	return out;
+	throw new McpRegistryError("official server license must be a string or object");
 }
 
-function fingerprintRegistryServer(server: Omit<McpRegistryServer, "fingerprint">): string {
+function normalizeMeta(raw: unknown, label: string): Record<string, unknown> | undefined {
+	if (raw === undefined) return undefined;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new McpRegistryError(`${label} must be an object`);
+	return raw as Record<string, unknown>;
+}
+
+function validateHeaderName(name: string, label: string): void {
+	if (!HEADER_NAME_RE.test(name)) throw new McpRegistryError(`${label} contains an invalid key`);
+}
+
+function validateEnvName(name: string): void {
+	if (!ENV_NAME_RE.test(name)) throw new McpRegistryError(`environment variable name is invalid: ${name}`);
+}
+
+function normalizeNpmRegistryBaseUrl(raw: unknown): string | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "string" || !raw.trim()) throw new McpRegistryError("npm registryBaseUrl must be a non-empty string when provided");
+	if (hasTemplateMarker(raw)) throw new McpRegistryError("npm registryBaseUrl contains variables/templates; Marketplace registry installs require the default npm registry");
+	let url: URL;
+	try {
+		url = new URL(raw.trim());
+	} catch {
+		throw new McpRegistryError(`npm registryBaseUrl is invalid: ${raw}`);
+	}
+	if (url.username || url.password) throw new McpRegistryError("npm registryBaseUrl must not include credentials");
+	if (url.hash) throw new McpRegistryError("npm registryBaseUrl must not include a fragment");
+	url.protocol = url.protocol.toLowerCase();
+	url.hostname = url.hostname.toLowerCase();
+	if (url.toString() !== DEFAULT_NPM_REGISTRY_BASE_URL) {
+		throw new McpRegistryError(`unsupported npm registryBaseUrl: ${raw} (Bobbit currently supports the default npm registry only)`);
+	}
+	return DEFAULT_NPM_REGISTRY_BASE_URL;
+}
+
+function validateNpmVersionSpec(version: string | undefined): asserts version is string {
+	if (!version) {
+		throw new McpRegistryError("npm package version is required: Marketplace registry installs require pinned concrete semver versions");
+	}
+	if (!NPM_PINNED_VERSION_RE.test(version) || WINDOWS_SHELL_UNSAFE_ARG_RE.test(version) || /\s/.test(version)) {
+		throw new McpRegistryError("npm package version is invalid: Marketplace registry installs require pinned concrete semver versions");
+	}
+}
+
+function validateCliArgName(name: string): void {
+	if (/\s/.test(name)) throw new McpRegistryError("package argument name must not contain whitespace");
+	validateFixedPackageArgString(name, "package argument name");
+}
+
+function validateFixedPackageArgString(value: string, label: string): void {
+	if (WINDOWS_SHELL_UNSAFE_ARG_RE.test(value)) {
+		throw new McpRegistryError(`${label} contains unsafe Windows shell metacharacters or control characters; only fixed cmd-safe package arguments are supported`);
+	}
+}
+
+function fingerprintRegistryServer(server: Omit<McpRegistryServer, "fingerprint">, sourceUrl: string, candidate: Record<string, unknown>): string {
 	return crypto.createHash("sha256").update(stableStringify({
+		sourceUrl: canonicalSourceUrl(sourceUrl),
+		sourceKey: server.sourceKey,
 		id: server.id,
+		officialName: server.officialName,
 		name: server.name,
 		label: server.label,
 		description: server.description,
 		version: server.version,
 		homepage: server.homepage,
 		license: server.license,
-		publisher: server.publisher,
+		repository: server.repository,
+		registryMeta: server.registryMeta,
+		serverMeta: server.serverMeta,
+		candidate,
 		config: server.config,
 	})).digest("hex");
 }

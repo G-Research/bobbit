@@ -1,5 +1,5 @@
 /**
- * Unit tests for src/app/sidebar-font-scale.ts \u2014 the pure helpers that drive
+ * Unit tests for src/app/sidebar-font-scale.ts — the pure helpers that drive
  * the user-adjustable sidebar font-size setting.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -9,11 +9,23 @@ import { fileURLToPath } from "node:url";
 import {
 	SIDEBAR_FONT_SCALE_DEFAULT,
 	SIDEBAR_FONT_SCALE_KEY,
-	SIDEBAR_FONT_SCALE_STOPS,
 	clampSidebarFontScale,
 	loadSidebarFontScale,
-	nearestStop,
 } from "../src/app/sidebar-font-scale.ts";
+
+const SIDEBAR_FONT_BASE_PX = 12;
+const SIDEBAR_FONT_MIN_PX = 10;
+const SIDEBAR_FONT_MAX_PX = 32;
+const SIDEBAR_FONT_DEFAULT_PX = 14;
+const SIDEBAR_FONT_DEFAULT_SCALE = SIDEBAR_FONT_DEFAULT_PX / SIDEBAR_FONT_BASE_PX;
+
+function scaleForPx(px: number): number {
+	return px / SIDEBAR_FONT_BASE_PX;
+}
+
+function assertClose(actual: number, expected: number, delta = 0.0001): void {
+	assert.ok(Math.abs(actual - expected) <= delta, `expected ${actual} to be within ${delta} of ${expected}`);
+}
 
 // Minimal in-memory localStorage shim so loadSidebarFontScale() takes the
 // "real" branch instead of the early `typeof localStorage === "undefined"`
@@ -32,78 +44,39 @@ function installLocalStorageShim(): { reset: () => void } {
 	return { reset: () => store.clear() };
 }
 
-describe("sidebar-font-scale: stops layout", () => {
-	it("ships exactly the 5 stops the design doc specifies, in ascending order", () => {
-		assert.equal(SIDEBAR_FONT_SCALE_STOPS.length, 5);
-		const labels = SIDEBAR_FONT_SCALE_STOPS.map(s => s.label);
-		assert.deepEqual(labels, ["Smallest", "Small", "Default", "Large", "Largest"]);
-		const values = SIDEBAR_FONT_SCALE_STOPS.map(s => s.value);
-		assert.deepEqual(values, [0.85, 0.92, 1.00, 1.10, 1.22]);
-		// Ascending invariant
-		for (let i = 1; i < values.length; i++) assert.ok(values[i] > values[i - 1]);
+describe("sidebar-font-scale: numeric pixel bounds", () => {
+	it("defaults to 14px from the 12px sidebar base", () => {
+		assert.equal(SIDEBAR_FONT_SCALE_DEFAULT, SIDEBAR_FONT_DEFAULT_SCALE);
+		assert.equal(SIDEBAR_FONT_DEFAULT_SCALE, 14 / 12);
+		assert.equal(SIDEBAR_FONT_DEFAULT_PX, 14);
 	});
 
-	it("Default stop equals SIDEBAR_FONT_SCALE_DEFAULT (=1.0)", () => {
-		assert.equal(SIDEBAR_FONT_SCALE_DEFAULT, 1.0);
-		const def = SIDEBAR_FONT_SCALE_STOPS.find(s => s.id === "default");
-		assert.ok(def);
-		assert.equal(def!.value, SIDEBAR_FONT_SCALE_DEFAULT);
-	});
-});
-
-describe("clampSidebarFontScale", () => {
-	it("returns default for NaN / Infinity / non-numeric", () => {
-		assert.equal(clampSidebarFontScale(NaN), 1.0);
-		assert.equal(clampSidebarFontScale(Infinity), 1.0);
-		assert.equal(clampSidebarFontScale(-Infinity), 1.0);
-		// @ts-expect-error \u2014 explicit non-number coverage
-		assert.equal(clampSidebarFontScale("nope"), 1.0);
+	it("clamps invalid and out-of-range scales to the pixel input bounds", () => {
+		assert.equal(clampSidebarFontScale(NaN), SIDEBAR_FONT_DEFAULT_SCALE);
+		assert.equal(clampSidebarFontScale(Infinity), SIDEBAR_FONT_DEFAULT_SCALE);
+		assert.equal(clampSidebarFontScale(-Infinity), SIDEBAR_FONT_DEFAULT_SCALE);
+		// @ts-expect-error — explicit non-number coverage
+		assert.equal(clampSidebarFontScale("nope"), SIDEBAR_FONT_DEFAULT_SCALE);
 		// @ts-expect-error
-		assert.equal(clampSidebarFontScale(undefined), 1.0);
+		assert.equal(clampSidebarFontScale(undefined), SIDEBAR_FONT_DEFAULT_SCALE);
+
+		assertClose(clampSidebarFontScale(0.5), scaleForPx(SIDEBAR_FONT_MIN_PX));
+		assertClose(clampSidebarFontScale(0), scaleForPx(SIDEBAR_FONT_MIN_PX));
+		assertClose(clampSidebarFontScale(-2), scaleForPx(SIDEBAR_FONT_MIN_PX));
+
+		assertClose(clampSidebarFontScale(3), scaleForPx(SIDEBAR_FONT_MAX_PX));
+		assertClose(clampSidebarFontScale(99), scaleForPx(SIDEBAR_FONT_MAX_PX));
 	});
 
-	it("clamps below the smallest stop value", () => {
-		assert.equal(clampSidebarFontScale(0.5), 0.85);
-		assert.equal(clampSidebarFontScale(0), 0.85);
-		assert.equal(clampSidebarFontScale(-2), 0.85);
-	});
-
-	it("clamps above the largest stop value", () => {
-		assert.equal(clampSidebarFontScale(3), 1.22);
-		assert.equal(clampSidebarFontScale(2.0), 1.22);
-	});
-
-	it("passes through valid in-range values without snapping", () => {
+	it("passes through valid range-based values instead of snapping to old presets", () => {
 		assert.equal(clampSidebarFontScale(1.0), 1.0);
-		assert.equal(clampSidebarFontScale(0.95), 0.95);
-		assert.equal(clampSidebarFontScale(1.10), 1.10);
+		assert.equal(clampSidebarFontScale(SIDEBAR_FONT_DEFAULT_SCALE), SIDEBAR_FONT_DEFAULT_SCALE);
+		assert.equal(clampSidebarFontScale(2.0), 2.0); // 24px
+		assertClose(clampSidebarFontScale(scaleForPx(32)), scaleForPx(32));
 	});
 });
 
-describe("nearestStop", () => {
-	it("returns Default for an exact 1.0", () => {
-		assert.equal(nearestStop(1.0).id, "default");
-	});
-
-	it("snaps a value between Small (0.92) and Default (1.0) toward the closer stop", () => {
-		assert.equal(nearestStop(0.95).id, "small");   // 0.95 is closer to 0.92 (\u0394 0.03) than 1.00 (\u0394 0.05)
-		assert.equal(nearestStop(0.97).id, "default"); // 0.97 closer to 1.00 (\u0394 0.03) than 0.92 (\u0394 0.05)
-	});
-
-	it("clamps out-of-range scales before snapping", () => {
-		assert.equal(nearestStop(2.0).id, "largest");
-		assert.equal(nearestStop(0.1).id, "smallest");
-		assert.equal(nearestStop(NaN).id, "default");
-	});
-
-	it("snaps each stop value to itself", () => {
-		for (const s of SIDEBAR_FONT_SCALE_STOPS) {
-			assert.equal(nearestStop(s.value).id, s.id);
-		}
-	});
-});
-
-describe("sidebar.ts source: no duplicate style= attributes", () => {
+describe("sidebar-font-scale source", () => {
 	it("src/app/sidebar.ts has no element carrying two `style=` attributes (regression: Add Project button)", () => {
 		const path = fileURLToPath(new URL("../src/app/sidebar.ts", import.meta.url));
 		const src = readFileSync(path, "utf8");
@@ -125,32 +98,35 @@ describe("loadSidebarFontScale", () => {
 	beforeEach(() => { shim = installLocalStorageShim(); });
 	afterEach(() => { shim.reset(); delete (globalThis as any).localStorage; });
 
-	it("returns default when localStorage is empty", () => {
-		assert.equal(loadSidebarFontScale(), 1.0);
+	it("returns the 14px default when localStorage is empty", () => {
+		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});
 
-	it("reads a valid persisted multiplier", () => {
-		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "1.10");
-		assert.equal(loadSidebarFontScale(), 1.10);
-	});
-
-	it("clamps a too-large persisted value", () => {
-		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "5");
+	it("reads existing persisted scale multipliers without migration", () => {
+		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "1.22");
 		assert.equal(loadSidebarFontScale(), 1.22);
+
+		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "2.0");
+		assert.equal(loadSidebarFontScale(), 2.0);
 	});
 
-	it("clamps a too-small persisted value", () => {
+	it("clamps a too-large persisted value to the 32px maximum", () => {
+		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "5");
+		assertClose(loadSidebarFontScale(), scaleForPx(SIDEBAR_FONT_MAX_PX));
+	});
+
+	it("clamps a too-small persisted value to the 10px minimum", () => {
 		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "0.1");
-		assert.equal(loadSidebarFontScale(), 0.85);
+		assertClose(loadSidebarFontScale(), scaleForPx(SIDEBAR_FONT_MIN_PX));
 	});
 
-	it("falls back to default for an invalid (non-numeric) persisted value", () => {
+	it("falls back to the 14px default for an invalid (non-numeric) persisted value", () => {
 		localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, "garbage");
-		assert.equal(loadSidebarFontScale(), 1.0);
+		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});
 
-	it("falls back to default when localStorage is absent (SSR-safe)", () => {
+	it("falls back to the 14px default when localStorage is absent (SSR-safe)", () => {
 		delete (globalThis as any).localStorage;
-		assert.equal(loadSidebarFontScale(), 1.0);
+		assert.equal(loadSidebarFontScale(), SIDEBAR_FONT_DEFAULT_SCALE);
 	});
 });

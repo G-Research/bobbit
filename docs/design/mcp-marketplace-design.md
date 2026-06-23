@@ -1,7 +1,7 @@
 # Marketplace MCP support — research and implementation design
 
-Status: research artifact / implementation plan  
-Scope: add Marketplace support for installable MCP server definitions and MCP registry/discovery sources without changing the existing manual MCP config cascade.
+Status: implemented design record; registry-source format uses the official MCP Registry API
+Scope: add Marketplace support for installable MCP server definitions and official MCP Registry API sources without changing the existing manual MCP config cascade.
 
 ## 1. Current architecture summary
 
@@ -107,9 +107,9 @@ Marketplace MCP should add two install paths that converge to the same installed
 1. **Authored schema-2 packs** in existing git/local Marketplace sources:
    - `pack.yaml` declares `schema: 2` and `contents.mcp: [<name>]`.
    - Each listed basename maps to `mcp/<name>.yaml` or `mcp/<name>.json`.
-2. **MCP registry/discovery URL sources**:
-   - A source URL points at an MCP registry/discovery endpoint.
-   - Browse maps each discovered server entry into a virtual pack row.
+2. **Official MCP Registry API sources**:
+   - A source URL points at an official MCP Registry API endpoint such as `https://registry.modelcontextprotocol.io/v0/servers`.
+   - Browse maps each supported `servers[].server` candidate into a virtual pack row.
    - Install materializes a normal schema-2 pack directory under `market-packs/<pack-name>/` with `pack.yaml`, `mcp/<name>.yaml`, and `.pack-meta.yaml`.
 
 After installation, both paths are identical: MCP discovery reads installed market packs, applies `DisabledRefs.mcp`, merges them with manual MCP config, then reconnects affected runtime servers and refreshes external MCP tools.
@@ -241,34 +241,40 @@ Add a small registry client module rather than overloading git sync:
   - `registryServerToVirtualPack(server): BrowsePack`
   - `materializeRegistryPack(server, destOrStagingDir): PackManifest`
 
-Accept a conservative registry response shape first. This is the same normative contract restated in §13.2; do not support legacy examples without `schemaVersion` or `id`.
+Accept the official MCP Registry API response shape. The canonical public source is `https://registry.modelcontextprotocol.io/v0/servers`. The old Bobbit-specific flat document with `schemaVersion: 1` is historical only and is rejected by the public registry-source path.
 
 ```json
 {
-  "schemaVersion": 1,
   "servers": [
     {
-      "id": "context7",
-      "name": "context7",
-      "description": "Fetch library docs",
-      "version": "1.0.0",
-      "transport": {
-        "type": "stdio",
-        "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp"],
-        "env": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
-      }
-    },
-    {
-      "id": "docs-remote",
-      "name": "docs-remote",
-      "description": "Remote docs MCP",
-      "version": "1.0.0",
-      "transport": {
-        "type": "http",
-        "url": "https://mcp.example.com/mcp",
-        "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
-      }
+      "server": {
+        "name": "io.modelcontextprotocol/context7",
+        "title": "Context7",
+        "description": "Fetch library docs",
+        "version": "1.0.0",
+        "remotes": [
+          {
+            "type": "streamable-http",
+            "url": "https://mcp.example.com/mcp"
+          }
+        ],
+        "packages": [
+          {
+            "registryType": "npm",
+            "identifier": "@upstash/context7-mcp",
+            "version": "1.0.0",
+            "runtimeHint": "npx",
+            "transport": { "type": "stdio" },
+            "environmentVariables": [
+              { "name": "CONTEXT7_API_KEY", "default": "${CONTEXT7_API_KEY}", "isSecret": true }
+            ]
+          }
+        ],
+        "repository": { "url": "https://github.com/upstash/context7" },
+        "websiteUrl": "https://context7.com",
+        "license": "MIT"
+      },
+      "_meta": { "registrySource": "official" }
     }
   ]
 }
@@ -311,10 +317,10 @@ contents:
 
 Naming:
 
-- Registry `id` is the stable pack-local `listName`, materialized file basename, `contents.mcp` ref, and default pack suffix.
-- Registry `name` is the runtime MCP `serverName` after validation.
+- A generated registry `id` is the stable pack-local `listName`, materialized file basename, `contents.mcp` ref, and default pack suffix.
+- The exact official `server.name` is preserved as `officialName` metadata; Bobbit generates a safe runtime MCP `serverName` from the official name, version, source key, and generated install id.
 - Pack name is `mcp-<id>`; if it collides with an unrelated installed pack in the target scope, install returns `409` like normal packs.
-- `dirName` in browse is `mcp-<id>`, never a raw URL or runtime server name.
+- `dirName` in browse is `mcp-<id>`, never a raw URL or official server name.
 
 Implementation files/functions:
 
@@ -530,7 +536,7 @@ MCP toggle granularity:
 `POST /api/marketplace/sources`
 
 ```json
-{ "url": "https://registry.example.com/mcp.json", "type": "mcp-registry" }
+{ "url": "https://registry.modelcontextprotocol.io/v0/servers", "type": "mcp-registry" }
 ```
 
 Response unchanged plus `type`:
@@ -679,7 +685,7 @@ Expected effect after PUT returns:
 
 - New `tests/e2e/ui/marketplace-mcp.spec.ts`:
   1. Open Market.
-  2. Add MCP registry/discovery URL using the new source type.
+  2. Add an official MCP Registry API URL using the new source type.
   3. Browse multiple servers as cards with MCP chips.
   4. Install one.
   5. Installed tab shows MCP chip/toggle/status.
@@ -710,9 +716,9 @@ Pay special attention to existing MCP tests:
 1. **Manual vs Marketplace precedence**
    - Risk: users expect installed Marketplace MCP to override manual `.mcp.json`.
    - Decision: manual wins initially. It is safer and preserves existing behavior.
-2. **Registry spec ambiguity**
+2. **Registry source format**
    - Risk: external MCP registries may not share one response format.
-   - Decision: implement a strict Bobbit-supported discovery JSON first; adapters for known registries can be added behind the same `fetchMcpRegistry()` seam.
+   - Decision: support the official MCP Registry API `servers[].server` shape directly. Use `https://registry.modelcontextprotocol.io/v0/servers` as the canonical source example, and reject the old Bobbit `schemaVersion: 1` registry JSON in public registry ingestion.
 3. **Secrets and environment variables**
    - Risk: registry/pack entries may require secrets. Marketplace must not store secret values casually.
    - Decision: support env-var placeholders in contribution files; document that users configure environment/secrets outside Marketplace. Future work can add scoped secret prompts.
@@ -789,58 +795,66 @@ Unknown top-level keys and unknown transport keys are validation errors. A malfo
 
 Tests must assert exact normalized `McpServerConfig` output, not only UI metadata.
 
-### 13.2 Registry/discovery URL contract
+### 13.2 Official MCP Registry API source contract
 
-Bobbit registry sources use a strict versioned JSON document:
+Bobbit registry sources use the official MCP Registry API response shape. The canonical public URL is `https://registry.modelcontextprotocol.io/v0/servers`.
 
 ```json
 {
-  "schemaVersion": 1,
-  "generatedAt": "2026-06-23T00:00:00.000Z",
   "servers": [
     {
-      "id": "context7",
-      "name": "context7",
-      "label": "Context7",
-      "description": "Fetch library docs",
-      "version": "1.0.0",
-      "homepage": "https://example.com/context7",
-      "transport": {
-        "type": "stdio",
-        "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp"],
-        "env": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
-      }
-    },
-    {
-      "id": "docs-remote",
-      "name": "docs-remote",
-      "description": "Remote docs MCP",
-      "version": "1.0.0",
-      "transport": {
-        "type": "http",
-        "url": "https://mcp.example.com/mcp",
-        "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
-      }
+      "server": {
+        "name": "io.modelcontextprotocol/context7",
+        "title": "Context7",
+        "description": "Fetch library docs",
+        "version": "1.0.0",
+        "websiteUrl": "https://context7.com",
+        "license": "MIT",
+        "repository": { "url": "https://github.com/upstash/context7" },
+        "remotes": [
+          { "type": "streamable-http", "url": "https://mcp.example.com/mcp" }
+        ],
+        "packages": [
+          {
+            "registryType": "npm",
+            "identifier": "@upstash/context7-mcp",
+            "version": "1.0.0",
+            "runtimeHint": "npx",
+            "transport": { "type": "stdio" },
+            "packageArguments": [{ "name": "--project", "value": "docs" }],
+            "environmentVariables": [
+              { "name": "CONTEXT7_API_KEY", "default": "${CONTEXT7_API_KEY}", "isSecret": true }
+            ]
+          }
+        ],
+        "_meta": { "category": "docs" }
+      },
+      "_meta": { "registrySource": "official" }
     }
   ]
 }
 ```
 
-Required fields: `schemaVersion: 1`, `servers[]`, per-server `id`, `name`, and `transport`. `id` is the stable registry package identity and must be a safe basename. `name` is the runtime MCP server name and must pass the MCP server-name guard. Optional metadata is preserved only in `.pack-meta.yaml` and activation catalogue details.
+Required fields: top-level `servers[]`, per-entry `server`, and official `server.name`. Display and provenance metadata may come from `server.title`, `server.description`, `server.version`, `server.websiteUrl`, `server.repository`, `server.license`, wrapper `_meta`, and server `_meta`.
+
+Supported candidates:
+
+- `remotes[]` entries with `type: "streamable-http"` and a valid concrete HTTP(S) URL without credentials, fragments, variables, or templates. Header values must be concrete strings. Descriptor-only, prompt-required, variable/template, and secret-marked headers are skipped because Bobbit does not prompt for or materialize registry header secrets.
+- `packages[]` entries with `registryType: "npm"`, `transport.type: "stdio"`, absent/`npx` `runtimeHint`, valid npm identifier, pinned concrete semver `version`, absent/default `registryBaseUrl` (`https://registry.npmjs.org/`), fixed literal `packageArguments`, no `runtimeArguments`, and environment variables with literal defaults or whole-value safe `${NAME}` placeholders. Materialized stdio configs run `npx -y --registry=https://registry.npmjs.org/ <identifier>@<version> ...` so package resolution remains pinned to the default npm registry.
 
 Virtual pack identity:
 
-- `dirName` and installed `pack.yaml.name` default to `mcp-${id}`.
-- If `mcp-${id}` collides with an existing installed pack in the target scope, install returns `409` unless the installed pack has matching source URL and registry `id`, in which case `update` semantics apply.
-- Refresh/update detection compares source URL, registry `id`, `version`, and a stable fingerprint of the normalized runtime config plus catalogue metadata.
-- `.pack-meta.yaml` records `sourceType: mcp-registry`, `sourceUrl`, `registryId`, `registryVersion`, `registryFingerprint`, and `materializedAt`.
+- `dirName` and installed `pack.yaml.name` are `mcp-${id}`, where `id` is a deterministic safe install id derived from official `server.name`, version, canonical source URL/source key, and candidate variant. Candidate variants are stable (`remote-<n>` for remotes, npm package identity for packages when present), making identities source-keyed and variant-stable.
+- If `mcp-${id}` collides with an existing installed pack in the target scope, install returns `409` unless the user explicitly updates the existing pack.
+- Refresh/update detection compares source URL/source key, official `server.name`, version, selected candidate descriptor, metadata that affects display, and a stable fingerprint of the normalized runtime config.
+- `.pack-meta.yaml` records `sourceType: mcp-registry`, `sourceUrl`, `sourceKey`, `registryId`, generated runtime `registryName`, exact `officialName`, `registryVersion`, `registryFingerprint`, optional repository/meta fields, and `materializedAt`.
 
 Failure behavior:
 
-- Invalid HTTP response, non-JSON body, unsupported `schemaVersion`, or missing `servers` fails browse for that source with a registry error.
-- Invalid individual server entries are skipped; browse returns valid virtual packs plus `skippedCount` and concise validation messages for UI warnings.
-- Duplicate `id` values in one registry keep the first valid entry and report later duplicates as skipped. Duplicate runtime `name` values across different ids are skipped unless their normalized configs are identical.
+- Invalid HTTP response, non-JSON body, old Bobbit `schemaVersion: 1` documents, missing `servers[]`, or entries without `servers[].server` fail browse for that source with a registry error.
+- Unsupported individual candidates are skipped; browse returns valid virtual packs plus `skippedCount` and concise validation messages for UI warnings.
+- Unsupported remote transports such as `sse`, remote variables/templates, prompt-required or secret-marked headers, unsupported package managers such as `pypi`, non-default npm registry URLs, missing/ranged npm versions, runtime arguments, prompts, package variables/templates, and unsafe package arguments are skipped with actionable diagnostics.
+- Duplicate generated ids keep the first valid entry and report later duplicates as skipped. Duplicate runtime names with different normalized configs are skipped.
 - Registry source `ref` is rejected at source creation and ignored for legacy malformed rows.
 
 ### 13.3 Scoped marketplace MCP resolver contract
@@ -949,10 +963,10 @@ Rules:
 - `DisabledRefs.mcp` stores `listName` strings per installed pack: `pack_activation[scope][packName].mcp = [listName]`.
 - Activation catalogue rows are keyed by `listName` and include `serverName`, `label`, `transportType`, optional `subNamespace`, and runtime status metadata.
 - `listName !== serverName` is supported and must be tested.
-- Registry materialization uses registry `id` as `listName`; registry `name` is the runtime `serverName`.
+- Registry materialization uses the generated safe registry `id` as `listName`; the official `server.name` is preserved as `officialName`, and Bobbit generates a safe runtime `serverName`.
 - Duplicate runtime server names across packs do not change ref identity because activation is per pack and per listName.
 - Disabling a contribution removes that pack-local Marketplace contribution before same-name resolution; it does not disable another pack's same-name contribution or any manual config.
-- Registry updates preserve disabled state as long as registry `id`/materialized `listName` is unchanged, even if runtime `name` or transport config changes.
+- Registry updates preserve disabled state as long as generated registry `id`/materialized `listName` is unchanged, even if official name metadata or transport config changes.
 
 ### 13.7 Mutation response timeout and partial-failure semantics
 
@@ -971,8 +985,8 @@ Validation must be centralized in shared helpers so authored packs, registry bro
 
 Name/path rules:
 
-- `listName` / `contents.mcp[]` / registry `id`: existing `isSafeBasename()` plus length 1-64; reject `.`, `..`, path separators, NUL, leading dot, whitespace-only, and Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
-- Runtime `serverName` / registry `name`: `/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/`; reject `__`, path separators, NUL, `.`/`..`, and names that normalize to an empty MCP meta-tool name.
+- `listName` / `contents.mcp[]` / generated registry `id`: existing `isSafeBasename()` plus length 1-64; reject `.`, `..`, path separators, NUL, leading dot, whitespace-only, and Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
+- Runtime `serverName`: `/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/`; reject `__`, path separators, NUL, `.`/`..`, and names that normalize to an empty MCP meta-tool name. The official `server.name` may contain `/` or dots and is preserved as metadata, not used directly as a runtime key.
 - Generated pack name `mcp-${id}`: validate with the same pack-name guard used by Marketplace installs after prefixing; reject if the final install path's realpath escapes the target `market-packs` root.
 - Materialized file path: exactly `mcp/${id}.yaml`; never use runtime `serverName` for paths. Ensure realpath containment for staging and final install directories.
 - Contribution `cwd`: if absent, omit from runtime config; if present, it must be a relative path without drive letter, URL scheme, leading slash, NUL, or `..` segment after normalization, and final realpath must stay inside pack root.
@@ -983,10 +997,10 @@ Name/path rules:
 Schema rules:
 
 - `pack.yaml` MCP is accepted only for `schema: 2`.
-- Registry document requires `schemaVersion: 1`; unsupported versions fail browse for the source.
-- Unknown keys are rejected at each level unless explicitly documented as metadata. Optional registry metadata allowed: `label`, `description`, `version`, `homepage`, `license`, `publisher`; it is preserved for UI/meta only.
+- Registry documents must use the official response shape with `servers[].server`; the historical Bobbit `schemaVersion: 1` format fails browse for the source.
+- Unknown keys are rejected for authored pack-owned MCP files unless explicitly documented as metadata. Official registry metadata allowed for preservation includes `title`, `description`, `version`, `websiteUrl`, `repository`, `license`, wrapper `_meta`, and server `_meta`.
 
-Tests must include path traversal ids, unsafe server names, Windows device names, absolute/escaping cwd, URL credentials/fragments, invalid arg/env/header types, and schema-version failures.
+Tests must include path traversal ids, unsafe generated/runtime names, Windows device names, absolute/escaping cwd, URL credentials/fragments, invalid arg/env/header types, unsupported official transports/packages, secret-marked remote headers, non-default npm registry URLs, missing/ranged npm versions, variable/template package arguments, and old schema-version failures.
 
 ### 13.9 Sub-namespace activation semantics
 

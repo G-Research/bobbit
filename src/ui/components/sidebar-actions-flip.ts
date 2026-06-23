@@ -20,9 +20,25 @@ function scale(sourceSize: number, targetSize: number): number {
 	return finiteOr(sourceSize / targetSize, 1);
 }
 
-export function captureSidebarActionSourceRects(rowEl: HTMLElement): SidebarActionsFlipRect[] {
-	return [...rowEl.querySelectorAll<HTMLElement>("[data-sidebar-action-quick='true'][data-sidebar-action-id]")]
+function isVisibleActionSource(el: HTMLElement): boolean {
+	const rect = el.getBoundingClientRect();
+	if (rect.width <= 0 || rect.height <= 0) return false;
+	const style = getComputedStyle(el);
+	return style.display !== "none" && style.visibility !== "hidden";
+}
+
+function captureActionSourceRects(rowEl: HTMLElement, selector: string): SidebarActionsFlipRect[] {
+	return [...rowEl.querySelectorAll<HTMLElement>(selector)]
+		.filter(isVisibleActionSource)
 		.map((el) => ({ actionId: el.dataset.sidebarActionId!, rect: el.getBoundingClientRect() }));
+}
+
+export function captureSidebarActionSourceRects(rowEl: HTMLElement): SidebarActionsFlipRect[] {
+	return captureActionSourceRects(rowEl, "[data-sidebar-action-quick='true'][data-sidebar-action-id]");
+}
+
+export function captureHeaderSessionActionSourceRects(rowEl: HTMLElement): SidebarActionsFlipRect[] {
+	return captureActionSourceRects(rowEl, "[data-session-action-surface='header'][data-sidebar-action-id]");
 }
 
 export function computeSidebarActionFlipDeltas(

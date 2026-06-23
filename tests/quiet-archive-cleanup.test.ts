@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { isMissingRemoteRefDeleteError } from "../src/server/server.ts";
+import { isIgnorableRemoteBranchDeleteError, isMissingRemoteRefDeleteError } from "../src/server/server.ts";
 
 describe("quiet archive remote branch cleanup", () => {
 	it("classifies missing remote-ref delete errors from stderr, message, and strings", () => {
@@ -32,5 +32,17 @@ describe("quiet archive remote branch cleanup", () => {
 		for (const failure of realFailures) {
 			assert.equal(isMissingRemoteRefDeleteError(failure), false, String(failure));
 		}
+	});
+
+	it("treats unavailable git during remote branch deletion as an idempotent no-op", () => {
+		assert.equal(
+			isIgnorableRemoteBranchDeleteError({
+				code: "ENOENT",
+				path: "git",
+				syscall: "spawn git",
+				spawnargs: ["push", "origin", "--delete", "goal/example"],
+			}),
+			true,
+		);
 	});
 });

@@ -492,9 +492,19 @@ export function isMissingRemoteRefDeleteError(err: unknown): boolean {
 	return texts.some(text => /\bremote\s+ref\s+does\s+not\s+exist\b/i.test(text));
 }
 
+export function isIgnorableRemoteBranchDeleteError(err: unknown): boolean {
+	if (isMissingRemoteRefDeleteError(err)) return true;
+	if (!err || typeof err !== "object") return false;
+	const record = err as Record<string, unknown>;
+	return record.code === "ENOENT"
+		&& record.path === "git"
+		&& typeof record.syscall === "string"
+		&& record.syscall.startsWith("spawn");
+}
+
 /**
  * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
+ * Fire-and-forget — idempotent cleanup misses are ignored; other errors are logged but never block the archive flow.
  */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
@@ -524,7 +534,7 @@ async function deleteRemoteGoalBranches(
 			});
 			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
-			if (isMissingRemoteRefDeleteError(err)) return;
+			if (isIgnorableRemoteBranchDeleteError(err)) return;
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
@@ -2122,7 +2132,9 @@ export function createGateway(config: GatewayConfig) {
 			} else {
 				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true, source: "verification" });
 			}
-			console.log(`[verification] Notified team lead for goal ${goalId}: ${message}`);
+			// The full verification notification is already surfaced in the team lead transcript.
+			// Keep it out of routine server logs unless explicitly debugging.
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Notified team lead for goal ${goalId} (${message.length} chars)`);
 		} catch (err) {
 			console.error(`[verification] Failed to notify team lead for goal ${goalId}:`, err);
 		}

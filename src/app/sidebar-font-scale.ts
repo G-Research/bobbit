@@ -1,49 +1,63 @@
 /**
- * Sidebar font-size scale \u2014 pure helpers.
+ * Sidebar font-size scale — pure helpers.
  *
  * Lives in its own module (no DOM imports) so unit tests can exercise the
- * stops/clamp/load logic under Node test runner without dragging in
+ * clamp/load/conversion logic under Node test runner without dragging in
  * `state.ts` and its DOM-dependent transitive imports.
  *
  * `state.ts` re-exports the names below for application call sites.
  */
 
 export const SIDEBAR_FONT_SCALE_KEY = "bobbit:sidebar-font-scale";
-export const SIDEBAR_FONT_SCALE_DEFAULT = 1.0;
 
-export interface SidebarFontScaleStop {
-	readonly id: string;
-	readonly label: string;
-	readonly value: number;
+export const SIDEBAR_FONT_SIZE_BASE_PX = 12;
+export const SIDEBAR_FONT_SIZE_MIN_PX = 10;
+export const SIDEBAR_FONT_SIZE_MAX_PX = 32;
+export const SIDEBAR_FONT_SIZE_STEP_PX = 1;
+
+export const SIDEBAR_FONT_SCALE_DEFAULT = 14 / SIDEBAR_FONT_SIZE_BASE_PX;
+export const SIDEBAR_FONT_SCALE_MIN = SIDEBAR_FONT_SIZE_MIN_PX / SIDEBAR_FONT_SIZE_BASE_PX;
+export const SIDEBAR_FONT_SCALE_MAX = SIDEBAR_FONT_SIZE_MAX_PX / SIDEBAR_FONT_SIZE_BASE_PX;
+
+function roundToSidebarFontSizeStep(px: number): number {
+	return Math.round(px / SIDEBAR_FONT_SIZE_STEP_PX) * SIDEBAR_FONT_SIZE_STEP_PX;
 }
 
-export const SIDEBAR_FONT_SCALE_STOPS: readonly SidebarFontScaleStop[] = [
-	{ id: "smallest", label: "Smallest", value: 0.85 },
-	{ id: "small",    label: "Small",    value: 0.92 },
-	{ id: "default",  label: "Default",  value: 1.00 },
-	{ id: "large",    label: "Large",    value: 1.10 },
-	{ id: "largest",  label: "Largest",  value: 1.22 },
-];
-
-export function clampSidebarFontScale(n: number): number {
-	if (typeof n !== "number" || !Number.isFinite(n)) return SIDEBAR_FONT_SCALE_DEFAULT;
-	const min = SIDEBAR_FONT_SCALE_STOPS[0].value;
-	const max = SIDEBAR_FONT_SCALE_STOPS[SIDEBAR_FONT_SCALE_STOPS.length - 1].value;
-	if (n < min) return min;
-	if (n > max) return max;
-	return n;
-}
-
-export function nearestStop(scale: number): SidebarFontScaleStop {
-	const clamped = clampSidebarFontScale(scale);
-	let best = SIDEBAR_FONT_SCALE_STOPS[0];
-	let bestDist = Math.abs(clamped - best.value);
-	for (let i = 1; i < SIDEBAR_FONT_SCALE_STOPS.length; i++) {
-		const s = SIDEBAR_FONT_SCALE_STOPS[i];
-		const d = Math.abs(clamped - s.value);
-		if (d < bestDist) { best = s; bestDist = d; }
+export function clampSidebarFontSizePx(px: number): number {
+	if (typeof px !== "number" || !Number.isFinite(px)) {
+		return roundToSidebarFontSizeStep(sidebarFontScaleToPx(SIDEBAR_FONT_SCALE_DEFAULT));
 	}
-	return best;
+	const rounded = roundToSidebarFontSizeStep(px);
+	if (rounded < SIDEBAR_FONT_SIZE_MIN_PX) return SIDEBAR_FONT_SIZE_MIN_PX;
+	if (rounded > SIDEBAR_FONT_SIZE_MAX_PX) return SIDEBAR_FONT_SIZE_MAX_PX;
+	return rounded;
+}
+
+export function sidebarFontSizePxToScale(px: number): number {
+	return clampSidebarFontSizePx(px) / SIDEBAR_FONT_SIZE_BASE_PX;
+}
+
+export function sidebarFontPxToScale(px: number): number {
+	return sidebarFontSizePxToScale(px);
+}
+
+export function clampSidebarFontScale(scale: number): number {
+	if (typeof scale !== "number" || !Number.isFinite(scale)) return SIDEBAR_FONT_SCALE_DEFAULT;
+	if (scale < SIDEBAR_FONT_SCALE_MIN) return SIDEBAR_FONT_SCALE_MIN;
+	if (scale > SIDEBAR_FONT_SCALE_MAX) return SIDEBAR_FONT_SCALE_MAX;
+	return scale;
+}
+
+export function sidebarFontScaleToPx(scale: number): number {
+	return clampSidebarFontScale(scale) * SIDEBAR_FONT_SIZE_BASE_PX;
+}
+
+export function sidebarFontScaleToFontSizePx(scale: number): number {
+	return sidebarFontScaleToPx(scale);
+}
+
+export function sidebarFontScaleToDisplayPx(scale: number): number {
+	return clampSidebarFontSizePx(sidebarFontScaleToPx(scale));
 }
 
 export function loadSidebarFontScale(): number {
@@ -57,5 +71,5 @@ export function loadSidebarFontScale(): number {
 
 export function applySidebarFontScaleVar(scale: number): void {
 	if (typeof document === "undefined") return;
-	document.documentElement.style.setProperty("--sidebar-font-scale", String(scale));
+	document.documentElement.style.setProperty("--sidebar-font-scale", String(clampSidebarFontScale(scale)));
 }
