@@ -38,6 +38,18 @@ async function footerRect(page: Page): Promise<Rect> {
 	};
 }
 
+async function setCompletedPickerPath(page: Page, path: string): Promise<void> {
+	await page.locator(ADD_PROJECT.picker).evaluate((el, nextPath) => {
+		const picker = el as HTMLElement & { setCompletedPath?: (value: string) => void };
+		picker.setCompletedPath?.(nextPath);
+		picker.dispatchEvent(new CustomEvent("directory-input", {
+			bubbles: true,
+			composed: true,
+			detail: { path: nextPath, source: "typed" },
+		}));
+	}, path);
+}
+
 function shifted(a: Rect, b: Rect): string | null {
 	const dx = Math.abs(a.x - b.x);
 	const dy = Math.abs(a.y - b.y);
@@ -86,7 +98,8 @@ test.describe("Add Project — footer position invariant", () => {
 			await assertNoShift("suggestion overlay open");
 
 			// 2. Replace with an empty dir to force preflight to a 'Ready' state.
-			await input.fill(empty);
+			await setCompletedPickerPath(page, empty);
+			await expect(input).toHaveValue(empty);
 			const rendered = await waitForPreflight(page);
 			expect(rendered).toBe(true);
 			await expect(page.locator(ADD_PROJECT.preflightPanel)).toBeVisible();
@@ -111,7 +124,7 @@ test.describe("Add Project — footer position invariant", () => {
 			// 4. Trigger an error-ish status by typing a path that doesn't
 			// exist. The status slot has reserved height and the preflight
 			// pane scrolls — the footer must stay put.
-			await input.fill("/this/path/definitely/does/not/exist/x");
+			await setCompletedPickerPath(page, "/this/path/definitely/does/not/exist/x");
 			// Let preflight finish (one way or another) for that path.
 			await expect.poll(
 				async () => {
@@ -125,7 +138,8 @@ test.describe("Add Project — footer position invariant", () => {
 
 			// 5. Drive to the scan step via the multi-repo fixture. Continue
 			// must transition us from path → scan without footer movement.
-			await input.fill(multi.root);
+			await setCompletedPickerPath(page, multi.root);
+			await expect(input).toHaveValue(multi.root);
 			await expect(page.locator(ADD_PROJECT.preflightPanel)).toBeVisible({ timeout: 8_000 });
 			// Wait for preflight to finish so Continue is enabled.
 			await expect.poll(
