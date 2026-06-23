@@ -2418,20 +2418,23 @@ function handleSidebarFontSizeInput(e: Event): void {
 
 function renderSidebarFontScaleControl() {
 	const currentPx = sidebarFontScaleToDisplayPx(loadSidebarFontScale());
+	const defaultPx = sidebarFontScaleToDisplayPx(SIDEBAR_FONT_SCALE_DEFAULT);
 	return html`
 		<div class="flex flex-col gap-1.5">
-			<span class="text-sm font-medium text-foreground">Sidebar font size</span>
-			<p class="text-xs text-muted-foreground">
+			<label for="sidebar-font-size-input" class="text-sm font-medium text-foreground">Sidebar font size</label>
+			<p id="sidebar-font-size-help" class="text-xs text-muted-foreground">
 				Scale all sidebar text proportionally. Affects only the sidebar — chat, header, and other surfaces are unchanged. Saved per browser.
 			</p>
 			<div class="flex items-center gap-3">
 				<label class="flex items-center gap-2 text-sm text-foreground">
 					<input
+						id="sidebar-font-size-input"
 						type="number"
 						min=${String(SIDEBAR_FONT_SIZE_MIN_PX)}
 						max=${String(SIDEBAR_FONT_SIZE_MAX_PX)}
 						step=${String(SIDEBAR_FONT_SIZE_STEP_PX)}
 						.value=${live(String(currentPx))}
+						aria-describedby="sidebar-font-size-help"
 						data-testid="sidebar-font-size-input"
 						class="w-20 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 						@input=${handleSidebarFontSizeInput}
@@ -2443,7 +2446,7 @@ function renderSidebarFontScaleControl() {
 					class="text-xs text-muted-foreground hover:text-foreground underline"
 					data-testid="sidebar-font-scale-reset"
 					@click=${resetSidebarFontScale}
-				>Reset to Default</button>
+				>Reset to ${defaultPx} px</button>
 			</div>
 		</div>
 	`;

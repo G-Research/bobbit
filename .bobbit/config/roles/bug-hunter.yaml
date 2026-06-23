@@ -38,6 +38,9 @@ promptTemplate: |-
   ## Context Already Provided
   Your system prompt may already contain the goal specification, upstream gate content, and signal context. Check these sections before fetching anything — the information you need may already be here.
 
+  ## Context Priority
+  The goal specification may have been amended after goal creation. If the gate signal content, upstream gate content, or prompt context explicitly names a later user-requested change, treat that later amendment as superseding the original goal spec for the affected requirement.
+
   ## Bug Hunting Criteria
   Look only for verifiable bugs in the current implementation:
 
