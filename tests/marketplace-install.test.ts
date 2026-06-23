@@ -14,6 +14,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -124,6 +125,72 @@ describe("#8 MarketplaceSourceStore CRUD + YAML persistence", () => {
 		const taken = new Set<string>(["repo"]);
 		assert.equal(deriveSourceId("https://x/Repo.git", taken), "repo-2");
 		assert.equal(deriveSourceId("/home/u/My Packs/", new Set()), "my-packs");
+	});
+});
+
+async function withJsonServer(body: unknown, fn: (url: string) => Promise<void>): Promise<void> {
+	const server = http.createServer((_req, res) => {
+		const text = JSON.stringify(body);
+		res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+		res.end(text);
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	try {
+		const address = server.address();
+		assert.ok(address && typeof address === "object");
+		await fn(`http://127.0.0.1:${address.port}/registry.json`);
+	} finally {
+		await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+	}
+}
+
+describe("Marketplace MCP registry diagnostics", () => {
+	it("surfaces skipped registry entries on browse and sync results", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-diag-"));
+		await withJsonServer({
+			schemaVersion: 1,
+			servers: [
+				{ id: "ok", name: "ok", transport: { type: "stdio", command: "node" } },
+				{ id: "bad", name: "bad__name", transport: { type: "stdio", command: "node" } },
+			],
+		}, async (url) => {
+			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+			const source = store.add({ url, type: "mcp-registry" });
+			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+			const packs = await inst.browseSourcePacks(source.id);
+			assert.equal(packs.length, 1);
+			const firstPack = packs[0]!;
+			assert.deepEqual(firstPack.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.id), ["bad"]);
+			assert.match(firstPack.mcpRegistryDiagnostics!.skippedEntries[0]!.reason, /unsafe/);
+
+			const synced = await inst.syncMarketplaceSource(source.id);
+			assert.deepEqual(synced.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.name), ["bad__name"]);
+		});
+	});
+
+	it("keeps installed registry packs sourceStatus ok when listed after reload", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-reg-list-"));
+		await withJsonServer({
+			schemaVersion: 1,
+			servers: [
+				{ id: "ok", name: "ok", version: "1.0.0", transport: { type: "stdio", command: "node" } },
+			],
+		}, async (url) => {
+			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+			const source = store.add({ url, type: "mcp-registry" });
+			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+			await inst.installMarketplacePack({ sourceId: source.id, dirName: "mcp-ok", scope: "server" });
+			const row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
+			assert.equal(row?.sourceStatus, "ok");
+			assert.equal(row?.updateAvailable, false);
+
+			store.update(source.id, { lastCommit: "different-registry-fingerprint" });
+			const stale = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
+			assert.equal(stale?.sourceStatus, "ok");
+			assert.equal(stale?.updateAvailable, true);
+		});
 	});
 });
 

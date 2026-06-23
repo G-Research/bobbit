@@ -59,7 +59,7 @@ import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
-import { McpManager } from "../mcp/mcp-manager.js";
+import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
@@ -778,6 +778,8 @@ export class SessionManager {
 	private projectContextManager: ProjectContextManager | null = null;
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
+	private scopedMcpManagers: Map<string, McpManager> = new Map();
+	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -1361,7 +1363,7 @@ export class SessionManager {
 	}
 
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
-	buildPipelineContext(projectId?: string): PipelineContext {
+	buildPipelineContext(projectId?: string, cwd?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		let resolvedGoalManager: GoalManager;
@@ -1391,7 +1393,7 @@ export class SessionManager {
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
-			mcpManager: this.mcpManager,
+			mcpManager: this.getMcpManagerForContext(projectId, cwd),
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1757,8 +1759,215 @@ export class SessionManager {
 		return tasks.length > 0 ? tasks[0].id : undefined;
 	}
 
-	getMcpManager(): McpManager | null {
+	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
+		if (scope?.scopeKey) return scope.scopeKey;
+		if (scope?.projectId) return `project:${scope.projectId}`;
+		if (scope?.cwd) return `cwd:${path.resolve(scope.cwd)}`;
+		return "default";
+	}
+
+	getMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): McpManager | null {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		return this.scopedMcpManagers.get(key) ?? null;
+	}
+
+	getActiveMcpManagers(): McpManager[] {
+		return [
+			...(this.mcpManager ? [this.mcpManager] : []),
+			...this.scopedMcpManagers.values(),
+		];
+	}
+
+	refreshExternalMcpToolRegistrations(): void {
+		if (!this.toolManager) return;
+		const removePrefixes = new Set<string>(["mcp__"]);
+		const toolInfos: ReturnType<McpManager["getToolInfos"]> = [];
+		for (const mgr of this.getActiveMcpManagers()) {
+			const refresh = mgr.getToolRegistrationRefresh();
+			for (const prefix of refresh.removePrefixes) removePrefixes.add(prefix);
+			toolInfos.push(...refresh.toolInfos);
+		}
+		for (const prefix of removePrefixes) this.toolManager.removeExternalTools(prefix);
+		this.toolManager.registerExternalTools(toolInfos.map(info => ({
+			name: info.name,
+			description: info.description,
+			summary: info.summary ?? info.description,
+			group: info.group,
+			docs: info.docs,
+			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+		})));
+	}
+
+	private async removeScopedMcpManagerByKey(key: string): Promise<boolean> {
+		const mgr = this.scopedMcpManagers.get(key);
+		if (!mgr) return false;
+		this.scopedMcpManagers.delete(key);
+		try {
+			await mgr.disconnectAll();
+		} finally {
+			this.refreshExternalMcpToolRegistrations();
+		}
+		return true;
+	}
+
+	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
+		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
+		const keys: string[] = [];
+		for (const [key, mgr] of this.scopedMcpManagers) {
+			const scope = mgr.getDiscoveryScope();
+			if (key === this.mcpScopeKey({ projectId }) || scope.projectId === projectId || (targetRoot && path.resolve(scope.cwd) === targetRoot)) {
+				keys.push(key);
+			}
+		}
+		for (const key of keys) await this.removeScopedMcpManagerByKey(key);
+	}
+
+	private async cleanupScopedMcpManagersForSessionScope(scope: { projectId?: string; cwd?: string }): Promise<void> {
+		if (!scope.cwd) return;
+		const cwdKey = this.mcpScopeKey({ cwd: scope.cwd });
+		if (!this.scopedMcpManagers.has(cwdKey)) return;
+		const cwd = path.resolve(scope.cwd);
+		const stillInUse = [...this.sessions.values()].some((s) => !!s.cwd && path.resolve(s.cwd) === cwd);
+		if (!stillInUse) await this.removeScopedMcpManagerByKey(cwdKey);
+	}
+
+	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
+		const projectConfigStore = opts?.projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(opts.projectId)?.projectConfigStore ?? this.projectConfigStore)
+			: this.projectConfigStore;
+		const mgr = new McpManager(cwd, projectConfigStore, bobbitStateDir(), {
+			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
+			...(opts?.projectId ? { projectId: opts.projectId } : {}),
+			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
+		});
+		if (opts?.includeAdditionalProjects && this.projectContextManager) {
+			const additionalProjects = Array.from(this.projectContextManager.all())
+				.filter(ctx => ctx.project.rootPath !== cwd)
+				.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
+			if (additionalProjects.length > 0) mgr.setAdditionalProjects(additionalProjects);
+		}
+		return mgr;
+	}
+
+	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		const existing = this.scopedMcpManagers.get(key);
+		if (existing) return existing;
+		let cwd = scope?.cwd;
+		let projectId = scope?.projectId;
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (!ctx) return null;
+			cwd = ctx.project.rootPath;
+		}
+		if (!cwd) return null;
+		const mgr = this.createMcpManager(cwd, { projectId, scopeKey: key });
+		this.scopedMcpManagers.set(key, mgr);
+		await mgr.connectAll();
+		return mgr;
+	}
+
+	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
+		if (projectId) return this.getMcpManager({ projectId, cwd });
+		if (cwd) return this.getMcpManager({ cwd });
 		return this.mcpManager;
+	}
+
+	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
+		if (projectId) return this.ensureMcpManager({ projectId, cwd });
+		if (cwd) return this.ensureMcpManager({ cwd });
+		return this.mcpManager;
+	}
+
+	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
+		const live = this.sessions.get(sessionId);
+		const persisted = live ? null : this.getPersistedSession(sessionId);
+		return { projectId: live?.projectId ?? persisted?.projectId, cwd: live?.cwd ?? persisted?.cwd };
+	}
+
+	getMcpManagerForSession(sessionId: string): McpManager | null {
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.getMcpManagerForContext(projectId, cwd);
+	}
+
+	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.ensureMcpManagerForContext(projectId, cwd);
+	}
+
+	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
+		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
+		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
+		const cwdScopeKey = cwd ? this.mcpScopeKey({ cwd }) : undefined;
+		if (!projectId && cwd && scopeKey === cwdScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ cwd, scopeKey });
+		return null;
+	}
+
+	private aggregateMcpReloadResults(results: McpReloadResult[]): McpReloadResult | undefined {
+		if (results.length === 0) return undefined;
+		const connected = results.flatMap(r => r.connected);
+		const disconnected = results.flatMap(r => r.disconnected);
+		const unchanged = results.flatMap(r => r.unchanged);
+		const skippedErrored = results.flatMap(r => r.skippedErrored);
+		const failed = results.flatMap(r => r.failed);
+		const statuses = results.flatMap(r => r.statuses);
+		let status: McpReloadResult["status"] = "ok";
+		if (results.some(r => r.status === "pending")) {
+			status = "pending";
+		} else if (results.every(r => r.status === "error")) {
+			status = "error";
+		} else if (results.some(r => r.status === "error" || r.status === "partial")) {
+			status = "partial";
+		}
+		return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses };
+	}
+
+	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
+		const managers = new Set<McpManager>();
+		if (scope === "project") {
+			const mgr = await this.ensureMcpManager({ projectId });
+			if (mgr) managers.add(mgr);
+		} else {
+			if (this.mcpManager) managers.add(this.mcpManager);
+			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
+		}
+		const results: McpReloadResult[] = [];
+		const pendingRefreshes: Promise<unknown>[] = [];
+		for (const mgr of managers) {
+			try {
+				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
+				results.push(result);
+				if (result.status === "pending") {
+					const pending = mgr.currentReload();
+					if (pending) pendingRefreshes.push(pending.catch(() => undefined));
+				}
+			} catch (err) {
+				const scopeKey = mgr.getScopeKey();
+				results.push({
+					status: "error",
+					connected: [],
+					disconnected: [],
+					unchanged: [],
+					skippedErrored: [],
+					failed: [{ name: scopeKey, error: err instanceof Error ? err.message : String(err) }],
+					statuses: [],
+				});
+			}
+		}
+		if (pendingRefreshes.length > 0) {
+			void Promise.allSettled(pendingRefreshes).then(() => this.refreshExternalMcpToolRegistrations());
+		}
+		return this.aggregateMcpReloadResults(results);
+	}
+
+	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
+		this.marketplaceMcpResolver = resolver ?? null;
+		this.mcpManager?.setMarketplaceResolver(this.marketplaceMcpResolver);
+		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
 	}
 
 	/**
@@ -1821,33 +2030,23 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir());
-
-			// Register additional projects for multi-project MCP discovery
-			if (this.projectContextManager) {
-				const additionalProjects = Array.from(this.projectContextManager.all())
-					.filter(ctx => ctx.project.rootPath !== cwd)
-					.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
-				if (additionalProjects.length > 0) {
-					mgr.setAdditionalProjects(additionalProjects);
-				}
-			}
+			const mgr = this.createMcpManager(cwd, { includeAdditionalProjects: true });
 
 			await mgr.connectAll();
 			this.mcpManager = mgr;
 
-			// Register MCP tools with ToolManager
-			if (this.toolManager) {
-				const infos = mgr.getToolInfos();
-				this.toolManager.registerExternalTools(infos.map(info => ({
-					name: info.name,
-					description: info.description,
-					summary: info.summary ?? info.description,
-					group: info.group,
-					docs: info.docs,
-					provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-				})));
+			if (this.projectContextManager) {
+				for (const ctx of this.projectContextManager.all()) {
+					const key = this.mcpScopeKey({ projectId: ctx.project.id });
+					if (this.scopedMcpManagers.has(key)) continue;
+					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
+					this.scopedMcpManagers.set(key, scoped);
+					await scoped.connectAll();
+				}
 			}
+
+			// Register MCP tools with ToolManager across default and scoped managers.
+			this.refreshExternalMcpToolRegistrations();
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
@@ -2007,9 +2206,11 @@ export class SessionManager {
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
 
+		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
+
 		// MCP proxy extensions
-		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+		const mcpExtPaths = mcpManager
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -2019,14 +2220,14 @@ export class SessionManager {
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -4406,6 +4607,7 @@ export class SessionManager {
 		const restoredAllowedTools: EffectiveTool[] | undefined =
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
+		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -4709,7 +4911,8 @@ export class SessionManager {
 			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
-		const ctx = this.buildPipelineContext(projectId);
+		await this.ensureMcpManagerForContext(projectId, cwd);
+		const ctx = this.buildPipelineContext(projectId, cwd);
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
 		// (`host.agents.spawn` → OrchestrationCore.spawn → createSession) threads only
@@ -5003,7 +5206,8 @@ export class SessionManager {
 		// Resolve projectId from parent session
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
 			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
-		const ctx = this.buildPipelineContext(parentProjectId);
+		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
+		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
 
 		// ── Sandbox propagation from parent ──
 		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
@@ -6213,6 +6417,7 @@ export class SessionManager {
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
+		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -6670,7 +6875,9 @@ export class SessionManager {
 		// Resolve the store BEFORE removing from in-memory map, so
 		// resolveStoreForSession can look up the session's projectId.
 		const terminateStore = this.resolveStoreForSession(id);
+		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
+		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
 		// archives directly (bypassing archiveWithCascade), so the dispatch
@@ -7042,6 +7249,8 @@ export class SessionManager {
 				console.error(`[session-manager] Failed to clean team-store entry on team-lead purge for ${ps.id}:`, err);
 			}
 		}
+
+		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.
@@ -7525,6 +7734,7 @@ export class SessionManager {
 			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 				? effective
 				: (effective.length > 0 ? effective : undefined);
+			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };

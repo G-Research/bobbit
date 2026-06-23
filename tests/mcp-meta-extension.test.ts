@@ -65,6 +65,18 @@ describe("generateMcpMetaExtension — happy path", () => {
 		assert.match(code, /"mcp__"\s*\+\s*"gr-halo"\s*\+\s*"__"\s*\+\s*operation/);
 	});
 
+	it("omits scopeKey for the default legacy manager path", () => {
+		assert.doesNotMatch(code, /scopeKey/);
+		const defaultCode = generateMcpMetaExtension("gr-halo", ops, undefined, undefined, undefined, "default");
+		assert.doesNotMatch(defaultCode, /scopeKey/);
+	});
+
+	it("includes scopeKey in scoped proxy call bodies", () => {
+		const scoped = generateMcpMetaExtension("gr-halo", ops, undefined, undefined, undefined, "cwd:/workspace/project");
+		assert.match(scoped, /scopeKey:\s*"cwd:\/workspace\/project"/);
+		assert.match(scoped, /JSON\.stringify\(\{ tool: fullName, args: args, scopeKey:/);
+	});
+
 	it("reuses the gwUrl/token bootstrap from generateMcpProxyExtension", () => {
 		assert.match(code, /BOBBIT_GATEWAY_URL/);
 		assert.match(code, /BOBBIT_TOKEN/);
@@ -261,6 +273,41 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		assert.match(code, /name:\s*"mcp_playwright"/);
 		assert.match(code, /Type\.Literal\("click"\)/);
 		assert.match(code, /Type\.Literal\("snap"\)/);
+	});
+
+	it("scoped manager extensions include trusted scopeKey while legacy mock managers do not", (t) => {
+		setIsolatedBobbit(t);
+
+		const infos = [
+			{
+				name: "mcp__playwright__click",
+				serverName: "playwright",
+				mcpToolName: "click",
+				group: "MCP: playwright",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const scopedMgr = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => [],
+			getScopeKey: () => "cwd:/tmp/scoped-project",
+		} as any;
+
+		const scopedPaths = writeMcpProxyExtensions(scopedMgr);
+		assert.equal(scopedPaths.length, 1);
+		const scopedCode = fs.readFileSync(scopedPaths[0], "utf-8");
+		assert.match(scopedCode, /scopeKey:\s*"cwd:\/tmp\/scoped-project"/);
+		assert.match(scopedCode, /JSON\.stringify\(\{ tool: fullName, args: args, scopeKey:/);
+
+		const legacyMgr = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => [],
+		} as any;
+		const legacyPaths = writeMcpProxyExtensions(legacyMgr);
+		assert.equal(legacyPaths.length, 1);
+		const legacyCode = fs.readFileSync(legacyPaths[0], "utf-8");
+		assert.doesNotMatch(legacyCode, /scopeKey/);
 	});
 
 	it("undefined allowlist emits servers; [] (explicit empty) emits none", (t) => {

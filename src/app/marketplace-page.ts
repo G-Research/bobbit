@@ -41,14 +41,19 @@ import {
 	updateInstalledPack,
 	fetchContributions,
 	fetchTools,
+	fetchMcpServers,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
 	type InstalledPackWire,
 	type MarketplaceSource,
+	type MarketplaceSourceType,
 	type MarketScope,
+	type McpServerInfo,
+	type PackActivationMcpEntry,
 	type PackActivationResponse,
 	type PackEntityDescriptions,
+	type PackMcpContributionWire,
 } from "./api.js";
 
 // ============================================================================
@@ -80,6 +85,12 @@ let conflicts: ConflictWire[] = [];
  *  visible + re-enableable. */
 const activationByPack = new Map<string, PackActivationResponse>();
 
+/** Runtime MCP status enriches activation rows; activation catalogue remains the
+ *  source of truth for which MCP entries exist/toggle. Keyed by "default" or
+ *  `project:${projectId}` and then by runtime server name. */
+const mcpRuntimeByScope = new Map<string, Map<string, McpServerInfo>>();
+
+let newSourceType: MarketplaceSourceType = "pack";
 let newSourceUrl = "";
 let newSourceRef = "";
 let addingSource = false;
@@ -122,6 +133,8 @@ export function clearMarketplaceState(): void {
 	installedError = "";
 	conflicts = [];
 	activationByPack.clear();
+	mcpRuntimeByScope.clear();
+	newSourceType = "pack";
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
@@ -238,9 +251,10 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	loading = false;
 	renderApp();
 
-	// Activation catalogues are fetched in the background (one GET per installed
-	// pack) so the page paints immediately; the toggles appear once they resolve.
+	// Activation catalogues/runtime statuses are fetched in the background so the
+	// page paints immediately; toggles/statuses appear once they resolve.
 	void loadActivationForInstalled();
+	void loadMcpRuntimeForInstalled();
 
 	if (selectedSourceId) await loadBrowse(selectedSourceId);
 }
@@ -264,12 +278,37 @@ async function loadActivationForInstalled(): Promise<void> {
 	if (changed) renderApp();
 }
 
+function mcpRuntimeScopeKeyForPack(pack: InstalledPackWire): string {
+	return pack.scope === "project" ? `project:${currentProjectId() || ""}` : "default";
+}
+
+async function loadMcpRuntimeForInstalled(): Promise<void> {
+	const needsDefault = installed.some((p) => p.scope !== "project" && packHasMcp(p));
+	const projectId = currentProjectId();
+	const needsProject = !!projectId && installed.some((p) => p.scope === "project" && packHasMcp(p));
+	const jobs: Array<Promise<void>> = [];
+	if (needsDefault) {
+		jobs.push(fetchMcpServers().then((servers) => {
+			mcpRuntimeByScope.set("default", new Map(servers.map((s) => [s.name, s])));
+		}).catch(() => {}));
+	}
+	if (needsProject && projectId) {
+		jobs.push(fetchMcpServers({ projectId }).then((servers) => {
+			mcpRuntimeByScope.set(`project:${projectId}`, new Map(servers.map((s) => [s.name, s])));
+		}).catch(() => {}));
+	}
+	if (jobs.length === 0) return;
+	await Promise.all(jobs);
+	renderApp();
+}
+
 /** Maps the singular testid kind → the `DisabledRefs` array key. */
-const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint", keyof DisabledRefs> = {
+const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mcp", keyof DisabledRefs> = {
 	role: "roles",
 	tool: "tools",
 	skill: "skills",
 	entrypoint: "entrypoints",
+	mcp: "mcp",
 };
 
 /** Toggle a user-facing pack entity's activation. Computes the new `disabled`
@@ -279,7 +318,7 @@ const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint", keyo
  *  (pack schema V1 §9). Entrypoints are keyed by `listName`. */
 async function handleToggleActivation(
 	pack: InstalledPackWire,
-	kind: "role" | "tool" | "skill" | "entrypoint",
+	kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
 	name: string,
 	enable: boolean,
 ): Promise<void> {
@@ -298,12 +337,13 @@ async function handleToggleAllActivation(pack: InstalledPackWire, enable: boolea
 	if (!current) return;
 	const cat = current.catalogue;
 	const disabled: DisabledRefs = enable
-		? { roles: [], tools: [], skills: [], entrypoints: [] }
+		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [] }
 		: {
 			roles: [...cat.roles],
 			tools: [...cat.tools],
 			skills: [...cat.skills],
 			entrypoints: cat.entrypoints.map((e) => e.listName),
+			mcp: normalizedActivationMcp(cat.mcp).map((e) => e.ref),
 		};
 	await savePackActivation(pack, disabled, `activation:${cacheKey}:all`);
 }
@@ -322,6 +362,7 @@ async function savePackActivation(pack: InstalledPackWire, disabled: DisabledRef
 		// registries (renderers/panels/entrypoints) drop/restore the toggled entity
 		// without a reload (the catalogue source above is unaffected).
 		await refreshConfigPages();
+		await loadMcpRuntimeForInstalled();
 		renderApp();
 	} else {
 		installedError = res.error;
@@ -370,11 +411,12 @@ async function handleAddSource(): Promise<void> {
 	addingSource = true;
 	sourcesError = "";
 	renderApp();
-	const res = await addMarketplaceSource(url, newSourceRef.trim() || undefined);
+	const res = await addMarketplaceSource(url, newSourceType === "pack" ? (newSourceRef.trim() || undefined) : undefined, newSourceType);
 	addingSource = false;
 	if (res.ok) {
 		newSourceUrl = "";
 		newSourceRef = "";
+		newSourceType = "pack";
 		await loadMarketplaceData(false);
 		if (res.data.source?.id) {
 			activeTab = "browse";
@@ -463,7 +505,10 @@ async function handleUpdate(pack: InstalledPackWire): Promise<void> {
 
 async function handleUninstall(pack: InstalledPackWire): Promise<void> {
 	const { confirmAction } = await import("./dialogs.js");
-	const ok = await confirmAction("Uninstall pack", `Uninstall "${pack.packName}"? This deletes the pack directory and removes its entities.`, "Uninstall", true);
+	const uninstallCopy = packHasMcp(pack)
+		? `Uninstall "${pack.packName}"? This deletes the pack directory, disconnects its MCP server, and unregisters its MCP tools. Tool policy settings are not deleted.`
+		: `Uninstall "${pack.packName}"? This deletes the pack directory and removes its entities.`;
+	const ok = await confirmAction("Uninstall pack", uninstallCopy, "Uninstall", true);
 	if (!ok) return;
 	const key = `${pack.scope}:${pack.packName}`;
 	busy.add(key);
@@ -563,6 +608,102 @@ function scopeLabel(scope: MarketScope): string {
 	return "Project";
 }
 
+function sourceType(src: MarketplaceSource | undefined): MarketplaceSourceType {
+	return src?.type === "mcp-registry" ? "mcp-registry" : "pack";
+}
+
+function selectedSourceType(): MarketplaceSourceType {
+	return sourceType(sources.find((s) => s.id === selectedSourceId));
+}
+
+function sourceMcpCount(src: MarketplaceSource): number | undefined {
+	return typeof src.mcpServerCount === "number"
+		? src.mcpServerCount
+		: typeof src.discoveredMcpServers === "number"
+			? src.discoveredMcpServers
+			: undefined;
+}
+
+function packMcpRefs(pack: BrowsePackWire | InstalledPackWire): string[] {
+	const contents = "contents" in pack ? pack.contents : (pack as InstalledPackWire).manifest.contents;
+	return contents?.mcp ?? [];
+}
+
+function packHasMcp(pack: BrowsePackWire | InstalledPackWire): boolean {
+	return packMcpRefs(pack).length > 0 || normalizedBrowseMcp(pack as BrowsePackWire).length > 0;
+}
+
+function normalizedBrowseMcp(pack: BrowsePackWire): PackMcpContributionWire[] {
+	const refs = pack.contents?.mcp ?? [];
+	const rich = pack.mcp ?? pack.mcpServers ?? [];
+	if (rich.length) {
+		return rich.map((entry, index) => ({
+			...entry,
+			ref: entry.ref || entry.listName || refs[index] || entry.serverName,
+		}));
+	}
+	return refs.map((ref) => ({ ref, serverName: ref, description: pack.descriptions?.mcp?.[ref] }));
+}
+
+function normalizedActivationMcp(entries: PackActivationResponse["catalogue"]["mcp"] | undefined): PackActivationMcpEntry[] {
+	return (entries ?? []).map((entry) => {
+		if (typeof entry === "string") return { ref: entry, serverName: entry };
+		return {
+			...entry,
+			ref: entry.ref || entry.listName || entry.serverName || "mcp",
+			serverName: entry.serverName || entry.ref || entry.listName,
+		};
+	});
+}
+
+function mcpEntryLabel(entry: PackActivationMcpEntry | PackMcpContributionWire): string {
+	const ref = entry.ref || entry.listName || entry.serverName || "mcp";
+	const server = entry.serverName || ref;
+	const base = entry.subNamespace ? `${server} / ${entry.subNamespace}` : server;
+	return entry.label && entry.label !== base ? `${entry.label} · ${base}` : base;
+}
+
+function keyNames(value: string[] | Record<string, unknown> | undefined): string[] {
+	if (!value) return [];
+	return Array.isArray(value) ? value : Object.keys(value);
+}
+
+function renderMcpTransportPreview(pack: BrowsePackWire): TemplateResult {
+	const entries = normalizedBrowseMcp(pack);
+	if (entries.length === 0) return html``;
+	return html`
+		<div class="market-mcp-transport-list">
+			${entries.map((entry) => {
+				const transport = entry.transport || (entry.url ? "http" : entry.command ? "stdio" : undefined);
+				const envNames = keyNames(entry.env);
+				const headerNames = keyNames(entry.headers);
+				const preview = transport === "http"
+					? `Endpoint: ${entry.url || entry.serverName || entry.ref || "MCP server"}`
+					: transport === "stdio"
+						? `Command: ${[entry.command, ...(entry.args ?? [])].filter(Boolean).join(" ") || entry.serverName || entry.ref || "MCP server"}`
+						: `MCP server: ${entry.serverName || entry.ref || "unknown"}`;
+				return html`
+					<div class="market-mcp-transport" data-testid="market-mcp-transport">
+						<span class="market-lozenge market-lozenge--mcp" data-testid="market-mcp-transport-kind">${transport === "http" ? "HTTP" : transport === "stdio" ? "stdio" : "MCP"}</span>
+						<span class="market-mcp-transport-preview">${preview}</span>
+						<details class="market-mcp-transport-details" data-testid="market-mcp-transport-details">
+							<summary>Transport details</summary>
+							<div>
+								${entry.command ? html`<div><strong>Command</strong> ${entry.command}</div>` : ""}
+								${entry.args?.length ? html`<div><strong>Args</strong> ${entry.args.join(" ")}</div>` : ""}
+								${entry.cwd ? html`<div><strong>Cwd</strong> ${entry.cwd}</div>` : ""}
+								${entry.url ? html`<div><strong>URL</strong> ${entry.url}</div>` : ""}
+								${envNames.length ? html`<div><strong>Env keys</strong> ${envNames.join(", ")}</div>` : ""}
+								${headerNames.length ? html`<div><strong>Header keys</strong> ${headerNames.join(", ")}</div>` : ""}
+							</div>
+						</details>
+					</div>
+				`;
+			})}
+		</div>
+	`;
+}
+
 function renderNavBar(): TemplateResult {
 	return html`
 		<div class="flex items-center gap-2 px-4 py-3 border-b border-border">
@@ -631,12 +772,19 @@ function entityChips(pack: BrowsePackWire | InstalledPackWire): TemplateResult {
 		["role", contents?.roles || []],
 		["tool", contents?.tools || []],
 		["skill", contents?.skills || []],
+		["mcp", contents?.mcp || []],
 	];
 	const chips = groups.flatMap(([kind, names]) =>
 		names.map((n) => html`<span class="market-entity-chip" data-kind=${kind}>${kind}: ${n}</span>`),
 	);
-	if (chips.length === 0) return html`<span class="text-[11px] text-muted-foreground italic">no declared entities</span>`;
-	return html`<div class="flex flex-wrap gap-1">${chips}</div>`;
+	const transportChips: TemplateResult[] = "contents" in pack
+		? normalizedBrowseMcp(pack).map((entry) => {
+			const transport = entry.transport || (entry.url ? "http" : entry.command ? "stdio" : undefined);
+			return transport ? html`<span class="market-lozenge market-lozenge--mcp">${transport === "http" ? "HTTP" : "stdio"}</span>` : null;
+		}).filter(Boolean) as TemplateResult[]
+		: [];
+	if (chips.length === 0 && transportChips.length === 0) return html`<span class="text-[11px] text-muted-foreground italic">no declared entities</span>`;
+	return html`<div class="flex flex-wrap gap-1">${chips}${transportChips}</div>`;
 }
 
 /** Declared-entity name lists for the description disclosure, across all four
@@ -646,6 +794,7 @@ interface EntityNameLists {
 	tools: string[];
 	skills: string[];
 	entrypoints: Array<{ listName: string; label?: string }>;
+	mcp?: Array<{ ref: string; label?: string }>;
 }
 
 /** Shared collapsed "Show details" disclosure (R3) — one row per declared
@@ -659,7 +808,7 @@ function renderEntityDetails(packName: string, descriptions: PackEntityDescripti
 	if (!descriptions) return html``;
 	const rows: TemplateResult[] = [];
 	const pushRows = (
-		kind: "role" | "tool" | "skill" | "entrypoint",
+		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
 		map: Record<string, string> | undefined,
 		names: string[],
 		labelFor?: (n: string) => string,
@@ -681,6 +830,8 @@ function renderEntityDetails(packName: string, descriptions: PackEntityDescripti
 	pushRows("skill", descriptions.skills, entities.skills);
 	const epLabel = new Map(entities.entrypoints.map((e) => [e.listName, e.label || e.listName]));
 	pushRows("entrypoint", descriptions.entrypoints, entities.entrypoints.map((e) => e.listName), (n) => epLabel.get(n) || n);
+	const mcpLabel = new Map((entities.mcp ?? []).map((e) => [e.ref, e.label || e.ref]));
+	pushRows("mcp", descriptions.mcp, (entities.mcp ?? []).map((e) => e.ref), (n) => mcpLabel.get(n) || n);
 	if (rows.length === 0) return html``;
 	return html`
 		<details class="market-entity-details" data-testid="market-entity-details-${packName}">
@@ -701,16 +852,31 @@ function renderSourcesPanel(): TemplateResult {
 
 			<div class="flex flex-col gap-2 mt-2 pt-3 border-t border-border">
 				<div class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add source</div>
+				<div class="market-source-kind" role="group" aria-label="Source type">
+					<button
+						type="button"
+						class="market-source-kind-option ${newSourceType === "pack" ? "market-source-kind-option--active" : ""}"
+						data-testid="market-source-kind-pack"
+						@click=${() => { newSourceType = "pack"; renderApp(); }}
+					>Pack repo / local dir</button>
+					<button
+						type="button"
+						class="market-source-kind-option ${newSourceType === "mcp-registry" ? "market-source-kind-option--active" : ""}"
+						data-testid="market-source-kind-mcp-registry"
+						@click=${() => { newSourceType = "mcp-registry"; newSourceRef = ""; renderApp(); }}
+					>MCP registry / discovery URL</button>
+				</div>
 				<div class="market-trust-warning" data-testid="market-trust-warning">
 					${icon(AlertTriangle, "xs")}
 					<div class="flex flex-col gap-1.5">
-						<span>Only add sources you trust. Installing any pack from a source can run code or instruct agents on your machine.</span>
+						<span>Only add sources you trust. Packs, MCP servers, and registry entries can run code, connect to remote services, or instruct agents on your machine.</span>
 						<details class="market-trust-why" data-testid="market-trust-why">
 							<summary>Why?</summary>
 							<div class="market-trust-why-body">
 								<p data-kind="tool"><strong>Tools</strong> ship <code>extension.ts</code> / <code>_shared/</code> code that runs directly in the Bobbit server process on the host, deterministically, with no LLM and no sandbox in the loop. Highest, most immediate risk.</p>
 								<p data-kind="skill"><strong>Skills</strong> are free-form instructions an agent tends to follow literally; an agent with shell access can be directed to do damage.</p>
 								<p data-kind="role"><strong>Roles</strong> steer persona/behavior; influential but more diffuse. Still drives an LLM with tool access.</p>
+								<p data-kind="mcp"><strong>MCP servers</strong> run trusted stdio commands on the host or call trusted remote HTTP endpoints that may receive prompts, tool arguments, headers, and project-derived data.</p>
 							</div>
 						</details>
 					</div>
@@ -719,18 +885,20 @@ function renderSourcesPanel(): TemplateResult {
 					type="text"
 					data-testid="market-source-url"
 					class="market-input"
-					placeholder="https://github.com/acme/bobbit-packs.git or /abs/local/path"
+					placeholder=${newSourceType === "mcp-registry" ? "https://registry.example.com/mcp/servers.json" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
 					.value=${newSourceUrl}
 					@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
 					@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
 				/>
+				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper" data-testid="market-mcp-source-helper">You will review and install individual servers after sync; installing a stdio server may start a host process.</div>` : ""}
 				<div class="flex items-center gap-2">
 					<input
 						type="text"
 						data-testid="market-source-ref"
 						class="market-input flex-1"
-						placeholder="ref (branch/tag, optional)"
+						placeholder=${newSourceType === "mcp-registry" ? "Registry sources do not use refs" : "ref (branch/tag, optional)"}
 						.value=${newSourceRef}
+						?disabled=${newSourceType === "mcp-registry"}
 						@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; renderApp(); }}
 						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
 					/>
@@ -741,6 +909,7 @@ function renderSourcesPanel(): TemplateResult {
 						@click=${handleAddSource}
 					>${icon(Plus, "xs")} ${addingSource ? "Adding…" : "Add"}</button>
 				</div>
+				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper">Registry sources are synced from their discovery URL; refs apply only to git sources.</div>` : ""}
 			</div>
 		</section>
 	`;
@@ -754,6 +923,8 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	// control entirely, and hide Re-sync (a harmless no-op server-side) to reduce
 	// confusion. It stays clickable so users can browse the shipped packs.
 	const isBuiltin = src.builtin === true;
+	const kind = sourceType(src);
+	const mcpCount = sourceMcpCount(src);
 	return html`
 		<div
 			class="market-source-row ${isSelected ? "market-source-row--selected" : ""}"
@@ -763,12 +934,15 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 			<button class="flex-1 min-w-0 text-left" @click=${() => { activeTab = "browse"; loadBrowse(src.id); }} title="Browse packs">
 				<div class="flex items-center gap-1.5">
 					<span class="text-sm font-medium truncate">${src.id}</span>
+					<span class="market-source-type-chip" data-kind=${kind} data-testid="market-source-type-chip">${kind === "mcp-registry" ? "MCP registry" : "Pack source"}</span>
 					${isBuiltin ? html`<span class="market-builtin-badge" data-testid="market-source-builtin-badge">Built-in</span>` : ""}
 				</div>
-				<div class="text-[11px] text-muted-foreground truncate">${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
+				<div class="text-[11px] text-muted-foreground truncate">${kind === "mcp-registry" ? "Discovery URL: " : ""}${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
 				${isBuiltin
 					? html`<div class="text-[10px] text-muted-foreground/80">Shipped core features — always available, enable/disable per pack.</div>`
-					: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
+					: kind === "mcp-registry"
+						? html`<div class="text-[10px] text-muted-foreground/80">${mcpCount === undefined ? "MCP registry source" : `${mcpCount} MCP servers discovered`}${src.lastSyncedAt ? ` · synced ${new Date(src.lastSyncedAt).toLocaleString()}` : ""}</div>`
+						: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
 			</button>
 			${isBuiltin
 				? ""
@@ -830,11 +1004,11 @@ function renderBrowsePanel(): TemplateResult {
 			${!selectedSourceId
 				? html`<p class="text-sm text-muted-foreground italic">Select a source to browse its packs.</p>`
 				: browseLoading
-					? html`<p class="text-sm text-muted-foreground">Loading packs…</p>`
+					? html`<p class="text-sm text-muted-foreground">${selectedSourceType() === "mcp-registry" ? "Loading MCP servers…" : "Loading packs…"}</p>`
 					: browseError
 						? html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`
 						: browsePacks.length === 0
-							? html`<p class="text-sm text-muted-foreground italic">This source has no packs.</p>`
+							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-registry" ? "This registry did not return any installable MCP servers." : "This source has no packs."}</p>`
 							: html`<div class="flex flex-col gap-2">${browsePacks.map(renderBrowsePackCard)}</div>`}
 		</section>
 	`;
@@ -889,7 +1063,7 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 				<div class="flex-1 min-w-0">
 					<div class="flex items-center gap-2 flex-wrap">
 						<span class="text-sm font-semibold">${pack.name}</span>
-						<span class="text-[11px] text-muted-foreground">v${pack.version}</span>
+						${pack.version ? html`<span class="text-[11px] text-muted-foreground">v${pack.version}</span>` : ""}
 					</div>
 					<div class="text-xs text-muted-foreground mt-0.5">${pack.description}</div>
 					<div class="mt-1.5">${entityChips(pack)}</div>
@@ -898,7 +1072,9 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 						tools: pack.contents?.tools ?? [],
 						skills: pack.contents?.skills ?? [],
 						entrypoints: entrypointNames,
+						mcp: normalizedBrowseMcp(pack).map((e) => ({ ref: e.ref || e.listName || e.serverName || "mcp", label: e.label || e.serverName })),
 					})}
+					${renderMcpTransportPreview(pack)}
 				</div>
 				${action}
 			</div>
@@ -992,6 +1168,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 						${isCorrupt ? html`<span class="market-corrupt" data-testid="market-pack-corrupt">${icon(AlertTriangle, "xs")} corrupt</span>` : ""}
 					</div>
 					${pack.manifest?.description ? html`<div class="text-xs text-muted-foreground mt-0.5">${pack.manifest.description}</div>` : ""}
+					<div class="mt-1.5">${entityChips(pack)}</div>
 				</div>
 				${shadowed ? "" : renderPackActivationSummary(pack)}
 			</div>
@@ -1044,6 +1221,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 						${hasConflict ? html`<button class="market-conflict-icon" data-testid="market-conflict-warning" title="Same-name conflict" @click=${() => { expanded ? expandedConflicts.delete(key) : expandedConflicts.add(key); renderApp(); }}>${icon(AlertTriangle, "xs")} conflict</button>` : ""}
 					</div>
 					${pack.manifest?.description ? html`<div class="text-xs text-muted-foreground mt-0.5">${pack.manifest.description}</div>` : ""}
+					<div class="mt-1.5">${entityChips(pack)}</div>
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
 					${renderActivationControls(pack)}
@@ -1117,7 +1295,7 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 
 function activationEntityTotal(activation: PackActivationResponse): number {
 	const cat = activation.catalogue;
-	return cat.roles.length + cat.tools.length + cat.skills.length + cat.entrypoints.length;
+	return cat.roles.length + cat.tools.length + cat.skills.length + cat.entrypoints.length + normalizedActivationMcp(cat.mcp).length;
 }
 
 function activationEntityEnabledCount(activation: PackActivationResponse): number {
@@ -1126,7 +1304,8 @@ function activationEntityEnabledCount(activation: PackActivationResponse): numbe
 		(disabled.roles ?? []).length +
 		(disabled.tools ?? []).length +
 		(disabled.skills ?? []).length +
-		(disabled.entrypoints ?? []).length;
+		(disabled.entrypoints ?? []).length +
+		(disabled.mcp ?? []).length;
 	return Math.max(0, activationEntityTotal(activation) - disabledCount);
 }
 
@@ -1153,7 +1332,54 @@ function renderActivationEntityDetails(pack: InstalledPackWire): TemplateResult 
 		tools: cat.tools,
 		skills: cat.skills,
 		entrypoints: cat.entrypoints.map((e) => ({ listName: e.listName, label: entrypointDisplayLabel(e) })),
+		mcp: normalizedActivationMcp(cat.mcp).map((e) => ({ ref: e.ref, label: mcpEntryLabel(e) })),
 	});
+}
+
+function mcpStatusText(status: string | undefined): string | undefined {
+	switch (status) {
+		case "overridden-by-manual": return "Manual config active";
+		case "overridden-by-marketplace": return "Overridden";
+		case "active-owner": return undefined;
+		case "connected": return undefined;
+		case "reconnecting": return "Reconnecting…";
+		case "error": return "Error";
+		case "disabled": return "Disabled";
+		default: return undefined;
+	}
+}
+
+function renderMcpRuntimeStatus(pack: InstalledPackWire, entry: PackActivationMcpEntry, checked: boolean, isBusy: boolean): TemplateResult {
+	if (!checked) {
+		return html`<span class="market-lozenge market-lozenge--muted" data-testid="market-mcp-status-${entry.ref}">Disabled</span>`;
+	}
+	if (isBusy) {
+		return html`<span class="market-lozenge market-lozenge--warning" data-testid="market-mcp-status-${entry.ref}">Reconnecting…</span>`;
+	}
+	const ownerStatus = entry.ownerStatus || entry.status;
+	const ownerText = mcpStatusText(ownerStatus);
+	if (ownerText === "Manual config active" || ownerText === "Overridden") {
+		const detail = entry.overriddenBy || entry.winningPack;
+		return html`<span class="market-lozenge market-lozenge--info" data-testid="market-mcp-status-${entry.ref}" title=${detail ? `Winner: ${detail}` : ownerText}>${ownerText}</span>`;
+	}
+	const serverName = entry.serverName || entry.ref;
+	const runtime = mcpRuntimeByScope.get(mcpRuntimeScopeKeyForPack(pack))?.get(serverName)
+		|| (pack.scope === "project" ? undefined : mcpRuntimeByScope.get("default")?.get(serverName));
+	const runtimeError = entry.error || runtime?.error;
+	if (ownerText === "Error" || runtime?.status === "error" || runtimeError) {
+		return html`
+			<span class="market-lozenge market-lozenge--error" data-testid="market-mcp-status-${entry.ref}">Error</span>
+			${runtimeError ? html`<span class="market-mcp-error" data-testid="market-mcp-error-${entry.ref}" title=${runtimeError}>${runtimeError}</span>` : ""}
+		`;
+	}
+	if (runtime?.status === "connected" || ownerStatus === "connected") {
+		const ops = runtime?.toolCount ?? entry.toolCount;
+		return html`
+			<span class="market-lozenge market-lozenge--positive" data-testid="market-mcp-status-${entry.ref}">Connected${typeof ops === "number" ? ` · ${ops} ops` : ""}</span>
+			<span class="market-mcp-policy-link" data-testid="market-mcp-policy-link-${entry.ref}">Policy in Tools</span>
+		`;
+	}
+	return html`<span class="market-lozenge market-lozenge--warning" data-testid="market-mcp-status-${entry.ref}">${ownerText || "Not loaded"}</span>`;
 }
 
 function renderActivationControls(pack: InstalledPackWire): TemplateResult {
@@ -1164,10 +1390,11 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	const isEnabled = (kindKey: keyof DisabledRefs, name: string) => !(disabled[kindKey] ?? []).includes(name);
 
 	const toggle = (
-		kind: "role" | "tool" | "skill" | "entrypoint",
+		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
 		name: string,
 		label: string,
 		kindLabel?: string,
+		afterLabel?: TemplateResult,
 	): TemplateResult => {
 		const kindKey = ACTIVATION_KIND_KEY[kind];
 		const checked = isEnabled(kindKey, name);
@@ -1186,14 +1413,18 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 				</span>
 				${kindLabel ? html`<span class="market-entrypoint-kind">${kindLabel}</span>` : ""}
 				<span class="market-activation-label">${label}</span>
+				${afterLabel ?? ""}
 			</label>
 		`;
 	};
 
-	const group = (title: string, toggles: TemplateResult[]): TemplateResult => html`
+	const group = (title: string, toggles: TemplateResult[], testId?: string, help?: TemplateResult): TemplateResult => html`
 		<div class="market-activation-group">
 			<div class="market-activation-group-title">${title}</div>
-			<div class="market-activation-toggles">${toggles}</div>
+			<div data-testid=${testId || ""}>
+				<div class="market-activation-toggles">${toggles}</div>
+				${help ?? ""}
+			</div>
 		</div>
 	`;
 
@@ -1203,6 +1434,19 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	if (cat.skills.length) groups.push(group("Skills", cat.skills.map((n) => toggle("skill", n, n))));
 	if (cat.entrypoints.length) {
 		groups.push(group("Entry points", cat.entrypoints.map((e) => toggle("entrypoint", e.listName, entrypointDisplayLabel(e), entrypointKindLabel(e.kind)))));
+	}
+	const mcpEntries = normalizedActivationMcp(cat.mcp);
+	if (mcpEntries.length) {
+		groups.push(group(
+			"MCP servers",
+			mcpEntries.map((entry) => {
+				const checked = isEnabled("mcp", entry.ref);
+				const busyKey = `activation:${pack.scope}:${pack.packName}:mcp:${entry.ref}`;
+				return toggle("mcp", entry.ref, mcpEntryLabel(entry), undefined, renderMcpRuntimeStatus(pack, entry, checked, busy.has(busyKey)));
+			}),
+			"market-activation-mcp-group",
+			html`<div class="market-activation-help">Activation controls whether this MCP server is installed into Bobbit. Allow/ask/never policy is managed on the Tools page.</div>`,
+		));
 	}
 	if (groups.length === 0) return html``;
 

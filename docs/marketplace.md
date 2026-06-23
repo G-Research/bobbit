@@ -1,6 +1,6 @@
 # Pack-Based Marketplace
 
-The marketplace lets you distribute and install Bobbit configuration — **roles**, **tools**, and **skills** — as self-contained directories called **packs**. Register a git repo (or a local directory) as a source, browse the packs it ships, and install any of them into a scope on your machine. Installed entities then resolve through Bobbit's normal config pages exactly like built-ins or hand-written overrides.
+The marketplace lets you distribute and install Bobbit configuration — **roles**, **tools**, **skills**, Extension-Host contributions, and **MCP servers** — as self-contained directories called **packs**. Register a git/local pack source or an MCP registry/discovery URL, browse the installable entries it ships, and install any of them into a scope on your machine. Installed entities then resolve through Bobbit's normal config pages and runtime registries exactly like built-ins or hand-written overrides.
 
 This document is the user + developer guide. The authoritative design — schemas, the full REST contract, the legacy→unified-list mapping, and the test plan — lives in [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md). This page summarises and points there for depth.
 
@@ -27,6 +27,7 @@ A **pack is just a directory** laid out like Bobbit's shipped `defaults/` tree:
   roles/<name>.yaml
   tools/<group>/{*.yaml, extension.ts, _shared/...}
   skills/<name>/SKILL.md
+  mcp/<name>.yaml                 # schema-2 MCP server contributions listed in contents.mcp
   panels/<panel>.yaml             # Extension-Host pack-scoped panels (auto-discovered)
   entrypoints/<ep>.yaml           # Extension-Host pack-scoped launchers/deep-links
   lib/                            # shared pack implementation modules (renderers, panels, routes)
@@ -49,7 +50,7 @@ Everything Bobbit resolves for these three entity types is a pack in that one li
 
 Unifying these into one resolver replaced two separate mechanisms — `ConfigCascade` (roles/tools) and `slash-skills.ts` (skills) — that each had their own precedence rules. See [Architecture](#architecture-developer) below.
 
-> **Out of scope, by design.** MCP servers (`mcp-manager.ts`, `.mcp.json`) and AGENTS/CLAUDE.md prompt assembly (`system-prompt.ts`) keep their own loaders and resolve exactly as before. A market pack may **not** ship `mcp/` or AGENTS content in the MVP. See [Limitations & deferred work](#limitations--deferred-work). (The Extension-Platform `schema: 2` manifest now *accepts* a `contents.mcp` catalogue key — see [pack.yaml schema 2](#packyaml-schema-2-extension-platform) — but there is still no MCP **loader**; the key is reserved for a later goal.)
+Marketplace MCP support is additive. Schema-2 packs may declare `contents.mcp` and ship `mcp/<name>.yaml|yml|json` files, and MCP registry/discovery URL sources browse as virtual packs that materialize to the same schema-2 pack layout when installed. Existing manual MCP config files still load through `McpManager` and override Marketplace definitions with the same runtime server name. AGENTS/CLAUDE.md prompt assembly (`system-prompt.ts`) remains separate and is not pack-installable.
 
 ## Using the marketplace
 
@@ -59,15 +60,20 @@ A **Market** button sits in the sidebar config-nav row, between **Workflows** an
 
 ### Registering a source
 
-A **source** is a git remote URL or an absolute local directory path whose top level is a collection of pack directories (never a flat `defaults/` mirror). Sources are **global to the server** — once registered, a source can be browsed and installed into any scope.
+A **source** is either:
 
-In the **Sources** panel, click "Add source", paste a git URL (or a local/`file://` path) and optionally a branch/tag `ref`. Adding a source immediately syncs it (shallow clone for git, read-in-place for local dirs). Per-source "Re-sync" and "Remove" actions are available.
+- a git remote URL or absolute local directory path whose top level is a collection of pack directories (never a flat `defaults/` mirror), or
+- an **MCP registry / discovery URL** (`type: "mcp-registry"`) that returns a JSON list of installable MCP servers.
 
-Private repos rely on your ambient git credentials (credential helper / SSH agent) — the marketplace stores no credentials of its own.
+Sources are **global to the server** — once registered, a source can be browsed and installed into any scope.
+
+In the **Sources** panel, click "Add source", choose the source type, then paste a git URL, local/`file://` path, or MCP registry URL. Git sources may carry an optional branch/tag `ref`; MCP registry sources do not use refs. Adding a source immediately validates/syncs it (shallow clone for git, read-in-place for local dirs, bounded JSON fetch for MCP registries). Per-source "Re-sync" and "Remove" actions are available.
+
+Private repos rely on your ambient git credentials (credential helper / SSH agent) — the marketplace stores no credentials of its own. MCP registry URLs are fetched as trusted source metadata; installing a registry entry may start a trusted host stdio process or connect Bobbit to a trusted remote HTTP endpoint.
 
 ### Browsing packs
 
-Select a source to list its packs. Each pack shows its name, version, description, and declared entities (the `contents` from `pack.yaml`, rendered as chips). A directory in the source is only treated as a pack if it contains a valid `pack.yaml`; anything else (a `README.md`, a `docs/` folder) is ignored.
+Select a source to list its installable entries. Git/local pack sources list authored pack directories. MCP registry sources list each valid server entry as a **virtual pack** named `mcp-<id>` with `contents.mcp: [<id>]`; installing it materializes a normal pack directory under the target scope. Each card shows its name, version, description, and declared entities (the `contents` from `pack.yaml`, rendered as chips). A directory in a pack source is only treated as a pack if it contains a valid `pack.yaml`; anything else (a `README.md`, a `docs/` folder) is ignored.
 
 **Per-entity descriptions.** Below the entity chips, a collapsed **"Show details"** disclosure (a `<details>` element) reveals a one-line description for each declared role, tool, skill, and entry point. Descriptions are read straight from the pack dir on the source — role frontmatter, a representative tool-group YAML, skill `SKILL.md` frontmatter, and entry-point YAML respectively. The disclosure is collapsed by default so the at-a-glance chips stay the default and the descriptions are progressive disclosure — a pack with many entities never produces a wall of text. Entities without a description are simply omitted, and the disclosure disappears entirely when nothing would render.
 
@@ -93,6 +99,7 @@ Why a blanket warning rather than a tool-pack-only one? The old model implied a 
   - **UI-thread renderers** (tool-YAML `renderer:` contribution) **and panels** (`panels/<panel>.yaml`, auto-discovered) — pre-built ESM modules the browser lazily imports and runs **on the main UI thread**, over LLM-influenced tool data. They render tool blocks / side panels and reach the server only through the mediated Host API (`host.invokeAction` / `host.callRoute` / `host.store.*` / `host.session.*`). (The server-only `host.agents.*` child-agent capability is available to **server-side** pack handlers, not to these UI-thread renderers/panels.) Renderers/panels must not auto-invoke actions or navigate on mount (writes require a genuine user gesture), must preserve iframe `sandbox` attributes for any embedded content, and use theme tokens only. A pack may **vendor npm dependencies** by bundling them into its served module ahead of time (esbuild, `npm run build:packs`; see the [authoring guide](extension-host-authoring.md#bundling-npm-dependencies-into-a-pack-vendoring)) — e.g. the artifacts pack inlines `highlight.js`/`pdfjs-dist`/`docx-preview` to reach built-in parity. This does NOT widen the trust model: bundled code is **the same trusted UI-thread code** as the rest of the renderer (source-level trust decision), and untrusted model-derived content (HTML artifacts) still renders inside a `sandbox`ed iframe — the trust boundary is content-origin, not which library drew the pixels.
   - **Pack IDENTITY on the scoped capabilities is a SERVER-MINTED surface binding token, never a caller-supplied id.** The scoped Host-API calls (`host.store.*`, `host.session.*`, `host.callRoute`, and the WS session-write mint/post) all act AS a specific pack — store keys are namespaced by `packId`, `callRoute` is confined to the calling pack's own namespace, session reads are own-session. Identity must therefore not be forgeable. When the trusted app first constructs a surface's Host API it asks the server to mint a token (`POST /api/ext/surface-token`) for either a **tool-bound** surface (renderer/action, ref `{ tool }`) or a **pack-bound** surface (panel/entrypoint/route, ref `{ contributionKind, contributionId, packId }`). The server resolves the winning contribution and mints an opaque, HMAC-signed token bound to `{sessionId, packId, contributionId, tool?}`. The token is captured in the Host API **closure** (pack module code never sees or sets it) and echoed on every scoped call; the server **derives `{packId, tool?}` from the validated token and ignores any caller-supplied id**, re-resolving the pack identity on each call (so a token gone stale after an uninstall, or a session mismatch, is rejected). **Trust boundary differs by surface kind.** A tool-bound token still layers `:tool ∈ allowedTools`. A **pack-bound** token has no carrier tool, so its gate is **pack installed + active in the session's scope + caller's own session** — `allowedTools` no longer narrows which pack a session may reach. This is the deliberate authorization change that lets **orphan / UI-only packs** (no `tools/`) use the scoped surfaces; it grants no capability a tool-bound surface did not already have, because it stays bounded by the pack-scoped guarantees (store is `packId`-namespaced, `callRoute` reaches only the pack's own routes, session reads are own-session, session writes keep the user-gesture + one-time permit gate). This closes the **accidental + non-pack-reachable** identity-confusion path. **Residual:** in the shared main UI realm (Model A) a deliberately MALICIOUS pack can still mint its own token for a contribution it knows, or read another surface's token out of a shared closure / monkey-patch `fetch` — TRUE cross-pack isolation needs **per-pack realm isolation**, which Model A de-scopes for UI. The token makes the Host API the only *sanctioned* identity path and is **not** claimed as a defense against a same-realm adversary; full UI-thread realm isolation is the documented future hardening.
   - **Session write (`host.session.postMessage`) drives the agent, so it is the highest-risk Host-API surface.** Because pack UI runs in the main realm and *can* monkey-patch globals like `window.fetch` **and `WebSocket.prototype.send`**, the surface is defended in depth: (1) the SEND does **not** ride a `fetch` — it goes over the app's already-authenticated **session WebSocket**, which pack code has no handle to, so there is no capturable session secret on any request; (2) every post must carry a **server-minted, one-time, content-bound write permit** — the client mints a nonce over the trusted WS (bound to `{session, packId, tool, sha256(role+text)}`, short TTL) and the server **single-use consumes** it on the post, so a **captured/replayed** `ext_session_post` frame (permit already consumed), a **forged** frame (no valid nonce), or a **tampered** role/text (hash mismatch) are all rejected with no post; (3) the server authorizes it (the pack's tool ∈ the session's `allowedTools`, server-derived packId), targets only the WS connection's own session (cross-session posting is structurally impossible), enforces role-aware delivery (a `"system"` message is framed as an explicit system directive, never silently delivered as user text), and **audits every post**; (4) the client adds a `navigator.userActivation` "no post on mount" check before minting. **Residual:** a pack forging the permit MINT *during a genuine user gesture* is inherent to the same-realm model — **FULL realm isolation of pack UI logic (a separate iframe/worker realm) is out of scope** for now and is what would close it; the source-level trust decision plus the server-side authorization/permit/audit are the durable boundary, and UI-thread realm isolation is the documented future hardening.
+- **MCP servers** — either run trusted stdio commands on the host or send prompts/tool arguments/headers/project-derived data to trusted remote HTTP endpoints. A Marketplace MCP install is a host-tier trust decision, not a sandbox boundary.
 - **Skills** — free-form instructions an agent tends to follow literally. An agent with shell access can be directed to do damage.
 - **Roles** — persona/behavior steering; influential but more diffuse. Still drives an LLM with tool access.
 
@@ -113,8 +120,8 @@ Why two fields instead of one boolean? A single "update available" flag can't di
 
 ### Updating and uninstalling
 
-- **Update** re-syncs the originating source, re-resolves the commit, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes.
-- **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added — no orphans.
+- **Update** re-syncs the originating source, re-resolves the commit/fingerprint, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes. MCP registry packs are rebuilt from the latest registry entry.
+- **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added — no orphans. If the pack contributed MCP servers, Bobbit reloads the affected MCP managers and unregisters removed external MCP tools.
 
 **When the Update button appears (change detection).** The Update button is shown only when the source's latest **manifest version** differs from the installed `.pack-meta.yaml` version — a plain version-string comparison, not a commit-SHA or file diff. This is cheap, deterministic, and matches the semver the publisher advertises.
 
@@ -136,14 +143,12 @@ user-facing entities are toggleable:** roles, tools, skills, and entrypoints. Su
 — panels, routes, stores, renderers, actions, `lib/` — are **not** independently toggleable
 (panels may be shown read-only as "support surfaces").
 
-> **Extension Platform (`schema: 2`).** The activation system also covers the new pack-scoped
-> kinds — `providers` plus the reserved siblings `hooks` / `mcp` / `piExtensions` / `runtimes`
+> **Extension Platform (`schema: 2`).** The activation system also covers the pack-scoped
+> kinds — `providers`, `mcp`, plus the reserved siblings `hooks` / `piExtensions` / `runtimes`
 > / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
-> `pack-activation` catalogue includes their arrays only for schema-2 packs, so the toggles round-trip through the same
-> REST without changing schema-1 catalogue shapes. Of these, only **providers** currently has a loader, so disabling a provider actually
-> removes it from `PackContributionRegistry.listProviders(...)`; the other five toggle purely as
-> catalogue metadata until their loaders land. See
-> [pack.yaml schema 2 → Per-provider activation](#per-provider-activation).
+> `pack-activation` catalogue includes their arrays only for schema-2 packs, so toggles round-trip through the same
+> REST without changing schema-1 catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads through `McpManager` discovery. The remaining reserved kinds toggle purely as catalogue metadata until their loaders land. See
+> [pack.yaml schema 2](#packyaml-schema-2-extension-platform).
 
 What disabling does:
 
@@ -154,6 +159,7 @@ What disabling does:
   `/api/ext/contributions`, so the launcher/deep-link disappears. **A panel the entrypoint
   targets stays available** to any enabled tool/entrypoint that opens it — disabling an
   entrypoint never disables a panel.
+- **Disable an MCP contribution** — its `contents.mcp` list name is added to `DisabledRefs.mcp`, so the contribution is omitted from Marketplace MCP discovery/connection. Runtime status and external `mcp_*` tools are refreshed immediately; the disabled row remains visible in the activation catalogue so it can be re-enabled.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -163,13 +169,15 @@ is keyed by those concrete tool names, and the runtime filters compare against t
 `/api/tools`, prompt docs, role effective-tool resolution, and extension/action/surface-token
 resolution. Disabling one tool in a group does not disable its siblings.
 
+**MCP toggle keys and granularity.** `DisabledRefs.mcp` is keyed by the pack-local `contents.mcp` basename (`listName`), not the runtime `server` name, not the model-facing `mcp_<server>` tool name, and not an operation id. Flat MCP contributions toggle the whole server. Contributions that declare a `subNamespace` toggle one model-facing sub-namespace (`mcp_<server>__<sub>`); identical-config sub-namespaces may share one underlying MCP client, so disabling one sub-namespace removes only that meta-tool while the shared client stays up if another enabled contribution still needs it. Raw per-operation activation is deliberately not exposed in Market; per-operation `never` remains a Tools-policy/runtime guard.
+
 **Why a catalogue/runtime split.** Toggles persist in `pack_activation` (per scope/project,
 keyed by pack name + entity kind + name; tool refs are concrete tool names; entrypoints are
 keyed by their `contents.entrypoints` basename, so one toggle covers both the launcher id and
-the deep-link `routeId` from that file). The toggle UI must render from the **unfiltered
+the deep-link `routeId` from that file; MCP refs are keyed by their `contents.mcp` basename). The toggle UI must render from the **unfiltered
 catalogue** — read from the installed pack's manifest plus its declared tool-group files via
-`GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools` /
-`/api/ext/contributions`. If the UI read the filtered runtime endpoints, a disabled entity
+`GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools`,
+`/api/ext/contributions`, or `/api/mcp-servers`. If the UI read the filtered runtime endpoints, a disabled entity
 would vanish from the list and become impossible to re-enable. So the catalogue stays complete
 (every toggle visible, `checked = name ∉ disabled[kind]`) while the runtime registries stay
 filtered (a disabled entity does not register/resolve). The `PUT` returns the refreshed
@@ -193,7 +201,114 @@ basename + a realpath-aware pack-root containment check) before any file is read
 manifest's `contents` names are publisher-authored and this helper also runs on Browse, before
 any install. A rejected name simply yields no description row.
 
-### Config-page integration
+## Marketplace MCP
+
+Marketplace MCP is the install/browse layer for MCP server definitions. It does **not** replace manual MCP config files; it adds pack-owned MCP contributions below the existing manual cascade so users can install and toggle MCP servers from Market while keeping `.mcp.json` and Claude-compatible config paths intact.
+
+### Pack-owned MCP contributions
+
+A schema-2 pack declares MCP entries by listing pack-local basenames in `contents.mcp`:
+
+```yaml
+# pack.yaml
+schema: 2
+name: github-mcp
+description: GitHub MCP server.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  mcp: [github]
+```
+
+Each basename loads exactly one `mcp/<listName>.yaml`, `.yml`, or `.json` file. The `listName` is the stable pack-local identity used by `contents.mcp`, `DisabledRefs.mcp`, activation toggles, registry materialization, and source metadata. It is intentionally separate from the runtime MCP `server` name, which is the key merged into `McpManager` and used to form policy keys/model-facing meta-tools.
+
+```yaml
+# mcp/github.yaml
+server: github                  # Optional; defaults to listName.
+label: GitHub
+subNamespace: issues            # Optional; toggles mcp_github__issues.
+description: GitHub issue tools.
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-github"]
+  env:
+    GITHUB_TOKEN: "${GITHUB_TOKEN}"
+  cwd: server                   # Optional, relative to and contained in pack root.
+```
+
+```yaml
+# mcp/docs.yaml
+server: docs
+label: Docs Search
+transport:
+  type: http
+  url: https://mcp.example.com/mcp
+  headers:
+    Authorization: "Bearer ${DOCS_TOKEN}"
+```
+
+Validation is strict because these files can start host processes or route data to remote services:
+
+- `listName` / registry `id`: 1–64 chars, safe basename, no separators/NUL/dot segments/leading dot/Windows device names.
+- `server` / `subNamespace`: `^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`, no `__`, separators, NUL, `.` / `..`, or empty meta-tool normalization.
+- Top-level MCP keys are only `server`, `label`, `description`, `subNamespace`, and `transport`; transport keys are shape-specific.
+- Stdio accepts `command`, `args`, `env`, and `cwd`; `args` must be strings, `env` must be a string map, and `cwd` must be relative, existing, and contained inside the pack root after realpath checks.
+- HTTP accepts `url` and `headers`; the URL must be `http:` or `https:` with no credentials or fragment, and `headers` must be a string map.
+- Env/header keys may not be empty and may not contain NUL or newline characters. Values are strings. Status payloads show only key names or redacted values, never secret values.
+- Unknown keys are rejected for authored MCP files and registry entries.
+
+### MCP registry / discovery sources
+
+An MCP registry source is added with `type: "mcp-registry"` and an HTTP(S) discovery URL. The document must be JSON with `schemaVersion: 1` and `servers[]`; each server has stable `id`, runtime `name`, optional display metadata, and a stdio/http `transport`.
+
+```json
+{
+  "schemaVersion": 1,
+  "servers": [
+    {
+      "id": "github",
+      "name": "github",
+      "label": "GitHub",
+      "version": "1.0.0",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.example.com/github",
+        "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" }
+      }
+    }
+  ]
+}
+```
+
+Browse maps each valid registry server to a virtual pack row:
+
+- `id` becomes the pack-local `contents.mcp` ref, materialized file basename, `DisabledRefs.mcp` key, and pack suffix.
+- `name` becomes the runtime MCP `server` name.
+- The virtual and installed pack name is `mcp-<id>`.
+- Installing materializes a normal schema-2 pack with `pack.yaml`, `mcp/<id>.yaml`, and `.pack-meta.yaml` containing the source URL, registry id/version/fingerprint, and materialization time.
+- Invalid registry documents fail browse. Invalid individual server entries are skipped and reported as diagnostics, so one bad entry does not hide every valid server.
+
+Registry update detection uses the registry entry fingerprint when the source has been synced/browsed. The Installed tab remains sync-free: it never fetches a registry just to render; explicit Re-sync/Update performs the network check.
+
+### Runtime layering, reloads, and status
+
+Marketplace MCP contributions are resolved by scope and then grouped into MCP client connections:
+
+1. Market packs are read in scope order (`server`, `global-user`, then current `project`), respecting each scope's `pack_order`.
+2. `DisabledRefs.mcp` is applied before same-name grouping, so disabled Marketplace entries do not connect.
+3. Same runtime `server` with identical config can share a connection; sub-namespace contributions filter which `mcp_<server>__<sub>` meta-tools are exposed.
+4. Manual MCP config discovery then runs unchanged and overlays Marketplace by runtime server name. A manual definition with the same server name wins over Marketplace and is shown as an override in Market status.
+
+MCP runtime state is contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own their own clients, status, tool docs, and external tool registrations. `GET /api/mcp-servers?projectId=...` or `?cwd=...` reads that scoped manager; without parameters it reads the default manager. A status read does not create a scoped manager unless the UI asks with `ensure=true`.
+
+Install/update/uninstall, `pack_order`, and MCP activation mutations persist disk state first, invalidate Marketplace/pack-contribution caches, then ask the affected manager(s) to reload. Reloads are serialized per manager, disconnect removed servers, keep unchanged connections, connect changed servers into fresh state, and refresh `ToolManager` external MCP tools. Responses may include `mcpReload.status: "ok" | "partial" | "error" | "pending"`; a pending reload continues in the background and refreshes external MCP tools when it settles.
+
+The Market page uses runtime status only as contextual decoration: connected/error/reconnecting, ownership, override hints, and redacted transport previews. Toggle rows come from the unfiltered `GET /api/marketplace/pack-activation` catalogue, never from `GET /api/mcp-servers`, because disabled MCP entries must stay visible and re-enableable.
+
+## Config-page integration
 
 The Roles (`#/roles`), Tools (`#/tools`), and Skills (`#/skills`) pages need no structural change — they already render `origin`/`overrides` scope badges. Market-pack entities now appear there with:
 
@@ -306,18 +421,20 @@ contents:                        # REQUIRED. roles/tools/skills required; each M
   skills:      [lit-review]      #   (No per-pack gate keys off tools[]; trust is
   entrypoints: [open-review]      #    decided once when adding a source.)
                                  #   OPTIONAL — entrypoints/<name>.yaml basenames (toggleable).
+  # schema: 2 only:
+  mcp:         [github]          #   OPTIONAL — mcp/<name>.yaml|yml|json basenames (toggleable).
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
   names:  [bundle, publish]       #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected at schema 1** (the absent-or-`1` default) — MCP installs are out of scope in the MVP — but **accepted at `schema: 2`** as catalogue metadata (no MCP loader exists yet; see [pack.yaml schema 2](#packyaml-schema-2-extension-platform)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
 Schema 2 is the **Extension Platform** workstream's manifest tier. It began as a deliberately
-**additive** change — schema 2 widens what a `pack.yaml` may declare and adds a loader for one
-new contribution type (**providers**) — and remains **fully back-compatible**: existing
+**additive** change — schema 2 widens what a `pack.yaml` may declare and adds loaders for
+pack-scoped contributions such as **providers** and **MCP** — and remains **fully back-compatible**: existing
 schema-1 (v1) packs see zero behaviour change. A pack opts in with a top-level `schema:` field;
 absent (or `1`) keeps the exact v1 semantics.
 **Providers now dispatch through the Lifecycle Hub.** What began as a manifest-only step is
@@ -354,7 +471,7 @@ Two optional top-level arrays of **capability names** (each entry matches `/^[a-
 - **`provides?: string[]`** — capability names this pack contributes.
 - **`requires?: string[]`** — capability names this pack depends on.
 
-They are **metadata only** in this PR (recorded on the parsed manifest, surfaced nowhere
+They are **metadata only** today (recorded on the parsed manifest, surfaced nowhere
 behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
 goal. They are validated now so packs can declare them ahead of that work.
 
@@ -364,21 +481,16 @@ Schema 2 adds six optional `contents` keys. Each is a `string[]` of **safe basen
 guard as `contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), and
 each defaults to `[]` when absent:
 
-| `contents` key | YAML key | Loader in this PR? | Purpose |
+| `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
 | `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
-| `mcp` | `mcp` | No (reserved) | MCP contribution basenames (accepted at schema 2 only). |
+| `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | No (reserved) | PI-extension basenames. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**Only `providers` has a loader in this PR.** The other five keys are **accepted** in the
-manifest, **normalised** onto `contents`, and **surfaced in the activation catalogue** (so the
-Market UI and the `pack-activation` REST already see and toggle them), but there is no loader
-that reads their files — that is owned by the later goals that implement each contribution
-type. Declaring them today is harmless: they validate as basenames and round-trip, nothing
-more.
+**`providers` and `mcp` have loaders.** `providers` load through the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path described above. The other reserved keys are accepted, normalised onto `contents`, and surfaced in the activation catalogue, but no runtime loader reads their files yet.
 
 #### Minimal schema-2 example
 
@@ -395,8 +507,9 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  # hooks / mcp / pi-extensions / runtimes / workflows are accepted here at
-  # schema 2 but have no loader in this PR — reserved for later goals.
+  mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
+  # hooks / pi-extensions / runtimes / workflows are accepted here at
+  # schema 2 but remain reserved for later goals.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
@@ -471,13 +584,13 @@ rule: load via the pack-contribution registry, never the name-merging resolver.
 
 #### Per-provider activation
 
-Providers (and the five reserved sibling kinds) are **first-class in the activation system**,
+Providers, MCP, and the reserved sibling kinds are **first-class in the activation system**,
 so they round-trip through the same `GET/PUT /api/marketplace/pack-activation` REST as roles,
 tools, skills, and entrypoints — see [Activation controls](#activation-controls):
 
-- **`DisabledRefs`** gains `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
-  `workflows` arrays, and all six are added to `ACTIVATION_KINDS` so normalisation, hydration,
-  and `getPackActivation` cover them automatically (one constant drives all three).
+- **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
+  `workflows` arrays, and all six are in `ACTIVATION_KINDS` so normalisation, hydration,
+  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same
@@ -487,6 +600,7 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
+- An MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 
 These REST shapes are **purely additive** — a schema-1 pack produces a byte-identical
 catalogue, so existing clients and the existing marketplace test suite are unaffected.
@@ -599,21 +713,21 @@ All marketplace routes live in `server.ts::handleApiRoute()`. Full request/respo
 | Method & path | Purpose |
 |---|---|
 | `GET /api/marketplace/sources` | List registered sources. |
-| `POST /api/marketplace/sources` | Add a source `{ url, ref? }` (syncs immediately). |
+| `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` (syncs immediately). `type: "mcp-registry"` registers an MCP registry/discovery URL; omitted/`"pack"` registers git/local pack sources. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source and its cache dir. |
-| `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch). |
-| `GET /api/marketplace/sources/:id/packs` | Browse a source's packs (`hasTools` reflects whether the pack ships tools; informational only — it no longer drives a per-pack gate). |
-| `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` — install a pack. |
-| `POST /api/marketplace/update` | `{ scope, packName, projectId? }` — re-pull + replace. |
+| `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch for pack sources, bounded JSON fetch/fingerprint update for MCP registries). |
+| `GET /api/marketplace/sources/:id/packs` | Browse a source's packs or MCP registry virtual packs (`hasTools` reflects whether the pack ships tools; informational only — it no longer drives a per-pack gate). |
+| `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` — install a pack or materialize/install an MCP registry virtual pack. May return `mcpReload`. |
+| `POST /api/marketplace/update` | `{ scope, packName, projectId? }` — re-pull/re-materialize + replace. May return `mcpReload`. |
 | `DELETE /api/marketplace/installed` | `{ scope, packName, projectId? }` — uninstall. |
 | `GET /api/marketplace/installed?projectId=` | List installed packs across scopes with provenance. |
 | `GET /api/marketplace/pack-order?scope=&projectId=` | Read a scope's market-pack order. |
-| `PUT /api/marketplace/pack-order` | `{ scope, projectId?, order }` — replace a scope's order. |
-| `GET /api/marketplace/pack-activation?scope=&projectId=&packName=` | Read a pack's activation state for a scope — returns the **unfiltered** `catalogue` (all toggleable entities the installed pack declares) + the current `disabled` refs. |
-| `PUT /api/marketplace/pack-activation` | `{ scope, projectId?, packName, disabled }` — replace a pack's activation overrides; returns the refreshed `catalogue` + normalized `disabled`, then invalidates caches. |
+| `PUT /api/marketplace/pack-order` | `{ scope, projectId?, order }` — replace a scope's order. May return `mcpReload` if MCP packs are affected. |
+| `GET /api/marketplace/pack-activation?scope=&projectId=&packName=` | Read a pack's activation state for a scope — returns the **unfiltered** `catalogue` (all toggleable entities the installed pack declares, including disabled MCP refs) + the current `disabled` refs. |
+| `PUT /api/marketplace/pack-activation` | `{ scope, projectId?, packName, disabled }` — replace a pack's activation overrides; returns the refreshed `catalogue` + normalized `disabled`, then invalidates caches. May return `mcpReload` when `disabled.mcp` changes. |
 | `GET /api/packs/conflicts?projectId=` | List same-name conflicts `(type, name, winner, shadowed[])`. |
 
-`scope` ∈ `"global-user" | "server" | "project"`; `projectId` is required when `scope === "project"`. Install/update/uninstall and pack-order changes invalidate the resolver cache and the slash-skills TTL cache synchronously, so a subsequent `GET /api/roles|tools|skills` reflects the change without a client reload.
+`scope` ∈ `"global-user" | "server" | "project"`; `projectId` is required when `scope === "project"`. Install/update/uninstall, pack-order changes, and activation changes invalidate resolver/catalogue caches synchronously. MCP-affecting mutations also reload affected MCP managers, disconnect removed servers, and refresh external ToolManager MCP registrations; Marketplace state is not rolled back if runtime reconnect partially fails.
 
 The existing `/api/roles`, `/api/tools`, `/api/skills` endpoints keep their shape but now source data from `PackResolver`. The `origin` field gained a `user` value (for global-user packs) and every entity carries `originPackId` / `originPackName` (both `null` for builtin/user entities). The `/api/tools` `ToolInfo` payload additionally carries the extension-host wire fields `rendererKind` (`"builtin" | "pack"`), `hasActions`, and `actionNames`.
 
@@ -642,7 +756,7 @@ The resolver is a single, type-agnostic pipeline (`src/server/agent/pack-resolve
 
 - `PackResolver.resolve<T>(type)` walks the ordered `PackEntry[]` low→high and merges by name. A later entry shadows an earlier same-name entry; shadowed entries are retained in `ResolvedEntity.shadows[]` to drive conflict UI.
 - Type-specific reading is delegated to **`EntityLoader<T>`** plugins — `RoleLoader`, `ToolLoader`, `SkillLoader`. Loaders are pure `(entry) → entities`; they contain **no** precedence logic. Roles/tools read the `defaults-tree` layout; the skill loader additionally handles `skills-flat` (a directory that is itself a skills root) and `commands-flat` (`.claude/commands/*.md`).
-- Adding a future entity type (`mcp/`, UI `panels/`) is *adding a loader*, not touching the ordering core. `EntityType` already reserves `mcp` for that seam.
+- Adding a future name-merged entity type is *adding a loader*, not touching the ordering core. MCP uses a separate pack-contribution path because it resolves to scoped runtime managers rather than role/tool/skill name-merged entities.
 
 Key types are in `src/server/agent/pack-types.ts`: `PackManifest`, `PackMeta`, `PackEntry`, `EntityLoader<T>`, `ResolvedEntity<T>`, and the `scopePaths()` helper that both resolution and install derive paths from.
 
@@ -683,10 +797,10 @@ See [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md) fo
 
 ## Limitations & deferred work
 
-- **MCP and AGENTS are not installable.** `.mcp.json` and AGENTS/CLAUDE.md keep their own loaders and resolve as before; a pack may not ship `mcp/` or AGENTS content. MCP configs reference local binaries, absolute paths, and secrets that mostly won't run on the installer's machine; AGENTS.md describes one specific project. The resolver leaves an `mcp/` loader seam for when a parameterization/secrets model exists.
+- **AGENTS are not installable.** AGENTS/CLAUDE.md prompt assembly keeps its own loader because these files describe a specific project and agent-operational contract. MCP is installable through schema-2 Marketplace contributions or MCP registry sources; manual `.mcp.json` sources remain supported and override Marketplace.
 - **Per-conflict pinning is deferred.** The only conflict-resolution mechanism is `pack_order` (plus user-pack customization). A future `pack_conflicts` schema is sketched in the design doc but not implemented, surfaced, or tested.
-- **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool or MCP server; there is no capability concept. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
+- **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, MCP packs can run host stdio commands or call trusted remote endpoints, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool or MCP server; there is no capability concept. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
 - **Git sync is synchronous.** Add-source, re-sync, and install run git inline and block until done.
-- **No hosted registry yet.** Sources are git repos or local dirs; the `MarketplaceSource` abstraction is kept open to a future hosted/searchable registry backend.
+- **No hosted pack registry yet.** Generic pack sources are still git repos or local dirs. MCP registry/discovery URLs are supported specifically for MCP server discovery, not as a searchable hosted pack marketplace.
 - **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; staff templates are noted as a gap. (UI panels are now shipped as auto-discovered `panels/<panel>.yaml` pack contributions — see the [Extension Host](#extension-contributions-tool-renderers--server-actions) section.)
 - **Child-agent launch is pack-expressible (sandbox-inherited) via `host.agents`; goal-team `team_spawn` is not; typed inference is out of scope for v1.** A pack can launch + orchestrate child agents through `host.agents.*`, but only within the calling session's sandbox/credential scope (no escalation, no foreign-session reach) — see [What is (and isn't) pack-expressible](#what-is-and-isnt-pack-expressible-in-v1). Goal-team `team_spawn` (worktree-on-sub-branch role agents) stays agent-tool-side. There is no *typed* `host.model.*` inference method — not because the worker lacks credentials (a trusted pack has full ambient env + network, like any tool), but because a gateway-mediated inference contract is deferred. A parent-side `host.model.*` is the highest-value future additive capability — see [What is (and isn't) pack-expressible in v1](#what-is-and-isnt-pack-expressible-in-v1).

@@ -109,6 +109,7 @@ const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(defau
 const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(defaultConcurrency);
 
 const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FAILURE_TAIL_LINES || "240", 10) || 240);
+const exitCloseGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_EXIT_CLOSE_GRACE_MS || "5000", 10) || 5000);
 
 function appendTail(tail, chunk) {
 	for (const line of String(chunk).split(/\r?\n/)) {
@@ -123,6 +124,9 @@ function run(label, args) {
 		const start = Date.now();
 		const tail = [];
 		let settled = false;
+		let exitCode = null;
+		let exitSignal = null;
+		let closeGraceTimer;
 		const child = spawn(npx, args, {
 			cwd: projectRoot,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -131,6 +135,16 @@ function run(label, args) {
 			shell: isWin,
 			env: testEnv,
 		});
+
+		const settle = (code, signal) => {
+			if (settled) return;
+			settled = true;
+			if (closeGraceTimer) clearTimeout(closeGraceTimer);
+			const secs = ((Date.now() - start) / 1000).toFixed(1);
+			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${code ?? signal ?? "?"})`);
+			res({ label, code: code ?? (signal ? 1 : 0), tail });
+		};
+
 		child.stdout?.on("data", (chunk) => {
 			process.stdout.write(chunk);
 			appendTail(tail, chunk);
@@ -139,16 +153,32 @@ function run(label, args) {
 			process.stderr.write(chunk);
 			appendTail(tail, chunk);
 		});
+		child.on("exit", (code, signal) => {
+			exitCode = code;
+			exitSignal = signal;
+			// `close` normally follows `exit` once stdio pipes close. Under Windows gate
+			// load, leaked descendants can inherit the node runner's stdout/stderr pipe:
+			// node:test has exited (and --test-force-exit has done its job), but `close`
+			// never arrives, so the wrapper waits until the outer gate timeout. Keep the
+			// child exit code authoritative, wait briefly for trailing output, then close
+			// our pipe readers and finish instead of hanging the whole unit phase.
+			closeGraceTimer = setTimeout(() => {
+				if (settled) return;
+				const warning = `[run-unit] ${label} process exited but stdio did not close within ${exitCloseGraceMs}ms; treating the process exit as authoritative. A descendant likely inherited stdout/stderr.`;
+				console.warn(`\n${warning}`);
+				appendTail(tail, warning);
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				settle(exitCode, exitSignal);
+			}, exitCloseGraceMs);
+		});
 		child.on("close", (code, signal) => {
-			if (settled) return;
-			settled = true;
-			const secs = ((Date.now() - start) / 1000).toFixed(1);
-			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${code ?? signal ?? "?"})`);
-			res({ label, code: code ?? (signal ? 1 : 0), tail });
+			settle(code ?? exitCode, signal ?? exitSignal);
 		});
 		child.on("error", (err) => {
 			if (settled) return;
 			settled = true;
+			if (closeGraceTimer) clearTimeout(closeGraceTimer);
 			console.error(`[run-unit] ${label} failed to start:`, err);
 			res({ label, code: 1, tail: [String(err?.stack || err)] });
 		});

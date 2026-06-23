@@ -210,6 +210,11 @@
 	color: var(--chart-3);
 }
 
+.market-entity-chip[data-kind="mcp"] {
+	background: color-mix(in oklch, var(--info, var(--chart-4)) 14%, transparent);
+	color: var(--info, var(--chart-4));
+}
+
 .market-builtin-badge {
 	display: inline-flex;
 	align-items: center;
@@ -324,6 +329,10 @@
 	border-left-color: color-mix(in oklch, var(--chart-1) 60%, transparent);
 }
 
+.market-trust-why-body p[data-kind="mcp"] {
+	border-left-color: color-mix(in oklch, var(--info, var(--chart-4)) 60%, transparent);
+}
+
 .market-trust-why-body strong {
 	color: var(--foreground);
 	font-weight: 600;
@@ -335,6 +344,55 @@
 	border-radius: 0.1875rem;
 	background: var(--muted);
 	color: var(--foreground);
+}
+
+.market-source-kind {
+	display: inline-flex;
+	align-items: center;
+	width: fit-content;
+	padding: 0.125rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: var(--muted);
+}
+
+.market-source-kind-option {
+	padding: 0.25rem 0.5rem;
+	border-radius: 0.375rem;
+	font-size: 0.6875rem;
+	font-weight: 600;
+	color: var(--muted-foreground);
+	cursor: pointer;
+}
+
+.market-source-kind-option--active {
+	background: var(--card);
+	color: var(--foreground);
+	box-shadow: 0 0 0 1px var(--border);
+}
+
+.market-source-helper {
+	font-size: 0.6875rem;
+	line-height: 1.35;
+	color: var(--muted-foreground);
+}
+
+.market-source-type-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	font-size: 10px;
+	font-weight: 600;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: nowrap;
+	background: var(--muted);
+	color: var(--muted-foreground);
+}
+
+.market-source-type-chip[data-kind="mcp-registry"] {
+	background: color-mix(in oklch, var(--info, var(--chart-4)) 14%, transparent);
+	color: var(--info, var(--chart-4));
 }
 
 .market-error {
@@ -527,6 +585,89 @@
 	border-color: color-mix(in oklch, var(--warning, var(--chart-4)) 35%, transparent);
 	background: color-mix(in oklch, var(--warning, var(--chart-4)) 12%, transparent);
 	color: var(--warning, var(--chart-4));
+}
+
+.market-lozenge--positive {
+	border-color: color-mix(in oklch, var(--positive, var(--chart-2)) 35%, transparent);
+	background: color-mix(in oklch, var(--positive, var(--chart-2)) 12%, transparent);
+	color: var(--positive, var(--chart-2));
+}
+
+.market-lozenge--error {
+	border-color: color-mix(in oklch, var(--negative, var(--destructive)) 35%, transparent);
+	background: color-mix(in oklch, var(--negative, var(--destructive)) 12%, transparent);
+	color: var(--negative, var(--destructive));
+}
+
+.market-lozenge--info,
+.market-lozenge--mcp {
+	border-color: color-mix(in oklch, var(--info, var(--chart-4)) 35%, transparent);
+	background: color-mix(in oklch, var(--info, var(--chart-4)) 12%, transparent);
+	color: var(--info, var(--chart-4));
+}
+
+.market-lozenge--muted {
+	border-color: var(--border);
+	background: var(--muted);
+	color: var(--muted-foreground);
+}
+
+.market-mcp-transport-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	margin-top: 0.5rem;
+}
+
+.market-mcp-transport {
+	display: flex;
+	align-items: center;
+	gap: 0.375rem;
+	min-width: 0;
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-mcp-transport-preview {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.market-mcp-transport-details {
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-mcp-transport-details > summary {
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.market-mcp-transport-details strong {
+	color: var(--foreground);
+	font-weight: 600;
+}
+
+.market-mcp-error {
+	max-width: 12rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--negative, var(--destructive));
+}
+
+.market-mcp-policy-link {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+}
+
+.market-activation-help {
+	margin-top: 0.25rem;
+	font-size: 0.6875rem;
+	line-height: 1.35;
+	color: var(--muted-foreground);
 }
 
 /* ── Per-entity description disclosure (R3) ──────────────────────────────────

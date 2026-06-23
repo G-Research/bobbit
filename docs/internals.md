@@ -2015,9 +2015,10 @@ See also: [docs/rest-api.md - Image generation](rest-api.md#image-generation) fo
 
 ## MCP servers
 
-Auto-discovered from Claude Code-compatible locations. Sources (later overrides earlier):
+MCP discovery has two layers. Marketplace MCP contributions are resolved first, then the manual/Claude-compatible cascade overlays them by runtime server name. Sources (later overrides earlier):
 
-1. Custom directories with type `"mcp"` (lowest priority)
+0. Active Marketplace MCP contributions from installed schema-2 packs and MCP registry materializations (lowest; `DisabledRefs.mcp` omitted before connection)
+1. Custom directories with type `"mcp"`
 2. Additional registered projects' MCP locations (see below)
 3. `~/.claude.json` → `mcpServers` + `projects[<cwd>].mcpServers`
 4. `~/.claude/.mcp.json`
@@ -2040,7 +2041,7 @@ Config format matches Claude Code `.mcp.json`:
 
 **Tool surface:** the model sees one **meta-tool per server** named `mcp_<server>(operation, args)` plus a shared `mcp_describe(server, operation?)` discovery tool. The legacy per-op identifier `mcp__<server>__<tool>` remains the internal routing key (used by `_toolNameMap`, `tool-group-policies.yaml` keys like `mcp__playwright`, the dispatcher, and existing tests) but is no longer exposed to the model. Failed servers degrade to a stub meta-tool that reports the failure reason rather than aborting the agent turn. See [docs/mcp-meta-tools.md](mcp-meta-tools.md) for the user-facing overview and [docs/design/mcp-meta-tool-aggregation.md](design/mcp-meta-tool-aggregation.md) for the architecture.
 
-Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`.
+Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`. Marketplace MCP validates the same transport shapes before they reach the runtime and redacts env/header values, args, URL credentials, URL query, and fragments in status payloads.
 
 ### MCP tool documentation
 
@@ -2057,7 +2058,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 
 **Prompt layout** - `getToolDocsForPrompt()` in `tool-manager.ts` produces a single compact `# Tools` section sent on every assistant turn. Each group is one `## <Group> — see <relpath>` header followed by a one-line bullet per tool: `- name(params) — summary`. The `params` list comes from the YAML `params: [name, name?]` field (trailing `?` marks optional); tools without `params` render as `- name — summary`. Per-tool prose (`docs`, `detail_docs`) is **not** inlined into the prompt — it is folded into the per-group reference markdown the pointer resolves to. Built-in groups point at `<stateDir>/tool-docs/<groupDir>.md` (written by `generateDetailDocs()` from each tool's `docs` paragraph followed by `detail_docs`); MCP groups point at `<stateDir>/mcp-tool-docs/<serverName>.md` (auto-generated from `tools/list`). MCP groups render one bullet per op with no inlined parameter prose — agents call `mcp_describe` for full schemas. This compact format replaced an earlier sentence-form `### name` layout to drop ~78% of the per-turn `# Tools` byte count.
 
-**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. See also [docs/mcp-meta-tools.md](mcp-meta-tools.md).
+**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. `GET /api/mcp-servers` is contextual status only (`projectId`/`cwd` select a scoped manager; `ensure=true` may create one for authenticated UI flows). Marketplace toggles come from `GET/PUT /api/marketplace/pack-activation`, not runtime status. See also [docs/mcp-meta-tools.md](mcp-meta-tools.md) and [docs/marketplace.md#marketplace-mcp](marketplace.md#marketplace-mcp).
 
 ---
 
