@@ -1,18 +1,63 @@
 /**
  * Browser E2E for the sidebar font-size setting.
  */
+import { type Locator } from "@playwright/test";
 import { test, expect, type Page } from "../gateway-harness.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const SCALE_KEY = "bobbit:sidebar-font-scale";
+const BASE_PX = 12;
+const DEFAULT_SCALE = 14 / BASE_PX;
+const MIN_PX = 10;
+const MAX_PX = 32;
+const FONT_SIZE_INPUT_SELECTOR = [
+	"[data-testid='sidebar-font-size-input']",
+	"[data-testid='sidebar-font-scale-input']",
+	"input[type='number'][min='10'][max='32'][step='1']",
+].join(", ");
 
 type SidebarMeasure = { rootSize: number; emChildSize: number | null; cssVar: string };
+
+function scaleForPx(px: number): number {
+	return px / BASE_PX;
+}
+
+function fontSizeInput(page: Page): Locator {
+	return page.locator(FONT_SIZE_INPUT_SELECTOR).first();
+}
 
 async function resetScale(page: Page): Promise<void> {
 	await openApp(page);
 	await page.evaluate((k) => localStorage.removeItem(k), SCALE_KEY);
 	await page.reload();
 	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+}
+
+async function readScale(page: Page): Promise<number> {
+	return page.evaluate(() => Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-font-scale").trim()));
+}
+
+async function waitForScale(page: Page, expected: number, precision = 2): Promise<void> {
+	await expect.poll(() => readScale(page), { timeout: 5_000 }).toBeCloseTo(expected, precision);
+}
+
+async function persistedScale(page: Page): Promise<number> {
+	const persisted = await page.evaluate((k) => localStorage.getItem(k), SCALE_KEY);
+	return Number.parseFloat(persisted ?? "");
+}
+
+async function inputValueAsNumber(page: Page): Promise<number> {
+	return Number.parseFloat(await fontSizeInput(page).inputValue());
+}
+
+async function setFontSizePx(page: Page, value: string): Promise<void> {
+	const input = fontSizeInput(page);
+	await input.fill(value);
+	await input.evaluate((el) => {
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+		el.dispatchEvent(new Event("change", { bubbles: true }));
+	});
+	await input.blur();
 }
 
 async function measureSidebar(page: Page): Promise<SidebarMeasure> {
@@ -27,13 +72,6 @@ async function measureSidebar(page: Page): Promise<SidebarMeasure> {
 	});
 	expect(result).not.toBeNull();
 	return result!;
-}
-
-async function setScaleSlider(page: Page, value: string): Promise<void> {
-	await page.locator("[data-testid='sidebar-font-scale-slider']").evaluate((el: HTMLInputElement, v) => {
-		el.value = v;
-		el.dispatchEvent(new Event("input", { bubbles: true }));
-	}, value);
 }
 
 async function injectActivityDot(page: Page): Promise<void> {
@@ -61,59 +99,93 @@ async function activityDotSize(page: Page): Promise<number> {
 }
 
 test.describe("Sidebar font scale (full-stack UI)", () => {
-	test("desktop control scales sidebar, persists on reload, resets, and leaves main pane unchanged @smoke", async ({ page }) => {
+	test("desktop numeric control scales sidebar, persists, clamps, resets, and leaves main pane unchanged @smoke", async ({ page }) => {
 		await resetScale(page);
 		await navigateToHash(page, "#/settings/system/general");
 
 		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator("[data-testid='general-appearance-heading']")).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator("[data-testid='sidebar-font-scale-slider']")).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Default");
+
+		const input = fontSizeInput(page);
+		await expect(input).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-font-scale-slider']")).toHaveCount(0);
+		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveCount(0);
 		await expect(page.locator("[data-testid='sidebar-font-scale-reset']")).toBeVisible();
+		expect(await input.getAttribute("type")).toBe("number");
+		expect(await input.getAttribute("min")).toBe(String(MIN_PX));
+		expect(await input.getAttribute("max")).toBe(String(MAX_PX));
+		expect(await input.getAttribute("step")).toBe("1");
+		expect(await inputValueAsNumber(page)).toBe(14);
 
 		const baseline = await measureSidebar(page);
-		expect(Math.round(baseline.rootSize)).toBe(12);
-		expect(baseline.cssVar).toBe("1");
+		expect(parseFloat(baseline.cssVar)).toBeCloseTo(DEFAULT_SCALE, 2);
+		expect(baseline.rootSize).toBeCloseTo(14, 1);
 		expect(baseline.emChildSize ?? 0).toBeGreaterThan(0);
 		const baselineChild = baseline.emChildSize!;
 		const baselineChat = await page.locator("h1").first().evaluate(
 			(el) => parseFloat(getComputedStyle(el).fontSize),
 		);
 		const baselineDot = await activityDotSize(page);
-		expect(baselineDot).toBeGreaterThan(5.5);
-		expect(baselineDot).toBeLessThan(6.5);
+		expect(baselineDot).toBeGreaterThan(6.5);
+		expect(baselineDot).toBeLessThan(7.5);
 
-		await setScaleSlider(page, "4");
-		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Largest");
+		await setFontSizePx(page, "24");
+		await waitForScale(page, scaleForPx(24));
 		const scaled = await measureSidebar(page);
-		expect(parseFloat(scaled.cssVar)).toBeCloseTo(1.22, 2);
-		expect(scaled.rootSize / baseline.rootSize).toBeCloseTo(1.22, 1);
-		expect(scaled.emChildSize! / baselineChild).toBeCloseTo(1.22, 1);
-		expect((await activityDotSize(page)) / baselineDot).toBeCloseTo(1.22, 1);
+		expect(scaled.rootSize).toBeCloseTo(24, 1);
+		expect(scaled.rootSize / baseline.rootSize).toBeCloseTo(scaleForPx(24) / DEFAULT_SCALE, 1);
+		expect(scaled.emChildSize! / baselineChild).toBeCloseTo(scaleForPx(24) / DEFAULT_SCALE, 1);
+		expect((await activityDotSize(page)) / baselineDot).toBeCloseTo(scaleForPx(24) / DEFAULT_SCALE, 1);
 		expect(await page.locator("h1").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(baselineChat, 1);
+		expect(await persistedScale(page)).toBeCloseTo(scaleForPx(24), 2);
 
-		const persisted = await page.evaluate((k) => localStorage.getItem(k), SCALE_KEY);
-		expect(parseFloat(persisted ?? "")).toBeCloseTo(1.22, 2);
+		await setFontSizePx(page, String(MAX_PX));
+		await waitForScale(page, scaleForPx(MAX_PX));
+		expect((await measureSidebar(page)).rootSize).toBeCloseTo(MAX_PX, 1);
+		expect(await persistedScale(page)).toBeCloseTo(scaleForPx(MAX_PX), 2);
 
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
-		expect(parseFloat(await page.evaluate(
-			() => getComputedStyle(document.documentElement).getPropertyValue("--sidebar-font-scale").trim(),
-		))).toBeCloseTo(1.22, 2);
-
+		await waitForScale(page, scaleForPx(MAX_PX));
 		await navigateToHash(page, "#/settings/system/general");
-		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Largest", { timeout: 5_000 });
-		expect(await page.locator("[data-testid='sidebar-font-scale-slider']").inputValue()).toBe("4");
+		await expect(fontSizeInput(page)).toHaveValue(String(MAX_PX), { timeout: 5_000 });
 
-		await setScaleSlider(page, "0");
-		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Smallest");
+		await setFontSizePx(page, "100");
+		await waitForScale(page, scaleForPx(MAX_PX));
+		expect(await inputValueAsNumber(page)).toBe(MAX_PX);
+		expect(await persistedScale(page)).toBeCloseTo(scaleForPx(MAX_PX), 2);
+
+		await setFontSizePx(page, "1");
+		await waitForScale(page, scaleForPx(MIN_PX));
+		expect(await inputValueAsNumber(page)).toBe(MIN_PX);
+		expect((await measureSidebar(page)).rootSize).toBeCloseTo(MIN_PX, 1);
+		expect(await persistedScale(page)).toBeCloseTo(scaleForPx(MIN_PX), 2);
 		expect(await page.locator("h1").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(baselineChat, 1);
 
 		await page.locator("[data-testid='sidebar-font-scale-reset']").click();
-		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Default");
+		await waitForScale(page, DEFAULT_SCALE);
+		expect(await inputValueAsNumber(page)).toBe(14);
 		const reset = await measureSidebar(page);
-		expect(parseFloat(reset.cssVar)).toBeCloseTo(1.0, 2);
-		expect(Math.round(reset.rootSize)).toBe(12);
+		expect(reset.rootSize).toBeCloseTo(14, 1);
+		expect(await persistedScale(page)).toBeCloseTo(DEFAULT_SCALE, 2);
+	});
+
+	test("existing persisted scale values load as pixel values in the numeric input", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate((k) => localStorage.setItem(k, "1.22"), SCALE_KEY);
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(fontSizeInput(page)).toBeVisible({ timeout: 5_000 });
+		expect(await inputValueAsNumber(page)).toBeCloseTo(15, 0);
+		await waitForScale(page, 1.22);
+
+		await page.evaluate((k) => localStorage.setItem(k, "2.0"), SCALE_KEY);
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(fontSizeInput(page)).toHaveValue("24", { timeout: 5_000 });
+		await waitForScale(page, 2.0);
 	});
 
 	test("mobile sidebar text-sm element scales with the persisted multiplier", async ({ page }) => {
@@ -126,14 +198,15 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 
 		const baseline = await rolesBtn.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
 		expect(baseline).toBeGreaterThan(0);
+		await waitForScale(page, DEFAULT_SCALE);
 
 		await page.evaluate(([key, val]) => {
 			localStorage.setItem(key as string, String(val));
 			document.documentElement.style.setProperty("--sidebar-font-scale", String(val));
-		}, [SCALE_KEY, 1.22]);
+		}, [SCALE_KEY, 2.0]);
 
 		const scaled = await rolesBtn.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
 		expect(scaled).toBeGreaterThan(baseline);
-		expect(scaled / baseline).toBeCloseTo(1.22, 1);
+		expect(scaled / baseline).toBeCloseTo(2.0 / DEFAULT_SCALE, 1);
 	});
 });

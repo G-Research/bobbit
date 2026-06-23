@@ -254,12 +254,21 @@ applySidebarWidthVar(loadSidebarWidth());
 export {
 	SIDEBAR_FONT_SCALE_KEY,
 	SIDEBAR_FONT_SCALE_DEFAULT,
-	SIDEBAR_FONT_SCALE_STOPS,
+	SIDEBAR_FONT_SCALE_MIN,
+	SIDEBAR_FONT_SCALE_MAX,
+	SIDEBAR_FONT_SIZE_BASE_PX,
+	SIDEBAR_FONT_SIZE_MIN_PX,
+	SIDEBAR_FONT_SIZE_MAX_PX,
+	SIDEBAR_FONT_SIZE_STEP_PX,
 	clampSidebarFontScale,
+	clampSidebarFontSizePx,
+	sidebarFontSizePxToScale,
+	sidebarFontPxToScale,
+	sidebarFontScaleToPx,
+	sidebarFontScaleToFontSizePx,
+	sidebarFontScaleToDisplayPx,
 	loadSidebarFontScale,
 	applySidebarFontScaleVar,
-	nearestStop,
-	type SidebarFontScaleStop,
 } from "./sidebar-font-scale.js";
 
 import { applySidebarFontScaleVar as _applySidebarFontScaleVar, loadSidebarFontScale as _loadSidebarFontScale } from "./sidebar-font-scale.js";
