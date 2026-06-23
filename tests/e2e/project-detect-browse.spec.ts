@@ -3,7 +3,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, bobbitDir } from "./e2e-setup.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -154,6 +154,77 @@ test.describe("POST /api/projects/detect", () => {
 			body: JSON.stringify({}),
 		});
 		expect(res.status).toBe(400);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/create-directory
+// ---------------------------------------------------------------------------
+
+test.describe("POST /api/create-directory", () => {
+	let testRoot: string;
+
+	test.beforeAll(() => {
+		testRoot = join(bobbitDir(), "create-directory-test");
+		mkdirSync(testRoot, { recursive: true });
+	});
+
+	test.afterAll(() => {
+		rmSync(testRoot, { recursive: true, force: true });
+	});
+
+	async function createDir(pathValue: unknown) {
+		return apiFetch("/api/create-directory", {
+			method: "POST",
+			body: JSON.stringify({ path: pathValue }),
+		});
+	}
+
+	test("creates the final path segment and returns the resolved path", async () => {
+		const target = join(testRoot, "new-project");
+		const res = await createDir(target);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.path).toBe(target);
+		expect(existsSync(target)).toBe(true);
+		expect(statSync(target).isDirectory()).toBe(true);
+	});
+
+	test("missing, empty, non-string, and relative paths return invalid_path", async () => {
+		for (const body of [{}, { path: "" }, { path: 42 }, { path: "relative/project" }]) {
+			const res = await apiFetch("/api/create-directory", {
+				method: "POST",
+				body: JSON.stringify(body),
+			});
+			expect(res.status).toBe(400);
+			const data = await res.json();
+			expect(data.code).toBe("invalid_path");
+		}
+	});
+
+	test("existing directory returns already_exists", async () => {
+		const res = await createDir(testRoot);
+		expect(res.status).toBe(409);
+		const data = await res.json();
+		expect(data.code).toBe("already_exists");
+	});
+
+	test("existing file returns exists_as_file", async () => {
+		const target = join(testRoot, "file-target");
+		writeFileSync(target, "not a directory");
+		const res = await createDir(target);
+		expect(res.status).toBe(409);
+		const data = await res.json();
+		expect(data.code).toBe("exists_as_file");
+	});
+
+	test("missing parent returns parent_not_found", async () => {
+		const target = join(testRoot, "missing-parent", "child");
+		const res = await createDir(target);
+		expect(res.status).toBe(404);
+		const data = await res.json();
+		expect(data.code).toBe("parent_not_found");
+		expect(existsSync(join(testRoot, "missing-parent"))).toBe(false);
 	});
 });
 

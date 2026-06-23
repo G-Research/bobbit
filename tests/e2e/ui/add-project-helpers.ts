@@ -42,6 +42,8 @@ export const ADD_PROJECT = {
 		`[data-testid="add-project-scan-checkbox-${id}"]`,
 	scanRowFor: (id: string) => `[data-testid="add-project-scan-row-${id}"]`,
 	continue: '[data-testid="add-project-continue"]',
+	createDirectory: '[data-testid="add-project-create-directory"]',
+	createError: '[data-testid="add-project-create-error"]',
 } as const;
 
 /** Build a unique temp dir under tmpdir(). Caller is responsible for cleanup. */

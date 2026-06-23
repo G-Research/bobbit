@@ -1057,6 +1057,15 @@ export async function browseDirectory(dirPath?: string): Promise<{
   return res.json();
 }
 
+export async function createDirectory(dirPath: string): Promise<{ path: string }> {
+  const res = await gatewayFetch("/api/create-directory", {
+    method: "POST",
+    body: JSON.stringify({ path: dirPath }),
+  });
+  if (!res.ok) throw await errorFromResponse(res, `Failed to create directory: ${res.status}`);
+  return res.json();
+}
+
 export async function registerProject(name: string, rootPath: string, color?: string, upsert?: boolean, acceptCanonical?: boolean): Promise<Project | null> {
   try {
     const body: Record<string, unknown> = { name, rootPath };
