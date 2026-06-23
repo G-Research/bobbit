@@ -458,7 +458,17 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 | Implementation & later | `origin/<primary>...HEAD`                 | All other verify-bearing gates        |
 | `ready-to-merge`       | `origin/<primary>` via `git merge-base`   | Hardcoded in workflow YAML            |
 
-**Why `origin/<primary>` and not local `<primary>`:** in remote-backed projects, local refs are only as fresh as the last `git pull` on the host. Goal worktrees are normally created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work. Before verification, the harness checks whether an `origin` remote exists. If it does, it syncs the goal worktree from `origin/<branch>` and fetches the baseline branch so `origin/<primary>` / `origin/{{baseBranch}}` is current. If the repository is local-only and has no `origin`, remote sync and baseline fetch are skipped quietly, and verification continues from the current local worktree state.
+**Why `origin/<primary>` and not local `<primary>`:** in remote-backed projects, local refs are only as fresh as the last `git pull` on the host. Goal worktrees are normally created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work.
+
+Before verification, the harness first checks whether the repo has an `origin` remote. If there is no `origin`, remote sync and baseline fetch are skipped quietly, and verification continues from the current local worktree state.
+
+When `origin` exists, the harness checks for `refs/heads/<goalBranch>` before syncing the goal branch:
+
+- If the remote goal branch exists, verification fetches it and resets the worktree to `origin/<goalBranch>` so published work is verified exactly as remote consumers see it.
+- If the remote goal branch is missing, verification treats that as an expected local-only branch case. This covers goal worktrees claimed from the pool and unpublished goal branches: remote goal-branch sync is skipped without a warning or stack trace, and verification runs against the current local worktree.
+- Unexpected remote-check, network, auth, or fetch/reset failures still warn non-fatally. The gate can continue using the best local state available, but the warning stays visible because it may affect diff freshness.
+
+The baseline branch is fetched separately when `origin` exists so `origin/<primary>` / `origin/{{baseBranch}}` is current for implementation and Ready-to-Merge checks.
 
 **Why pre-implementation gates skip the diff entirely:** a design-doc or issue-analysis gate, by workflow construction, runs before any code is committed. A branch with zero goal-unique commits is the normal expected state. Running a diff produces noise at best, and — if local `<primary>` is stale — false positives at worst. The reviewer prompt explicitly forbids `git diff` / `git log` for these gates.
 
