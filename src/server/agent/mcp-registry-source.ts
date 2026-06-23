@@ -21,6 +21,7 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NPM_PACKAGE_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
 const NPM_PINNED_VERSION_RE = /^[vV]?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const DEFAULT_NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org/";
+const DEFAULT_NPM_REGISTRY_ARG = `--registry=${DEFAULT_NPM_REGISTRY_BASE_URL}`;
 const WINDOWS_SHELL_UNSAFE_ARG_RE = /[\x00-\x1F\x7F&|<>^%"'`!()]/;
 const SAFE_PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
@@ -506,7 +507,8 @@ function candidateFromPackage(raw: unknown, index: number): Candidate {
 	const version = optionalNonEmptyString(pkg.version, "npm package version");
 	validateNpmVersionSpec(version);
 	const identifierWithVersion = `${identifier}@${version}`;
-	const transport: McpRegistryStdioTransport = { type: "stdio", command: "npx", args: ["-y", identifierWithVersion, ...packageArgs] };
+	const args = ["-y", DEFAULT_NPM_REGISTRY_ARG, identifierWithVersion, ...packageArgs];
+	const transport: McpRegistryStdioTransport = { type: "stdio", command: "npx", args };
 	if (env) transport.env = env;
 	const config: McpServerConfig = { command: transport.command, args: transport.args };
 	if (env) config.env = env;
@@ -522,6 +524,7 @@ function normalizeRemoteHeaders(raw: unknown): Record<string, string> | undefine
 			const header = entry as Record<string, unknown>;
 			const name = requiredNonEmptyString(header.name, "remote header name");
 			validateHeaderName(name, "remote header");
+			if (hasSecretMarker(header)) throw secretRemoteHeaderError(name);
 			if (hasPromptOrVariableMarker(header)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
 			if (typeof header.value !== "string") throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
 			if (hasTemplateMarker(header.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
@@ -537,6 +540,7 @@ function normalizeRemoteHeaders(raw: unknown): Record<string, string> | undefine
 			}
 			if (value && typeof value === "object" && !Array.isArray(value)) {
 				const descriptor = value as Record<string, unknown>;
+				if (hasSecretMarker(descriptor)) throw secretRemoteHeaderError(name);
 				if (hasPromptOrVariableMarker(descriptor)) throw new McpRegistryError(`remote ${name} header requires a user-supplied value; Marketplace registry installs do not prompt for header values yet`);
 				if (typeof descriptor.value === "string") {
 					if (hasTemplateMarker(descriptor.value)) throw new McpRegistryError(`remote ${name} header contains variables/templates; Marketplace registry installs require concrete header values`);
@@ -588,6 +592,10 @@ function variablePackageArgumentsError(): McpRegistryError {
 	return new McpRegistryError("packageArguments contain variables/prompts; only fixed value arguments are supported");
 }
 
+function secretRemoteHeaderError(name: string): McpRegistryError {
+	return new McpRegistryError(`remote ${name} header is marked secret; Marketplace registry installs do not materialize secret header values`);
+}
+
 function normalizePackageEnvironment(raw: unknown): Record<string, string> | undefined {
 	if (raw === undefined) return undefined;
 	const env: Record<string, string> = {};
@@ -622,6 +630,10 @@ function hasPromptOrVariableMarker(arg: Record<string, unknown>): boolean {
 	if (arg.variables !== undefined || arg.variable !== undefined || arg.prompt !== undefined || arg.prompts !== undefined || arg.valueHint !== undefined) return true;
 	if (arg.isRequired === true && arg.value === undefined && arg.default === undefined) return true;
 	return false;
+}
+
+function hasSecretMarker(arg: Record<string, unknown>): boolean {
+	return arg.isSecret === true || arg.secret === true;
 }
 
 function hasTemplateMarker(value: string, opts: { allowWholeEnvPlaceholder?: boolean } = {}): boolean {

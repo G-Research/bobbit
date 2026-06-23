@@ -226,10 +226,30 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(parsed.servers[0].transport.type, "http");
 		assert.equal(parsed.skipped.length, 5);
 		assert.ok(parsed.skipped.some((s) => /unsupported remote transport: sse/.test(s.reason)));
-		assert.ok(parsed.skipped.some((s) => /remote Authorization header requires a user-supplied value/.test(s.reason)));
+		assert.ok(parsed.skipped.some((s) => /remote Authorization header is marked secret/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /unsupported package registryType: pypi \(supported: npm\)/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /runtimeArguments are not supported/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /packageArguments contain variables\/prompts/.test(s.reason)));
+	});
+
+	it("rejects secret-marked remote header literals while keeping valid candidates", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "diagnostics/secret-headers",
+					version: "1.0.0",
+					remotes: [
+						{ type: "streamable-http", url: "https://mcp.example.com/array-secret", headers: [{ name: "Authorization", value: "Bearer literal", isSecret: true }] },
+						{ type: "streamable-http", url: "https://mcp.example.com/object-secret", headers: { Authorization: { value: "Bearer literal", secret: true } } },
+						{ type: "streamable-http", url: "https://mcp.example.com/valid", headers: { "X-Static": "ok" } },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 1);
+		assert.deepEqual(parsed.servers[0].config, { url: "https://mcp.example.com/valid", headers: { "X-Static": "ok" } });
+		assert.equal(parsed.skipped.length, 2);
+		assert.equal(parsed.skipped.filter((s) => /remote Authorization header is marked secret/.test(s.reason)).length, 2);
 	});
 
 	it("skips remote variables and template URLs while keeping valid candidates", () => {
@@ -273,7 +293,7 @@ describe("Marketplace MCP registry source primitives", () => {
 		}, SOURCE_URL);
 		assert.equal(parsed.servers.length, 2);
 		assert.deepEqual(parsed.servers.map((server) => server.transport.type), ["http", "stdio"]);
-		assert.deepEqual(parsed.servers[1].config, { command: "npx", args: ["-y", "env-safe-mcp@1.2.3"], env: { TOKEN: "${TOKEN}" } });
+		assert.deepEqual(parsed.servers[1].config, { command: "npx", args: ["-y", "--registry=https://registry.npmjs.org/", "env-safe-mcp@1.2.3"], env: { TOKEN: "${TOKEN}" } });
 		assert.equal(parsed.skipped.length, 3);
 		assert.ok(parsed.skipped.some((s) => /environment variable TOKEN contains variables\/prompts/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /environment variable TENANT_URL contains variables\/templates/.test(s.reason)));
@@ -321,7 +341,7 @@ describe("Marketplace MCP registry source primitives", () => {
 		}, SOURCE_URL);
 		assert.equal(parsed.servers.length, 1);
 		assert.equal(parsed.servers[0].transport.type, "stdio");
-		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "pinned-mcp@1.2.3-beta.1+build.5"] });
+		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "--registry=https://registry.npmjs.org/", "pinned-mcp@1.2.3-beta.1+build.5"] });
 		assert.equal(parsed.skipped.length, 6);
 		assert.equal(parsed.skipped.filter((s) => /npm package version is invalid: Marketplace registry installs require pinned concrete semver versions/.test(s.reason)).length, 5);
 		assert.ok(parsed.skipped.some((s) => /npm package version is required: Marketplace registry installs require pinned concrete semver versions/.test(s.reason)));
@@ -341,7 +361,7 @@ describe("Marketplace MCP registry source primitives", () => {
 			}],
 		}, SOURCE_URL);
 		assert.equal(parsed.servers.length, 1);
-		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "default-mcp@1.2.3"] });
+		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "--registry=https://registry.npmjs.org/", "default-mcp@1.2.3"] });
 		assert.equal(parsed.skipped.length, 1);
 		assert.ok(parsed.skipped.some((s) => /unsupported npm registryBaseUrl: https:\/\/npm\.example\.com\/ \(Bobbit currently supports the default npm registry only\)/.test(s.reason)));
 	});
@@ -379,7 +399,7 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(server.transport.type, "stdio");
 		assert.deepEqual(server.config, {
 			command: "npx",
-			args: ["-y", "@upstash/context7-mcp@1.2.3", "--readonly", "--project", "bobbit", "--verbose", "docs"],
+			args: ["-y", "--registry=https://registry.npmjs.org/", "@upstash/context7-mcp@1.2.3", "--readonly", "--project", "bobbit", "--verbose", "docs"],
 			env: { CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}", CONTEXT7_MODE: "docs" },
 		});
 		const pack = registryServerToVirtualPack(server);
@@ -391,9 +411,19 @@ describe("Marketplace MCP registry source primitives", () => {
 			description: "Fetch library docs",
 			transport: "stdio",
 			command: "npx",
-			args: ["-y", "@upstash/context7-mcp@1.2.3", "--readonly", "--project", "bobbit", "--verbose", "docs"],
+			args: ["-y", "--registry=https://registry.npmjs.org/", "@upstash/context7-mcp@1.2.3", "--readonly", "--project", "bobbit", "--verbose", "docs"],
 			env: ["CONTEXT7_API_KEY", "CONTEXT7_MODE"],
 		}]);
+
+		const dest = path.join(dir, pack.name);
+		materializeRegistryPack(server, dest, { sourceUrl: SOURCE_URL, materializedAt: "2026-06-23T00:00:00.000Z" });
+		const materialized = parse(fs.readFileSync(path.join(dest, "mcp", `${server.id}.yaml`), "utf-8")) as Record<string, unknown>;
+		assert.deepEqual(materialized.transport, {
+			type: "stdio",
+			command: "npx",
+			args: ["-y", "--registry=https://registry.npmjs.org/", "@upstash/context7-mcp@1.2.3", "--readonly", "--project", "bobbit", "--verbose", "docs"],
+			env: { CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}", CONTEXT7_MODE: "docs" },
+		});
 	});
 
 	it("keeps remote install IDs stable when package candidates are added later", () => {
