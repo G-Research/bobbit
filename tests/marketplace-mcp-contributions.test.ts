@@ -166,7 +166,7 @@ describe("loadMcpContributions", () => {
 		);
 	});
 
-	it("rejects unknown top-level keys, string-only maps, and cwd escapes", () => {
+	it("rejects unknown top-level keys, string-only maps, invalid map keys, and cwd escapes", () => {
 		const root = packRoot("strict-schema");
 		const sourceFile = path.join(root, "mcp", "bad.yaml");
 		assert.throws(
@@ -177,6 +177,16 @@ describe("loadMcpContributions", () => {
 			() => normalizeMcpContribution({ transport: { type: "http", url: "https://example.test", headers: { Ok: 1 } } }, { listName: "bad", sourceFile, packRoot: root }),
 			(e) => e instanceof McpContributionValidationError && /headers.Ok must be a string/.test(e.message),
 		);
+		for (const key of ["", "BAD\0KEY", "BAD\nKEY", "BAD\rKEY"]) {
+			assert.throws(
+				() => normalizeMcpContribution({ transport: { type: "stdio", command: "node", env: { [key]: "value" } } }, { listName: "bad", sourceFile, packRoot: root }),
+				(e) => e instanceof McpContributionValidationError && /env contains an invalid key/.test(e.message),
+			);
+			assert.throws(
+				() => normalizeMcpContribution({ transport: { type: "http", url: "https://example.test", headers: { [key]: "value" } } }, { listName: "bad", sourceFile, packRoot: root }),
+				(e) => e instanceof McpContributionValidationError && /headers contains an invalid key/.test(e.message),
+			);
+		}
 		assert.throws(
 			() => normalizeMcpContribution({ transport: { type: "stdio", command: "node", cwd: ".." } }, { listName: "bad", sourceFile, packRoot: root }),
 			(e) => e instanceof McpContributionValidationError && /outside the pack root/.test(e.message),

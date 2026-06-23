@@ -536,6 +536,7 @@ function stringRecord(value: unknown, where: string): Record<string, string> | u
 	if (!isPlainObject(value)) failMcp(`${where} must be a string map`);
 	const out: Record<string, string> = {};
 	for (const [key, item] of Object.entries(value)) {
+		if (!key || key.includes("\0") || key.includes("\n") || key.includes("\r")) failMcp(`${where} contains an invalid key`);
 		if (typeof item !== "string") failMcp(`${where}.${key} must be a string`);
 		out[key] = item;
 	}

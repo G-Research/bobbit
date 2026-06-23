@@ -15,6 +15,8 @@ const TOP_KEYS = new Set(["schemaVersion", "generatedAt", "servers"]);
 const SERVER_KEYS = new Set(["id", "name", "label", "description", "version", "homepage", "license", "publisher", "transport"]);
 const STDIO_KEYS = new Set(["type", "command", "args", "env", "cwd"]);
 const HTTP_KEYS = new Set(["type", "url", "headers"]);
+const DEFAULT_REGISTRY_FETCH_TIMEOUT_MS = 10_000;
+const DEFAULT_REGISTRY_MAX_BODY_BYTES = 1024 * 1024;
 
 export interface McpRegistryStdioTransport {
 	type: "stdio";
@@ -59,6 +61,12 @@ export interface McpRegistryParseResult {
 	skipped: McpRegistrySkippedEntry[];
 }
 
+export interface FetchMcpRegistryOptions {
+	timeoutMs?: number;
+	maxBodyBytes?: number;
+	fetchFn?: typeof fetch;
+}
+
 export type McpRegistryBrowsePack = BrowsePack & {
 	virtual: true;
 	sourceType: "mcp-registry";
@@ -82,11 +90,11 @@ export function isMcpRegistrySource(source: MarketplaceSource): boolean {
 	return source.type === "mcp-registry";
 }
 
-export async function fetchMcpRegistry(source: MarketplaceSource): Promise<McpRegistryServer[]> {
-	return (await fetchMcpRegistryWithDiagnostics(source)).servers;
+export async function fetchMcpRegistry(source: MarketplaceSource, opts?: FetchMcpRegistryOptions): Promise<McpRegistryServer[]> {
+	return (await fetchMcpRegistryWithDiagnostics(source, opts)).servers;
 }
 
-export async function fetchMcpRegistryWithDiagnostics(source: MarketplaceSource): Promise<McpRegistryParseResult> {
+export async function fetchMcpRegistryWithDiagnostics(source: MarketplaceSource, opts: FetchMcpRegistryOptions = {}): Promise<McpRegistryParseResult> {
 	if (!isMcpRegistrySource(source)) throw new McpRegistryError(`source is not an MCP registry: ${source.id}`);
 	if (source.ref) throw new McpRegistryError("mcp-registry sources do not support ref");
 	let url: URL;
@@ -98,15 +106,66 @@ export async function fetchMcpRegistryWithDiagnostics(source: MarketplaceSource)
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new McpRegistryError("mcp-registry source URL must use http or https");
 	}
-	const response = await fetch(url, { headers: { accept: "application/json" } });
-	if (!response.ok) throw new McpRegistryError(`registry fetch failed: HTTP ${response.status}`);
-	let body: unknown;
+	const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_REGISTRY_MAX_BODY_BYTES;
+	if (!Number.isFinite(maxBodyBytes) || maxBodyBytes < 1) throw new McpRegistryError("registry max body size must be positive");
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_REGISTRY_FETCH_TIMEOUT_MS;
+	if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new McpRegistryError("registry fetch timeout must be positive");
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		body = await response.json();
+		const response = await (opts.fetchFn ?? fetch)(url, { headers: { accept: "application/json" }, signal: controller.signal });
+		if (!response.ok) throw new McpRegistryError(`registry fetch failed: HTTP ${response.status}`);
+		const declaredLength = response.headers.get("content-length");
+		if (declaredLength !== null) {
+			const length = Number(declaredLength);
+			if (!Number.isFinite(length) || length < 0) throw new McpRegistryError(`registry response has invalid Content-Length: ${declaredLength}`);
+			if (length > maxBodyBytes) throw new McpRegistryError(`registry response Content-Length ${length} exceeds limit ${maxBodyBytes}`);
+		}
+		let body: unknown;
+		try {
+			body = JSON.parse(await readResponseTextBounded(response, maxBodyBytes));
+		} catch (err) {
+			if (err instanceof McpRegistryError) throw err;
+			if (controller.signal.aborted) throw new McpRegistryError(`registry fetch timed out after ${timeoutMs}ms`);
+			throw new McpRegistryError(`registry response is not valid JSON: ${String(err)}`);
+		}
+		return parseMcpRegistryDocument(body);
 	} catch (err) {
-		throw new McpRegistryError(`registry response is not valid JSON: ${String(err)}`);
+		if (err instanceof McpRegistryError) throw err;
+		if (controller.signal.aborted) throw new McpRegistryError(`registry fetch timed out after ${timeoutMs}ms`);
+		throw new McpRegistryError(`registry fetch failed: ${String(err)}`);
+	} finally {
+		clearTimeout(timeout);
 	}
-	return parseMcpRegistryDocument(body);
+}
+
+async function readResponseTextBounded(response: Response, maxBytes: number): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				await reader.cancel().catch(() => undefined);
+				throw new McpRegistryError(`registry response body exceeds limit ${maxBytes}`);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(body);
 }
 
 export function parseMcpRegistryDocument(raw: unknown): McpRegistryParseResult {

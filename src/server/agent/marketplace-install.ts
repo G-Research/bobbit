@@ -31,6 +31,7 @@ import {
 	registryPackNameForId,
 	registryServerToVirtualPack,
 	type McpRegistryBrowsePack,
+	type McpRegistrySkippedEntry,
 } from "./mcp-registry-source.js";
 
 /** Install scopes — builtin is never an install target. */
@@ -62,6 +63,10 @@ export interface PackEntityDescriptions {
 	mcp?: Record<string, string>;
 }
 
+export interface MarketplaceMcpRegistryDiagnostics {
+	skippedEntries: McpRegistrySkippedEntry[];
+}
+
 /** Browse-payload pack shape (manifest + dirName + executable-code flag). */
 export interface BrowsePack extends PackManifest {
 	dirName: string;
@@ -76,6 +81,8 @@ export interface BrowsePack extends PackManifest {
 	/** Rich MCP transport previews used by the Market browse UI. */
 	mcp?: Array<Record<string, unknown>>;
 	mcpServers?: Array<Record<string, unknown>>;
+	/** Source-level diagnostics for registry entries skipped while preserving browse compatibility. */
+	mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics;
 }
 
 /** Installed-pack listing row for the REST layer. */
@@ -91,6 +98,8 @@ export interface InstalledPackWire {
 	/** `"unknown"` when the source can't be checked (removed / never-synced / no
 	 *  version data) — disambiguates "up to date" from "source unknown". */
 	sourceStatus: "ok" | "unknown";
+	/** Source-level diagnostics for registry entries skipped while preserving install/update compatibility. */
+	mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics;
 }
 
 /** Coded error so the REST layer can map to HTTP statuses. */
@@ -469,18 +478,23 @@ export class MarketplaceInstaller {
 		const parsed = await fetchMcpRegistryWithDiagnostics(source);
 		const fingerprint = parsed.servers.map((s) => s.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
-		return parsed.servers.map((server): McpRegistryBrowsePack => registryServerToVirtualPack(server));
+		const diagnostics = mcpRegistryDiagnostics(parsed.skipped);
+		return parsed.servers.map((server): McpRegistryBrowsePack => {
+			const pack = registryServerToVirtualPack(server);
+			if (diagnostics) pack.mcpRegistryDiagnostics = diagnostics;
+			return pack;
+		});
 	}
 
 	/** Validate/fetch a source without necessarily cloning it. */
-	async syncMarketplaceSource(sourceId: string): Promise<MarketplaceSource> {
+	async syncMarketplaceSource(sourceId: string): Promise<MarketplaceSource & { mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics }> {
 		const source = this.opts.sourceStore.get(sourceId);
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${sourceId}`);
 		if (!isMcpRegistrySource(source)) return this.syncSource(sourceId).source;
 		const parsed = await fetchMcpRegistryWithDiagnostics(source);
 		const fingerprint = parsed.servers.map((s) => s.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
-		return this.opts.sourceStore.get(sourceId)!;
+		return withMcpRegistryDiagnostics(this.opts.sourceStore.get(sourceId)!, parsed.skipped);
 	}
 
 	/**
@@ -594,7 +608,7 @@ export class MarketplaceInstaller {
 
 		const parsed = await fetchMcpRegistryWithDiagnostics(source);
 		const server = parsed.servers.find((s) => registryPackNameForId(s.id) === args.dirName || s.id === args.dirName);
-		if (!server) throw new MarketplaceError("unknown_pack", `registry server not found: ${args.dirName}`);
+		if (!server) throw new MarketplaceError("unknown_pack", registryMissingMessage(args.dirName, parsed.skipped));
 		const manifest = registryServerToVirtualPack(server);
 		const packName = manifest.name;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in registry: ${JSON.stringify(packName)}`);
@@ -627,7 +641,7 @@ export class MarketplaceInstaller {
 		}
 		this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.servers.map((s) => s.fingerprint).join(",") });
 		this.appendOrder(ctx, packName);
-		return { scope: args.scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" };
+		return withMcpRegistryDiagnostics({ scope: args.scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 
 	/** Uninstall: delete the dir, drop from pack_order. */
@@ -718,7 +732,7 @@ export class MarketplaceInstaller {
 
 		const parsed = await fetchMcpRegistryWithDiagnostics(source);
 		const server = parsed.servers.find((s) => registryPackNameForId(s.id) === packName);
-		if (!server) throw new MarketplaceError("unknown_pack", `no registry server with pack name ${packName} in ${source.url}`);
+		if (!server) throw new MarketplaceError("unknown_pack", registryMissingMessage(packName, parsed.skipped, source.url));
 		const manifest = registryServerToVirtualPack(server);
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
@@ -750,7 +764,7 @@ export class MarketplaceInstaller {
 			throw err;
 		}
 		this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.servers.map((s) => s.fingerprint).join(",") });
-		return { scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" };
+		return withMcpRegistryDiagnostics({ scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 
 	// ── listing ──────────────────────────────────────────────────
@@ -830,6 +844,26 @@ export class MarketplaceInstaller {
 		const order = ctx.packOrderStore.getPackOrder(ctx.scope).filter((n) => n !== packName);
 		ctx.packOrderStore.setPackOrder(ctx.scope, order);
 	}
+}
+
+function mcpRegistryDiagnostics(skipped: McpRegistrySkippedEntry[]): MarketplaceMcpRegistryDiagnostics | undefined {
+	return skipped.length > 0 ? { skippedEntries: skipped } : undefined;
+}
+
+function withMcpRegistryDiagnostics<T extends object>(value: T, skipped: McpRegistrySkippedEntry[]): T & { mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics } {
+	const diagnostics = mcpRegistryDiagnostics(skipped);
+	return diagnostics ? { ...value, mcpRegistryDiagnostics: diagnostics } : value;
+}
+
+function registryMissingMessage(requested: string, skipped: McpRegistrySkippedEntry[], sourceUrl?: string): string {
+	const requestedId = requested.startsWith("mcp-") ? requested.slice("mcp-".length) : requested;
+	const skippedEntry = skipped.find((entry) => entry.id === requested || entry.id === requestedId || entry.name === requested);
+	if (skippedEntry) {
+		const id = skippedEntry.id ? ` id=${JSON.stringify(skippedEntry.id)}` : "";
+		const name = skippedEntry.name ? ` name=${JSON.stringify(skippedEntry.name)}` : "";
+		return `registry server ${requested} was skipped during validation:${id}${name} reason=${skippedEntry.reason}`;
+	}
+	return sourceUrl ? `no registry server with pack name ${requested} in ${sourceUrl}` : `registry server not found: ${requested}`;
 }
 
 function synthManifest(name: string, meta: PackMeta | null): PackManifest {
