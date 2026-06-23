@@ -243,6 +243,31 @@ export function resolveStep(
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
 
+function execOutputToString(value: unknown): string {
+	if (Buffer.isBuffer(value)) return value.toString("utf8");
+	return typeof value === "string" ? value : "";
+}
+
+function execErrorCode(err: unknown): number | string | undefined {
+	return (err as { code?: number | string } | null | undefined)?.code;
+}
+
+function isMissingRemoteHeadLsRemoteError(err: unknown): boolean {
+	const code = execErrorCode(err);
+	if (code !== 2 && code !== "2") return false;
+	const stdout = execOutputToString((err as { stdout?: unknown } | null | undefined)?.stdout).trim();
+	const stderr = execOutputToString((err as { stderr?: unknown } | null | undefined)?.stderr);
+	if (stdout) return false;
+	return !/\bfatal:|could not|unable|authentication|permission denied/i.test(stderr);
+}
+
+function lsRemoteOutputHasHead(stdout: unknown, branch: string): boolean {
+	const headRef = `refs/heads/${branch}`;
+	return execOutputToString(stdout)
+		.split(/\r?\n/)
+		.some(line => line.trimEnd().endsWith(`\t${headRef}`));
+}
+
 /**
  * Frozen workflows may omit `timeout:` for component command steps. The full
  * unit suite is resource-sensitive on developer machines/CI and can exceed the
@@ -2338,12 +2363,24 @@ export class VerificationHarness {
 				}
 
 				if (hasOriginRemote) {
+					let hasRemoteGoalBranch = false;
 					try {
-						await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-						await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-						console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						const { stdout } = await execFileAsync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
+						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout, goalBranch);
 					} catch (err) {
-						console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						if (!isMissingRemoteHeadLsRemoteError(err)) {
+							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
+						}
+					}
+
+					if (hasRemoteGoalBranch) {
+						try {
+							await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+							await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						}
 					}
 
 					// Also fetch the review baseline branch so origin/<base> is up-to-date for
