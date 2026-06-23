@@ -1,6 +1,13 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, defaultProjectId } from "./e2e-setup.js";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 
 async function startRegistry(): Promise<{ url: string; close: () => Promise<void> }> {
 	const server = http.createServer((req, res) => {
@@ -39,17 +46,58 @@ async function startRegistry(): Promise<{ url: string; close: () => Promise<void
 }
 
 async function cleanup(sourceId?: string, projectId?: string): Promise<void> {
-	await apiFetch("/api/marketplace/installed", {
-		method: "DELETE",
-		body: JSON.stringify({ scope: "server", packName: "mcp-docs-remote" }),
-	}).catch(() => {});
-	if (projectId) {
+	for (const packName of ["mcp-docs-remote", "mcp-drop-pack"]) {
 		await apiFetch("/api/marketplace/installed", {
 			method: "DELETE",
-			body: JSON.stringify({ scope: "project", projectId, packName: "mcp-docs-remote" }),
+			body: JSON.stringify({ scope: "server", packName }),
 		}).catch(() => {});
+		if (projectId) {
+			await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "project", projectId, packName }),
+			}).catch(() => {});
+		}
 	}
 	if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
+}
+
+function writeAuthoredMcpPack(repo: string): void {
+	const packDir = path.join(repo, "mcp-drop-pack");
+	fs.rmSync(packDir, { recursive: true, force: true });
+	fs.mkdirSync(path.join(packDir, "mcp"), { recursive: true });
+	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
+		"name: mcp-drop-pack",
+		"description: MCP update regression pack",
+		"version: 1.0.0",
+		"schema: 2",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		"  skills: []",
+		"  mcp: [drop-server]",
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(packDir, "mcp", "drop-server.json"), JSON.stringify({
+		server: "drop_runtime",
+		transport: { type: "stdio", command: process.execPath, args: [MOCK_MCP_SERVER] },
+	}, null, 2), "utf-8");
+}
+
+function writeAuthoredNonMcpPack(repo: string): void {
+	const packDir = path.join(repo, "mcp-drop-pack");
+	fs.rmSync(packDir, { recursive: true, force: true });
+	fs.mkdirSync(packDir, { recursive: true });
+	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
+		"name: mcp-drop-pack",
+		"description: MCP update regression pack without MCP",
+		"version: 2.0.0",
+		"schema: 2",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		"  skills: []",
+		"",
+	].join("\n"), "utf-8");
 }
 
 test.describe("Marketplace MCP API integration", () => {
@@ -121,6 +169,54 @@ test.describe("Marketplace MCP API integration", () => {
 		} finally {
 			await cleanup(sourceId);
 			await registry.close();
+		}
+	});
+
+	test("authored pack update from MCP to non-MCP disconnects stale runtime and tools", async ({ gateway }) => {
+		await gateway.sessionManager.initMcp(gateway.bobbitDir);
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "marketplace-mcp-update-"));
+		const repo = path.join(root, "repo");
+		fs.mkdirSync(repo, { recursive: true });
+		writeAuthoredMcpPack(repo);
+		let sourceId: string | undefined;
+		try {
+			const add = await apiFetch("/api/marketplace/sources", {
+				method: "POST",
+				body: JSON.stringify({ url: repo }),
+			});
+			expect(add.status).toBe(201);
+			sourceId = (await add.json()).source.id;
+
+			const install = await apiFetch("/api/marketplace/install", {
+				method: "POST",
+				body: JSON.stringify({ sourceId, dirName: "mcp-drop-pack", scope: "server" }),
+			});
+			expect(install.status).toBe(201);
+			expect((await install.json()).mcpReload?.connected).toContain("drop_runtime");
+
+			let mcp = await apiFetch("/api/mcp-servers");
+			expect(mcp.status).toBe(200);
+			expect((await mcp.json()).some((s: any) => s.name === "drop_runtime" && s.status === "connected")).toBe(true);
+			let toolsBody = await (await apiFetch("/api/tools")).json();
+			expect(toolsBody.tools.map((t: any) => t.name)).toContain("mcp__drop_runtime__echo");
+
+			writeAuthoredNonMcpPack(repo);
+			const update = await apiFetch("/api/marketplace/update", {
+				method: "POST",
+				body: JSON.stringify({ scope: "server", packName: "mcp-drop-pack" }),
+			});
+			expect(update.status).toBe(200);
+			const updateBody = await update.json();
+			expect(updateBody.installed.manifest.contents.mcp).toEqual([]);
+			expect(updateBody.mcpReload?.disconnected).toContain("drop_runtime");
+
+			mcp = await apiFetch("/api/mcp-servers");
+			expect((await mcp.json()).some((s: any) => s.name === "drop_runtime")).toBe(false);
+			toolsBody = await (await apiFetch("/api/tools")).json();
+			expect(toolsBody.tools.map((t: any) => t.name)).not.toContain("mcp__drop_runtime__echo");
+		} finally {
+			await cleanup(sourceId);
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 

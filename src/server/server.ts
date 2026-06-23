@@ -7099,9 +7099,12 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
+				const prior = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).find((p) => p.scope === scope && p.packName === body.packName);
+				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
+				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
+				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
 			} catch (err) { handleMarketErr(err, 409); }
 			return;
