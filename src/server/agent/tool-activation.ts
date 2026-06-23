@@ -922,7 +922,7 @@ export function writeMcpProxyExtensions(
 	// deleted externally we fall through and regenerate. The disabled-tools set
 	// is included ONLY when non-empty so the empty case keeps today's key (and
 	// thus byte-identical reuse).
-	const managerScopeKey = mcpManager.getScopeKey();
+	const managerScopeKey = typeof (mcpManager as any).getScopeKey === "function" ? (mcpManager as any).getScopeKey() : "default";
 	const scopeSegment = managerScopeKey === "default" ? "" : createHash("sha256").update(managerScopeKey).digest("hex").slice(0, 12);
 	const cacheKey = hashKey({
 		kind: 'mcpProxy_v2',
@@ -1060,7 +1060,10 @@ export function writeMcpProxyExtensions(
 		// locked-down session would still see `mcp_<server>` for every failed
 		// server even though no MCP tool is permitted.
 		if (allowedSet && !allowedSet.has(metaLower)) continue;
-		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state", undefined, mcpManager.getToolDocsRelativePath(status.name));
+		const docsPath = typeof (mcpManager as any).getToolDocsRelativePath === "function"
+			? (mcpManager as any).getToolDocsRelativePath(status.name)
+			: `mcp-tool-docs/${path.basename(status.name)}.md`;
+		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state", undefined, docsPath);
 		writeFile(status.name, undefined, code);
 		handled.add(`${status.name}\u0000`);
 		handledServersErrored.add(status.name);
@@ -1078,7 +1081,11 @@ export function writeMcpProxyExtensions(
 			description: info.description,
 			inputSchema: info.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
 		}));
-		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub, mcpManager.getToolDocsRelativePath(entry.server, entry.sub));
+		const docsKey = entry.sub ? `${entry.server}__${entry.sub}` : entry.server;
+		const docsPath = typeof (mcpManager as any).getToolDocsRelativePath === "function"
+			? (mcpManager as any).getToolDocsRelativePath(entry.server, entry.sub)
+			: `mcp-tool-docs/${path.basename(docsKey)}.md`;
+		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub, docsPath);
 		writeFile(entry.server, entry.sub, code);
 		handled.add(k);
 	}
