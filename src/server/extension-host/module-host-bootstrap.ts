@@ -430,7 +430,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		},
 		store: {
 			get: (key: string) => callHost(["store", "get"], [key]),
-			put: (key: string, value: unknown) => callHost(["store", "put"], [key, value]),
+			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
 		// `session` is READ-ONLY for server modules: `postMessage` is intentionally
