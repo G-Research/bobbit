@@ -73,7 +73,12 @@ export interface DirectoryBrowseRequestDetail {
 	path: string;
 }
 
-export type BrowseDirectoryFn = (path?: string) => Promise<DirectoryBrowseResult>;
+export interface BrowseDirectoryOptions {
+	prefix?: string;
+	limit?: number;
+}
+
+export type BrowseDirectoryFn = (path?: string, options?: BrowseDirectoryOptions) => Promise<DirectoryBrowseResult>;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -326,7 +331,10 @@ export class DirectoryPicker extends LitElement {
 		this._loading = true;
 		let result: DirectoryBrowseResult | null = null;
 		try {
-			result = await this.browseDirectory(intent.parent);
+			result = await this.browseDirectory(intent.parent, {
+				prefix: intent.basename || undefined,
+				limit: this.maxSuggestions,
+			});
 		} catch {
 			result = null;
 		}
@@ -372,6 +380,10 @@ export class DirectoryPicker extends LitElement {
 		this._valueChangingFromInput = true;
 		this.value = next;
 		if (next !== this._completedPath) this._completedPath = null;
+		this._suggestions = [];
+		this._open = false;
+		this._highlight = -1;
+		this._loading = false;
 		this._fire<DirectoryPickerPathDetail>("directory-input", {
 			path: next,
 			source: "typed",
