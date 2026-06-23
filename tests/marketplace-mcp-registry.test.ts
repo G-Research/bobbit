@@ -266,14 +266,14 @@ describe("Marketplace MCP registry source primitives", () => {
 						{ registryType: "npm", identifier: "env-vars-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TOKEN", variables: [{ name: "TOKEN" }] }] },
 						{ registryType: "npm", identifier: "env-curly-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TENANT_URL", default: "https://{tenant}.example.com" }] },
 						{ registryType: "npm", identifier: "env-template-mcp", transport: { type: "stdio" }, environmentVariables: { TOKEN_URL: "https://mcp.example.com/${TOKEN}" } },
-						{ registryType: "npm", identifier: "env-safe-mcp", transport: { type: "stdio" }, environmentVariables: [{ name: "TOKEN", default: "${TOKEN}", isSecret: true }] },
+						{ registryType: "npm", identifier: "env-safe-mcp", version: "1.2.3", transport: { type: "stdio" }, environmentVariables: [{ name: "TOKEN", default: "${TOKEN}", isSecret: true }] },
 					],
 				},
 			}],
 		}, SOURCE_URL);
 		assert.equal(parsed.servers.length, 2);
 		assert.deepEqual(parsed.servers.map((server) => server.transport.type), ["http", "stdio"]);
-		assert.deepEqual(parsed.servers[1].config, { command: "npx", args: ["-y", "env-safe-mcp"], env: { TOKEN: "${TOKEN}" } });
+		assert.deepEqual(parsed.servers[1].config, { command: "npx", args: ["-y", "env-safe-mcp@1.2.3"], env: { TOKEN: "${TOKEN}" } });
 		assert.equal(parsed.skipped.length, 3);
 		assert.ok(parsed.skipped.some((s) => /environment variable TOKEN contains variables\/prompts/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /environment variable TENANT_URL contains variables\/templates/.test(s.reason)));
@@ -297,8 +297,53 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(parsed.servers.length, 1);
 		assert.equal(parsed.servers[0].transport.type, "http");
 		assert.equal(parsed.skipped.length, 2);
-		assert.ok(parsed.skipped.some((s) => /npm package version is invalid: only safe npm versions, dist-tags, or specs without Windows shell metacharacters are supported/.test(s.reason)));
+		assert.ok(parsed.skipped.some((s) => /npm package version is invalid: Marketplace registry installs require pinned concrete semver versions/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /packageArguments value contains unsafe Windows shell metacharacters/.test(s.reason)));
+	});
+
+	it("skips npm packages with moving versions while keeping pinned concrete semver versions", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "security/versions",
+					version: "1.0.0",
+					packages: [
+						{ registryType: "npm", identifier: "caret-mcp", version: "^1.2.3", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "tilde-mcp", version: "~1.2.3", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "x-mcp", version: "1.x", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "star-mcp", version: "*", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "tag-mcp", version: "latest", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "missing-mcp", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "pinned-mcp", version: "1.2.3-beta.1+build.5", transport: { type: "stdio" } },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 1);
+		assert.equal(parsed.servers[0].transport.type, "stdio");
+		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "pinned-mcp@1.2.3-beta.1+build.5"] });
+		assert.equal(parsed.skipped.length, 6);
+		assert.equal(parsed.skipped.filter((s) => /npm package version is invalid: Marketplace registry installs require pinned concrete semver versions/.test(s.reason)).length, 5);
+		assert.ok(parsed.skipped.some((s) => /npm package version is required: Marketplace registry installs require pinned concrete semver versions/.test(s.reason)));
+	});
+
+	it("skips npm packages with unsupported registryBaseUrl values", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "security/registry-base",
+					version: "1.0.0",
+					packages: [
+						{ registryType: "npm", identifier: "private-mcp", version: "1.2.3", registryBaseUrl: "https://npm.example.com/", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "default-mcp", version: "1.2.3", registryBaseUrl: "https://registry.npmjs.org", transport: { type: "stdio" } },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 1);
+		assert.deepEqual(parsed.servers[0].config, { command: "npx", args: ["-y", "default-mcp@1.2.3"] });
+		assert.equal(parsed.skipped.length, 1);
+		assert.ok(parsed.skipped.some((s) => /unsupported npm registryBaseUrl: https:\/\/npm\.example\.com\/ \(Bobbit currently supports the default npm registry only\)/.test(s.reason)));
 	});
 
 	it("translates safe npm stdio packages to npx configs with fixed args and env placeholders", () => {

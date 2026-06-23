@@ -19,7 +19,8 @@ const DEFAULT_SOURCE_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NPM_PACKAGE_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
-const NPM_VERSION_SPEC_RE = /^(?:[vV]?\d+(?:\.\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?|[~^][vV]?\d+(?:\.\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?|(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}|[A-Za-z][A-Za-z0-9._+-]{0,127})$/;
+const NPM_PINNED_VERSION_RE = /^[vV]?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const DEFAULT_NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org/";
 const WINDOWS_SHELL_UNSAFE_ARG_RE = /[\x00-\x1F\x7F&|<>^%"'`!()]/;
 const SAFE_PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
@@ -497,18 +498,19 @@ function candidateFromPackage(raw: unknown, index: number): Candidate {
 	}
 	if (pkg.runtimeHint !== undefined && pkg.runtimeHint !== "npx") throw new McpRegistryError(`unsupported npm runtimeHint: ${String(pkg.runtimeHint)} (supported: npx)`);
 	if (Array.isArray(pkg.runtimeArguments) ? pkg.runtimeArguments.length > 0 : pkg.runtimeArguments !== undefined) throw new McpRegistryError("runtimeArguments are not supported for Marketplace registry installs yet");
+	const registryBaseUrl = normalizeNpmRegistryBaseUrl(pkg.registryBaseUrl);
 	const identifier = requiredNonEmptyString(pkg.identifier, "npm package identifier");
 	if (!NPM_PACKAGE_RE.test(identifier)) throw new McpRegistryError(`npm package identifier is invalid: ${identifier}`);
-	const version = optionalNonEmptyString(pkg.version, "npm package version");
-	if (version) validateNpmVersionSpec(version);
-	const identifierWithVersion = version ? `${identifier}@${version}` : identifier;
 	const packageArgs = normalizePackageArguments(pkg.packageArguments);
 	const env = normalizePackageEnvironment(pkg.environmentVariables);
+	const version = optionalNonEmptyString(pkg.version, "npm package version");
+	validateNpmVersionSpec(version);
+	const identifierWithVersion = `${identifier}@${version}`;
 	const transport: McpRegistryStdioTransport = { type: "stdio", command: "npx", args: ["-y", identifierWithVersion, ...packageArgs] };
 	if (env) transport.env = env;
 	const config: McpServerConfig = { command: transport.command, args: transport.args };
 	if (env) config.env = env;
-	return { variant: packageVariant(pkg, index), transport, config, descriptor: { kind: "package", index, registryType, identifier, version, args: packageArgs, env: env ? Object.keys(env).sort() : [] } };
+	return { variant: packageVariant(pkg, index), transport, config, descriptor: { kind: "package", index, registryType, registryBaseUrl: registryBaseUrl ?? DEFAULT_NPM_REGISTRY_BASE_URL, identifier, version, args: packageArgs, env: env ? Object.keys(env).sort() : [] } };
 }
 
 function normalizeRemoteHeaders(raw: unknown): Record<string, string> | undefined {
@@ -718,9 +720,32 @@ function validateEnvName(name: string): void {
 	if (!ENV_NAME_RE.test(name)) throw new McpRegistryError(`environment variable name is invalid: ${name}`);
 }
 
-function validateNpmVersionSpec(version: string): void {
-	if (!NPM_VERSION_SPEC_RE.test(version) || WINDOWS_SHELL_UNSAFE_ARG_RE.test(version) || /\s/.test(version)) {
-		throw new McpRegistryError("npm package version is invalid: only safe npm versions, dist-tags, or specs without Windows shell metacharacters are supported");
+function normalizeNpmRegistryBaseUrl(raw: unknown): string | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "string" || !raw.trim()) throw new McpRegistryError("npm registryBaseUrl must be a non-empty string when provided");
+	if (hasTemplateMarker(raw)) throw new McpRegistryError("npm registryBaseUrl contains variables/templates; Marketplace registry installs require the default npm registry");
+	let url: URL;
+	try {
+		url = new URL(raw.trim());
+	} catch {
+		throw new McpRegistryError(`npm registryBaseUrl is invalid: ${raw}`);
+	}
+	if (url.username || url.password) throw new McpRegistryError("npm registryBaseUrl must not include credentials");
+	if (url.hash) throw new McpRegistryError("npm registryBaseUrl must not include a fragment");
+	url.protocol = url.protocol.toLowerCase();
+	url.hostname = url.hostname.toLowerCase();
+	if (url.toString() !== DEFAULT_NPM_REGISTRY_BASE_URL) {
+		throw new McpRegistryError(`unsupported npm registryBaseUrl: ${raw} (Bobbit currently supports the default npm registry only)`);
+	}
+	return DEFAULT_NPM_REGISTRY_BASE_URL;
+}
+
+function validateNpmVersionSpec(version: string | undefined): asserts version is string {
+	if (!version) {
+		throw new McpRegistryError("npm package version is required: Marketplace registry installs require pinned concrete semver versions");
+	}
+	if (!NPM_PINNED_VERSION_RE.test(version) || WINDOWS_SHELL_UNSAFE_ARG_RE.test(version) || /\s/.test(version)) {
+		throw new McpRegistryError("npm package version is invalid: Marketplace registry installs require pinned concrete semver versions");
 	}
 }
 
