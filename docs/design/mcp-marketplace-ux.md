@@ -48,6 +48,7 @@ For MCP registries:
 - URL placeholder: `https://registry.modelcontextprotocol.io/v0/servers`
 - Hide or disable the `ref` input with helper text: `Registry sources are synced from the official MCP Registry API URL; refs apply only to git sources.`
 - Primary button label remains `Add`.
+- If the URL returns the old Bobbit `schemaVersion: 1` registry JSON or any non-`servers[].server` shape, show the registry validation error instead of treating it as a pack source.
 
 Recommended test ids:
 
@@ -132,7 +133,7 @@ Recommended test ids:
 - Loading: reuse `Loading packs…`; for MCP registry sources, prefer `Loading MCP servers…` if source kind is known.
 - Empty registry: `This registry did not return any installable MCP servers.`
 - Registry error: use `market-error`; include server-provided message and keep the source row visible for re-sync/remove.
-- Invalid entry within a registry: do not fail the whole browse list; show valid cards and a compact warning row: `3 registry entries were skipped because they were invalid.`
+- Invalid entry within a registry: do not fail the whole browse list; show valid cards and a compact warning row: `3 registry entries were skipped because they were unsupported.` The expandable detail should surface server-provided diagnostics such as unsupported transport, secret-marked remote header, non-default npm registry URL, missing/ranged npm version, variables/templates, prompt-required value, or unsafe package argument.
 
 ## Installed UX for MCP contributions
 

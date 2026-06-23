@@ -1,6 +1,6 @@
 # Marketplace MCP support — research and implementation design
 
-Status: research artifact / implementation plan; registry-source format updated to the official MCP Registry API
+Status: implemented design record; registry-source format uses the official MCP Registry API
 Scope: add Marketplace support for installable MCP server definitions and official MCP Registry API sources without changing the existing manual MCP config cascade.
 
 ## 1. Current architecture summary
@@ -266,7 +266,7 @@ Accept the official MCP Registry API response shape. The canonical public source
             "runtimeHint": "npx",
             "transport": { "type": "stdio" },
             "environmentVariables": [
-              { "name": "CONTEXT7_API_KEY", "variable": "CONTEXT7_API_KEY", "isSecret": true }
+              { "name": "CONTEXT7_API_KEY", "default": "${CONTEXT7_API_KEY}", "isSecret": true }
             ]
           }
         ],
@@ -318,7 +318,7 @@ contents:
 Naming:
 
 - A generated registry `id` is the stable pack-local `listName`, materialized file basename, `contents.mcp` ref, and default pack suffix.
-- The exact official `server.name` is preserved as `officialName` metadata; Bobbit generates a safe runtime MCP `serverName` from the official name, version, source URL, and candidate variant.
+- The exact official `server.name` is preserved as `officialName` metadata; Bobbit generates a safe runtime MCP `serverName` from the official name, version, source key, and generated install id.
 - Pack name is `mcp-<id>`; if it collides with an unrelated installed pack in the target scope, install returns `409` like normal packs.
 - `dirName` in browse is `mcp-<id>`, never a raw URL or official server name.
 
@@ -823,7 +823,7 @@ Bobbit registry sources use the official MCP Registry API response shape. The ca
             "transport": { "type": "stdio" },
             "packageArguments": [{ "name": "--project", "value": "docs" }],
             "environmentVariables": [
-              { "name": "CONTEXT7_API_KEY", "variable": "CONTEXT7_API_KEY", "isSecret": true }
+              { "name": "CONTEXT7_API_KEY", "default": "${CONTEXT7_API_KEY}", "isSecret": true }
             ]
           }
         ],
@@ -839,13 +839,13 @@ Required fields: top-level `servers[]`, per-entry `server`, and official `server
 
 Supported candidates:
 
-- `remotes[]` entries with `type: "streamable-http"` and a valid HTTP(S) URL without credentials or fragment. Concrete string headers are allowed; descriptor-only required headers are skipped because Bobbit does not prompt for registry header values yet.
-- `packages[]` entries with `registryType: "npm"`, `transport.type: "stdio"`, absent/`npx` `runtimeHint`, valid npm identifier/version, fixed literal `packageArguments`, no `runtimeArguments`, and environment variables with literal defaults or safe `${NAME}` placeholders.
+- `remotes[]` entries with `type: "streamable-http"` and a valid concrete HTTP(S) URL without credentials, fragments, variables, or templates. Header values must be concrete strings. Descriptor-only, prompt-required, variable/template, and secret-marked headers are skipped because Bobbit does not prompt for or materialize registry header secrets.
+- `packages[]` entries with `registryType: "npm"`, `transport.type: "stdio"`, absent/`npx` `runtimeHint`, valid npm identifier, pinned concrete semver `version`, absent/default `registryBaseUrl` (`https://registry.npmjs.org/`), fixed literal `packageArguments`, no `runtimeArguments`, and environment variables with literal defaults or whole-value safe `${NAME}` placeholders. Materialized stdio configs run `npx -y --registry=https://registry.npmjs.org/ <identifier>@<version> ...` so package resolution remains pinned to the default npm registry.
 
 Virtual pack identity:
 
-- `dirName` and installed `pack.yaml.name` default to `mcp-${id}`, where `id` is a deterministic safe install id derived from official `server.name`, version, source URL, and candidate variant.
-- If `mcp-${id}` collides with an existing installed pack in the target scope, install returns `409` unless the installed pack has matching source URL and generated registry id, in which case `update` semantics apply.
+- `dirName` and installed `pack.yaml.name` are `mcp-${id}`, where `id` is a deterministic safe install id derived from official `server.name`, version, canonical source URL/source key, and candidate variant. Candidate variants are stable (`remote-<n>` for remotes, npm package identity for packages when present), making identities source-keyed and variant-stable.
+- If `mcp-${id}` collides with an existing installed pack in the target scope, install returns `409` unless the user explicitly updates the existing pack.
 - Refresh/update detection compares source URL/source key, official `server.name`, version, selected candidate descriptor, metadata that affects display, and a stable fingerprint of the normalized runtime config.
 - `.pack-meta.yaml` records `sourceType: mcp-registry`, `sourceUrl`, `sourceKey`, `registryId`, generated runtime `registryName`, exact `officialName`, `registryVersion`, `registryFingerprint`, optional repository/meta fields, and `materializedAt`.
 
@@ -853,7 +853,7 @@ Failure behavior:
 
 - Invalid HTTP response, non-JSON body, old Bobbit `schemaVersion: 1` documents, missing `servers[]`, or entries without `servers[].server` fail browse for that source with a registry error.
 - Unsupported individual candidates are skipped; browse returns valid virtual packs plus `skippedCount` and concise validation messages for UI warnings.
-- Unsupported remote transports such as `sse`, unsupported package managers such as `pypi`, runtime arguments, prompts, and variable package arguments are skipped with actionable diagnostics.
+- Unsupported remote transports such as `sse`, remote variables/templates, prompt-required or secret-marked headers, unsupported package managers such as `pypi`, non-default npm registry URLs, missing/ranged npm versions, runtime arguments, prompts, package variables/templates, and unsafe package arguments are skipped with actionable diagnostics.
 - Duplicate generated ids keep the first valid entry and report later duplicates as skipped. Duplicate runtime names with different normalized configs are skipped.
 - Registry source `ref` is rejected at source creation and ignored for legacy malformed rows.
 
@@ -1000,7 +1000,7 @@ Schema rules:
 - Registry documents must use the official response shape with `servers[].server`; the historical Bobbit `schemaVersion: 1` format fails browse for the source.
 - Unknown keys are rejected for authored pack-owned MCP files unless explicitly documented as metadata. Official registry metadata allowed for preservation includes `title`, `description`, `version`, `websiteUrl`, `repository`, `license`, wrapper `_meta`, and server `_meta`.
 
-Tests must include path traversal ids, unsafe generated/runtime names, Windows device names, absolute/escaping cwd, URL credentials/fragments, invalid arg/env/header types, unsupported official transports/packages, variable package arguments, and old schema-version failures.
+Tests must include path traversal ids, unsafe generated/runtime names, Windows device names, absolute/escaping cwd, URL credentials/fragments, invalid arg/env/header types, unsupported official transports/packages, secret-marked remote headers, non-default npm registry URLs, missing/ranged npm versions, variable/template package arguments, and old schema-version failures.
 
 ### 13.9 Sub-namespace activation semantics
 

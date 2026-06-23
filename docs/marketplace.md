@@ -203,7 +203,7 @@ any install. A rejected name simply yields no description row.
 
 ## Marketplace MCP
 
-Marketplace MCP is the install/browse layer for MCP server definitions. It does **not** replace manual MCP config files; it adds pack-owned MCP contributions below the existing manual cascade so users can install and toggle MCP servers from Market while keeping `.mcp.json` and Claude-compatible config paths intact.
+Marketplace MCP is the install/browse layer for MCP server definitions. It does **not** replace manual MCP config files; it adds pack-owned MCP contributions below the existing manual cascade so users can install and toggle MCP servers from Market while keeping `.mcp.json` and Claude-compatible config paths intact. Registry ingestion uses the official MCP Registry API only; installed and authored MCP packs remain normal schema-2 packs with `contents.mcp`.
 
 ### Pack-owned MCP contributions
 
@@ -268,7 +268,7 @@ An MCP registry source is added with `type: "mcp-registry"` and an HTTP(S) offic
 https://registry.modelcontextprotocol.io/v0/servers
 ```
 
-The response must be the official MCP Registry API shape: a JSON object with `servers[]`, where each item wraps the server at `servers[].server`. Bobbit rejects the old Bobbit-specific flat `servers[]` document as unsupported.
+The response must be the official MCP Registry API shape: a JSON object with `servers[]`, where each item wraps the server at `servers[].server`. Bobbit reads official metadata from `server.name`, `title`, `description`, `version`, `websiteUrl`, `repository`, `license`, `remotes`, `packages`, wrapper `_meta`, and server `_meta`. The old Bobbit-specific `schemaVersion: 1` registry JSON is unsupported and fails browse.
 
 ```json
 {
@@ -296,7 +296,7 @@ The response must be the official MCP Registry API shape: a JSON object with `se
             "transport": { "type": "stdio" },
             "packageArguments": ["/workspace"],
             "environmentVariables": [
-              { "name": "MCP_TOKEN", "variable": "MCP_TOKEN", "isSecret": true }
+              { "name": "MCP_TOKEN", "default": "${MCP_TOKEN}", "isSecret": true }
             ]
           }
         ],
@@ -311,12 +311,12 @@ The response must be the official MCP Registry API shape: a JSON object with `se
 
 Browse maps each supported official server candidate to a virtual pack row:
 
-- The official `server.name` is preserved in `.pack-meta.yaml` as `officialName`, while a deterministic safe install id is generated from the official name, version, source URL, and candidate variant.
+- The official `server.name` is preserved in `.pack-meta.yaml` as `officialName`, while a deterministic safe install id is generated from the official name, version, canonical source URL, source key, and candidate variant. Candidate variants are stable per candidate (`remote-<n>` for remotes, npm package identity for packages when present), so multiple remotes/packages for one official server become separate installable rows without colliding across sources.
 - `mcp-<id>` becomes the virtual and installed pack name. `<id>` is also the pack-local `contents.mcp` ref, materialized file basename, and `DisabledRefs.mcp` key.
 - The runtime MCP `server` name is generated from the same official metadata and source key so multiple registry sources can publish the same official server without colliding.
 - Installing materializes a normal schema-2 pack with `pack.yaml`, `mcp/<id>.yaml`, and `.pack-meta.yaml` containing the source URL, source key, official name, registry metadata, version/fingerprint, and materialization time.
-- Supported remote candidates use official `remotes[].type: "streamable-http"` and materialize to Bobbit's HTTP MCP transport. `sse` and unknown remote transports are skipped with diagnostics.
-- Supported package candidates use `registryType: "npm"`, `transport.type: "stdio"`, optional/`npx` `runtimeHint`, fixed literal package arguments, and environment variables with literal defaults or safe `${NAME}` placeholders. Unsupported package managers, runtime arguments, prompts, and variable package arguments are skipped with diagnostics.
+- Supported remote candidates use official `remotes[].type: "streamable-http"` and materialize to Bobbit's HTTP MCP transport. Remote URLs must be concrete HTTP(S) URLs without credentials, fragments, variables, or templates. Headers must be concrete string values; descriptor-only, variable/template, prompt-required, and secret-marked headers are skipped because Bobbit does not prompt for or materialize registry header secrets. `sse` and unknown remote transports are skipped with diagnostics.
+- Supported package candidates use `registryType: "npm"`, `transport.type: "stdio"`, absent/`npx` `runtimeHint`, a pinned concrete semver package `version`, the default npm registry (`https://registry.npmjs.org/`), fixed literal package arguments, and environment variables with literal defaults or whole-value safe `${NAME}` placeholders. Materialization pins resolution with `npx -y --registry=https://registry.npmjs.org/ <identifier>@<version> ...`. Unsupported package managers, non-default registry URLs, missing/ranged versions, runtime arguments, prompts, variables/templates, and unsafe package arguments are skipped with diagnostics.
 - Invalid official registry documents fail browse. Invalid individual server candidates are skipped and reported as diagnostics, so one unsupported transport or package does not hide every valid server.
 
 Registry update detection uses the registry entry fingerprint when the source has been synced/browsed. The Installed tab remains sync-free: it never fetches a registry just to render; explicit Re-sync/Update performs the network check.
