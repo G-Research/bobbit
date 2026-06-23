@@ -28,12 +28,16 @@ export function isValidSourceId(id: unknown): id is string {
 	);
 }
 
+export type MarketplaceSourceType = "pack" | "mcp-registry";
+
 export interface MarketplaceSource {
 	/** Stable id ([a-z0-9-]+, unique). Also the cache subdir name. */
 	id: string;
-	/** Git remote URL OR absolute local directory path. */
+	/** Source kind. Absent means the legacy/default pack source type. */
+	type?: MarketplaceSourceType;
+	/** Git remote URL OR absolute local directory path; registry discovery URL for MCP registry sources. */
 	url: string;
-	/** Branch/tag. Optional (defaults to the remote HEAD on clone). */
+	/** Branch/tag. Optional for pack sources only (defaults to the remote HEAD on clone). */
 	ref?: string;
 	addedAt: string; // ISO-8601
 	lastSyncedAt?: string; // ISO-8601
@@ -55,11 +59,19 @@ function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
 
+function normalizeSourceType(v: unknown): MarketplaceSourceType | null {
+	if (v === undefined || v === "pack") return "pack";
+	if (v === "mcp-registry") return "mcp-registry";
+	return null;
+}
+
 function parseSource(raw: unknown): MarketplaceSource | null {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
 	const r = raw as Record<string, unknown>;
 	if (!isValidSourceId(r.id)) return null;
 	if (!nonEmptyString(r.url)) return null;
+	const type = normalizeSourceType(r.type);
+	if (!type) return null;
 	// §4.1/§4.4 — the built-in source is synthetic and composed only at the API
 	// layer. Reject any disk-authored row that would duplicate or shadow it so a
 	// hand-edited/legacy `marketplace-sources.yaml` can never collide with it.
@@ -69,7 +81,10 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 		url: (r.url as string).trim(),
 		addedAt: nonEmptyString(r.addedAt) ? (r.addedAt as string) : new Date().toISOString(),
 	};
-	if (nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
+	if (type !== "pack") s.type = type;
+	// Registry sources do not support refs. Ignore a legacy malformed on-disk ref
+	// rather than preserving it across the next save.
+	if (type === "pack" && nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
 	if (nonEmptyString(r.lastSyncedAt)) s.lastSyncedAt = r.lastSyncedAt as string;
 	if (typeof r.lastCommit === "string") s.lastCommit = r.lastCommit;
 	return s;
@@ -77,7 +92,8 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 
 function serializeSource(s: MarketplaceSource): Record<string, unknown> {
 	const out: Record<string, unknown> = { id: s.id, url: s.url };
-	if (s.ref) out.ref = s.ref;
+	if (s.type && s.type !== "pack") out.type = s.type;
+	if (s.type !== "mcp-registry" && s.ref) out.ref = s.ref;
 	out.addedAt = s.addedAt;
 	if (s.lastSyncedAt) out.lastSyncedAt = s.lastSyncedAt;
 	if (s.lastCommit) out.lastCommit = s.lastCommit;
@@ -175,9 +191,12 @@ export class MarketplaceSourceStore {
 	 * url. Returns the created record (sync metadata is filled in later by the
 	 * install engine after a successful git sync).
 	 */
-	add(input: { url: string; ref?: string }): MarketplaceSource {
+	add(input: { url: string; ref?: string; type?: MarketplaceSourceType }): MarketplaceSource {
 		const url = input.url.trim();
 		if (!nonEmptyString(url)) throw new Error("source url is required");
+		const type = normalizeSourceType(input.type);
+		if (!type) throw new Error(`invalid source type: ${String(input.type)}`);
+		if (type === "mcp-registry" && nonEmptyString(input.ref)) throw new Error("mcp-registry sources do not support ref");
 		// Reject the reserved built-in url scheme (§4.4): the built-in source is
 		// synthetic and must never be user-registered/persisted.
 		if (url === BUILTIN_SOURCE_URL || url.toLowerCase().startsWith("builtin:")) {
@@ -192,17 +211,21 @@ export class MarketplaceSourceStore {
 			url,
 			addedAt: new Date().toISOString(),
 		};
-		if (nonEmptyString(input.ref)) source.ref = input.ref!.trim();
+		if (type !== "pack") source.type = type;
+		if (type === "pack" && nonEmptyString(input.ref)) source.ref = input.ref!.trim();
 		this.sources.push(source);
 		this.save();
 		return { ...source };
 	}
 
-	/** Patch sync metadata after a git sync. No-op if id unknown. */
+	/** Patch sync metadata after a sync. No-op if id unknown. */
 	update(id: string, patch: Partial<Pick<MarketplaceSource, "ref" | "lastSyncedAt" | "lastCommit">>): MarketplaceSource | undefined {
 		const s = this.sources.find((x) => x.id === id);
 		if (!s) return undefined;
-		if (patch.ref !== undefined) s.ref = patch.ref || undefined;
+		if (patch.ref !== undefined) {
+			if (s.type === "mcp-registry" && patch.ref) throw new Error("mcp-registry sources do not support ref");
+			s.ref = patch.ref || undefined;
+		}
 		if (patch.lastSyncedAt !== undefined) s.lastSyncedAt = patch.lastSyncedAt;
 		if (patch.lastCommit !== undefined) s.lastCommit = patch.lastCommit;
 		this.save();
