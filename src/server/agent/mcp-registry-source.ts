@@ -157,6 +157,7 @@ export function parseMcpRegistryDocument(raw: unknown): McpRegistryParseResult {
 export function registryServerToVirtualPack(server: McpRegistryServer): McpRegistryBrowsePack {
 	const packName = registryPackName(server.id);
 	if (!isValidPackName(packName)) throw new McpRegistryError(`generated pack name is unsafe: ${packName}`);
+	const mcpEntry = registryServerToMcpWire(server);
 	return {
 		schema: 2,
 		name: packName,
@@ -170,7 +171,30 @@ export function registryServerToVirtualPack(server: McpRegistryServer): McpRegis
 		sourceType: "mcp-registry",
 		registryId: server.id,
 		serverName: server.name,
+		mcp: [mcpEntry],
+		mcpServers: [mcpEntry],
 	};
+}
+
+function registryServerToMcpWire(server: McpRegistryServer): Record<string, unknown> {
+	const base: Record<string, unknown> = {
+		ref: server.id,
+		listName: server.id,
+		serverName: server.name,
+		transport: server.transport.type,
+	};
+	if (server.label) base.label = server.label;
+	if (server.description) base.description = server.description;
+	if (server.transport.type === "stdio") {
+		base.command = server.transport.command;
+		if (server.transport.args) base.args = server.transport.args;
+		if (server.transport.cwd) base.cwd = server.transport.cwd;
+		if (server.transport.env) base.env = Object.keys(server.transport.env);
+	} else {
+		base.url = server.transport.url;
+		if (server.transport.headers) base.headers = Object.keys(server.transport.headers);
+	}
+	return base;
 }
 
 export function materializeRegistryPack(server: McpRegistryServer, destOrStagingDir: string, opts: MaterializeRegistryPackOptions = {}): PackManifest {
@@ -185,6 +209,11 @@ export function materializeRegistryPack(server: McpRegistryServer, destOrStaging
 		if (!isPackPathWithinRoot(root, target)) throw new McpRegistryError(`materialized path escapes pack root: ${target}`);
 	}
 	fs.mkdirSync(mcpDir, { recursive: true });
+	if (server.transport.type === "stdio" && server.transport.cwd) {
+		const cwdDir = path.resolve(root, server.transport.cwd);
+		if (!isPackPathWithinRoot(root, cwdDir)) throw new McpRegistryError(`materialized cwd escapes pack root: ${server.transport.cwd}`);
+		fs.mkdirSync(cwdDir, { recursive: true });
+	}
 	fs.writeFileSync(packYamlPath, stringify(stripUndefined({
 		schema: 2,
 		name: manifest.name,

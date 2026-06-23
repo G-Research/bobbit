@@ -59,7 +59,7 @@ import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
-import { McpManager, type MarketplaceMcpResolver } from "../mcp/mcp-manager.js";
+import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
@@ -778,6 +778,7 @@ export class SessionManager {
 	private projectContextManager: ProjectContextManager | null = null;
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
+	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
@@ -1392,7 +1393,7 @@ export class SessionManager {
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
-			mcpManager: this.mcpManager,
+			mcpManager: this.getMcpManager({ projectId }) ?? this.mcpManager,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1758,13 +1759,86 @@ export class SessionManager {
 		return tasks.length > 0 ? tasks[0].id : undefined;
 	}
 
-	getMcpManager(): McpManager | null {
-		return this.mcpManager;
+	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
+		if (scope?.scopeKey) return scope.scopeKey;
+		if (scope?.projectId) return `project:${scope.projectId}`;
+		if (scope?.cwd) return `cwd:${path.resolve(scope.cwd)}`;
+		return "default";
+	}
+
+	getMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): McpManager | null {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		return this.scopedMcpManagers.get(key) ?? null;
+	}
+
+	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
+		const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir(), {
+			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
+			...(opts?.projectId ? { projectId: opts.projectId } : {}),
+			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
+		});
+		if (opts?.includeAdditionalProjects && this.projectContextManager) {
+			const additionalProjects = Array.from(this.projectContextManager.all())
+				.filter(ctx => ctx.project.rootPath !== cwd)
+				.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
+			if (additionalProjects.length > 0) mgr.setAdditionalProjects(additionalProjects);
+		}
+		return mgr;
+	}
+
+	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		const existing = this.scopedMcpManagers.get(key);
+		if (existing) return existing;
+		let cwd = scope?.cwd;
+		let projectId = scope?.projectId;
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (!ctx) return null;
+			cwd = cwd ?? ctx.project.rootPath;
+		}
+		if (!cwd) return null;
+		const mgr = this.createMcpManager(cwd, { projectId, scopeKey: key });
+		this.scopedMcpManagers.set(key, mgr);
+		await mgr.connectAll();
+		return mgr;
+	}
+
+	getMcpManagerForSession(sessionId: string): McpManager | null {
+		const live = this.sessions.get(sessionId);
+		const projectId = live?.projectId ?? this.getPersistedSession(sessionId)?.projectId;
+		return projectId ? (this.getMcpManager({ projectId }) ?? this.mcpManager) : this.mcpManager;
+	}
+
+	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
+		const live = this.sessions.get(sessionId);
+		const projectId = live?.projectId ?? this.getPersistedSession(sessionId)?.projectId;
+		return projectId ? (await this.ensureMcpManager({ projectId }) ?? this.mcpManager) : this.mcpManager;
+	}
+
+	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
+		const managers = new Set<McpManager>();
+		if (scope === "project") {
+			const mgr = await this.ensureMcpManager({ projectId });
+			if (mgr) managers.add(mgr);
+		} else {
+			if (this.mcpManager) managers.add(this.mcpManager);
+			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
+		}
+		let first: McpReloadResult | undefined;
+		for (const mgr of managers) {
+			const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
+			if (!first) first = result;
+		}
+		return first;
 	}
 
 	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
 		this.marketplaceMcpResolver = resolver ?? null;
 		this.mcpManager?.setMarketplaceResolver(this.marketplaceMcpResolver);
+		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
 	}
 
 	/**
@@ -1827,20 +1901,20 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir(), { marketplaceResolver: this.marketplaceMcpResolver ?? undefined });
-
-			// Register additional projects for multi-project MCP discovery
-			if (this.projectContextManager) {
-				const additionalProjects = Array.from(this.projectContextManager.all())
-					.filter(ctx => ctx.project.rootPath !== cwd)
-					.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
-				if (additionalProjects.length > 0) {
-					mgr.setAdditionalProjects(additionalProjects);
-				}
-			}
+			const mgr = this.createMcpManager(cwd, { includeAdditionalProjects: true });
 
 			await mgr.connectAll();
 			this.mcpManager = mgr;
+
+			if (this.projectContextManager) {
+				for (const ctx of this.projectContextManager.all()) {
+					const key = this.mcpScopeKey({ projectId: ctx.project.id });
+					if (this.scopedMcpManagers.has(key)) continue;
+					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
+					this.scopedMcpManagers.set(key, scoped);
+					await scoped.connectAll();
+				}
+			}
 
 			// Register MCP tools with ToolManager
 			if (this.toolManager) {
@@ -2013,9 +2087,11 @@ export class SessionManager {
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
 
+		const mcpManager = this.getMcpManager({ projectId, cwd }) ?? this.mcpManager;
+
 		// MCP proxy extensions
-		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+		const mcpExtPaths = mcpManager
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -2025,14 +2101,14 @@ export class SessionManager {
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);

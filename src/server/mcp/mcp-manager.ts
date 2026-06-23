@@ -127,6 +127,11 @@ function stableFingerprint(value: unknown): string {
     .digest("hex");
 }
 
+function safeScopeSegment(scopeKey: string): string {
+  const readable = scopeKey.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "scope";
+  return `${readable}-${stableFingerprint(scopeKey).slice(0, 12)}`;
+}
+
 function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
   return stableFingerprint(a) === stableFingerprint(b);
 }
@@ -161,6 +166,7 @@ export class McpManager {
   private projectConfigStore: ProjectConfigReader | null;
   private additionalProjects: Array<{cwd: string, configStore: ProjectConfigReader}> = [];
   private stateDir: string | undefined;
+  private readonly scopeKey: string;
 
   /** Override-able for tests via constructor opts. */
   private listToolsTimeoutMs: number = DEFAULT_LIST_TOOLS_TIMEOUT_MS;
@@ -175,6 +181,7 @@ export class McpManager {
       callToolTimeoutMs?: number;
       projectId?: string;
       marketplaceResolver?: MarketplaceMcpResolver;
+      scopeKey?: string;
     },
   ) {
     this.projectConfigStore = projectConfigStore ?? null;
@@ -183,6 +190,7 @@ export class McpManager {
     if (opts?.callToolTimeoutMs !== undefined) this.callToolTimeoutMs = opts.callToolTimeoutMs;
     if (opts?.marketplaceResolver) this.marketplaceResolver = opts.marketplaceResolver;
     this.discoveryScope = { cwd: this.cwd, ...(opts?.projectId ? { projectId: opts.projectId } : {}) };
+    this.scopeKey = opts?.scopeKey ?? (opts?.projectId ? `project:${opts.projectId}` : "default");
   }
 
   /**
@@ -222,6 +230,21 @@ export class McpManager {
   /** Runtime discovery scope supplied to the Marketplace resolver seam. */
   getDiscoveryScope(): McpDiscoveryScope {
     return { ...this.discoveryScope };
+  }
+
+  /** Stable runtime scope identity used for routing and scoped cache paths. */
+  getScopeKey(): string {
+    return this.scopeKey;
+  }
+
+  /** Relative directory containing generated MCP tool docs for this manager. */
+  getToolDocsRelativeDir(): string {
+    return this.scopeKey === "default" ? "mcp-tool-docs" : path.join("mcp-tool-docs", safeScopeSegment(this.scopeKey));
+  }
+
+  getToolDocsRelativePath(serverName: string, sub?: string): string {
+    const docsKey = sub ? `${serverName}__${sub}` : serverName;
+    return path.join(this.getToolDocsRelativeDir(), `${path.basename(docsKey)}.md`).replace(/\\/g, "/");
   }
 
   // ── Discovery ──────────────────────────────────────────────────────
@@ -758,7 +781,7 @@ export class McpManager {
    */
   private _updateDocCache(serverName: string, tools: McpToolDef[]): void {
     try {
-      const dir = path.join(this.stateDir ?? bobbitStateDir(), 'mcp-tool-docs');
+      const dir = path.join(this.stateDir ?? bobbitStateDir(), ...this.getToolDocsRelativeDir().split(/[\\/]+/));
       fs.mkdirSync(dir, { recursive: true });
 
       const safeName = path.basename(serverName);

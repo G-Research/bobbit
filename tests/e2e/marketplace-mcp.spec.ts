@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch } from "./e2e-setup.js";
+import { apiFetch, defaultProjectId } from "./e2e-setup.js";
 import http from "node:http";
 
 async function startRegistry(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -38,11 +38,17 @@ async function startRegistry(): Promise<{ url: string; close: () => Promise<void
 	};
 }
 
-async function cleanup(sourceId?: string): Promise<void> {
+async function cleanup(sourceId?: string, projectId?: string): Promise<void> {
 	await apiFetch("/api/marketplace/installed", {
 		method: "DELETE",
 		body: JSON.stringify({ scope: "server", packName: "mcp-docs-remote" }),
 	}).catch(() => {});
+	if (projectId) {
+		await apiFetch("/api/marketplace/installed", {
+			method: "DELETE",
+			body: JSON.stringify({ scope: "project", projectId, packName: "mcp-docs-remote" }),
+		}).catch(() => {});
+	}
 	if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
 }
 
@@ -63,7 +69,12 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(browse.status).toBe(200);
 			const packs = (await browse.json()).packs;
 			expect(packs.map((p: any) => p.name)).toContain("mcp-docs-remote");
-			expect(packs.find((p: any) => p.name === "mcp-docs-remote")).toMatchObject({ virtual: true, sourceType: "mcp-registry", serverName: "docs_runtime" });
+			expect(packs.find((p: any) => p.name === "mcp-docs-remote")).toMatchObject({
+				virtual: true,
+				sourceType: "mcp-registry",
+				serverName: "docs_runtime",
+				mcp: [{ ref: "docs-remote", serverName: "docs_runtime", transport: "http", url: expect.stringContaining("/mcp") }],
+			});
 
 			const install = await apiFetch("/api/marketplace/install", {
 				method: "POST",
@@ -109,6 +120,44 @@ test.describe("Marketplace MCP API integration", () => {
 			expect((await mcp.json()).some((s: any) => s.name === "docs_runtime")).toBe(false);
 		} finally {
 			await cleanup(sourceId);
+			await registry.close();
+		}
+	});
+
+	test("project-scope registry install appears only in project MCP runtime", async ({ gateway }) => {
+		await gateway.sessionManager.initMcp(gateway.bobbitDir);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const registry = await startRegistry();
+		let sourceId: string | undefined;
+		try {
+			const add = await apiFetch("/api/marketplace/sources", {
+				method: "POST",
+				body: JSON.stringify({ url: registry.url, type: "mcp-registry" }),
+			});
+			expect(add.status).toBe(201);
+			sourceId = (await add.json()).source.id;
+
+			const install = await apiFetch("/api/marketplace/install", {
+				method: "POST",
+				body: JSON.stringify({ sourceId, dirName: "mcp-docs-remote", scope: "project", projectId }),
+			});
+			expect(install.status).toBe(201);
+			expect((await install.json()).mcpReload?.status).toBeTruthy();
+
+			const scoped = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
+			expect(scoped.status).toBe(200);
+			expect((await scoped.json()).some((s: any) => s.name === "docs_runtime")).toBe(true);
+
+			const global = await apiFetch("/api/mcp-servers");
+			expect(global.status).toBe(200);
+			expect((await global.json()).some((s: any) => s.name === "docs_runtime")).toBe(false);
+
+			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(projectId!)}&packName=mcp-docs-remote`);
+			expect(activation.status).toBe(200);
+			expect((await activation.json()).catalogue.mcp[0]).toMatchObject({ ref: "docs-remote", serverName: "docs_runtime", transport: "http" });
+		} finally {
+			await cleanup(sourceId, projectId);
 			await registry.close();
 		}
 	});

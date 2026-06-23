@@ -383,6 +383,22 @@ describe("MCP doc MD file generation", () => {
 
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	});
+
+	it("scopes project manager doc files to avoid same-name server collisions", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-md-scoped-"));
+		const projectA = new McpManager("/tmp/project-a", undefined, stateDir, { projectId: "project-a" });
+		const projectB = new McpManager("/tmp/project-b", undefined, stateDir, { projectId: "project-b" });
+		(projectA as any)._updateDocCache("shared", [{ name: "tool_a", description: "A tool.", inputSchema: { type: "object" } }]);
+		(projectB as any)._updateDocCache("shared", [{ name: "tool_b", description: "B tool.", inputSchema: { type: "object" } }]);
+
+		const aFile = path.join(stateDir, ...projectA.getToolDocsRelativePath("shared").split("/"));
+		const bFile = path.join(stateDir, ...projectB.getToolDocsRelativePath("shared").split("/"));
+		assert.notEqual(aFile, bFile);
+		assert.ok(fs.readFileSync(aFile, "utf-8").includes("tool_a"));
+		assert.ok(fs.readFileSync(bFile, "utf-8").includes("tool_b"));
+
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	});
 });
 
 // ── getToolInfos integration ────────────────────────────────────────
