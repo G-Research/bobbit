@@ -13582,7 +13582,7 @@ async function handleApiRoute(
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
 			}
-			const mcpManager = await sessionManager.ensureMcpManagerForSession(mcpSessionId);
+			let mcpManager = await sessionManager.ensureMcpManagerForSession(mcpSessionId);
 			if (!mcpManager) {
 				json({ error: "MCP not initialized" }, 500);
 				return;
@@ -13612,6 +13612,17 @@ async function handleApiRoute(
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
 					return;
+				}
+			}
+
+			const parsedForManager = parseMcpToolName(toolStr);
+			if (parsedForManager && !mcpManager.getServerStatuses().some(s => s.name === parsedForManager.server)) {
+				const defaultManager = sessionManager.getMcpManager();
+				if (defaultManager && defaultManager !== mcpManager && defaultManager.getServerStatuses().some(s => s.name === parsedForManager.server)) {
+					// Back-compat for legacy/default MCP sessions and tests that seed the
+					// singleton manager directly. If the scoped/session manager owns the
+					// server name, even in an error state, it remains authoritative.
+					mcpManager = defaultManager;
 				}
 			}
 
@@ -13665,10 +13676,19 @@ async function handleApiRoute(
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
 				return;
 			}
-			const mcpManager = await sessionManager.ensureMcpManagerForSession(describeSessionId);
+			let mcpManager = await sessionManager.ensureMcpManagerForSession(describeSessionId);
 			if (!mcpManager) {
 				json({ error: "MCP not initialized" }, 500);
 				return;
+			}
+			if (!mcpManager.getServerStatuses().some(s => s.name === server)) {
+				const defaultManager = sessionManager.getMcpManager();
+				if (defaultManager && defaultManager !== mcpManager && defaultManager.getServerStatuses().some(s => s.name === server)) {
+					// Back-compat for legacy/default MCP sessions and tests that seed the
+					// singleton manager directly. If the scoped/session manager owns the
+					// server name, even in an error state, it remains authoritative.
+					mcpManager = defaultManager;
+				}
 			}
 
 			const statuses = mcpManager.getServerStatuses();
