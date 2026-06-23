@@ -1,124 +1,134 @@
 # Add Project inline directory creation UX
 
-Status: design-doc gate artifact  
-Owner: goal `goal-a9ad7bc0`  
+Status: shipped implementation reference
+Owner: goal `goal-a9ad7bc0`
 Scope: Add Project path step only.
 
-## Problem
+## Context
 
-The current Add Project dialog supports creating a typed project directory, but the create action is placed in the modal footer beside Continue. A nonexistent directory is also easy to read as an invalid path rather than as a recoverable "create this folder" state.
+The Add Project dialog is the path-first entry point for registering an existing
+project or starting a new one. Directory browsing, typeahead, detection,
+preflight, and project-assistant handoff all converge on the typed `rootPath`.
 
-## Goals
+Inline directory creation solves one specific gap: users can type a new project
+directory path without leaving Bobbit to create the folder manually. The
+nonexistent-path state is treated as a recoverable creation opportunity, not as
+a normal validation error.
 
-1. Keep path guidance where users already scan the path field.
-2. Treat a nonexistent typed directory as a neutral creation opportunity, not a normal validation error.
-3. Make `Create Directory` prominent and directly adjacent to `Directory doesn't exist`.
-4. Preserve autocomplete, preflight, and footer layout invariants from the existing Add Project implementation.
+## User-facing behavior
 
-## Affected ownership boundaries
+### Empty path guidance
 
-| Area | Owner | Change |
-|---|---|---|
-| `src/app/dialogs.ts::showProjectDialog` | Add Project path-step state, status rendering, create action orchestration | Move create CTA from footer into `add-project-status-slot`; define status render priority; refresh detection/preflight after creation. |
-| `src/app/api.ts::createDirectory` | Client API helper | Keep structured `errorFromResponse` behavior; no new response shape required. |
-| `src/server/server.ts` `/api/create-directory` | Server filesystem contract | Existing endpoint remains the source of structured create failures. Preserve codes: `invalid_path`, `parent_not_found`, `exists_as_file`, `permission_denied`, `already_exists`, `create_failed`. |
-| `src/ui/components/DirectoryPicker.ts` | Input value, suggestion lookup, keyboard behavior | No layout or lookup behavior change. Use existing `setCompletedPath()` from `showProjectDialog` after successful creation. |
-
-## Path-step layout
-
-Keep the existing structure:
-
-```text
-Project Directory label
-[directory-picker input + Browse…]
-[status / validation area: add-project-status-slot]
-[preflight area: add-project-preflight-slot]
-------------------------------------------------
-Cancel                                Continue
-```
-
-The inline create UX lives only in `add-project-status-slot`. It must not be added to:
-
-- the `DirectoryPicker` root, because suggestions/loading are absolute overlays below the picker;
-- the modal footer, because footer position and actions must remain stable;
-- a separate field hint outside the existing status/validation area.
-
-## Required hint copy
-
-When the path is empty, `add-project-status-slot` renders exactly:
+When the path field is empty, `add-project-status-slot` renders the exact hint:
 
 > Type a path or click Browse to pick a directory, or type a path of a new directory to create it
 
-Treatment: `text-xs text-muted-foreground`, readable in light/dark themes, no trailing period.
+The hint keeps the original prefix, adds the creation suffix, uses subordinate
+muted text, and lives in the status slot below the picker. It does not change
+the picker height or suggestion overlay positioning.
 
-## Status-slot contract
+### Nonexistent directory state
 
-`add-project-status-slot` is the single source for path guidance, checking, nonexistent-directory creation, and create errors.
-
-Render priority:
-
-1. `errorMessage`: show existing general error text.
-2. `createErrorMessage`: show inline create block with error text and retry button when a path is present.
-3. Empty path: show exact hint copy.
-4. Detection loading or missing detection result: show `Checking directory…`.
-5. `detectionResult.exists === false`: show inline create block with `Directory doesn't exist` and `Create Directory`.
-6. Existing Bobbit project: show existing green register-project status.
-7. Existing non-empty directory: show existing setup status.
-8. Existing empty directory: show existing scaffold status.
-
-This priority prevents duplicate footer actions and ensures create failures stay visible until the user changes the path or retries.
-
-## Nonexistent directory UI
-
-When the typed path is syntactically usable and detection reports `exists === false`, show a centered neutral block in `add-project-status-slot`:
+When the typed path is syntactically usable and detection reports that it does not exist, the status slot shows a centered inline block:
 
 ```text
 Directory doesn't exist
 [Create Directory]
 ```
 
-Recommended rendering:
+Implementation selectors:
 
-```ts
-html`
-  <div
-    class="flex min-h-[88px] flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-muted/20 px-3 py-3 text-center"
-    data-testid="add-project-inline-create"
-  >
-    <div class="text-xs font-medium text-foreground">Directory doesn't exist</div>
-    ${Button({
-      variant: "default",
-      onClick: createTypedDirectory,
-      disabled: busy || archiving || creatingDirectory,
-      children: html`<span data-testid="add-project-create-directory">${creatingDirectory ? "Creating…" : "Create Directory"}</span>`,
-    })}
-  </div>
-`;
-```
+- Container: `data-testid="add-project-inline-create"`
+- Status area: `data-testid="add-project-status-slot"`
+- Button label span: `data-testid="add-project-create-directory"`
 
-Rationale:
+The button is directly adjacent to the message and is rendered in the
+validation/status area, not in the modal footer. The path-step footer remains
+limited to `Cancel` and `Continue`, so footer layout stays stable while typing,
+opening suggestions, creating, or showing errors.
 
-- `items-center justify-center text-center` makes the action visible during normal form scanning.
-- `min-h-[88px]` creates a real validation-area target without moving footer controls.
-- Dashed neutral styling indicates “not created yet,” not “invalid.”
-- `Button({ variant: "default" })` makes create discoverable and reuses the app button primitive.
+### Create Directory action
 
-## State machine
+Clicking `Create Directory` calls the client `createDirectory()` helper, which
+posts to `POST /api/create-directory` with the typed absolute path. While the
+request is running, the button label changes to `Creating…` and the dialog stays
+open.
 
-| Event/state | Dialog state updates | Detection/preflight behavior | UI result |
-|---|---|---|---|
-| Path empty | `pathValue = ""`; clear detection/preflight/create errors | No detection/preflight | Exact hint copy; Continue disabled |
-| User types path | Clear `errorMessage` and `createErrorMessage`; bump detection/preflight tokens | Debounced detection and preflight for typed path | `Checking directory…` while pending |
-| Detection says missing | `detectionResult.exists === false`; `detectionLoading = false` | Existing preflight may also report `path.exists`; do not make that the primary visible error | Centered `Directory doesn't exist` + `Create Directory`; Continue disabled |
-| Click Create Directory | `creatingDirectory = true`; clear create/general errors; disable picker | No stale lookup should reopen suggestions; in-flight detection/preflight tokens are already guarded by `onEffectivePathChange` and refreshed after success | Inline button reads `Creating…`; dialog stays open |
-| Create succeeds | `pathValue = created.path || typed`; `creatingDirectory = false`; call picker `setCompletedPath(createdPath)` | Call `onEffectivePathChange(createdPath, true)` to bump tokens and immediately rerun detection/preflight | Inline create block disappears after detection sees existing dir; normal scaffold/existing status appears |
-| Create returns `already_exists` | Treat as recoverable success for UI flow; set completed path and rerun detection/preflight | Same as success | No create error; Continue becomes available when checks pass |
-| Create fails structurally | `creatingDirectory = false`; set mapped `createErrorMessage`; keep path | Do not close modal; no auto-continue | Inline error block + retry `Create Directory` |
-| User changes path after error | Clear create error via `onEffectivePathChange` | Debounced detection/preflight for new path | New checking/create/existing state |
+On success:
 
-## API and error contract
+1. The dialog uses the returned path when present, otherwise the typed path.
+2. The `DirectoryPicker` is updated via `setCompletedPath()` so the created path is treated as a completed selection.
+3. Detection and preflight are refreshed for the created directory.
+4. The inline create block disappears after detection sees the directory.
+5. The normal existing-directory/scaffolding state controls whether `Continue` is enabled.
 
-`createDirectory(dirPath)` posts:
+A structured `already_exists` response is recoverable. The UI treats it like a
+refresh signal: detection and preflight rerun, no create error is shown, and the
+user can continue if the directory is otherwise valid.
+
+### Inline errors
+
+Creation failures are rendered inline in the same status slot with
+`data-testid="add-project-create-error"`. They do not close the Add Project
+dialog, do not move into the footer, and do not auto-continue.
+
+Mapped errors stay stable for the known server codes:
+
+| Server code | UI copy |
+|---|---|
+| `invalid_path` | `Enter an absolute directory path.` |
+| `parent_not_found` | `The parent directory does not exist.` |
+| `exists_as_file` | `A file already exists at that path.` |
+| `permission_denied` | `Permission denied creating this directory.` |
+| `already_exists` | Recover by refreshing detection/preflight. |
+| Other / `create_failed` | `Could not create directory: <message>` |
+
+Changing the path clears the create error and starts the normal detection/preflight cycle for the new value.
+
+## Status-slot priority
+
+`add-project-status-slot` is the single place for path guidance, checking text, nonexistent-directory creation, and create failures.
+
+Render priority:
+
+1. General path/dialog error.
+2. Create error plus retry button when the current path can still be created.
+3. Empty-path hint.
+4. `Checking directory…` while detection is pending or missing.
+5. `Directory doesn't exist` plus `Create Directory` when detection reports `exists === false`.
+6. Existing configured Bobbit project status.
+7. Existing non-empty directory setup status.
+8. Existing empty-directory scaffolding status.
+
+This ordering keeps missing-directory creation primary and prevents the preflight
+`path.exists` failure from looking like the main validation error while the
+inline create affordance is visible.
+
+## Autocomplete invariants
+
+The inline create UX preserves the `DirectoryPicker` intent-gating rules:
+
+- Typing a prefix such as `/tmp/al` browses the parent directory with prefix `al`.
+- Selecting a suggestion, Browse modal selection, Select current, picker sync, or successful creation marks the path as completed.
+- Completed paths do not automatically open next-level child suggestions.
+- Child suggestions appear only after explicit intent, such as typing a trailing
+  path separator, continuing to edit, or using keyboard navigation to request
+  suggestions.
+- Suggestions never appear when the input is blurred.
+- Arrow keys navigate suggestions, Enter selects/commits, and Escape closes suggestions before the outer dialog can close.
+- Async lookup results are ignored if they are stale, the input blurred, the value changed, or the lookup intent no longer matches.
+
+Successful creation intentionally uses `setCompletedPath()` so a newly-created
+folder with children does not immediately open a suggestion popover. A trailing
+separator after creation still lists children.
+
+## API contract
+
+`POST /api/create-directory` creates only the final path segment. It does not
+recursively create missing parents, because silently creating a directory tree
+can put a project somewhere the user did not intend.
+
+Request:
 
 ```http
 POST /api/create-directory
@@ -133,83 +143,45 @@ Success:
 { "path": "<created absolute path>" }
 ```
 
-Structured failures are normalized by `errorFromResponse()` in `src/app/api.ts` and mapped in `showProjectDialog`:
+Structured API coverage lives in `tests/e2e/project-detect-browse.spec.ts` and
+validates success, invalid input, existing directory, existing file, and
+missing-parent failures.
 
-| Server code | UI copy |
+## Implementation map
+
+| Concern | Location |
 |---|---|
-| `invalid_path` | `Enter an absolute directory path.` |
-| `parent_not_found` | `The parent directory does not exist.` |
-| `exists_as_file` | `A file already exists at that path.` |
-| `permission_denied` | `Permission denied creating this directory.` |
-| `already_exists` | Recover: rerun detection/preflight and allow Continue when valid. If shown, `That directory already exists; refresh and continue.` |
-| other / `create_failed` | `Could not create directory: <message>` |
+| Path-step state, status-slot rendering, create orchestration | `src/app/dialogs.ts::showProjectDialog` |
+| Browse modal composition | `src/app/dialogs.ts::openProjectBrowseDialog` |
+| Client API helper | `src/app/api.ts::createDirectory` |
+| Server create endpoint | `src/server/server.ts` handler for `POST /api/create-directory` |
+| Picker completed-path and typeahead gating | `src/ui/components/DirectoryPicker.ts` |
 
-No new API fields are required.
-
-## Preflight composition
-
-For a nonexistent typed path, the recoverable create state must be primary. Avoid showing a duplicate red `path.exists` row as the main user-facing validation state while `detectionResult.exists === false` and the inline create block is visible.
-
-Implementation options:
-
-- Hide the preflight panel while `showInlineCreate === true`, or
-- filter/de-emphasize only the `path.exists` fail row for that state.
-
-Continue remains disabled until the directory exists and preflight has no hard failures. Other existing-directory preflight failures remain visible and blocking.
-
-## DirectoryPicker/autocomplete invariants
-
-Do not change these invariants:
-
-- Suggestions stay `position: absolute` below the picker and do not push layout.
-- Suggestions never appear when the path input is blurred.
-- Selecting a suggestion, Browse modal selection, Select current, picker sync, or successful creation marks the path as completed and must not auto-open child suggestions.
-- Next-level suggestions appear only after explicit user intent: trailing separator, additional typing/editing, or keyboard request.
-- Arrow navigation, Enter selection/commit, and Escape close behavior remain as pinned by `tests/e2e/ui/add-project-typeahead.spec.ts`.
-- Stale async lookup results must not reopen suggestions after blur, selection, or a no-longer-qualifying input.
-
-## Footer invariant
-
-On the path step, the footer renders only:
-
-- `Cancel`
-- `Continue`
-
-`Create Directory` is not rendered inside `add-project-footer`. The footer container remains outside scrollable content and stable across typing, suggestions, inline create, errors, and creation loading.
-
-## Test plan
-
-Browser E2E coverage should update/extend:
+## Test references
 
 - `tests/e2e/ui/add-project-flow.spec.ts`
-  - exact hint copy is visible on empty path;
-  - nonexistent path shows `Directory doesn't exist` and inline `Create Directory` in `add-project-status-slot`;
-  - create button is absent from `add-project-footer`;
-  - successful creation creates the directory, removes inline create state, refreshes detection/preflight, and allows Continue;
-  - create failures stay inline and modal remains open.
+  - exact extended hint copy;
+  - centered inline `Directory doesn't exist` + `Create Directory` in `add-project-status-slot`;
+  - no `Create Directory` button in `add-project-footer`;
+  - happy-path creation, detection refresh, preflight refresh, and scaffolding handoff;
+  - recoverable `already_exists` refresh;
+  - inline structured and routed server errors that keep the dialog open.
 - `tests/e2e/ui/add-project-typeahead.spec.ts`
-  - existing suggestion selection, blur invalidation, trailing separator, Enter, and Escape regressions still pass;
-  - no popover appears after creation marks the completed path.
+  - prefix suggestions;
+  - completed-path suppression after suggestion selection;
+  - no suggestion reopen after successful creation;
+  - trailing-separator child suggestions after creation;
+  - blur invalidation and Escape behavior.
 - `tests/e2e/ui/add-project-browse-modal.spec.ts`
-  - Browse/Select current still sets a completed path without opening child suggestions.
+  - Browse/Select current writes a completed path and does not open child suggestions.
 - `tests/e2e/project-detect-browse.spec.ts`
-  - existing `/api/create-directory` structured error coverage remains valid; extend only if a missing error code is uncovered.
+  - `POST /api/create-directory` response shape and structured error codes;
+  - `GET /api/browse-directory` prefix/limit behavior used by typeahead.
+- `tests/e2e/ui/add-project-footer-stability.spec.ts`
+  - footer bounding-box stability across Add Project path-step transitions.
 
-Validation commands:
+## Related docs
 
-```bash
-npm run check
-npx playwright test tests/e2e/ui/add-project-flow.spec.ts tests/e2e/ui/add-project-typeahead.spec.ts tests/e2e/ui/add-project-browse-modal.spec.ts --reporter=line
-npx playwright test tests/e2e/project-detect-browse.spec.ts --reporter=line
-```
-
-## Acceptance checklist
-
-- Empty path hint exactly matches the required sentence.
-- Nonexistent typed path shows `Directory doesn't exist` plus directly adjacent `Create Directory` in `add-project-status-slot`.
-- The inline create block is centered and visually prominent.
-- The footer does not render `Create Directory`.
-- Create success creates the directory, marks the picker path completed, reruns detection/preflight, and removes the inline block.
-- Create failures render inline in `add-project-create-error` and keep the modal open.
-- Duplicate missing-path/preflight error treatment is suppressed while inline create is visible.
-- DirectoryPicker overlay, keyboard behavior, blur gating, stale-result gating, and completed-path gating remain unchanged.
+- [Project onboarding UX](project-onboarding-ux.md) — broader Add Project architecture and assistant handoff.
+- [Add Project pre-flight & archive](../add-project-preflight.md) — preflight checks and archive flow.
+- [REST API](../rest-api.md#add-project-directory-helpers) — directory browse/create endpoint details.
