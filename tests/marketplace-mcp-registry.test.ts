@@ -117,7 +117,7 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.equal(parsed.skipped.length, 0);
 		assert.equal(parsed.servers.length, 1);
 		const [server] = parsed.servers;
-		const expectedId = officialRegistryInstallId({ officialName: "ai.adeu/adeu", version: "1.7.1", sourceUrl: SOURCE_URL });
+		const expectedId = officialRegistryInstallId({ officialName: "ai.adeu/adeu", version: "1.7.1", sourceUrl: SOURCE_URL, variant: "remote-1" });
 		assert.equal(server.id, expectedId);
 		assert.equal(server.sourceKey, officialRegistrySourceKey(SOURCE_URL));
 		assert.equal(server.officialName, "ai.adeu/adeu");
@@ -179,8 +179,8 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.notEqual(registryPackNameForId(a.id), registryPackNameForId(b.id));
 		assert.notEqual(a.name, b.name);
 		assert.notEqual(a.fingerprint, b.fingerprint);
-		assert.match(a.id, /^ai-adeu-adeu-1-7-1-[a-f0-9]{9}$/);
-		assert.equal(a.id, officialRegistryInstallId({ officialName: "ai.adeu/adeu", version: "1.7.1", sourceUrl: sourceA }));
+		assert.match(a.id, /^ai-adeu-adeu-1-7-1-remote-1-[a-f0-9]{9}$/);
+		assert.equal(a.id, officialRegistryInstallId({ officialName: "ai.adeu/adeu", version: "1.7.1", sourceUrl: sourceA, variant: "remote-1" }));
 
 		const longId = officialRegistryInstallId({ officialName: "@scope/" + "very.".repeat(30) + "server", version: "2026.06.23", sourceUrl: sourceA, variant: "remote-1" });
 		assert.match(longId, /^[a-z0-9][a-z0-9-]*$/);
@@ -223,6 +223,27 @@ describe("Marketplace MCP registry source primitives", () => {
 		assert.ok(parsed.skipped.some((s) => /unsupported package registryType: pypi \(supported: npm\)/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /runtimeArguments are not supported/.test(s.reason)));
 		assert.ok(parsed.skipped.some((s) => /packageArguments contain variables\/prompts/.test(s.reason)));
+	});
+
+	it("skips npm package versions and fixed args with Windows shell metacharacters", () => {
+		const parsed = parseMcpRegistryDocument({
+			servers: [{
+				server: {
+					name: "security/packages",
+					version: "1.0.0",
+					remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+					packages: [
+						{ registryType: "npm", identifier: "safe-mcp", version: "1.0.0&calc", transport: { type: "stdio" } },
+						{ registryType: "npm", identifier: "safe-args-mcp", version: "1.0.0", packageArguments: ["ok&calc"], transport: { type: "stdio" } },
+					],
+				},
+			}],
+		}, SOURCE_URL);
+		assert.equal(parsed.servers.length, 1);
+		assert.equal(parsed.servers[0].transport.type, "http");
+		assert.equal(parsed.skipped.length, 2);
+		assert.ok(parsed.skipped.some((s) => /npm package version is invalid: only safe npm versions, dist-tags, or specs without Windows shell metacharacters are supported/.test(s.reason)));
+		assert.ok(parsed.skipped.some((s) => /packageArguments value contains unsafe Windows shell metacharacters/.test(s.reason)));
 	});
 
 	it("translates safe npm stdio packages to npx configs with fixed args and env placeholders", () => {
@@ -275,8 +296,15 @@ describe("Marketplace MCP registry source primitives", () => {
 		}]);
 	});
 
-	it("uses variant install IDs when multiple supported candidates are exposed", () => {
-		const parsed = parseMcpRegistryDocument({
+	it("keeps remote install IDs stable when package candidates are added later", () => {
+		const remoteOnly = parseMcpRegistryDocument({
+			servers: [{ server: {
+				name: "multi/server",
+				version: "1.0.0",
+				remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+			} }],
+		}, SOURCE_URL);
+		const remoteAndPackage = parseMcpRegistryDocument({
 			servers: [{ server: {
 				name: "multi/server",
 				version: "1.0.0",
@@ -284,11 +312,13 @@ describe("Marketplace MCP registry source primitives", () => {
 				packages: [{ registryType: "npm", identifier: "multi-mcp", version: "1.0.0", transport: { type: "stdio" } }],
 			} }],
 		}, SOURCE_URL);
-		assert.equal(parsed.servers.length, 2);
-		assert.deepEqual(parsed.servers.map((s) => s.id), [
+		assert.equal(remoteOnly.servers.length, 1);
+		assert.equal(remoteAndPackage.servers.length, 2);
+		assert.deepEqual(remoteAndPackage.servers.map((s) => s.id), [
 			officialRegistryInstallId({ officialName: "multi/server", version: "1.0.0", sourceUrl: SOURCE_URL, variant: "remote-1" }),
 			officialRegistryInstallId({ officialName: "multi/server", version: "1.0.0", sourceUrl: SOURCE_URL, variant: "npm-multi-mcp" }),
 		]);
-		assert.notEqual(parsed.servers[0].name, parsed.servers[1].name);
+		assert.equal(remoteOnly.servers[0].id, remoteAndPackage.servers[0].id);
+		assert.notEqual(remoteAndPackage.servers[0].name, remoteAndPackage.servers[1].name);
 	});
 });

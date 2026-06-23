@@ -155,7 +155,7 @@ async function withJsonServer(body: unknown, fn: (url: string, setBody: (next: u
 	}
 }
 
-function officialRegistryBody(url: string, opts: { description?: string; includeUnsupported?: boolean } = {}): Record<string, unknown> {
+function officialRegistryBody(url: string, opts: { description?: string; includeUnsupported?: boolean; includePackage?: boolean } = {}): Record<string, unknown> {
 	return {
 		servers: [
 			{
@@ -168,6 +168,7 @@ function officialRegistryBody(url: string, opts: { description?: string; include
 					license: "MIT",
 					repository: { url: "https://github.com/acme/docs-mcp", source: "github" },
 					remotes: [{ type: "streamable-http", url }],
+					...(opts.includePackage ? { packages: [{ registryType: "npm", identifier: "acme-docs-mcp", version: "1.0.0", transport: { type: "stdio" } }] } : {}),
 					_meta: { serverMeta: true },
 				},
 				_meta: { registryMeta: true },
@@ -259,7 +260,7 @@ describe("Marketplace MCP registry integration", () => {
 			assert.equal(rawMeta.packName, pack.name);
 			assert.equal(rawMeta.commit, installed.meta.commit);
 
-			setBody(officialRegistryBody("https://mcp.example.com/mcp?v=2", { description: "Remote docs MCP v2" }));
+			setBody(officialRegistryBody("https://mcp.example.com/mcp?v=2", { description: "Remote docs MCP v2", includePackage: true }));
 			await inst.syncMarketplaceSource(source.id);
 			row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === pack.name);
 			assert.equal(row?.sourceStatus, "ok");

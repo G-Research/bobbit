@@ -16,6 +16,8 @@ const DEFAULT_SOURCE_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NPM_PACKAGE_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
+const NPM_VERSION_SPEC_RE = /^(?:[vV]?\d+(?:\.\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?|[~^][vV]?\d+(?:\.\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?|(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}|[A-Za-z][A-Za-z0-9._+-]{0,127})$/;
+const WINDOWS_SHELL_UNSAFE_ARG_RE = /[\x00-\x1F\x7F&|<>^%"'`!()]/;
 const SAFE_PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
 export interface McpRegistryStdioTransport {
@@ -420,10 +422,8 @@ function normalizeOfficialEntry(entry: unknown, sourceUrl: string): { servers: M
 	}
 
 	const sourceKey = officialRegistrySourceKey(sourceUrl);
-	const includeVariant = candidates.length > 1;
 	const servers = candidates.map((candidate) => {
-		const variant = includeVariant ? candidate.variant : undefined;
-		const id = officialRegistryInstallId({ officialName: metadata.officialName, version: metadata.version, sourceUrl, variant });
+		const id = officialRegistryInstallId({ officialName: metadata.officialName, version: metadata.version, sourceUrl, variant: candidate.variant });
 		const packName = registryPackName(id);
 		if (!isValidPackName(packName)) throw new McpRegistryError(`generated pack name is unsafe: ${packName}`);
 		const name = officialRegistryRuntimeName({ officialName: metadata.officialName, version: metadata.version, sourceUrl, installId: id });
@@ -495,7 +495,7 @@ function candidateFromPackage(raw: unknown, index: number): Candidate {
 	const identifier = requiredNonEmptyString(pkg.identifier, "npm package identifier");
 	if (!NPM_PACKAGE_RE.test(identifier)) throw new McpRegistryError(`npm package identifier is invalid: ${identifier}`);
 	const version = optionalNonEmptyString(pkg.version, "npm package version");
-	if (version && /[\s\0]/.test(version)) throw new McpRegistryError(`npm package version is invalid: ${version}`);
+	if (version) validateNpmVersionSpec(version);
 	const identifierWithVersion = version ? `${identifier}@${version}` : identifier;
 	const packageArgs = normalizePackageArguments(pkg.packageArguments);
 	const env = normalizePackageEnvironment(pkg.environmentVariables);
@@ -547,6 +547,7 @@ function normalizePackageArguments(raw: unknown): string[] {
 	for (const item of raw) {
 		if (typeof item === "string") {
 			if (item.includes("${")) throw variablePackageArgumentsError();
+			validateFixedPackageArgString(item, "packageArguments value");
 			args.push(item);
 			continue;
 		}
@@ -558,6 +559,7 @@ function normalizePackageArguments(raw: unknown): string[] {
 		if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") throw variablePackageArgumentsError();
 		const stringValue = String(value);
 		if (stringValue.includes("${")) throw variablePackageArgumentsError();
+		validateFixedPackageArgString(stringValue, "packageArguments value");
 		const name = optionalNonEmptyString(arg.name, "package argument name");
 		if (name) {
 			validateCliArgName(name);
@@ -700,8 +702,21 @@ function validateEnvName(name: string): void {
 	if (!ENV_NAME_RE.test(name)) throw new McpRegistryError(`environment variable name is invalid: ${name}`);
 }
 
+function validateNpmVersionSpec(version: string): void {
+	if (!NPM_VERSION_SPEC_RE.test(version) || WINDOWS_SHELL_UNSAFE_ARG_RE.test(version) || /\s/.test(version)) {
+		throw new McpRegistryError("npm package version is invalid: only safe npm versions, dist-tags, or specs without Windows shell metacharacters are supported");
+	}
+}
+
 function validateCliArgName(name: string): void {
-	if (name.includes("\0") || name.includes("\n") || name.includes("\r") || /\s/.test(name)) throw new McpRegistryError("packageArguments contain variables/prompts; only fixed value arguments are supported");
+	if (/\s/.test(name)) throw new McpRegistryError("package argument name must not contain whitespace");
+	validateFixedPackageArgString(name, "package argument name");
+}
+
+function validateFixedPackageArgString(value: string, label: string): void {
+	if (WINDOWS_SHELL_UNSAFE_ARG_RE.test(value)) {
+		throw new McpRegistryError(`${label} contains unsafe Windows shell metacharacters or control characters; only fixed cmd-safe package arguments are supported`);
+	}
 }
 
 function fingerprintRegistryServer(server: Omit<McpRegistryServer, "fingerprint">, sourceUrl: string, candidate: Record<string, unknown>): string {
