@@ -7,6 +7,7 @@ import { parse, stringify } from "yaml";
 
 const { MarketplaceSourceStore } = await import("../src/server/agent/marketplace-source-store.ts");
 const {
+	fetchMcpRegistryWithDiagnostics,
 	isMcpRegistrySource,
 	parseMcpRegistryDocument,
 	registryServerToVirtualPack,
@@ -55,6 +56,37 @@ describe("Marketplace MCP registry source primitives", () => {
 		);
 		const store = new MarketplaceSourceStore(dir);
 		assert.deepEqual(store.list(), [{ id: "reg", type: "mcp-registry", url: "https://registry.example.com/mcp.json", addedAt: "2026-01-01T00:00:00.000Z" }]);
+	});
+
+	it("fetches registries with timeout and bounded body checks before parsing JSON", async () => {
+		const source = { id: "reg", type: "mcp-registry" as const, url: "https://registry.example.test/mcp.json", addedAt: "2026-01-01T00:00:00.000Z" };
+		await assert.rejects(
+			() => fetchMcpRegistryWithDiagnostics(source, {
+				maxBodyBytes: 10,
+				fetchFn: async () => new Response("{}", { headers: { "content-length": "11" } }),
+			}),
+			/Content-Length 11 exceeds limit 10/,
+		);
+		await assert.rejects(
+			() => fetchMcpRegistryWithDiagnostics(source, {
+				maxBodyBytes: 20,
+				fetchFn: async () => new Response(JSON.stringify({ schemaVersion: 1, servers: [] }).repeat(2)),
+			}),
+			/body exceeds limit 20/,
+		);
+		await assert.rejects(
+			() => fetchMcpRegistryWithDiagnostics(source, {
+				timeoutMs: 1,
+				fetchFn: (_input: URL | RequestInfo, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+				}),
+			}),
+			/timed out after 1ms/,
+		);
+		const parsed = await fetchMcpRegistryWithDiagnostics(source, {
+			fetchFn: async () => new Response(JSON.stringify({ schemaVersion: 1, servers: [{ id: "ok", name: "ok", transport: { type: "stdio", command: "node" } }] })),
+		});
+		assert.deepEqual(parsed.servers.map((s) => s.id), ["ok"]);
 	});
 
 	it("parses schemaVersion 1 registries and normalizes exact MCP runtime configs", () => {
