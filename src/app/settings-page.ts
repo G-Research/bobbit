@@ -29,10 +29,13 @@ import {
 	state,
 	SIDEBAR_FONT_SCALE_KEY,
 	SIDEBAR_FONT_SCALE_DEFAULT,
-	SIDEBAR_FONT_SCALE_STOPS,
+	SIDEBAR_FONT_SIZE_MIN_PX,
+	SIDEBAR_FONT_SIZE_MAX_PX,
+	SIDEBAR_FONT_SIZE_STEP_PX,
 	loadSidebarFontScale,
 	applySidebarFontScaleVar,
-	nearestStop,
+	sidebarFontSizePxToScale,
+	sidebarFontScaleToDisplayPx,
 } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
@@ -2391,11 +2394,10 @@ async function toggleSubgoalsEnabled(): Promise<void> {
 	} catch {}
 }
 
-function setSidebarFontScaleStop(stopIndex: number): void {
-	const clampedIndex = Math.max(0, Math.min(SIDEBAR_FONT_SCALE_STOPS.length - 1, Math.round(stopIndex)));
-	const value = SIDEBAR_FONT_SCALE_STOPS[clampedIndex].value;
-	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(value)); } catch { /* private mode */ }
-	applySidebarFontScaleVar(value);
+function setSidebarFontSizePx(px: number): void {
+	const scale = sidebarFontSizePxToScale(px);
+	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(scale)); } catch { /* private mode */ }
+	applySidebarFontScaleVar(scale);
 	renderApp();
 }
 
@@ -2405,10 +2407,17 @@ function resetSidebarFontScale(): void {
 	renderApp();
 }
 
+function handleSidebarFontSizeInput(e: Event): void {
+	const input = e.target as HTMLInputElement;
+	const raw = input.value.trim();
+	const px = Number.parseFloat(raw);
+	if (!Number.isFinite(px)) return;
+	if (e.type === "input" && px < SIDEBAR_FONT_SIZE_MIN_PX && raw.length < String(SIDEBAR_FONT_SIZE_MIN_PX).length) return;
+	setSidebarFontSizePx(px);
+}
+
 function renderSidebarFontScaleControl() {
-	const current = loadSidebarFontScale();
-	const stop = nearestStop(current);
-	const index = SIDEBAR_FONT_SCALE_STOPS.findIndex(s => s.id === stop.id);
+	const currentPx = sidebarFontScaleToDisplayPx(loadSidebarFontScale());
 	return html`
 		<div class="flex flex-col gap-1.5">
 			<span class="text-sm font-medium text-foreground">Sidebar font size</span>
@@ -2416,17 +2425,20 @@ function renderSidebarFontScaleControl() {
 				Scale all sidebar text proportionally. Affects only the sidebar — chat, header, and other surfaces are unchanged. Saved per browser.
 			</p>
 			<div class="flex items-center gap-3">
-				<input
-					type="range"
-					min="0"
-					max="${SIDEBAR_FONT_SCALE_STOPS.length - 1}"
-					step="1"
-					.value=${String(index)}
-					data-testid="sidebar-font-scale-slider"
-					class="flex-1 max-w-xs accent-primary cursor-pointer"
-					@input=${(e: Event) => setSidebarFontScaleStop(Number((e.target as HTMLInputElement).value))}
-				/>
-				<span class="text-sm text-foreground tabular-nums min-w-16" data-testid="sidebar-font-scale-label">${stop.label}</span>
+				<label class="flex items-center gap-2 text-sm text-foreground">
+					<input
+						type="number"
+						min=${String(SIDEBAR_FONT_SIZE_MIN_PX)}
+						max=${String(SIDEBAR_FONT_SIZE_MAX_PX)}
+						step=${String(SIDEBAR_FONT_SIZE_STEP_PX)}
+						.value=${live(String(currentPx))}
+						data-testid="sidebar-font-size-input"
+						class="w-20 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						@input=${handleSidebarFontSizeInput}
+						@change=${handleSidebarFontSizeInput}
+					/>
+					<span class="text-sm text-muted-foreground">px</span>
+				</label>
 				<button
 					class="text-xs text-muted-foreground hover:text-foreground underline"
 					data-testid="sidebar-font-scale-reset"
