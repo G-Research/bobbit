@@ -896,7 +896,10 @@ Implementation contract:
 - `SessionManager` owns one default/system `McpManager` for the server cwd as today, plus a per-project/per-cwd manager map for project contexts that need project-scoped marketplace MCP.
 - Manager key: normalized `projectId` when available, otherwise normalized cwd.
 - Each `McpManager` stores its own `cwd`, optional `projectId`, marketplace resolver binding, clients, error/status map, and registered tool infos.
-- `GET /api/mcp-servers` accepts optional `projectId` or `cwd` query parameters. Without parameters it returns the default/system manager for backward compatibility. The Market page must pass the selected install/project scope when showing project-scoped pack status.
+- Manager creation points are explicit: session/project-context creation, project-scoped Market install/update/activation, and first tool-registration request for a known project. Plain status reads do **not** instantiate managers unless `ensure=true` is supplied by an authenticated UI action that already selected a known project.
+- Managers are reused while their project/session context is active. On project removal, session teardown, or worktree cleanup, the corresponding manager runs `disconnectAll()`, unregisters scoped external MCP tools, removes scoped tool-doc cache directories, and is deleted from the map.
+- Idle managers with no live sessions and no in-flight reload are evicted after a bounded TTL (for example 30 minutes), disconnecting clients first. Server/global-user mutations only reload currently active managers; evicted managers pick up changes on next creation.
+- `GET /api/mcp-servers` accepts optional `projectId` or `cwd` query parameters. Without parameters it returns the default/system manager for backward compatibility. By default this endpoint is read-only and returns `404`/empty scoped status for unknown inactive projects rather than spawning processes.
 - Marketplace mutation reload chooses affected managers: server/global-user mutations reload all active managers; project-scope mutations reload only that project/cwd manager plus the default manager if the edited project is the current cwd.
 - Tool registration is per manager/tool-manager context. A project manager refreshes only its project `ToolManager`; the default manager refreshes only the default server `ToolManager`.
 - Runtime status responses include `scopeKey`, `projectId?`, and `cwd` so UI/tests can verify no cross-project leakage.
@@ -987,14 +990,34 @@ Tests must include path traversal ids, unsafe server names, Windows device names
 
 ### 13.9 Sub-namespace activation semantics
 
-First implementation supports server-level pack contributions and can represent sub-namespace catalogue rows when a contribution explicitly declares them, but it must not infer sub-namespace activation from runtime operation names during catalogue construction.
+First implementation supports both flat server contributions and explicit declared sub-namespace contributions without collapsing the activation model to bare `serverName`.
 
-Default behavior:
+Contribution identity and connection grouping are separate:
 
-- One `contents.mcp` `listName` represents one installed MCP server contribution.
-- Disabling that `listName` omits the whole contribution from discovery and therefore all model-facing meta-tools for that server.
+```ts
+interface ResolvedMcpContribution {
+  listName: string;                 // pack-local activation ref
+  serverName: string;               // connection/runtime server key
+  subNamespace?: string;            // optional declared meta-tool sub-namespace
+  config: McpServerConfig;
+  origin: ResolvedMcpOrigin;
+  catalogue: McpContributionCatalogueRecord;
+}
 
-Optional explicit sub-namespace entries, if needed for gateway-style authored packs:
+interface ResolvedMcpConnectionGroup {
+  serverName: string;
+  config: McpServerConfig;
+  ownerContributions: ResolvedMcpContribution[];
+  activeSubNamespaces?: Set<string>; // undefined means all namespaces for flat/server contribution
+}
+```
+
+Default flat behavior:
+
+- One `contents.mcp` `listName` without `subNamespace` represents one installed MCP server contribution.
+- Disabling that `listName` omits the contribution from resolver output. If no other enabled contribution owns the same server/config, the server disconnects and all its model-facing meta-tools disappear.
+
+Explicit sub-namespace behavior for gateway-style authored packs:
 
 ```yaml
 server: gr
@@ -1003,11 +1026,21 @@ transport: { type: http, url: "https://gateway.example.com/mcp" }
 ```
 
 - `listName` remains the activation ref for that pack-local server/sub-namespace contribution.
-- `serverName` plus `subNamespace` maps to the model-facing `mcp_<server>__<sub>` meta-tool and policy key `mcp__<server>__<sub>`.
-- Disabling an explicit sub-namespace contribution filters that catalogue/runtime meta-tool, but does not imply per-operation toggles.
-- If one physical MCP gateway exposes multiple sub-namespaces dynamically, Market still toggles only declared pack-local contributions; dynamic operation/sub-namespace discovery remains visible/read-only in Tools policy.
+- `serverName + subNamespace` maps to model-facing `mcp_<server>__<sub>` and policy key `mcp__<server>__<sub>`.
+- Contributions with the same `serverName` and byte-identical normalized `config` are grouped into one MCP client connection. Their enabled `subNamespace` values become `activeSubNamespaces` for meta-tool registration.
+- A flat contribution for a server (`subNamespace` absent) is an all-namespaces owner and cannot coexist with sub-namespace owners for the same `serverName`/config in one Marketplace precedence layer; later precedence wins and status marks earlier rows overridden.
+- Same `serverName` with different configs still follows server config collision rules; later Marketplace/manual owner wins the connection group.
+- `McpManager.getToolInfos()` can still list raw operations from the connected server, but `writeMcpProxyExtensions()` / meta-tool aggregation receives the active contribution metadata and filters model-facing meta-tools to enabled declared sub-namespaces. Per-operation dispatch remains Layer-B policy only.
+- Disabling one explicit sub-namespace removes only that `mcp_<server>__<sub>` meta-tool while keeping the shared MCP client alive if other enabled contributions still require it. If no enabled contribution remains for the group, disconnect the server.
+- Dynamic runtime sub-namespaces not declared by installed contributions are not surfaced as Market toggles; they remain read-only in Tools if a flat owner exposes the whole server.
 
-Tests must cover flat server contribution activation, explicit `subNamespace` activation, and no raw per-operation activation rows.
+Collision rules:
+
+- Duplicate `serverName + subNamespace` contributions: later Marketplace precedence wins; earlier row state is `overridden-by-marketplace`.
+- Duplicate `listName` inside one pack is invalid at manifest validation.
+- Manual config with the same `serverName` overrides the whole Marketplace connection group; rows become `overridden-by-manual`.
+
+Tests must cover flat server activation, two enabled sub-namespaces sharing one server config, disabling one while the other remains active, duplicate sub-namespace conflicts, flat-vs-subnamespace precedence, manual override, and no raw per-operation activation rows.
 
 ### 13.10 Runtime status ownership for duplicate names
 

@@ -291,7 +291,7 @@ If the backend keeps `mcp: string[]` initially, the UI should still render funct
 - Extend `PackManifest.contents` with optional `mcp?: string[]` on the client type.
 - Extend `DisabledRefs` with `mcp?: string[]`.
 - Extend `PackActivationCatalogue` with `mcp` entries. Prefer richer `PackActivationMcpEntry[]`; tolerate string arrays if the first backend pass is minimal.
-- Extend `MarketplaceSource` with a source kind, for example `kind?: "pack" | "mcp-registry" | "builtin"`.
+- Extend `MarketplaceSource` with the backend wire field `type?: "pack" | "mcp-registry"`; keep `builtin?: boolean` as separate provenance, not a source type.
 - Reuse existing `fetchMcpServers()` types or move them to shared API exports if Market imports runtime status.
 
 ### `src/app/marketplace-page.ts`
