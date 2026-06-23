@@ -23,6 +23,7 @@ export const ADD_PROJECT = {
 	pickerSuggestions: '[data-testid="directory-picker-suggestions"]',
 	pickerSuggestion: '[data-testid="directory-picker-suggestion"]',
 	statusSlot: '[data-testid="add-project-status-slot"]',
+	inlineCreate: '[data-testid="add-project-inline-create"]',
 	preflightSlot: '[data-testid="add-project-preflight-slot"]',
 	preflightPanel: '[data-testid="preflight-panel"]',
 	footer: '[data-testid="add-project-footer"]',

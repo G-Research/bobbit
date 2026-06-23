@@ -199,6 +199,7 @@ test.describe("POST /api/create-directory", () => {
 			expect(res.status).toBe(400);
 			const data = await res.json();
 			expect(data.code).toBe("invalid_path");
+			expect(data.error).toBe("Enter an absolute directory path.");
 		}
 	});
 
@@ -207,6 +208,7 @@ test.describe("POST /api/create-directory", () => {
 		expect(res.status).toBe(409);
 		const data = await res.json();
 		expect(data.code).toBe("already_exists");
+		expect(data.error).toBe("Directory already exists");
 	});
 
 	test("existing file returns exists_as_file", async () => {
@@ -216,6 +218,7 @@ test.describe("POST /api/create-directory", () => {
 		expect(res.status).toBe(409);
 		const data = await res.json();
 		expect(data.code).toBe("exists_as_file");
+		expect(data.error).toBe("A file already exists at that path");
 	});
 
 	test("missing parent returns parent_not_found", async () => {
@@ -224,6 +227,7 @@ test.describe("POST /api/create-directory", () => {
 		expect(res.status).toBe(404);
 		const data = await res.json();
 		expect(data.code).toBe("parent_not_found");
+		expect(data.error).toBe("The parent directory does not exist");
 		expect(existsSync(join(testRoot, "missing-parent"))).toBe(false);
 	});
 });
