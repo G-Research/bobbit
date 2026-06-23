@@ -22,6 +22,17 @@ async function sendChatMessage(page: Page, text: string) {
 	await textarea.press("Enter");
 }
 
+async function waitForGoalTitle(page: Page, title: string) {
+	await page.waitForFunction(
+		(expected) => (window as any).bobbitState?.activeProposals?.goal?.fields?.title === expected,
+		title,
+		{ timeout: 20_000 },
+	);
+	const titleInput = page.locator("input[placeholder='Goal title']").first();
+	await expect(titleInput).toBeVisible({ timeout: 20_000 });
+	await expect(titleInput).toHaveValue(title, { timeout: 20_000 });
+}
+
 async function openNewGoalAssistantProposal(page: Page) {
 	test.setTimeout(90_000);
 	await openApp(page);
@@ -36,9 +47,7 @@ async function openNewGoalAssistantProposal(page: Page) {
 	await sessionCreated;
 	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
 	await sendChatMessage(page, "Please create a GOAL_PROPOSAL for testing");
-	const titleInput = page.locator("input[placeholder='Goal title']").first();
-	await expect(titleInput).toBeVisible({ timeout: 20_000 });
-	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+	await waitForGoalTitle(page, "E2E Test Goal");
 }
 
 async function clickCreate(page: Page): Promise<string> {
@@ -92,5 +101,25 @@ test.describe("Goal proposal — Roles tab wiring", () => {
 		} finally {
 			await deleteGoal(goalId);
 		}
+	});
+
+	test("Roles Customize works in a second proposal after roles are cached", async ({ page }) => {
+		await openNewGoalAssistantProposal(page);
+
+		await page.locator(ROLES_TAB).click();
+		await expect(page.locator(ROLES_PANEL)).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`${ROLES_PANEL} [data-testid='role-editor']`).first()).toBeVisible({ timeout: 15_000 });
+
+		await sendChatMessage(page, "Please create GOAL_PROPOSAL_REV2 now");
+		await waitForGoalTitle(page, "Revised Goal Title");
+
+		await page.locator(ROLES_TAB).click();
+		await expect(page.locator(ROLE_CUSTOMIZE)).toBeVisible({ timeout: 10_000 });
+		await page.locator(ROLE_CUSTOMIZE).click();
+		await expect(
+			page.locator(ROLE_RESET),
+			"Customize must not be an enabled no-op when the roles list came from cache",
+		).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`${ROLES_PANEL} [data-testid='role-editor']`).first()).toBeVisible({ timeout: 10_000 });
 	});
 });

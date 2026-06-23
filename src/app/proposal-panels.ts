@@ -1518,6 +1518,12 @@ function goalPreviewPanel() {
 		}
 	}
 	useGoalProposalTabsContext(goalProposalTabsContextKey("preview"));
+	// The assistant preview renders from state.preview* mirrors, but Workflow /
+	// Roles tab drafts live in the shared proposal-tab state. Hydrate proposal-
+	// supplied inline workflow/role snapshots here too so assistant, +New Goal,
+	// re-attempt, and project-scoped goal creation stay behaviorally equivalent
+	// to the non-assistant proposal panel.
+	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 	ensureProposalRolesLoaded();
@@ -2814,10 +2820,11 @@ function proposalPanelForType(type: ProposalType) {
 }
 
 // Dispatcher used by both the live current-proposal path and the
-// historical-override path. Goal proposals from the assistant flow render
-// via `goalPreviewPanel()`; everything else (including project, role, tool,
-// staff, and non-assistant goal proposals) goes through `proposalPanelForType`.
+// historical-override path. Historical goal revisions must render through the
+// override-backed proposal panel; live goal proposals from the assistant flow
+// render via `goalPreviewPanel()`.
 function proposalPanelForWorkspaceType(type: ProposalType, currentAssistantProposalType: () => ProposalType | null) {
+	if (type === "goal" && _proposalOverride?.type === "goal") return proposalPanelForType(type);
 	if (type === "goal" && currentAssistantProposalType() === "goal") return goalPreviewPanel();
 	return proposalPanelForType(type);
 }
@@ -2971,14 +2978,16 @@ function useGoalProposalTabsContext(key: string): GoalProposalTabsState {
 
 function goalProposalTabsContextKey(surface: "preview" | "proposal"): string {
 	if (_proposalOverride?.type === "goal") {
-		const title = typeof _proposalOverride.fields.title === "string" ? _proposalOverride.fields.title : "";
-		return `goal:historical:${_proposalOverride.rev}:${title}`;
+		const sessionPart = _proposalOverrideSessionId || "no-session";
+		return `goal:historical:${sessionPart}:${_proposalOverride.rev}`;
 	}
-	const sid = state.activeProposals.goal?.sessionId ?? activeSessionId() ?? "no-session";
+	const slot = state.activeProposals.goal;
+	const sid = slot?.sessionId ?? activeSessionId() ?? "no-session";
 	const sess = state.gatewaySessions.find(s => s.id === sid);
 	const projectId = state.previewProjectId || sess?.projectId || "no-project";
 	const reattempt = sess?.reattemptGoalId || "";
-	return `goal:${surface}:${sid}:${projectId}:${reattempt}`;
+	const rev = slot?.rev ?? "no-rev";
+	return `goal:${surface}:${sid}:${projectId}:${reattempt}:${rev}`;
 }
 
 function proposalRolesProjectKey(): string {
@@ -2996,7 +3005,15 @@ function proposalRolesLoading(): boolean {
 
 function ensureProposalRolesLoaded(): void {
 	const key = proposalRolesProjectKey();
-	if (_proposalRolesCacheByProject.has(key) || _proposalRolesLoadingByProject.has(key)) return;
+	const cached = _proposalRolesCacheByProject.get(key);
+	if (cached) {
+		if (!_proposalSelectedRoleName && cached.length > 0) {
+			_proposalSelectedRoleName = cached[0].name;
+			commitGoalProposalTabsState();
+		}
+		return;
+	}
+	if (_proposalRolesLoadingByProject.has(key)) return;
 	_proposalRolesLoadingByProject.add(key);
 	fetchRolesForProject(key || undefined)
 		.then((list) => {
@@ -3088,7 +3105,7 @@ function goalProposalTabsConfig(
 		},
 
 		inlineRoles: _proposalInlineRoles,
-		selectedRoleName: _proposalSelectedRoleName,
+		selectedRoleName: _proposalSelectedRoleName || proposalRolesList()[0]?.name || null,
 		onSelectRole: (name) => {
 			_proposalSelectedRoleName = name;
 			_proposalCustomizingRole = !!_proposalInlineRoles[name];
@@ -3097,8 +3114,9 @@ function goalProposalTabsConfig(
 		},
 		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
 		onCustomizeRole: () => {
-			const name = _proposalSelectedRoleName;
+			const name = _proposalSelectedRoleName || proposalRolesList()[0]?.name || null;
 			if (!name) return;
+			if (!_proposalSelectedRoleName) _proposalSelectedRoleName = name;
 			const src = proposalRolesList().find((r) => r.name === name);
 			if (!src) return;
 			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
@@ -3163,6 +3181,7 @@ function resetProposalTabsState(): void {
 // `state.activeProposals[type]`, so the live current-proposal slot is never
 // clobbered when the user views an older snapshot.
 let _proposalOverride: { type: ProposalType; fields: Record<string, unknown>; rev: number } | null = null;
+let _proposalOverrideSessionId: string | null = null;
 // Tracks the raw source `fields` reference that the current `_proposalOverride`
 // was derived from, so the identity short-circuit in `proposalPanelContent`
 // still works when we project legacy top-level commands into a synthetic
@@ -3303,7 +3322,7 @@ function goalProposalPanel() {
 			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
 		}
 		if (!candidate) {
-			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			const cwd = ((_proposalOverride?.type === "goal" ? _proposalOverride.fields : state.activeProposals.goal?.fields) as any)?.cwd as string | undefined;
 			if (cwd) {
 				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 				const target = norm(cwd);
@@ -3600,6 +3619,7 @@ export function proposalPanelContent(
 		if (!_proposalOverride || _proposalOverride.type !== type || _proposalOverrideSource !== fields || _proposalOverride.rev !== rev) {
 			const projected = type === "project" ? projectLegacyToComponents(fields) : fields;
 			_proposalOverride = { type, fields: projected, rev };
+			_proposalOverrideSessionId = typeof tab.source.sessionId === "string" ? tab.source.sessionId : null;
 			_proposalOverrideSource = fields;
 			_proposalInitializedFrom = null;
 		}
@@ -3609,6 +3629,7 @@ export function proposalPanelContent(
 		// Returning to the current tab: drop the override and force a
 		// re-hydration of the form from the live activeProposals slot.
 		_proposalOverride = null;
+		_proposalOverrideSessionId = null;
 		_proposalOverrideSource = null;
 		_proposalInitializedFrom = null;
 	}

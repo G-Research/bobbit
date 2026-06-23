@@ -19,6 +19,8 @@ const METADATA_TAB = "[data-testid='goal-proposal-tab-metadata']";
 const METADATA_PANEL = "[data-testid='goal-proposal-panel-metadata']";
 const ROLES_TAB = "[data-testid='goal-proposal-tab-roles']";
 const ROLES_PANEL = "[data-testid='goal-proposal-panel-roles']";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
+const GOAL_PROPOSAL_TAB_TITLE_RE = /^Goal Proposal$/i;
 
 async function sendChatMessage(page: Page, text: string) {
 	const textarea = page.locator("message-editor textarea").first();
@@ -61,11 +63,53 @@ async function openRegularSessionProposal(
 	page: Page,
 	trigger: string,
 	expectedTitle: string,
-	options: { expectTitleVisible?: boolean } = {},
+	options: { expectTitleVisible?: boolean; createSession?: boolean } = {},
 ) {
-	await createSessionViaUI(page);
+	if (options.createSession !== false) await createSessionViaUI(page);
 	await sendChatMessage(page, trigger);
 	await waitForGoalProposal(page, expectedTitle, options);
+}
+
+async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; title: string; kind: string; active: boolean }>> {
+	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
+		.map((button, index) => {
+			const el = button as HTMLElement;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return null;
+			return {
+				index,
+				title: (button.getAttribute("data-panel-tab-title") || "").replace(/\s+/g, " ").trim(),
+				kind: button.getAttribute("data-panel-tab-kind") || "",
+				active: button.classList.contains("goal-tab-pill--active"),
+			};
+		})
+		.filter(Boolean) as Array<{ index: number; title: string; kind: string; active: boolean }>);
+}
+
+async function clickPanelTabByIndex(page: Page, index: number, errorPrefix: string): Promise<void> {
+	const tab = page.locator(PANEL_TAB_SELECTOR).nth(index);
+	await tab.evaluate((el) => (el as HTMLElement).scrollIntoView({ block: "nearest", inline: "center" }));
+	await expect(tab, `${errorPrefix}: tab at index ${index} should be visible before click`).toBeVisible({ timeout: 5_000 });
+	await tab.click();
+}
+
+async function selectPanelTabByTitle(page: Page, title: RegExp, errorPrefix: string): Promise<void> {
+	const tabs = await visiblePanelTabs(page);
+	const match = tabs.find((tab) => tab.kind === "proposal" && title.test(tab.title));
+	if (!match) throw new Error(`${errorPrefix}: expected proposal tab title ${title}; visible=${JSON.stringify(tabs)}`);
+	await clickPanelTabByIndex(page, match.index, errorPrefix);
+}
+
+async function clickProposalOpenButtonForRev(page: Page, rev: number, errorPrefix: string): Promise<void> {
+	const card = page.locator("tool-message", {
+		has: page.locator('[data-testid="proposal-rev"]', { hasText: new RegExp(`^\\s*rev\\s+${rev}\\s*$`) }),
+	}).first();
+	await expect(card, `${errorPrefix}: rev ${rev} proposal tool card should be present`).toBeVisible({ timeout: 15_000 });
+	const button = card.locator('[data-testid="proposal-open-button"]').first();
+	await button.scrollIntoViewIfNeeded();
+	await expect(button, `${errorPrefix}: rev ${rev} Open proposal button should be enabled`).toBeEnabled({ timeout: 5_000 });
+	await button.click();
 }
 
 test.describe("Goal proposal — tab wiring repro", () => {
@@ -100,8 +144,13 @@ test.describe("Goal proposal — tab wiring repro", () => {
 		await expect(page.locator(METADATA_PANEL)).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(METADATA_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
 
+		await page.locator(WORKFLOW_TAB).click();
+		await page.locator(WORKFLOW_CUSTOMIZE).click();
+		await expect(page.locator(`${WORKFLOW_PANEL} [data-testid='workflow-editor']`)).toBeVisible({ timeout: 10_000 });
+
 		await openRegularSessionProposal(page, "Please create GOAL_PROPOSAL_REV2 now", "Revised Goal Title", {
 			expectTitleVisible: false,
+			createSession: false,
 		});
 
 		await expect(
@@ -109,5 +158,40 @@ test.describe("Goal proposal — tab wiring repro", () => {
 			"a newly opened goal proposal context must default to the Goal tab, not inherit the previous context's active tab",
 		).toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
 		await expect(page.locator(GOAL_PANEL)).toBeVisible({ timeout: 10_000 });
+
+		await page.locator(WORKFLOW_TAB).click();
+		await expect(
+			page.locator(`${WORKFLOW_PANEL} [data-testid='workflow-inspector']`),
+			"a replacement proposal must not inherit the previous proposal's inline workflow draft",
+		).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`${WORKFLOW_PANEL} [data-testid='workflow-editor']`)).toHaveCount(0);
+	});
+
+	test("historical goal revisions in a goal assistant render historical fields and keep live tab state isolated", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openNewGoalAssistantProposal(page);
+		await sendChatMessage(page, "Please create GOAL_PROPOSAL_REV2 now");
+		await waitForGoalProposal(page, "Revised Goal Title");
+
+		await page.locator(WORKFLOW_TAB).click();
+		await expect(page.locator(WORKFLOW_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+
+		await clickProposalOpenButtonForRev(page, 1, "GOAL_HISTORICAL_TAB_WIRING");
+		await expect(
+			page.locator('[data-testid="proposal-panel-rev"]').first(),
+			"rev 1 should render in the active historical goal proposal panel",
+		).toHaveText("rev 1", { timeout: 10_000 });
+		await expect(page.locator("input[placeholder='Goal title']").first()).toHaveValue("E2E Test Goal", { timeout: 10_000 });
+
+		await page.locator(METADATA_TAB).click();
+		await expect(page.locator(METADATA_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+
+		await selectPanelTabByTitle(page, GOAL_PROPOSAL_TAB_TITLE_RE, "GOAL_HISTORICAL_TAB_WIRING");
+		await expect(
+			page.locator(WORKFLOW_TAB),
+			"navigating inside a historical proposal must not mutate the live proposal's active tab",
+		).toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
+		await page.locator(GOAL_TAB).click();
+		await expect(page.locator("input[placeholder='Goal title']").first()).toHaveValue("Revised Goal Title", { timeout: 10_000 });
 	});
 });
