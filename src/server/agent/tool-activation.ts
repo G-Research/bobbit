@@ -535,7 +535,11 @@ export function jsonSchemaToTypeBox(schema: Record<string, unknown>): string {
 export function generateMcpProxyExtension(
 	serverName: string,
 	tools: Array<{ name: string; bobbitName: string; description?: string; inputSchema: Record<string, unknown> }>,
+	managerScopeKey?: string,
 ): string {
+	const scopeKeyField = managerScopeKey && managerScopeKey !== "default"
+		? `, scopeKey: ${JSON.stringify(managerScopeKey)}`
+		: "";
 	const toolRegistrations = tools.map(tool => {
 		const fullName = tool.bobbitName;
 		const schema = jsonSchemaToTypeBox(tool.inputSchema);
@@ -546,7 +550,7 @@ export function generateMcpProxyExtension(
     description: ${desc},
     parameters: ${schema},
     execute: async (toolCallId, params) => {
-      const body = JSON.stringify({ tool: ${JSON.stringify(fullName)}, args: params });
+      const body = JSON.stringify({ tool: ${JSON.stringify(fullName)}, args: params${scopeKeyField} });
       const url = new URL(gwUrl + "/api/internal/mcp-call");
       const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
       const result = await new Promise((resolve, reject) => {
@@ -616,10 +620,14 @@ export function generateMcpMetaExtension(
 	unavailableReason?: string,
 	sub?: string,
 	docsRelPathOverride?: string,
+	managerScopeKey?: string,
 ): string {
 	const metaName = makeMetaToolName(serverName, sub);
 	const docsKey = sub ? `${serverName}__${sub}` : serverName;
 	const docsRelPath = docsRelPathOverride ?? `mcp-tool-docs/${docsKey}.md`;
+	const scopeKeyField = managerScopeKey && managerScopeKey !== "default"
+		? `, scopeKey: ${JSON.stringify(managerScopeKey)}`
+		: "";
 
 	const isStub = unavailableReason !== undefined || ops.length === 0;
 
@@ -685,7 +693,7 @@ export default function(pi) {
       const fullName = ${sub
 			? `"mcp__" + ${JSON.stringify(serverName)} + "__" + ${JSON.stringify(sub)} + "__" + operation`
 			: `"mcp__" + ${JSON.stringify(serverName)} + "__" + operation`};
-      const body = JSON.stringify({ tool: fullName, args: args });
+      const body = JSON.stringify({ tool: fullName, args: args${scopeKeyField} });
       const url = new URL(gwUrl + "/api/internal/mcp-call");
       const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
       const result = await new Promise((resolve, reject) => {
@@ -1063,7 +1071,7 @@ export function writeMcpProxyExtensions(
 		const docsPath = typeof (mcpManager as any).getToolDocsRelativePath === "function"
 			? (mcpManager as any).getToolDocsRelativePath(status.name)
 			: `mcp-tool-docs/${path.basename(status.name)}.md`;
-		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state", undefined, docsPath);
+		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state", undefined, docsPath, managerScopeKey);
 		writeFile(status.name, undefined, code);
 		handled.add(`${status.name}\u0000`);
 		handledServersErrored.add(status.name);
@@ -1085,7 +1093,7 @@ export function writeMcpProxyExtensions(
 		const docsPath = typeof (mcpManager as any).getToolDocsRelativePath === "function"
 			? (mcpManager as any).getToolDocsRelativePath(entry.server, entry.sub)
 			: `mcp-tool-docs/${path.basename(docsKey)}.md`;
-		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub, docsPath);
+		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub, docsPath, managerScopeKey);
 		writeFile(entry.server, entry.sub, code);
 		handled.add(k);
 	}
