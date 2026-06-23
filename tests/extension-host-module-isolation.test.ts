@@ -439,6 +439,35 @@ describe("ModuleHost — host-API proxy (the ONLY capability over the MessagePor
 		}
 	});
 
+	it("store.put forwards quota options to the parent's LIVE host", async () => {
+		let seen: unknown;
+		const quotaOptions = { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } };
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: true, has: (n: string) => n === "store" },
+			store: {
+				put: async (_k: string, _v: unknown, opts?: unknown) => { seen = opts; },
+				get: async () => null,
+				list: async () => [],
+			},
+			session: { readTranscript: async () => ({}), readToolCall: async () => null, postMessage: async () => {} },
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "sess-opts", toolUseId: "tu-opts", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { write: async (ctx) => {` +
+				` await ctx.host.store.put("reviews/a/final/payload", { ok: true }, { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } });` +
+				` return true; } };`,
+			);
+			assert.equal(await mh.invoke(req(url, "write", ctx)), true);
+			assert.deepEqual(seen, quotaOptions, "store.put quota options should cross module-host proxy");
+		} finally {
+			mh.dispose();
+		}
+	});
+
 	it("a host call that the parent rejects surfaces as an error to the pack handler", async () => {
 		const host = {
 			version: 1,

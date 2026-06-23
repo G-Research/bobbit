@@ -107,15 +107,19 @@ Scoped quota writes keep old reviews from blocking new ones:
 - Per-value and global key-count limits still apply.
 - An emergency per-pack byte ceiling still applies to all scoped writes, so a pack cannot shard prefixes indefinitely.
 
+The broad legacy per-pack quota is unchanged. A scoped write bypasses only that legacy
+cumulative cap; it still goes through `PackStore.put` validation, prefix/profile checks,
+per-value/key limits, and the emergency per-pack ceiling.
+
 PR Walkthrough uses these scoped profiles:
 
 | Data | Prefix | Profile |
 |---|---|---|
 | Draft chunks, status, checkpoints | `reviews/<jobId>/draft/` | `review-draft` |
-| Final payload | `reviews/<jobId>/final/` | `review-final` |
+| Final payload | `reviews/<jobId>/final/` via `FINAL_QUOTA(jobId)` | `review-final` |
 | Review binding/index metadata | exact review/index prefix | `default` |
 
-Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured quota error, and existing chunks remain intact because `put` rejects before replacing the previous value.
+Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured quota error, and existing chunks remain intact because `put` rejects before replacing the previous value. Because finalization runs inside a `ModuleHost` worker, the worker proxy preserves the third `host.store.put` argument so `FINAL_QUOTA(jobId)` reaches the parent pack store.
 
 ## Incremental chunk submission
 
@@ -183,7 +187,8 @@ Finalization is commit-record atomic:
 
 1. Validate the YAML.
 2. Build the final record, including canonical YAML, job/change metadata, synthesized changeset/cards, warnings, `persistedAt`, `finalizedAt`, and `cardCount`.
-3. Write `reviews/<jobId>/final/payload` last with the `review-final` quota scope.
+3. Write `reviews/<jobId>/final/payload` last with `FINAL_QUOTA(jobId)`, where the
+   quota scope prefix is `reviews/<jobId>/final/` and the profile is `review-final`.
 4. Best-effort delete `reviews/<jobId>/staging/` and `reviews/<jobId>/draft/`.
 
 Readers treat only `reviews/<jobId>/final/payload` as submitted/finalized. Staging and draft data are invisible to `bundle`, `status`, and `recover` until that commit record exists.
@@ -224,6 +229,20 @@ Common codes include:
 - `STORE_QUOTA_EXCEEDED`
 - `STORE_QUOTA_PROFILE_INVALID`
 - `STORE_QUOTA_SCOPE_INVALID`
+
+## Operational recovery for draft-saved reviewers
+
+After deploying or restarting a gateway that includes the `ModuleHost` proxy fix, a reviewer
+that previously saved all chunks but failed final publication can retry from the same reviewer
+session if it still exists:
+
+1. Call `read_pr_walkthrough_submission_status()` to confirm saved chunks and missing sections.
+2. Call `finalize_pr_walkthrough_submission()` again, or use the panel's submit action if it
+   routes through the same reviewer session.
+
+The panel has no finalized UI state until `reviews/<jobId>/final/payload` exists. If the
+reviewer was archived or shutdown cleanup already removed the review prefix, start a new
+walkthrough.
 
 ## Lifecycle provider behavior
 
@@ -278,6 +297,7 @@ Durable behavior is pinned by focused unit and browser tests:
 
 - `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
 - `tests/extension-host-server-host-api.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
+- `tests/extension-host-module-isolation.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
 - `tests/client-host-api.spec.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
 - `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum.
 - `tests/pr-walkthrough-lifecycle-provider.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.
