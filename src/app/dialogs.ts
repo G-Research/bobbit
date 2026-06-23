@@ -23,6 +23,7 @@ import {
 	fetchRoles,
 	patchSession,
 	browseDirectory,
+	createDirectory,
 	detectProject,
 	fetchProjects,
 	registerProject,
@@ -1872,6 +1873,7 @@ export function showProjectDialog(): void {
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
+	let detectionLoading = false;
 	let detectionToken = 0;
 
 	let preflightReport: PreflightReport | null = null;
@@ -1880,6 +1882,8 @@ export function showProjectDialog(): void {
 	let preflightToken = 0;
 	let preflightUnavailable = false;
 	let archiving = false;
+	let creatingDirectory = false;
+	let createErrorMessage: string | null = null;
 
 	let scanItems: ProjectScanItem[] = [];
 	let scanSelection = new Set<string>();
@@ -1918,10 +1922,13 @@ export function showProjectDialog(): void {
 		const trimmed = dirPath.trim();
 		if (!trimmed) {
 			detectionResult = null;
+			detectionLoading = false;
 			renderDialog();
 			return;
 		}
 		const token = ++detectionToken;
+		detectionLoading = true;
+		renderDialog();
 		try {
 			const result = await detectProject(trimmed);
 			if (token !== detectionToken) return;
@@ -1929,8 +1936,12 @@ export function showProjectDialog(): void {
 		} catch {
 			if (token !== detectionToken) return;
 			detectionResult = null;
+		} finally {
+			if (token === detectionToken) {
+				detectionLoading = false;
+				renderDialog();
+			}
 		}
-		renderDialog();
 	};
 
 	const runPreflight = async (dirPath: string) => {
@@ -1985,6 +1996,7 @@ export function showProjectDialog(): void {
 			scanSelection = new Set();
 		}
 		errorMessage = null;
+		createErrorMessage = null;
 		// Bump tokens immediately so stale in-flight responses for the previous
 		// path can't overwrite the new path's state.
 		detectionToken++;
@@ -1995,12 +2007,15 @@ export function showProjectDialog(): void {
 		}
 		if (!next.trim()) {
 			detectionResult = null;
+			detectionLoading = false;
 			preflightReport = null;
 			preflightLoading = false;
 			preflightError = "";
 			renderDialog();
 			return;
 		}
+		detectionResult = null;
+		detectionLoading = true;
 		const run = () => {
 			void runDetection(pathValue);
 			void runPreflight(pathValue);
@@ -2032,10 +2047,19 @@ export function showProjectDialog(): void {
 		cleanup();
 	});
 
+	const setPickerCompletedPath = (completedPath: string): void => {
+		const pickerWithCompleted = pickerEl as DirectoryPickerEl & { setCompletedPath?: (path: string) => void };
+		if (typeof pickerWithCompleted.setCompletedPath === "function") {
+			pickerWithCompleted.setCompletedPath(completedPath);
+		} else {
+			pickerEl.value = completedPath;
+		}
+	};
+
 	const openBrowseModal = async () => {
 		const selected = await openProjectBrowseDialog(pathValue);
 		if (selected != null) {
-			pickerEl.value = selected;
+			setPickerCompletedPath(selected);
 			onEffectivePathChange(selected, true);
 		}
 		// Focus returns to the picker regardless of outcome.
@@ -2076,8 +2100,59 @@ export function showProjectDialog(): void {
 		}
 	};
 
+	const createDirectoryErrorMessage = (err: unknown): string => {
+		const { message, code } = errorDetails(err);
+		switch (code) {
+			case "invalid_path":
+				return "Enter an absolute directory path.";
+			case "parent_not_found":
+				return "The parent directory does not exist.";
+			case "exists_as_file":
+				return "A file already exists at that path.";
+			case "permission_denied":
+				return "Permission denied creating this directory.";
+			case "already_exists":
+				return "That directory already exists; refresh and continue.";
+			default:
+				return `Could not create directory: ${message}`;
+		}
+	};
+
+	const createTypedDirectory = async () => {
+		if (busy || creatingDirectory) return;
+		const trimmed = pathValue.trim();
+		if (!trimmed) return;
+		creatingDirectory = true;
+		createErrorMessage = null;
+		errorMessage = null;
+		renderDialog();
+		try {
+			const created = await createDirectory(trimmed);
+			const createdPath = created.path || trimmed;
+			pathValue = createdPath;
+			setPickerCompletedPath(createdPath);
+			createErrorMessage = null;
+			creatingDirectory = false;
+			onEffectivePathChange(createdPath, true);
+			requestAnimationFrame(() => pickerEl.focusInput());
+		} catch (err) {
+			const { code } = errorDetails(err);
+			creatingDirectory = false;
+			if (code === "already_exists") {
+				pathValue = trimmed;
+				setPickerCompletedPath(trimmed);
+				onEffectivePathChange(trimmed, true);
+				requestAnimationFrame(() => pickerEl.focusInput());
+				return;
+			}
+			createErrorMessage = createDirectoryErrorMessage(err);
+			renderDialog();
+			requestAnimationFrame(() => pickerEl.focusInput());
+		}
+	};
+
 	const doContinue = async () => {
-		if (busy) return;
+		if (busy || creatingDirectory) return;
 		const trimmed = pathValue.trim();
 		if (!trimmed) return;
 		if (step === "scan") {
@@ -2231,10 +2306,13 @@ export function showProjectDialog(): void {
 		if (errorMessage) {
 			return html`<span class="text-red-500 text-xs">${errorMessage}</span>`;
 		}
+		if (createErrorMessage) {
+			return html`<span class="text-red-500 text-xs" data-testid="add-project-create-error">${createErrorMessage}</span>`;
+		}
 		if (!trimmed) {
 			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory.</span>`;
 		}
-		if (!detectionResult) {
+		if (!detectionResult || detectionLoading) {
 			return html`<span class="text-muted-foreground text-xs">Checking directory…</span>`;
 		}
 		if (detectionResult.hasBobbit) {
@@ -2353,11 +2431,19 @@ export function showProjectDialog(): void {
 		}
 		const trimmed = pathValue.trim();
 		const continueDisabled =
-			busy || archiving || !trimmed || (preflightReport?.hasFail === true);
+			busy || archiving || creatingDirectory || !trimmed || (preflightReport?.hasFail === true);
 		const continueLabel = busy ? "Detecting…" : archiving ? "Archiving…" : "Continue";
+		const showCreateDirectory = !!trimmed && !detectionLoading && detectionResult?.exists !== true;
+		const createDisabled = busy || archiving || creatingDirectory;
 		return html`
 			<div class="flex gap-2 justify-end">
-				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel", disabled: creatingDirectory })}
+				${showCreateDirectory ? Button({
+					variant: "secondary" as any,
+					onClick: createTypedDirectory,
+					disabled: createDisabled,
+					children: html`<span data-testid="add-project-create-directory">${creatingDirectory ? "Creating…" : "Create directory"}</span>`,
+				}) : ""}
 				${Button({
 					variant: "default",
 					onClick: doContinue,
@@ -2379,7 +2465,7 @@ export function showProjectDialog(): void {
 			pickerEl.browseDirectory = browseDirectory;
 			pickerAny.__browseWired = true;
 		}
-		pickerEl.disabled = busy;
+		pickerEl.disabled = busy || creatingDirectory;
 
 		render(
 			Dialog({

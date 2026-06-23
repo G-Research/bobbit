@@ -67,6 +67,8 @@ Reasoning:
 
 Event surface (stable): `directory-input`, `directory-select`,
 `directory-commit`, `directory-browse-request`, `directory-cancel`.
+The public `setCompletedPath(path)` method lets parent flows commit a chosen
+folder without triggering typeahead.
 
 ### D3. Browse is a dedicated modal, not an in-dialog list
 
@@ -196,16 +198,63 @@ See the comment block at the top of
 [`src/ui/components/ProjectPickerPopover.ts`](../../src/ui/components/ProjectPickerPopover.ts)
 for the boundary.
 
+### D11. Directory suggestions are intent-gated
+
+Typeahead no longer treats an existing value as an implicit request to browse
+inside that folder. The picker derives an intent from the focused input:
+
+- empty focused input → recent paths;
+- typed prefix such as `/tmp/al` → browse `/tmp` with prefix `al`;
+- trailing separator such as `/tmp/alpha/` → browse `/tmp/alpha` children;
+- blurred input or exact completed path → no suggestions.
+
+`setCompletedPath(path)` is used for suggestion picks, browse-modal selection,
+Select current, and parent-driven value restoration. It clears suggestions,
+cancels debounce, invalidates in-flight lookups, and records the exact path as
+a completed value so focus restoration cannot reopen child suggestions.
+
+Before applying async browse results, the picker re-checks the browse token,
+focus state, current value, and lookup intent. This prevents stale responses
+from reopening the popover after blur, selection, or continued typing.
+
+**Why:** Selecting a folder and immediately seeing its children felt like an
+unwanted drill-down. The trailing separator keeps child browsing available, but
+makes the user's intent explicit.
+
+The server-backed `GET /api/browse-directory` path now accepts `prefix` and
+`limit` so the picker can ask the server for only the matching first page.
+Filtering before statting entries keeps large directories responsive while the
+client still defensively filters the returned names.
+
+### D12. Directory creation stays inside Add Project
+
+When detection says the typed path does not exist, the footer shows a secondary
+**Create directory** action. Successful creation keeps the dialog mounted,
+sets the canonical created path via `setCompletedPath()`, refreshes detection
+and preflight, and leaves **Continue** on the normal scaffolding path.
+
+Failures remain inline in the dialog. The API returns structured `code` values
+so the UI can show stable messages for invalid paths, missing parents,
+file-at-target conflicts, permission errors, already-existing directories, and
+unexpected create failures. An `already_exists` response is recoverable: the
+UI refreshes detection/preflight and lets the user continue if the directory is
+usable.
+
+**Why:** The scaffolding assistant already handled empty directories, but users
+had to create the target folder outside Bobbit first. Keeping creation in the
+same modal removes that round trip without changing the assistant handoff.
+
 ## Where it lives
 
 | Concern | File |
 |---|---|
 | Reusable picker primitive | `src/ui/components/DirectoryPicker.ts` |
 | Dialog orchestration + browse modal | `src/app/dialogs.ts::showProjectDialog`, `openProjectBrowseDialog` |
+| Add Project API helpers | `src/app/api.ts::browseDirectory`, `createDirectory`, `scanProject` (+ `scanProjectRepos` shim) |
+| Add Project REST endpoints | `src/server/server.ts` handlers for browse, create, detect, scan, and preflight |
 | Auto-prompt formatter + types | `src/app/project-assistant-autoprompt.ts` |
 | Session wiring | `src/app/session-manager.ts::connectToSession` (`projectInitialScanContext` option) |
 | Assistant first-turn contract | `src/server/agent/project-assistant.ts` (First message → User-confirmed initial selection) |
-| Scan API helper | `src/app/api.ts::scanProject` (+ `scanProjectRepos` shim) |
 
 ## Verification
 
@@ -213,18 +262,24 @@ Pinning tests (run on every check-in):
 
 - `tests/project-assistant-autoprompt.test.ts` — formatter golden output,
   selected/unselected ordering, scaffolding/edit/new modes.
-- `tests/e2e/ui/add-project-typeahead.spec.ts` — typeahead happy path.
+- `tests/e2e/ui/add-project-typeahead.spec.ts` — prefix suggestions,
+  completed-path suppression, explicit trailing-separator child suggestions,
+  keyboard behavior, Windows drive-root lookup, and blur invalidation.
 - `tests/e2e/ui/add-project-browse-modal.spec.ts` — modal open/close, select
-  current, focus return.
+  current, focus return, and no child suggestions after browse selection.
 - `tests/e2e/ui/add-project-footer-stability.spec.ts` — bounding-box
   invariant across all state transitions.
 - `tests/e2e/ui/add-project-multi-repo-subset.spec.ts` — WebSocket frame
   contains the derived bullet summary + JSON payload.
 - `tests/e2e/ui/add-project-select-all.spec.ts` — select/deselect-all,
   Continue disabled when count = 0.
-- Preserved: `add-project-flow.spec.ts`, `add-project-preflight.spec.ts`,
-  `add-project-post-archive.spec.ts`, `add-project-symlink.spec.ts`,
-  `project-detect-browse.spec.ts`.
+- `tests/e2e/ui/add-project-flow.spec.ts` — typed directory creation happy
+  path, scaffolding handoff, reload cleanup, recoverable `already_exists`, and
+  structured create-error rendering.
+- `tests/e2e/project-detect-browse.spec.ts` — create-directory API success and
+  structured error codes; browse-directory prefix/limit/truncation behavior.
+- Preserved: `add-project-preflight.spec.ts`, `add-project-post-archive.spec.ts`,
+  and `add-project-symlink.spec.ts`.
 
 If a future change to the auto-prompt format is required, update the
 formatter, the server-side instructions in `project-assistant.ts`, **and**
@@ -232,9 +287,9 @@ both pinning tests in the same commit.
 
 ## Non-goals (kept out, on purpose)
 
-- **Richer server-side suggestion endpoint.** Existing `/api/browse-directory`
-  + recent paths cover the prototype review. A `mode=suggest&path=...` knob
-  is left for a future need-driven change.
+- **Recursive directory creation.** `POST /api/create-directory` creates only
+  the final path segment. Missing parents are a user-visible error so Bobbit
+  does not silently create an unexpected directory tree.
 - **Shadow-DOM variant of the picker.** Light DOM was a deliberate choice
   (see D2); a shadow variant would fork the styling story.
 - **Persisting the subset across a failed first WebSocket.** See D6 — add a

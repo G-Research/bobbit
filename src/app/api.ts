@@ -1046,14 +1046,31 @@ export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]>
   return repos;
 }
 
-export async function browseDirectory(dirPath?: string): Promise<{
+export async function browseDirectory(dirPath?: string, options?: { prefix?: string; limit?: number }): Promise<{
   current: string;
   parent: string | null;
   entries: Array<{ name: string; path: string }>;
+  truncated?: boolean;
 }> {
-  const params = dirPath ? `?path=${encodeURIComponent(dirPath)}` : '';
-  const res = await gatewayFetch(`/api/browse-directory${params}`);
+  const params = new URLSearchParams();
+  if (dirPath) params.set("path", dirPath);
+  const prefix = options?.prefix;
+  if (prefix) params.set("prefix", prefix);
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit > 0) {
+    params.set("limit", String(Math.floor(options.limit)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await gatewayFetch(`/api/browse-directory${suffix}`);
   if (!res.ok) throw new Error('Browse failed');
+  return res.json();
+}
+
+export async function createDirectory(dirPath: string): Promise<{ path: string }> {
+  const res = await gatewayFetch("/api/create-directory", {
+    method: "POST",
+    body: JSON.stringify({ path: dirPath }),
+  });
+  if (!res.ok) throw await errorFromResponse(res, `Failed to create directory: ${res.status}`);
   return res.json();
 }
 

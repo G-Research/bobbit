@@ -11,7 +11,7 @@
  *   - Re-opening the modal and pressing Esc closes it without mutating the
  *     picker input, and focus returns to the picker input.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect, type Page } from "../gateway-harness.js";
 import { rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
@@ -22,6 +22,18 @@ import {
 	waitForPreflight,
 	preflightAvailable,
 } from "./add-project-helpers.js";
+
+async function setCompletedPickerPath(page: Page, path: string): Promise<void> {
+	await page.locator(ADD_PROJECT.picker).evaluate((el, nextPath) => {
+		const picker = el as HTMLElement & { setCompletedPath?: (value: string) => void };
+		picker.setCompletedPath?.(nextPath);
+		picker.dispatchEvent(new CustomEvent("directory-input", {
+			bubbles: true,
+			composed: true,
+			detail: { path: nextPath, source: "typed" },
+		}));
+	}, path);
+}
 
 test.describe("Add Project — browse modal", () => {
 	test.afterEach(async () => {
@@ -45,7 +57,8 @@ test.describe("Add Project — browse modal", () => {
 			const input = page.locator(ADD_PROJECT.pickerInput);
 
 			// Seed the input so the browse modal opens at a known starting point.
-			await input.fill(parent);
+			await setCompletedPickerPath(page, parent);
+			await expect(input).toHaveValue(parent);
 			await expect(waitForPreflight(page)).resolves.toBe(true);
 
 			// --- happy path: browse → navigate down → Select current ---
@@ -97,16 +110,20 @@ test.describe("Add Project — browse modal", () => {
 			await selectBtn.click();
 			await expect(modal).toHaveCount(0, { timeout: 5_000 });
 
-			// Picker input updated to the selected path.
+			// Picker input updated to the selected path. Focus returns to the input,
+			// but the picker must treat the browse result as a completed path and
+			// not open child suggestions for the selected folder.
 			await expect.poll(
 				async () => await input.inputValue(),
 				{ timeout: 5_000 },
 			).toContain("deeper-child");
+			await expect(input).toBeFocused();
 			// Preflight re-ran for the new path. We assert the preflight panel
 			// shows the chosen folder by checking its `rootPath` data via the
 			// path-existence check row.
 			const rendered = await waitForPreflight(page);
 			expect(rendered).toBe(true);
+			await expect(page.locator(ADD_PROJECT.pickerSuggestions)).toHaveCount(0);
 			await expect(
 				page.locator('[data-testid="preflight-check"][data-check-id="path.exists"]'),
 			).toBeVisible({ timeout: 8_000 });

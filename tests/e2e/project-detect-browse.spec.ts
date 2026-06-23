@@ -3,7 +3,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, bobbitDir } from "./e2e-setup.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -158,6 +158,77 @@ test.describe("POST /api/projects/detect", () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/create-directory
+// ---------------------------------------------------------------------------
+
+test.describe("POST /api/create-directory", () => {
+	let testRoot: string;
+
+	test.beforeAll(() => {
+		testRoot = join(bobbitDir(), "create-directory-test");
+		mkdirSync(testRoot, { recursive: true });
+	});
+
+	test.afterAll(() => {
+		rmSync(testRoot, { recursive: true, force: true });
+	});
+
+	async function createDir(pathValue: unknown) {
+		return apiFetch("/api/create-directory", {
+			method: "POST",
+			body: JSON.stringify({ path: pathValue }),
+		});
+	}
+
+	test("creates the final path segment and returns the resolved path", async () => {
+		const target = join(testRoot, "new-project");
+		const res = await createDir(target);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.path).toBe(target);
+		expect(existsSync(target)).toBe(true);
+		expect(statSync(target).isDirectory()).toBe(true);
+	});
+
+	test("missing, empty, non-string, and relative paths return invalid_path", async () => {
+		for (const body of [{}, { path: "" }, { path: 42 }, { path: "relative/project" }]) {
+			const res = await apiFetch("/api/create-directory", {
+				method: "POST",
+				body: JSON.stringify(body),
+			});
+			expect(res.status).toBe(400);
+			const data = await res.json();
+			expect(data.code).toBe("invalid_path");
+		}
+	});
+
+	test("existing directory returns already_exists", async () => {
+		const res = await createDir(testRoot);
+		expect(res.status).toBe(409);
+		const data = await res.json();
+		expect(data.code).toBe("already_exists");
+	});
+
+	test("existing file returns exists_as_file", async () => {
+		const target = join(testRoot, "file-target");
+		writeFileSync(target, "not a directory");
+		const res = await createDir(target);
+		expect(res.status).toBe(409);
+		const data = await res.json();
+		expect(data.code).toBe("exists_as_file");
+	});
+
+	test("missing parent returns parent_not_found", async () => {
+		const target = join(testRoot, "missing-parent", "child");
+		const res = await createDir(target);
+		expect(res.status).toBe(404);
+		const data = await res.json();
+		expect(data.code).toBe("parent_not_found");
+		expect(existsSync(join(testRoot, "missing-parent"))).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/browse-directory
 // ---------------------------------------------------------------------------
 
@@ -169,6 +240,8 @@ test.describe("GET /api/browse-directory", () => {
 		mkdirSync(testRoot, { recursive: true });
 		// Create some subdirectories
 		mkdirSync(join(testRoot, "alpha"), { recursive: true });
+		mkdirSync(join(testRoot, "alpha-tools"), { recursive: true });
+		mkdirSync(join(testRoot, "alphabet"), { recursive: true });
 		mkdirSync(join(testRoot, "beta"), { recursive: true });
 		mkdirSync(join(testRoot, "gamma"), { recursive: true });
 		// Create a file (should not appear in results)
@@ -200,6 +273,8 @@ test.describe("GET /api/browse-directory", () => {
 		expect(data.current).toBe(testRoot);
 		const names = data.entries.map((e: any) => e.name);
 		expect(names).toContain("alpha");
+		expect(names).toContain("alpha-tools");
+		expect(names).toContain("alphabet");
 		expect(names).toContain("beta");
 		expect(names).toContain("gamma");
 	});
@@ -220,8 +295,16 @@ test.describe("GET /api/browse-directory", () => {
 		expect(names).not.toContain(".hidden");
 		// Should not include node_modules
 		expect(names).not.toContain("node_modules");
-		// Should only have the three directories
-		expect(names).toEqual(["alpha", "beta", "gamma"]);
+		// Should only have the visible directories
+		expect(names).toEqual(["alpha", "alpha-tools", "alphabet", "beta", "gamma"]);
+	});
+
+	test("prefix and limit filter before statting all entries", async () => {
+		const res = await apiFetch(`/api/browse-directory?path=${encodeURIComponent(testRoot)}&prefix=${encodeURIComponent("alph")}&limit=2`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.entries.map((e: any) => e.name)).toEqual(["alpha", "alpha-tools"]);
+		expect(data.truncated).toBe(true);
 	});
 
 	test("entries are sorted alphabetically", async () => {

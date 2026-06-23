@@ -523,10 +523,52 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). See [add-project-preflight.md](add-project-preflight.md). |
+| `GET` | `/api/browse-directory?path=&prefix=&limit=` | Directory-only listing used by Add Project Browse and typeahead. See [Add Project directory helpers](#add-project-directory-helpers). |
+| `POST` | `/api/create-directory` | Create the typed Add Project directory's final path segment. See [Add Project directory helpers](#add-project-directory-helpers). |
 | `GET` | `/api/projects/:id` | Get a single project. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
 | `PUT` | `/api/projects/:id` | Update name/color. |
 | `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk). Any project may be removed, including the last visible one — when zero non-hidden projects remain, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow. |
+
+#### Add Project directory helpers
+
+`GET /api/browse-directory` powers the Browse modal and directory-picker typeahead.
+It accepts optional query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `path` | Directory to list. Defaults to the gateway's configured CWD. |
+| `prefix` | Case-insensitive basename prefix. Applied before per-entry stat calls. |
+| `limit` | Positive integer maximum number of directory entries to return, clamped server-side. When more entries match, the response includes `truncated: true`. |
+
+Success returns:
+
+```json
+{ "current": "/repo", "parent": "/", "entries": [{ "name": "app", "path": "/repo/app" }], "truncated": false }
+```
+
+Only visible directories are returned; files, hidden directories, `node_modules`,
+and symlinks are skipped. Missing paths return `404`; non-directories or
+inaccessible paths return `400`; unreadable directories return `500`.
+
+`POST /api/create-directory` creates exactly one final path segment for the Add
+Project flow:
+
+```json
+{ "path": "/absolute/new-project" }
+```
+
+Success returns `200 { "path": "/resolved/new-project" }`. The endpoint does
+not create missing parents recursively.
+
+| Status | Code | Meaning |
+|---|---|---|
+| `400` | `invalid_path` | Missing, non-string, empty, or non-absolute `path`. |
+| `404` | `parent_not_found` | Parent is missing or not a directory. |
+| `403` | `permission_denied` | Stat or mkdir failed with a permission error. |
+| `409` | `already_exists` | Target already exists as a directory. The UI treats this as recoverable by refreshing detection/preflight. |
+| `409` | `exists_as_file` | Target exists but is not a directory. |
+| `500` | `create_failed` | Unexpected stat or mkdir failure. |
 
 #### Project order
 

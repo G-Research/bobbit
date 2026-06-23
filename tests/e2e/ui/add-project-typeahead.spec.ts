@@ -32,8 +32,8 @@ test.describe("Add Project — directory picker typeahead", () => {
 		// Build a parent dir with a couple of named children that the suggestion
 		// query (filtered by typed basename) will hit.
 		const parent = uniqueDir("typeahead-parent");
-		mkdirSync(join(parent, "alpha-child"), { recursive: true });
-		mkdirSync(join(parent, "alpha-other"), { recursive: true });
+		mkdirSync(join(parent, "alpha-child", "nested-child"), { recursive: true });
+		mkdirSync(join(parent, "alpha-other", "nested-child"), { recursive: true });
 		mkdirSync(join(parent, "beta"), { recursive: true });
 		writeFileSync(join(parent, "alpha-child", "README.md"), "hello\n");
 
@@ -75,15 +75,30 @@ test.describe("Add Project — directory picker typeahead", () => {
 			expect(pickedPath!).toContain("alpha-");
 
 			// Press Enter — picker should fire directory-select; input value
-			// updates to the chosen suggestion and the overlay closes.
+			// updates to the chosen suggestion and the overlay closes. Even though
+			// the picked folder has children, focus restoration must not reopen
+			// next-level suggestions until the user asks for them.
 			await input.press("Enter");
 			await expect(overlay).toHaveCount(0, { timeout: 2_000 });
 			await expect(input).toHaveValue(pickedPath!);
+			await expect(input).toBeFocused();
 
 			// Preflight re-runs against the new path (source = "suggestion" runs
-			// immediate detection/preflight; not debounced).
+			// immediate detection/preflight; not debounced). While that async work
+			// settles, stale typeahead lookups must not reopen child suggestions.
 			const rendered = await waitForPreflight(page);
 			expect(rendered).toBe(true);
+			await expect(overlay).toHaveCount(0);
+
+			// A trailing separator is an explicit request to browse children.
+			const separator = pickedPath!.includes("\\") ? "\\" : "/";
+			await input.fill(`${pickedPath!}${separator}`);
+			await expect(overlay).toBeVisible({ timeout: 5_000 });
+			await expect(
+				overlay.locator(ADD_PROJECT.pickerSuggestion).filter({ hasText: "nested-child" }).first(),
+			).toBeVisible({ timeout: 5_000 });
+			await input.press("Escape");
+			await expect(overlay).toHaveCount(0, { timeout: 2_000 });
 			const panel = page.locator(ADD_PROJECT.preflightPanel);
 			await expect(panel).toBeVisible();
 			// The path.absolute / path.exists checks should be present for the
@@ -110,6 +125,87 @@ test.describe("Add Project — directory picker typeahead", () => {
 			await input.press("Escape");
 			await expect(page.locator(ADD_PROJECT.dialog)).toHaveCount(0, { timeout: 5_000 });
 		} finally {
+			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
+	test("Windows drive-root prefix browses the drive root, not the bare drive", async ({ page }) => {
+		const requestedPaths: string[] = [];
+		const driveRoot = "C:\\";
+
+		try {
+			await page.route("**/api/browse-directory?**", async (route) => {
+				const url = new URL(route.request().url());
+				const requestedPath = url.searchParams.get("path") ?? "";
+				requestedPaths.push(requestedPath);
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						current: requestedPath,
+						parent: null,
+						entries: requestedPath === driveRoot
+							? [{ name: "Users", path: "C:\\Users" }]
+							: [],
+					}),
+				});
+			});
+
+			await openAddProjectDialog(page);
+			const input = page.locator(ADD_PROJECT.pickerInput);
+			await expect(input).toBeFocused();
+
+			await input.fill("C:\\Us");
+			await expect.poll(() => requestedPaths.includes(driveRoot)).toBe(true);
+			expect(requestedPaths).not.toContain("C:");
+
+			const overlay = page.locator(ADD_PROJECT.pickerSuggestions);
+			await expect(overlay).toBeVisible({ timeout: 5_000 });
+			await expect(
+				overlay.locator(ADD_PROJECT.pickerSuggestion).filter({ hasText: "Users" }).first(),
+			).toBeVisible();
+		} finally {
+			await page.unroute("**/api/browse-directory?**").catch(() => {});
+		}
+	});
+
+	test("blur invalidates in-flight suggestions", async ({ page }, testInfo) => {
+		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
+
+		const parent = uniqueDir("typeahead-blur-parent");
+		mkdirSync(join(parent, "alpha-child"), { recursive: true });
+
+		let releaseBrowse: (() => void) | null = null;
+		let browseFinished: Promise<void> | null = null;
+		try {
+			const browseStarted = new Promise<void>((resolveStarted) => {
+				browseFinished = new Promise<void>((resolveFinished) => {
+					void page.route("**/api/browse-directory?**", async (route) => {
+						resolveStarted();
+						await new Promise<void>((resolveRelease) => {
+							releaseBrowse = resolveRelease;
+						});
+						await route.continue();
+						resolveFinished();
+					});
+				});
+			});
+
+			await openAddProjectDialog(page);
+			const input = page.locator(ADD_PROJECT.pickerInput);
+			await expect(input).toBeFocused();
+
+			await input.fill(join(parent, "alpha"));
+			await browseStarted;
+			await input.press("Tab");
+			await expect(input).not.toBeFocused();
+
+			releaseBrowse?.();
+			await browseFinished;
+			await expect(page.locator(ADD_PROJECT.pickerSuggestions)).toHaveCount(0);
+			await expect(page.locator('[data-testid="directory-picker-loading"]')).toHaveCount(0);
+		} finally {
+			await page.unroute("**/api/browse-directory?**").catch(() => {});
 			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
