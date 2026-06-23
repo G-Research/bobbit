@@ -168,6 +168,30 @@ describe("Marketplace MCP registry diagnostics", () => {
 			assert.deepEqual(synced.mcpRegistryDiagnostics?.skippedEntries.map((entry) => entry.name), ["bad__name"]);
 		});
 	});
+
+	it("keeps installed registry packs sourceStatus ok when listed after reload", async () => {
+		const root = fs.mkdtempSync(path.join(TMP, "mcp-reg-list-"));
+		await withJsonServer({
+			schemaVersion: 1,
+			servers: [
+				{ id: "ok", name: "ok", version: "1.0.0", transport: { type: "stdio", command: "node" } },
+			],
+		}, async (url) => {
+			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+			const source = store.add({ url, type: "mcp-registry" });
+			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+			await inst.installMarketplacePack({ sourceId: source.id, dirName: "mcp-ok", scope: "server" });
+			const row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
+			assert.equal(row?.sourceStatus, "ok");
+			assert.equal(row?.updateAvailable, false);
+
+			store.update(source.id, { lastCommit: "different-registry-fingerprint" });
+			const stale = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "mcp-ok");
+			assert.equal(stale?.sourceStatus, "ok");
+			assert.equal(stale?.updateAvailable, true);
+		});
+	});
 });
 
 // ── local-dir vs git-url branching ───────────────────────────────
