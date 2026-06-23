@@ -777,11 +777,11 @@ function entityChips(pack: BrowsePackWire | InstalledPackWire): TemplateResult {
 	const chips = groups.flatMap(([kind, names]) =>
 		names.map((n) => html`<span class="market-entity-chip" data-kind=${kind}>${kind}: ${n}</span>`),
 	);
-	const transportChips = "contents" in pack
+	const transportChips: TemplateResult[] = "contents" in pack
 		? normalizedBrowseMcp(pack).map((entry) => {
 			const transport = entry.transport || (entry.url ? "http" : entry.command ? "stdio" : undefined);
 			return transport ? html`<span class="market-lozenge market-lozenge--mcp">${transport === "http" ? "HTTP" : "stdio"}</span>` : null;
-		}).filter((v): v is TemplateResult => !!v)
+		}).filter(Boolean) as TemplateResult[]
 		: [];
 	if (chips.length === 0 && transportChips.length === 0) return html`<span class="text-[11px] text-muted-foreground italic">no declared entities</span>`;
 	return html`<div class="flex flex-wrap gap-1">${chips}${transportChips}</div>`;
