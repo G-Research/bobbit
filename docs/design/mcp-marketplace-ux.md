@@ -149,23 +149,25 @@ For packs that contain only MCP contributions, the chip row should make the pack
 
 ### Runtime status
 
-Fetch `GET /api/mcp-servers` when the Market page loads and after install/update/uninstall/activation changes. Merge by server name. The status display is read-only.
+Fetch scoped MCP runtime status when the Market page loads and after install/update/uninstall/activation changes. For project installs, call `GET /api/mcp-servers?projectId=<id>` (or scoped cwd fallback); for server/global-user installs, use the default/system runtime plus activation catalogue owner metadata. Do not merge by bare server name alone: activation catalogue rows are keyed by pack-local `listName` and include `serverName`, origin, and owner/override metadata.
 
 Status lozenge copy:
 
 | Condition | Label | Treatment |
 |---|---|---|
-| enabled and runtime connected | `Connected · 12 ops` | positive/info text |
-| enabled and runtime error | `Error` | negative lozenge plus expandable error text |
-| enabled and absent from runtime | `Not loaded` or `Reconnecting…` while busy | warning/muted |
+| enabled and active owner connected | `Connected · 12 ops` | positive/info text |
+| enabled and active owner runtime error | `Error` | negative lozenge plus expandable error text |
+| enabled and active owner absent | `Not loaded` or `Reconnecting…` while busy | warning/muted |
 | disabled in Market | `Disabled` | muted; absence from runtime is expected |
+| enabled but same-name manual config overrides | `Manual config active` | muted/info, with explanation |
+| enabled but later Marketplace pack overrides | `Overridden` | muted/info, include winning pack when available |
 | server is connected but policy blocks it | do not show as disabled | add small link/copy: `Policy in Tools` |
 
-Important: if an MCP activation toggle is off, `GET /api/mcp-servers` should not contain that server. The UI should render `Disabled`, not `Missing`.
+Important: if an MCP activation toggle is off, absence of that Marketplace contribution from runtime is expected. A same-name manual server or another Marketplace winner may still appear in scoped runtime status; the row should still render `Disabled` for the disabled contribution, optionally with a note like `Same-name manual MCP is still active`.
 
 Recommended helper component in `marketplace-page.ts`:
 
-- `renderMcpRuntimeStatus(mcpRef, activationChecked, runtimeByServer)`
+- `renderMcpRuntimeStatus(mcpRef, activationChecked, activationMcpDetails, runtimeByScopeAndServer)`
 
 Recommended test ids:
 

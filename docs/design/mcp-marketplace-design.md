@@ -241,12 +241,14 @@ Add a small registry client module rather than overloading git sync:
   - `registryServerToVirtualPack(server): BrowsePack`
   - `materializeRegistryPack(server, destOrStagingDir): PackManifest`
 
-Accept a conservative registry response shape first:
+Accept a conservative registry response shape first. This is the same normative contract restated in §13.2; do not support legacy examples without `schemaVersion` or `id`.
 
 ```json
 {
+  "schemaVersion": 1,
   "servers": [
     {
+      "id": "context7",
       "name": "context7",
       "description": "Fetch library docs",
       "version": "1.0.0",
@@ -258,6 +260,7 @@ Accept a conservative registry response shape first:
       }
     },
     {
+      "id": "docs-remote",
       "name": "docs-remote",
       "description": "Remote docs MCP",
       "version": "1.0.0",
@@ -277,7 +280,7 @@ Virtual browse row:
 BrowsePackWire & {
   virtual?: true;
   sourceType?: "mcp-registry";
-  contents: { roles: []; tools: []; skills: []; entrypoints: []; mcp: [serverName] };
+  contents: { roles: []; tools: []; skills: []; entrypoints: []; mcp: [registryId] };
   hasTools: false;
 }
 ```
@@ -287,7 +290,7 @@ Pack materialization on install:
 ```text
 <staging>/
   pack.yaml
-  mcp/<server>.yaml
+  mcp/<registry-id>.yaml
   .pack-meta.yaml
 ```
 
@@ -295,7 +298,7 @@ Generated `pack.yaml`:
 
 ```yaml
 schema: 2
-name: <safe-pack-name>
+name: mcp-<registry-id>
 description: <registry description>
 version: <registry version or 0.0.0>
 contents:
@@ -303,14 +306,15 @@ contents:
   tools: []
   skills: []
   entrypoints: []
-  mcp: [<server>]
+  mcp: [<registry-id>]
 ```
 
 Naming:
 
-- Runtime server name comes from registry `name` after validation.
-- Pack name should be deterministic and collision-safe. Recommended: `mcp-<server>` unless registry entry carries a valid `packName`; if `mcp-<server>` collides, install returns `409` like normal packs.
-- `dirName` in browse should be the safe pack name, not a raw URL/server string.
+- Registry `id` is the stable pack-local `listName`, materialized file basename, `contents.mcp` ref, and default pack suffix.
+- Registry `name` is the runtime MCP `serverName` after validation.
+- Pack name is `mcp-<id>`; if it collides with an unrelated installed pack in the target scope, install returns `409` like normal packs.
+- `dirName` in browse is `mcp-<id>`, never a raw URL or runtime server name.
 
 Implementation files/functions:
 
@@ -883,7 +887,7 @@ for (const contribution of resolver({ cwd: this.cwd, projectId: this.projectId }
 
 Tests must cover server/global-user/project ordering, pack-order changes, project isolation, disabled refs before merge, Marketplace same-name override, and manual same-name override.
 
-### 13.4 Runtime boundary, reload scoping, and status APIs
+### 13.4 Runtime boundary, reload scoping, status APIs, and internal call routing
 
 MCP runtime state must be scoped to the same project/cwd context used by discovery. Do not use one context-dependent singleton state for all projects.
 
@@ -897,7 +901,15 @@ Implementation contract:
 - Tool registration is per manager/tool-manager context. A project manager refreshes only its project `ToolManager`; the default manager refreshes only the default server `ToolManager`.
 - Runtime status responses include `scopeKey`, `projectId?`, and `cwd` so UI/tests can verify no cross-project leakage.
 
-Tests must create two project contexts with different project-scope MCP packs, trigger reloads concurrently, and assert each `GET /api/mcp-servers?projectId=...` and each tool manager contains only its own project MCP plus shared server/global-user MCP.
+Internal execution routing must use the same manager as tool registration:
+
+- `writeMcpProxyExtensions()` embeds or sidecars a server-trusted `scopeKey` for each generated MCP meta-tool extension. The scope key is derived from the session/project context on the server, not from model-controlled arguments.
+- Generated `mcp_<server>` and `mcp_<server>__<sub>` extensions include `scopeKey` in `/api/internal/mcp-call` and `/api/internal/mcp-describe` requests. This field is accepted only on internal authenticated extension calls, not public/user-authored payloads.
+- `/api/internal/mcp-call` and `/api/internal/mcp-describe` resolve `McpManager` by `scopeKey` first, then fall back to the session-bound manager, then the default manager for backward compatibility.
+- Server-side routing validates that the requested tool/server exists in the resolved manager's current tool infos before dispatch. A same-name server in another manager is never considered.
+- Tool docs paths remain per manager: default manager keeps the current `<stateDir>/mcp-tool-docs/`; project managers write to `<stateDir>/mcp-tool-docs/<scopeKey>/` or another deterministic scoped subdirectory to avoid same-name doc collisions.
+
+Tests must create two project contexts with different project-scope MCP packs using the same runtime server name, trigger reloads concurrently, and assert each `GET /api/mcp-servers?projectId=...`, generated tool registration, `mcp_describe`, and operation call route only to that project's manager plus shared server/global-user MCP.
 
 ### 13.5 Runtime reload consistency and concurrency
 
@@ -949,3 +961,86 @@ Marketplace install/update/uninstall/activation persistence is not rolled back b
 - If reload exceeds budget, response still succeeds for the pack mutation with `{ mcpReload: { status: "pending" } }`; the queued reload continues in the background and `GET /api/mcp-servers?projectId=...` exposes `reloadStatus: "running"` until it settles.
 - Failed or timed-out servers remain represented in runtime status with `status: "error"`, `error`, and `lastAttemptAt`; they contribute no external tools.
 - UI copy distinguishes pack mutation success from runtime connection failure: the toggle stays in the saved state, while the status lozenge shows `Error` or `Reconnecting`.
+
+### 13.8 Strict validation rules
+
+Validation must be centralized in shared helpers so authored packs, registry browse, registry materialization, and activation catalogue construction agree.
+
+Name/path rules:
+
+- `listName` / `contents.mcp[]` / registry `id`: existing `isSafeBasename()` plus length 1-64; reject `.`, `..`, path separators, NUL, leading dot, whitespace-only, and Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
+- Runtime `serverName` / registry `name`: `/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/`; reject `__`, path separators, NUL, `.`/`..`, and names that normalize to an empty MCP meta-tool name.
+- Generated pack name `mcp-${id}`: validate with the same pack-name guard used by Marketplace installs after prefixing; reject if the final install path's realpath escapes the target `market-packs` root.
+- Materialized file path: exactly `mcp/${id}.yaml`; never use runtime `serverName` for paths. Ensure realpath containment for staging and final install directories.
+- Contribution `cwd`: if absent, omit from runtime config; if present, it must be a relative path without drive letter, URL scheme, leading slash, NUL, or `..` segment after normalization, and final realpath must stay inside pack root.
+- HTTP URL: parse with `new URL`; allow only `http:` and `https:`; reject credentials in URL (`username`/`password`) and fragments; headers must carry auth.
+- Header/env keys: non-empty strings without NUL or newline. Values must be strings; UI displays keys only.
+- Args: string array only; reject objects/numbers/null.
+
+Schema rules:
+
+- `pack.yaml` MCP is accepted only for `schema: 2`.
+- Registry document requires `schemaVersion: 1`; unsupported versions fail browse for the source.
+- Unknown keys are rejected at each level unless explicitly documented as metadata. Optional registry metadata allowed: `label`, `description`, `version`, `homepage`, `license`, `publisher`; it is preserved for UI/meta only.
+
+Tests must include path traversal ids, unsafe server names, Windows device names, absolute/escaping cwd, URL credentials/fragments, invalid arg/env/header types, and schema-version failures.
+
+### 13.9 Sub-namespace activation semantics
+
+First implementation supports server-level pack contributions and can represent sub-namespace catalogue rows when a contribution explicitly declares them, but it must not infer sub-namespace activation from runtime operation names during catalogue construction.
+
+Default behavior:
+
+- One `contents.mcp` `listName` represents one installed MCP server contribution.
+- Disabling that `listName` omits the whole contribution from discovery and therefore all model-facing meta-tools for that server.
+
+Optional explicit sub-namespace entries, if needed for gateway-style authored packs:
+
+```yaml
+server: gr
+subNamespace: ai-adoption
+transport: { type: http, url: "https://gateway.example.com/mcp" }
+```
+
+- `listName` remains the activation ref for that pack-local server/sub-namespace contribution.
+- `serverName` plus `subNamespace` maps to the model-facing `mcp_<server>__<sub>` meta-tool and policy key `mcp__<server>__<sub>`.
+- Disabling an explicit sub-namespace contribution filters that catalogue/runtime meta-tool, but does not imply per-operation toggles.
+- If one physical MCP gateway exposes multiple sub-namespaces dynamically, Market still toggles only declared pack-local contributions; dynamic operation/sub-namespace discovery remains visible/read-only in Tools policy.
+
+Tests must cover flat server contribution activation, explicit `subNamespace` activation, and no raw per-operation activation rows.
+
+### 13.10 Runtime status ownership for duplicate names
+
+Activation catalogue status must be keyed by pack-local `listName` plus origin, not by bare runtime `serverName` alone.
+
+Catalogue/status states:
+
+- `disabled`: `listName` is in `DisabledRefs.mcp`; runtime lookup is not used for that row except to show a note if a same-name manual server is active.
+- `active-owner`: this contribution wins Marketplace resolution and is not overridden by manual config; runtime status comes from its manager/server.
+- `overridden-by-marketplace`: another later Marketplace contribution with the same `serverName` wins; row remains enabled but status says `Overridden by <pack>`.
+- `overridden-by-manual`: manual config overrides this Marketplace contribution; row remains enabled but status says `Manual config active`.
+- `error` / `connected` / `reconnecting`: only for the active owner.
+
+`GET /api/marketplace/pack-activation` should include enough `mcpDetails` origin/runtime-owner metadata for the UI to render these states without guessing from `GET /api/mcp-servers` by name. Tests must cover disabled same-name manual fallback and duplicate Marketplace server names.
+
+### 13.11 Cache invalidation after Marketplace MCP mutations
+
+After install/update/uninstall/activation/pack-order changes, reuse existing Marketplace cache invalidation and add MCP-specific invalidation:
+
+- invalidate `PackResolver`/slash-skill/tool scan caches as current Marketplace mutations do;
+- invalidate activation catalogue/status cache for the touched scope/pack;
+- invalidate registry browse cache for updated registry sources;
+- invalidate MCP contribution loader caches for touched pack roots;
+- clear scoped MCP tool-doc cache entries for removed/changed servers;
+- refresh pack contribution registry if pack server/actions/routes are present;
+- broadcast Market/runtime status refresh events or ensure mutation responses include fresh `mcpReload` state.
+
+### 13.12 Documentation deliverables
+
+The documentation gate must update:
+
+- `docs/marketplace.md`: final MCP contribution schema, registry source flow, activation/status behavior, trust model, and manual-over-Marketplace precedence.
+- `docs/extension-host-authoring.md`: replace "`contents.mcp` is rejected" with schema-2 MCP contribution authoring rules.
+- `docs/mcp-meta-tools.md`: explain Marketplace activation vs Tools policy and server/sub-namespace toggle granularity.
+- `docs/design/pack-based-marketplace.md`: revise the old MVP/out-of-scope boundary or point to the new Marketplace MCP design.
+- Any MCP/runtime docs that list discovery precedence: add Marketplace as the lowest-priority installed layer and document the disabled/manual same-name exception.
