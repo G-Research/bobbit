@@ -3412,6 +3412,68 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/create-directory
+	if (url.pathname === "/api/create-directory" && req.method === "POST") {
+		const body = await readBody(req).catch(() => null);
+		const rawPath = typeof body?.path === "string" ? body.path.trim() : "";
+		if (!rawPath || !path.isAbsolute(rawPath)) {
+			json({ error: "Enter an absolute directory path.", code: "invalid_path" }, 400);
+			return;
+		}
+
+		const targetPath = path.resolve(rawPath);
+		try {
+			const targetStat = fs.statSync(targetPath);
+			if (targetStat.isDirectory()) {
+				json({ error: "Directory already exists", code: "already_exists" }, 409);
+			} else {
+				json({ error: "A file already exists at that path", code: "exists_as_file" }, 409);
+			}
+			return;
+		} catch (err: any) {
+			if (err?.code && err.code !== "ENOENT") {
+				if (err.code === "EACCES" || err.code === "EPERM") {
+					json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+					return;
+				}
+				json({ error: err?.message || "Could not check directory", code: "create_failed" }, 500);
+				return;
+			}
+		}
+
+		const parentPath = path.dirname(targetPath);
+		try {
+			const parentStat = fs.statSync(parentPath);
+			if (!parentStat.isDirectory()) {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+				return;
+			}
+		} catch (err: any) {
+			if (err?.code === "EACCES" || err?.code === "EPERM") {
+				json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+			} else {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+			}
+			return;
+		}
+
+		try {
+			fs.mkdirSync(targetPath, { recursive: false });
+			json({ path: targetPath });
+		} catch (err: any) {
+			if (err?.code === "EEXIST") {
+				json({ error: "Directory already exists", code: "already_exists" }, 409);
+			} else if (err?.code === "EACCES" || err?.code === "EPERM") {
+				json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+			} else if (err?.code === "ENOENT" || err?.code === "ENOTDIR") {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+			} else {
+				json({ error: err?.message || "Could not create directory", code: "create_failed" }, 500);
+			}
+		}
+		return;
+	}
+
 	// GET /api/browse-directory
 	if (url.pathname === "/api/browse-directory" && req.method === "GET") {
 		const rawPath = url.searchParams.get("path");
