@@ -1833,7 +1833,10 @@ export class SessionManager {
 	}
 
 	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
-		const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir(), {
+		const projectConfigStore = opts?.projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(opts.projectId)?.projectConfigStore ?? this.projectConfigStore)
+			: this.projectConfigStore;
+		const mgr = new McpManager(cwd, projectConfigStore, bobbitStateDir(), {
 			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
 			...(opts?.projectId ? { projectId: opts.projectId } : {}),
 			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),

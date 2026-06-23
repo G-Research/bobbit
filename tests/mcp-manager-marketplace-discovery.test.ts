@@ -7,6 +7,10 @@ import path from "node:path";
 const {
   McpManager,
 } = await import("../src/server/mcp/mcp-manager.ts");
+const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
+const { ProjectContextManager } = await import("../src/server/agent/project-context-manager.ts");
+const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
 import type {
   MarketplaceMcpResolver,
   ResolvedMcpContribution,
@@ -220,5 +224,63 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(removed.disconnected, ["one"]);
     assert.deepEqual(mgr.getServerStatuses(), []);
     assert.deepEqual(mgr.getToolInfos(), []);
+  });
+});
+
+describe("SessionManager scoped MCP manager creation", () => {
+  it("uses the scoped project's config store for custom MCP config directories", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-session-scope-"));
+    const serverConfigDir = path.join(root, "server-config");
+    const serverCustomDir = path.join(root, "server-custom-mcp");
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    const projectCustomDir = path.join(root, "project-custom-mcp");
+    fs.mkdirSync(serverCustomDir, { recursive: true });
+    fs.mkdirSync(projectCustomDir, { recursive: true });
+    fs.mkdirSync(path.join(projectRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+
+    fs.writeFileSync(path.join(serverCustomDir, ".mcp.json"), JSON.stringify({
+      mcpServers: { server_only: { command: "server-only" } },
+    }));
+    fs.writeFileSync(path.join(projectCustomDir, ".mcp.json"), JSON.stringify({
+      mcpServers: { project_scoped: { command: "project-scoped" } },
+    }));
+
+    const serverStore = new ProjectConfigStore(serverConfigDir);
+    serverStore.setConfigDirectories([{ path: serverCustomDir, types: ["mcp"] }]);
+    const projectStore = new ProjectConfigStore(path.join(projectRoot, ".bobbit", "config"));
+    projectStore.setConfigDirectories([{ path: projectCustomDir, types: ["mcp"] }]);
+
+    const projectId = "project-scoped-mcp-config";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([{
+      id: projectId,
+      name: "Project Scoped MCP Config",
+      rootPath: projectRoot,
+      createdAt: Date.now(),
+      colorLight: "#3b82f6",
+      colorDark: "#60a5fa",
+    }]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry);
+    const sessionManager = new SessionManager({ projectConfigStore: serverStore, projectContextManager: pcm });
+
+    try {
+      const defaultMgr = (sessionManager as any).createMcpManager(root) as InstanceType<typeof McpManager>;
+      const defaultDiscovered = defaultMgr.discoverServers();
+      assert.deepEqual(defaultDiscovered.server_only, { command: "server-only" });
+      assert.equal(defaultDiscovered.project_scoped, undefined);
+
+      const scopedMgr = (sessionManager as any).createMcpManager(projectRoot, {
+        projectId,
+        scopeKey: `project:${projectId}`,
+      }) as InstanceType<typeof McpManager>;
+      const scopedDiscovered = scopedMgr.discoverServers();
+      assert.deepEqual(scopedDiscovered.project_scoped, { command: "project-scoped" });
+      assert.equal(scopedDiscovered.server_only, undefined);
+    } finally {
+      await Promise.all(Array.from(pcm.all(), (ctx) => ctx.close()));
+    }
   });
 });
