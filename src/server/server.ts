@@ -1566,7 +1566,8 @@ export function createGateway(config: GatewayConfig) {
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
 			const role = roleManager.getRole(roleName);
 			if (!role) return undefined;
-			const mcpManager = sessionManager.getMcpManager({ projectId: session?.projectId ?? ps?.projectId }) ?? sessionManager.getMcpManager();
+			const mcpManager = sessionManager.getMcpManagerForSession(sessionId)
+				?? ((session?.projectId ?? ps?.projectId ?? session?.cwd ?? ps?.cwd) ? null : sessionManager.getMcpManager());
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
@@ -1580,7 +1581,7 @@ export function createGateway(config: GatewayConfig) {
 			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
 			const role = cascadeRole ?? roleManager.getRole(roleName);
 			if (!role) return undefined;
-			const mcpManager = sessionManager.getMcpManager({ projectId }) ?? sessionManager.getMcpManager();
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 	});

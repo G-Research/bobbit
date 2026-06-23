@@ -635,6 +635,11 @@ export class McpManager {
     });
   }
 
+  /** Return the in-flight reload, if any, so callers can refresh dependents after a pending response completes. */
+  currentReload(): Promise<McpReloadResult> | undefined {
+    return this.reloadPromise;
+  }
+
   private _pendingReloadResult(): McpReloadResult {
     return {
       status: "pending",
@@ -667,7 +672,14 @@ export class McpManager {
       const name = group.serverName;
       const fp = this._fingerprintGroup(group);
       const unchangedConfig = this.serverFingerprints.get(name) === fp;
+      this.discoveredConnectionGroups.set(name, group);
       if (!force && unchangedConfig) {
+        // The connection can stay up, but ownership/origin metadata may have
+        // changed under the same transport config (for example manual override
+        // with identical config, or Marketplace disable while manual remains).
+        this.configs.set(name, group.config);
+        this.connectionGroups.set(name, group);
+        this.serverFingerprints.set(name, fp);
         if (this.errors.has(name)) {
           skippedErrored.push(name);
           return;
@@ -677,7 +689,6 @@ export class McpManager {
           return;
         }
       }
-      this.discoveredConnectionGroups.set(name, group);
       await this.connectServer(name, group.config);
       if (this.errors.has(name)) {
         failed.push({ name, error: this.errors.get(name)! });

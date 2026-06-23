@@ -225,6 +225,29 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(mgr.getServerStatuses(), []);
     assert.deepEqual(mgr.getToolInfos(), []);
   });
+
+  it("updates ownership metadata for unchanged connected server configs", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const config = { command: "same" };
+    const resolver: MarketplaceMcpResolver = () => [contrib("same", "same", config)];
+    const stub = new StubMcpClient("same", { tools: [op("do")] });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([["same", stub]]), { marketplaceResolver: resolver }) as any;
+
+    await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(mgr.getServerStatuses()[0].origin.scope, "project");
+    assert.equal(stub.connectCount, 1);
+
+    fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
+      mcpServers: { same: config },
+    }));
+    const unchanged = await mgr.reloadDiscoveredServers({ timeoutMs: 0 });
+
+    assert.deepEqual(unchanged.unchanged, ["same"]);
+    assert.equal(stub.connectCount, 1);
+    const status = mgr.getServerStatuses()[0];
+    assert.equal(status.origin?.scope, "manual");
+    assert.equal(status.ownerContributions?.[0]?.origin.scope, "manual");
+  });
 });
 
 describe("SessionManager scoped MCP manager creation", () => {
@@ -282,5 +305,91 @@ describe("SessionManager scoped MCP manager creation", () => {
     } finally {
       await Promise.all(Array.from(pcm.all(), (ctx) => ctx.close()));
     }
+  });
+
+  it("does not substitute the default MCP manager for project pipeline context", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-session-project-route-"));
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    fs.mkdirSync(path.join(projectRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+    const projectId = "project-route";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([{
+      id: projectId,
+      name: "Project Route",
+      rootPath: projectRoot,
+      createdAt: Date.now(),
+      colorLight: "#3b82f6",
+      colorDark: "#60a5fa",
+    }]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry);
+    const sessionManager = new SessionManager({ projectContextManager: pcm }) as any;
+    const defaultMgr = { marker: "default" };
+    const scopedMgr = { marker: "scoped", connectAll: async () => {} };
+    sessionManager.mcpManager = defaultMgr;
+    sessionManager.createMcpManager = () => scopedMgr;
+
+    try {
+      assert.equal(sessionManager.buildPipelineContext(projectId, projectRoot).mcpManager, null);
+      assert.equal(await sessionManager.ensureMcpManager({ projectId }), scopedMgr);
+      assert.equal(sessionManager.buildPipelineContext(projectId, projectRoot).mcpManager, scopedMgr);
+    } finally {
+      await Promise.all(Array.from(pcm.all(), (ctx) => ctx.close()));
+    }
+  });
+
+  it("routes no-project sessions to their cwd-scoped MCP manager when no scopeKey is supplied", async () => {
+    const { cwd } = tmpDirs();
+    const sessionManager = new SessionManager() as any;
+    const defaultMgr = { marker: "default" };
+    const cwdMgr = { marker: "cwd", connectAll: async () => {} };
+    const sessionId = "cwd-session";
+    sessionManager.mcpManager = defaultMgr;
+    sessionManager.createMcpManager = () => cwdMgr;
+    sessionManager.sessions.set(sessionId, { id: sessionId, cwd });
+
+    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), cwdMgr);
+    assert.equal(sessionManager.getMcpManagerForSession(sessionId), cwdMgr);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), cwdMgr);
+    assert.notEqual(await sessionManager.resolveMcpManagerForSession(sessionId), defaultMgr);
+  });
+
+  it("refreshes external MCP tool registrations after pending marketplace reloads complete", async () => {
+    const sessionManager = new SessionManager() as any;
+    let release!: () => void;
+    const done = new Promise<any>((resolve) => { release = () => resolve({
+      status: "ok",
+      connected: ["late"],
+      disconnected: [],
+      unchanged: [],
+      skippedErrored: [],
+      failed: [],
+      statuses: [],
+    }); });
+    let refreshCount = 0;
+    sessionManager.mcpManager = {
+      getScopeKey: () => "default",
+      reloadDiscoveredServers: async () => ({
+        status: "pending",
+        connected: [],
+        disconnected: [],
+        unchanged: [],
+        skippedErrored: [],
+        failed: [],
+        statuses: [],
+      }),
+      currentReload: () => done,
+    };
+    sessionManager.refreshExternalMcpToolRegistrations = () => { refreshCount += 1; };
+
+    const result = await sessionManager.reloadMcpAfterMarketplaceMutation("server");
+    assert.equal(result?.status, "pending");
+    assert.equal(refreshCount, 0);
+    release();
+    await done;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(refreshCount, 1);
   });
 });

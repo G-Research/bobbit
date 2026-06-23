@@ -1363,7 +1363,7 @@ export class SessionManager {
 	}
 
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
-	buildPipelineContext(projectId?: string): PipelineContext {
+	buildPipelineContext(projectId?: string, cwd?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		let resolvedGoalManager: GoalManager;
@@ -1393,7 +1393,7 @@ export class SessionManager {
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
-			mcpManager: this.getMcpManager({ projectId }) ?? this.mcpManager,
+			mcpManager: this.getMcpManagerForContext(projectId, cwd),
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1860,13 +1860,25 @@ export class SessionManager {
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
 			if (!ctx) return null;
-			cwd = cwd ?? ctx.project.rootPath;
+			cwd = ctx.project.rootPath;
 		}
 		if (!cwd) return null;
 		const mgr = this.createMcpManager(cwd, { projectId, scopeKey: key });
 		this.scopedMcpManagers.set(key, mgr);
 		await mgr.connectAll();
 		return mgr;
+	}
+
+	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
+		if (projectId) return this.getMcpManager({ projectId, cwd });
+		if (cwd) return this.getMcpManager({ cwd });
+		return this.mcpManager;
+	}
+
+	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
+		if (projectId) return this.ensureMcpManager({ projectId, cwd });
+		if (cwd) return this.ensureMcpManager({ cwd });
+		return this.mcpManager;
 	}
 
 	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
@@ -1876,13 +1888,13 @@ export class SessionManager {
 	}
 
 	getMcpManagerForSession(sessionId: string): McpManager | null {
-		const { projectId } = this.getMcpSessionScope(sessionId);
-		return projectId ? this.getMcpManager({ projectId }) : this.mcpManager;
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.getMcpManagerForContext(projectId, cwd);
 	}
 
 	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
-		const { projectId } = this.getMcpSessionScope(sessionId);
-		return projectId ? await this.ensureMcpManager({ projectId }) : this.mcpManager;
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.ensureMcpManagerForContext(projectId, cwd);
 	}
 
 	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
@@ -1924,9 +1936,15 @@ export class SessionManager {
 			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
 		}
 		const results: McpReloadResult[] = [];
+		const pendingRefreshes: Promise<unknown>[] = [];
 		for (const mgr of managers) {
 			try {
-				results.push(await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 }));
+				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
+				results.push(result);
+				if (result.status === "pending") {
+					const pending = mgr.currentReload();
+					if (pending) pendingRefreshes.push(pending.catch(() => undefined));
+				}
 			} catch (err) {
 				const scopeKey = mgr.getScopeKey();
 				results.push({
@@ -1939,6 +1957,9 @@ export class SessionManager {
 					statuses: [],
 				});
 			}
+		}
+		if (pendingRefreshes.length > 0) {
+			void Promise.allSettled(pendingRefreshes).then(() => this.refreshExternalMcpToolRegistrations());
 		}
 		return this.aggregateMcpReloadResults(results);
 	}
@@ -2185,7 +2206,7 @@ export class SessionManager {
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
 
-		const mcpManager = this.getMcpManager({ projectId, cwd }) ?? this.mcpManager;
+		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
@@ -4586,6 +4607,7 @@ export class SessionManager {
 		const restoredAllowedTools: EffectiveTool[] | undefined =
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
+		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -4889,7 +4911,8 @@ export class SessionManager {
 			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
-		const ctx = this.buildPipelineContext(projectId);
+		await this.ensureMcpManagerForContext(projectId, cwd);
+		const ctx = this.buildPipelineContext(projectId, cwd);
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
 		// (`host.agents.spawn` → OrchestrationCore.spawn → createSession) threads only
@@ -5183,7 +5206,8 @@ export class SessionManager {
 		// Resolve projectId from parent session
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
 			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
-		const ctx = this.buildPipelineContext(parentProjectId);
+		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
+		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
 
 		// ── Sandbox propagation from parent ──
 		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
@@ -6393,6 +6417,7 @@ export class SessionManager {
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
+		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -7709,6 +7734,7 @@ export class SessionManager {
 			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 				? effective
 				: (effective.length > 0 ? effective : undefined);
+			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
