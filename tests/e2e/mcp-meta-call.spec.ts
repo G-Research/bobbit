@@ -59,14 +59,29 @@ const STUB_OPS = [
  * known operations. Returns the manager so the test can clear state in
  * teardown.
  */
-async function makeFakeMcpManager(gw: GatewayInfo, serverName = "fake-server", opts?: Record<string, unknown>) {
+async function makeFakeMcpManager(
+	gw: GatewayInfo,
+	serverName = "fake-server",
+	opts?: Record<string, unknown>,
+	toolDefs = STUB_OPS,
+	activeSubNamespaces?: string[],
+) {
 	const { McpManager } = await import("../../dist/server/mcp/mcp-manager.js");
 	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, opts);
 	const client = new FakeMcpClient(serverName);
 	client.connected = true;
+	const config = { command: "stub" };
 	(mgr as any).clients.set(serverName, client);
-	(mgr as any).toolDefs.set(serverName, STUB_OPS);
-	(mgr as any).configs.set(serverName, { command: "stub" });
+	(mgr as any).toolDefs.set(serverName, toolDefs);
+	(mgr as any).configs.set(serverName, config);
+	if (activeSubNamespaces) {
+		(mgr as any).connectionGroups.set(serverName, {
+			serverName,
+			config,
+			ownerContributions: [],
+			activeSubNamespaces: new Set(activeSubNamespaces),
+		});
+	}
 	return mgr;
 }
 
@@ -76,9 +91,15 @@ async function seedFakeMcpManager(gw: GatewayInfo, serverName = "fake-server") {
 	return mgr;
 }
 
-async function seedFakeScopedMcpManager(gw: GatewayInfo, projectId: string, serverName = "fake-server") {
+async function seedFakeScopedMcpManager(
+	gw: GatewayInfo,
+	projectId: string,
+	serverName = "fake-server",
+	toolDefs = STUB_OPS,
+	activeSubNamespaces?: string[],
+) {
 	const scopeKey = `project:${projectId}`;
-	const mgr = await makeFakeMcpManager(gw, serverName, { projectId, scopeKey });
+	const mgr = await makeFakeMcpManager(gw, serverName, { projectId, scopeKey }, toolDefs, activeSubNamespaces);
 	(gw.sessionManager as any).scopedMcpManagers.set(scopeKey, mgr);
 	return mgr;
 }
@@ -346,6 +367,54 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(missResp.status).toBe(404);
 		const missBody = await missResp.json();
 		expect(missBody.error).toMatch(/operation not found/i);
+	});
+
+	test("POST /api/internal/mcp-describe uses stripped operation names for sub-namespace servers", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		const subNamespaceOps = [
+			{
+				name: "ai-adoption__list-articles",
+				description: "List adoption articles.",
+				inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+			},
+			{
+				name: "ai-adoption__create-article",
+				description: "Create an adoption article.",
+				inputSchema: { type: "object", properties: { title: { type: "string" } } },
+			},
+		];
+		await seedFakeScopedMcpManager(gateway, projectId!, "gr", subNamespaceOps, ["ai-adoption"]);
+		const sessionId = await createSession({ projectId });
+		const token = readE2EToken();
+
+		const headers = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${token}`,
+			"X-Bobbit-Session-Id": sessionId,
+		};
+
+		const listResp = await fetch(`${base()}/api/internal/mcp-describe`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ server: "gr" }),
+		});
+		expect(listResp.status).toBe(200);
+		const listBody = await listResp.json();
+		expect(listBody.tools.map((t: any) => t.name).sort()).toEqual(["create-article", "list-articles"]);
+		expect(listBody.tools.map((t: any) => t.name)).not.toContain("ai-adoption__list-articles");
+		expect(listBody.tools.every((t: any) => t.subNamespace === "ai-adoption")).toBe(true);
+
+		const oneResp = await fetch(`${base()}/api/internal/mcp-describe`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ server: "gr", operation: "list-articles" }),
+		});
+		expect(oneResp.status).toBe(200);
+		const oneBody = await oneResp.json();
+		expect(oneBody.tool.name).toBe("list-articles");
+		expect(oneBody.tool.subNamespace).toBe("ai-adoption");
+		expect(oneBody.tool.description).toMatch(/List adoption/);
+		expect(oneBody.tool.inputSchema?.properties?.limit).toBeDefined();
 	});
 
 	test("POST /api/internal/mcp-call does not fall back from project manager to default", async ({ gateway }) => {

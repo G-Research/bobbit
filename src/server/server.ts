@@ -13675,22 +13675,34 @@ async function handleApiRoute(
 			}
 
 			const infos = mcpManager.getToolInfos().filter(i => i.serverName === server);
+			const activeSubNamespaces = new Set(status.activeSubNamespaces ?? []);
+			const describeNameFor = (info: (typeof infos)[number]): { name: string; subNamespace?: string } => {
+				const parsedName = parseMcpToolName(info.name);
+				if (parsedName?.server === server && parsedName.sub && activeSubNamespaces.has(parsedName.sub)) {
+					return { name: parsedName.op, subNamespace: parsedName.sub };
+				}
+				return { name: info.mcpToolName };
+			};
+			const toDescriptor = (info: (typeof infos)[number]) => {
+				const described = describeNameFor(info);
+				return {
+					name: described.name,
+					...(described.subNamespace ? { subNamespace: described.subNamespace } : {}),
+					description: info.description,
+					inputSchema: info.inputSchema,
+				};
+			};
 			if (operation) {
-				const match = infos.find(i => i.mcpToolName === operation);
+				const match = infos.find(i => i.mcpToolName === operation)
+					?? infos.find(i => describeNameFor(i).name === operation);
 				if (!match) {
 					json({ error: "operation not found" }, 404);
 					return;
 				}
-				json({ tool: { name: match.mcpToolName, description: match.description, inputSchema: match.inputSchema } });
+				json({ tool: toDescriptor(match) });
 				return;
 			}
-			json({
-				tools: infos.map(i => ({
-					name: i.mcpToolName,
-					description: i.description,
-					inputSchema: i.inputSchema,
-				})),
-			});
+			json({ tools: infos.map(toDescriptor) });
 		} catch (err) {
 			const e = err as Error;
 			console.error(`[mcp] Describe failed:`, e.stack || e);
