@@ -734,3 +734,218 @@ Pay special attention to existing MCP tests:
 - No automatic live-agent restart after MCP install/disable.
 - No hosted/searchable registry UX beyond adding a registry URL and browsing returned entries.
 - No change to existing manual `.mcp.json`, Claude config, or custom config directory discovery support.
+
+## 13. Review clarifications required before implementation
+
+This section resolves design-review gaps and is normative for implementation.
+
+### 13.1 Normalized MCP contribution records
+
+Authored pack files use `transport` for readability, but runtime receives only the existing `McpServerConfig` shape. Loaders normalize into two records:
+
+```ts
+interface McpContributionRuntimeRecord {
+  listName: string;        // contents.mcp basename and DisabledRefs.mcp key
+  serverName: string;      // mcpServers object key and runtime status key
+  config: McpServerConfig; // exact object merged into McpManager.discoverServers()
+  origin: ResolvedMcpOrigin;
+}
+
+interface McpContributionCatalogueRecord {
+  listName: string;
+  serverName: string;
+  label?: string;
+  description?: string;
+  transportType: "stdio" | "http";
+  commandPreview?: string;
+  endpointPreview?: string;
+  envKeys?: string[];
+  headerKeys?: string[];
+  origin: ResolvedMcpOrigin;
+}
+```
+
+Mapping table:
+
+| Contribution field | Runtime `McpServerConfig` | Catalogue metadata | Rule |
+|---|---|---|---|
+| `server` | object key only | `serverName` | Defaults to `listName`; not copied into config. |
+| `label` | none | `label` | UI/status only. |
+| `description` | none | `description` | UI/status only. |
+| `transport.type: stdio` | chooses stdio mapping | `transportType` | Requires `command`, forbids `url`/`headers`. |
+| `transport.command` | `command` | `commandPreview` | Non-empty string. |
+| `transport.args` | `args` | `commandPreview` | Optional string array; default omitted. |
+| `transport.env` | `env` | `envKeys` only | Values remain literal strings such as `${TOKEN}`; existing stdio env expansion remains in `McpClient`. |
+| `transport.cwd` | `cwd` | none | Relative path resolved to an absolute path within pack root before runtime merge. |
+| `transport.type: http` | chooses HTTP mapping | `transportType` | Requires `url`, forbids `command`/`args`/`cwd`. |
+| `transport.url` | `url` | `endpointPreview` | Must parse as `http:` or `https:`. |
+| `transport.headers` | `headers` | `headerKeys` only | Values remain literal strings; no secret values are displayed. |
+
+Unknown top-level keys and unknown transport keys are validation errors. A malformed MCP contribution is skipped during catalogue scans with a warning for authored multi-entity packs, but registry materialization fails the selected install because a registry virtual pack represents one MCP server.
+
+Tests must assert exact normalized `McpServerConfig` output, not only UI metadata.
+
+### 13.2 Registry/discovery URL contract
+
+Bobbit registry sources use a strict versioned JSON document:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-23T00:00:00.000Z",
+  "servers": [
+    {
+      "id": "context7",
+      "name": "context7",
+      "label": "Context7",
+      "description": "Fetch library docs",
+      "version": "1.0.0",
+      "homepage": "https://example.com/context7",
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp"],
+        "env": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+      }
+    },
+    {
+      "id": "docs-remote",
+      "name": "docs-remote",
+      "description": "Remote docs MCP",
+      "version": "1.0.0",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
+      }
+    }
+  ]
+}
+```
+
+Required fields: `schemaVersion: 1`, `servers[]`, per-server `id`, `name`, and `transport`. `id` is the stable registry package identity and must be a safe basename. `name` is the runtime MCP server name and must pass the MCP server-name guard. Optional metadata is preserved only in `.pack-meta.yaml` and activation catalogue details.
+
+Virtual pack identity:
+
+- `dirName` and installed `pack.yaml.name` default to `mcp-${id}`.
+- If `mcp-${id}` collides with an existing installed pack in the target scope, install returns `409` unless the installed pack has matching source URL and registry `id`, in which case `update` semantics apply.
+- Refresh/update detection compares source URL, registry `id`, `version`, and a stable fingerprint of the normalized runtime config plus catalogue metadata.
+- `.pack-meta.yaml` records `sourceType: mcp-registry`, `sourceUrl`, `registryId`, `registryVersion`, `registryFingerprint`, and `materializedAt`.
+
+Failure behavior:
+
+- Invalid HTTP response, non-JSON body, unsupported `schemaVersion`, or missing `servers` fails browse for that source with a registry error.
+- Invalid individual server entries are skipped; browse returns valid virtual packs plus `skippedCount` and concise validation messages for UI warnings.
+- Duplicate `id` values in one registry keep the first valid entry and report later duplicates as skipped. Duplicate runtime `name` values across different ids are skipped unless their normalized configs are identical.
+- Registry source `ref` is rejected at source creation and ignored for legacy malformed rows.
+
+### 13.3 Scoped marketplace MCP resolver contract
+
+Use an explicit scoped resolver:
+
+```ts
+interface ResolveMarketplaceMcpOptions {
+  cwd: string;
+  projectId?: string;
+}
+
+interface ResolvedMcpOrigin {
+  scope: "server" | "global-user" | "project";
+  packName: string;
+  packRoot: string;
+  sourceId?: string;
+  listName: string;
+}
+
+interface ResolvedMcpContribution extends McpContributionRuntimeRecord {
+  catalogue: McpContributionCatalogueRecord;
+}
+
+type MarketplaceMcpResolver = (options: ResolveMarketplaceMcpOptions) => ResolvedMcpContribution[];
+```
+
+Resolution order is deterministic low to high within Marketplace before manual config overrides all Marketplace entries:
+
+1. Server-scope installed packs in `pack_order` order.
+2. Global-user installed packs in `pack_order` order.
+3. Project-scope installed packs for `projectId`/`cwd` only, in that project's `pack_order` order.
+
+For each pack, load `contents.mcp` in manifest order and drop entries listed in `getPackActivation(scope, packName).mcp` before same-name collision resolution. Same `serverName` collisions within Marketplace are resolved by later entries overriding earlier entries; the resolver logs origin replacement. A `seenPath` guard avoids resolving the same physical market-pack directory twice for one `cwd`.
+
+`McpManager` receives a bound resolver and calls it as:
+
+```ts
+for (const contribution of resolver({ cwd: this.cwd, projectId: this.projectId })) {
+  merged[contribution.serverName] = contribution.config;
+}
+// existing manual config discovery follows unchanged and may override these keys
+```
+
+Tests must cover server/global-user/project ordering, pack-order changes, project isolation, disabled refs before merge, Marketplace same-name override, and manual same-name override.
+
+### 13.4 Runtime boundary, reload scoping, and status APIs
+
+MCP runtime state must be scoped to the same project/cwd context used by discovery. Do not use one context-dependent singleton state for all projects.
+
+Implementation contract:
+
+- `SessionManager` owns one default/system `McpManager` for the server cwd as today, plus a per-project/per-cwd manager map for project contexts that need project-scoped marketplace MCP.
+- Manager key: normalized `projectId` when available, otherwise normalized cwd.
+- Each `McpManager` stores its own `cwd`, optional `projectId`, marketplace resolver binding, clients, error/status map, and registered tool infos.
+- `GET /api/mcp-servers` accepts optional `projectId` or `cwd` query parameters. Without parameters it returns the default/system manager for backward compatibility. The Market page must pass the selected install/project scope when showing project-scoped pack status.
+- Marketplace mutation reload chooses affected managers: server/global-user mutations reload all active managers; project-scope mutations reload only that project/cwd manager plus the default manager if the edited project is the current cwd.
+- Tool registration is per manager/tool-manager context. A project manager refreshes only its project `ToolManager`; the default manager refreshes only the default server `ToolManager`.
+- Runtime status responses include `scopeKey`, `projectId?`, and `cwd` so UI/tests can verify no cross-project leakage.
+
+Tests must create two project contexts with different project-scope MCP packs, trigger reloads concurrently, and assert each `GET /api/mcp-servers?projectId=...` and each tool manager contains only its own project MCP plus shared server/global-user MCP.
+
+### 13.5 Runtime reload consistency and concurrency
+
+Marketplace-triggered MCP reloads are serialized per manager with a single-flight queue/lock:
+
+```ts
+private reloadChain: Promise<McpReloadResult> = Promise.resolve(initialResult);
+reloadDiscoveredServers(reason: string): Promise<McpReloadResult> {
+  this.reloadChain = this.reloadChain.catch(() => initialResult).then(() => this.performReload(reason));
+  return this.reloadChain;
+}
+```
+
+`performReload()` semantics:
+
+1. Build `next` via `discoverServers()` and compute deterministic config fingerprints by stable JSON stringify with sorted object keys.
+2. Disconnect removed servers first and remove their tool docs/tool-info cache entries.
+3. For added/changed servers, attempt connect into a temporary client/result slot.
+4. A failed added server is recorded in MCP runtime status as error and contributes no external tools.
+5. A failed changed-server reconnect replaces the old config/status with the new error state and removes old tools. This avoids stale tools for a now-disabled or changed command.
+6. Unchanged connected servers keep their clients; unchanged errored servers are not retried unless the caller uses explicit restart/retry.
+7. After all connect/disconnect attempts settle, refresh that manager's `ToolManager` external MCP tools once, from `mcpManager.getToolInfos()` for currently connected clients only.
+
+Tool registration is atomic from the `ToolManager` perspective: build the complete next MCP external-tool array first, then call `removeExternalTools("mcp__")` and `registerExternalTools(nextTools)` synchronously in one helper. Marketplace mutation handlers await bounded reload and registration before responding, but pack state persistence remains successful even if runtime reload reports errors.
+
+Tests must include overlapping activation/uninstall requests, failed reconnect removing stale tools, disabled server removal, re-enable reconnect, and unchanged server not restarted unnecessarily.
+
+### 13.6 Canonical `DisabledRefs.mcp` identity
+
+The canonical activation ref is always the pack-local manifest `contents.mcp` list name (`listName`). It is not the runtime `serverName`, not a generated meta-tool name, and not an operation id.
+
+Rules:
+
+- `DisabledRefs.mcp` stores `listName` strings per installed pack: `pack_activation[scope][packName].mcp = [listName]`.
+- Activation catalogue rows are keyed by `listName` and include `serverName`, `label`, `transportType`, optional `subNamespace`, and runtime status metadata.
+- `listName !== serverName` is supported and must be tested.
+- Registry materialization uses registry `id` as `listName`; registry `name` is the runtime `serverName`.
+- Duplicate runtime server names across packs do not change ref identity because activation is per pack and per listName.
+- Disabling a contribution removes that pack-local Marketplace contribution before same-name resolution; it does not disable another pack's same-name contribution or any manual config.
+- Registry updates preserve disabled state as long as registry `id`/materialized `listName` is unchanged, even if runtime `name` or transport config changes.
+
+### 13.7 Mutation response timeout and partial-failure semantics
+
+Marketplace install/update/uninstall/activation persistence is not rolled back because an MCP server is slow or fails to connect.
+
+- Persist pack/activation state first.
+- Trigger affected-manager reloads with bounded connect/list timeouts using existing MCP connect/tool-list timeout constants where possible; add an overall per-manager marketplace reload budget of 30 seconds for API response latency.
+- If reload completes within budget, mutation responses include `{ mcpReload: { status: "ok" | "partial" | "error", added, removed, restarted, failed } }`.
+- If reload exceeds budget, response still succeeds for the pack mutation with `{ mcpReload: { status: "pending" } }`; the queued reload continues in the background and `GET /api/mcp-servers?projectId=...` exposes `reloadStatus: "running"` until it settles.
+- Failed or timed-out servers remain represented in runtime status with `status: "error"`, `error`, and `lastAttemptAt`; they contribute no external tools.
+- UI copy distinguishes pack mutation success from runtime connection failure: the toggle stays in the saved state, while the status lozenge shows `Error` or `Reconnecting`.
