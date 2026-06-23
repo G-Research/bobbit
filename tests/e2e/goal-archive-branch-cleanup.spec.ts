@@ -1,20 +1,25 @@
 /**
  * E2E test for Bug 1 of docs/design/orphan-remote-branch-cleanup.md:
- * archiving a team goal must push-delete every per-role agent branch from
- * `origin`. The bug was a mutated-array read in the DELETE /api/goals/:id
- * handler — see server.ts ~L2755.
+ * archiving a team goal must leave every per-role agent branch absent from
+ * `origin`, push-deleting any per-role refs that were published. The bug was
+ * a mutated-array read in the DELETE /api/goals/:id handler — see
+ * server.ts ~L2755.
  *
  * Strategy: stand up a real local bare-repo origin, register the clone as
  * a project, create a team goal, spawn 2 role agents (each gets its own
- * `goal/<id8>/<role>-<short4>` branch pushed to origin — legacy
+ * `goal/<id8>/<role>-<short4>` local branch; current policy keeps scoped
+ * sub-agent branches local-only unless explicitly published — legacy
  * `goal-goal-<slug>-<id>-<role>-<short>` branches from before the
- * `pithier-te` rename are recognised by the same cleanup path), archive
- * the goal, then poll `git ls-remote --heads <bare>` until every per-role
- * branch is gone (≤55s).
+ * `pithier-te` rename are recognised by the same cleanup path), capture
+ * remote heads before archive, archive the goal, then poll
+ * `git ls-remote --heads <bare>` until every expected per-role branch is
+ * absent remotely (≤55s). Branches present before archive prove cleanup;
+ * branches already absent before archive satisfy the local-only policy.
  *
  * Uses the `realpush` harness variant so BOBBIT_TEST_NO_PUSH is NOT set —
- * push-delete actually executes. Registered as the `api-realpush` project
- * in playwright-e2e.config.ts for env isolation from other workers.
+ * push-delete actually executes for any published branches. Registered as
+ * the `api-realpush` project in playwright-e2e.config.ts for env isolation
+ * from other workers.
  */
 import { test, expect } from "./in-process-harness-realpush.js";
 import { execFileSync, execFile as execFileCb } from "node:child_process";
@@ -76,6 +81,16 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 			if (typeof arg === "string") return arg;
 			try { return JSON.stringify(arg); } catch { return String(arg); }
 		}).join(" ");
+	}
+
+	function remoteHeadBranches(stdout: string): Set<string> {
+		const branches = new Set<string>();
+		for (const line of stdout.split(/\r?\n/)) {
+			const marker = "\trefs/heads/";
+			const markerIndex = line.indexOf(marker);
+			if (markerIndex >= 0) branches.add(line.slice(markerIndex + marker.length));
+		}
+		return branches;
 	}
 
 	test("archiving a goal whose remote branch is already absent succeeds without a missing-ref warning", async () => {
@@ -166,7 +181,7 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		const goal = await goalResp.json();
 		const goalId: string = goal.id;
 
-		// Wait for goal setup (worktree create + push) to complete.
+		// Wait for goal setup (worktree creation) to complete.
 		await pollUntil(async () => {
 			const r = await apiFetch(`/api/goals/${goalId}`);
 			if (!r.ok) return null;
@@ -196,44 +211,49 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 			.filter((b: string | undefined): b is string => Boolean(b));
 		expect(expectedBranches.length).toBeGreaterThanOrEqual(2);
 
-		// Sanity: branches were pushed to origin during worktree creation.
-		// Poll briefly — push happens async during spawn in some paths.
-		const lsBefore = await pollUntil(async () => {
-			const { stdout } = await execFileAsync(
-				"git", ["ls-remote", "--heads", bareRepo],
-				{ encoding: "utf-8" },
-			);
-			return expectedBranches.every(b => stdout.includes(b)) ? stdout : null;
-		}, { timeoutMs: 30_000, intervalMs: 500, label: "all per-role branches pushed to origin" });
-		for (const b of expectedBranches) {
-			expect(lsBefore, `branch ${b} should have been pushed`).toContain(b);
-		}
+		// Capture remote heads before archive without requiring scoped
+		// team-member branches to have been published. Local-only per-role
+		// branches are expected under the current sub-agent branch policy.
+		const { stdout: lsBefore } = await execFileAsync(
+			"git", ["ls-remote", "--heads", bareRepo],
+			{ encoding: "utf-8" },
+		);
+		const branchesBefore = remoteHeadBranches(lsBefore);
 
 		// Archive the goal — DELETE /api/goals/:id triggers
-		// deleteRemoteGoalBranches() fire-and-forget.
+		// deleteRemoteGoalBranches() fire-and-forget. Any per-role remote branch
+		// present in lsBefore must be push-deleted; any branch absent in lsBefore
+		// is accepted as a local-only sub-agent branch.
 		const del = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 		expect(del.status).toBe(200);
 
-		// Poll ls-remote until every per-role branch is gone (≤55s).
-		let lsAfter = "";
+		// Poll ls-remote until every expected per-role branch is absent (≤55s).
+		let branchesAfter = new Set<string>();
 		try {
-			lsAfter = await pollUntil(async () => {
+			branchesAfter = await pollUntil(async () => {
 				const { stdout } = await execFileAsync(
 					"git", ["ls-remote", "--heads", bareRepo],
 					{ encoding: "utf-8" },
 				);
-				return expectedBranches.every(b => !stdout.includes(b)) ? stdout : null;
-			}, { timeoutMs: 55_000, intervalMs: 500, label: "all per-role branches deleted from origin" });
+				const remoteBranches = remoteHeadBranches(stdout);
+				return expectedBranches.every(b => !remoteBranches.has(b)) ? remoteBranches : null;
+			}, { timeoutMs: 55_000, intervalMs: 500, label: "all per-role branches absent from origin after archive" });
 		} catch {
 			// Fall through to the per-branch expect() below for a clearer diff.
 			const { stdout } = await execFileAsync(
 				"git", ["ls-remote", "--heads", bareRepo],
 				{ encoding: "utf-8" },
 			);
-			lsAfter = stdout;
+			branchesAfter = remoteHeadBranches(stdout);
 		}
 		for (const b of expectedBranches) {
-			expect(lsAfter, `branch ${b} should have been deleted from origin`).not.toContain(b);
+			const beforeState = branchesBefore.has(b)
+				? "was present before archive"
+				: "was already absent before archive under local-only policy";
+			expect(
+				branchesAfter.has(b),
+				`branch ${b} should be absent remotely after archive (${beforeState})`,
+			).toBe(false);
 		}
 	});
 });
