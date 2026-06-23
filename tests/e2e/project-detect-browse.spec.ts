@@ -240,6 +240,8 @@ test.describe("GET /api/browse-directory", () => {
 		mkdirSync(testRoot, { recursive: true });
 		// Create some subdirectories
 		mkdirSync(join(testRoot, "alpha"), { recursive: true });
+		mkdirSync(join(testRoot, "alpha-tools"), { recursive: true });
+		mkdirSync(join(testRoot, "alphabet"), { recursive: true });
 		mkdirSync(join(testRoot, "beta"), { recursive: true });
 		mkdirSync(join(testRoot, "gamma"), { recursive: true });
 		// Create a file (should not appear in results)
@@ -271,6 +273,8 @@ test.describe("GET /api/browse-directory", () => {
 		expect(data.current).toBe(testRoot);
 		const names = data.entries.map((e: any) => e.name);
 		expect(names).toContain("alpha");
+		expect(names).toContain("alpha-tools");
+		expect(names).toContain("alphabet");
 		expect(names).toContain("beta");
 		expect(names).toContain("gamma");
 	});
@@ -291,8 +295,16 @@ test.describe("GET /api/browse-directory", () => {
 		expect(names).not.toContain(".hidden");
 		// Should not include node_modules
 		expect(names).not.toContain("node_modules");
-		// Should only have the three directories
-		expect(names).toEqual(["alpha", "beta", "gamma"]);
+		// Should only have the visible directories
+		expect(names).toEqual(["alpha", "alpha-tools", "alphabet", "beta", "gamma"]);
+	});
+
+	test("prefix and limit filter before statting all entries", async () => {
+		const res = await apiFetch(`/api/browse-directory?path=${encodeURIComponent(testRoot)}&prefix=${encodeURIComponent("alph")}&limit=2`);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.entries.map((e: any) => e.name)).toEqual(["alpha", "alpha-tools"]);
+		expect(data.truncated).toBe(true);
 	});
 
 	test("entries are sorted alphabetically", async () => {
