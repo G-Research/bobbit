@@ -1,8 +1,8 @@
 # Unified Session Actions
 
-Unified session actions keep every per-session command behind one canonical model so the sidebar row menu, the open-session desktop header, and the open-session mobile header do not drift. The sidebar action set is the baseline, and the header renders the same descriptors either directly or through the same hamburger popover component.
+Unified session actions keep every per-session command behind one canonical model so the sidebar row menu, the open-session desktop header, and the open-session mobile header do not drift. The sidebar action set is the baseline, and the header renders the same descriptors both as direct buttons and through the same hamburger popover component.
 
-This feature sits in the browser app shell. It does not change session REST semantics; actions call the existing session, staff, routing, clipboard, prompt-inspector, refresh, fork, and window-opening helpers.
+This feature sits in the browser app shell. It does not change session REST semantics; actions call the existing session, staff, routing, clipboard, prompt-inspector, refresh, fork, window-opening, and pack launcher helpers.
 
 ## Canonical model
 
@@ -20,7 +20,7 @@ The descriptor is intentionally small and renderer-agnostic:
 - `run(event)` — action handler.
 - `trailingToggle` — optional control rendered at the row edge, currently used by Fork.
 
-`SessionActionId` covers the built-ins, but descriptors allow string ids so a future extension-contributed session action can flow through the same builder/adapter path. Session-menu launchers also flow through this shared model, so extension launch actions render consistently in the sidebar row menu and chat header menu instead of adding surface-specific buttons.
+`SessionActionId` covers the built-ins, but descriptors allow string ids so extension-contributed session actions can flow through the same builder/adapter path. Pack `session-menu` launchers also flow through this shared model, so extension launch actions render consistently in the sidebar row menu and chat header menu instead of adding surface-specific buttons. Built-ins keep the priority order below; contributed actions are appended by their descriptor priority.
 
 ## Built-in order
 
@@ -46,7 +46,7 @@ The sidebar still uses `SidebarActionsPopover` for positioning, roving keyboard 
 
 ### Desktop open-session header
 
-`src/app/render.ts` builds the same canonical descriptors for the active session. On desktop it renders the highest-priority actions directly, then places lower-priority actions in a `Session actions` hamburger popover when the header width budget is constrained.
+`src/app/render.ts` builds the same canonical descriptors for the active session. On desktop it renders the highest-priority actions directly, then shows a `Session actions` hamburger when the header width budget leaves any remaining actions for the popover.
 
 Direct buttons are chosen from the start of the canonical order. Actions with trailing controls, such as Fork, are kept in the popover so their control can be rendered and operated consistently.
 
@@ -57,13 +57,27 @@ The responsive direct-action limit is width based:
 - `< 1180px` — three direct actions.
 - `>= 1180px` — four direct actions.
 
-The overflow menu is another `SidebarActionsPopover` instance populated from the remaining canonical descriptors.
+The hamburger does **not** open only the overflow subset. It opens a `SidebarActionsPopover` populated with the complete canonical session action list in priority order, including any direct buttons that were already visible and any pack-contributed `session-menu` actions. This keeps the hamburger as the full command menu while the direct buttons remain shortcuts.
 
 ### Mobile open-session header
 
-Mobile session view renders no individual header action buttons. It keeps the back button and truncated session title visible, then exposes a `Session actions` hamburger button on the right.
+Mobile session view keeps the back button and truncated session title visible, renders the quick session actions as icon-only direct buttons, and exposes a `Session actions` hamburger button on the right.
 
-Opening that menu shows the full canonical session action set for the active session, including actions that are not practical as separate mobile header buttons. This is distinct from mobile sidebar/landing rows, where the sidebar hamburger remains suppressed.
+Opening that menu shows the full canonical session action set for the active session, including actions that are not practical as separate mobile header buttons. The visible quick buttons are still part of the header DOM so they can participate in shared-element animation. This is distinct from mobile sidebar/landing rows, where the sidebar hamburger remains suppressed.
+
+## Header shared-element animation
+
+The header hamburger uses the same `SidebarActionsPopover` component and FLIP helper pipeline as sidebar menus, but with a header-specific source capture:
+
+1. Before opening, the header captures every currently visible direct header action button for the active session, not just actions marked `quick`.
+2. The popover mounts with the complete canonical action list.
+3. Matching source buttons animate into the icon position of their popover rows by stable action id.
+4. While the popover is open, the source buttons stay mounted but are hidden from view, pointer interaction, and keyboard focus so the FLIP source geometry remains stable without leaving duplicate interactive controls.
+5. Closing the popover restores the direct buttons appropriate for the current viewport. When source and target rects are still available, the popover can run the reverse close animation; otherwise it falls back to normal cleanup.
+
+This is intentionally broader than sidebar row capture. Sidebar session and goal menus remain quick-action-source driven: only `[data-sidebar-action-quick="true"]` row buttons should be captured as sidebar FLIP sources. Do not broaden sidebar capture to all menu rows to match the header; the header uses its own capture path because constrained desktop headers can show direct non-quick actions such as `Refresh agent`.
+
+Reduced-motion handling is owned by `SidebarActionsPopover`: when `prefers-reduced-motion: reduce` matches, shared-element and slide animations are skipped while focus, dismissal, and action behavior stay the same.
 
 ## Fork trailing toggle
 
@@ -104,7 +118,7 @@ Goal links still use hash routes (`/#/goal/<goalId>`). The path-style behavior d
 
 Relevant coverage lives in:
 
-- `tests/e2e/ui/session-actions.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop overflow, mobile hamburger, Fork toggle accessibility, and header action reachability.
+- `tests/e2e/ui/session-actions.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop and mobile header hamburgers opening the full action list, FLIP sources for all visible direct header buttons, hidden/non-interactive direct buttons while open, restoration on close, Fork toggle accessibility, and header action reachability.
 - `tests/e2e/ui/copy-session-link.spec.ts` — path-style copy URL, direct `/session/<id>` load, hash canonicalization, reload behavior, and hash precedence.
 - `tests/e2e/ui/open-session-new-window.spec.ts` — path-style open-in-new-window behavior and middle-click no-navigation regression coverage.
 - `tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts` — sidebar menu ordering/title contract in a fast browser fixture.

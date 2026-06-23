@@ -50,7 +50,7 @@ Menu-only sidebar-row actions remain desktop-only in the mobile landing list:
 - Goal `Copy link`
 - Goal `Open on GitHub`
 
-Open-session mobile view is different: its header exposes the full canonical session action set through a `Session actions` hamburger. See [Unified Session Actions](session-actions.md#mobile-open-session-header).
+Open-session mobile view is different: its header keeps icon-only quick actions and exposes the full canonical session action set through a `Session actions` hamburger. See [Unified Session Actions](session-actions.md#mobile-open-session-header).
 
 ## Session actions
 
@@ -243,6 +243,8 @@ Opening uses a FLIP-style shared-element animation:
 2. The popover measures matching menu icon rects after render.
 3. Matching quick-action icons animate from their source strip positions into their menu positions.
 4. Menu-only rows fade/slide in after the shared icons, making the new actions discoverable.
+
+The sidebar source set is deliberately quick-action-only for both session and goal rows. Header session actions use a separate capture path because their direct buttons can include non-quick actions at constrained desktop widths; see [Unified Session Actions — Header shared-element animation](session-actions.md#header-shared-element-animation). Do not broaden sidebar source capture when changing header behavior.
 
 Closing runs the reverse animation when the source and target rects are still available. If layout/route changes removed the source row, close falls back to a fade-only path. All animations are cancelable and are cleaned up on close and `disconnectedCallback`.
 
