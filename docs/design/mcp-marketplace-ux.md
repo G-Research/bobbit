@@ -131,7 +131,7 @@ Recommended test ids:
 ### Browse states
 
 - Loading: reuse `Loading packs…`; for MCP registry sources, prefer `Loading MCP servers…` if source kind is known.
-- Empty registry: `This registry did not return any installable MCP servers.`
+- Empty registry: `This registry did not return any supported MCP servers.`
 - Registry error: use `market-error`; include server-provided message and keep the source row visible for re-sync/remove.
 - Invalid entry within a registry: do not fail the whole browse list; show valid cards and a compact warning row: `3 registry entries were skipped because they were unsupported.` The expandable detail should surface server-provided diagnostics such as unsupported transport, secret-marked remote header, non-default npm registry URL, missing/ranged npm version, variables/templates, prompt-required value, or unsafe package argument.
 

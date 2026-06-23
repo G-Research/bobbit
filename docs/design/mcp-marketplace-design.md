@@ -716,9 +716,9 @@ Pay special attention to existing MCP tests:
 1. **Manual vs Marketplace precedence**
    - Risk: users expect installed Marketplace MCP to override manual `.mcp.json`.
    - Decision: manual wins initially. It is safer and preserves existing behavior.
-2. **Registry spec ambiguity**
+2. **Registry source format**
    - Risk: external MCP registries may not share one response format.
-   - Decision: implement a strict Bobbit-supported discovery JSON first; adapters for known registries can be added behind the same `fetchMcpRegistry()` seam.
+   - Decision: support the official MCP Registry API `servers[].server` shape directly. Use `https://registry.modelcontextprotocol.io/v0/servers` as the canonical source example, and reject the old Bobbit `schemaVersion: 1` registry JSON in public registry ingestion.
 3. **Secrets and environment variables**
    - Risk: registry/pack entries may require secrets. Marketplace must not store secret values casually.
    - Decision: support env-var placeholders in contribution files; document that users configure environment/secrets outside Marketplace. Future work can add scoped secret prompts.
