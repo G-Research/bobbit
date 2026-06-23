@@ -169,6 +169,63 @@ test.describe("Add Project — directory picker typeahead", () => {
 		}
 	});
 
+	test("created path is treated as completed and does not reopen suggestions", async ({ page }) => {
+		const parent = uniqueDir("typeahead-create-parent");
+		const target = join(parent, "created-project");
+		const routePath = "**/api/create-directory";
+
+		try {
+			await page.route(routePath, async (route) => {
+				if (route.request().method() !== "POST") return route.fallback();
+				let requestedPath = "";
+				try {
+					requestedPath = JSON.parse(route.request().postData() || "{}").path || "";
+				} catch {
+					requestedPath = "";
+				}
+				if (requestedPath !== target) return route.fallback();
+				mkdirSync(join(target, "nested-child"), { recursive: true });
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ path: target }),
+				});
+			});
+
+			await openAddProjectDialog(page);
+			const input = page.locator(ADD_PROJECT.pickerInput);
+			await expect(input).toBeFocused();
+
+			await input.fill(target);
+			const inlineCreate = page.locator(ADD_PROJECT.statusSlot).locator(ADD_PROJECT.inlineCreate);
+			await expect(inlineCreate).toBeVisible({ timeout: 10_000 });
+			const createButton = page.locator("button").filter({ has: page.locator(ADD_PROJECT.createDirectory) }).first();
+			await expect(createButton).toBeEnabled();
+			await createButton.click();
+
+			await expect(inlineCreate).toHaveCount(0, { timeout: 10_000 });
+			await expect(input).toHaveValue(target);
+			await expect(input).toBeFocused();
+			const overlay = page.locator(ADD_PROJECT.pickerSuggestions);
+			await expect(overlay).toHaveCount(0);
+			await expect.poll(async () => await overlay.count(), {
+				timeout: 1_000,
+				intervals: [100, 150, 250, 500],
+			}).toBe(0);
+
+			// A trailing separator is still an explicit child-list request after creation.
+			const separator = target.includes("\\") ? "\\" : "/";
+			await input.fill(`${target}${separator}`);
+			await expect(overlay).toBeVisible({ timeout: 5_000 });
+			await expect(
+				overlay.locator(ADD_PROJECT.pickerSuggestion).filter({ hasText: "nested-child" }).first(),
+			).toBeVisible({ timeout: 5_000 });
+		} finally {
+			await page.unroute(routePath).catch(() => {});
+			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
 	test("blur invalidates in-flight suggestions", async ({ page }, testInfo) => {
 		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
 
