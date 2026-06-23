@@ -243,6 +243,31 @@ export function resolveStep(
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
 
+function execOutputToString(value: unknown): string {
+	if (Buffer.isBuffer(value)) return value.toString("utf8");
+	return typeof value === "string" ? value : "";
+}
+
+function execErrorCode(err: unknown): number | string | undefined {
+	return (err as { code?: number | string } | null | undefined)?.code;
+}
+
+function isMissingRemoteHeadLsRemoteError(err: unknown): boolean {
+	const code = execErrorCode(err);
+	if (code !== 2 && code !== "2") return false;
+	const stdout = execOutputToString((err as { stdout?: unknown } | null | undefined)?.stdout).trim();
+	const stderr = execOutputToString((err as { stderr?: unknown } | null | undefined)?.stderr);
+	if (stdout) return false;
+	return !/\bfatal:|could not|unable|authentication|permission denied/i.test(stderr);
+}
+
+function lsRemoteOutputHasHead(stdout: unknown, branch: string): boolean {
+	const headRef = `refs/heads/${branch}`;
+	return execOutputToString(stdout)
+		.split(/\r?\n/)
+		.some(line => line.trimEnd().endsWith(`\t${headRef}`));
+}
+
 /**
  * Frozen workflows may omit `timeout:` for component command steps. The full
  * unit suite is resource-sensitive on developer machines/CI and can exceed the
@@ -1159,14 +1184,14 @@ export class VerificationHarness {
 			return;
 		}
 
-		console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
 
 		for (const v of running) {
 			try {
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-					console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
+					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
 					this.activeVerifications.delete(v.signalId);
 					this._persistActive();
 					continue;
@@ -1240,7 +1265,7 @@ export class VerificationHarness {
 
 		// Clear persisted file after all verifications finalized
 		try { fs.unlinkSync(this._persistPath); } catch {}
-		console.log("[verification] Finished resuming interrupted verifications.");
+		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
 	}
 
 	/**
@@ -1472,11 +1497,11 @@ export class VerificationHarness {
 					`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
 				);
 			}
-			console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
 		} else {
 			const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
 			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
-			console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
 		}
 	}
 
@@ -2338,12 +2363,24 @@ export class VerificationHarness {
 				}
 
 				if (hasOriginRemote) {
+					let hasRemoteGoalBranch = false;
 					try {
-						await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-						await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-						console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						const { stdout } = await execFileAsync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
+						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout, goalBranch);
 					} catch (err) {
-						console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						if (!isMissingRemoteHeadLsRemoteError(err)) {
+							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
+						}
+					}
+
+					if (hasRemoteGoalBranch) {
+						try {
+							await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+							await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						}
 					}
 
 					// Also fetch the review baseline branch so origin/<base> is up-to-date for
@@ -4245,7 +4282,7 @@ export class VerificationHarness {
 
 		// Case A: child already finished before we restarted.
 		if (step.exitFile && fs.existsSync(step.exitFile)) {
-			console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
 			return finalize(readExitFile());
 		}
 
@@ -4265,7 +4302,7 @@ export class VerificationHarness {
 		if (!pidLooksReused && typeof step.pid === "number" && isPidAlive(step.pid)) {
 			const timeoutMs = timeoutSec * 1000;
 			const deadline = step.startedAt + timeoutMs;
-			console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
 
 			// Tail the surviving child's stdout/stderr files so UI clients see
 			// live output during the resume wait (and so subsequent gate_status
@@ -4314,7 +4351,7 @@ export class VerificationHarness {
 
 		// Case C: process gone, no exit file — killed by something between our
 		// last persist and now.
-		console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
 		return withDiagnostics({
 			name: step.name,
 			type: step.type,
