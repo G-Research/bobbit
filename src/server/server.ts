@@ -338,7 +338,7 @@ import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.j
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
-import type { MarketplaceMcpResolver, McpReloadResult, McpManager, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { MarketplaceMcpResolver, McpReloadResult, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
@@ -2805,22 +2805,12 @@ async function handleApiRoute(
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
 	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
-	const registerMcpExternalTools = (mgr: McpManager | null): void => {
-		if (!mgr || !toolManager) return;
-		const refresh = mgr.getToolRegistrationRefresh();
-		for (const prefix of refresh.removePrefixes) toolManager.removeExternalTools(prefix);
-		toolManager.registerExternalTools(refresh.toolInfos.map(info => ({
-			name: info.name,
-			description: info.description,
-			summary: info.summary ?? info.description,
-			group: info.group,
-			docs: info.docs,
-			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-		})));
+	const refreshMcpExternalTools = (): void => {
+		sessionManager.refreshExternalMcpToolRegistrations();
 	};
 	const reloadMcpAfterMarketplaceMutation = async (scope?: InstallScope, projectId?: string): Promise<McpReloadResult | undefined> => {
 		const result = await sessionManager.reloadMcpAfterMarketplaceMutation(scope, projectId);
-		registerMcpExternalTools(sessionManager.getMcpManager());
+		refreshMcpExternalTools();
 		return result;
 	};
 	// Host-owned activation-cache invalidation: a pack persisting provider config
@@ -3776,6 +3766,7 @@ async function handleApiRoute(
 			for (const s of liveSessions) {
 				try { await sessionManager.terminateSession(s.id); } catch {}
 			}
+			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
 			projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
@@ -13541,8 +13532,8 @@ async function handleApiRoute(
 			const config = refreshed[serverName] || existing.config;
 			await mcpManager.connectServer(serverName, config);
 		}
-		// Re-register MCP tools with ToolManager
-		registerMcpExternalTools(mcpManager);
+		// Re-register MCP tools with ToolManager across default and scoped managers.
+		refreshMcpExternalTools();
 		const updated = mcpManager.getServerStatuses().find(s => s.name === serverName);
 		json({ ok: true, ...updated });
 		return;

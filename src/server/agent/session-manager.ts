@@ -1772,6 +1772,66 @@ export class SessionManager {
 		return this.scopedMcpManagers.get(key) ?? null;
 	}
 
+	getActiveMcpManagers(): McpManager[] {
+		return [
+			...(this.mcpManager ? [this.mcpManager] : []),
+			...this.scopedMcpManagers.values(),
+		];
+	}
+
+	refreshExternalMcpToolRegistrations(): void {
+		if (!this.toolManager) return;
+		const removePrefixes = new Set<string>(["mcp__"]);
+		const toolInfos: ReturnType<McpManager["getToolInfos"]> = [];
+		for (const mgr of this.getActiveMcpManagers()) {
+			const refresh = mgr.getToolRegistrationRefresh();
+			for (const prefix of refresh.removePrefixes) removePrefixes.add(prefix);
+			toolInfos.push(...refresh.toolInfos);
+		}
+		for (const prefix of removePrefixes) this.toolManager.removeExternalTools(prefix);
+		this.toolManager.registerExternalTools(toolInfos.map(info => ({
+			name: info.name,
+			description: info.description,
+			summary: info.summary ?? info.description,
+			group: info.group,
+			docs: info.docs,
+			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+		})));
+	}
+
+	private async removeScopedMcpManagerByKey(key: string): Promise<boolean> {
+		const mgr = this.scopedMcpManagers.get(key);
+		if (!mgr) return false;
+		this.scopedMcpManagers.delete(key);
+		try {
+			await mgr.disconnectAll();
+		} finally {
+			this.refreshExternalMcpToolRegistrations();
+		}
+		return true;
+	}
+
+	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
+		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
+		const keys: string[] = [];
+		for (const [key, mgr] of this.scopedMcpManagers) {
+			const scope = mgr.getDiscoveryScope();
+			if (key === this.mcpScopeKey({ projectId }) || scope.projectId === projectId || (targetRoot && path.resolve(scope.cwd) === targetRoot)) {
+				keys.push(key);
+			}
+		}
+		for (const key of keys) await this.removeScopedMcpManagerByKey(key);
+	}
+
+	private async cleanupScopedMcpManagersForSessionScope(scope: { projectId?: string; cwd?: string }): Promise<void> {
+		if (!scope.cwd) return;
+		const cwdKey = this.mcpScopeKey({ cwd: scope.cwd });
+		if (!this.scopedMcpManagers.has(cwdKey)) return;
+		const cwd = path.resolve(scope.cwd);
+		const stillInUse = [...this.sessions.values()].some((s) => !!s.cwd && path.resolve(s.cwd) === cwd);
+		if (!stillInUse) await this.removeScopedMcpManagerByKey(cwdKey);
+	}
+
 	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
 		const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir(), {
 			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
@@ -1961,18 +2021,8 @@ export class SessionManager {
 				}
 			}
 
-			// Register MCP tools with ToolManager
-			if (this.toolManager) {
-				const infos = mgr.getToolInfos();
-				this.toolManager.registerExternalTools(infos.map(info => ({
-					name: info.name,
-					description: info.description,
-					summary: info.summary ?? info.description,
-					group: info.group,
-					docs: info.docs,
-					provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-				})));
-			}
+			// Register MCP tools with ToolManager across default and scoped managers.
+			this.refreshExternalMcpToolRegistrations();
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
@@ -6797,7 +6847,9 @@ export class SessionManager {
 		// Resolve the store BEFORE removing from in-memory map, so
 		// resolveStoreForSession can look up the session's projectId.
 		const terminateStore = this.resolveStoreForSession(id);
+		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
+		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
 		// archives directly (bypassing archiveWithCascade), so the dispatch
@@ -7169,6 +7221,8 @@ export class SessionManager {
 				console.error(`[session-manager] Failed to clean team-store entry on team-lead purge for ${ps.id}:`, err);
 			}
 		}
+
+		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.

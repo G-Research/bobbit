@@ -15,6 +15,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "./e2e-setup.js";
+import path from "node:path";
 import type { GatewayInfo } from "./in-process-harness.js";
 
 // ─── Stub MCP plumbing ─────────────────────────────────────────────────
@@ -85,6 +86,7 @@ async function seedFakeScopedMcpManager(gw: GatewayInfo, projectId: string, serv
 function clearFakeMcpManager(gw: GatewayInfo) {
 	(gw.sessionManager as any).mcpManager = null;
 	(gw.sessionManager as any).scopedMcpManagers.clear();
+	gw.sessionManager.refreshExternalMcpToolRegistrations?.();
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -135,6 +137,55 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(ensured.status).toBe(200);
 		expect(Array.isArray(await ensured.json())).toBe(true);
 		expect(gateway.sessionManager.getMcpManager({ projectId })).not.toBeNull();
+	});
+
+	test("scoped MCP project cleanup disconnects managers and unregisters external tools", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const projectRoot = gateway.projectContextManager.getOrCreate(projectId!)?.project.rootPath;
+		expect(projectRoot).toBeTruthy();
+
+		await seedFakeMcpManager(gateway, "default-server");
+		const projectMgr = await seedFakeScopedMcpManager(gateway, projectId!, "project-server");
+		const cwdKey = `cwd:${path.resolve(projectRoot)}`;
+		const cwdMgr = await makeFakeMcpManager(gateway, "cwd-server", { scopeKey: cwdKey });
+		(gateway.sessionManager as any).scopedMcpManagers.set(cwdKey, cwdMgr);
+		gateway.sessionManager.refreshExternalMcpToolRegistrations();
+		const projectClient = (projectMgr as any).clients.get("project-server");
+		const cwdClient = (cwdMgr as any).clients.get("cwd-server");
+
+		let toolsBody = await (await apiFetch("/api/tools")).json();
+		let names = toolsBody.tools.map((t: any) => t.name);
+		expect(names).toContain("mcp__default-server__echo");
+		expect(names).toContain("mcp__project-server__echo");
+		expect(names).toContain("mcp__cwd-server__echo");
+
+		await gateway.sessionManager.cleanupScopedMcpManagersForProject(projectId!, projectRoot);
+
+		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
+		expect(gateway.sessionManager.getMcpManager({ cwd: projectRoot })).toBeNull();
+		expect(projectClient?.connected).toBe(false);
+		expect(cwdClient?.connected).toBe(false);
+
+		toolsBody = await (await apiFetch("/api/tools")).json();
+		names = toolsBody.tools.map((t: any) => t.name);
+		expect(names).toContain("mcp__default-server__echo");
+		expect(names).not.toContain("mcp__project-server__echo");
+		expect(names).not.toContain("mcp__cwd-server__echo");
+	});
+
+	test("external MCP refresh keeps scoped registrations alongside default", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		await seedFakeMcpManager(gateway, "default-refresh");
+		await seedFakeScopedMcpManager(gateway, projectId!, "scoped-refresh");
+
+		gateway.sessionManager.refreshExternalMcpToolRegistrations();
+
+		const toolsBody = await (await apiFetch("/api/tools")).json();
+		const names = toolsBody.tools.map((t: any) => t.name);
+		expect(names).toContain("mcp__default-refresh__echo");
+		expect(names).toContain("mcp__scoped-refresh__echo");
 	});
 
 	test("reloadMcpAfterMarketplaceMutation aggregates scoped manager failures", async ({ gateway }) => {
