@@ -727,7 +727,7 @@ export class ProjectSandbox {
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
-		for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+		for (const sub of ["sessions", "tool-guard", "html-snapshots", "google-code-assist", "openai-orphan-tool-result"]) {
 			fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 		}
 

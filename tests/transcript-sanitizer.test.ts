@@ -10,6 +10,8 @@
  *   (d) string-content blank user message  → rewritten
  *   (e) valid transcripts pass through unchanged + byte-identical (idempotent)
  *   (f) assistant / non-user blank messages are NOT touched
+ *   (g) valid tool-result history is left byte-identical while orphan results
+ *       are dropped or filtered
  *
  * Run with:
  *   npx tsx --test --test-force-exit tests/transcript-sanitizer.test.ts
@@ -31,6 +33,52 @@ import {
 
 function msg(role: string, content: unknown, id = "x"): string {
 	return JSON.stringify({ type: "message", id, ts: "2026-01-01T00-00-00-000Z", message: { role, content } });
+}
+
+function assistantToolCall(toolCallId: string, id = `assistant-${toolCallId}`, stopReason?: string): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolCallId, name: "bash", input: { command: "echo ok" } }],
+			...(stopReason ? { stopReason } : {}),
+		},
+	});
+}
+
+function assistantToolUse(toolCallId: string, id = `assistant-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "tool_use", id: toolCallId, name: "bash", input: { command: "echo ok" } }],
+		},
+	});
+}
+
+function assistantPiToolCall(toolCallId: string, id = `assistant-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: {
+			role: "assistant",
+			content: [{ toolCallId, toolName: "bash", args: { command: "echo ok" } }],
+		},
+	});
+}
+
+function toolResultRow(toolCallId: string, id = `result-${toolCallId}`): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		ts: "2026-01-01T00-00-00-000Z",
+		message: { role: "toolResult", toolCallId, content: "ok done" },
+	});
 }
 
 const IMG = { type: "image", source: { data: "AAAA" } };
@@ -95,27 +143,352 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(content, line);
 	});
 
-	it("(g) leaves a tool_result-only user message byte-identical (no text by design)", () => {
-		const line = msg("user", [{ type: "tool_result", toolCallId: "t1", content: "ok done" }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
-		assert.equal(changed, false, "tool_result user message must NOT be rewritten");
-		assert.equal(content, line, "tool_result user message must stay byte-identical");
+	it("(g) leaves a valid toolCall + toolResult row pair byte-identical and idempotent", () => {
+		const file = [assistantToolCall("t1"), toolResultRow("t1")].join("\n");
+		const first = sanitizeTranscriptContent(file);
+		assert.equal(first.changed, false, "valid message-level toolResult must stay unchanged");
+		assert.equal(first.content, file, "valid tool-call history must stay byte-identical");
+		assert.equal(first.droppedToolResultRows, 0);
+		assert.equal(first.filteredToolResultBlocks, 0);
+
+		const second = sanitizeTranscriptContent(first.content);
+		assert.equal(second.changed, false, "valid pair sanitizer pass must remain a no-op");
+		assert.equal(second.content, file);
 	});
 
-	it("(g') leaves a toolResult-variant user message byte-identical", () => {
-		const line = msg("user", [{ type: "toolResult", toolCallId: "t2", content: [{ type: "text", text: "" }] }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
-		assert.equal(changed, false, "toolResult user message must NOT be rewritten");
-		assert.equal(content, line, "toolResult user message must stay byte-identical");
+	it("(g') leaves a valid tool_use + toolResult-block user message byte-identical", () => {
+		const result = msg("user", [{ type: "toolResult", toolCallId: "t2", content: [{ type: "text", text: "" }] }], "result-t2");
+		const file = [assistantToolUse("t2"), result].join("\n");
+		const { changed, content } = sanitizeTranscriptContent(file);
+		assert.equal(changed, false, "valid toolResult user message must NOT be rewritten");
+		assert.equal(content, file, "valid toolResult user message must stay byte-identical");
 	});
 
-	it("(g'') leaves a tool_result + blank-text user message byte-identical (tool result wins)", () => {
-		// Even if a stray empty text block coexists, the presence of a tool_result
-		// block means this is tool-call history and must not be touched.
-		const line = msg("user", [{ type: "text", text: "" }, { type: "tool_result", content: "x" }]);
-		const { changed, content } = sanitizeTranscriptContent(line);
+	it("(g' pi) leaves a valid pi {toolCallId,toolName} + toolResult row pair byte-identical", () => {
+		const file = [assistantPiToolCall("pi-tool"), toolResultRow("pi-tool")].join("\n");
+		const first = sanitizeTranscriptContent(file);
+		assert.equal(first.changed, false, "pi-shaped assistant tool call must validate the matching toolResult row");
+		assert.equal(first.content, file, "valid pi-shaped tool-call history must stay byte-identical");
+		assert.equal(first.droppedToolResultRows, 0);
+
+		const second = sanitizeTranscriptContent(first.content);
+		assert.equal(second.changed, false, "valid pi-shaped pair sanitizer pass must remain a no-op");
+		assert.equal(second.content, file);
+	});
+
+	it("(g'') leaves a valid tool_result + blank-text user message byte-identical (tool result wins)", () => {
+		// Even if a stray empty text block coexists, the presence of a valid
+		// tool_result block means this is tool-call history and must not be touched.
+		const result = msg("user", [{ type: "text", text: "" }, { type: "tool_result", tool_use_id: "t3", content: "x" }], "result-t3");
+		const file = [assistantToolCall("t3"), result].join("\n");
+		const { changed, content } = sanitizeTranscriptContent(file);
 		assert.equal(changed, false);
-		assert.equal(content, line);
+		assert.equal(content, file);
+	});
+
+	it("(g''' toolCall) recognizes a typed toolCall block carrying toolCallId instead of id", () => {
+		// Regression (PR #845): toolCallIdFromAssistantBlock() previously only
+		// accepted `id` for typed `toolCall`/`tool_use` blocks, so a block carrying
+		// `toolCallId` (or `tool_use_id`) instead of `id` was skipped and its
+		// matching toolResult wrongly dropped as orphaned. Match action-guard.ts.
+		const assistant = JSON.stringify({
+			type: "message",
+			id: "assistant-tc-alt",
+			ts: "2026-01-01T00-00-00-000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", toolCallId: "tc-alt", name: "bash", input: { command: "echo ok" } }],
+			},
+		});
+		const result = toolResultRow("tc-alt", "result-tc-alt");
+		const file = [assistant, result].join("\n");
+		const { changed, content, droppedToolResultRows } = sanitizeTranscriptContent(file);
+		assert.equal(changed, false, "typed toolCall with toolCallId must validate the matching toolResult");
+		assert.equal(droppedToolResultRows, 0);
+		assert.equal(content, file, "valid typed-toolCall history must stay byte-identical");
+	});
+
+	it("(g''' tool_use) recognizes a typed tool_use block carrying tool_use_id instead of id", () => {
+		const assistant = JSON.stringify({
+			type: "message",
+			id: "assistant-tu-alt",
+			ts: "2026-01-01T00-00-00-000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "tool_use", tool_use_id: "tu-alt", name: "bash", input: { command: "echo ok" } }],
+			},
+		});
+		const result = toolResultRow("tu-alt", "result-tu-alt");
+		const file = [assistant, result].join("\n");
+		const { changed, content, droppedToolResultRows } = sanitizeTranscriptContent(file);
+		assert.equal(changed, false, "typed tool_use with tool_use_id must validate the matching toolResult");
+		assert.equal(droppedToolResultRows, 0);
+		assert.equal(content, file);
+	});
+
+	it("drops a toolResult row whose only matching assistant row was aborted", () => {
+		const assistant = assistantToolCall("aborted-tool", "assistant-aborted", "aborted");
+		const result = toolResultRow("aborted-tool", "late-result");
+		const after = msg("user", "after", "after");
+		const file = [assistant, result, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.rewritten, 0);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.filteredToolResultBlocks, 0);
+		assert.equal(sanitized.content, [assistant, after].join("\n"));
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "orphan repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("drops a toolResult row whose only matching assistant row errored", () => {
+		const assistant = assistantToolCall("errored-tool", "assistant-error", "error");
+		const result = toolResultRow("errored-tool", "late-error-result");
+		const file = [assistant, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, assistant);
+	});
+
+	it("drops a toolResult row after a compaction boundary with no retained tool call", () => {
+		const user = msg("user", "retained prompt", "retained-user");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const result = toolResultRow("pre-compaction-tool", "orphan-after-compaction");
+		const file = [user, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, [user, compaction].join("\n"));
+	});
+
+	it("drops a post-compaction toolResult whose matching assistant tool call was before the compaction marker", () => {
+		// Regression (PR #845): seenToolCallIds used to persist across the
+		// `compaction` marker, so a post-compaction toolResult could incorrectly
+		// match a pre-compaction assistant tool call that is no longer in the
+		// retained context — rehydrating an orphan function_call_output.
+		const assistant = assistantToolCall("pre-compact-call", "assistant-pre-compact");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const result = toolResultRow("pre-compact-call", "late-result-after-compaction");
+		const after = msg("user", "after", "after");
+		const file = [assistant, compaction, result, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.filteredToolResultBlocks, 0);
+		assert.equal(sanitized.content, [assistant, compaction, after].join("\n"));
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "compaction-boundary orphan repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("keeps a toolCall before the marker when firstKeptEntryId names an earlier retained user row", () => {
+		// Pi's exact retained-range boundary can point to any retained entry, not
+		// just an assistant tool-call row. A later retained assistant tool call before
+		// the inline compaction marker is still valid for post-marker results.
+		const retainedUser = msg("user", "retained prompt", "retained-user");
+		const assistant = assistantToolCall("kept-before-marker-call", "assistant-kept-before-marker");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1", firstKeptEntryId: "retained-user" });
+		const result = toolResultRow("kept-before-marker-call", "result-after-marker");
+		const file = [retainedUser, assistant, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, false, "valid retained-range pair must stay unchanged");
+		assert.equal(sanitized.content, file, "valid retained-range pair must stay byte-identical");
+		assert.equal(sanitized.droppedToolResultRows, 0);
+	});
+
+	it("keeps a valid toolCall + toolResult pair when both are after the compaction marker", () => {
+		// A post-compaction assistant tool call matched by a post-compaction
+		// toolResult is valid retained history and must stay byte-identical.
+		const preUser = msg("user", "retained prompt", "retained-user");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const assistant = assistantToolCall("post-compact-call", "assistant-post-compact");
+		const result = toolResultRow("post-compact-call", "post-compact-result");
+		const file = [preUser, compaction, assistant, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, false, "valid post-compaction pair must stay unchanged");
+		assert.equal(sanitized.content, file, "valid post-compaction pair must stay byte-identical");
+		assert.equal(sanitized.droppedToolResultRows, 0);
+	});
+
+	it("keeps a post-compaction toolResult whose matching assistant call is in the retained range before the marker (resolvable firstKeptEntryId)", () => {
+		// Regression (PR #845 review): do NOT blindly clear seen ids at every
+		// compaction marker. The compaction entry carries a resolvable
+		// `firstKeptEntryId` pointing at a kept assistant tool-call entry that
+		// appears BEFORE the marker (the retained tail the marker trails). That
+		// call is still in the retained context, so a later toolResult matching it
+		// must be kept — not dropped as an orphan.
+		const keptAssistant = assistantToolCall("kept-range-call", "assistant-kept-range");
+		const compaction = JSON.stringify({
+			type: "compaction",
+			id: "compact-1",
+			firstKeptEntryId: "assistant-kept-range",
+		});
+		const result = toolResultRow("kept-range-call", "late-result");
+		const after = msg("user", "after", "after");
+		const file = [keptAssistant, compaction, result, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, false, "retained-range call before marker must validate the later result");
+		assert.equal(sanitized.droppedToolResultRows, 0);
+		assert.equal(sanitized.content, file, "valid retained-range pair must stay byte-identical");
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "retained-range repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("drops a toolResult whose matching assistant call was before firstKeptEntryId (summarized away)", () => {
+		// Two pre-marker assistant tool calls; the compaction entry's
+		// `firstKeptEntryId` points at the SECOND (kept) entry. A result matching
+		// the FIRST entry (strictly before the kept boundary) was summarized away
+		// and must be dropped, while a result matching the kept entry is retained.
+		const summarizedAssistant = assistantToolCall("summarized-call", "assistant-summarized");
+		const keptAssistant = assistantToolCall("kept-call", "assistant-kept");
+		const compaction = JSON.stringify({
+			type: "compaction",
+			id: "compact-1",
+			firstKeptEntryId: "assistant-kept",
+		});
+		const droppedResult = toolResultRow("summarized-call", "dropped-result");
+		const keptResult = toolResultRow("kept-call", "kept-result");
+		const after = msg("user", "after", "after");
+		const file = [summarizedAssistant, keptAssistant, compaction, droppedResult, keptResult, after].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1, "summarized-away call result must be dropped");
+		assert.equal(sanitized.content, [summarizedAssistant, keptAssistant, compaction, keptResult, after].join("\n"));
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "firstKeptEntryId-boundary repair must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("falls back to clearing at the marker when firstKeptEntryId is absent (legacy compaction entry)", () => {
+		// No firstKeptEntryId → conservative fallback: clear everything at the
+		// marker, so a pre-compaction call cannot validate a post-compaction result.
+		const assistant = assistantToolCall("pre-call", "assistant-pre");
+		const compaction = JSON.stringify({ type: "compaction", id: "compact-1" });
+		const result = toolResultRow("pre-call", "late-result");
+		const file = [assistant, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, [assistant, compaction].join("\n"));
+	});
+
+	it("falls back to clearing at the marker when firstKeptEntryId is unresolvable", () => {
+		// firstKeptEntryId present but doesn't match any tracked retained tool
+		// call's entry id → unresolved → conservative fallback clear at marker.
+		const assistant = assistantToolCall("pre-call", "assistant-pre");
+		const compaction = JSON.stringify({
+			type: "compaction",
+			id: "compact-1",
+			firstKeptEntryId: "does-not-exist",
+		});
+		const result = toolResultRow("pre-call", "late-result");
+		const file = [assistant, compaction, result].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 1);
+		assert.equal(sanitized.content, [assistant, compaction].join("\n"));
+	});
+
+	it("filters orphan user/content tool_result blocks while preserving valid blocks and other content", () => {
+		const assistant = assistantToolCall("valid-block");
+		const userLine = msg("user", [
+			{ type: "text", text: "tool outputs:" },
+			{ type: "tool_result", tool_use_id: "valid-block", content: "keep me" },
+			{ type: "toolResult", toolCallId: "orphan-block", content: "drop me" },
+			IMG,
+		], "mixed-results");
+		const file = [assistant, userLine].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.droppedToolResultRows, 0);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+
+		const lines = sanitized.content.split("\n");
+		assert.equal(lines[0], assistant, "assistant tool call must stay byte-identical");
+		const blocks = JSON.parse(lines[1]).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "tool outputs:" },
+			{ type: "tool_result", tool_use_id: "valid-block", content: "keep me" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "filtered transcript must be idempotent");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("rewrites blank/image-only user content after filtering orphan tool_result blocks", () => {
+		const userLine = msg("user", [
+			{ type: "text", text: "   " },
+			{ type: "tool_result", tool_use_id: "missing", content: "drop me" },
+			IMG,
+		], "orphan-plus-attachment");
+
+		const sanitized = sanitizeTranscriptContent(userLine);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.rewritten, 1);
+
+		const blocks = JSON.parse(sanitized.content).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "Attachments:" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "filter + blank-user repair must be idempotent in one pass");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("rewrites image-only user content after filtering orphan toolResult blocks", () => {
+		const userLine = msg("user", [
+			{ type: "toolResult", toolCallId: "missing", content: "drop me" },
+			IMG,
+		], "orphan-plus-image");
+
+		const sanitized = sanitizeTranscriptContent(userLine);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.rewritten, 1);
+
+		const blocks = JSON.parse(sanitized.content).message.content;
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "Attachments:" },
+			IMG,
+		]);
+
+		const second = sanitizeTranscriptContent(sanitized.content);
+		assert.equal(second.changed, false, "image-only remainder must not need a second repair pass");
+		assert.equal(second.content, sanitized.content);
+	});
+
+	it("drops a user/content tool_result-only row when every block is orphaned", () => {
+		const orphan = msg("user", [{ type: "tool_result", tool_use_id: "missing", content: "drop" }], "orphan-user-result");
+		const next = msg("user", "next", "next");
+		const file = [orphan, next].join("\n");
+
+		const sanitized = sanitizeTranscriptContent(file);
+		assert.equal(sanitized.changed, true);
+		assert.equal(sanitized.filteredToolResultBlocks, 1);
+		assert.equal(sanitized.content, next);
 	});
 
 	it("preserves other lines and only rewrites poisoned ones in a multi-line file", () => {

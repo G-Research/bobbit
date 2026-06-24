@@ -111,9 +111,13 @@ The allowlist covers (paths are relative to `<rootPath>/.bobbit/`):
   `state/sessions.json`, `state/projects.json`.
 - TLS / DNS challenge state — `state/tls/`, `state/desec.json`.
 - Restart caches — `state/tool-docs/`, `state/mcp-tool-docs/`.
-- Per-session scratch — `state/preview/`, `state/tool-guard/`,
-  `state/mcp-extensions/`, `state/html-snapshots/`, `state/proposal-drafts/`,
-  `state/sessions/`, `state/session-prompts/`, `state/system-project/`, and
+- Per-session scratch and generated extension state — `state/preview/`,
+  `state/preview-artifacts/`, `state/tool-guard/`, `state/provider-bridge/`,
+  `state/google-code-assist/`, `state/openai-orphan-tool-result/`,
+  `state/mcp-extensions/`, `state/html-snapshots/`, `state/gate-diagnostics/`,
+  `state/proposal-drafts/`, `state/pr-walkthrough/`, `state/sessions/`,
+  `state/session-prompts/`, `state/sandbox-agent-auth/`,
+  `state/system-project/`, `state/marketplace-cache/`, and
   `state/model-name-*` files.
 
 When `bobbit.gateway-owned` is `pass` (the common case — the gateway runs

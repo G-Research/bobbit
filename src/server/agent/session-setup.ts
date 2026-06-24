@@ -42,6 +42,7 @@ import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
+import { writeOpenAiOrphanToolResultExtension } from "./openai-orphan-tool-result-extension.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -860,6 +861,14 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
 		}
+	}
+
+	// OpenAI Responses preflight guard: remove orphan function_call_output items
+	// that would otherwise wedge Codex/OpenAI sessions. Provider-safe no-op for
+	// non-Responses payloads.
+	const openAiOrphanGuardPath = writeOpenAiOrphanToolResultExtension();
+	if (openAiOrphanGuardPath) {
+		plan.bridgeOptions.args.push("--extension", openAiOrphanGuardPath);
 	}
 
 	// Register the Google account (Code Assist) provider INSIDE the agent process
