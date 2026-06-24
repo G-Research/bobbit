@@ -194,6 +194,7 @@ const PERSISTED_FIELDS = [
 	"contextExpansions",
 ];
 const persistenceKeyFor = (panelKey, jobId) => `review-state/${safeDomId(panelKey || "session")}/${safeDomId(jobId || "job")}`;
+const persistenceQuotaFor = (panelKey, jobId) => ({ quotaScope: { prefix: persistenceKeyFor(panelKey, jobId), profile: "default" } });
 const localPersistenceKeyFor = (panelKey, jobId) => `bobbit:pr-walkthrough:${persistenceKeyFor(panelKey, jobId)}`;
 const pickPersistedState = (entry) => {
 	const state = { version: PERSISTED_STATE_VERSION, savedAt: new Date().toISOString() };
@@ -217,7 +218,7 @@ const readHostPersistedState = async (host, panelKey, jobId) => {
 	catch { return undefined; }
 };
 const writeHostPersistedState = async (host, panelKey, jobId, state) => {
-	try { if (host && host.store && host.store.put) await host.store.put(persistenceKeyFor(panelKey, jobId), state); }
+	try { if (host && host.store && host.store.put) await host.store.put(persistenceKeyFor(panelKey, jobId), state, persistenceQuotaFor(panelKey, jobId)); }
 	catch { /* host persistence is best-effort */ }
 };
 const emitReviewEvent = (host, panelKey, type, detail = {}) => {
