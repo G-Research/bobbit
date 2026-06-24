@@ -50,6 +50,7 @@ import "../ui/components/ErrorDetails.js";
 // module-init time — ESM live bindings resolve at call time.
 import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
+import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -428,7 +429,7 @@ function promptArchiveConfirm(opts: {
  *
  * IMPORTANT: a transient HTTP failure (network blip, gateway restart in
  * flight, server overload) must NOT be reported as "not authenticated" —
- * doing so causes `authenticateGateway()` to spuriously open the OAuth
+ * doing so used to cause gateway authentication to spuriously open the OAuth
  * dialog over a perfectly valid session, which is a confusing UX bug in
  * production and a long-tail E2E flake (the dialog steals focus and
  * subsequent assertions on sidebar/page elements time out).
@@ -464,6 +465,70 @@ export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean>
 	return true;
 }
 
+let oauthExpiryModalOpen = false;
+
+export function showOAuthExpiryModal(credentials: readonly ExpiredAccountOAuthCredential[]): void {
+	if (credentials.length === 0 || oauthExpiryModalOpen) return;
+	oauthExpiryModalOpen = true;
+	const container = document.createElement("div");
+	document.body.appendChild(container);
+
+	const names = credentials.map((credential) => credential.label);
+	const namesText = names.length === 1
+		? names[0]
+		: `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+	const title = names.length === 1 ? `${names[0]} login expired` : "OAuth logins expired";
+	const message = names.length === 1
+		? `Your ${names[0]} OAuth login has expired and needs attention.`
+		: `Your OAuth logins for ${namesText} have expired and need attention.`;
+
+	const cleanup = () => {
+		render(html``, container);
+		container.remove();
+		oauthExpiryModalOpen = false;
+	};
+	const dismiss = () => {
+		dismissAccountOAuthExpiryReminders(credentials);
+		cleanup();
+	};
+	const goToAccountSettings = () => {
+		window.location.hash = "#/settings/system/account";
+		cleanup();
+	};
+
+	render(html`
+		<div
+			class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+			@click=${dismiss}
+		>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="oauth-expiry-title"
+				class="w-[min(440px,92vw)] rounded-lg border border-border bg-background text-foreground shadow-lg"
+				@click=${(event: Event) => event.stopPropagation()}
+			>
+				<div class="px-6 pt-6 pb-4">
+					<h2 id="oauth-expiry-title" class="text-lg font-semibold leading-none tracking-tight">${title}</h2>
+					<p class="text-sm text-muted-foreground mt-2">${message}</p>
+				</div>
+				<div class="flex items-center justify-between gap-2 px-6 pb-4">
+					<button
+						type="button"
+						class="inline-flex h-9 items-center justify-center rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-secondary"
+						@click=${dismiss}
+					>Dismiss</button>
+					<button
+						type="button"
+						class="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+						@click=${goToAccountSettings}
+					>Go to Account Settings</button>
+				</div>
+			</div>
+		</div>
+	`, container);
+}
+
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
@@ -482,14 +547,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		const POLL_MAX_DELAY_MS = 8000;
 		const POLL_MAX_TOTAL_MS = 5 * 60 * 1000;
 
-		// Canonical Google account OAuth id is `google-gemini-cli`; `google`/`gemini`
-		// are inbound aliases the server collapses to it. Label all three "Google".
-		const providerName =
-			provider === "google-gemini-cli" || provider === "google" || provider === "gemini"
-				? "Google"
-				: provider === "openai-codex" || provider === "openai"
-					? "OpenAI"
-					: "Anthropic";
+		const providerName = accountOAuthProviderLabel(provider);
 
 		const cleanup = (result: boolean) => {
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);

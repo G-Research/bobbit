@@ -26,7 +26,7 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
-import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs-lazy.js";
+import { showConnectionError, confirmAction, showOAuthExpiryModal } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
@@ -35,6 +35,7 @@ import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetP
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { restorePersistedReviewDocuments } from "./review-sources.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import { getExpiredAccountOAuthCredentials } from "./account-oauth-providers.js";
 
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -729,13 +730,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	if (typeof healthData.orphanedTranscripts === "number") {
 		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
 	}
-	if (!healthData.localhost && !healthData.aigw) {
-		const hasAuth = await checkOAuthStatus();
-		if (!hasAuth) {
-			const success = await openOAuthDialog();
-			if (!success) throw new Error("OAuth login required");
-		}
-	}
+	const shouldCheckOAuthExpiry = !healthData.localhost && !healthData.aigw;
 
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
@@ -743,6 +738,16 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		setHashRoute("landing");
 	}
 	renderApp();
+	if (shouldCheckOAuthExpiry) {
+		void (async () => {
+			try {
+				const expiredCredentials = await getExpiredAccountOAuthCredentials();
+				if (expiredCredentials.length > 0) void showOAuthExpiryModal(expiredCredentials);
+			} catch {
+				// OAuth status failures are indeterminate; never block gateway auth.
+			}
+		})();
+	}
 	await refreshSessions();
 	try {
 		const cwdRes = await gatewayFetch("/api/config/cwd");
