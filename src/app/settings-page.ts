@@ -1463,6 +1463,7 @@ let prefImageModel = "";     // same format, defaults to openai/gpt-image-2 when
 let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|""
 let prefReviewThinking = "";
 let prefNamingThinking = "";
+let allowSessionModelFallback = false; // Global controlled-fallback opt-in; absent preference defaults off.
 let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
@@ -1551,6 +1552,7 @@ function loadModelsState(): void {
 				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
+				allowSessionModelFallback = prefs.allowSessionModelFallback === true; // default false
 				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
 			}
 			if (modelsRes.ok) {
@@ -1568,7 +1570,7 @@ function loadModelsState(): void {
 	})();
 }
 
-async function savePref(key: string, value: string | null): Promise<void> {
+async function savePref(key: string, value: string | boolean | null): Promise<void> {
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
@@ -1578,11 +1580,12 @@ async function savePref(key: string, value: string | null): Promise<void> {
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
-export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string; image: string }>): void {
+export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string; image: string; allowFallback: boolean }>): void {
 	if (p.session !== undefined) prefSessionModel = p.session;
 	if (p.review !== undefined) prefReviewModel = p.review;
 	if (p.naming !== undefined) prefNamingModel = p.naming;
 	if (p.image !== undefined) prefImageModel = p.image;
+	if (p.allowFallback !== undefined) allowSessionModelFallback = p.allowFallback;
 }
 
 async function setSessionModel(value: string): Promise<void> {
@@ -1623,6 +1626,12 @@ async function setNamingThinking(value: string): Promise<void> {
 	prefNamingThinking = value;
 	await savePref("default.namingThinkingLevel", value || null);
 	renderApp();
+}
+
+async function setAllowSessionModelFallback(value: boolean): Promise<void> {
+	allowSessionModelFallback = value;
+	renderApp();
+	await savePref("allowSessionModelFallback", value);
 }
 
 async function testAigwConnection(): Promise<void> {
@@ -1987,6 +1996,7 @@ export function __testResetModelsTab(opts: {
 	prefReviewModel?: string;
 	prefNamingModel?: string;
 	prefImageModel?: string;
+	allowSessionModelFallback?: boolean;
 } = {}): void {
 	_modelsLoaded = true; // skip the fetcher
 	aigwConfigured = opts.aigwConfigured ?? false;
@@ -2002,6 +2012,7 @@ export function __testResetModelsTab(opts: {
 	prefSessionThinking = "";
 	prefReviewThinking = "";
 	prefNamingThinking = "";
+	allowSessionModelFallback = opts.allowSessionModelFallback ?? false;
 	modelTestResults = {};
 	modelTestInFlight = {};
 }
@@ -2142,6 +2153,21 @@ export function renderModelsTab() {
 					prefImageModel,
 					setImageModel,
 				)}
+				<label class="flex items-start gap-2 rounded-lg border border-border bg-card px-3 py-3 text-sm text-foreground cursor-pointer">
+					<input
+						type="checkbox"
+						class="mt-0.5 w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="allow-session-model-fallback-toggle"
+						.checked=${allowSessionModelFallback}
+						@change=${(e: Event) => setAllowSessionModelFallback((e.target as HTMLInputElement).checked)}
+					/>
+					<span class="flex flex-col gap-1">
+						<span class="font-medium">Allow controlled session-model fallback</span>
+						<span class="text-xs text-muted-foreground leading-relaxed">
+							Off by default. When enabled, a failed explicit session, review, or role model may try exactly one fallback: <code>default.sessionModel</code>. Image generation is separate and does not use this fallback.
+						</span>
+					</span>
+				</label>
 				${hasModels ? html`
 					<div>
 						<button
