@@ -92,10 +92,14 @@ const draftStatusKey = (jobId) => `${draftPrefix(jobId)}status`;
 const draftCheckpointKey = (jobId) => `${draftPrefix(jobId)}checkpoint`;
 const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
 
+const DEFAULT_KEY_QUOTA = (key) => ({ quotaScope: { prefix: key, profile: "default" } });
 const DRAFT_QUOTA = (jobId) => ({ quotaScope: { prefix: draftPrefix(jobId), profile: "review-draft" } });
 const FINAL_QUOTA = (jobId) => ({ quotaScope: { prefix: finalPrefix(jobId), profile: "review-final" } });
 const REVIEW_BINDING_QUOTA = (jobId) => ({ quotaScope: { prefix: reviewPrefix(jobId), profile: "default" } });
-const REVIEWER_INDEX_QUOTA = (sessionId) => ({ quotaScope: { prefix: reviewerIndexKey(sessionId), profile: "default" } });
+const REVIEWER_INDEX_QUOTA = (sessionId) => DEFAULT_KEY_QUOTA(reviewerIndexKey(sessionId));
+const LEGACY_BINDING_QUOTA = (sessionId) => DEFAULT_KEY_QUOTA(bindingKey(sessionId));
+const LEGACY_CARDS_QUOTA = (changesetId) => DEFAULT_KEY_QUOTA(cardsKey(changesetId));
+const LEGACY_JOB_QUOTA = (jobId) => DEFAULT_KEY_QUOTA(jobKey(jobId));
 const CHUNK_ID_PATTERN = /^(?:metadata|context|merge_assessment|omissions_and_followups|audit|display|document|decision:[A-Za-z0-9_.-]+|chunk:[A-Za-z0-9_.-]+)$/;
 const DEFAULT_PHASE_ORDER = ["orientation", "design", "significant", "other", "audit"];
 
@@ -573,7 +577,7 @@ async function finalizePrWalkthroughSubmission(ctx, body = {}) {
 	await ctx.host.store.put(finalPayloadKey(binding.jobId), finalPayload, FINAL_QUOTA(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, stagingPrefix(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, draftPrefix(binding.jobId));
-	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }); } catch { /* legacy marker best-effort */ }
+	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }, LEGACY_BINDING_QUOTA(ctx.sessionId)); } catch { /* legacy marker best-effort */ }
 	return { ok: true, status: "submitted", jobId: binding.jobId, changesetId: finalPayload.changesetId, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
 }
 
@@ -617,7 +621,7 @@ async function writeLegacyPublishArtifacts(store, jobId, payload) {
 		cards: payload.cards,
 		warnings: payload.warnings || [],
 		persistedAt: payload.persistedAt,
-	});
+	}, LEGACY_CARDS_QUOTA(payload.changesetId));
 	await store.put(jobKey(jobId), {
 		schemaVersion: STORE_SCHEMA_VERSION,
 		jobId,
@@ -625,7 +629,7 @@ async function writeLegacyPublishArtifacts(store, jobId, payload) {
 		baseSha: payload.baseSha,
 		headSha: payload.headSha,
 		persistedAt: payload.persistedAt,
-	});
+	}, LEGACY_JOB_QUOTA(jobId));
 }
 
 async function readChunkRecords(store, jobId) {
