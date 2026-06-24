@@ -1749,6 +1749,49 @@ export function formatModelPref(value: string, fallbackLabel: string = "Auto (be
 	return slash > 0 ? value.slice(slash + 1) : value;
 }
 
+// ============================================================================
+// ROLES PAGE — shared default-model display helpers
+//
+// Roles UI display heuristic (NOT authoritative runtime resolution). Inherited
+// role list rows need a deterministic at-a-glance default to show. Roles in
+// this allowlist display the review-model default; all other roles (including
+// custom) display the session-model default. Runtime model selection remains
+// contextual — verification/QA sessions use review defaults regardless of the
+// role name. Keep this allowlist deliberate; it is pinned by tests.
+// ============================================================================
+export const REVIEW_DEFAULT_ROLE_NAMES = new Set<string>([
+	"architect",
+	"code-reviewer",
+	"reviewer",
+	"security-reviewer",
+	"spec-auditor",
+	"qa-tester",
+]);
+
+export function getRoleDefaultModelPrefKey(roleName: string): "default.sessionModel" | "default.reviewModel" {
+	return REVIEW_DEFAULT_ROLE_NAMES.has(roleName) ? "default.reviewModel" : "default.sessionModel";
+}
+
+/** Effective default model + thinking a role inherits when it has no override. */
+export function getRoleDefaultModel(roleName: string): { model: string; thinking: string } {
+	return getRoleDefaultModelPrefKey(roleName) === "default.reviewModel"
+		? { model: prefReviewModel, thinking: prefReviewThinking }
+		: { model: prefSessionModel, thinking: prefSessionThinking };
+}
+
+/** Label for an inherited role row, e.g. "gpt-5.5 · default" or
+ *  "Auto (best available) · default" when the default pref is unset. */
+export function formatRoleDefaultModelLabel(roleName: string): string {
+	return `${formatModelPref(getRoleDefaultModel(roleName).model)} \u00b7 default`;
+}
+
+/** Ensure default model prefs + the model registry are loaded for the Roles
+ *  page even when the user opens Roles directly without visiting Settings.
+ *  loadModelsState() is idempotent and calls renderApp() once resolved. */
+export function ensureModelDefaultsLoaded(): void {
+	loadModelsState();
+}
+
 function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	// Build a pseudo-Model from the current pref so the selector can highlight it
 	let currentModel = null;
@@ -1784,9 +1827,20 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: { fallbackLabel?: string },
+	opts?: {
+		fallbackLabel?: string;
+		thinkingFallbackLabel?: string;
+		thinkingWidth?: string;
+		thinkingFitContent?: boolean;
+		onThinkingClear?: () => void;
+		clearModelTitle?: string;
+		clearThinkingTitle?: string;
+		modelTitle?: string;
+		thinkingTitle?: string;
+	},
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
+	const thinkingFallbackLabel = opts?.thinkingFallbackLabel ?? opts?.fallbackLabel;
 
 	// Determine the selected model's capabilities. When the model is
 	// unknown (not in allModels yet — registry still loading, or the saved
@@ -1844,7 +1898,8 @@ export function renderModelRow(
 							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
 							flex-1 min-w-0 text-left
 							${modelValue ? "text-foreground" : "text-muted-foreground"}"
-						title="Choose model"
+						title=${opts?.modelTitle ?? "Choose model"}
+						data-testid="model-picker-btn"
 						@click=${() => openModelPicker(modelValue, onModelChange)}
 					>
 						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
@@ -1860,7 +1915,8 @@ export function renderModelRow(
 					${modelValue ? html`
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-							title=${showUnavailable ? "Clear unavailable model" : "Reset model to auto"}
+							title=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
+							aria-label=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
 							data-testid="model-clear-btn"
 							@click=${() => {
 								delete modelTestResults[modelValue];
@@ -1899,20 +1955,36 @@ export function renderModelRow(
 					<div class="w-px h-5 bg-border shrink-0"></div>
 					<!-- Thinking picker -->
 					<div class="shrink-0 ${thinkingDisabled ? "opacity-40 pointer-events-none" : ""}"
-						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
+						title=${thinkingDisabled ? "Selected model does not support thinking" : (opts?.thinkingTitle ?? "Thinking level")}
 					>
 						${Select({
-							value: displayedThinking || (opts?.fallbackLabel ? "" : thinkingDefault),
+							value: displayedThinking || (thinkingFallbackLabel ? "" : thinkingDefault),
 							options: [
-								...(opts?.fallbackLabel ? [{ value: "", label: opts.fallbackLabel, icon: icon(Brain, "sm") }] : []),
+								...(thinkingFallbackLabel ? [{ value: "", label: thinkingFallbackLabel, icon: icon(Brain, "sm") }] : []),
 								...supportedLevels.map(lvl => ({ value: lvl, label: thinkingLabels[lvl], icon: icon(Brain, "sm") })),
 							] as SelectOption[],
 							onChange: (value: string) => { onThinkingChange(value); },
 							size: "sm",
 							variant: "ghost",
-							fitContent: true,
+							// Settings callers pass neither opt → Select keeps its default
+							// 180px fit-content sizing. Compact list rows pass an explicit
+							// fixed width + fitContent:false so the trigger never injects an
+							// inline min-width:180px that overflows the narrow row cell.
+							...(opts?.thinkingWidth ? { width: opts.thinkingWidth } : {}),
+							fitContent: opts?.thinkingFitContent ?? true,
 						})}
 					</div>
+					<!-- Optional in-box thinking reset: keeps model + thinking resets in
+					     the SAME control (opt-in; Settings rows don't pass it). -->
+					${opts?.onThinkingClear && thinkingValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
+							aria-label=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
+							data-testid="model-thinking-clear-btn"
+							@click=${() => opts.onThinkingClear!()}
+						>${icon(X, "xs")}</button>
+					` : ""}
 				</div>
 			</div>
 			${testResult && !testing ? html`

@@ -2812,6 +2812,20 @@ async function handleApiRoute(
 		originPackId: r.originPackId ?? null,
 		originPackName: r.originPackName ?? null,
 	});
+	/**
+	 * Serialize a cascade-resolved role with origin metadata PLUS the per-field
+	 * `modelResolution` (model/thinkingLevel source hierarchy + editability) the
+	 * Roles list/detail UI uses to render accurate source badges. Backwards
+	 * compatible: existing top-level fields (model, thinkingLevel, origin…) are
+	 * preserved; `modelResolution` is purely additive.
+	 */
+	const withRoleResolution = (
+		r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null },
+		projectId?: string,
+	): Record<string, unknown> => ({
+		...withOrigin(r),
+		modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),
+	});
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
@@ -7965,7 +7979,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveRoles(projectId);
-		json({ roles: resolved.map(r => withOrigin(r as any)) });
+		json({ roles: resolved.map(r => withRoleResolution(r as any, projectId)) });
 		return;
 	}
 
@@ -8077,11 +8091,11 @@ async function handleApiRoute(
 				const resolved = configCascade.resolveRoles(qProjectId);
 				const found = resolved.find(r => r.item.name === name);
 				if (!found) { json({ error: "Role not found" }, 404); return; }
-				json(withOrigin(found as any));
+				json(withRoleResolution(found as any, qProjectId));
 			} else {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
-				json(role);
+				json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name) });
 			}
 			return;
 		}

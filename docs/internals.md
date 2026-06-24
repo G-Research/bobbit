@@ -1436,9 +1436,61 @@ This is what makes "my `code-reviewer` role always runs on opus" work without ch
 
 **Naming model is explicitly unaffected** - `default.namingModel` and `pickFallbackAigwNamingModel` still drive title generation regardless of role.
 
-### UI
+### UI & API Metadata
 
-The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+The Roles model and thinking configuration integrates directly across both list and detail views, driven by server-resolved metadata.
+
+#### 1. Server-Side API Metadata (`modelResolution`)
+
+To enable accurate, source-aware rendering of effective values and inheritance, the `/api/roles` endpoints (both GET list and GET single role) return additive `modelResolution` metadata. This is computed by `resolveRoleModelResolution(roleName, projectId)` in `src/server/agent/config-cascade.ts`.
+
+It provides a granular, field-level audit of both `model` and `thinkingLevel`:
+
+```ts
+export interface RoleModelResolution {
+	model: RoleFieldSource;
+	thinkingLevel: RoleFieldSource;
+}
+
+export interface RoleFieldSource {
+	/** Resolved field value when a role layer supplies it; omitted for `default` */
+	value?: string;
+	source: "role" | "inherited-role" | "default";
+	/** Cascade layer the value came from (omitted for `default`) */
+	origin?: "project" | "server" | "builtin";
+	/** Market-pack name when the value comes from a pack-defined role; null otherwise */
+	originPackName?: string | null;
+	/** False only for pack-managed/read-only roles or when shadowed above current scope; true otherwise */
+	editable: boolean;
+	/** Short human label for the source ("Project", "Server", "Built-in", or pack name) */
+	sourceLabel: string;
+}
+```
+
+The metadata ensures that:
+*   **Shadowing is respected:** If a higher-precedence winner (e.g. a global server-user override) shadows the current project scope, the server reports the field as non-editable (`editable: false`). The UI displays it without misleading clear/reset or edit affordances that would secretly no-op.
+*   **Source labels are accurate:** Clear distinction between direct local overrides (`source: "role"`), inherited layers (`source: "inherited-role"`), or system-wide fallbacks (`source: "default"`).
+
+#### 2. Roles List View Inline Controls
+
+The main Roles page (`src/app/role-manager-page.ts`) renders compact, two-line model + thinking level inline controls in the middle of each list row by reusing a compact layout variant of the `renderModelRow` component:
+
+*   **Two-Line Layout:** Line 1 displays the interactive model selector and thinking level dropdown. Line 2 displays compact, monochromatic source badges (e.g., `Model: [Session default]  Thinking: [Session default]` or `[Inherited role override · Server]`).
+*   **Auto-Save on Change:** Interacting with the inline control immediately persists the changes to the backend. On success, a transient green `"Saved"` confirmation badge briefly flashes next to the role name.
+*   **Coalesced Saves (Race Guard):** Rapid sequential edits (such as picking a model and immediately changing thinking before the network refetch completes) are queued via `pendingInlineEdits` and handled sequentially in a serialized save loop (`scheduleInlineSave`). This prevents a newer change from reading stale data from the un-refetched row object and clobbering the previous field with empty strings.
+*   **Independent Overrides & Model Clears:** Model and thinking level can be overridden independently. Clicking the clear (`×`) button next to the model selector removes only the model override, preserving any custom thinking override (shown as a `thinking-override` state), and vice-versa.
+*   **No Misleading Reset Affordances:** Clearing and reset buttons are only exposed for active current-scope overrides (`source === "role"`). Inherited or default values display the placeholder label `(use default)` and have no clear buttons, avoiding confusing no-ops.
+*   **Propagation Stopping:** Dropdown click/keydown events are stopped via `stopPropagation` so that interacting with the selectors does not trigger the outer row's click-to-edit navigation.
+*   **Read-Only/Pack Rows:** Roles installed from a Market Pack (or non-editable due to scope shadow rules) render a static effective-value summary (Model + Thinking labels) alongside a badge like `Managed by pack <name>` or `Read-only`, completely disabling inline editing.
+
+#### 3. Role Detail Editor Relocation
+
+In the role detail editor (`renderRoleEditor`):
+
+*   **Removed Tab:** The dedicated "Model" tab is removed; the tab bar now exposes only "Prompt" and "Tool Access".
+*   **Static Section:** Model and thinking controls are presented as a static section placed vertically between the **Accessory** selector and the tab bar, styled identically to the Accessory selector.
+*   **Draft-Based Saves:** Unlike the list page's immediate auto-saves, modifications within the detail-page Model section do not auto-save. They are draft-based and are only committed when the user clicks the main **Save** button in the top navigation bar.
+*   **Read-Only Inspector:** The read-only inspector (`renderRoleInspector` used in the goal-proposal modal) mimics this vertical layout, rendering the Model section as read-only.
 
 ---
 

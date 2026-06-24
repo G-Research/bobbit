@@ -589,3 +589,121 @@ model under a different id" class of bug.
 | `tests/manual-integration/role-model-override.test.ts` | Manual binding-verification test. |
 | `AGENTS.md` | Add a Recipes bullet: **"Per-role model override"** → role yaml `model:`/`thinkingLevel:`; bound at session start by `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` (`session-manager.ts:2814`); reviewer/QA path in `verification-harness.ts` 3 sites. |
 | `docs/internals.md` | Brief note under "Per-project config" or a new "Per-role model" subsection cross-linking this design doc. |
+
+---
+
+## 8. Roles Model UI Reshuffle & Save-Hang Fix
+
+To make per-role model and thinking level overrides visible at a glance and editable in one place, the Roles UI was reshuffled (not redesigning the underlying model) to introduce list-row inline model controls, a relocated detail-page Model section, and a bug-fix for a save-button race condition.
+
+### 8.1 Roles List View Inline Controls & Heuristic
+
+The Roles list page (`src/app/role-manager-page.ts`) now renders an inline model + thinking level control in the middle of each list row by reusing the existing `renderModelRow` component.
+
+*   **Auto-Save on Change:** Interacting with the inline control (selecting a model, changing thinking level, or clearing an override) immediately persists the change to the backend via `updateRole` (scoped to the current project). A transient `"Saved"` confirmation badge briefly flashes next to the role name on success.
+*   **Propagation Stopping:** Events (`click`, `keydown`) inside the inline control container call `stopPropagation` to prevent triggering the outer list-row's click handler (which navigates to the role editor).
+*   **Overridden State:** When a role override is active, the model picker displays with an filled accent style, the thinking dropdown is fully interactive, and both clear (`×`) and Test (flask) buttons are exposed.
+*   **Inherited State Heuristic:** When no role override exists, the list row displays a resolved, greyed-out effective default model label formatted as `<resolved-model> · default` with the thinking dropdown disabled and clear/Test buttons hidden. Since inherited default resolution is contextual at session-start (reviewer sessions use review defaults, others use session defaults), the list UI uses a deterministic display-only heuristic:
+    *   **Review Default Allowlist (`default.reviewModel`):** `architect`, `code-reviewer`, `reviewer`, `security-reviewer`, `spec-auditor`, and `qa-tester` display the review-model default.
+    *   **Session Default (`default.sessionModel`):** All other roles (including custom roles) display the session-model default.
+
+### 8.2 Role Detail Editor Relocation
+
+In the role detail editor (`renderRoleEditor`):
+
+*   **Removed Tab:** The dedicated "Model" tab is removed; the tab bar now exposes only "Prompt" and "Tool Access".
+*   **Static Section:** Model and thinking controls are presented as a static section placed between the **Accessory** selector and the tab bar, styled identically to the Accessory selector.
+*   **Draft-Based Saves:** Unlike the list page, modifications within the detail-page Model section do not auto-save. They are draft-based and only committed when the user clicks the main **Save** button.
+*   **Read-Only Inspector:** The read-only inspector (`renderRoleInspector` used in the goal-proposal modal) is updated to reflect the new vertical layout, rendering the Model section as read-only.
+
+### 8.3 Save-Hang Bug Fix
+
+*   **Root Cause:** Inside the `handleSave` function of `role-manager-page.ts`, the successful PUT path calls `showEdit(updated)` -> `setHashRoute("role-edit", name)`. If the user saved changes while already on that role's edit page, `window.location.hash` was already current. Consequently, `setHashRoute` was a no-op that did not trigger a `hashchange` event. Because rendering was only bound to route/hash transitions, the DOM was never refreshed; the Save button remained stuck showing "Saving…" even though `saving` was set to `false` in memory.
+*   **Fix:** Explicitly call `renderApp()` in the success path of `handleSave` (after `showEdit`/`showList`) so that the DOM is guaranteed to re-render and return the button to the idle "Save" state regardless of whether the hash changed.
+
+### 8.4 Test Coverage
+
+*   **UI Fixture Tests (`tests/ui-fixtures/settings-admin-fixture.spec.ts`):**
+    *   Asserts inherited list rows display the correct default model label according to the allowance heuristic (e.g., `coder` shows session default, `reviewer` shows review default).
+    *   Asserts inline model selection auto-saves, flips row state to override, reveals clear/Test buttons, does not trigger edit page navigation, and survives page reloads.
+    *   Asserts clearing an override reverts the row back to the inherited display state and clears backend fields.
+    *   Asserts the detail page vertical section ordering (Accessory -> Model section -> Tab bar) and draft-based saving.
+    *   Asserts the Save button returns to idle "Save" after saving (regression check for the save-hang).
+*   **Browser E2E (`tests/e2e/ui/roles-model-reshuffle.spec.ts`):**
+    *   Real browser-driven spec verifying section layout ordering, tab bar composition (exposing only Prompt and Tool Access), and the Save button transition lifecycle under direct text changes on a real gateway.
+*   **Marketplace E2E (`tests/e2e/ui/marketplace.spec.ts`):**
+    *   Adjusted row-edit navigation. Because list rows now host interactive inline model controls, the test specifically clicks the explicit Pencil Edit action (`button[title="Edit"]`) in the row instead of clicking anywhere on the row.
+
+---
+
+## 9. Polished Roles Model Row Controls & Source Hierarchy (Release 0.14)
+
+### 9.1 Server-Side Metadata and Cascade Resolution (`modelResolution`)
+
+The server exposes granular field-level model/thinking resolution metadata via `resolveRoleModelResolution(roleName, projectId)` in `src/server/agent/config-cascade.ts`. This goes beyond flat role definitions to provide the client with the precise source, origin, and editability of each field.
+
+#### Source Hierarchy
+The resolution engine walks the cascade (highest priority to lowest):
+1. **Direct Role Override:** User-defined override at the current scope (Project or Server-wide).
+2. **Inherited Role Override:** An override defined at an ancestor project layer, the server-wide layer, or via built-in / market-pack defaults.
+3. **Effective Defaults:** If no role layer provides a value, it falls back to global preferences (`default.sessionModel` or `default.reviewModel` based on role type).
+
+#### Heuristic for Default Models
+Since inherited model resolution is contextual at session-start, the UI uses a deterministic display-only heuristic to determine the fallback default:
+*   **Review Defaults (`default.reviewModel`):** Applied to review-centric roles (`architect`, `code-reviewer`, `reviewer`, `security-reviewer`, `spec-auditor`, and `qa-tester`).
+*   **Session Defaults (`default.sessionModel`):** Applied to all other roles, including custom-created roles.
+*   **Auto Default:** Rendered when no global defaults are configured (the AI gateway auto-selects a model).
+
+#### Metadata Fields
+GET `/api/roles` and GET `/api/roles/:name` attach a `modelResolution` object mapping `model` and `thinkingLevel` to `RoleFieldSource` descriptors:
+*   `value`: The resolved model string (e.g. `anthropic/claude-opus-4-8`) or thinking level.
+*   `source`: `"role"` (current scope), `"inherited-role"` (inherited scope), or `"default"` (fallback).
+*   `origin`: `"project"`, `"server"`, or `"builtin"`.
+*   `originPackName`: The name of the source market-pack, if applicable.
+*   `editable`: Boolean indicating if editing is permitted. Gated by pack-managed status (pack roles are read-only) or whether a higher-precedence winner (like a global server user-override) shadows this scope, preventing confusing no-ops.
+*   `sourceLabel`: Clean human-friendly label (e.g., `Project`, `Server`, `Built-in`, `Inherited project`, or market pack name).
+
+---
+
+### 9.2 Main Roles List Row Behavior & Visual Polish
+
+The list row inline controls inside `role-manager-page.ts` are designed to be extremely compact, source-aware, and aligned.
+
+#### Inline Selector Layout
+*   **Two-Line Layout:** Line 1 hosts the interactive selectors (reusing a compact variant wrapper of `renderModelRow` with contained chevrons). Line 2 houses the compact, monochromatic source badges below the selectors, aligning with the layout without overflowing boundaries or wasting vertical space.
+*   **Instant Auto-Save:** Interacting with a selector immediately persists the change to the backend via `updateRole` (scoped to the current project context). On success, a transient green `"Saved"` flash badge briefly renders next to the role label.
+*   **Rapid Save Coalescing (Queue & Lock):** To guard against race conditions—such as a user changing model and immediately changing thinking level before the network fetch completes—a per-role pending edit map (`pendingInlineEdits`) and lock set (`inlineSaveActive`) implement a sequential save queue. Edits are merged and written sequentially, preventing stale-state overwrites.
+*   **Independent Field Overrides:** Model and thinking can be overridden and cleared independently. A role can have a thinking-only override with no visible model override. Clearing the model override via the `×` button preserves any custom thinking level (falling back to the default/inherited model) and vice-versa.
+*   **Affordance Precision:** Clear and reset buttons are only rendered when there is an active current-scope override (`source === "role"`). If the field is inherited or default, no reset button is shown, and the dropdown shows `(use default)`, preventing confusing no-ops.
+*   **Event Isolation:** Select container events call `stopPropagation()` to prevent triggering the parent list-row click action, ensuring users do not accidentally navigate to the details editor when adjusting models.
+*   **Market Pack / Above-Current-Scope Read-Only:** Read-only roles render static effective labels plus a badge like `Managed by pack <packName>` or `Read-only`, completely preventing inline modification.
+
+---
+
+### 9.3 Detail Editor Behavior & Section Relocation
+
+The role detail page (`renderRoleEditor`):
+*   **Tab Simplification:** The separate "Model" tab has been removed; only the "Prompt" and "Tool Access" tabs remain.
+*   **Vertical Section Ordering:** Model and thinking controls are now laid out as a static vertical section positioned between the **Accessory** grid and the tab bar.
+*   **Draft-Based Saves:** Unlike the list row's immediate auto-saves, edits in the detail editor Model section are strictly draft-based. They are only committed to the backend when the user clicks the main **Save** button in the header.
+
+---
+
+### 9.4 Visual QA Evidence & Checklist
+
+The following visual assertions have been verified in the development environment and are pinned by automated tests (`tests/e2e/ui/roles-model-reshuffle.spec.ts` and `tests/ui-fixtures/settings-admin-fixture.spec.ts`).
+
+#### Visual Verification Checklist
+1. **Compact Rows:** Selectors and source badges are aligned, compact, and fit neatly inside the list rows. No overflow or layout brokenness.
+2. **Source Badges Visible:** Labels like `Role override` (green), `Inherited role override · Server` (blue/grey), or `Session default` (grey) render correctly on line 2.
+3. **Model & Thinking Always Visible:** The current effective labels (e.g. `claude-opus-4-8 · default` or overridden names) are legible.
+4. **Chevrons Contained:** Dropdown arrows are perfectly positioned inside the controls.
+5. **Responsive Action Buttons:** The Pencil (Edit) and Trash (Delete) buttons on the extreme right of the row remain fully reachable and clickable even at narrow viewport widths.
+6. **Save-Hang Guard:** Detail editor's Save button correctly reverts to the idle "Save" state (not stuck on "Saving...") after a successful save.
+
+#### Visual Screenshots
+Screenshots captured during visual validation can be found in:
+*   `.bobbit/tmp/roles-list-inherited.png` — Default and inherited role rows with greyed-out default indicators and disablement.
+*   `.bobbit/tmp/roles-list-overridden.png` — Active role overrides displaying interactive selectors and clear (`×`) / Test (flask) buttons.
+*   `.bobbit/tmp/roles-detail-layout.png` — Polished detail editor vertical structure with the static Model section.
+

@@ -114,7 +114,9 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
-	max-width: 600px;
+	/* Keep the Roles list compact, while row internals allocate enough space for
+	 * inline model/thinking labels without expanding the whole page. */
+	max-width: 880px;
 	margin: 0 auto;
 }
 
@@ -146,7 +148,7 @@
 }
 
 .role-row-info {
-	flex: 1;
+	flex: 0 0 190px;
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
@@ -161,6 +163,22 @@
 	white-space: nowrap;
 }
 
+/* Slug + origin badge on one line: only the slug ellipsises; the origin badge
+ * (Built-in / Custom / pack) is shrink-0 so it is never reduced to "…". */
+.role-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.role-origin-definition-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
 .role-row-slug {
 	font-size: 11px;
 	font-family: var(--font-mono, monospace);
@@ -168,6 +186,12 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	min-width: 0;
+}
+
+.role-meta .config-origin-badge,
+.role-meta [data-testid="origin-pack-chip"] {
+	flex-shrink: 0;
 }
 
 .role-row-actions {
@@ -199,6 +223,113 @@
 .role-row-action-btn.delete:hover {
 	color: var(--destructive);
 	background: color-mix(in oklch, var(--destructive) 10%, transparent);
+}
+
+/* ----------------------------------------------------------------------------
+ * Inline model + thinking control (list rows)
+ * Reuses the shared renderModelRow; placed in the gap between identity and
+ * the edit/delete actions. Only the main Roles page supplies it.
+ * -------------------------------------------------------------------------- */
+.role-row-model-control {
+	flex: 1 1 520px;
+	min-width: 180px;
+	max-width: none;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-height: 0;
+}
+
+/* Compact placement: hide the (empty) label column and hint paragraph that
+ * renderModelRow emits, so the control fits a list row. Scoped to list rows
+ * only — global Settings model rows are untouched. */
+.role-row-model-control [data-testid="model-row"] > div:first-child > span:first-child,
+.role-row-model-control [data-testid="model-row"] > p {
+	display: none;
+}
+
+/* Tighten the renderModelRow control box for list density. */
+.role-row-model-control [data-testid="model-row"] {
+	gap: 0;
+}
+.role-row-model-control [data-testid="model-row"] > div:first-child > div:nth-child(2) {
+	padding: 2px;
+	gap: 2px;
+}
+/* The thinking Select is rendered compact-by-construction for list rows
+ * (renderModelRow opts: thinkingWidth=clamp(220px, 36%, 360px),
+ * fitContent=false), giving it enough room for the inline default label while
+ * still avoiding the global Settings min-width:180px overflow behaviour. */
+.role-row-model-control [data-testid="model-row"] [role="combobox"] {
+	min-width: 0;
+	max-width: 360px;
+}
+
+/* Override / thinking-override rows: accent the control box with a primary tint. */
+.role-row-model-control--override [data-testid="model-row"] > div:first-child > div:nth-child(2),
+.role-row-model-control--thinking-override [data-testid="model-row"] > div:first-child > div:nth-child(2) {
+	border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	background: color-mix(in oklch, var(--primary) 8%, var(--background));
+}
+
+/* Read-only pack rows: static effective-value summary, no pickers. */
+.role-row-model-sources {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 2px 14px;
+	font-size: 11.5px;
+	line-height: 1.45;
+	color: var(--muted-foreground);
+	cursor: default;
+}
+.rrm-src {
+	display: inline-flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 4px;
+	min-width: 0;
+}
+.rrm-src-from {
+	opacity: 0.85;
+}
+
+.role-row-model-control--readonly {
+	gap: 4px;
+}
+.role-row-model-readonly {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	font-size: 12px;
+}
+.rrm-ro-row {
+	display: flex;
+	gap: 6px;
+	align-items: baseline;
+	min-width: 0;
+}
+.rrm-ro-key {
+	font-weight: 600;
+	font-size: 11px;
+	color: var(--muted-foreground);
+	opacity: 0.75;
+	width: 52px;
+	flex-shrink: 0;
+}
+.rrm-ro-val {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--foreground);
+}
+
+/* "Saved" flash next to the role label after an inline auto-save. */
+.role-row-saved-flash {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--primary);
+	opacity: 0.9;
 }
 
 /* ============================================================================
@@ -445,9 +576,23 @@
 	.role-row {
 		padding: 8px 12px;
 		gap: 10px;
+		flex-wrap: wrap;
 	}
 	.role-row-slug {
 		display: none;
+	}
+	/* Let the inline model control drop beneath the label at narrow widths
+	 * while keeping the edit/delete actions reachable on the first line. */
+	.role-row-info {
+		flex: 1 1 auto;
+	}
+	.role-row-model-control {
+		flex: 0 0 100%;
+		order: 3;
+		max-width: none;
+	}
+	.role-row-model-control [data-testid="model-row"] [role="combobox"] {
+		max-width: min(190px, 46vw);
 	}
 	.role-row-action-btn {
 		width: 28px;
