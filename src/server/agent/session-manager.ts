@@ -56,6 +56,7 @@ import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch,
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
+import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
@@ -5720,9 +5721,10 @@ export class SessionManager {
 		// try only default.sessionModel.
 		const pinnedModel = session.spawnPinnedModel;
 		if (pinnedModel) {
+			const safePinnedModel = sanitizeModelErrorText(pinnedModel);
 			let pinnedModelError;
 			if (!isSessionSelectableModelString(pinnedModel)) {
-				pinnedModelError = new Error(`spawn-pinned model "${pinnedModel}" is not session-selectable`);
+				pinnedModelError = new Error(`spawn-pinned model "${safePinnedModel}" is not session-selectable`);
 			} else {
 				try {
 					await applyModelString(session.rpcClient, pinnedModel, {
@@ -5754,12 +5756,13 @@ export class SessionManager {
 				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
 					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
 				} else if (fallbackSessionModel === pinnedModel) {
-					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed spawn-pinned model "${pinnedModel}"`);
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed spawn-pinned model "${safePinnedModel}"`);
 				}
 				if (!controlledFallbackError && fallbackSessionModel) {
 					try {
-						const pinnedMsg = pinnedModelError instanceof Error ? pinnedModelError.message : String(pinnedModelError);
-						console.warn(`[session-manager] Spawn-pinned model "${pinnedModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${fallbackSessionModel}": ${pinnedMsg}`);
+						const pinnedMsg = sanitizeModelErrorText(pinnedModelError);
+						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						console.warn(`[session-manager] Spawn-pinned model "${safePinnedModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${pinnedMsg}`);
 						await applyModelString(session.rpcClient, fallbackSessionModel, {
 							sessionManager: this,
 							sessionId: session.id,
@@ -5780,13 +5783,13 @@ export class SessionManager {
 						controlledFallbackError = fallbackErr;
 					}
 				}
-				const originalMsg = pinnedModelError instanceof Error ? pinnedModelError.message : String(pinnedModelError);
-				const fallbackMsg = controlledFallbackError instanceof Error ? controlledFallbackError.message : String(controlledFallbackError);
-				throw new Error(`spawn-pinned model "${pinnedModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+				const originalMsg = sanitizeModelErrorText(pinnedModelError);
+				const fallbackMsg = sanitizeModelErrorText(controlledFallbackError);
+				throw new Error(`spawn-pinned model "${safePinnedModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
 			}
 
-			console.error(`[session-manager] Spawn-pinned model "${pinnedModel}" failed for ${session.id}:`, pinnedModelError);
-			throw pinnedModelError;
+			console.error(`[session-manager] Spawn-pinned model "${safePinnedModel}" failed for ${session.id}: ${sanitizeModelErrorForLog(pinnedModelError)}`);
+			throw (pinnedModelError instanceof Error && pinnedModelError.message === sanitizeModelErrorText(pinnedModelError)) ? pinnedModelError : new Error(sanitizeModelErrorText(pinnedModelError));
 		}
 
 		// 0. Role override (highest explicit precedence). If it fails, never fall
@@ -5794,9 +5797,10 @@ export class SessionManager {
 		// default.sessionModel as the controlled fallback target.
 		const roleModel = this.resolveRoleModel(session);
 		if (roleModel) {
+			const safeRoleModel = sanitizeModelErrorText(roleModel);
 			let roleModelError;
 			if (!isSessionSelectableModelString(roleModel)) {
-				roleModelError = new Error(`role.${session.role}.model "${roleModel}" is not session-selectable`);
+				roleModelError = new Error(`role.${session.role}.model "${safeRoleModel}" is not session-selectable`);
 			} else {
 				try {
 					await applyModelString(session.rpcClient, roleModel, {
@@ -5828,12 +5832,13 @@ export class SessionManager {
 				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
 					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
 				} else if (fallbackSessionModel === roleModel) {
-					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed role model "${roleModel}"`);
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed role model "${safeRoleModel}"`);
 				}
 				if (!controlledFallbackError && fallbackSessionModel) {
 					try {
-						const roleMsg = roleModelError instanceof Error ? roleModelError.message : String(roleModelError);
-						console.warn(`[session-manager] Role model "${roleModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${fallbackSessionModel}": ${roleMsg}`);
+						const roleMsg = sanitizeModelErrorText(roleModelError);
+						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						console.warn(`[session-manager] Role model "${safeRoleModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${roleMsg}`);
 						await applyModelString(session.rpcClient, fallbackSessionModel, {
 							sessionManager: this,
 							sessionId: session.id,
@@ -5855,13 +5860,13 @@ export class SessionManager {
 						controlledFallbackError = fallbackErr;
 					}
 				}
-				const originalMsg = roleModelError instanceof Error ? roleModelError.message : String(roleModelError);
-				const fallbackMsg = controlledFallbackError instanceof Error ? controlledFallbackError.message : String(controlledFallbackError);
-				throw new Error(`role model "${roleModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+				const originalMsg = sanitizeModelErrorText(roleModelError);
+				const fallbackMsg = sanitizeModelErrorText(controlledFallbackError);
+				throw new Error(`role model "${safeRoleModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
 			}
 
-			console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, roleModelError);
-			throw roleModelError;
+			console.error(`[session-manager] Role model "${safeRoleModel}" failed for ${session.id}: ${sanitizeModelErrorForLog(roleModelError)}`);
+			throw (roleModelError instanceof Error && roleModelError.message === sanitizeModelErrorText(roleModelError)) ? roleModelError : new Error(sanitizeModelErrorText(roleModelError));
 		}
 
 		if (!this.preferencesStore) return;
@@ -5872,8 +5877,9 @@ export class SessionManager {
 		// loudly and never falls through to AIGW or provider defaults.
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
 		if (sessionModelPref) {
+			const safeSessionModelPref = sanitizeModelErrorText(sessionModelPref);
 			if (!isSessionSelectableModelString(sessionModelPref)) {
-				throw new Error(`default.sessionModel "${sessionModelPref}" is not session-selectable`);
+				throw new Error(`default.sessionModel "${safeSessionModelPref}" is not session-selectable`);
 			}
 			const slash = sessionModelPref.indexOf("/");
 			const provider = sessionModelPref.slice(0, slash);
@@ -5898,8 +5904,8 @@ export class SessionManager {
 				});
 				return;
 			} catch (err) {
-				console.error(`[session-manager] default.sessionModel "${sessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model:`, err);
-				throw err;
+				console.error(`[session-manager] default.sessionModel "${safeSessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model: ${sanitizeModelErrorForLog(err)}`);
+				throw (err instanceof Error && err.message === sanitizeModelErrorText(err)) ? err : new Error(sanitizeModelErrorText(err));
 			}
 		}
 

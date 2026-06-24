@@ -49,6 +49,7 @@ import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -1551,10 +1552,10 @@ export function handleSetupFailure(
 	error: Error,
 	ctx: PipelineContext,
 ): void {
+	const safeErrorMessage = sanitizeModelErrorText(error);
 	console.error(
 		`[session-setup] Session ${session.id} setup failed ` +
-		`(mode: ${plan.mode}, step: ${error.message}):`,
-		error,
+		`(mode: ${plan.mode}, step: ${safeErrorMessage}): ${sanitizeModelErrorForLog(error)}`,
 	);
 
 	// 1. Surface a visible setup error in the live transcript before the session
@@ -1565,9 +1566,9 @@ export function handleSetupFailure(
 			type: "message_end",
 			message: {
 				role: "assistant",
-				content: [{ type: "text", text: `Session setup failed: ${error.message}` }],
+				content: [{ type: "text", text: `Session setup failed: ${safeErrorMessage}` }],
 				stopReason: "error",
-				errorMessage: error.message,
+				errorMessage: safeErrorMessage,
 			},
 		});
 	}
