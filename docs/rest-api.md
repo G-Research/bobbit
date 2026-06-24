@@ -808,12 +808,25 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 **`GET /api/oauth/status?provider=<id>`** responses:
 
 - `200 { provider: "anthropic", authenticated: true, expires: 1775812345000 }` — credential present and not expired.
-- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or the stored credential is expired.
+- `200 { provider: "anthropic", authenticated: false, expires: 1700000000000 }` — a stored credential exists, but its expiry timestamp is in the past.
+- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or no confident expiry timestamp is available.
 - `400 { error: "<message>" }` — provider value rejected by `normalizeProvider`.
 
 The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
 
 The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`); it is never a token.
+
+#### Client expiry reminders
+
+After remote gateway authentication succeeds, the web client checks the Account-tab OAuth providers neutrally: `anthropic` (Anthropic), `openai-codex` (OpenAI), and `google-gemini-cli` (Google). The reminder exists to send users to the shared Account re-login surface instead of automatically launching an Anthropic-only OAuth flow.
+
+A provider is considered confidently expired only when `/api/oauth/status?provider=<id>` returns `authenticated: false` with a finite `expires` value earlier than the client clock. Missing credentials, never-authenticated rows, missing/non-finite `expires`, non-2xx responses, network errors, and invalid JSON are treated as indeterminate and do not show a reminder for that provider.
+
+When one or more providers are expired, the modal names the affected providers with their friendly labels. Its secondary left button is **Dismiss**; its primary right button is **Go to Account Settings**, which closes the modal and navigates to `#/settings/system/account` so the user can re-authenticate from Settings → Account. Dismissal never blocks normal app use.
+
+Dismissed reminders persist client-side by stable identity: `provider + expires` (stored as `${provider}:${expires}`). The same expired credential stays suppressed across rechecks and reloads, but a different provider or a later expiry timestamp resurfaces the modal. Successful Account-tab re-authentication clears dismissed reminder state for that provider so future distinct expiries can be shown.
+
+Only provider ids, friendly labels, and expiry timestamps participate in this client state. OAuth access tokens, refresh tokens, API keys, and other token material remain server-side and are never exposed by the status response or the reminder modal.
 
 **`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" | "google-gemini-cli" }`. Returns:
 
