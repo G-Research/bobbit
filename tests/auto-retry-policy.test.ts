@@ -16,18 +16,30 @@
  *   1. Provider overload / rate-limit errors → effectively unbounded retries,
  *      exponential backoff capped at 300_000 ms.
  *   2. Non-provider transient errors → bounded at 3 attempts (1s, 2s, 4s).
- *   3. Non-transient errors → no auto-retry.
+ *   3. Generic unexpected agent errors → bounded at 3 attempts (1s, 5s, 60s)
+ *      and delivered through the same auto retry path as the Retry button.
+ *   4. Deterministic/non-retryable errors → no auto-retry.
  *
  * Runs via `npm run test:unit` (Node test runner).
  */
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
 	isTransientReviewError,
 	isProviderBackoffError,
 } from "../src/server/agent/verification-logic.ts";
 import { nextBackoffDelay } from "../src/server/agent/session-setup.ts";
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "auto-retry-policy-test-"));
+process.env.BOBBIT_DIR = tmpRoot;
+
+const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../src/server/agent/event-buffer.ts");
 
 // ── Policy under test ──────────────────────────────────────────────────────
 
@@ -72,6 +84,89 @@ const RATE_LIMIT_JSON = '{"type":"rate_limit_error","message":"Rate limited"}';
 const JSON_GLITCH =
 	"Error: Expected ',' or '}' after property value in JSON at position 320";
 const NETWORK_BLIP = "Error: read ECONNRESET";
+const GENERIC_UNEXPECTED = "The system encountered an unexpected error.";
+
+const managers: any[] = [];
+
+type TestClient = {
+	readyState: number;
+	bufferedAmount: number;
+	sent: any[];
+	send(data: string): void;
+	close(code?: number, reason?: string): void;
+};
+
+function makeClient(): TestClient {
+	return {
+		readyState: 1,
+		bufferedAmount: 0,
+		sent: [],
+		send(data: string) { this.sent.push(JSON.parse(data)); },
+		close() { this.readyState = 3; },
+	};
+}
+
+function makeManager(): any {
+	const manager: any = new SessionManager();
+	manager._testStore = {
+		update: mock.fn(() => {}),
+		get: mock.fn(() => undefined),
+	};
+	managers.push(manager);
+	return manager;
+}
+
+function cleanupManager(manager: any): void {
+	if (manager._statusHeartbeatTimer) {
+		clearInterval(manager._statusHeartbeatTimer);
+		manager._statusHeartbeatTimer = null;
+	}
+	for (const session of manager.sessions?.values?.() ?? []) {
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+	}
+	manager.sessionsWithConnectedClients?.clear();
+	manager.sessions?.clear();
+}
+
+function putRetryStateSession(manager: any, overrides: Record<string, any> = {}): { session: any; client: TestClient; prompt: any } {
+	const client = makeClient();
+	const prompt = mock.fn(async () => ({ success: true }));
+	const session = {
+		id: `s-auto-retry-${Math.random().toString(36).slice(2)}`,
+		title: "Auto retry policy test",
+		titleGenerated: true,
+		cwd: tmpRoot,
+		status: "idle",
+		statusVersion: 0,
+		createdAt: Date.now(),
+		lastActivity: Date.now(),
+		clients: new Set([client]),
+		promptQueue: new PromptQueue(),
+		eventBuffer: new EventBuffer(),
+		rpcClient: { prompt },
+		lastTurnErrored: true,
+		lastTurnErrorMessage: GENERIC_UNEXPECTED,
+		lastPromptText: "retry the last user request",
+		turnHadToolCalls: false,
+		consecutiveErrorTurns: 1,
+		transientRetryAttempts: 0,
+		lifecycleGeneration: 0,
+		...overrides,
+	};
+	manager.sessions.set(session.id, session);
+	return { session, client, prompt };
+}
+
+function autoRetryPendingEvents(session: any): any[] {
+	return session.eventBuffer
+		.getAll()
+		.map((entry: any) => entry.event)
+		.filter((event: any) => event?.type === "auto_retry_pending");
+}
+
+afterEach(() => {
+	while (managers.length > 0) cleanupManager(managers.pop());
+});
 
 // ── Provider-backoff path: effectively unbounded ──────────────────────────
 
@@ -180,6 +275,104 @@ describe("decideRetryPolicy — non-provider transient (bounded)", () => {
 		);
 		assert.equal(r.retry, true);
 		assert.equal((r as any).reason, "transient-error");
+	});
+});
+
+// ── Generic unexpected errors: bounded scheduler path ─────────────────────
+
+describe("SessionManager generic unexpected auto-retry policy", () => {
+	it("schedules generic unexpected agent errors at 1s/5s/60s while preserving Retry state", () => {
+		const manager = makeManager();
+		const { session } = putRetryStateSession(manager);
+		for (const [attempt, expectedDelayMs] of [
+			[1, 1000],
+			[2, 5000],
+			[3, 60_000],
+		] as const) {
+			manager.maybeAutoRetryTransient(session);
+
+			assert.equal(session.lastTurnErrored, true, "the chat Retry affordance should remain available while auto-retry is pending");
+			assert.ok(
+				session.pendingAutoRetryTimer,
+				`expected generic unexpected error to schedule auto-retry attempt ${attempt}`,
+			);
+			const pending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(pending, "expected auto_retry_pending event for generic unexpected error");
+			assert.equal(pending.retryDelayMs, expectedDelayMs);
+			assert.equal(pending.attempt, attempt);
+
+			clearTimeout(session.pendingAutoRetryTimer);
+			session.pendingAutoRetryTimer = undefined;
+		}
+	});
+
+	it("uses the pending timer to call the existing auto retry path after the first 1s generic retry", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const { session, prompt } = putRetryStateSession(manager, {
+			lastPromptText: "please retry this user request",
+		});
+
+		manager.maybeAutoRetryTransient(session);
+
+		assert.ok(session.pendingAutoRetryTimer, "expected a pending auto-retry timer for generic unexpected errors");
+		t.mock.timers.tick(999);
+		assert.equal(prompt.mock.callCount(), 0, "auto retry should not fire before its 1s delay");
+
+		t.mock.timers.tick(1);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 1, "generic auto retry should dispatch through retryLastPrompt(..., { auto: true })");
+		assert.equal(prompt.mock.calls[0].arguments[0], "please retry this user request");
+		assert.equal(session.lastTurnErrored, false, "retryLastPrompt should clear error state once the auto retry starts");
+		assert.equal(session.status, "streaming");
+	});
+
+	it("stops after the third generic unexpected retry and leaves manual Retry available", () => {
+		const manager = makeManager();
+		const { session } = putRetryStateSession(manager);
+		for (let i = 0; i < 3; i++) {
+			manager.maybeAutoRetryTransient(session);
+			if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+			session.pendingAutoRetryTimer = undefined;
+		}
+		const emittedBeforeExhaustion = autoRetryPendingEvents(session).length;
+
+		manager.maybeAutoRetryTransient(session);
+
+		assert.equal(session.pendingAutoRetryTimer, undefined);
+		assert.equal(
+			autoRetryPendingEvents(session).length,
+			emittedBeforeExhaustion,
+			"exhausted generic auto-retry must not emit a new pending event",
+		);
+		assert.equal(session.lastTurnErrored, true, "after exhaustion the session should still expose manual Retry");
+	});
+
+	it("does not auto-retry deterministic generic-looking failures", () => {
+		const nonRetryable = [
+			"Authentication failed: invalid API key for provider",
+			"Configuration error: model provider is not configured",
+			"No API key found for openrouter",
+			"Permission denied while reading workspace file",
+			"User aborted the request",
+			"Content policy violation: disallowed content",
+			"ValidationError: invalid session id",
+			"The system encountered an unexpected error: missing API key",
+		];
+
+		for (const message of nonRetryable) {
+			const manager = makeManager();
+			const { session } = putRetryStateSession(manager, {
+				lastTurnErrorMessage: message,
+			});
+
+			manager.maybeAutoRetryTransient(session);
+
+			assert.equal(session.pendingAutoRetryTimer, undefined, `did not expect auto-retry for: ${message}`);
+			assert.equal(autoRetryPendingEvents(session).length, 0, `did not expect auto_retry_pending for: ${message}`);
+		}
 	});
 });
 
