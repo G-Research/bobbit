@@ -33,6 +33,7 @@ const { initPromptDirs } = await import("../src/server/agent/system-prompt.ts");
 initPromptDirs(stateDir);
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
+const PINNED_OPENROUTER_MODEL = { provider: "openrouter", id: "anthropic/claude-3.5-sonnet" };
 const AUTH_ERROR_SECRET = "sk-or-secret-never-log";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_ERROR_SECRET}`;
 
@@ -129,7 +130,10 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			return makeBridge({
 				getState: mock.fn(async () => ({
 					success: true,
-					data: { sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl") },
+					data: {
+						model: PINNED_OPENROUTER_MODEL,
+						sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl"),
+					},
 				})),
 			});
 		});
@@ -179,7 +183,12 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		let capturedOptions: any | undefined;
 		registerRpcBridgeFactory((options: any) => {
 			capturedOptions = options;
-			return makeBridge();
+			return makeBridge({
+				getState: mock.fn(async () => ({
+					success: true,
+					data: { model: PINNED_OPENROUTER_MODEL },
+				})),
+			});
 		});
 
 		const manager: any = new SessionManager({ preferencesStore: prefs });
