@@ -61,7 +61,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
-import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
+import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -3528,20 +3528,28 @@ export class SessionManager {
 	 * - Other transient glitches (malformed tool-call JSON, ECONNRESET, etc.):
 	 *   bounded 3 attempts at 1s/2s/4s, after which the error surfaces and
 	 *   the user can manually retry.
+	 *
+	 * - Retryable generic agent/runtime errors (sanitized unexpected/internal
+	 *   system errors): bounded 3 attempts at 1s/5s/60s, then manual retry.
 	 */
 	private maybeAutoRetryTransient(session: SessionInfo): void {
 		const BOUNDED_MAX_ATTEMPTS = 3;
 		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
+		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
 		if (!errMsg) return;
-		if (!isTransientReviewError(errMsg)) return;
 
 		const isBackoff = isProviderBackoffError(errMsg);
+		const isTransient = isTransientReviewError(errMsg);
+		const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
+		if (!isBackoff && !isTransient && !isGenericRetryable) return;
+
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
 
 		if (!isBackoff && attempt > BOUNDED_MAX_ATTEMPTS) {
+			const label = isGenericRetryable ? "generic" : "transient";
 			console.warn(
-				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
+				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} ${label} auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
 			return;
@@ -3550,11 +3558,17 @@ export class SessionManager {
 
 		const delayMs = isBackoff
 			? nextBackoffDelay(attempt, { baseMs: 1000, maxMs: PROVIDER_BACKOFF_MAX_MS, jitterRatio: 0.2 })
-			: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
+			: isGenericRetryable
+				? GENERIC_RETRY_DELAYS_MS[attempt - 1]!
+				: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
 
 		if (isBackoff) {
 			console.log(
 				`[session-manager] Session ${session.id} hit provider overload/rate-limit (attempt ${attempt}); auto-retrying in ${Math.round(delayMs / 1000)}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		} else if (isGenericRetryable) {
+			console.log(
+				`[session-manager] Session ${session.id} turn failed with a retryable generic error (attempt ${attempt}/${BOUNDED_MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
 			);
 		} else {
 			console.log(
