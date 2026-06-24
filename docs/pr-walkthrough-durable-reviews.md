@@ -109,17 +109,28 @@ Scoped quota writes keep old reviews from blocking new ones:
 
 The broad legacy per-pack quota is unchanged. A scoped write bypasses only that legacy
 cumulative cap; it still goes through `PackStore.put` validation, prefix/profile checks,
-per-value/key limits, and the emergency per-pack ceiling.
+per-value/key limits, and the emergency per-pack ceiling. A later generic unscoped write
+can still fail with `STORE_QUOTA_EXCEEDED` if the total pack directory is over the legacy
+cap; PR Walkthrough avoids that for first-party durable review state by supplying scoped
+quota options on those writes.
 
 PR Walkthrough uses these scoped profiles:
 
-| Data | Prefix | Profile |
+| Data | Key or prefix | Profile |
 |---|---|---|
 | Draft chunks, status, checkpoints | `reviews/<jobId>/draft/` | `review-draft` |
 | Final payload | `reviews/<jobId>/final/` via `FINAL_QUOTA(jobId)` | `review-final` |
-| Review binding/index metadata | exact review/index prefix | `default` |
+| Reviewer index | exact `reviewers/<childSessionId>` key | `default` |
+| Review-scoped binding | `reviews/<jobId>/` via `REVIEW_BINDING_QUOTA(jobId)` | `default` |
+| Panel interaction state | exact `review-state/<panel>/<job>` key | `default` |
+| Finalize legacy binding marker | exact `binding/<childSessionId>` key | `default` |
+| Legacy publish artifacts | exact `cards/<base64url(changesetId)>` and `job/<jobId>` keys | `default` |
 
-Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured quota error, and existing chunks remain intact because `put` rejects before replacing the previous value. Because finalization runs inside a `ModuleHost` worker, the worker proxy preserves the third `host.store.put` argument so `FINAL_QUOTA(jobId)` reaches the parent pack store.
+Exact-key default scopes are for small first-party metadata that should remain writable
+after draft and final review payloads push total pack bytes over the legacy unscoped cap.
+They do not raise the draft/final review limits or remove disk-exhaustion protection.
+
+Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured `STORE_QUOTA_EXCEEDED` error, and existing chunks remain intact because `put` rejects before replacing the previous value. Because finalization runs inside a `ModuleHost` worker, the worker proxy preserves the third `host.store.put` argument so `FINAL_QUOTA(jobId)` reaches the parent pack store.
 
 ## Incremental chunk submission
 
@@ -202,7 +213,7 @@ Readers treat only `reviews/<jobId>/final/payload` as submitted/finalized. Stagi
 3. Save the full YAML as the `document` chunk.
 4. Finalize through the same path as `finalize_pr_walkthrough_submission()`.
 
-The `publish` route is compatibility-only for panel and legacy callers. When called by an authorized review-scoped caller, it writes the same final payload. When called without an authorized scoped binding, it falls back to legacy `cards/<changesetId>` and `job/<jobId>` artifacts so older direct flows continue to work, but it does not overwrite a review-scoped final payload.
+The `publish` route is compatibility-only for panel and legacy callers. When called by an authorized review-scoped caller, it writes the same final payload. When called without an authorized scoped binding, it falls back to legacy `cards/<changesetId>` and `job/<jobId>` artifacts so older direct flows continue to work, but it does not overwrite a review-scoped final payload. Those legacy artifact writes use exact-key `default` quota scopes because they are still first-party durable review metadata.
 
 ## Route and panel states
 
@@ -212,6 +223,8 @@ The pack panel calls routes through `host.callRoute`, never raw `fetch`.
 - `status` returns `running`, `draft`, `submitted`, or `error`. It reports `submitted` only when a final payload exists, with legacy `submitted/<jobId>` as a migration fallback. If chunks exist but no final payload exists, it returns `draft` with chunk summary.
 - `recover` is child-self reload recovery. It reads the caller's binding, returns finalized YAML when present, returns bounded draft state when chunks exist, and returns `PRW_REVIEW_MISSING` when data expired or was cleaned up.
 - `bundle` prefers `reviews/<jobId>/final/payload`. If no final payload exists, it can fall back to live diff plus legacy card artifacts where authorized.
+
+The panel persists interaction state such as completed cards, comments, collapsed files, and context expansions under `review-state/<panel>/<job>`. It writes both localStorage and best-effort host-store copies; the host-store copy uses an exact-key `default` quota scope so normal interaction state can persist even when review-scoped payloads have already pushed total pack bytes over the legacy unscoped cap. If host persistence fails, localStorage remains the fallback.
 
 Known route failures return structured data with `code`, `error`, and optional `details`. Client `host.callRoute` preserves JSON error bodies on non-2xx responses, and the panel renders actionable messages for schema, quota, missing/expired, unauthorized, and incomplete-finalization states instead of a bare `callRoute publish HTTP 500`.
 
@@ -295,7 +308,7 @@ These fallbacks exist for already-running or restored reviewers. New code should
 
 Durable behavior is pinned by focused unit and browser tests:
 
-- `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
+- `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, PR Walkthrough panel state after scoped review payloads exceed the legacy cap, unscoped-write rejection, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
 - `tests/extension-host-server-host-api.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
 - `tests/extension-host-module-isolation.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
 - `tests/client-host-api.spec.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
