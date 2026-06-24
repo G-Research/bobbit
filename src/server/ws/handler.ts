@@ -33,6 +33,8 @@ import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
 import { resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
+import type { PreferencesStore } from "../agent/preferences-store.js";
+import { applyRuntimeSessionModelSelection } from "./runtime-model-selection.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 
@@ -242,6 +244,7 @@ export function handleWebSocketConnection(
 	projectContextManager?: ProjectContextManager,
 	toolManager?: ToolManager,
 	packContributionRegistry?: PackContributionResolver,
+	preferencesStore?: PreferencesStore,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -666,9 +669,7 @@ export function handleWebSocketConnection(
 					break;
 				case "set_model":
 					try {
-						await session.rpcClient.setModel(msg.provider, msg.modelId);
-						sessionManager.updateModelNameFile(session.id, msg.modelId);
-						sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
+						await applyRuntimeSessionModelSelection(sessionManager, session, msg.provider, msg.modelId, preferencesStore, broadcast);
 					} catch (err: any) {
 						// Surface set_model failures to the UI instead of silently swallowing
 						// them — otherwise the client keeps showing the new model while the

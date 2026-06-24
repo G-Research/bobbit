@@ -106,10 +106,28 @@ const ASK_RESPONSE_ENVELOPE_REGEX = new RegExp(
 	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
 );
 
+const DEFAULT_MODEL = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
+
+const KNOWN_MODELS = {
+	"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+};
+
+export function mockModelFromString(modelString) {
+	if (typeof modelString !== "string") return null;
+	const slash = modelString.indexOf("/");
+	if (slash <= 0 || slash >= modelString.length - 1) return null;
+	const provider = modelString.slice(0, slash);
+	const modelId = modelString.slice(slash + 1);
+	const known = KNOWN_MODELS[modelId];
+	if (known && known.provider === provider) return { ...known };
+	return { provider, id: modelId, contextWindow: 128000, maxTokens: 16384 };
+}
+
 /**
  * @typedef {Object} MockAgentOptions
  * @property {string} [cwd] - Working directory (defaults to process.cwd())
  * @property {Object} [env] - Env-var overrides (defaults to process.env)
+ * @property {string} [initialModel] - Optional spawn-time `<provider>/<modelId>` pin.
  * @property {(event: any) => void} [onEvent] - Event emitter. Required for in-process mode.
  */
 
@@ -120,7 +138,7 @@ export class MockAgentCore {
 		this.env = options.env || process.env;
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
-		this.currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
+		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
 		this.sessionFilePath = null;
 		// When an AUTO_COMPACT turn has run, this holds the FULL on-disk
 		// transcript (orphaned pre-compaction entries + a compaction marker +
@@ -2446,15 +2464,9 @@ export class MockAgentCore {
 				return { success: true, data: this.conversationMessages };
 
 			case "set_model": {
-				const knownModels = {
-					"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
-				};
-				const known = knownModels[msg.modelId];
-				if (known) {
-					this.currentModel = known;
-				} else {
-					this.currentModel = { provider: msg.provider || "mock", id: msg.modelId || "mock-model", contextWindow: 128000, maxTokens: 16384 };
-				}
+				const provider = msg.provider || "mock";
+				const modelId = msg.modelId || "mock-model";
+				this.currentModel = mockModelFromString(`${provider}/${modelId}`) || { ...DEFAULT_MODEL };
 				return { success: true };
 			}
 

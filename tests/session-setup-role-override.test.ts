@@ -90,6 +90,7 @@ type ResolverCtx = {
 };
 
 const RUNNABLE_RESOLVER_BLOCK = `
+const fallbackProviderAllowlistFromPrefs = () => undefined;
 const mergeHostAgentProviderEnv = (env) => env;
 ${RESOLVER_BLOCK}
 `;

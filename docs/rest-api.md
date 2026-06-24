@@ -732,6 +732,8 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `GET` | `/api/preferences` | Get all preferences |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
 
+Model-related preference keys include `default.sessionModel`, `default.reviewModel`, `default.imageModel`, and `allowSessionModelFallback`. The fallback setting defaults to off when absent; see [Controlled session model fallback](session-model-fallback.md).
+
 ### Models
 
 | Method | Path | Description |

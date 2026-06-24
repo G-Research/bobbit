@@ -56,8 +56,8 @@ describe("session-setup spawn env contract", () => {
 			"bridge env must spread caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
 		);
 		assert.ok(
-			/mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*\}\)/.test(src),
-			"direct host provider env must be merged after active model resolution while preserving existing env precedence",
+			/mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\),\s*\}\)/.test(src),
+			"direct host provider env must be merged after active model resolution with only the active model provider plus controlled fallback allowlist",
 		);
 	});
 
@@ -84,7 +84,7 @@ describe("session-setup spawn env contract", () => {
 			"utf-8",
 		);
 		assert.ok(
-			/if \(!plan\.sandboxed\) \{\s*plan\.bridgeOptions\.env = mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*\}\);\s*\}/.test(src),
+			/if \(!plan\.sandboxed\) \{\s*plan\.bridgeOptions\.env = mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\),\s*\}\);\s*\}/.test(src),
 			"sandboxed sessions must not receive Settings provider keys through the direct host env path; sandbox token policy remains the only sandbox credential path",
 		);
 	});
@@ -95,12 +95,12 @@ describe("session-setup spawn env contract", () => {
 			"utf-8",
 		);
 		assert.ok(
-			/import \{ mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
-			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver",
+			/import \{ fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
+			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver and controlled fallback allowlist resolver",
 		);
 		assert.ok(
-			/bridgeOptions\.env = mergeHostAgentProviderEnv\(bridgeOptions\.env,\s*this\.preferencesStore,\s*\{\s*model:\s*bridgeOptions\.initialModel,\s*\}\)/.test(src),
-			"legacy direct RpcBridge review fallback must merge only the active model provider env for non-sandbox review agents",
+			/bridgeOptions\.env = mergeHostAgentProviderEnv\(bridgeOptions\.env,\s*this\.preferencesStore,\s*\{\s*model:\s*bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\),\s*\}\)/.test(src),
+			"legacy direct RpcBridge review fallback must merge only the active model provider plus controlled fallback allowlist for non-sandbox review agents",
 		);
 	});
 

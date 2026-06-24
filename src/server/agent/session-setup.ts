@@ -48,7 +48,8 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -512,6 +513,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	if (!plan.sandboxed) {
 		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
 			model: plan.bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(ctx.preferencesStore),
 		});
 	}
 	if (plan.initialThinkingLevel) {
@@ -992,8 +994,20 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
 
-	// Step 10: post-spawn setup (model, thinking level)
-	await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
+	// Step 10: post-spawn setup (model, thinking level). Model binding is
+	// awaited before the session is returned/live so explicit failures cannot
+	// continue on provider/runtime defaults.
+	try {
+		await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
+	} catch (err) {
+		const setupError = err instanceof Error ? err : new Error(String(err));
+		handleSetupFailure(session, plan, setupError, ctx);
+		throw setupError;
+	}
+
+	// Normal/delegate sessions are not broadcast until createSession returns, but
+	// the returned object must be ready only after model enforcement succeeds.
+	if (session.status !== "terminated") session.status = "idle";
 
 	return session;
 }
@@ -1326,11 +1340,13 @@ export async function executeWorktreeAsync(
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
 	}
 
+	// Enforce explicit model selection before marking the session idle/live. This
+	// prevents a failed selected model from silently continuing on provider or
+	// runtime defaults. Thinking-level application remains non-fatal below.
+	await postSpawn(session, plan, ctx);
+
 	// Notify connected clients that the session is ready (single writer + version bump).
 	broadcastStatus(session, "idle");
-
-	// Fire model + thinking level immediately (non-blocking)
-	postSpawnFireAndForget(session, plan, ctx);
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -1450,48 +1466,37 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);
 
-	// Persist agentSessionFile BEFORE flipping status to idle so the session
-	// survives a hard kill in the post-spawn window. Pre-existing cloned
-	// transcripts are already recorded; avoid get_state rewriting their runtime
-	// metadata. See worktree path for the full rationale.
+	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
+	// survives a hard kill in the setup window. Pre-existing cloned transcripts
+	// are already recorded; avoid get_state rewriting their runtime metadata. See
+	// worktree path for the full rationale.
 	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
 	}
 
-	session.status = "idle";
-
 	return session;
 }
 
 /**
- * Post-spawn setup for synchronous paths (normal, delegate):
- * fire-and-forget metadata persist + model/thinking level.
+ * Post-spawn setup for synchronous paths (normal, worktree, delegate).
+ *
+ * Model selection is awaited and fatal for every session type so explicit
+ * selected-model failures cannot be hidden after spawn. Thinking-level setup is
+ * a best-effort preference and remains a visible non-fatal warning.
  */
 async function postSpawn(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
-	// For delegates, model + thinking level are awaited (delegate needs model before prompt)
-	if (plan.mode === "delegate") {
-		const tasks: Promise<void>[] = [];
-		if (!plan.skipAutoModel) tasks.push(ctx.tryAutoSelectModel(session));
-		if (!plan.skipAutoThinking) tasks.push(ctx.tryApplyDefaultThinkingLevel(session));
-		await Promise.all(tasks);
-	} else {
-		// Normal sessions: fire-and-forget
-		postSpawnFireAndForget(session, plan, ctx);
-	}
-}
-
-/** Fire model + thinking level setup as non-blocking (fire-and-forget). */
-function postSpawnFireAndForget(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (!plan.skipAutoModel) {
-		ctx.tryAutoSelectModel(session).catch((err) => {
-			console.warn(`[session-setup] Early model selection failed for ${session.id}:`, err);
-		});
+		await ctx.tryAutoSelectModel(session);
 	}
 	if (!plan.skipAutoThinking) {
-		ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
+		const thinkingPromise = ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
 			console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
 		});
+		// Delegates send their first prompt immediately after setup; preserve the
+		// previous ordering by applying a valid thinking-level preference first,
+		// while still treating failures as non-fatal warnings.
+		if (plan.mode === "delegate") await thinkingPromise;
 	}
 }
 
@@ -1547,22 +1552,46 @@ export function handleSetupFailure(
 	error: Error,
 	ctx: PipelineContext,
 ): void {
+	const safeErrorMessage = sanitizeModelErrorText(error);
 	console.error(
 		`[session-setup] Session ${session.id} setup failed ` +
-		`(mode: ${plan.mode}, step: ${error.message}):`,
-		error,
+		`(mode: ${plan.mode}, step: ${safeErrorMessage}): ${sanitizeModelErrorForLog(error)}`,
 	);
 
-	// 1. Remove from in-memory map
+	// 1. Surface a visible setup error in the live transcript before the session
+	// is terminated/archived. This is especially important for post-spawn model
+	// selection failures: they must not be downgraded to server-only warnings.
+	if ((session as any).eventBuffer && session.clients) {
+		emitSessionEvent(session, {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: `Session setup failed: ${safeErrorMessage}` }],
+				stopReason: "error",
+				errorMessage: safeErrorMessage,
+			},
+		});
+	}
+
+	// 2. Stop the spawned agent if setup failed after rpcClient.start(). Fire and
+	// forget: setup failure handling must not hang on a wedged provider process.
+	try { session.unsubscribe?.(); } catch { /* best-effort */ }
+	if ((session as any).rpcClient?.stop) {
+		session.rpcClient.stop().catch((stopErr: unknown) => {
+			console.warn(`[session-setup] Failed to stop setup-failed session ${session.id}:`, stopErr);
+		});
+	}
+
+	// 3. Remove from in-memory map
 	ctx.sessions.delete(session.id);
 
-	// 2. Archive in store (preserves evidence)
+	// 4. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);
 
-	// 3. Notify connected clients (single writer + version bump).
+	// 5. Notify connected clients (single writer + version bump).
 	broadcastStatus(session, "terminated");
 
-	// 4. Background worktree cleanup (slow, non-blocking)
+	// 6. Background worktree cleanup (slow, non-blocking)
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
 		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
@@ -1572,11 +1601,11 @@ export function handleSetupFailure(
 		}
 	}
 
-	// 5. Clean up sandbox token for this session
+	// 7. Clean up sandbox token for this session
 	if (ctx.sandboxTokenStore && plan.projectId) {
 		ctx.sandboxTokenStore.removeSession(plan.projectId, session.id);
 	}
 
-	// 6. S1: drop the per-session capability secret.
+	// 8. S1: drop the per-session capability secret.
 	ctx.sessionSecretStore.remove(session.id);
 }

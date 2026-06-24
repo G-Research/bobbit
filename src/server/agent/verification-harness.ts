@@ -70,8 +70,9 @@ import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
@@ -95,6 +96,14 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
 	return clampThinkingLevelForModel(level, provider, modelId);
+}
+
+function controlledSessionModelFallback(prefs: PreferencesStore | undefined): { enabled: boolean; model?: string } | undefined {
+	if (!prefs) return undefined;
+	return {
+		enabled: prefs.get("allowSessionModelFallback") === true,
+		model: prefs.get("default.sessionModel") as string | undefined,
+	};
 }
 
 export interface VerificationToolActivationDeps {
@@ -3075,27 +3084,29 @@ export class VerificationHarness {
 						sessionId,
 						contextLabel: `role.${roleName}.model`,
 						skipSetModel: _preInitialModel === roleModel_r,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${roleModel_r}" for reviewer ${sessionId} (role=${roleName})`);
+					console.log(`[verification] Applied role model policy for reviewer ${sessionId} (selected="${roleModel_r}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_r}" failed for reviewer ${sessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_r, 500)}" failed for reviewer ${sessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						role: "reviewer",
 						skipSetModel: !!reviewModelPref && _preInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
+						console.log(`[verification] Applied review model policy for ${sessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3412,27 +3423,29 @@ export class VerificationHarness {
 						sessionId: qaSessionId,
 						contextLabel: `role.${qaRoleName}.model`,
 						skipSetModel: _preQaInitialModel === roleModel_q,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${roleModel_q}" for QA ${qaSessionId} (role=${qaRoleName})`);
+					console.log(`[verification] Applied role model policy for QA ${qaSessionId} (selected="${roleModel_q}", role=${qaRoleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_q}" failed for QA ${qaSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_q, 500)}" failed for QA ${qaSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						role: "qa",
 						skipSetModel: !!reviewModelPref && _preQaInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
+						console.log(`[verification] Applied QA model policy for ${qaSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3593,6 +3606,7 @@ export class VerificationHarness {
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			model: bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
@@ -3648,27 +3662,29 @@ export class VerificationHarness {
 						sessionId: null,
 						contextLabel: `role.${roleName}.model`,
 						skipSetModel: _preLegacyInitialModel === roleModel_s,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${roleModel_s}" for sub-session ${subSessionId} (role=${roleName})`);
+					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${roleModel_s}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_s}" failed for sub-session ${subSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(rpc, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: null,
 						sessionId: null,
 						role: "subsession",
 						skipSetModel: !!reviewModelPref && _preLegacyInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
+						console.log(`[verification] Applied review model policy for ${subSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}

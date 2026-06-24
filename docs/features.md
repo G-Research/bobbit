@@ -160,7 +160,7 @@ These cues are scoped to **human attention**: standalone sessions notify on idle
 
 ## Model Authentication
 
-Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider.
+Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider. Text-session model fallback is opt-in via `allowSessionModelFallback`; see [Controlled session model fallback](session-model-fallback.md).
 
 - **Anthropic** and **OpenAI** account login work as before.
 - **Google** has two intentionally separate paths: account OAuth (`google-gemini-cli`, via the official Gemini Code Assist API) and a Google AI Studio API key (`google`, Gemini Developer API). Both are session-usable: account-backed Gemini models run in agent sessions through a generated Code Assist provider extension (per-request Bearer token + project from the gateway), while the API key remains an independent path. See [google-oauth-models.md](google-oauth-models.md) for the full split, runtime architecture, project selection, and caveats.

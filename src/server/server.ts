@@ -2161,7 +2161,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore);
 		});
 	});
 
@@ -10216,7 +10216,6 @@ async function handleApiRoute(
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
 			allowedTools: ps.allowedTools,
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
 		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
@@ -10251,7 +10250,6 @@ async function handleApiRoute(
 			const title = `Fork: ${baseTitle}`;
 			sessionManager.setTitle(fork.id, title, { markGenerated: true });
 			if (ps.staffId) fork.staffId = ps.staffId;
-			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
 
 			json({
 				id: fork.id,
@@ -10724,8 +10722,6 @@ async function handleApiRoute(
 			// continues keep bypassing the host-side pool because container worktrees are isolated.
 			awaitWorktreeSetup: !!worktreeOpts,
 			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
-			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
 		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
@@ -10768,13 +10764,6 @@ async function handleApiRoute(
 		// markGenerated: prevents the first-message auto-titler from overwriting
 		// "Continued: …" once the user sends their first prompt in the new session.
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
-
-		if (ps.modelProvider && ps.modelId) {
-			// Model is pinned at spawn via createOpts.initialModel above; just
-			// persist the choice so a later restore picks it up. No redundant
-			// post-spawn setModel — that's the whole point of spawn-time pinning.
-			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
-		}
 
 		json({
 			id: newSession.id,
