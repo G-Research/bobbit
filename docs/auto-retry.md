@@ -1,199 +1,94 @@
-# Auto-Retry: Provider Overload and Transient Errors
+# Auto-Retry
 
-## Background
+## Purpose
 
-When the Anthropic API (or another provider) returns a transient error mid-turn
-— such as `overloaded_error` (HTTP 529) or `rate_limit_error` (HTTP 429) — the
-session used to stall silently and require the user to click **Retry** manually.
-During peak load these events can last 10+ minutes; surfacing the error to the
-user is worse than waiting.
+Bobbit auto-retries agent turns when the last turn ended with a retryable infrastructure or agent-runtime error. The retry uses the same `retryLastPrompt(sessionId, { auto: true })` path as the chat **Retry** button so continuation safety stays centralized: if a failed turn already ran tools, Retry resumes rather than blindly replaying side effects.
 
-The auto-retry system automatically reschedules the turn with an exponential
-backoff, keeps the UI informed, and cancels gracefully whenever the user or
-session intervenes.
+Auto-retry is intentionally conservative. It keeps transient provider and runtime failures moving, but stops when the error looks deterministic and needs a human fix.
 
----
+## Retry policies
 
-## Two retry policies
+| Error class | Classifier | Schedule | Stop condition |
+|-------------|------------|----------|----------------|
+| Provider overload / rate-limit | `isProviderBackoffError()` | Exponential from 1 s, capped at 5 min, ±20% jitter | No hard attempt cap; stops on success, termination, new prompt, or explicit Retry |
+| JSON/network transient | `isTransientReviewError()` and not provider backoff | 1 s, 2 s, 4 s | After 3 failed auto attempts, leave manual Retry available |
+| Generic unexpected/internal/system agent error | `isRetryableGenericAgentError()` and not transient | 1 s, 5 s, 60 s | After 3 failed auto attempts, leave manual Retry available |
 
-### 1. Provider overload / rate-limit (unbounded)
+The bounded policies exist to recover from short-lived failures without looping forever on a broken model, invalid request, or bad configuration. Provider overload stays effectively unbounded because real provider incidents can last longer than a short retry burst; the long capped backoff prevents tight retry loops while still recovering without user action.
 
-Detected by `isProviderBackoffError()` in `verification-logic.ts`.
+## Classification
 
-Triggers on:
-- `overloaded_error` — Anthropic HTTP 529
-- `rate_limit_error` — Anthropic HTTP 429
-- Phrasings matching `HTTP 429`, `HTTP 529`, `status 429`, `statusCode: 529`,
-  etc. (via `PROVIDER_BACKOFF_REGEXES`)
+Core retry classification lives in `src/server/agent/verification-logic.ts`:
 
-Behaviour:
-- **No hard attempt cap.** Provider outages legitimately last 10+ minutes.
-- **Exponential backoff** starting at 1 s, doubling each attempt, capped at
-  **300 000 ms (5 minutes)** per attempt.
-- **±20% jitter** applied after the cap so multiple concurrent team-lead
-  sessions don't hammer the API at exactly the same moment.
-- `transientRetryAttempts` is **preserved** across auto-retries so the delay
-  keeps growing toward the cap. It is **not** reset until the session succeeds,
-  is terminated, or the user explicitly clicks Retry.
+- `isProviderBackoffError(output)` matches provider overload/rate-limit signals such as `overloaded_error`, `rate_limit_error`, `HTTP 429`, and `HTTP 529`.
+- `isTransientReviewError(output)` matches retryable transient glitches such as malformed streamed tool JSON, `ECONNRESET`, `EPIPE`, `socket hang up`, process exits, and `Validation failed for tool`.
+- `isRetryableGenericAgentError(output)` matches sanitized runtime failures such as `The system encountered an unexpected error`, `unexpected internal error`, and `system server error`.
 
-Backoff sequence (no jitter, `random() = 0.5`):
+Generic auto-retry excludes errors that are likely deterministic or operator-actionable before applying the retryable match. Exclusions include:
 
-| Attempt | Delay  |
-|---------|--------|
-| 1       | 1 s    |
-| 2       | 2 s    |
-| 3       | 4 s    |
-| 4       | 8 s    |
-| 5       | 16 s   |
-| …       | …      |
-| 10+     | 300 s (cap) |
+- authentication or authorization failures
+- missing, invalid, expired, or unconfigured API keys/tokens/credentials
+- configuration errors
+- permission denials
+- user/human aborts or cancellations
+- content/safety-policy blocks
+- validation, bad-request, or schema-validation failures
 
-### 2. Other transient errors (bounded, 3 attempts)
+This ordering matters: a wrapper like `The system encountered an unexpected error: missing API key` must not retry just because it contains the generic unexpected-error text.
 
-Detected by `isTransientReviewError()` but **not** `isProviderBackoffError()`.
+## Scheduling lifecycle
 
-Triggers on: malformed tool-call JSON (`SyntaxError … in JSON at position N`),
-`ECONNRESET`, `EPIPE`, `socket hang up`, `process exited`, `Validation failed
-for tool`, etc. (via `TRANSIENT_ERROR_PATTERNS` and `TRANSIENT_ERROR_REGEXES`).
+`SessionManager.maybeAutoRetryTransient(session)` runs after a turn ends with `message_end.stopReason === "error"`.
 
-Behaviour:
-- Maximum **3 attempts** at fixed 1 s / 2 s / 4 s delays (legacy schedule,
-  preserved for compatibility).
-- After the third failure the error is surfaced to the user and the manual
-  Retry button is required.
+When a policy applies, it:
 
----
+1. increments `session.transientRetryAttempts`;
+2. computes the policy delay;
+3. emits `auto_retry_pending` through the session event stream;
+4. sets `session.pendingAutoRetryTimer`;
+5. when the timer fires, calls `retryLastPrompt(session.id, { auto: true })` if the session is still the current idle session.
 
-## Key functions
+A pending timer is cancelled when the user sends a new prompt, clicks explicit Retry, terminates the session, or the gateway shuts down. Cancellation emits `auto_retry_cancelled` except during shutdown.
 
-| Symbol | Location | Responsibility |
-|--------|----------|----------------|
-| `isTransientReviewError(output)` | `verification-logic.ts` | Returns true for both policy classes. |
-| `isProviderBackoffError(output)` | `verification-logic.ts` | Narrows to the unbounded backoff class. |
-| `TRANSIENT_ERROR_PATTERNS` | `verification-logic.ts` | Literal substring list (includes `overloaded_error`, `rate_limit_error`). |
-| `PROVIDER_BACKOFF_REGEXES` | `verification-logic.ts` | Regex list for HTTP 429/529 status phrasings. |
-| `TRANSIENT_ERROR_REGEXES` | `verification-logic.ts` | Regex list for JSON-glitch / Node `SyntaxError` variants. |
-| `nextBackoffDelay(attempt, opts)` | `session-setup.ts` | Pure function: `baseMs * 2^(attempt-1)`, capped, then ±`jitterRatio` jitter. |
-| `maybeAutoRetryTransient(session)` | `session-manager.ts` | Selects policy, computes delay, broadcasts `auto_retry_pending`, sets `pendingAutoRetryTimer`. |
-| `cancelPendingAutoRetry(session, reason)` | `session-manager.ts` | Tears down the timer and broadcasts `auto_retry_cancelled`. |
-| `retryLastPrompt(id, {auto})` | `session-manager.ts` | Performs the actual retry; `auto: true` preserves `transientRetryAttempts`. |
+`retryLastPrompt(..., { auto: true })` preserves `transientRetryAttempts` so repeated auto failures advance the schedule. Explicit user Retry resets the counter, because human intervention is treated as a fresh recovery attempt.
 
-All detection logic is pure (no I/O) and lives in `verification-logic.ts`.
-All scheduling / timer logic lives in `session-manager.ts`.
+## UI events
 
----
-
-## `transientRetryAttempts` and the explicit vs. auto distinction
-
-`retryLastPrompt` accepts `{ auto: boolean }`:
-
-- **`auto: false`** (user clicked Retry): resets `transientRetryAttempts` to 0
-  and calls `cancelPendingAutoRetry(…, "explicit-retry")`. The next failure
-  starts fresh at the 1 s base delay.
-- **`auto: true`** (timer fired): does **not** touch `transientRetryAttempts`.
-  If the retry itself ends in another overload, `maybeAutoRetryTransient` will
-  find the counter already incremented and schedule a longer delay.
-
-This is intentional: human intervention gets a fresh budget; the auto path must
-grow toward the 5-minute cap or the backoff serves no purpose.
-
----
-
-## Timer lifecycle — when pending retries are cancelled
-
-A pending auto-retry timer is cleared (and `auto_retry_cancelled` broadcast)
-in all of these situations:
-
-| Trigger | Reason string |
-|---------|---------------|
-| User sends a new prompt | `"new-prompt"` |
-| User clicks the Retry button (explicit retry) | `"explicit-retry"` |
-| Session is terminated | `"terminated"` |
-| Gateway shuts down (all sessions) | `"shutdown"` |
-
-The `"shutdown"` case does not broadcast to clients (WebSocket is already torn
-down).
-
----
-
-## UI: auto-retry banner
-
-When a retry is scheduled the server broadcasts a WebSocket event:
+The server emits `auto_retry_pending` while a retry timer is waiting:
 
 ```json
 {
-  "type": "event",
-  "data": {
-    "type": "auto_retry_pending",
-    "reason": "provider-overload" | "transient-error",
-    "retryDelayMs": 4000,
-    "attempt": 3,
-    "scheduledAt": 1715800000000,
-    "error": "<first 200 chars of error message>"
-  }
+  "type": "auto_retry_pending",
+  "reason": "provider-overload" | "transient-error",
+  "retryDelayMs": 5000,
+  "attempt": 2,
+  "scheduledAt": 1715800000000,
+  "error": "The system encountered an unexpected error."
 }
 ```
 
-The client stores this in `state.autoRetryPending`. `AgentInterface` renders a
-banner below the composer:
+Generic unexpected errors use `reason: "transient-error"` on the wire; the policy distinction is server-side. The client stores the event in `state.autoRetryPending` and renders the retry banner while the session remains `idle`.
 
-> ↻ *Retrying in ~4s due to provider overload…* (attempt #3)
+`lastTurnErrored` remains true while auto-retry is pending, so the normal manual Retry affordance is still available. If the bounded retry budget is exhausted, no new pending event is emitted and the user must click Retry after fixing or accepting the failure.
 
-When the retry fires, or the user intervenes, the server broadcasts
-`auto_retry_cancelled` (fields: `reason: "explicit-retry" | "new-prompt" |
-"terminated" | "shutdown"`, `cancelledAt: number`) and the banner disappears.
-The session status remains `"idle"` throughout — the banner is the only
-visible indicator of the pending wait.
+## Team-lead auto-nudge interaction
 
-**Wire-shape pin.** Both events are typed in the WS protocol union as
-`AutoRetryPendingEvent` / `AutoRetryCancelledEvent` exported from
-`src/server/ws/protocol.ts`. The producer (`session-manager.ts`) and consumer
-(`src/app/remote-agent.ts`) both rely on this typing — no runtime `typeof`
-guards on the consumer side. If you need to add or rename a field, update the
-protocol types first; both ends will fail to type-check until they agree.
+Team leads rely on automatic nudges to resume work after child-agent or gate activity. `TeamManager` uses `nudgePending` to avoid flooding a lead with duplicate prompts, but that guard must only stay set when a lead turn actually starts.
 
----
+Auto-nudge delivery now clears or avoids sticky `nudgePending` when delivery does not start a turn, including:
 
-## Testing
+- `enqueuePrompt()` throws synchronously;
+- the async delivery rejects;
+- the prompt parks behind an errored/capped session;
+- delivery resolves as queued while the team lead remains idle.
 
-Three unit test files cover this feature, all runnable via `npm run test:unit`:
+`agent_start` still clears `nudgePending` for the normal success path. This prevents an errored retry or parked nudge from permanently suppressing later team-lead nudges.
 
-**`tests/backoff-delay.test.ts`** — pins `nextBackoffDelay` in isolation:
-- Correct doubling sequence (1 s, 2 s, 4 s, …)
-- Cap enforcement at `maxMs` before and after jitter
-- Jitter bounds (±20% across a sweep of deterministic `random()` values)
-- Finite, non-negative output even for very large attempt counts (no `Infinity`/`NaN`)
+## Tests
 
-**`tests/auto-retry-policy.test.ts`** — pins the end-to-end policy decision
-tree (`decideRetryPolicy` mirrors `maybeAutoRetryTransient`'s logic using the
-same exported building blocks):
-- Overload / rate-limit errors retry indefinitely past the 3-attempt bounded cap
-- HTTP 429/529 status phrasings are classified as provider-backoff
-- Non-provider transient errors stop after attempt 3
-- Non-transient errors produce no retry
+Relevant unit coverage runs under `npm run test:unit`:
 
-**`tests/queue-dispatch.spec.ts`** — integration-level pins on
-`SessionManager`-style simulation:
-- Explicit `retryLastPrompt` clears `pendingAutoRetryTimer`
-- Explicit retry resets `transientRetryAttempts`; auto retry preserves it
-- Provider-overload error retries past the 3-attempt non-provider cap
-
----
-
-## E2E harness: canonical path helper
-
-The E2E test harnesses (`gateway-harness`, `in-process-harness`) were updated
-alongside this feature to fix a macOS path-canonicalization issue unrelated to
-retry logic but discovered during the same work.
-
-On macOS, `os.tmpdir()` returns `/var/folders/…` which is a symlink to
-`/private/var/folders/…`. `POST /api/projects` rejects a symlinked `rootPath`
-unless `acceptCanonical: true` is supplied. The harnesses were silently eating
-the resulting 400, leaving the gateway with zero registered projects at startup.
-
-The fix: `apiFetch` in `tests/e2e/e2e-setup.ts` now intercepts every `POST
-/api/projects` call, resolves `rootPath` through `realpathSync`, and
-automatically adds `acceptCanonical: true`. Tests that intentionally exercise
-the 400 path use `rawApiFetch`, which bypasses this interceptor. The opt-out
-marker `__e2e_no_accept_canonical: true` is also reserved for future negative
-tests routed through `apiFetch`.
+- `tests/backoff-delay.test.ts` pins `nextBackoffDelay()` math, cap handling, and jitter bounds.
+- `tests/auto-retry-policy.test.ts` covers provider overload, JSON/network transient retries, generic unexpected retries at 1 s / 5 s / 60 s, retry exhaustion, non-retryable generic-looking exclusions, and dispatch through the existing auto Retry path.
+- `tests/queue-dispatch.spec.ts` covers retry-counter preservation/reset and pending timer cancellation around prompt dispatch.
+- `tests/team-manager-idle-nudge-backoff.test.ts` covers `nudgePending` clearing when a team-lead auto-nudge parks instead of starting a turn.
