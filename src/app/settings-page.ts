@@ -48,6 +48,7 @@ import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog, confirmAction } from "./dialogs.js";
+import { ACCOUNT_OAUTH_PROVIDERS, clearDismissedAccountOAuthExpiryRemindersForProvider, type AccountOAuthProviderId } from "./account-oauth-providers.js";
 import "../ui/components/ProviderKeyInput.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
@@ -2922,33 +2923,8 @@ function renderDirectoriesTab() {
 // `google` is reserved for the Google AI Studio / Gemini Developer API-key
 // provider rendered in Settings → Models → Provider API Keys; it is NEVER an
 // Account-tab OAuth id. See docs/design/google-oauth-settings-ux.md.
-type AccountProviderId = "anthropic" | "openai-codex" | "google-gemini-cli";
-
-const ACCOUNT_PROVIDERS: Array<{
-	id: AccountProviderId;
-	title: string;
-	description: string;
-	authenticatedLabel: string;
-}> = [
-	{
-		id: "anthropic",
-		title: "Anthropic OAuth",
-		description: "OAuth credentials used by agent sessions to access the Anthropic API. Re-authenticate to refresh expired tokens or switch accounts.",
-		authenticatedLabel: "Authenticated",
-	},
-	{
-		id: "openai-codex",
-		title: "OpenAI OAuth",
-		description: "OAuth credentials used by agent sessions to access ChatGPT subscription GPT models through the OpenAI Codex provider.",
-		authenticatedLabel: "Authenticated",
-	},
-	{
-		id: "google-gemini-cli",
-		title: "Google OAuth",
-		description: "Connect your Google account to run Gemini (Code Assist) in agent sessions. This account path is unofficial and depends on your account's Code Assist quota and Google's terms — separate from a Google AI Studio API key. Re-authenticate to refresh expired tokens or switch accounts.",
-		authenticatedLabel: "Authenticated",
-	},
-];
+type AccountProviderId = AccountOAuthProviderId;
+const ACCOUNT_PROVIDERS = ACCOUNT_OAUTH_PROVIDERS;
 
 let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
 let accountLoading = false;
@@ -3002,6 +2978,7 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	try {
 		const success = await openOAuthDialog(provider);
 		if (success) {
+			clearDismissedAccountOAuthExpiryRemindersForProvider(provider);
 			// Refresh status after successful re-auth
 			accountStatus = null;
 			loadAccountStatus();
@@ -3012,14 +2989,8 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	}
 }
 
-const ACCOUNT_LOGOUT_LABELS: Record<AccountProviderId, string> = {
-	anthropic: "Anthropic",
-	"openai-codex": "OpenAI",
-	"google-gemini-cli": "Google",
-};
-
 async function handleAccountLogout(provider: AccountProviderId): Promise<void> {
-	const label = ACCOUNT_LOGOUT_LABELS[provider] ?? provider;
+	const label = ACCOUNT_PROVIDERS.find((accountProvider) => accountProvider.id === provider)?.label ?? provider;
 	const confirmed = await confirmAction(
 		`Log out of ${label}?`,
 		`Agent sessions will lose access to ${label} models until you log in again.`,
