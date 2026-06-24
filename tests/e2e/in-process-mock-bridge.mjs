@@ -18,9 +18,22 @@
  * in-process move — a single Node process can host hundreds of independent
  * "agent" instances cheaply.
  */
-import { MockAgentCore } from "./mock-agent-core.mjs";
+import { MockAgentCore, mockModelFromString } from "./mock-agent-core.mjs";
 
 export const IN_PROCESS_MOCK_SENTINEL = "<in-process-mock>";
+
+function lastModelArg(args = []) {
+	let model;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--model" && i + 1 < args.length) {
+			model = args[++i];
+		} else if (typeof arg === "string" && arg.startsWith("--model=")) {
+			model = arg.slice("--model=".length);
+		}
+	}
+	return mockModelFromString(model) ? model : undefined;
+}
 
 export class InProcessMockBridge {
 	constructor(options = {}) {
@@ -41,9 +54,11 @@ export class InProcessMockBridge {
 		// spawn() does in the real bridge). The core reads only env values,
 		// not argv, so we pass cwd directly via opts.
 		const env = { ...process.env, ...(this.options.env || {}) };
+		const argModel = lastModelArg(this.options.args);
 		this._agent = new MockAgentCore({
 			cwd: this.options.cwd || process.cwd(),
 			env,
+			initialModel: argModel || this.options.initialModel,
 			onEvent: (evt) => this._emit(evt),
 		});
 		this._running = true;
