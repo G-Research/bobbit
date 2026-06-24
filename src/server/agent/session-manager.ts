@@ -2894,6 +2894,7 @@ export class SessionManager {
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			provider,
 			model: bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
 	}
 
@@ -4772,6 +4773,8 @@ export class SessionManager {
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
+			spawnPinnedModel: bridgeOptions.initialModel,
+			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreePushPolicy: ps.worktreePushPolicy,
@@ -4836,6 +4839,13 @@ export class SessionManager {
 		if (!switchResp.success) {
 			await rpcClient.stop();
 			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+
+		try {
+			await this.tryAutoSelectModel(session);
+		} catch (err) {
+			await rpcClient.stop();
+			throw err;
 		}
 
 		broadcastStatus(session, "idle");
@@ -5702,6 +5712,83 @@ export class SessionManager {
 		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
 		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 
+		// Spawn-pinned models are explicit selections too (restore/respawn persisted
+		// model, role/default pin from initial setup, or caller-supplied initialModel).
+		// Verify the actual bound model before the session becomes idle/live. If the
+		// pinned model is stale or unavailable, never fall through to role/default
+		// resolution, AIGW discovery, or SDK/provider defaults; with the opt-in policy
+		// try only default.sessionModel.
+		const pinnedModel = session.spawnPinnedModel;
+		if (pinnedModel) {
+			let pinnedModelError;
+			if (!isSessionSelectableModelString(pinnedModel)) {
+				pinnedModelError = new Error(`spawn-pinned model "${pinnedModel}" is not session-selectable`);
+			} else {
+				try {
+					await applyModelString(session.rpcClient, pinnedModel, {
+						sessionManager: this,
+						sessionId: session.id,
+						contextLabel: "spawn-pinned model",
+						skipSetModel: true,
+					});
+					this._writeModelNameFile(session.id, pinnedModel);
+					const slash = pinnedModel.indexOf("/");
+					const provider = pinnedModel.slice(0, slash);
+					const modelId = pinnedModel.slice(slash + 1);
+					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+					broadcast(session.clients, {
+						type: "state",
+						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+					});
+					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Verified spawn-pinned model "${pinnedModel}" for session ${session.id}`);
+					return;
+				} catch (err) {
+					pinnedModelError = err;
+				}
+			}
+
+			if (allowSessionModelFallback) {
+				let controlledFallbackError;
+				if (!fallbackSessionModel) {
+					controlledFallbackError = new Error("controlled model fallback is enabled but default.sessionModel is unset");
+				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
+				} else if (fallbackSessionModel === pinnedModel) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed spawn-pinned model "${pinnedModel}"`);
+				}
+				if (!controlledFallbackError && fallbackSessionModel) {
+					try {
+						const pinnedMsg = pinnedModelError instanceof Error ? pinnedModelError.message : String(pinnedModelError);
+						console.warn(`[session-manager] Spawn-pinned model "${pinnedModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${fallbackSessionModel}": ${pinnedMsg}`);
+						await applyModelString(session.rpcClient, fallbackSessionModel, {
+							sessionManager: this,
+							sessionId: session.id,
+							contextLabel: "default.sessionModel fallback",
+						});
+						this._writeModelNameFile(session.id, fallbackSessionModel);
+						const slash = fallbackSessionModel.indexOf("/");
+						const provider = fallbackSessionModel.slice(0, slash);
+						const modelId = fallbackSessionModel.slice(slash + 1);
+						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+						broadcast(session.clients, {
+							type: "state",
+							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+						});
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
+						return;
+					} catch (fallbackErr) {
+						controlledFallbackError = fallbackErr;
+					}
+				}
+				const originalMsg = pinnedModelError instanceof Error ? pinnedModelError.message : String(pinnedModelError);
+				const fallbackMsg = controlledFallbackError instanceof Error ? controlledFallbackError.message : String(controlledFallbackError);
+				throw new Error(`spawn-pinned model "${pinnedModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+			}
+
+			console.error(`[session-manager] Spawn-pinned model "${pinnedModel}" failed for ${session.id}:`, pinnedModelError);
+			throw pinnedModelError;
+		}
+
 		// 0. Role override (highest explicit precedence). If it fails, never fall
 		// through to discovery/provider defaults. With the opt-in policy, try only
 		// default.sessionModel as the controlled fallback target.
@@ -6516,6 +6603,13 @@ export class SessionManager {
 		session.allowedTools = effectiveAllowedNames;
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory });
+
+		try {
+			await this.tryAutoSelectModel(session);
+		} catch (err) {
+			await rpcClient.stop();
+			throw err;
+		}
 
 		broadcastStatus(session, "idle");
 
@@ -7834,6 +7928,13 @@ export class SessionManager {
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
 
+			try {
+				await this.tryAutoSelectModel(session);
+			} catch (err) {
+				await rpcClient.stop();
+				throw err;
+			}
+
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
@@ -7931,7 +8032,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

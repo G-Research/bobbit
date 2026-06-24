@@ -17,12 +17,14 @@ import {
 	type ReviewModelRpc,
 } from "../src/server/agent/review-model-override.js";
 import { generateImage } from "../src/server/agent/image-generation.js";
+import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
+const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
@@ -101,6 +103,8 @@ async function exerciseAutoSelect(options: {
 	prefs: Prefs;
 	roleModel?: string;
 	failModels?: string[];
+	spawnPinnedModel?: string;
+	initialBound?: { provider: string; id: string };
 }): Promise<{
 	error: unknown;
 	setModelCalls: ModelPair[];
@@ -111,7 +115,7 @@ async function exerciseAutoSelect(options: {
 	const setModelCalls: ModelPair[] = [];
 	const persisted: Array<Record<string, unknown>> = [];
 	const modelFiles: string[] = [];
-	let bound: { provider: string; id: string } | undefined;
+	let bound: { provider: string; id: string } | undefined = options.initialBound;
 	const failModels = new Set(options.failModels ?? []);
 	const client = { messages: [] as any[] };
 	const manager = {
@@ -126,7 +130,7 @@ async function exerciseAutoSelect(options: {
 	const session = {
 		id: "session-under-test",
 		role: "coder",
-		spawnPinnedModel: undefined,
+		spawnPinnedModel: options.spawnPinnedModel,
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -295,6 +299,36 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.equal(failingDefault.persisted.length, 0);
 	});
+
+	it("restore/respawn spawn-pinned model is verified and fails visibly when fallback is off", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "aigw.baseUrl": "https://aigw.test" },
+			spawnPinnedModel: "anthropic/stale-persisted",
+			initialBound: { provider: "unset", id: "unset" },
+		});
+
+		assert.ok(result.error, "controlled model fallback policy: stale spawn-pinned persisted model must fail when fallback is off");
+		assert.deepEqual(result.setModelCalls, [], "spawn-pinned verification must not call setModel for the failed selected model or AIGW");
+		assert.equal(result.persisted.length, 0);
+		assert.equal(result.broadcastModels.length, 0);
+	});
+
+	it("enabled setting: failing restore/respawn spawn-pinned model falls back only to default.sessionModel", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "openai/fallback-session",
+				"aigw.baseUrl": "https://aigw.test",
+			},
+			spawnPinnedModel: "anthropic/stale-persisted",
+			initialBound: { provider: "unset", id: "unset" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["openai", "fallback-session"]]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "openai", modelId: "fallback-session" }]);
+		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
+	});
 });
 
 describe("controlled model fallback policy — session setup visibility", () => {
@@ -327,6 +361,86 @@ describe("controlled model fallback policy — session setup visibility", () => 
 			postSpawnIdx < idleIdx,
 			"controlled model fallback policy: worktree sessions must enforce model selection before becoming idle/live",
 		);
+	});
+});
+
+describe("controlled model fallback policy — restore/respawn lifecycle", () => {
+	it("restore verifies spawn-pinned persisted model before broadcasting idle", () => {
+		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const body = extractMethodBody(src, "private async restoreSession(ps: PersistedSession)");
+
+		assert.match(
+			body,
+			/spawnPinnedModel:\s*bridgeOptions\.initialModel/,
+			"controlled model fallback policy: restored persisted initialModel must be carried as spawnPinnedModel for read-back verification",
+		);
+		const switchIdx = body.indexOf("if (!switchResp.success)");
+		const verifyIdx = body.indexOf("await this.tryAutoSelectModel(session)");
+		const idleIdx = body.indexOf('broadcastStatus(session, "idle")', verifyIdx);
+		assert.ok(switchIdx >= 0 && verifyIdx > switchIdx, "restore must verify model after switch_session succeeds");
+		assert.ok(idleIdx > verifyIdx, "restore must verify controlled fallback policy before broadcasting idle");
+	});
+
+	it("role assignment and force-abort respawns verify spawn-pinned model before idle", () => {
+		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		for (const [label, marker] of [
+			["role assignment", "): Promise<boolean> {\n\t\tconst session = this.sessions.get(id);"],
+			["force abort", "async forceAbort(id: string"],
+		] as const) {
+			const body = extractMethodBody(src, marker);
+			const pinnedIdx = body.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel");
+			const verifyIdx = body.indexOf("await this.tryAutoSelectModel(session)", pinnedIdx);
+			const idleIdx = body.indexOf('broadcastStatus(session, "idle")', verifyIdx);
+			assert.ok(pinnedIdx >= 0, `${label}: respawn must carry initialModel as spawnPinnedModel`);
+			assert.ok(verifyIdx > pinnedIdx, `${label}: respawn must verify spawn-pinned model`);
+			assert.ok(idleIdx > verifyIdx, `${label}: respawn must verify model before broadcasting idle`);
+		}
+	});
+});
+
+describe("controlled model fallback policy — direct host provider env", () => {
+	it("includes fallback provider credentials only when controlled fallback is enabled", () => {
+		const makePrefs = (allow: boolean) => ({
+			get(key: string) {
+				return ({
+					allowSessionModelFallback: allow,
+					"default.sessionModel": "openai/fallback-session",
+					"providerKey.anthropic": "anthropic-key",
+					"providerKey.openai": "openai-key",
+					"providerKey.xai": "xai-key",
+				} as Record<string, unknown>)[key];
+			},
+		});
+
+		const enabledPrefs = makePrefs(true);
+		assert.deepEqual(
+			resolveHostAgentProviderEnv(enabledPrefs as any, {
+				model: "anthropic/selected-session",
+				providers: fallbackProviderAllowlistFromPrefs(enabledPrefs as any),
+			}),
+			{ ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key" },
+			"enabled policy must allow credentials for selected provider and default.sessionModel fallback provider only",
+		);
+
+		const disabledPrefs = makePrefs(false);
+		assert.deepEqual(
+			resolveHostAgentProviderEnv(disabledPrefs as any, {
+				model: "anthropic/selected-session",
+				providers: fallbackProviderAllowlistFromPrefs(disabledPrefs as any),
+			}),
+			{ ANTHROPIC_API_KEY: "anthropic-key" },
+			"disabled policy must not inject fallback provider credentials",
+		);
+	});
+
+	it("normal setup, restore/respawn, and legacy verification use the fallback provider allowlist", () => {
+		const setupSrc = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
+		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const verificationSrc = readFileSync(VERIFICATION_HARNESS_SOURCE, "utf-8");
+
+		assert.match(setupSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\)/);
+		assert.match(managerSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
+		assert.match(verificationSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 	});
 });
 
