@@ -137,8 +137,9 @@ test.describe("host.agents — sandbox / credential inheritance (no escalation)"
 			expect((host as Record<string, unknown>).fetch).toBeUndefined();
 			expect((host.agents as Record<string, unknown>).fetch).toBeUndefined();
 			expect((host.agents as Record<string, unknown>).token).toBeUndefined();
-			// The agents surface is EXACTLY the six poll-based verbs.
-			expect(Object.keys(host.agents).sort()).toEqual(["dismiss", "list", "prompt", "read", "spawn", "status"]);
+			// The agents surface is the six poll-based verbs plus the experiment-runner
+			// seam `spawnGoal` (7th verb, same `agents` capability).
+			expect(Object.keys(host.agents).sort()).toEqual(["dismiss", "list", "prompt", "read", "spawn", "spawnGoal", "status"]);
 		} finally {
 			await deleteSession(owner);
 		}

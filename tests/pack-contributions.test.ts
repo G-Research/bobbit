@@ -76,6 +76,11 @@ describe("validateManifest (§1.2)", () => {
 		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names: ["bundle", "publish"] } });
 		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names: ["bundle", "publish"] });
 	});
+	it("accepts camelCase route names (e.g. defineExperiment)", () => {
+		const names = ["defineExperiment", "getExperiment", "saveDashboard", "listWidgets"];
+		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names } });
+		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names });
+	});
 	it("still rejects contents.mcp at schema 1; carries no stores schema", () => {
 		const problems: string[] = [];
 		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, mcp: ["x"] } }, problems), null);
@@ -244,6 +249,13 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		assert.equal(c.panels.length, 1);
 		assert.equal(c.entrypoints.length, 1);
 		assert.deepEqual(c.routes?.names, ["bundle"]);
+	});
+
+	it("accepts camelCase route names in the allowlist", () => {
+		const root = packRoot("camel-routes", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		const c = loadPackContributions(root, manifest("p", { routes: { module: "lib/r.mjs", names: ["defineExperiment", "projectCost", "saveDashboard"] } }));
+		assert.deepEqual(c.routes?.names, ["defineExperiment", "projectCost", "saveDashboard"]);
 	});
 });
 

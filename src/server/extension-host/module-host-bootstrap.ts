@@ -451,6 +451,9 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			list: () => callHost(["agents", "list"], []),
 			read: (childSessionId: string, opts?: unknown) => callHost(["agents", "read"], [childSessionId, opts]),
 			status: (childSessionId: string) => callHost(["agents", "status"], [childSessionId]),
+			// EXPERIMENT-RUNNER SEAM: the 7th verb — launch a child GOAL carrying a
+			// per-arm treatment. Marshalled to the parent like the poll verbs.
+			spawnGoal: (spawnOpts: unknown) => callHost(["agents", "spawnGoal"], [spawnOpts]),
 		},
 	};
 }

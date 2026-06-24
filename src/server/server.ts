@@ -28,6 +28,7 @@ import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
+import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
@@ -337,6 +338,7 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { seedBuiltinPackDefaults } from "./agent/builtin-pack-defaults.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
@@ -1184,6 +1186,12 @@ export function createGateway(config: GatewayConfig) {
 	const preferencesStore = new PreferencesStore(stateDir);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
 	const projectConfigStore = new ProjectConfigStore(configDir);
+	// One-time boot seed: first-party built-ins that ship DISABLED by default
+	// (opt-in). Subtractive activation model means built-ins are otherwise
+	// enabled, so we seed a server-scope pack_activation entry disabling all of
+	// the pack's toggleable entities — exactly once, guarded by a durable marker
+	// so enabling via the Market toggle stays sticky. Defensive: never throws.
+	seedBuiltinPackDefaults({ stateDir, store: projectConfigStore });
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -6331,6 +6339,15 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
+			// nested-goal creation closure (parent-derived, cap-aware team start).
+			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
+				sessionManager,
+				projectContextManager,
+				verificationHarness,
+				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+				broadcastToAll,
+			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
@@ -6719,6 +6736,15 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
+			// nested-goal creation closure (parent-derived, cap-aware team start).
+			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
+				sessionManager,
+				projectContextManager,
+				verificationHarness,
+				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+				broadcastToAll,
+			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});

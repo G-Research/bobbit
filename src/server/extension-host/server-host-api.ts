@@ -29,6 +29,13 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // import is erased at runtime (no module cycle); the gateway injects the live
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
 import type { OrchestrationCore } from "../agent/orchestration-core.js";
+// EXPERIMENT-RUNNER SEAM: `host.agents.spawnGoal` launches a child goal carrying
+// a per-arm treatment. These imports are TYPE-ONLY (erased at runtime — no module
+// cycle); the gateway injects the live `spawnChildGoal` closure through
+// CreateServerHostApiOptions.
+import type { SpawnChildGoalOpts } from "../agent/experiment-spawn-goal.js";
+import type { Role } from "../agent/role-store.js";
+import type { Workflow } from "../agent/workflow-store.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -92,6 +99,37 @@ export interface ServerHostAgentsApi {
 	read(childSessionId: string, opts?: ReadTranscriptOpts): Promise<unknown>;
 	/** Poll an owned host.agents child's live status. */
 	status(childSessionId: string): Promise<{ status: "idle" | "streaming" | "queued" | "preparing" | "terminated" }>;
+	/** EXPERIMENT-RUNNER SEAM (the 7th `host.agents` verb): launch a CHILD GOAL of
+	 *  the bound session's effective goal, carrying a distinct per-arm treatment
+	 *  (`metadata` + `inlineRoles` + workflow). Returns the new goal id. The child
+	 *  goal is created via GoalManager.createGoal, its worktree provisioned, and its
+	 *  team start requested through the per-root scheduler — exactly the lifecycle
+	 *  the spawn-child REST route drives. Throws when the bound session is itself a
+	 *  child (no grandchildren), has no effective goal, when the spawn backend is
+	 *  unavailable, or when the goal-level nesting/subgoal policy rejects the spawn.
+	 *  Rides `capabilities.agents` (NO new flag); feature-detect via
+	 *  `typeof ctx.host.agents.spawnGoal === "function"`. */
+	spawnGoal(opts: {
+		/** Visible goal title. Required; non-empty after trim. */
+		title: string;
+		/** Goal spec (markdown). Required; non-empty after trim. */
+		spec: string;
+		/** Idempotency key unique within the parent goal. A re-call with the same
+		 *  key returns the existing child id. */
+		runKey: string;
+		/** Optional caller assertion only. The server ALWAYS derives the real parent
+		 *  from the bound session's effective goal and rejects a mismatch. */
+		parentGoalId?: string;
+		/** Per-arm namespaced metadata (the treatment), deep-merged over the
+		 *  experiment goal's effective metadata across the child sub-tree. */
+		metadata?: Record<string, unknown>;
+		/** Per-arm inline roles, merged with the parent's (child wins per name). */
+		inlineRoles?: Record<string, Role>;
+		/** Workflow selection: `workflowId` (store lookup) or `workflow` (inline
+		 *  snapshot, highest precedence). Absent ⇒ inherit the parent's workflow. */
+		workflowId?: string;
+		workflow?: Workflow;
+	}): Promise<{ goalId: string }>;
 }
 
 /** Mirrors HostSessionApi server-side, but READ-ONLY. Slice B2 implements the
@@ -185,6 +223,15 @@ export interface CreateServerHostApiOptions {
 	 *  gateway as `sessionManager.getSession(id)?.status`. Absent in non-gateway
 	 *  contexts → status reports "preparing". */
 	readChildStatus?: (sessionId: string) => string | undefined;
+	/** EXPERIMENT-RUNNER SEAM: create a CHILD GOAL of the owner session's effective
+	 *  goal, carrying per-arm metadata + inlineRoles + workflow. Injected by the
+	 *  gateway (server.ts), which owns the per-project GoalManager + team-start
+	 *  scheduler. Bound to the owner session id; there is NO parameter for a foreign
+	 *  session or an arbitrary parent goal. Absent in non-gateway contexts ⇒
+	 *  `host.agents.spawnGoal` throws a clear "backend unavailable". The host stays a
+	 *  thin shell — all goal/worktree logic lives in this closure (so the host keeps
+	 *  no GoalManager/ProjectContext import, avoiding a module cycle). */
+	spawnChildGoal?: (ownerSessionId: string, opts: SpawnChildGoalOpts) => Promise<{ goalId: string }>;
 	/** Least-privilege capability mask (EP provider hooks). When supplied, the host
 	 *  reports ONLY the capabilities set `true` here and DENIES the rest — each
 	 *  masked-off namespace throws a clear "not available" error rather than
@@ -289,6 +336,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	const ownerSessionId = opts.sessionId;
 	const core = opts.orchestrationCore as OrchestrationCore | undefined;
 	const readChildStatus = opts.readChildStatus;
+	const spawnChildGoal = opts.spawnChildGoal;
 	const requireCore = (): OrchestrationCore => {
 		if (!core) throw new Error("host.agents backend unavailable");
 		return core;
@@ -360,6 +408,38 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		status: async (childSessionId) => {
 			requireOwnAgentsChild(childSessionId);
 			return { status: mapStatus(readChildStatus?.(childSessionId)) };
+		},
+		// EXPERIMENT-RUNNER SEAM: launch a child GOAL (not a child session) carrying a
+		// per-arm treatment. The host stays a thin shell — it reuses A's recursion
+		// guard (assertCanSpawn) and validates the required strings, then delegates all
+		// goal/worktree logic to the injected gateway closure.
+		spawnGoal: async (goalOpts) => {
+			const c = requireCore();
+			// Recursion belt: a bound CHILD session may not spawn goals (no grandchild
+			// principals), surfaced as a capability-specific message.
+			try {
+				c.assertCanSpawn(ownerSessionId);
+			} catch {
+				throw new Error("host.agents.spawnGoal is not permitted for a child session");
+			}
+			if (!spawnChildGoal) throw new Error("host.agents.spawnGoal backend unavailable");
+			const spec = typeof goalOpts?.spec === "string" ? goalOpts.spec.trim() : "";
+			const title = typeof goalOpts?.title === "string" ? goalOpts.title.trim() : "";
+			const runKey = typeof goalOpts?.runKey === "string" ? goalOpts.runKey.trim() : "";
+			if (!spec) throw new Error("host.agents.spawnGoal: spec is required");
+			if (!title) throw new Error("host.agents.spawnGoal: title is required");
+			if (!runKey) throw new Error("host.agents.spawnGoal: runKey is required");
+			return spawnChildGoal(ownerSessionId, {
+				spec,
+				title,
+				runKey,
+				// assertion only; the closure verifies it against the derived parent.
+				parentGoalId: goalOpts.parentGoalId,
+				metadata: goalOpts.metadata,
+				inlineRoles: goalOpts.inlineRoles,
+				workflowId: goalOpts.workflowId,
+				workflow: goalOpts.workflow,
+			});
 		},
 	};
 
