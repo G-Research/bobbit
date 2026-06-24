@@ -270,17 +270,17 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
   1. `[session-manager] Session … implicit unstick from enqueuePrompt (consecutiveErrorTurns=…)` or `… from deliverLiveSteer` log lines — if missing, the call didn't reach the helper. Steers must route through `SessionManager.deliverLiveSteer()` (see the abort/steer section above).
   2. `consecutiveErrorTurns` on the session info — if it's ≥ 3, the cap is parking. Click Retry or fix the upstream.
   3. Team-lead nudges to an errored worker: no longer suppressed in `team-manager.ts` (the old `if (teamLeadSession.lastTurnErrored) return;` guard was removed). SessionManager is now the single source of truth for error-state policy.
-- **Related**: pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`) handles transient in-band recovery. See [docs/auto-retry.md](auto-retry.md) for the full policy. The implicit-unstick path is the structural fallback when the whitelist doesn't match.
+- **Related**: auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`) handles provider backoff, JSON/network transients, and retryable generic unexpected/internal/system errors. See [docs/auto-retry.md](auto-retry.md) for the full policy. The implicit-unstick path is the structural fallback when auto-retry does not apply or has exhausted its bounded budget.
 
-## Provider overload / rate-limit: session appears frozen with no retry banner
+## Auto-retryable error: session appears frozen with no retry banner
 
-- **Symptom**: turn ended with `overloaded_error` or `rate_limit_error` (or `HTTP 429/529`); session is `idle` but the UI shows no retry banner and nothing happens.
-- **Expected behaviour**: `maybeAutoRetryTransient` schedules an exponential-backoff retry automatically and broadcasts `auto_retry_pending`. The banner reads *"Retrying in ~Xs due to provider overload…"*.
+- **Symptom**: turn ended with `overloaded_error`, `rate_limit_error`, `HTTP 429/529`, or a sanitized message such as `The system encountered an unexpected error`; session is `idle` but the UI shows no retry banner and nothing happens.
+- **Expected behaviour**: `maybeAutoRetryTransient` schedules auto-retry and broadcasts `auto_retry_pending`. Provider overload uses long capped exponential backoff; generic unexpected errors use the bounded 1 s / 5 s / 60 s policy.
 - **Diagnosis**:
-  1. Check server log for `[session-manager] Session … hit provider overload/rate-limit`. If missing, `isProviderBackoffError` didn't match — verify the error string contains `overloaded_error`, `rate_limit_error`, or an HTTP 429/529 phrase.
+  1. Check server logs for `[session-manager] Session … hit provider overload/rate-limit`, `… turn failed transiently`, or `… retryable generic error`. If none appear, the classifier did not match or a non-retryable exclusion matched first.
   2. Check `session.pendingAutoRetryTimer` is set (non-null). If the timer fired but the retry itself failed again, look for `[session-manager] Auto-retry failed for session` in the log.
   3. Banner missing despite `auto_retry_pending` being broadcast? Check `state.autoRetryPending` in `remote-agent.ts` — the `case "auto_retry_pending"` handler must have run. If it did, verify `AgentInterface` re-renders on `auto_retry_pending` events (see `AgentInterface._handleEvent`).
-- See [docs/auto-retry.md](auto-retry.md) for the full policy, cancellation triggers, and test coverage.
+- See [docs/auto-retry.md](auto-retry.md) for the full policy, cancellation triggers, non-retryable exclusions, and test coverage.
 
 ## "Setting up worktree…" banner missing on a brand-new session / preparing UX absent
 
