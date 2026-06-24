@@ -48,7 +48,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -512,6 +512,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	if (!plan.sandboxed) {
 		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
 			model: plan.bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(ctx.preferencesStore),
 		});
 	}
 	if (plan.initialThinkingLevel) {

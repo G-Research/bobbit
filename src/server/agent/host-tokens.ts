@@ -305,10 +305,20 @@ export interface HostAgentProviderEnvOptions {
 	providers?: string[];
 }
 
-function providerFromModel(model: string | undefined): string | undefined {
+export function providerFromModel(model: string | undefined): string | undefined {
 	if (!model || !model.includes("/")) return undefined;
 	const provider = model.split("/", 1)[0]?.trim();
 	return provider || undefined;
+}
+
+export function controlledFallbackProviderFromPrefs(prefs?: PreferencesStore | null): string | undefined {
+	if (!prefs || prefs.get("allowSessionModelFallback") !== true) return undefined;
+	return providerFromModel(nonEmptyString(prefs.get("default.sessionModel")));
+}
+
+export function fallbackProviderAllowlistFromPrefs(prefs?: PreferencesStore | null): string[] | undefined {
+	const provider = controlledFallbackProviderFromPrefs(prefs);
+	return provider ? [provider] : undefined;
 }
 
 function allowedHostAgentProviders(options?: HostAgentProviderEnvOptions): Set<string> {

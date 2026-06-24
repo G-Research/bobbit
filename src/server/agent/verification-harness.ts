@@ -70,7 +70,7 @@ import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
@@ -3605,6 +3605,7 @@ export class VerificationHarness {
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			model: bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
