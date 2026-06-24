@@ -5699,83 +5699,125 @@ export class SessionManager {
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
+		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
+		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 
-		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
-		// matching the contract used for review/QA sessions: if a user explicitly
-		// pinned a model on a role and it cannot be bound, surface the failure.
+		// 0. Role override (highest explicit precedence). If it fails, never fall
+		// through to discovery/provider defaults. With the opt-in policy, try only
+		// default.sessionModel as the controlled fallback target.
 		const roleModel = this.resolveRoleModel(session);
-		if (roleModel && !isSessionSelectableModelString(roleModel)) {
-			// A role pinned a model that can't run in an agent session (e.g.
-			// google-gemini-cli Code Assist). Binding it would hard-fail the session,
-			// so skip it and fall through to the default/aigw selection instead.
-			console.warn(`[session-manager] Role model "${roleModel}" is not session-selectable for ${session.id} (role=${session.role}); skipping role override.`);
-		} else if (roleModel) {
-			try {
-				await applyModelString(session.rpcClient, roleModel, {
-					sessionManager: this,
-					sessionId: session.id,
-					contextLabel: `role.${session.role}.model`,
-					skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
-				});
-				this._writeModelNameFile(session.id, roleModel);
-				const slash = roleModel.indexOf("/");
-				const provider = roleModel.slice(0, slash);
-				const modelId = roleModel.slice(slash + 1);
-				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-				broadcast(session.clients, {
-					type: "state",
-					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-				});
-				console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
-				return;
-			} catch (err) {
-				console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, err);
-				throw err;
-			}
-		}
-
-		if (!this.preferencesStore) return;
-
-		// Check explicit preference first (works for both aigw and public providers)
-		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref && !isSessionSelectableModelString(sessionModelPref)) {
-			// A stale/restored preference points at a not-session-runnable model
-			// (e.g. google-gemini-cli Code Assist). Skip it and fall through to aigw
-			// auto-selection rather than attempting an unrunnable bind.
-			console.warn(`[session-manager] default.sessionModel "${sessionModelPref}" is not session-selectable for ${session.id}; falling back.`);
-		} else if (sessionModelPref) {
-			const slash = sessionModelPref.indexOf("/");
-			if (slash > 0 && slash < sessionModelPref.length - 1) {
-				const provider = sessionModelPref.slice(0, slash);
-				const modelId = sessionModelPref.slice(slash + 1);
-				const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+		if (roleModel) {
+			let roleModelError;
+			if (!isSessionSelectableModelString(roleModel)) {
+				roleModelError = new Error(`role.${session.role}.model "${roleModel}" is not session-selectable`);
+			} else {
 				try {
-					// Route through applyModelString to preserve the hard-fail-on-mismatch
-					// contract (read-back via getState()) regardless of whether we skipped
-					// the redundant setModel RPC because the spawn already pinned the same model.
-					await applyModelString(session.rpcClient, sessionModelPref, {
+					await applyModelString(session.rpcClient, roleModel, {
 						sessionManager: this,
 						sessionId: session.id,
-						contextLabel: "default.sessionModel",
-						skipSetModel: preSpawnPinned,
+						contextLabel: `role.${session.role}.model`,
+						skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
 					});
-					this._writeModelNameFile(session.id, sessionModelPref);
+					this._writeModelNameFile(session.id, roleModel);
+					const slash = roleModel.indexOf("/");
+					const provider = roleModel.slice(0, slash);
+					const modelId = roleModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
 					broadcast(session.clients, {
 						type: "state",
 						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
 					});
+					console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
 					return;
 				} catch (err) {
-					console.warn(`[session-manager] Preferred model "${sessionModelPref}" failed, falling back:`, err);
+					roleModelError = err;
 				}
-			} else {
-				console.warn(`[session-manager] Malformed default.sessionModel preference: "${sessionModelPref}", ignoring`);
+			}
+
+			if (allowSessionModelFallback) {
+				let controlledFallbackError;
+				if (!fallbackSessionModel) {
+					controlledFallbackError = new Error("controlled model fallback is enabled but default.sessionModel is unset");
+				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
+				} else if (fallbackSessionModel === roleModel) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed role model "${roleModel}"`);
+				}
+				if (!controlledFallbackError && fallbackSessionModel) {
+					try {
+						const roleMsg = roleModelError instanceof Error ? roleModelError.message : String(roleModelError);
+						console.warn(`[session-manager] Role model "${roleModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${fallbackSessionModel}": ${roleMsg}`);
+						await applyModelString(session.rpcClient, fallbackSessionModel, {
+							sessionManager: this,
+							sessionId: session.id,
+							contextLabel: "default.sessionModel fallback",
+							skipSetModel: spawnPinned && session.spawnPinnedModel === fallbackSessionModel,
+						});
+						this._writeModelNameFile(session.id, fallbackSessionModel);
+						const slash = fallbackSessionModel.indexOf("/");
+						const provider = fallbackSessionModel.slice(0, slash);
+						const modelId = fallbackSessionModel.slice(slash + 1);
+						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+						broadcast(session.clients, {
+							type: "state",
+							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+						});
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
+						return;
+					} catch (fallbackErr) {
+						controlledFallbackError = fallbackErr;
+					}
+				}
+				const originalMsg = roleModelError instanceof Error ? roleModelError.message : String(roleModelError);
+				const fallbackMsg = controlledFallbackError instanceof Error ? controlledFallbackError.message : String(controlledFallbackError);
+				throw new Error(`role model "${roleModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+			}
+
+			console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, roleModelError);
+			throw roleModelError;
+		}
+
+		if (!this.preferencesStore) return;
+
+		// Check explicit preference first (works for both aigw and public providers).
+		// default.sessionModel itself is not fallback-eligible: any malformed,
+		// non-session-selectable, unavailable, or read-back-mismatched value fails
+		// loudly and never falls through to AIGW or provider defaults.
+		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		if (sessionModelPref) {
+			if (!isSessionSelectableModelString(sessionModelPref)) {
+				throw new Error(`default.sessionModel "${sessionModelPref}" is not session-selectable`);
+			}
+			const slash = sessionModelPref.indexOf("/");
+			const provider = sessionModelPref.slice(0, slash);
+			const modelId = sessionModelPref.slice(slash + 1);
+			const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+			try {
+				// Route through applyModelString to preserve the hard-fail-on-mismatch
+				// contract (read-back via getState()) regardless of whether we skipped
+				// the redundant setModel RPC because the spawn already pinned the same model.
+				await applyModelString(session.rpcClient, sessionModelPref, {
+					sessionManager: this,
+					sessionId: session.id,
+					contextLabel: "default.sessionModel",
+					skipSetModel: preSpawnPinned,
+				});
+				this._writeModelNameFile(session.id, sessionModelPref);
+				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
+				broadcast(session.clients, {
+					type: "state",
+					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+				});
+				return;
+			} catch (err) {
+				console.error(`[session-manager] default.sessionModel "${sessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model:`, err);
+				throw err;
 			}
 		}
 
-		// Fall back to aigw best-ranked model when gateway is configured
+		// Fall back to aigw best-ranked model only when no explicit role/default
+		// session model was selected.
 		const aigwUrl = getAigwUrl(this.preferencesStore);
 		if (!aigwUrl) return;
 
