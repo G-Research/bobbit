@@ -87,7 +87,7 @@ function reminderId(provider: AccountOAuthProviderId, expires: number): string {
 	return `${provider}:${expires}`;
 }
 
-function clearDismissedOAuthExpiryRemindersForProvider(provider: AccountOAuthProviderId): void {
+export function clearDismissedAccountOAuthExpiryRemindersForProvider(provider: AccountOAuthProviderId): void {
 	const dismissed = readDismissedOAuthExpiryReminders();
 	let changed = false;
 	for (const id of [...dismissed]) {
@@ -122,7 +122,7 @@ export async function getExpiredAccountOAuthCredentials(now = Date.now()): Promi
 			if (!res.ok) return null;
 			const status = await res.json() as AccountOAuthStatus;
 			if (status?.authenticated === true) {
-				clearDismissedOAuthExpiryRemindersForProvider(provider.id);
+				clearDismissedAccountOAuthExpiryRemindersForProvider(provider.id);
 				return null;
 			}
 			if (!isExpiredExistingCredential(status, now)) return null;

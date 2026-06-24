@@ -48,7 +48,7 @@ import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog, confirmAction } from "./dialogs.js";
-import { ACCOUNT_OAUTH_PROVIDERS, type AccountOAuthProviderId } from "./account-oauth-providers.js";
+import { ACCOUNT_OAUTH_PROVIDERS, clearDismissedAccountOAuthExpiryRemindersForProvider, type AccountOAuthProviderId } from "./account-oauth-providers.js";
 import "../ui/components/ProviderKeyInput.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
@@ -2978,6 +2978,7 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	try {
 		const success = await openOAuthDialog(provider);
 		if (success) {
+			clearDismissedAccountOAuthExpiryRemindersForProvider(provider);
 			// Refresh status after successful re-auth
 			accountStatus = null;
 			loadAccountStatus();
