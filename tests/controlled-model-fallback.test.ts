@@ -22,6 +22,7 @@ import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
+const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
@@ -293,6 +294,39 @@ describe("controlled model fallback policy — session auto-selection", () => {
 			"controlled model fallback policy: failing fallback target should be tried exactly once, then stop without AIGW",
 		);
 		assert.equal(failingDefault.persisted.length, 0);
+	});
+});
+
+describe("controlled model fallback policy — session setup visibility", () => {
+	it("normal/worktree post-spawn model selection is awaited, not swallowed as a warning", () => {
+		const src = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
+		const postSpawnBody = extractMethodBody(src, "async function postSpawn(session: SessionInfo");
+
+		assert.match(
+			postSpawnBody,
+			/await\s+ctx\.tryAutoSelectModel\(session\)/,
+			"controlled model fallback policy: post-spawn model selection must be awaited so explicit failures reject visibly",
+		);
+		assert.doesNotMatch(
+			postSpawnBody,
+			/tryAutoSelectModel\(session\)\.catch[\s\S]*Early model selection failed/,
+			"controlled model fallback policy: model selection failures must not be swallowed as fire-and-forget warnings",
+		);
+		assert.match(
+			postSpawnBody,
+			/tryApplyDefaultThinkingLevel\(session\)\.catch[\s\S]*Early thinking level failed/,
+			"thinking-level failures may remain non-fatal warnings",
+		);
+
+		const worktreeBody = extractMethodBody(src, "export async function executeWorktreeAsync");
+		const postSpawnIdx = worktreeBody.indexOf("await postSpawn(session, plan, ctx)");
+		const idleIdx = worktreeBody.indexOf('broadcastStatus(session, "idle")');
+		assert.ok(postSpawnIdx >= 0, "worktree setup must call postSpawn");
+		assert.ok(idleIdx >= 0, "worktree setup must broadcast idle");
+		assert.ok(
+			postSpawnIdx < idleIdx,
+			"controlled model fallback policy: worktree sessions must enforce model selection before becoming idle/live",
+		);
 	});
 });
 
