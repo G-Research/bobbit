@@ -1399,7 +1399,7 @@ Roles can pin a specific model and reasoning level for any session that runs und
 
 This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
 
-> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) - file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`.
+> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) - file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`. Model binding failures and the opt-in fallback policy are covered in [Controlled session model fallback](session-model-fallback.md).
 
 ### Role fields
 
@@ -1426,7 +1426,7 @@ When a session starts, the model and thinking level are resolved in this order (
 
 Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` - the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
 
-**Failure handling.** Model binding failures throw - the session start fails loudly with the same red "Unavailable" pattern you see in Settings → Models. Thinking-level failures only `console.warn` and fall through to the global default, matching the existing tolerance for level mismatches.
+**Failure handling.** Model binding failures throw - the session start fails loudly with the same red "Unavailable" pattern you see in Settings → Models. When `allowSessionModelFallback` is enabled, explicit non-default model failures may try only `default.sessionModel`; otherwise they never fall through to discovery, provider defaults, SDK defaults, or hardcoded defaults. Thinking-level failures only `console.warn` and fall through to the global default, matching the existing tolerance for level mismatches.
 
 ### Verification harness integration
 
@@ -1447,6 +1447,8 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default and Bobbit then called `setModel` shortly afterward - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
 
 Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single matching `model_change` event. For the Pi 0.77 / Opus 4.8 upgrade, that means a persisted or selected `anthropic/claude-opus-4-8` session starts on Opus 4.8 rather than flashing an older Pi default. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
+
+Spawn-pinned models are still read-back verified before a session becomes idle/live. If the agent reports a different model or the selected model cannot bind, the controlled policy in [Controlled session model fallback](session-model-fallback.md) decides whether to fail immediately or try `default.sessionModel` exactly once.
 
 ### Bridge options and CLI flags
 
