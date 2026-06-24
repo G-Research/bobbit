@@ -13,7 +13,10 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const TMP_DIR = path.resolve(".bobbit/tmp/pr-walkthrough-panel-parity");
+// Playwright can run tests from this file in multiple workers during the full
+// browser-fixture phase. Keep the generated bundle worker-local so one worker
+// never reads a partially rewritten bundle from another worker.
+const TMP_DIR = path.resolve(".bobbit/tmp", `pr-walkthrough-panel-parity-${process.pid}`);
 const ENTRY = path.join(TMP_DIR, "entry.ts");
 const BUNDLE = path.join(TMP_DIR, "bundle.js");
 const PANEL_SRC = path.resolve("market-packs/pr-walkthrough/src/panel.js");

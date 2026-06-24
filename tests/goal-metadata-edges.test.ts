@@ -257,7 +257,10 @@ function fixtureProvider(tmp: string, id: string, body: string, hooks: string[] 
 		kind: "memory",
 		module: path.basename(file),
 		hooks,
-		budget: { maxTokens: 400, timeoutMs: 2_000 },
+		// The full unit phase runs this fixture under heavy parallel load. Keep the
+		// budget comfortably above worker/module cold-start jitter so this test
+		// verifies disabled-provider filtering, not scheduler timing.
+		budget: { maxTokens: 400, timeoutMs: 10_000 },
 		config: { enabled: true },
 		listName: id,
 		sourceFile: path.join(tmp, "pack.yaml"),

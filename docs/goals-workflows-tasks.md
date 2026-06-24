@@ -76,9 +76,13 @@ Tab ownership is strict:
 - The **Metadata** tab is the only place the key/value metadata editor renders. The main Goal tab must never contain `renderGoalMetadataEditor()`.
 - The **Sub-goals** tab owns parent/child goal controls and is gated only by the system sub-goals setting.
 
+Workflow and Roles draft state is also shared by the proposal form, not by the active DOM panel. Proposal-supplied `inlineWorkflow` and `inlineRoles` hydrate the Workflow/Roles tabs on every goal proposal surface, including the goal assistant / `+ New Goal`, project-scoped goal creation, re-attempt sessions, and historical revision tabs. Customizing a workflow forwards the inline workflow snapshot instead of `workflowId`; customizing a role forwards only the touched role entries as `inlineRoles`. These snapshots are goal-scoped and do not mutate project workflow or role definitions.
+
+Goal proposal tab state is scoped by proposal context. A newly opened proposal context starts on **Goal**, while returning to the same in-progress proposal revision can preserve its selected tab and inline Workflow/Roles draft. Historical revisions use their own session/revision-scoped state and render from the historical snapshot, not from the live proposal mirrors. The form also resolves the proposal's source project before loading Workflow/Roles or submitting, replacing any stale project id left by a previous proposal context so customizations and created goals apply to the correct project.
+
 Metadata draft state is shared across tabs rather than stored in panel-local DOM. Seeded `propose_goal` metadata hydrates the Metadata tab, user edits survive tab switches, blank-key rows are dropped on submit, values are JSON-parsed where possible, and accepted/created goals persist the resulting `metadata` field. An empty metadata editor sends no override, preserving legacy goal records.
 
-Browser coverage lives in [`tests/e2e/ui/goal-metadata.spec.ts`](../tests/e2e/ui/goal-metadata.spec.ts). It pins the default Goal tab, required tab visibility, Metadata-tab-only editor placement, Sub-goals flag behavior, metadata edit persistence, and accepted-goal metadata persistence.
+Browser coverage lives in [`tests/e2e/ui/goal-metadata.spec.ts`](../tests/e2e/ui/goal-metadata.spec.ts), [`tests/e2e/ui/goal-tabs-wiring.spec.ts`](../tests/e2e/ui/goal-tabs-wiring.spec.ts), and [`tests/e2e/ui/goal-role-tabs-wiring.spec.ts`](../tests/e2e/ui/goal-role-tabs-wiring.spec.ts). They pin the default Goal tab, required tab visibility, Metadata-tab-only editor placement, Sub-goals flag behavior, metadata edit persistence, inline Workflow/Roles customization wiring and persistence, active-tab/draft isolation across contexts, historical revision isolation, and accepted-goal metadata persistence.
 
 #### `createGoal` failure preserves the assistant
 
