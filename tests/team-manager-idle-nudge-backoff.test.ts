@@ -358,6 +358,56 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Sticky nudgePending guard — delivery that parks before agent_start
+// ---------------------------------------------------------------------------
+
+describe("TeamManager — nudgePending clears when delivery does not start a turn (regression)", () => {
+	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager's cap path: provenance is recorded but the
+					// prompt is parked/queued and no agent_start event is emitted.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return Promise.resolve({ queued: true, parked: true, id: "parked-auto-nudge" });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+
+			// First no-workers nudge reaches SessionManager but is parked behind the
+			// errored/capped team-lead state. No agent_start follows.
+			t.mock.timers.tick(BASE + SLACK);
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first parked no-workers nudge should be enqueued at the base delay");
+			assert.equal((enqueuePrompt.mock.calls[0].arguments[2] as any)?.source, "auto-nudge",
+				"the parked delivery must still be tagged as an auto-nudge");
+
+			// The next eligible no-workers nudge should still fire after the normal
+			// backoff delay. A sticky nudgePending flag suppresses this forever today.
+			tlSession.status = "idle";
+			t.mock.timers.tick(BASE * 2 + SLACK);
+			assert.equal(
+				enqueuePrompt.mock.callCount(),
+				2,
+				"nudgePending sticky regression: expected a second no-workers auto-nudge " +
+					"after the parked delivery did not start a lead turn",
+			);
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
 // PromptSource semantics — reset vs. preserve behaviour of subscribeTeamLeadEvents
 // ---------------------------------------------------------------------------
 

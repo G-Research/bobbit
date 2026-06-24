@@ -260,6 +260,37 @@ export function isProviderBackoffError(output: string): boolean {
 	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
+const GENERIC_AGENT_RETRYABLE_REGEXES: RegExp[] = [
+	/\bthe system encountered an unexpected error\b/i,
+	/\ban unexpected (?:agent |system |internal )?error (?:occurred|happened|was encountered)\b/i,
+	/\b(?:internal|system) (?:server )?error\b/i,
+];
+
+const GENERIC_AGENT_NON_RETRYABLE_REGEXES: RegExp[] = [
+	/\b(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden)\b/i,
+	/\b(?:invalid|missing|no) api key\b/i,
+	/\b(?:api key|token|credential)s? (?:is |are )?(?:missing|invalid|expired|not configured|required)\b/i,
+	/\b(?:configuration|config) (?:error|invalid|missing|not configured)\b/i,
+	/\b(?:permission denied|access denied|operation not permitted|eacces|eperm)\b/i,
+	/\b(?:user|human) (?:aborted|cancelled|canceled|interrupted)\b/i,
+	/\b(?:aborterror|cancelled by user|canceled by user)\b/i,
+	/\b(?:content policy|policy violation|safety policy|blocked by policy|disallowed content)\b/i,
+	/\b(?:validationerror|validation error|invalid request|bad request|schema validation)\b/i,
+];
+
+/**
+ * Classify generic agent/runtime failures that are worth one short bounded
+ * retry burst even when they do not match the narrower transient/provider
+ * classifiers above. Deterministic operator/config/user-policy failures are
+ * excluded first so sanitized "unexpected error" wrappers with a concrete
+ * cause (for example, "missing API key") do not loop.
+ */
+export function isRetryableGenericAgentError(output: string): boolean {
+	if (!output) return false;
+	if (GENERIC_AGENT_NON_RETRYABLE_REGEXES.some(re => re.test(output))) return false;
+	return GENERIC_AGENT_RETRYABLE_REGEXES.some(re => re.test(output));
+}
+
 /**
  * Decide whether a verification-step retry loop should attempt another
  * pass given the latest result, or break out.

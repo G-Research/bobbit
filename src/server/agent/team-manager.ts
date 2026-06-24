@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { SessionManager, SessionInfo } from "./session-manager.js";
+import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
@@ -372,14 +372,8 @@ export class TeamManager {
 			"merge a finished branch, mark a task complete, or signal the next gate.\n" +
 			"If all gates have passed, call `team_complete`.";
 
-		this.nudgePending.set(goalId, true);
+		if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true }, "Stuck-team watchdog")) return;
 		this.lastNudgeAtPerGoal.set(goalId, now);
-		try {
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
-		} catch (err) {
-			console.error(`[team-manager] Stuck-team watchdog enqueuePrompt failed for goal ${goalId}:`, err);
-			return;
-		}
 		console.log(`[team-manager] Stuck-team watchdog fired for goal ${goalId} after ${minutes}m idle`);
 	}
 
@@ -1016,11 +1010,9 @@ export class TeamManager {
 				"if everything is genuinely done.";
 			// enqueuePrompt drains ASYNCHRONOUSLY: for an idle lead with an empty
 			// queue it awaits dispatchDirectPrompt → rpcClient.prompt(), which on
-			// a cold agent rejects with the cold-start timeout. Dispatch through a
-			// helper that owns (awaits + catches) that rejection so it never
-			// escapes as `[gateway] Unhandled rejection`.
-			void this._dispatchBootResumeNudge(entry.teamLeadSessionId, msg, goalId);
-			this.nudgePending.set(goalId, true);
+			// a cold agent rejects with the cold-start timeout. The helper owns
+			// async rejection handling so it never escapes as `[gateway] Unhandled rejection`.
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId, msg, { isSteered: true, coldStart: true }, "Boot-resume nudge")) continue;
 			this.lastNudgeAtPerGoal.set(goalId, now);
 			resumed++;
 			console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
@@ -1030,18 +1022,59 @@ export class TeamManager {
 		}
 	}
 
-	/**
-	 * Dispatch a boot-resume nudge through enqueuePrompt with cold-start
-	 * handling, owning the async drain's rejection so a cold-start prompt
-	 * timeout is caught and logged here rather than escaping as a process-level
-	 * `[gateway] Unhandled rejection`.
-	 */
-	private async _dispatchBootResumeNudge(sessionId: string, msg: string, goalId: string): Promise<void> {
+	private enqueueAutoNudge(
+		goalId: string,
+		sessionId: string,
+		message: string,
+		opts: { isSteered: true; source?: PromptSource; coldStart?: boolean },
+		label: string,
+	): boolean {
+		this.nudgePending.set(goalId, true);
+
+		let delivery: unknown;
 		try {
-			await this.sessionManager.enqueuePrompt(sessionId, msg, { isSteered: true, coldStart: true });
+			delivery = this.sessionManager.enqueuePrompt(sessionId, message, opts);
 		} catch (err) {
-			console.error(`[team-manager] Boot-resume nudge failed for goal=${goalId}:`, err);
+			this.nudgePending.delete(goalId);
+			console.error(`[team-manager] ${label} enqueuePrompt failed for goal ${goalId}:`, err);
+			return false;
 		}
+
+		this.clearNudgePendingIfDeliveryDidNotStart(goalId, delivery);
+		if (this.isThenable(delivery)) {
+			// A parked/capped enqueue returns a resolved promise while the lead stays idle.
+			// Clear on the next macrotask if no agent_start/status transition happened.
+			setTimeout(() => {
+				if (this.isTeamLeadIdle(goalId)) this.nudgePending.delete(goalId);
+			}, 0);
+			void delivery.then(
+				(result) => this.clearNudgePendingIfDeliveryDidNotStart(goalId, result),
+				(err) => {
+					this.nudgePending.delete(goalId);
+					console.error(`[team-manager] ${label} failed for goal ${goalId}:`, err);
+				},
+			);
+		}
+
+		return true;
+	}
+
+	private clearNudgePendingIfDeliveryDidNotStart(goalId: string, delivery: unknown): void {
+		if (!delivery || typeof delivery !== "object") return;
+		const result = delivery as { status?: unknown; parked?: unknown };
+		if (result.parked === true || (result.status === "queued" && this.isTeamLeadIdle(goalId))) {
+			this.nudgePending.delete(goalId);
+		}
+	}
+
+	private isThenable(value: unknown): value is PromiseLike<unknown> {
+		return !!value && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function";
+	}
+
+	private isTeamLeadIdle(goalId: string): boolean {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return false;
+		return this.sessionManager.getSession(entry.teamLeadSessionId)?.status === "idle";
 	}
 
 	/**
@@ -1190,8 +1223,7 @@ export class TeamManager {
 				`If there's more work to do, spawn agents or do it yourself. ` +
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
 
-			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "No-workers nudge")) return;
 			this.noWorkersNudgeCount.set(goalId, count + 1);
 			const nextDelay = Math.min(
 				TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count + 1),
@@ -1274,8 +1306,7 @@ export class TeamManager {
 				`If an agent is idle and their work looks complete, mark their task as done and dismiss them. ` +
 				`If idle agents have more to do, prompt them to continue.`;
 
-			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "Idle nudge")) return;
 			this.idleNudgeCount.set(goalId, count + 1);
 			const nextDelay = Math.min(
 				TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count + 1),
