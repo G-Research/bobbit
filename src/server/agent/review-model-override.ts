@@ -16,6 +16,7 @@
  */
 
 import { isSessionSelectableModelString } from "./google-code-assist.js";
+import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 interface ModelShape { id?: string; provider?: string }
 /**
@@ -98,7 +99,13 @@ function sleep(ms: number): Promise<void> {
  * red Unavailable badge).
  */
 function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+	return sanitizeModelErrorText(err);
+}
+
+function sanitizedError(err: unknown): Error {
+	const safe = errorMessage(err);
+	if (err instanceof Error && err.message === safe) return err;
+	return new Error(safe);
 }
 
 function parseModelString(modelString: string, label: string): { provider: string; modelId: string } {
@@ -188,22 +195,24 @@ export async function applyModelString(
 	modelString: string,
 	opts: ApplyModelStringOptions = {},
 ): Promise<void> {
+	const safeModelString = sanitizeModelErrorText(modelString);
 	try {
 		await bindModelString(rpc, modelString, opts);
 		return;
 	} catch (err) {
-		if (!opts.controlledFallback?.enabled) throw err;
+		if (!opts.controlledFallback?.enabled) throw sanitizedError(err);
 		let fallbackModel: string;
 		try {
 			fallbackModel = validateControlledFallbackTarget(modelString, opts.controlledFallback.model);
 		} catch (fallbackValidationErr) {
 			throw new Error(
-				`controlled model fallback rejected for ${opts.contextLabel ?? "model"}="${modelString}"; ` +
+				`controlled model fallback rejected for ${opts.contextLabel ?? "model"}="${safeModelString}"; ` +
 					`original error: ${errorMessage(err)}; fallback error: ${errorMessage(fallbackValidationErr)}`,
 			);
 		}
+		const safeFallbackModel = sanitizeModelErrorText(fallbackModel);
 		console.warn(
-			`[review-model-override] ${opts.contextLabel ?? "model"}="${modelString}" failed; controlled fallback enabled, trying default.sessionModel="${fallbackModel}": ${errorMessage(err)}`,
+			`[review-model-override] ${opts.contextLabel ?? "model"}="${safeModelString}" failed; controlled fallback enabled, trying default.sessionModel="${safeFallbackModel}": ${errorMessage(err)}`,
 		);
 		try {
 			await bindModelString(rpc, fallbackModel, {
@@ -216,7 +225,7 @@ export async function applyModelString(
 			return;
 		} catch (fallbackErr) {
 			throw new Error(
-				`controlled model fallback failed for ${opts.contextLabel ?? "model"}="${modelString}"; ` +
+				`controlled model fallback failed for ${opts.contextLabel ?? "model"}="${safeModelString}"; ` +
 					`original error: ${errorMessage(err)}; default.sessionModel fallback error: ${errorMessage(fallbackErr)}`,
 			);
 		}

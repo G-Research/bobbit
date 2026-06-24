@@ -82,6 +82,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const discoverAigwModels = async () => ([{ id: "us.anthropic.claude-opus-4-5" }]);
 	const modelRecencyRank = () => 1;
 	const inferMeta = () => ({ reasoning: false });
+	const sanitizeModelErrorText = (err: unknown) => err instanceof Error ? err.message : String(err);
+	const sanitizeModelErrorForLog = sanitizeModelErrorText;
 	const broadcast = (clients: Set<any>, message: any) => {
 		for (const client of clients) client.messages.push(message);
 	};
@@ -94,6 +96,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"discoverAigwModels",
 		"modelRecencyRank",
 		"inferMeta",
+		"sanitizeModelErrorText",
+		"sanitizeModelErrorForLog",
 		"broadcast",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
@@ -103,6 +107,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		discoverAigwModels,
 		modelRecencyRank,
 		inferMeta,
+		sanitizeModelErrorText,
+		sanitizeModelErrorForLog,
 		broadcast,
 	);
 }

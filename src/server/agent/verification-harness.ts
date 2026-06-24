@@ -72,6 +72,7 @@ import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
@@ -3087,7 +3088,7 @@ export class VerificationHarness {
 					});
 					console.log(`[verification] Applied role model policy for reviewer ${sessionId} (selected="${roleModel_r}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_r}" failed for reviewer ${sessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_r, 500)}" failed for reviewer ${sessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
@@ -3105,7 +3106,7 @@ export class VerificationHarness {
 						console.log(`[verification] Applied review model policy for ${sessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3426,7 +3427,7 @@ export class VerificationHarness {
 					});
 					console.log(`[verification] Applied role model policy for QA ${qaSessionId} (selected="${roleModel_q}", role=${qaRoleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_q}" failed for QA ${qaSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_q, 500)}" failed for QA ${qaSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
@@ -3444,7 +3445,7 @@ export class VerificationHarness {
 						console.log(`[verification] Applied QA model policy for ${qaSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3665,7 +3666,7 @@ export class VerificationHarness {
 					});
 					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${roleModel_s}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${roleModel_s}" failed for sub-session ${subSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
@@ -3683,7 +3684,7 @@ export class VerificationHarness {
 						console.log(`[verification] Applied review model policy for ${subSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
