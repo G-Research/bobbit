@@ -260,6 +260,64 @@ describe("createPackStore — delete/stats and scoped review quotas", () => {
 		await assert.rejects(() => store.put("pack-scoped-unscoped", "b", value), /store full/);
 	});
 
+	it("scoped PR Walkthrough metadata writes survive legacy quota after review payloads", async () => {
+		const store = createPackStore({
+			rootDir,
+			quota: {
+				maxValueBytes: 4096,
+				maxKeys: 100,
+				maxTotalBytes: 350,
+				maxTotalBytesEmergency: 4096,
+				profiles: {
+					default: { maxTotalBytes: 1024 },
+					"review-draft": { maxTotalBytes: 1024 },
+					"review-final": { maxTotalBytes: 1024 },
+				},
+			},
+		});
+		const pack = "pack-prw-quota-regression";
+		await store.put(pack, "reviews/job-a/draft/chunks/context", { yaml: "d".repeat(190) }, { quotaScope: { prefix: "reviews/job-a/draft/", profile: "review-draft" } });
+		await store.put(pack, "reviews/job-a/final/payload", { yaml: "f".repeat(190) }, { quotaScope: { prefix: "reviews/job-a/final/", profile: "review-final" } });
+		const reviewStats = await store.stats(pack);
+		assert.ok(reviewStats.bytes > 350, `combined scoped review payloads should exceed legacy cap; got ${reviewStats.bytes}`);
+
+		const panelStateKey = "review-state/overview/job-a";
+		const panelState = { schemaVersion: 1, selectedCardId: "audit-summary", completedCards: ["orientation-overview"], collapsedFiles: { "src/app.ts": true } };
+		await store.put(pack, panelStateKey, panelState, { quotaScope: { prefix: panelStateKey, profile: "default" } });
+		assert.deepEqual(await store.get(pack, panelStateKey), panelState);
+
+		await assert.rejects(
+			() => store.put(pack, "review-state/unscoped/job-a", { selectedCardId: "diff-review" }),
+			(e) => e instanceof PackStoreQuotaError
+				&& e.code === "STORE_QUOTA_EXCEEDED"
+				&& e.details?.dimension === "pack"
+				&& /store full/.test(e.message),
+		);
+	});
+
+	it("oversized scoped review payload reports structured STORE_QUOTA_EXCEEDED", async () => {
+		const store = createPackStore({
+			rootDir,
+			quota: {
+				maxValueBytes: 128,
+				maxKeys: 100,
+				maxTotalBytes: 128,
+				maxTotalBytesEmergency: 4096,
+				profiles: { "review-final": { maxTotalBytes: 1024 } },
+			},
+		});
+		const key = "reviews/job-too-big/final/payload";
+		await assert.rejects(
+			() => store.put("pack-prw-oversized-review", key, { yaml: "z".repeat(500) }, { quotaScope: { prefix: "reviews/job-too-big/final/", profile: "review-final" } }),
+			(e) => e instanceof PackStoreQuotaError
+				&& e.code === "STORE_QUOTA_EXCEEDED"
+				&& e.details?.dimension === "value"
+				&& e.details?.limit === 128
+				&& /store value too large/.test(e.message),
+		);
+		assert.equal(await store.get("pack-prw-oversized-review", key), null);
+	});
+
 	it("rejects invalid quota scopes and unknown profiles with structured codes", async () => {
 		const store = createPackStore({ rootDir, quota: { maxValueBytes: 1024 } });
 		await assert.rejects(
