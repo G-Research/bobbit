@@ -16,6 +16,7 @@ import {
 	applyReviewModelOverrides,
 	type ReviewModelRpc,
 } from "../src/server/agent/review-model-override.js";
+import { applyRuntimeSessionModelSelection } from "../src/server/ws/runtime-model-selection.js";
 import { generateImage } from "../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
@@ -25,9 +26,18 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
+const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
+
+function extractRouteSlice(src: string, startMarker: string, endMarker: string): string {
+	const start = src.indexOf(startMarker);
+	assert.ok(start >= 0, `could not find ${startMarker}`);
+	const end = src.indexOf(endMarker, start);
+	assert.ok(end > start, `could not find ${endMarker} after ${startMarker}`);
+	return src.slice(start, end);
+}
 
 function extractMethodBody(src: string, marker: string): string {
 	const markerIndex = src.indexOf(marker);
@@ -187,6 +197,53 @@ function makeReviewRpc(failModels: string[] = []): ReviewModelRpc & {
 	} as any;
 }
 
+function makeRuntimeHarness(options: {
+	prefs?: Prefs;
+	failModels?: string[];
+	readBack?: { provider: string; id: string };
+} = {}) {
+	const setModelCalls: ModelPair[] = [];
+	const persisted: Array<{ sessionId: string; provider: string; modelId: string }> = [];
+	const modelFiles: string[] = [];
+	const messages: any[] = [];
+	let bound: { provider: string; id: string } | undefined;
+	const fail = new Set(options.failModels ?? []);
+	const sessionManager = {
+		persistSessionModel(sessionId: string, provider: string, modelId: string) {
+			persisted.push({ sessionId, provider, modelId });
+		},
+		getPersistedSession(sessionId: string) {
+			const match = [...persisted].reverse().find((entry) => entry.sessionId === sessionId);
+			return match ? { modelProvider: match.provider, modelId: match.modelId } : undefined;
+		},
+		updateModelNameFile(_sessionId: string, modelName: string) {
+			modelFiles.push(modelName);
+		},
+	};
+	const session = {
+		id: "runtime-session",
+		clients: new Set([{ readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) }]),
+		rpcClient: {
+			async setModel(provider: string, modelId: string) {
+				setModelCalls.push([provider, modelId]);
+				const key = `${provider}/${modelId}`;
+				if (fail.has(key)) throw new Error(`controlled model fallback policy fixture: unavailable ${key}`);
+				bound = { provider, id: modelId };
+			},
+			async getState() {
+				return { model: options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
+			},
+		},
+	};
+	const prefs = {
+		get(key: string) {
+			return options.prefs?.[key];
+		},
+	};
+	const broadcast = (_clients: any, msg: any) => messages.push(msg);
+	return { sessionManager, session, prefs, broadcast, setModelCalls, persisted, modelFiles, messages };
+}
+
 function tempPrefs(): { prefs: PreferencesStore; cleanup: () => void } {
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-controlled-fallback-"));
 	return {
@@ -331,6 +388,83 @@ describe("controlled model fallback policy — session auto-selection", () => {
 	});
 });
 
+describe("controlled model fallback policy — runtime WS set_model", () => {
+	it("fallback off: read-back mismatch rejects and does not persist, broadcast, or update model file", async () => {
+		const harness = makeRuntimeHarness({
+			readBack: { provider: "anthropic", id: "still-old" },
+		});
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"anthropic",
+				"selected-new",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/read-back mismatch|mismatch/i,
+		);
+
+		assert.deepEqual(harness.setModelCalls, [["anthropic", "selected-new"]]);
+		assert.deepEqual(harness.persisted, [], "runtime set_model mismatch must not persist the selected model");
+		assert.deepEqual(harness.modelFiles, [], "runtime set_model mismatch must not update .model state");
+		assert.deepEqual(harness.messages, [], "runtime set_model mismatch must not broadcast a successful model state");
+	});
+
+	it("fallback on: failed non-default runtime selection falls back only to default.sessionModel and displays that actual model", async () => {
+		const harness = makeRuntimeHarness({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "openai/fallback-session",
+			},
+			failModels: ["anthropic/dead-selected"],
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			"anthropic",
+			"dead-selected",
+			harness.prefs as any,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: "openai", id: "fallback-session" });
+		assert.deepEqual(harness.setModelCalls, [["anthropic", "dead-selected"], ["openai", "fallback-session"]]);
+		assert.deepEqual(harness.persisted, [{ sessionId: "runtime-session", provider: "openai", modelId: "fallback-session" }]);
+		assert.deepEqual(harness.modelFiles, ["openai/fallback-session"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["openai"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["fallback-session"]);
+	});
+
+	it("fallback on: same-as-selected default.sessionModel rejects without trying another fallback or persisting stale state", async () => {
+		const harness = makeRuntimeHarness({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/dead-selected",
+			},
+			failModels: ["anthropic/dead-selected"],
+		});
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"anthropic",
+				"dead-selected",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/same as failed model|fallback rejected/i,
+		);
+
+		assert.deepEqual(harness.setModelCalls, [["anthropic", "dead-selected"]]);
+		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.modelFiles, []);
+	});
+});
+
 describe("controlled model fallback policy — session setup visibility", () => {
 	it("normal/worktree post-spawn model selection is awaited, not swallowed as a warning", () => {
 		const src = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
@@ -365,6 +499,30 @@ describe("controlled model fallback policy — session setup visibility", () => 
 });
 
 describe("controlled model fallback policy — restore/respawn lifecycle", () => {
+	it("fork and continue routes verify inherited persisted models instead of skipping auto-selection", () => {
+		const src = readFileSync(SERVER_SOURCE, "utf-8");
+		const forkRoute = extractRouteSlice(src, "// POST /api/sessions/:id/fork", "// POST /api/sessions/:id/wait");
+		const continueRoute = extractRouteSlice(src, "// POST /api/sessions/:archivedId/continue", "// GET /api/sessions/:id/output");
+
+		for (const [label, route] of [["fork", forkRoute], ["continue", continueRoute]] as const) {
+			assert.match(
+				route,
+				/if \(ps\.modelProvider && ps\.modelId\)[\s\S]*createOpts\.initialModel = `\$\{ps\.modelProvider\}\/\$\{ps\.modelId\}`/,
+				`${label}: persisted model should still be spawn-pinned as the explicit selected model`,
+			);
+			assert.doesNotMatch(
+				route,
+				/skipAutoModel:\s*!!\(ps\.modelProvider && ps\.modelId\)/,
+				`${label}: inherited explicit model must not bypass post-spawn read-back/fallback enforcement`,
+			);
+			assert.doesNotMatch(
+				route,
+				/persistSessionModel\([^,]+,\s*ps\.modelProvider,\s*ps\.modelId\)/,
+				`${label}: route must not re-persist a stale inherited model after controlled fallback may have selected another model`,
+			);
+		}
+	});
+
 	it("restore verifies spawn-pinned persisted model before broadcasting idle", () => {
 		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
 		const body = extractMethodBody(src, "private async restoreSession(ps: PersistedSession)");
