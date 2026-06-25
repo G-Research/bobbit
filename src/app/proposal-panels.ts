@@ -256,6 +256,12 @@ function clearActiveGoalWorkflowValidationError(): void {
 	const slot = state.activeProposals.goal as any;
 	if (!slot?.workflowValidationError) return;
 	delete slot.workflowValidationError;
+	// Clearing a failed workflow-validation error should mark the current form
+	// snapshot as already initialized. Otherwise syncProposalFormState sees the
+	// identity key change, re-seeds from the original failed fields, and can
+	// overwrite the user's corrected workflow with the first cached workflow.
+	const key = activeGoalProposalFormIdentityKey();
+	if (_proposalInitializedFrom && key) _proposalInitializedFrom = key;
 }
 
 let _sandboxStatusFetching = false;
@@ -3294,18 +3300,34 @@ function projectLegacyToComponents(fields: Record<string, unknown>): Record<stri
 	return { ...fields, components: [component] };
 }
 
-/** Sync module-level form state from the active goal proposal when it changes. */
-function syncProposalFormState(): void {
+type GoalProposalFormSnapshot = {
+	title: string; spec: string; cwd?: string; workflow?: string; options?: string;
+	parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
+	subgoalsAllowed?: boolean; maxNestingDepth?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
+	metadata?: Record<string, unknown>;
+};
+
+function activeGoalProposalFormSnapshot(): GoalProposalFormSnapshot | undefined {
 	const raw = _proposalOverride?.type === "goal"
 		? _proposalOverride.fields
 		: state.activeProposals.goal?.fields;
-	const proposal = raw as undefined | {
-		title: string; spec: string; cwd?: string; workflow?: string; options?: string;
-		parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
-		subgoalsAllowed?: boolean; maxNestingDepth?: number;
-		divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
-		metadata?: Record<string, unknown>;
-	};
+	return raw as GoalProposalFormSnapshot | undefined;
+}
+
+function goalProposalFormIdentityKey(proposal: GoalProposalFormSnapshot, workflowValidationKey: string): string {
+	return `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
+}
+
+function activeGoalProposalFormIdentityKey(): string | null {
+	const proposal = activeGoalProposalFormSnapshot();
+	if (!proposal) return null;
+	return goalProposalFormIdentityKey(proposal, workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError()));
+}
+
+/** Sync module-level form state from the active goal proposal when it changes. */
+function syncProposalFormState(): void {
+	const proposal = activeGoalProposalFormSnapshot();
 	if (!proposal) return;
 
 	// --- Tab + inline-customisation reset identity ---------------------------
@@ -3337,7 +3359,7 @@ function syncProposalFormState(): void {
 
 	// Use a simple identity check to avoid re-initializing on every render
 	const workflowValidationKey = workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError());
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
+	const key = goalProposalFormIdentityKey(proposal, workflowValidationKey);
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
