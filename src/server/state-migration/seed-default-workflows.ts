@@ -163,6 +163,12 @@ Check:
 4. Code style — consistent naming, no dead code, clear intent
 5. Test coverage — are new behaviors tested?`;
 
+export const BUG_HUNT_PROMPT = `Review the implementation on branch {{branch}} vs origin/{{baseBranch}} for actionable bugs.
+
+Focus on correctness, edge cases, error paths, cross-system interactions, concurrency/lifecycle, and dangerous behavior. Fail only for critical/high actionable bugs.
+
+For every finding, include file:line, reproduction conditions, consequence, and why it is a bug.`;
+
 export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
@@ -330,6 +336,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 				],
 			},
 			{
@@ -371,6 +378,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 					{
 						name: "QA testing",
@@ -441,6 +449,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 				],
 			},
@@ -471,6 +480,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 				],
 			},
 			// quick-fix has no documentation gate — wire ready-to-merge directly off implementation.

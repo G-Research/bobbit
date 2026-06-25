@@ -42,7 +42,7 @@ describe("buildPerComponentWorkflow", () => {
 		}
 	});
 
-	it("inherits design-time and post-impl gap-analyses from feature", () => {
+	it("inherits design-time gap-analysis, post-impl gap-analysis, and bug hunt from feature", () => {
 		const wf = buildPerComponentWorkflow("api", COMPONENTS);
 		const designDoc = wf.gates.find((g) => g.id === "design-doc")!;
 		assert.ok(designDoc.verify?.some((s) => s.name === "Gap analysis"));
@@ -50,6 +50,9 @@ describe("buildPerComponentWorkflow", () => {
 		const gap = impl.verify?.find((s) => s.name === "Gap analysis");
 		assert.ok(gap);
 		assert.equal(gap!.phase, 2);
+		const bugHunt = impl.verify?.find((s) => s.name === "Bug hunt");
+		assert.ok(bugHunt);
+		assert.equal(bugHunt!.role, "bug-hunter");
 	});
 
 	it("derived per-component workflow passes the validator", () => {
@@ -78,7 +81,7 @@ describe("buildAllComponentsWorkflow", () => {
 		assert.equal(fromShared.length, 0);
 	});
 
-	it("includes design-time and post-impl gap-analyses", () => {
+	it("includes design-time gap-analysis, post-impl gap-analysis, and bug hunt", () => {
 		const wf = buildAllComponentsWorkflow(COMPONENTS);
 		const designDoc = wf.gates.find((g) => g.id === "design-doc")!;
 		assert.ok(designDoc.verify?.some((s) => s.name === "Gap analysis"));
@@ -86,6 +89,9 @@ describe("buildAllComponentsWorkflow", () => {
 		const postImpl = impl.verify?.find((s) => s.name === "Gap analysis");
 		assert.ok(postImpl);
 		assert.equal(postImpl!.phase, 2);
+		const bugHunt = impl.verify?.find((s) => s.name === "Bug hunt");
+		assert.ok(bugHunt);
+		assert.equal(bugHunt!.role, "bug-hunter");
 	});
 
 	it("derived all-components workflow passes the validator", () => {

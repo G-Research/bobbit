@@ -2,17 +2,19 @@ name: bug-hunter
 label: Bug Hunter
 accessory: magnifier
 toolPolicies:
-  read: allow
-  bash: allow
-  grep: allow
-  find: allow
-  ls: allow
-  task_list: allow
-  task_update: allow
-  gate_list: allow
-  gate_status: allow
-  gate_inspect: allow
-  verification_result: allow
+  edit: never
+  bash_bg: never
+  team_delegate: never
+  gate_signal: never
+  goal_spawn_child: never
+  goal_plan_propose: never
+  goal_plan_status: never
+  goal_merge_child: never
+  goal_pause: never
+  goal_resume: never
+  goal_archive_child: never
+  goal_decide_mutation: never
+  goal_set_policy: never
 createdAt: 1781993664645
 updatedAt: 1781993664645
 promptTemplate: |-

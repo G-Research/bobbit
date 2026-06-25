@@ -2,8 +2,8 @@
  * Unit test enforcing the per-role `gate_signal` tool-policy invariant.
  *
  * Design: only the team lead may signal gates; all spawnable contributor roles
- * (coder, test-engineer, reviewer family, architect, spec-auditor, qa-tester,
- * docs-writer) MUST declare `toolPolicies.gate_signal: never` so the
+ * (coder, test-engineer, reviewer family, architect, spec-auditor, bug-hunter,
+ * qa-tester, docs-writer) MUST declare `toolPolicies.gate_signal: never` so the
  * tool-guard extension hard-blocks the call at runtime. Assistant-style and
  * out-of-scope roles (general, assistant, ux-designer) are exempt.
  */
@@ -23,6 +23,7 @@ const CONTRIBUTOR_ROLES = [
 	"security-reviewer",
 	"architect",
 	"spec-auditor",
+	"bug-hunter",
 	"qa-tester",
 	"docs-writer",
 ];
