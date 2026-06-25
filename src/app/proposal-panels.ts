@@ -64,7 +64,7 @@ import {
 	nestingDepthOf,
 	resolveDepthControl,
 } from "./subgoal-eligibility.js";
-import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
+import { PROPOSAL_TYPES, type GoalWorkflowValidationError, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
@@ -154,26 +154,26 @@ let _staffProposalRolesLoaded = false;
 let _creatingStaff = false;
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal).
- *  Normalizes against the loaded workflow cache: a proposed id that isn't a configured
- *  workflow falls back to the first available id so the dropdown's displayed option and
- *  the underlying state always agree. The post-load `normalizeWorkflowSelections()` is the
- *  safety net for the case where the cache hadn't loaded yet when this was called. */
+ *  Normalizes ordinary goal forms against the loaded workflow cache, but preserves
+ *  missing/unknown selections for failed workflow-validation proposals so the UI
+ *  doesn't hide the server rejection by silently selecting the first workflow. */
 export function setSelectedWorkflowId(id: string): void {
-	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !_cachedWorkflows.some(w => w.id === id))
+	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !isKnownWorkflowId(id) && !shouldPreserveFailedWorkflowSelection())
 		? (_cachedWorkflows[0]?.id ?? "")
 		: id;
 }
 
 /** Normalize the workflow form selections against the loaded workflow cache.
- *  Whenever the list is available, any empty or phantom (not-in-list) selection is
- *  reset to the first available id so the rendered <select> option and the form state
- *  always agree. A value already present in the list is never clobbered. */
+ *  Ordinary empty/phantom selections fall back to the first available id. Failed
+ *  workflow-validation proposals keep the exact missing/unknown value so the
+ *  selector remains visibly invalid until corrected. */
 function normalizeWorkflowSelections(): void {
 	if (_cachedWorkflows.length === 0) return;
 	const ids = new Set(_cachedWorkflows.map(w => w.id));
 	const first = _cachedWorkflows[0].id;
-	if (!ids.has(_selectedWorkflowId)) _selectedWorkflowId = first;
-	if (!ids.has(_proposalWorkflowId)) _proposalWorkflowId = first;
+	const preserveInvalid = shouldPreserveFailedWorkflowSelection();
+	if (!ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;
+	if (!ids.has(_proposalWorkflowId) && !preserveInvalid) _proposalWorkflowId = first;
 }
 
 // Test affordance (mirrors main.ts's `__bobbitState` / `__bobbitRenderApp`):
@@ -227,6 +227,35 @@ function workflowStateFor(projectId: string | undefined): "no-project" | "loadin
 		return (_workflowCacheByProject.get(projectId) || []).length === 0 ? "empty" : "ready";
 	}
 	return "loading";
+}
+
+function activeGoalWorkflowValidationError(): GoalWorkflowValidationError | undefined {
+	return (state.activeProposals.goal as any)?.workflowValidationError;
+}
+
+function shouldPreserveFailedWorkflowSelection(): boolean {
+	return !!activeGoalWorkflowValidationError();
+}
+
+function isKnownWorkflowId(id: string): boolean {
+	return _cachedWorkflows.some(w => w.id === id);
+}
+
+function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null): boolean {
+	return _cachedWorkflows.length > 0 && !inlineWorkflow && !isKnownWorkflowId(id);
+}
+
+function workflowErrorMessageWithAvailable(error: GoalWorkflowValidationError | undefined): string {
+	if (!error) return "";
+	const ids = error.availableWorkflows?.map(w => w.id).filter(Boolean) ?? [];
+	if (ids.length === 0 || ids.some(id => error.message.includes(id))) return error.message;
+	return `${error.message} Available workflows: ${ids.join(", ")}.`;
+}
+
+function clearActiveGoalWorkflowValidationError(): void {
+	const slot = state.activeProposals.goal as any;
+	if (!slot?.workflowValidationError) return;
+	delete slot.workflowValidationError;
 }
 
 let _sandboxStatusFetching = false;
@@ -462,6 +491,9 @@ interface GoalFormConfig {
 	/** Invoked when the user clicks "Open Project Assistant" in the empty
 	 *  workflows banner. */
 	onOpenProjectAssistant?: () => void;
+
+	/** Draft-scoped workflow validation failure returned by propose_goal seed. */
+	workflowErrorMessage?: string;
 
 	// Field change callbacks
 	onTitleChange: (e: Event) => void;
@@ -924,6 +956,8 @@ function renderGoalForm(config: GoalFormConfig) {
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
 		: worktreePreviewPath(config.cwd, config.title);
 	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
+	const workflowInvalid = isWorkflowSelectionInvalid(config.workflowId, config.inlineWorkflow);
+	const workflowErrorMessage = config.workflowErrorMessage && workflowInvalid ? config.workflowErrorMessage : "";
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
 	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
 	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
@@ -1002,10 +1036,16 @@ function renderGoalForm(config: GoalFormConfig) {
 					<div class="flex items-center gap-2 md:shrink-0">
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
-							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowInvalid ? "border-[color:var(--negative)]" : "border-border"}"
 							.value=${config.workflowId}
+							aria-invalid=${workflowInvalid ? "true" : "false"}
 							@change=${config.onWorkflowChange}
 						>
+							${workflowInvalid ? html`
+								<option value=${config.workflowId} ?selected=${true} disabled>
+									${config.workflowId ? `Unknown workflow: ${config.workflowId}` : "Select workflow"}
+								</option>
+							` : ""}
 							${_cachedWorkflows.map((w) => html`
 								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
 							`)}
@@ -1149,7 +1189,18 @@ function renderGoalForm(config: GoalFormConfig) {
 	`;
 	const footer = html`
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-			<div class="flex items-center justify-end gap-2">
+			<div class="flex items-center justify-between gap-3">
+				<div class="min-w-0 flex-1">
+					${workflowErrorMessage ? html`
+						<div
+							class="text-xs leading-snug truncate"
+							style="color: var(--negative);"
+							data-testid="goal-proposal-workflow-error"
+							title=${workflowErrorMessage}
+						>${workflowErrorMessage}</div>
+					` : ""}
+				</div>
+				<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
 				${config.commentable && _goalAnnCount > 0 && !config.streaming ? Button({
 					variant: "secondary",
@@ -1168,13 +1219,14 @@ function renderGoalForm(config: GoalFormConfig) {
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
 				<span
 					data-testid="proposal-primary-submit"
-					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : ""}
+					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : workflowErrorMessage ? workflowErrorMessage : ""}
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || workflowInvalid,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
+				</div>
 			</div>
 		</div>
 	`;
@@ -1280,8 +1332,10 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const workflows = _cachedWorkflows;
 	const inline = config.inlineWorkflow ?? null;
 	const customizing = !!config.customizingWorkflow && !!inline;
-	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
+	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? null;
 	const displayWf = inline ?? selectedLibrary;
+	const workflowInvalid = isWorkflowSelectionInvalid(selectedId, inline);
+	const workflowErrorMessage = config.workflowErrorMessage && workflowInvalid ? config.workflowErrorMessage : "";
 	return html`
 		<div class="flex-1 overflow-hidden flex flex-col min-h-0 min-w-0"
 			role="tabpanel"
@@ -1294,10 +1348,16 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
 						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
 						<select
-							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowInvalid ? "border-[color:var(--negative)]" : "border-border"}"
 							data-testid="goal-proposal-workflow-select"
 							.value=${selectedId}
+							aria-invalid=${workflowInvalid ? "true" : "false"}
 							@change=${config.onWorkflowChange}>
+							${workflowInvalid ? html`
+								<option value=${selectedId} ?selected=${true} disabled>
+									${selectedId ? `Unknown workflow: ${selectedId}` : "Select workflow"}
+								</option>
+							` : ""}
 							${workflows.map((w) => html`
 								<option value=${w.id} ?selected=${selectedId === w.id}>${w.name} (${w.gates.length} gates)</option>
 							`)}
@@ -1319,7 +1379,11 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 					</div>
 					<hr class="shrink-0 border-t border-border" />
 					<div class="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-3">
-						${customizing && inline
+						${workflowInvalid ? html`
+							<div class="rounded-md border p-3 text-sm" style="border-color: color-mix(in oklch, var(--negative) 45%, transparent); background: color-mix(in oklch, var(--negative) 8%, transparent); color: var(--negative);">
+								${workflowErrorMessage || (selectedId ? `Unknown workflow: ${selectedId}` : "Select a workflow before creating this goal.")}
+							</div>
+						` : customizing && inline
 							? renderWorkflowEditor({
 								workflow: inline,
 								onChange: (wf) => config.onInlineWorkflowChange?.(wf),
@@ -3272,7 +3336,8 @@ function syncProposalFormState(): void {
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}`;
+	const workflowValidationKey = workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError());
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -3350,6 +3415,9 @@ function goalProposalPanel() {
 	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
+	const workflowValidationError = activeGoalWorkflowValidationError();
+	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
+	const workflowInvalid = isWorkflowSelectionInvalid(_proposalWorkflowId, _proposalInlineWorkflow);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
@@ -3363,6 +3431,10 @@ function goalProposalPanel() {
 				"This project has no workflows yet",
 				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
 			);
+			return;
+		}
+		if (workflowInvalid) {
+			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
 			return;
 		}
 
@@ -3528,6 +3600,7 @@ function goalProposalPanel() {
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
 		linkedProjectId: state.previewProjectId || undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
+		workflowErrorMessage,
 		onOpenProjectAssistant: handleOpenProjectAssistant,
 		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
@@ -3535,6 +3608,7 @@ function goalProposalPanel() {
 		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
 		onWorkflowChange: (e: Event) => {
 			_proposalWorkflowId = (e.target as HTMLSelectElement).value;
+			if (isKnownWorkflowId(_proposalWorkflowId)) clearActiveGoalWorkflowValidationError();
 			// Changing the picker selects a different library workflow; any prior
 			// goal-draft inline workflow customisation is for the old selection and
 			// must be cleared so submit doesn't ship stale inline content alongside
@@ -3563,7 +3637,7 @@ function goalProposalPanel() {
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
 		createDisabled: (() => {
-			if (!_proposalTitle.trim() || _proposalSaving) return true;
+			if (!_proposalTitle.trim() || _proposalSaving || workflowInvalid) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
 			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 				const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
