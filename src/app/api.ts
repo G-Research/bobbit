@@ -14,7 +14,6 @@ import {
 // import it without pulling the entire app-shell graph.
 import { gatewayFetch, GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
 export { gatewayFetch };
-import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
@@ -1724,7 +1723,6 @@ export async function deleteGoal(id: string): Promise<void> {
 				const allIds = collectGoalIdsFor(id);
 				eagerMarkArchived(allIds);
 			}
-			setHashRoute("landing");
 			await refreshSessions();
 		}
 		return;
@@ -1751,7 +1749,6 @@ export async function deleteGoal(id: string): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		eagerMarkArchived([id]);
-		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
