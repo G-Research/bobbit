@@ -184,9 +184,13 @@ export interface ArchivedSessionWorktreeCleanupResult {
 	branchDeleted: boolean;
 }
 
+interface GitWorktreeRef {
+	path: string;
+	branch?: string;
+}
+
 interface GitWorktreeRefs {
-	paths: Set<string>;
-	branches: Set<string>;
+	entries: GitWorktreeRef[];
 }
 
 interface ArchivedWorktreeGuardRef {
@@ -7484,9 +7488,24 @@ export class SessionManager {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(item.repoPath, item.path, item.branch, item.willDeleteBranch);
-				response.results.push({ ...base, status: "cleaned", reason: item.willDeleteBranch ? "worktree-and-branch-cleaned" : "worktree-cleaned", worktreeRemoved: true, branchDeleted: item.willDeleteBranch });
+
+				const postState = await this.archivedWorktreeCleanupPostState(item);
+				if (!postState.worktreeRemoved) {
+					response.results.push({ ...base, status: "failed", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: postState.branchDeleted });
+					response.counts.failed++;
+					if (postState.branchDeleted) response.counts.branchDeleted++;
+					continue;
+				}
+
+				response.results.push({
+					...base,
+					status: "cleaned",
+					reason: postState.branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
+					worktreeRemoved: true,
+					branchDeleted: postState.branchDeleted,
+				});
 				response.counts.cleaned++;
-				if (item.willDeleteBranch) response.counts.branchDeleted++;
+				if (postState.branchDeleted) response.counts.branchDeleted++;
 			} catch (err) {
 				response.results.push({ ...base, status: "failed", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
 				response.counts.failed++;
@@ -7627,7 +7646,7 @@ export class SessionManager {
 		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
 		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
-		const gitWorktreeMetadataExists = !!normalizedCandidate && (gitRefs.paths.has(normalizedCandidate) || (!!spec.branch && gitRefs.branches.has(spec.branch)));
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
 		const worktreePresent = pathExists || gitWorktreeMetadataExists;
 		if (!worktreePresent) {
@@ -7705,30 +7724,48 @@ export class SessionManager {
 		return !ctx.branchGuardsByRepo.get(repoKey)?.has(branch);
 	}
 
+	private async archivedWorktreeCleanupPostState(item: ArchivedSessionWorktreeItem): Promise<{ worktreeRemoved: boolean; branchDeleted: boolean }> {
+		let pathExists = false;
+		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
+		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
+		const branchDeleted = item.willDeleteBranch && item.branch
+			? !(await this.localBranchExistsUncached(item.repoPath, item.branch))
+			: false;
+		return { worktreeRemoved: !pathExists && !gitWorktreeMetadataExists, branchDeleted };
+	}
+
+	private gitWorktreeMetadataMatches(gitRefs: GitWorktreeRefs, normalizedCandidate: string | undefined, branch: string | undefined): boolean {
+		if (!normalizedCandidate) return false;
+		return gitRefs.entries.some(entry => entry.path === normalizedCandidate && (!branch || entry.branch === branch));
+	}
+
 	private readGitWorktreeRefs(repoPath: string, ctx: ArchivedWorktreeScanContext): Promise<GitWorktreeRefs> {
 		const repoKey = normalizeWorktreeHostPath(repoPath) ?? repoPath;
 		let cached = ctx.gitRefsCache.get(repoKey);
 		if (!cached) {
-			cached = (async () => {
-				try {
-					const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
-					const paths = new Set<string>();
-					const branches = new Set<string>();
-					for (const block of stdout.split("\n\n")) {
-						const pathMatch = block.match(/^worktree (.+)$/m);
-						const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
-						const normalizedPath = normalizeWorktreeHostPath(pathMatch?.[1]);
-						if (normalizedPath) paths.add(normalizedPath);
-						if (branchMatch?.[1]) branches.add(branchMatch[1]);
-					}
-					return { paths, branches };
-				} catch {
-					return { paths: new Set<string>(), branches: new Set<string>() };
-				}
-			})();
+			cached = this.readGitWorktreeRefsUncached(repoPath);
 			ctx.gitRefsCache.set(repoKey, cached);
 		}
 		return cached;
+	}
+
+	private async readGitWorktreeRefsUncached(repoPath: string): Promise<GitWorktreeRefs> {
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const entries: GitWorktreeRef[] = [];
+			for (const block of stdout.split("\n\n")) {
+				const pathMatch = block.match(/^worktree (.+)$/m);
+				const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
+				const normalizedPath = normalizeWorktreeHostPath(pathMatch?.[1]);
+				if (!normalizedPath) continue;
+				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
+			}
+			return { entries };
+		} catch {
+			return { entries: [] };
+		}
 	}
 
 	private localBranchExists(repoPath: string, branch: string | undefined, ctx: ArchivedWorktreeScanContext): Promise<boolean> {
@@ -7737,12 +7774,16 @@ export class SessionManager {
 		const key = `${repoKey}:${branch}`;
 		let cached = ctx.branchExistsCache.get(key);
 		if (!cached) {
-			cached = execFileAsync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
-				.then(() => true)
-				.catch(() => false);
+			cached = this.localBranchExistsUncached(repoPath, branch);
 			ctx.branchExistsCache.set(key, cached);
 		}
 		return cached;
+	}
+
+	private localBranchExistsUncached(repoPath: string, branch: string): Promise<boolean> {
+		return execFileAsync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
+			.then(() => true)
+			.catch(() => false);
 	}
 
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */

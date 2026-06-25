@@ -96,6 +96,15 @@ function branchExists(repoPath: string, branch: string): boolean {
 	}
 }
 
+function normalizeTestPath(path: string): string {
+	return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function listedWorktreePaths(repoPath: string): string[] {
+	return [...git(repoPath, ["worktree", "list", "--porcelain"]).matchAll(/^worktree (.+)$/gm)]
+		.map(match => normalizeTestPath(match[1]));
+}
+
 function initGitRepo(path: string): void {
 	mkdirSync(path, { recursive: true });
 	git(path, ["init"]);
@@ -428,6 +437,76 @@ test.describe("archived session worktree maintenance", () => {
 			expect(branchExists(repoPath, branch)).toBe(true);
 		} finally {
 			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			tryDeleteBranch(repoPath, branch);
+			rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	test("stale archived paths do not inherit git metadata from another worktree on the same branch", async ({ gateway }) => {
+		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-branch-assoc-"));
+		const repoPath = join(baseDir, "repo");
+		const worktreeBasename = "same-basename-worktree";
+		const activeWorktreePath = join(baseDir, "active", worktreeBasename);
+		const missingWorktreePath = join(baseDir, "missing", worktreeBasename);
+		const branch = `archived-branch-assoc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		let seeded: SeededSession | undefined;
+		try {
+			initGitRepo(repoPath);
+			mkdirSync(dirname(activeWorktreePath), { recursive: true });
+			mkdirSync(dirname(missingWorktreePath), { recursive: true });
+			git(repoPath, ["worktree", "add", "-b", branch, activeWorktreePath, "HEAD"]);
+			expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(activeWorktreePath));
+			expect(existsSync(missingWorktreePath)).toBe(false);
+
+			seeded = await seedArchivedSession(gateway, {
+				baseDir,
+				title: "Archived stale path sharing another branch",
+				cwd: missingWorktreePath,
+				repoPath,
+				worktreePath: missingWorktreePath,
+				branch,
+			});
+
+			const diagnosticScan = await getArchivedWorktreeScan("?includeAlreadyCleaned=1");
+			const diagnosticSession = findArchivedSession(diagnosticScan, seeded.session.id);
+			expect(diagnosticSession).toBeTruthy();
+			const item = diagnosticSession.worktrees[0];
+			expect.soft(item).toMatchObject({
+				status: "already-cleaned",
+				pathExists: false,
+				gitWorktreeMetadataExists: false,
+				localBranchExists: true,
+				willDeleteBranch: false,
+			});
+
+			const cleanup = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+				method: "POST",
+				body: JSON.stringify({
+					mode: "selected",
+					worktrees: [{ sessionId: seeded.session.id, key: item.key }],
+				}),
+			});
+			expect(cleanup.status).toBe(200);
+			const cleanupBody = await cleanup.json();
+			expectArchivedCleanupShape(cleanupBody);
+			expect(cleanupBody.counts.cleaned).toBe(0);
+			expect(cleanupBody.counts.branchDeleted).toBe(0);
+			expect(cleanupBody.counts.alreadyCleaned).toBe(1);
+			expect(cleanupBody.results).toContainEqual(expect.objectContaining({
+				sessionId: seeded.session.id,
+				key: item.key,
+				status: "already-cleaned",
+				worktreeRemoved: false,
+				branchDeleted: false,
+			}));
+
+			expect(existsSync(activeWorktreePath)).toBe(true);
+			expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(activeWorktreePath));
+			expect(branchExists(repoPath, branch)).toBe(true);
+			git(activeWorktreePath, ["status", "--short"]);
+		} finally {
+			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			tryRemoveWorktree(repoPath, activeWorktreePath);
 			tryDeleteBranch(repoPath, branch);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
