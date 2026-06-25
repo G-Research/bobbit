@@ -697,14 +697,17 @@ This means crash recovery doesn't require the user to manually clean up pool det
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are exposed in Settings → Maintenance and through the REST API (`GET /api/maintenance/orphaned-worktrees`, `POST /api/maintenance/cleanup-worktrees`). The same shared-path guard keeps live referenced paths out of the orphan list; unreferenced worktrees remain eligible for cleanup.
 5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it.
 
-**Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles four modes, all routed through the same plan/execute structure:
+**Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles these modes, all routed through the same plan/execute structure:
 
 | Mode | Triggered by | Worktree? | Seed context? |
 |---|---|---|---|
 | Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
 | Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
 | Delegate | Parent session spawns a child via the `team_delegate` tool (or the `host.agents` pack capability) — both go through `OrchestrationCore`; see [orchestration.md](orchestration.md) | Inherits parent cwd | No |
+| Fork | `POST /api/sessions/:id/fork` | Fresh by default; can reuse the source cwd/worktree with `newWorktree:false` | No - agent CLI rehydrates from a clone of the source `.jsonl` |
 | Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | No - agent CLI rehydrates from a clone of the source `.jsonl` (no system-prompt injection) |
+
+Fork and Continue-Archived both clone transcript history and hand that clone to the agent with `switch_session`. Any path values copied from the source runtime must be treated as provenance, not as the fork/continue runtime. Their handlers therefore pass old cwd candidates as `preExistingAgentSessionOldCwds` so `session-setup.ts` can rebase only top-level runtime cwd metadata before `switch_session`. User and assistant message content is not inspected or rewritten, so ordinary mentions of old paths remain byte-identical. Fork stale-source coverage is pinned in `tests/e2e/sidebar-actions-server.spec.ts`.
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
