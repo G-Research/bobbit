@@ -8,9 +8,9 @@ import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import "../../../ui/components/ExpandableSection.js";
-import { parseRevFromResult } from "./proposal-rev-marker.js";
+import { parseProposalErrorFromResult, parseRevFromResult } from "./proposal-rev-marker.js";
 import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
-export { parseRevFromResult } from "./proposal-rev-marker.js";
+export { parseProposalErrorFromResult, parseRevFromResult } from "./proposal-rev-marker.js";
 
 /** Map tool name → display label and proposal type key */
 const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField: string; previewField: string }> = {
@@ -54,7 +54,15 @@ function parseParams(params: any): Record<string, any> | null {
 	return null;
 }
 
-
+function formatProposalErrorMessage(result: ToolResultMessage | undefined): string {
+	const details = parseProposalErrorFromResult(result);
+	if (!details) return "Proposal failed.";
+	const parts = [details.message];
+	if (details.availableWorkflowIds.length > 0) {
+		parts.push(`Valid workflows: ${details.availableWorkflowIds.join(", ")}.`);
+	}
+	return parts.join(" ");
+}
 
 export class ProposalRenderer implements ToolRenderer {
 	private _toolName: string;
@@ -88,7 +96,9 @@ export class ProposalRenderer implements ToolRenderer {
 
 		const title = fields?.[meta.titleField] || "";
 		const preview = fields?.[meta.previewField] || "";
-		const rev = parseRevFromResult(result);
+		const isFailedGoalProposal = this._toolName === "propose_goal" && Boolean(result?.isError);
+		const rev = isFailedGoalProposal ? undefined : parseRevFromResult(result);
+		const errorMessage = isFailedGoalProposal ? formatProposalErrorMessage(result) : "";
 
 		// Handler for the "Open proposal" button
 		const openProposal = (e: Event) => {
@@ -106,9 +116,13 @@ export class ProposalRenderer implements ToolRenderer {
 
 		return {
 			content: html`
-				<div class="space-y-2">
-					${renderHeader(state, FileText, meta.label)}
+				<div
+					class="space-y-2 ${isFailedGoalProposal ? "rounded-lg border border-destructive/20 bg-destructive/10 p-3" : ""}"
+					data-testid=${isFailedGoalProposal ? "proposal-failed-card" : undefined}
+				>
+					${renderHeader(state, FileText, isFailedGoalProposal ? `${meta.label} failed` : meta.label)}
 					${title ? html`<div class="text-sm font-medium">${title}</div>` : ""}
+					${isFailedGoalProposal ? html`<div class="text-sm text-destructive" data-testid="proposal-error-message">${errorMessage}</div>` : ""}
 					${typeof rev === "number" && rev > 0 ? html`<div class="text-xs text-muted-foreground" data-testid="proposal-rev">rev ${rev}</div>` : ""}
 					${preview ? html`<expandable-section .summary=${truncate(preview, 80)}><markdown-block .content=${preview}></markdown-block></expandable-section>` : ""}
 					${result ? html`
