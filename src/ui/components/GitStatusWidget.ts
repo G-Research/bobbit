@@ -1,6 +1,6 @@
 import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import './DiffBlock.js';
+import './RichGitDiffViewer.js';
 
 type CommitChangedFile = {
     path: string;
@@ -723,7 +723,12 @@ export class GitStatusWidget extends LitElement {
         } else if (this._diffError) {
             body = html`<div class="p-8" style="color:var(--destructive)">${this._diffError}</div>`;
         } else if (this._diffContent) {
-            body = html`<diff-block .content=${this._diffContent}></diff-block>`;
+            body = html`<rich-git-diff-viewer
+                .content=${this._diffContent}
+                .filePath=${this._modalFile}
+                .title=${this._modalFile ?? 'Diff'}
+                default-mode="auto"
+            ></rich-git-diff-viewer>`;
         } else {
             body = html`<div class="p-8 text-muted-foreground">No diff available</div>`;
         }
@@ -732,14 +737,20 @@ export class GitStatusWidget extends LitElement {
             <div style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px"
                  @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeModal(); }}>
                 <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeModal()}></div>
-                <div style="position:relative;width:100%;max-width:calc(100vw - 48px);height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
+                <div
+                    style="position:relative;width:100%;max-width:calc(100vw - 48px);height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="git-diff-modal-title"
+                >
                     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-                        <span class="font-mono text-sm text-foreground truncate" title=${this._modalFile}>${this._modalFile}</span>
+                        <span id="git-diff-modal-title" class="font-mono text-sm text-foreground truncate" title=${this._modalFile}>${this._modalFile}</span>
                         <button
                             style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
                             class="hover:text-foreground hover:bg-muted/50"
                             @click=${() => this._closeModal()}
                             title="Close"
+                            aria-label="Close diff modal"
                         >&times;</button>
                     </div>
                     <div style="flex:1;overflow:auto">${body}</div>
