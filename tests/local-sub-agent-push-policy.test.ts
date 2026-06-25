@@ -98,7 +98,21 @@ function restoreEnv(key: string, value: string | undefined): void {
 }
 
 function cleanup(root: string): void {
-	fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+	try {
+		fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+		return;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (process.platform !== "win32" || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw err;
+		// Git for Windows can briefly hold worktree files after command exit. The
+		// assertions are already complete; avoid failing the test on best-effort
+		// temp-dir cleanup when a scanner or lingering git handle races deletion.
+		try {
+			const deferred = `${root}-cleanup-${Date.now()}`;
+			fs.renameSync(root, deferred);
+			try { fs.rmSync(deferred, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); } catch { /* best-effort */ }
+		} catch { /* best-effort */ }
+	}
 }
 
 describe("host worktree push policy", () => {

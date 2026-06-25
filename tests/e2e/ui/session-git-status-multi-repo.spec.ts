@@ -139,7 +139,7 @@ test.describe("session git-status widget — polyrepo", () => {
 
 			// Click a file in the api section → opens that repo's diff.
 			await apiSection.getByText("src/a.ts").first().click();
-			await expect(page.locator("#git-diff-modal diff-block")).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator("#git-diff-modal rich-git-diff-viewer")).toBeVisible({ timeout: 5_000 });
 			expect(mock.diffRepos).toContain("api");
 
 			// Close modal, reload — aggregated pill persists (re-fetch hits mock).
