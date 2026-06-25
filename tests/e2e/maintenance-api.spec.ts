@@ -350,6 +350,12 @@ test.describe("archived session worktree maintenance", () => {
 				id: seeded.session.id,
 				title: "Archived cleanup candidate",
 				archived: true,
+			});
+			const persistedSession = seeded.ctx.sessionStore.get(seeded.session.id);
+			expect(persistedSession).toMatchObject({
+				id: seeded.session.id,
+				title: "Archived cleanup candidate",
+				archived: true,
 				repoPath,
 				worktreePath,
 				branch,
