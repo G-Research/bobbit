@@ -152,7 +152,7 @@ Validation and selection rules:
 - `mode: "selected"` accepts exactly one selector type: either `sessionIds` or `worktrees`. Mixing both returns `400` rather than taking a surprising union.
 - Empty `mode: "selected"` input (`sessionIds: []`, `worktrees: []`, or neither field) is a no-op returning zero counts and an empty `results` array.
 - `sessionIds`, `worktrees`, and `worktrees[*].*` must be strings when present; otherwise return `400`.
-- A specified item with no remaining worktree path/git metadata is returned with `status: "already-cleaned"` and `reason: "already-cleaned"` when any remaining branch is live-referenced or absent. A branch-only stale item is actionable only when branch deletion is allowed for that same repo.
+- A specified item with no remaining worktree path/git metadata is returned with `status: "already-cleaned"` and `reason: "already-cleaned"` even if a branch remains. Branch-only stale items are not actionable in this feature.
 - A specified item that cannot be matched to an archived session/worktree is returned as `skipped` with `reason: "invalid-selection"`.
 - Cleanup is best-effort per item. One failure must not abort the whole request.
 
@@ -184,14 +184,14 @@ private localBranchExists(repoPath: string, branch: string | undefined): Promise
 
 `ArchivedWorktreeScanContext` should distinguish candidate scope from guard scope:
 
-- **Cleanup candidates:** archived sessions from visible project contexts only (`projectContextManager.visible()`), matching existing maintenance worktree behavior.
-- **Guard references:** every store that can still own live worktrees, gathered from `projectContextManager.all()` rather than only visible contexts:
+- **Cleanup candidates:** archived sessions from visible project contexts only (`projectContextManager.visible()`), matching existing maintenance worktree behavior. The endpoints are global maintenance endpoints, not current-project-scoped; "visible" means configured user projects returned by the context manager and excludes hidden/synthetic system contexts that have no host worktrees.
+- **Guard references:** every store that can still own a worktree or branch, gathered from `projectContextManager.all()` rather than only visible contexts:
   - all non-archived persisted sessions by iterating `for (const ctx of projectContextManager.all()) ctx.sessionStore.getLive()` plus current runtime `this.sessions` records;
-  - live goals via `ctx.goalStore.getLive()`;
-  - live teams via `ctx.teamStore.getAll()` where `ctx.goalStore.get(entry.goalId)?.archived !== true`, including `agents[*].worktreePath`, `agents[*].branch`, and the team lead session from `teamLeadSessionId`;
+  - all persisted goals with worktree/branch metadata via each `ctx.goalStore`, including archived goals unless the goal has been purged and no longer exists in the store;
+  - all persisted team entries via `ctx.teamStore.getAll()`, including each `agents[*].worktreePath`, `agents[*].branch`, and the team lead session from `teamLeadSessionId`; do not infer safety from the owning goal being archived;
   - staff records via `ctx.staffStore.getAll()`; any staff record with `worktreePath`, `repoWorktrees`, `cwd`, or `branch` is authoritative because paused staff still owns its worktree and staff cleanup is outside this feature;
   - every `repoWorktrees` entry from sessions, goals, and staff, preserving the component repo key so sibling multi-repo paths/branches are protected independently.
-- **Branch guards:** live branch names keyed by `repoPath`, collected from non-archived sessions, live goals, live team agents, staff records, and multi-repo sibling records. A branch can be deleted for a candidate repo only when the same branch is absent from that repo's live branch guard set.
+- **Branch guards:** branch names keyed by `repoPath`, collected from non-archived sessions, all persisted goals, all team agents, staff records, and multi-repo sibling records. A branch can be deleted for a candidate repo only when the same branch is absent from that repo's guard set.
 
 ## Candidate discovery and already-cleaned derivation
 
@@ -204,12 +204,12 @@ For each archived session from visible project contexts:
    - `pathExists = fs.existsSync(path)`;
    - `gitWorktreeMetadataExists = git worktree list --porcelain` contains the candidate `worktree` path or its `branch refs/heads/<branch>` in that `repoPath`;
    - `localBranchExists = git show-ref --verify --quiet refs/heads/<branch>` succeeds in that `repoPath`.
-5. Separate worktree cleanup state from branch cleanup state:
+5. Separate worktree cleanup state from branch cleanup state, but keep this feature worktree-focused:
    - `worktreePresent = pathExists || gitWorktreeMetadataExists`;
-   - `branchCleanupAvailable = localBranchExists && branchDeletionAllowed(branch, repoPath, ctx)`.
-6. If `worktreePresent` is false, classify the archived-session worktree as `already-cleaned` even when `localBranchExists` remains true because branch deletion is blocked by a live guard. It must not appear in the default candidate list or default cleanup count, so archived metadata can retain historical `worktreePath`/`repoWorktrees` without causing cleaned worktrees to reappear forever. It may appear only when `includeAlreadyCleaned=1` or when reporting a stale selected cleanup request. Do not use archived-session worktree maintenance as a generic orphan-branch cleanup tool.
-7. Skip and explain missing `repoPath`, missing worktree path, and container-internal sandbox paths.
-8. Mark an item `removable` only when either `worktreePresent` is true, or `branchCleanupAvailable` is true for an archived-session branch that is not live-referenced. A retained live-referenced branch by itself must never keep a worktree-cleaned item actionable.
+   - `branchDeletionAllowedForPresentWorktree = worktreePresent && localBranchExists && branchDeletionAllowed(branch, repoPath, ctx)`.
+6. If `worktreePresent` is false, classify the archived-session worktree as `already-cleaned` regardless of `localBranchExists`. It must not appear in the default candidate list or default cleanup count, so archived metadata can retain historical `worktreePath`/`repoWorktrees` without causing cleaned worktrees to reappear forever. It may appear only when `includeAlreadyCleaned=1` or when reporting a stale selected cleanup request. Branch-only cleanup is out of scope for this feature because it is generic orphan-branch cleanup and cannot safely route through `cleanupWorktree`.
+7. Skip and explain missing `repoPath`, missing worktree path, container-internal sandbox paths, and guard references.
+8. Mark an item `removable` only when `worktreePresent` is true and no guard reference blocks the worktree path. `willDeleteBranch` is true only when `branchDeletionAllowedForPresentWorktree` is true. A retained branch by itself must never keep a worktree-cleaned item actionable.
 
 The default scan should include removable rows plus skipped rows that explain blocked cleanup. It should exclude sessions whose only rows are `already-cleaned` unless diagnostics request them.
 
@@ -228,11 +228,11 @@ This protects flat `worktreePath`, `cwd` inside a worktree, and exact `repoWorkt
 
 ### Goals
 
-Live/non-archived goals may own goal worktrees independently of sessions. Convert live goals to `WorktreeReferenceRecord`-compatible objects using `id`, `worktreePath`, `cwd`, `repoWorktrees`, and `archived`, then check the same path guard. Also add live goal `branch` values to the branch guard set.
+Goals may own worktrees independently of sessions, and the safety requirement forbids deleting a worktree referenced by any goal. Convert every persisted goal with worktree metadata to `WorktreeReferenceRecord`-compatible objects using `id`, `worktreePath`, `cwd`, `repoWorktrees`, and `archived`, then check the same path guard. Also add every goal `branch` value to the branch guard set. Archived goals still guard paths/branches because their metadata and archive visibility are preserved.
 
 ### Teams
 
-For each `PersistedTeamEntry` from `ctx.teamStore.getAll()` whose goal is missing or non-archived, treat every agent `worktreePath` as live. Add every agent `branch` to the branch guard set and include `teamLeadSessionId` through the persisted-session records. If any live team agent references the candidate path, skip with `referenced-by-live-team`.
+For each `PersistedTeamEntry` from `ctx.teamStore.getAll()`, treat every agent `worktreePath` as guarded. Add every agent `branch` to the branch guard set and include `teamLeadSessionId` through the persisted-session records. Do not infer safety from the owning goal being archived; the team record remains authoritative until it is removed. If any team agent references the candidate path, skip with `referenced-by-live-team`.
 
 ### Staff
 
@@ -254,11 +254,12 @@ Skip paths that are container-internal, currently any normalized path starting w
 
 `cleanupWorktree` can delete the local and remote branch when called with `deleteBranch=true`. Pass `true` only when:
 
+- a worktree is present (`pathExists || gitWorktreeMetadataExists`);
 - `branch` is present;
-- the same branch is not referenced in the same `repoPath` by any non-archived session, runtime session, live goal, live team agent, staff record, or multi-repo sibling guard;
+- the same branch is not referenced in the same `repoPath` by any non-archived session, runtime session, persisted goal, team agent, staff record, or multi-repo sibling guard;
 - the selected item is still removable in the fresh cleanup scan.
 
-If the worktree is removable but the branch is still referenced, call `cleanupWorktree(repoPath, path, branch, false)` and return `branchDeleted: false` plus `branchDeleteBlockedReason` in the scan item.
+If the worktree is removable but branch deletion is blocked, call `cleanupWorktree(repoPath, path, branch, false)` and return `branchDeleted: false` plus `branchDeleteBlockedReason` in the scan item. If the worktree is already gone, do not call `cleanupWorktree` only to delete a branch.
 
 ## Cleanup semantics
 
@@ -270,14 +271,14 @@ Cleanup always starts by running the same scan derivation again, including alrea
 - stale selected rows that now derive to `already-cleaned` return `status: "already-cleaned"` and do not call git;
 - stale selected rows that cannot be matched to an archived session/worktree return `status: "skipped"`, `reason: "invalid-selection"`.
 
-For each selected fresh-scan item with `status: "removable"`:
+For each selected fresh-scan item with `status: "removable"`, `worktreePresent` must be true, so cleanup always uses the worktree helper for a real worktree cleanup:
 
 ```ts
 const { cleanupWorktree } = await import("../skills/git.js");
 await cleanupWorktree(item.repoPath, item.path, item.branch, item.willDeleteBranch);
 ```
 
-Then return a per-item result. A successful cleanup will not mutate `PersistedSession`; on the next scan the retained archived paths derive as `already-cleaned` when the path and git worktree metadata are gone. If branch deletion was blocked, the remaining live-referenced branch does not make the archived worktree reappear in the default candidate list. The archived transcript remains visible, but the worktree path shown in archived session details may point to a removed directory. A later enhancement may add non-destructive metadata such as `worktreeCleanedAt`, but that is not required for this goal.
+Never route branch-only cleanup through `cleanupWorktree`; branch-only rows are `already-cleaned` (or skipped diagnostics) and no git call is made for them. Then return a per-item result. A successful cleanup will not mutate `PersistedSession`; on the next scan the retained archived paths derive as `already-cleaned` when the path and git worktree metadata are gone. If branch deletion was blocked, the remaining branch does not make the archived worktree reappear in the default candidate list. The archived transcript remains visible, but the worktree path shown in archived session details may point to a removed directory. A later enhancement may add non-destructive metadata such as `worktreeCleanedAt`, but that is not required for this goal.
 
 ## Settings UI changes
 
@@ -331,9 +332,9 @@ Add coverage for:
 4. Cleanup removes the git worktree and branch where safe, returns `cleaned: 1`, and the archived session remains returned by archived-session APIs.
 5. A second scan after cleanup does not list the archived session by default; with `includeAlreadyCleaned=1` it reports `status: "already-cleaned"`, and a stale selected cleanup request reports `already-cleaned` rather than failing.
 6. A removable item whose branch deletion is blocked by a live guard cleans the worktree, leaves the branch, and is excluded from the next default scan.
-7. A branch-only archived-session item is removable only when branch deletion is allowed; otherwise it is already-cleaned/skipped and not repeatedly actionable.
+7. A branch-only archived-session item is classified already-cleaned/skipped and is never repeatedly actionable.
 8. A candidate sharing its path with a non-archived session is skipped and cleanup does not remove it.
-9. Live guard tests cover live goals (`goalStore.getLive()`), teams (`teamStore.getAll()`), staff records (`staffStore.getAll()`), runtime sessions, and multi-repo sibling `repoWorktrees`/branch references.
+9. Guard tests cover all persisted goals (including archived goals), all team entries (`teamStore.getAll()`), staff records (`staffStore.getAll()`), runtime sessions, and multi-repo sibling `repoWorktrees`/branch references.
 10. A `repoWorktrees` archived session returns one item per repo and cleans each independently.
 11. A sandbox/container-internal path like `/workspace-wt/session/x` is skipped with `sandbox-container-path`.
 
