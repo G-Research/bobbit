@@ -53,7 +53,7 @@ import {
 } from "./proposal-helpers.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { shouldApplyProposalUpdate } from "./proposal-update-policy.js";
-import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type GoalWorkflowValidationError, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	activePanelTabIdForSession,
@@ -240,6 +240,15 @@ function liveProposalSlotForSession(type: ProposalType, sessionId: string): Prop
 	if (!slot) return undefined;
 	if (slot.sessionId && slot.sessionId !== sessionId) return undefined;
 	return slot;
+}
+
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function workflowValidationErrorFromSlot(slot: ProposalSlot | undefined): GoalWorkflowValidationError | undefined {
+	return (slot as any)?.workflowValidationError;
 }
 
 function hasObjectFields(value: unknown): value is Record<string, unknown> {
@@ -1874,6 +1883,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const nextRev = hasServerRev
 				? Math.max(Math.trunc(serverRev as number), prevRev)
 				: prevRev;
+			const preservedWorkflowValidation = type === "goal" && !hasServerRev && sameProposalFields(prev?.fields, merged)
+				? workflowValidationErrorFromSlot(prev)
+				: undefined;
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
@@ -1882,6 +1894,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					? (prev?.mode ?? resolveProjectMode(sessionId))
 					: undefined,
 				rev: nextRev,
+				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),
 			};
 			state.activeProposals[type] = slot;
 			state.assistantHasProposal = true;
