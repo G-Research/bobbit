@@ -206,20 +206,24 @@ test.describe("Maintenance tab fixture", () => {
 		await expect(card.getByText("arch-ski")).toBeVisible();
 
 		const removableRow = card.locator('[data-archived-worktree-key="arch-alpha::packages-web"]');
-		await expect(removableRow).toContainText("session/archived-alpha");
-		await expect(removableRow).toContainText("packages/web");
-		await expect(removableRow).toContainText("C:/repo-wt/session-archived-alpha/packages/web");
-		await expect(removableRow).toContainText("Safe to remove");
+		await expect(removableRow).toContainText("removable");
+		await expect(removableRow).toContainText("repo: packages/web");
+		await expect(removableRow).toContainText("branch: session/archived-alpha");
+		await expect(removableRow).toContainText("branch will be deleted");
+		await expect(removableRow).toContainText("worktree: C:/repo-wt/session-archived-alpha/packages/web");
+		await expect(removableRow).toContainText("repo path: C:/repo/packages/web");
 		await expect(removableRow).toContainText("No live session, goal, team, staff, or sibling record references this path.");
 		await expect(removableRow.getByRole("checkbox")).toBeEnabled();
 		await expect(removableRow.getByRole("checkbox")).toBeChecked();
 
 		const skippedRow = card.locator('[data-archived-worktree-key="arch-skip::root"]');
-		await expect(skippedRow).toContainText("session/shared-branch");
-		await expect(skippedRow).toContainText(".");
-		await expect(skippedRow).toContainText("C:/repo-wt/shared-worktree");
-		await expect(skippedRow).toContainText("Still referenced");
+		await expect(skippedRow).toContainText("skipped");
+		await expect(skippedRow).toContainText("repo: .");
+		await expect(skippedRow).toContainText("branch: session/shared-branch");
+		await expect(skippedRow).toContainText("worktree: C:/repo-wt/shared-worktree");
+		await expect(skippedRow).toContainText("repo path: C:/repo");
 		await expect(skippedRow).toContainText("A live team member still uses this worktree path.");
+		await expect(skippedRow).toContainText("Branch kept: Branch is referenced by a live team member.");
 		await expect(skippedRow.getByRole("checkbox")).toBeDisabled();
 	});
 
@@ -265,11 +269,13 @@ test.describe("Maintenance tab fixture", () => {
 		const cleanedRow = card.locator('[data-archived-worktree-key="arch-cleaned::root"]');
 		if (await cleanedRow.count() === 0) test.skip(true, "Archived worktree diagnostics are not exposed by this UI.");
 
-		await expect(cleanedRow).toContainText("Already cleaned archive");
-		await expect(cleanedRow).toContainText("arch-cle");
-		await expect(cleanedRow).toContainText("session/already-cleaned");
-		await expect(cleanedRow).toContainText("C:/repo-wt/already-cleaned");
-		await expect(cleanedRow).toContainText("Already cleaned");
+		await expect(card.getByText("Already cleaned archive")).toBeVisible();
+		await expect(card.getByText("arch-cle")).toBeVisible();
+		await expect(cleanedRow).toContainText("already-cleaned");
+		await expect(cleanedRow).toContainText("repo: .");
+		await expect(cleanedRow).toContainText("branch: session/already-cleaned");
+		await expect(cleanedRow).toContainText("worktree: C:/repo-wt/already-cleaned");
+		await expect(cleanedRow).toContainText("repo path: C:/repo");
 		await expect(cleanedRow).toContainText("The worktree path and git worktree metadata are gone.");
 		await expect(cleanedRow.getByRole("checkbox")).toBeDisabled();
 		await expect(card.locator('[data-action="cleanup-archived-session-worktrees"]')).toBeDisabled();
