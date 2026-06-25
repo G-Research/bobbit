@@ -346,7 +346,9 @@ test.describe("GitStatusWidget render states", () => {
 		await expect(commitRow).toContainText("src/old-name.ts → src/new-name.ts");
 
 		await commitRow.getByText("src/old-name.ts → src/new-name.ts").click();
-		await expect(page.locator("#git-diff-modal diff-block")).toHaveCount(1);
+		await expect(page.locator('#git-diff-modal rich-git-diff-viewer')).toHaveCount(1);
+		await expect(page.locator('#git-diff-modal [role="dialog"]')).toHaveAttribute("aria-modal", "true");
+		await expect(page.locator('#git-diff-modal [aria-label="Close diff modal"]')).toHaveCount(1);
 
 		const diffCall = await page.waitForFunction(() =>
 			((window as any).__fetchCalls as string[]).find((url) =>
