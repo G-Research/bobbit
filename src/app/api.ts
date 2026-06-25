@@ -1724,7 +1724,6 @@ export async function deleteGoal(id: string): Promise<void> {
 				const allIds = collectGoalIdsFor(id);
 				eagerMarkArchived(allIds);
 			}
-			setHashRoute("landing");
 			await refreshSessions();
 		}
 		return;
@@ -1751,7 +1750,6 @@ export async function deleteGoal(id: string): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		eagerMarkArchived([id]);
-		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
