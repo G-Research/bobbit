@@ -512,6 +512,130 @@ test.describe("archived session worktree maintenance", () => {
 		}
 	});
 
+	test("stale existing directories with colliding basenames are non-actionable", async ({ gateway }) => {
+		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-stale-dir-"));
+		const repoPath = join(baseDir, "repo");
+		const worktreeBasename = "same-basename-worktree";
+		const activeWorktreePath = join(baseDir, "active", worktreeBasename);
+		const staleWorktreePath = join(baseDir, "stale", worktreeBasename);
+		const branch = `archived-stale-dir-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		let seeded: SeededSession | undefined;
+		try {
+			initGitRepo(repoPath);
+			mkdirSync(dirname(activeWorktreePath), { recursive: true });
+			git(repoPath, ["worktree", "add", "-b", branch, activeWorktreePath, "HEAD"]);
+			mkdirSync(staleWorktreePath, { recursive: true });
+			expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(activeWorktreePath));
+
+			seeded = await seedArchivedSession(gateway, {
+				baseDir,
+				title: "Archived stale existing path",
+				cwd: staleWorktreePath,
+				repoPath,
+				worktreePath: staleWorktreePath,
+				branch,
+			});
+
+			const scan = await getArchivedWorktreeScan();
+			const scannedSession = findArchivedSession(scan, seeded.session.id);
+			expect(scannedSession).toBeTruthy();
+			const item = scannedSession.worktrees[0];
+			expect(item).toMatchObject({
+				status: "skipped",
+				reason: "stale-worktree-directory",
+				pathExists: true,
+				gitWorktreeMetadataExists: false,
+				localBranchExists: true,
+				willDeleteBranch: false,
+			});
+
+			const cleanup = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+				method: "POST",
+				body: JSON.stringify({
+					mode: "selected",
+					worktrees: [{ sessionId: seeded.session.id, key: item.key }],
+				}),
+			});
+			expect(cleanup.status).toBe(200);
+			const cleanupBody = await cleanup.json();
+			expectArchivedCleanupShape(cleanupBody);
+			expect(cleanupBody.counts).toMatchObject({ cleaned: 0, branchDeleted: 0, skipped: 1, failed: 0 });
+			expect(cleanupBody.results).toContainEqual(expect.objectContaining({
+				sessionId: seeded.session.id,
+				key: item.key,
+				status: "skipped",
+				reason: "stale-worktree-directory",
+				worktreeRemoved: false,
+				branchDeleted: false,
+			}));
+
+			expect(existsSync(staleWorktreePath)).toBe(true);
+			expect(existsSync(activeWorktreePath)).toBe(true);
+			expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(activeWorktreePath));
+			expect(branchExists(repoPath, branch)).toBe(true);
+			git(activeWorktreePath, ["status", "--short"]);
+		} finally {
+			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			tryRemoveWorktree(repoPath, activeWorktreePath);
+			tryDeleteBranch(repoPath, branch);
+			rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	test("worktree key selectors must match the supplied session id", async ({ gateway }) => {
+		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-key-session-"));
+		const repoPath = join(baseDir, "repo");
+		const worktreePath = join(baseDir, "worktree");
+		const branch = `archived-key-session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		let seeded: SeededSession | undefined;
+		try {
+			initGitRepo(repoPath);
+			git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+			seeded = await seedArchivedSession(gateway, {
+				baseDir,
+				title: "Archived key/session mismatch candidate",
+				cwd: worktreePath,
+				repoPath,
+				worktreePath,
+				branch,
+			});
+
+			const scan = await getArchivedWorktreeScan();
+			const scannedSession = findArchivedSession(scan, seeded.session.id);
+			expect(scannedSession).toBeTruthy();
+			const item = scannedSession.worktrees[0];
+			expect(item.status).toBe("removable");
+
+			const cleanup = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+				method: "POST",
+				body: JSON.stringify({
+					mode: "selected",
+					worktrees: [{ sessionId: `${seeded.session.id}-wrong`, key: item.key }],
+				}),
+			});
+			expect(cleanup.status).toBe(200);
+			const cleanupBody = await cleanup.json();
+			expectArchivedCleanupShape(cleanupBody);
+			expect(cleanupBody.counts).toMatchObject({ requested: 1, cleaned: 0, branchDeleted: 0, skipped: 1, failed: 0 });
+			expect(cleanupBody.results).toContainEqual(expect.objectContaining({
+				key: item.key,
+				sessionId: `${seeded.session.id}-wrong`,
+				status: "skipped",
+				reason: "invalid-selection",
+				worktreeRemoved: false,
+				branchDeleted: false,
+			}));
+			expect(existsSync(worktreePath)).toBe(true);
+			expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(worktreePath));
+			expect(branchExists(repoPath, branch)).toBe(true);
+		} finally {
+			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			tryRemoveWorktree(repoPath, worktreePath);
+			tryDeleteBranch(repoPath, branch);
+			rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
 	test("sandbox container paths are skipped instead of treated as host worktrees", async ({ gateway }) => {
 		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-sandbox-"));
 		const repoPath = join(baseDir, "repo");

@@ -52,7 +52,7 @@ import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -7436,8 +7436,8 @@ export class SessionManager {
 		} else if (request.worktrees) {
 			for (const selector of request.worktrees) {
 				const match = rows.find(row => {
-					if (selector.key) return row.item.key === selector.key;
 					if (row.session.id !== selector.sessionId) return false;
+					if (selector.key) return row.item.key === selector.key;
 					if (selector.repo !== undefined && row.item.repo !== selector.repo) return false;
 					if (selector.path !== undefined && normalizeWorktreeHostPath(row.item.path) !== normalizeWorktreeHostPath(selector.path)) return false;
 					return selector.repo !== undefined || selector.path !== undefined;
@@ -7487,25 +7487,25 @@ export class SessionManager {
 
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
-				await cleanupWorktree(item.repoPath, item.path, item.branch, item.willDeleteBranch);
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
 
-				const postState = await this.archivedWorktreeCleanupPostState(item);
-				if (!postState.worktreeRemoved) {
-					response.results.push({ ...base, status: "failed", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: postState.branchDeleted });
+				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
+				if (!worktreeRemoved) {
+					response.results.push({ ...base, status: "failed", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
 					response.counts.failed++;
-					if (postState.branchDeleted) response.counts.branchDeleted++;
 					continue;
 				}
 
+				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
 				response.results.push({
 					...base,
 					status: "cleaned",
-					reason: postState.branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
+					reason: branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
 					worktreeRemoved: true,
-					branchDeleted: postState.branchDeleted,
+					branchDeleted,
 				});
 				response.counts.cleaned++;
-				if (postState.branchDeleted) response.counts.branchDeleted++;
+				if (branchDeleted) response.counts.branchDeleted++;
 			} catch (err) {
 				response.results.push({ ...base, status: "failed", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
 				response.counts.failed++;
@@ -7648,15 +7648,16 @@ export class SessionManager {
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
-		const worktreePresent = pathExists || gitWorktreeMetadataExists;
-		if (!worktreePresent) {
+		if (!gitWorktreeMetadataExists) {
 			return base({
 				pathExists,
 				gitWorktreeMetadataExists,
 				localBranchExists,
-				status: "already-cleaned",
-				reason: "already-cleaned",
-				detail: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
+				status: pathExists ? "skipped" : "already-cleaned",
+				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
+				detail: pathExists
+					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
+					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
 			});
 		}
 
@@ -7677,7 +7678,7 @@ export class SessionManager {
 		const branchDeleteBlockedReason = localBranchExists && !this.branchDeletionAllowed(spec.branch, spec.repoPath, ctx)
 			? "branch-referenced-by-live-record"
 			: undefined;
-		const willDeleteBranch = worktreePresent && localBranchExists && !branchDeleteBlockedReason;
+		const willDeleteBranch = localBranchExists && !branchDeleteBlockedReason;
 		return base({
 			pathExists,
 			gitWorktreeMetadataExists,
@@ -7724,16 +7725,34 @@ export class SessionManager {
 		return !ctx.branchGuardsByRepo.get(repoKey)?.has(branch);
 	}
 
-	private async archivedWorktreeCleanupPostState(item: ArchivedSessionWorktreeItem): Promise<{ worktreeRemoved: boolean; branchDeleted: boolean }> {
+	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
 		let pathExists = false;
 		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
 		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
 		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
-		const branchDeleted = item.willDeleteBranch && item.branch
-			? !(await this.localBranchExistsUncached(item.repoPath, item.branch))
-			: false;
-		return { worktreeRemoved: !pathExists && !gitWorktreeMetadataExists, branchDeleted };
+		return !pathExists && !gitWorktreeMetadataExists;
+	}
+
+	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
+		if (!item.willDeleteBranch || !item.branch || !item.localBranchExists) return false;
+		const ctx = this.buildArchivedWorktreeScanContext();
+		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx)) return false;
+		try {
+			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
+		} catch {
+			// Verify below before reporting success; branch deletion may have raced or been blocked.
+		}
+		const branchDeleted = !(await this.localBranchExistsUncached(item.repoPath, item.branch));
+		if (!branchDeleted) return false;
+		if (!(await shouldSkipRemotePushForTests(item.repoPath))) {
+			try {
+				await execFileAsync("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
+			} catch {
+				// Best effort: remote may be missing, unreachable, or already deleted.
+			}
+		}
+		return true;
 	}
 
 	private gitWorktreeMetadataMatches(gitRefs: GitWorktreeRefs, normalizedCandidate: string | undefined, branch: string | undefined): boolean {
