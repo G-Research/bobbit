@@ -7,11 +7,62 @@ type FetchLogEntry = { url: string; method: string; body: unknown };
 type Worktree = { path: string; branch: string };
 type Session = { id: string; title?: string };
 type Archives = { count: number; totalSizeBytes: number };
+type ArchivedWorktreeStatus = "removable" | "skipped" | "already-cleaned";
+type ArchivedWorktreeItem = {
+	key: string;
+	sessionId: string;
+	repo: string;
+	repoPath: string;
+	path: string;
+	branch?: string;
+	pathExists: boolean;
+	gitWorktreeMetadataExists: boolean;
+	localBranchExists: boolean;
+	status: ArchivedWorktreeStatus;
+	reason: string;
+	detail: string;
+	willDeleteBranch: boolean;
+	branchDeleteBlockedReason?: string;
+};
+type ArchivedWorktreeSession = {
+	id: string;
+	title: string;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
+	goalId?: string;
+	teamGoalId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	sandboxed?: boolean;
+	branch?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	worktrees: ArchivedWorktreeItem[];
+};
+type ArchivedWorktreeScan = {
+	sessions: ArchivedWorktreeSession[];
+	counts: {
+		archivedSessions: number;
+		sessionsWithWorktrees: number;
+		removableWorktrees: number;
+		skippedWorktrees: number;
+		alreadyCleanedWorktrees: number;
+	};
+};
+
+type CleanupArchivedWorktreeRequest = {
+	mode?: "all" | "selected";
+	sessionIds?: string[];
+	worktrees?: Array<{ sessionId: string; repo?: string; path?: string; key?: string }>;
+};
 
 let worktrees: Worktree[] = [];
 let sessions: Session[] = [];
 let archives: Archives = { count: 0, totalSizeBytes: 0 };
 let orphanRows: { count: number; sample: Array<{ id: string; source_id: string; parent_id?: string | null }> } = { count: 0, sample: [] };
+let archivedWorktreeScan: ArchivedWorktreeScan = emptyArchivedWorktreeScan();
 let fetchLog: FetchLogEntry[] = [];
 
 class FixtureWebSocket {
@@ -63,6 +114,91 @@ function searchStatsBody() {
 	};
 }
 
+function emptyArchivedWorktreeScan(): ArchivedWorktreeScan {
+	return {
+		sessions: [],
+		counts: {
+			archivedSessions: 0,
+			sessionsWithWorktrees: 0,
+			removableWorktrees: 0,
+			skippedWorktrees: 0,
+			alreadyCleanedWorktrees: 0,
+		},
+	};
+}
+
+function archivedCounts(sessions: ArchivedWorktreeSession[]): ArchivedWorktreeScan["counts"] {
+	return {
+		archivedSessions: sessions.length,
+		sessionsWithWorktrees: sessions.filter(session => session.worktrees.length > 0).length,
+		removableWorktrees: sessions.reduce((sum, session) => sum + session.worktrees.filter(wt => wt.status === "removable").length, 0),
+		skippedWorktrees: sessions.reduce((sum, session) => sum + session.worktrees.filter(wt => wt.status === "skipped").length, 0),
+		alreadyCleanedWorktrees: sessions.reduce((sum, session) => sum + session.worktrees.filter(wt => wt.status === "already-cleaned").length, 0),
+	};
+}
+
+function normalizeArchivedWorktreeScan(scan?: ArchivedWorktreeScan): ArchivedWorktreeScan {
+	if (!scan) return emptyArchivedWorktreeScan();
+	const sessions = scan.sessions.map(session => ({
+		...session,
+		worktrees: session.worktrees.map(wt => ({ ...wt, sessionId: wt.sessionId || session.id })),
+	}));
+	return { sessions, counts: scan.counts || archivedCounts(sessions) };
+}
+
+function matchesSelectedArchivedWorktree(item: ArchivedWorktreeItem, selector: { sessionId: string; repo?: string; path?: string; key?: string }): boolean {
+	if (selector.key) return selector.key === item.key;
+	if (selector.sessionId !== item.sessionId) return false;
+	if (selector.repo && selector.repo !== item.repo) return false;
+	if (selector.path && selector.path !== item.path) return false;
+	return true;
+}
+
+function cleanupArchivedWorktrees(body: unknown): unknown {
+	const request = (body && typeof body === "object" ? body : {}) as CleanupArchivedWorktreeRequest;
+	const allRows = archivedWorktreeScan.sessions.flatMap(session => session.worktrees.map(item => ({ session, item })));
+	const selected = request.mode === "all"
+		? allRows.filter(({ item }) => item.status === "removable")
+		: Array.isArray(request.worktrees)
+			? allRows.filter(({ item }) => request.worktrees!.some(selector => matchesSelectedArchivedWorktree(item, selector)))
+			: Array.isArray(request.sessionIds)
+				? allRows.filter(({ item }) => request.sessionIds!.includes(item.sessionId))
+				: [];
+	const cleanedKeys = new Set<string>();
+	const results = selected.map(({ session, item }) => {
+		const cleaned = item.status === "removable";
+		if (cleaned) cleanedKeys.add(item.key);
+		return {
+			key: item.key,
+			sessionId: session.id,
+			title: session.title,
+			repo: item.repo,
+			repoPath: item.repoPath,
+			path: item.path,
+			branch: item.branch,
+			status: cleaned ? "cleaned" : item.status,
+			reason: cleaned ? undefined : item.reason,
+			worktreeRemoved: cleaned,
+			branchDeleted: cleaned && item.willDeleteBranch,
+		};
+	});
+	const remainingSessions = archivedWorktreeScan.sessions
+		.map(session => ({ ...session, worktrees: session.worktrees.filter(item => !cleanedKeys.has(item.key)) }))
+		.filter(session => session.worktrees.length > 0);
+	archivedWorktreeScan = { sessions: remainingSessions, counts: archivedCounts(remainingSessions) };
+	return {
+		counts: {
+			requested: selected.length,
+			cleaned: results.filter(result => result.status === "cleaned").length,
+			branchDeleted: results.filter(result => result.branchDeleted).length,
+			skipped: results.filter(result => result.status === "skipped").length,
+			alreadyCleaned: results.filter(result => result.status === "already-cleaned").length,
+			failed: 0,
+		},
+		results,
+	};
+}
+
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const url = requestPath(input);
 	const method = (init?.method || "GET").toUpperCase();
@@ -79,6 +215,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url === "/api/maintenance/cleanup-worktrees" && method === "POST") {
 		worktrees = [];
 		return response({ cleaned: true });
+	}
+	if (url.startsWith("/api/maintenance/archived-session-worktrees")) return response(archivedWorktreeScan);
+	if (url === "/api/maintenance/cleanup-archived-session-worktrees" && method === "POST") {
+		return response(cleanupArchivedWorktrees(parseBody(init)));
 	}
 	if (url === "/api/maintenance/orphaned-sessions") return response({ sessions });
 	if (url === "/api/maintenance/cleanup-sessions" && method === "POST") {
@@ -107,11 +247,13 @@ window.addEventListener("hashchange", doRender);
 	sessions?: Session[];
 	archives?: Archives;
 	orphanRows?: { count: number; sample: Array<{ id: string; source_id: string; parent_id?: string | null }> };
+	archivedWorktreeScan?: ArchivedWorktreeScan;
 }) => {
 	worktrees = opts.worktrees || [];
 	sessions = opts.sessions || [];
 	archives = opts.archives || { count: 0, totalSizeBytes: 0 };
 	orphanRows = opts.orphanRows || { count: 0, sample: [] };
+	archivedWorktreeScan = normalizeArchivedWorktreeScan(opts.archivedWorktreeScan);
 	fetchLog = [];
 	state.activeProjectId = "fixture-project";
 	window.location.hash = "#/settings/system/maintenance";
