@@ -14045,6 +14045,73 @@ async function handleApiRoute(
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
 
+	// GET /api/maintenance/archived-session-worktrees
+	if (url.pathname === "/api/maintenance/archived-session-worktrees" && req.method === "GET") {
+		const includeAlreadyCleaned = url.searchParams.get("includeAlreadyCleaned") === "1";
+		const result = await sessionManager.listArchivedSessionWorktrees(includeAlreadyCleaned);
+		json(result);
+		return;
+	}
+
+	// POST /api/maintenance/cleanup-archived-session-worktrees
+	if (url.pathname === "/api/maintenance/cleanup-archived-session-worktrees" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Request body must be an object" }, 400);
+			return;
+		}
+		const mode = (body as any).mode;
+		const hasSessionIds = Object.prototype.hasOwnProperty.call(body, "sessionIds");
+		const hasWorktrees = Object.prototype.hasOwnProperty.call(body, "worktrees");
+		if (mode !== "all" && mode !== "selected") {
+			json({ error: "Invalid cleanup mode" }, 400);
+			return;
+		}
+		if (mode === "all") {
+			if (hasSessionIds || hasWorktrees) {
+				json({ error: "mode=all does not accept selectors" }, 400);
+				return;
+			}
+			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "all" });
+			json(result);
+			return;
+		}
+		if (hasSessionIds && hasWorktrees) {
+			json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400);
+			return;
+		}
+		if (hasSessionIds) {
+			const sessionIds = (body as any).sessionIds;
+			if (!Array.isArray(sessionIds) || sessionIds.some((id: unknown) => typeof id !== "string")) {
+				json({ error: "sessionIds must be an array of strings" }, 400);
+				return;
+			}
+			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected", sessionIds });
+			json(result);
+			return;
+		}
+		if (hasWorktrees) {
+			const worktrees = (body as any).worktrees;
+			if (!Array.isArray(worktrees) || worktrees.some((wt: unknown) => {
+				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
+				const rec = wt as Record<string, unknown>;
+				return typeof rec.sessionId !== "string"
+					|| (rec.repo !== undefined && typeof rec.repo !== "string")
+					|| (rec.path !== undefined && typeof rec.path !== "string")
+					|| (rec.key !== undefined && typeof rec.key !== "string");
+			})) {
+				json({ error: "worktrees must be an array of selector objects with string fields" }, 400);
+				return;
+			}
+			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected", worktrees });
+			json(result);
+			return;
+		}
+		const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected" });
+		json(result);
+		return;
+	}
+
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
 		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
