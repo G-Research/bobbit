@@ -391,6 +391,31 @@ export class MockAgentCore {
 			};
 		}
 
+		// Failed workflow-validation proposal path. The omitted workflow makes the
+		// gateway seed endpoint return MISSING_WORKFLOW; _handleSingleTool mirrors
+		// that 400 as an isError toolResult so the UI can render the failed draft.
+		if (text.includes("GOAL_PROPOSAL_MISSING_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Missing Workflow Goal",
+					spec: "A draft intentionally missing workflow so the proposal seed endpoint rejects it.",
+				},
+				output: "Goal proposal failed workflow validation.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_FIXED_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Fixed Workflow Goal",
+					workflow: "general",
+					spec: "A corrected draft with an explicit valid workflow.",
+				},
+				output: "Corrected goal proposal submitted.",
+			};
+		}
+
 		// Goal revision (2nd propose_goal with a different title/spec) — used by
 		// goal-proposal-revision-autoupdate.spec.ts (Failure Mode A). Must precede
 		// the generic `goal_proposal` matcher below because the trigger string
@@ -2185,10 +2210,19 @@ export class MockAgentCore {
 		// propose_* tools: mirror the real extension's seed POST so the file-on-disk
 		// source of truth (Slice B) is populated during E2E. Awaited so the seed
 		// completes before message_end fires — the rehydrate path on reload depends
-		// on the file already existing.
-	let revMarker = undefined;
+		// on the file already existing. If the gateway rejects the seed, surface that
+		// structured body as an isError result to match the real tool extension.
+		let revMarker = undefined;
 		if (typeof toolAction.tool === "string" && toolAction.tool.startsWith("propose_")) {
-			revMarker = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			const seedResult = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			if (seedResult && typeof seedResult === "object") {
+				if (typeof seedResult.rev === "number") {
+					revMarker = seedResult.rev;
+				} else if (seedResult.ok === false || typeof seedResult.code === "string" || typeof seedResult.message === "string") {
+					isError = true;
+					output = JSON.stringify(seedResult, null, 2);
+				}
+			}
 		}
 		// edit_proposal tool: shell to the gateway edit endpoint so the file
 		// updates and the server broadcasts proposal_update {source:"edit"}.
@@ -2281,7 +2315,7 @@ export class MockAgentCore {
 		const creds = this._gatewayCreds();
 		if (!creds) return undefined;
 		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
-		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
+		return body && typeof body === "object" ? body : undefined;
 	}
 
 	async _editProposal(type, oldText, newText) {
