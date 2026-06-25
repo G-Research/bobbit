@@ -223,6 +223,7 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 - `sandboxed` is a typed field on `SessionInfo` (no `(session as any)._sandboxed` hack)
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
+- **Forked session restore fails with `Stored session working directory does not exist` after source cleanup**: the fork clone kept stale source cwd metadata. `POST /api/sessions/:id/fork` must pass source cwd/worktree candidates as `preExistingAgentSessionOldCwds`, like Continue-Archived, so only top-level runtime cwd metadata is rebased before `switch_session`; message content mentioning old paths stays byte-identical. Pinned by `tests/e2e/sidebar-actions-server.spec.ts`.
 - **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
 
 ## Staff inbox tools missing after restart / `[INBOX]` completion silently fails
