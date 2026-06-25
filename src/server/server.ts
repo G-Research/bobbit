@@ -945,8 +945,116 @@ async function runBatchGitStatus(
 	return runBatchGitStatusNative(cwd, { ...opts, containerId });
 }
 
-// ── Git diff helper (shared between session and goal endpoints) ──
+// ── Git diff / commit helpers (shared between session and goal endpoints) ──
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
+const COMMIT_LOG_FORMAT = "%H%x1f%h%x1f%s%x1f%an%x1f%aI";
+const COMMIT_LOG_SEPARATOR = "\x1f";
+
+type CommitChangedFile = {
+	path: string;
+	oldPath?: string;
+	status: string;
+	statusLabel: string;
+};
+
+type CommitInfo = {
+	sha: string;
+	shortSha: string;
+	message: string;
+	author: string;
+	timestamp: string;
+	filesChanged: number;
+	insertions: number;
+	deletions: number;
+	files: CommitChangedFile[];
+};
+
+function isUnsafeGitPath(file: string): boolean {
+	return !file
+		|| file.includes("..")
+		|| path.posix.isAbsolute(file)
+		|| path.win32.isAbsolute(file)
+		|| /^[a-zA-Z]:/.test(file);
+}
+
+function isValidCommitSha(commit: string): boolean {
+	return /^[0-9a-fA-F]{4,40}$/.test(commit);
+}
+
+function statusLabelForCommitFile(status: string): string {
+	switch (status) {
+		case "M": return "modified";
+		case "A": return "added";
+		case "D": return "deleted";
+		case "R": return "renamed";
+		default: return status ? status.toLowerCase() : "unknown";
+	}
+}
+
+function parseCommitChangedFiles(output: string): CommitChangedFile[] {
+	return output.split("\n").map(line => line.trim()).filter(Boolean).flatMap((line): CommitChangedFile[] => {
+		const parts = line.split("\t");
+		const rawStatus = parts[0] || "";
+		const status = rawStatus.startsWith("R") ? "R" : rawStatus;
+		if (status === "R") {
+			const oldPath = parts[1];
+			const newPath = parts[2];
+			if (!oldPath || !newPath) return [];
+			return [{ path: newPath, oldPath, status, statusLabel: statusLabelForCommitFile(status) }];
+		}
+		const filePath = parts[1];
+		if (!filePath) return [];
+		return [{ path: filePath, status, statusLabel: statusLabelForCommitFile(status) }];
+	});
+}
+
+async function assertCommitExists(cwd: string, commit: string, containerId?: string): Promise<void> {
+	if (!isValidCommitSha(commit)) throw new Error("INVALID_COMMIT");
+	try {
+		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId);
+	} catch {
+		throw new Error("INVALID_COMMIT");
+	}
+}
+
+async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string): Promise<CommitChangedFile[]> {
+	await assertCommitExists(cwd, sha, containerId);
+	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId);
+	return parseCommitChangedFiles(out);
+}
+
+function parseCommitLogWithShortstat(output: string): CommitInfo[] {
+	const lines = output.split("\n");
+	const commits: CommitInfo[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (!line.includes(COMMIT_LOG_SEPARATOR)) continue;
+		const parts = line.split(COMMIT_LOG_SEPARATOR);
+		if (parts.length < 5) continue;
+		const [sha, shortSha, message, author, timestamp] = parts;
+		let filesChanged = 0, insertions = 0, deletions = 0;
+		for (let j = i + 1; j < lines.length && !lines[j].includes(COMMIT_LOG_SEPARATOR); j++) {
+			const statLine = lines[j].trim();
+			if (!statLine.includes("changed")) continue;
+			const fm = statLine.match(/(\d+) file/);
+			const im = statLine.match(/(\d+) insertion/);
+			const dm = statLine.match(/(\d+) deletion/);
+			if (fm) filesChanged = parseInt(fm[1], 10);
+			if (im) insertions = parseInt(im[1], 10);
+			if (dm) deletions = parseInt(dm[1], 10);
+			break;
+		}
+		commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions, files: [] });
+	}
+	return commits;
+}
+
+async function attachCommitFiles(commits: CommitInfo[], cwd: string, containerId?: string): Promise<CommitInfo[]> {
+	return Promise.all(commits.map(async commit => ({
+		...commit,
+		files: await getCommitChangedFiles(cwd, commit.sha, containerId),
+	})));
+}
 
 /**
  * The seven legacy top-level QA keys that have moved to per-component
@@ -997,15 +1105,22 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
+async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string): Promise<string> {
 	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
 
 	let diff = "";
-	if (file) {
+	if (commit) {
+		if (!file || isUnsafeGitPath(file)) throw new Error("INVALID_PATH");
+		await assertCommitExists(cwd, commit, containerId);
+		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId);
+		const renamedFile = changedFiles.find(f => f.status === "R" && (f.path === file || f.oldPath === file));
+		const pathspecs = renamedFile?.oldPath ? [renamedFile.oldPath, renamedFile.path] : [file];
+		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId);
+	} else if (file) {
 		// Sanitize: reject path traversal, absolute paths, drive letters
-		if (file.includes("..") || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) {
+		if (isUnsafeGitPath(file)) {
 			throw new Error("INVALID_PATH");
 		}
 		if (containerId) {
@@ -9508,11 +9623,8 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" ${rangeSpec}`, goal.cwd);
-			const commits = out.trim().split("\n").filter(Boolean).map((line: string) => {
-				const [sha, shortSha, message, author, timestamp] = line.split("|");
-				return { sha, shortSha, message, author, timestamp };
-			});
+			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, goal.cwd);
+			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -9597,6 +9709,7 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const commit = url.searchParams.get("commit") || undefined;
 		const repoParam = url.searchParams.get("repo") || undefined;
 		const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
 		let diffCwd = cwd;
@@ -9604,10 +9717,11 @@ async function handleApiRoute(
 			diffCwd = goalRepoWorktrees[repoParam];
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid, commit);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "INVALID_COMMIT") { json({ error: "Invalid commit" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			jsonError(500, err);
 		}
@@ -11781,6 +11895,7 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const commit = url.searchParams.get("commit") || undefined;
 		// Per-repo diff routing (multi-repo sessions). `session.repoWorktrees` is
 		// an array; resolve the requested repo's worktree path, else fall back to cwd.
 		const repoParam = url.searchParams.get("repo") || undefined;
@@ -11790,10 +11905,11 @@ async function handleApiRoute(
 			if (entry) diffCwd = entry.worktreePath;
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid, commit);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "INVALID_COMMIT") { json({ error: "Invalid commit" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			jsonError(500, err);
 		}
@@ -11838,32 +11954,8 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000, cid);
-			const lines = out.split('\n');
-			const commits: Array<{sha: string; shortSha: string; message: string; author: string; timestamp: string; filesChanged: number; insertions: number; deletions: number}> = [];
-
-			for (let i = 0; i < lines.length; i++) {
-				const line = lines[i];
-				if (!line.includes('|')) continue;
-				const parts = line.split('|');
-				if (parts.length < 5) continue;
-				const [sha, shortSha, message, author, timestamp] = parts;
-				// Next non-empty line should be the shortstat
-				let filesChanged = 0, insertions = 0, deletions = 0;
-				for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-					const statLine = lines[j].trim();
-					if (statLine.includes('file') && statLine.includes('changed')) {
-						const fm = statLine.match(/(\d+) file/);
-						const im = statLine.match(/(\d+) insertion/);
-						const dm = statLine.match(/(\d+) deletion/);
-						if (fm) filesChanged = parseInt(fm[1], 10);
-						if (im) insertions = parseInt(im[1], 10);
-						if (dm) deletions = parseInt(dm[1], 10);
-						break;
-					}
-				}
-				commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions });
-			}
+			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, cwd, 10000, cid);
+			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
 
 			json({ commits });
 		} catch (e: any) {
