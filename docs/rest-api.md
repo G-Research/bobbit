@@ -58,6 +58,8 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
+| `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
+| `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
@@ -303,13 +305,63 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
-| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
+| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
+| `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+### Git commit lists and commit-scoped diffs
+
+The git-status widget uses the commit endpoints to explain what changed on a branch before a push, pull, or merge action. The same response shape is used for session-scoped and goal-scoped commit modals so the UI can render expandable commit rows without issuing one request per commit.
+
+`GET /api/sessions/:id/commits` returns commits for the session branch. By default it lists unpushed commits relative to the upstream branch, falls back to recent `HEAD` commits when no upstream exists, supports `direction=behind` for incoming commits, and supports `vs=primary` to compare against the resolved primary ref. `GET /api/goals/:id/commits` returns commits on the goal branch relative to the primary branch when that comparison is available. Goal requests also accept `limit` clamped to the server's safe range.
+
+Response envelope:
+
+```json
+{
+  "commits": [
+    {
+      "sha": "9f3c1a8d4e...",
+      "shortSha": "9f3c1a8",
+      "message": "Add commit file diffs",
+      "author": "Ada Developer",
+      "timestamp": "2026-06-25T12:34:56.000Z",
+      "filesChanged": 2,
+      "insertions": 18,
+      "deletions": 4,
+      "files": [
+        { "path": "src/ui/components/GitStatusWidget.ts", "status": "M", "statusLabel": "modified" },
+        { "oldPath": "docs/old.md", "path": "docs/new.md", "status": "R", "statusLabel": "renamed" }
+      ]
+    }
+  ]
+}
+```
+
+`files[]` comes from name-status git output with rename detection enabled. Known status labels are `modified`, `added`, `deleted`, and `renamed`; unknown statuses are preserved and lowercased for display. For renamed files, `oldPath` is the source path and `path` is the destination path. Click targets should request the destination `path`; the diff endpoint includes rename metadata when Git reports it.
+
+`GET /api/{sessions|goals}/:id/git-diff?file=<path>` keeps the existing working-tree diff behavior. Adding `commit=<sha>` switches the endpoint to a commit-scoped diff for that file:
+
+```http
+GET /api/sessions/:id/git-diff?commit=9f3c1a8&file=src%2Fui%2Fcomponents%2FGitStatusWidget.ts
+GET /api/goals/:id/git-diff?commit=9f3c1a8&file=docs%2Fnew.md
+```
+
+The response is `{ "diff": "...unified diff..." }` and uses the same truncation behavior as working-tree diffs, including the truncation marker when the payload exceeds the configured diff size limit. Multi-repo callers may pass `repo=<repoName>` to route the diff to a specific repo worktree when one is registered.
+
+Validation and errors:
+
+- `commit` is optional. When present, it must be a 4- to 40-character hexadecimal SHA that resolves to a commit object; otherwise the endpoint returns `400 { "error": "Invalid commit" }`.
+- `file` is required for commit-scoped diffs. File paths that are empty, contain traversal (`..`), are POSIX/Windows absolute paths, or start with a Windows drive prefix are rejected with `400 { "error": "Invalid file path" }`.
+- If the selected commit/file pair has no diff, the endpoint returns `404 { "error": "No diff found" }`.
+- Unknown sessions/goals and missing worktrees use the same not-found responses as the existing git-status and git-diff endpoints.
+
+Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
 
 ### Archived goal list and query search
 
