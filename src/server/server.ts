@@ -10320,12 +10320,15 @@ async function handleApiRoute(
 			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
+		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath, source.cwd]
+			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
 			sessionId: forkId,
 			projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
