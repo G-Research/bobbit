@@ -64,6 +64,23 @@ function formatProposalErrorMessage(result: ToolResultMessage | undefined): stri
 	return parts.join(" ");
 }
 
+function workflowValidationErrorDetail(
+	result: ToolResultMessage | undefined,
+	fields: Record<string, any> | null,
+): Record<string, unknown> | undefined {
+	const details = parseProposalErrorFromResult(result);
+	if (!details || (details.code !== "MISSING_WORKFLOW" && details.code !== "UNKNOWN_WORKFLOW")) return undefined;
+	const workflowId = typeof fields?.workflow === "string" ? fields.workflow : undefined;
+	return {
+		code: details.code,
+		message: details.message,
+		...(workflowId !== undefined ? { workflowId } : {}),
+		...(details.availableWorkflowIds.length > 0
+			? { availableWorkflows: details.availableWorkflowIds.map((id) => ({ id })) }
+			: {}),
+	};
+}
+
 export class ProposalRenderer implements ToolRenderer {
 	private _toolName: string;
 
@@ -99,6 +116,7 @@ export class ProposalRenderer implements ToolRenderer {
 		const isFailedGoalProposal = this._toolName === "propose_goal" && Boolean(result?.isError);
 		const rev = isFailedGoalProposal ? undefined : parseRevFromResult(result);
 		const errorMessage = isFailedGoalProposal ? formatProposalErrorMessage(result) : "";
+		const workflowValidationError = isFailedGoalProposal ? workflowValidationErrorDetail(result, fields) : undefined;
 
 		// Handler for the "Open proposal" button
 		const openProposal = (e: Event) => {
@@ -106,6 +124,7 @@ export class ProposalRenderer implements ToolRenderer {
 			e.stopPropagation();
 			const detail: Record<string, unknown> = { type: meta.type };
 			if (fields) detail.fields = fields;
+			if (workflowValidationError) detail.workflowValidationError = workflowValidationError;
 			if (typeof rev === "number" && rev > 0) {
 				detail.rev = rev;
 			} else if (!fields) {

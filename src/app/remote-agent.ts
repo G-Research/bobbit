@@ -236,6 +236,11 @@ function normalizeAvailableWorkflows(value: unknown): Array<{ id: string; name?:
 	return workflows.length > 0 ? workflows : undefined;
 }
 
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
 function parseGoalWorkflowValidationError(result: any, input?: Record<string, unknown>): GoalWorkflowValidationError | null {
 	if (!result?.isError) return null;
 	const texts: string[] = [];
@@ -1207,11 +1212,18 @@ export class RemoteAgent {
 		this._deferProposalCheck = false;
 		if (this._hasDeferredProposals) {
 			this._hasDeferredProposals = false;
-			for (const m of this._state.messages) {
-				if (m.role === "assistant") {
-					this._checkToolProposals(m);
-					this._checkProposals(m);
-				}
+			this._scanLoadedProposalMessages();
+		}
+	}
+
+	private _scanLoadedProposalMessages(): void {
+		for (const m of this._state.messages) {
+			if (m.role === "assistant") {
+				const normalizedMessage = normalizeProposalToolCallInputs(m, (id) => this._toolCallInputsById.get(id));
+				this._checkToolProposals(normalizedMessage);
+				this._checkProposals(normalizedMessage);
+			} else {
+				this._checkProposalToolResult(m);
 			}
 		}
 	}
@@ -1708,12 +1720,7 @@ export class RemoteAgent {
 					if (this._deferProposalCheck) {
 						this._hasDeferredProposals = true;
 					} else {
-						for (const m of this._state.messages) {
-							if (m.role === "assistant") {
-								this._checkToolProposals(m);
-								this._checkProposals(m);
-							}
-						}
+						this._scanLoadedProposalMessages();
 					}
 					// Rebuild review pane state from message history (same persistence as preview pane).
 					// Hydrate annotation cache from server before checking submitted state.
@@ -2173,14 +2180,26 @@ export class RemoteAgent {
 		const input = remembered?.input ?? (toolCallId ? parseToolPayload(this._toolCallInputsById.get(toolCallId)) ?? undefined : undefined);
 		const validation = parseGoalWorkflowValidationError(message, input);
 		if (!validation) return;
-		if (!state.activeProposals.goal || state.activeProposals.goal.sessionId !== this._sessionId) {
+		const current = state.activeProposals.goal;
+		if (!current || current.sessionId !== this._sessionId) {
 			if (input && this.onProposal) this.onProposal("goal", input, false, undefined, "tool");
+		} else if ((current.rev ?? 0) > 0 && input && !sameProposalFields(current.fields, input)) {
+			// Historical replay may encounter an older failed no-rev tool result after a
+			// later successful retry has already rehydrated a rev-backed draft. Keep the
+			// failed metadata tied to its own tool card/open event instead of poisoning
+			// the current successful proposal slot.
+			return;
 		}
 		const slot = state.activeProposals.goal;
 		if (!slot || slot.sessionId !== this._sessionId) return;
-		(state.activeProposals.goal as any) = { ...slot, workflowValidationError: validation };
+		if (input && (slot.rev ?? 0) === 0 && !sameProposalFields(slot.fields, input)) {
+			(state.activeProposals.goal as any) = { ...slot, fields: { ...input } };
+		}
+		const target = state.activeProposals.goal;
+		if (!target || target.sessionId !== this._sessionId) return;
+		(state.activeProposals.goal as any) = { ...target, workflowValidationError: validation };
 		if (validation.workflowId !== undefined) {
-			(state.activeProposals.goal as any).fields = { ...slot.fields, workflow: validation.workflowId };
+			(state.activeProposals.goal as any).fields = { ...target.fields, workflow: validation.workflowId };
 		}
 		renderApp();
 	}
@@ -2206,10 +2225,7 @@ export class RemoteAgent {
 			// Either may be unset — we keep going as long as one is wired.
 			if (!callback && !this.onProposal) continue;
 
-			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
-			// During streaming we still check this so we don't re-fire after message_end marks it.
 			const blockId = block.id || block.toolCallId || "";
-			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			// Extract input — tool_use blocks use `input`, toolCall blocks may use `arguments`
 			let input = block.input;
@@ -2227,6 +2243,16 @@ export class RemoteAgent {
 			if (blockId && isProposalType(proposalType)) {
 				this._proposalToolCallsById.set(blockId, { type: proposalType, input: { ...input } });
 			}
+
+			// Track that this message had a tool-based proposal before the dedupe
+			// return, so historical scans do not also parse any legacy XML fallback.
+			const msgId = message.id || "";
+			if (msgId) this._toolProposalMessageIds.add(msgId);
+
+			// Deduplicate callbacks — but only after remembering the input above, so a
+			// later historical toolResult row can still reconstruct failed workflow
+			// metadata from a processed propose_goal call.
+			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			const tagKey = `${proposalType}_proposal`;
 			if (streaming) {
@@ -2263,9 +2289,7 @@ export class RemoteAgent {
 					} catch { /* ignore quota errors */ }
 				}
 			}
-			// Track that this message had a tool-based proposal
-			const msgId = message.id || "";
-			if (msgId) this._toolProposalMessageIds.add(msgId);
+			// Message id was recorded before callback dedupe.
 		}
 	}
 
