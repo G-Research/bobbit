@@ -287,7 +287,7 @@ export class RichGitDiffViewer extends LitElement {
 					${this.title ? html`<span class="rich-git-diff-title" title=${this.title}>${this.title}</span>` : nothing}
 					<span class="rich-git-diff-pill">${fileCount} ${fileCount === 1 ? "file" : "files"}</span>
 					<span class="rich-git-diff-pill rich-git-diff-add-count">+${summary.additions}</span>
-					<span class="rich-git-diff-pill rich-git-diff-del-count">−${summary.deletions}</span>
+					<span class="rich-git-diff-pill rich-git-diff-del-count">-${summary.deletions}</span>
 				</div>
 				<div class="rich-git-diff-controls">
 					<span class="rich-git-diff-mode-toggle" data-testid="rich-git-diff-mode" role="radiogroup" aria-label="Diff display mode">
@@ -364,7 +364,7 @@ export class RichGitDiffViewer extends LitElement {
 						<span class="rich-git-diff-status">${status}</span>
 						<span class="rich-git-diff-counts" data-testid="rich-git-diff-counts" aria-label=${`${file.additions} additions, ${file.deletions} deletions`}>
 							<span class="rich-git-diff-add-count">+${file.additions}</span>
-							<span class="rich-git-diff-del-count">−${file.deletions}</span>
+							<span class="rich-git-diff-del-count">-${file.deletions}</span>
 						</span>
 					</button>
 				</div>

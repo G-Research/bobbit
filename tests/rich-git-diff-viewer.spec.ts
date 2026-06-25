@@ -178,15 +178,16 @@ test.describe("RichGitDiffViewer browser fixture", () => {
 		await mount(page, { content: LONG_CONTEXT_DIFF, defaultMode: "inline" });
 
 		const lines = page.locator('[data-testid="rich-git-diff-line"]');
+		const foldedFirstContextLine = page.locator(".rich-git-diff-line-text", { hasText: /^context line 1$/ });
 		const initialLineCount = await lines.count();
-		await expect(page.locator('[data-testid="rich-git-diff-line"]', { hasText: "context line 1" })).toBeHidden();
+		await expect(foldedFirstContextLine).toBeHidden();
 
 		const contextToggle = page.locator('[data-testid="rich-git-diff-context-toggle"]').first();
 		await expect(contextToggle).toBeVisible();
 		await contextToggle.click();
 
 		await expect.poll(async () => await lines.count()).toBeGreaterThan(initialLineCount);
-		await expect(page.locator('[data-testid="rich-git-diff-line"]', { hasText: "context line 1" })).toBeVisible();
+		await expect(foldedFirstContextLine).toBeVisible();
 	});
 
 	test("auto mode defaults split on wide screens and inline on narrow screens", async ({ page }) => {
