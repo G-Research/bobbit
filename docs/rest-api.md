@@ -352,7 +352,7 @@ GET /api/sessions/:id/git-diff?commit=9f3c1a8&file=src%2Fui%2Fcomponents%2FGitSt
 GET /api/goals/:id/git-diff?commit=9f3c1a8&file=docs%2Fnew.md
 ```
 
-The response is `{ "diff": "...unified diff..." }` and uses the same truncation behavior as working-tree diffs, including the truncation marker when the payload exceeds the configured diff size limit. Multi-repo callers may pass `repo=<repoName>` to route the diff to a specific repo worktree when one is registered.
+The response is `{ "diff": "...unified diff..." }` and uses the same truncation behavior as working-tree diffs, including the truncation marker when the payload exceeds the configured diff size limit. Multi-repo callers may pass `repo=<repoName>` to route the diff to a specific repo worktree when one is registered. The Git status modal parses this raw string client-side with the shared unified-diff parser; see [Git status rich diff viewer](git-status-diff-viewer.md).
 
 Validation and errors:
 
@@ -361,7 +361,7 @@ Validation and errors:
 - If the selected commit/file pair has no diff, the endpoint returns `404 { "error": "No diff found" }`.
 - Unknown sessions/goals and missing worktrees use the same not-found responses as the existing git-status and git-diff endpoints.
 
-Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
+Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, the rich diff viewer opens, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
 
 ### Archived goal list and query search
 
