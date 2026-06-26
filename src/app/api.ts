@@ -2484,6 +2484,14 @@ export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string;
 	}
 }
 
+export interface ToolProviderProvenance {
+	providerKey: string;
+	packName: string;
+	listName: string;
+	scope: string;
+	sourcePath?: string;
+}
+
 export interface ToolInfo {
 	name: string;
 	description: string;
@@ -2506,6 +2514,12 @@ export interface ToolInfo {
 	 *  would collide when another installed pack shares the panel id. */
 	packId?: string;
 	grantPolicy?: string;
+	providerType?: "pi-extension" | string;
+	origin?: "marketplace-pi-extension" | "builtin" | "server" | "user" | "project" | string;
+	originPackName?: string | null;
+	originPackId?: string | null;
+	sourcePath?: string;
+	providers?: ToolProviderProvenance[];
 }
 
 // ============================================================================
@@ -2927,6 +2941,8 @@ export interface PackManifest {
 		/** MCP contribution `listName` basenames (schema 2). Optional so older
 		 *  pack/source responses keep parsing while MCP-aware catalogues render chips. */
 		mcp?: string[];
+		/** Pi runtime extension basenames (schema 2 `contents.pi-extensions`). */
+		piExtensions?: string[];
 	};
 }
 
@@ -2970,6 +2986,7 @@ export interface PackEntityDescriptions {
 	skills?: Record<string, string>;
 	entrypoints?: Record<string, string>;
 	mcp?: Record<string, string>;
+	piExtensions?: Record<string, string>;
 }
 
 export interface PackMcpContributionWire {
@@ -2999,6 +3016,30 @@ export interface PackActivationMcpEntry extends PackMcpContributionWire {
 	ref: string;
 	/** Runtime MCP server name. Older servers may omit it; the UI falls back to ref. */
 	serverName?: string;
+}
+
+export interface PiExtensionDiagnostic {
+	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
+	code: string;
+	message: string;
+	updatedAt: string;
+	stale?: boolean;
+}
+
+export interface PiExtensionToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: Record<string, unknown>;
+}
+
+export interface PackActivationPiExtensionEntry {
+	/** Stable DisabledRefs.piExtensions key, usually the contents.pi-extensions basename. */
+	ref: string;
+	listName?: string;
+	label?: string;
+	entryRelativePath?: string;
+	diagnostic?: PiExtensionDiagnostic;
+	tools?: PiExtensionToolInfo[];
 }
 
 export interface BrowsePackWire extends PackManifest {
@@ -3158,6 +3199,7 @@ export interface DisabledRefs {
 	skills?: string[];
 	entrypoints?: string[];
 	mcp?: string[];
+	piExtensions?: string[];
 }
 
 /** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
@@ -3175,6 +3217,9 @@ export interface PackActivationCatalogue {
 	/** MCP activation refs. Rich entries are preferred, but older backends may
 	 *  return string refs; the UI normalizes both. */
 	mcp?: Array<string | PackActivationMcpEntry>;
+	/** Pi extension activation refs. Rich entries are preferred, but older backends may
+	 *  return string refs; the UI normalizes both. */
+	piExtensions?: Array<string | PackActivationPiExtensionEntry>;
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }

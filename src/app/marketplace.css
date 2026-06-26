@@ -215,6 +215,11 @@
 	color: var(--info, var(--chart-4));
 }
 
+.market-entity-chip[data-kind="pi-extension"] {
+	background: color-mix(in oklch, var(--chart-5) 14%, transparent);
+	color: var(--chart-5);
+}
+
 .market-builtin-badge {
 	display: inline-flex;
 	align-items: center;
@@ -331,6 +336,10 @@
 
 .market-trust-why-body p[data-kind="mcp"] {
 	border-left-color: color-mix(in oklch, var(--info, var(--chart-4)) 60%, transparent);
+}
+
+.market-trust-why-body p[data-kind="pi-extension"] {
+	border-left-color: color-mix(in oklch, var(--chart-5) 60%, transparent);
 }
 
 .market-trust-why-body strong {
@@ -661,6 +670,24 @@
 .market-mcp-policy-link {
 	font-size: 0.625rem;
 	color: var(--muted-foreground);
+}
+
+.market-pi-extension-path,
+.market-pi-extension-diagnostic {
+	max-width: 12rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+}
+
+.market-pi-extension-path {
+	font-family: var(--font-mono, monospace);
+}
+
+.market-pi-extension-diagnostic {
+	color: var(--negative, var(--destructive));
 }
 
 .market-activation-help {
