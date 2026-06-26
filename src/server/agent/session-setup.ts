@@ -27,7 +27,7 @@ import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
 import type { RoleManager } from "./role-manager.js";
-import type { ToolManager } from "./tool-manager.js";
+import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
@@ -94,6 +94,11 @@ export interface MarketplacePiExtensionActivation {
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved", "remap-failed"]);
+
+function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
+	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
+	return { ...(projectId ? { projectId } : {}), ...(cwd ? { cwd } : {}), scopeKey };
+}
 
 export function resolveMarketplacePiExtensionActivation(
 	resolver: MarketplacePiExtensionResolver | null | undefined,
@@ -641,7 +646,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 		if (role && ctx.toolManager) {
 			effectiveAllowedTools = computeEffectiveAllowedTools(
-				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
 			);
 		}
 	}
@@ -748,7 +753,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		// Use assistant role's tool restrictions
 		if (assistantRole && ctx.toolManager) {
 			plan.effectiveAllowedTools = computeEffectiveAllowedTools(
-				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
 			);
 			// Re-filter: the assistant recompute above replaced the allowlist, so
 			// strip disabled tools again before the prompt/tool-docs are assembled.
@@ -900,7 +905,8 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools);
+	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
+	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = [...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])];
@@ -915,6 +921,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		ctx.groupPolicyStore ?? undefined,
 		[],
 		disabledTools,
+		toolScope,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
