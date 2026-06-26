@@ -50,20 +50,33 @@ function ok(tools: PiExtensionToolInfo[], cacheKey?: string): PiExtensionDiscove
 	};
 }
 
+function absolutizeNodeFlagValue(flag: string, value: string): string {
+	// Unit tests often run under tsx via a relative --import/--loader hook. The
+	// probe process intentionally runs from an empty temp cwd, so relative hook
+	// paths must be anchored to the parent process cwd before forwarding them.
+	if ((flag === "--import" || flag === "--loader" || flag === "--experimental-loader" || flag === "--require" || flag === "-r")
+		&& value.startsWith(".") && !value.startsWith("data:") && !value.startsWith("node:")) {
+		return path.resolve(process.cwd(), value);
+	}
+	return value;
+}
+
 function safeExecArgv(argv: readonly string[]): string[] {
 	const out: string[] = [];
 	const flagsWithValue = new Set(["--require", "-r", "--import", "--loader", "--experimental-loader", "--conditions", "-C"]);
 	const safePrefixes = ["--require=", "--import=", "--loader=", "--experimental-loader=", "--conditions="];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
-		if (safePrefixes.some((prefix) => arg.startsWith(prefix))) {
-			out.push(arg);
+		const prefix = safePrefixes.find((p) => arg.startsWith(p));
+		if (prefix) {
+			const flag = prefix.slice(0, -1);
+			out.push(prefix + absolutizeNodeFlagValue(flag, arg.slice(prefix.length)));
 			continue;
 		}
 		if (flagsWithValue.has(arg)) {
 			const value = argv[i + 1];
 			if (typeof value === "string") {
-				out.push(arg, value);
+				out.push(arg, absolutizeNodeFlagValue(arg, value));
 				i++;
 			}
 		}

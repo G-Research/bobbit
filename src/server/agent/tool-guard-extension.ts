@@ -83,7 +83,10 @@ export default function(pi) {
     // Hard-block 'never' tools immediately with a clear reason. The agent sees
     // this as a tool error so it can adapt (e.g. reviewers falling back to
     // read-only analysis instead of running bash_bg).
-    const neverPolicy = policyEntry(neverPolicies, neverPolicyNamesByLower, toolName);
+    const directNeverPolicy = neverPolicies[toolName];
+    const neverPolicy = directNeverPolicy
+      ? { canonicalName: toolName, entry: directNeverPolicy }
+      : policyEntry(neverPolicies, neverPolicyNamesByLower, toolName);
     if (neverPolicy) {
       return {
         block: true,
