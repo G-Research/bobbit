@@ -40,6 +40,8 @@ export interface MarketplaceSource {
 	/** Branch/tag. Optional for pack sources only (defaults to the remote HEAD on clone). */
 	ref?: string;
 	addedAt: string; // ISO-8601
+	/** ISO timestamp recording source-level marketplace trust acceptance. */
+	trustedAt?: string;
 	lastSyncedAt?: string; // ISO-8601
 	lastCommit?: string;
 	/**
@@ -85,6 +87,7 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 	// Registry sources do not support refs. Ignore a legacy malformed on-disk ref
 	// rather than preserving it across the next save.
 	if (type === "pack" && nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
+	if (nonEmptyString(r.trustedAt)) s.trustedAt = r.trustedAt as string;
 	if (nonEmptyString(r.lastSyncedAt)) s.lastSyncedAt = r.lastSyncedAt as string;
 	if (typeof r.lastCommit === "string") s.lastCommit = r.lastCommit;
 	return s;
@@ -95,6 +98,7 @@ function serializeSource(s: MarketplaceSource): Record<string, unknown> {
 	if (s.type && s.type !== "pack") out.type = s.type;
 	if (s.type !== "mcp-registry" && s.ref) out.ref = s.ref;
 	out.addedAt = s.addedAt;
+	if (s.trustedAt) out.trustedAt = s.trustedAt;
 	if (s.lastSyncedAt) out.lastSyncedAt = s.lastSyncedAt;
 	if (s.lastCommit) out.lastCommit = s.lastCommit;
 	return out;
@@ -206,10 +210,12 @@ export class MarketplaceSourceStore {
 		const id = deriveSourceId(url, new Set(this.sources.map((s) => s.id)));
 		// Reject the reserved built-in id (§4.4) even if a url happens to slug to it.
 		if (id === BUILTIN_SOURCE_ID) throw new Error(`the built-in source cannot be added`);
+		const now = new Date().toISOString();
 		const source: MarketplaceSource = {
 			id,
 			url,
-			addedAt: new Date().toISOString(),
+			addedAt: now,
+			trustedAt: now,
 		};
 		if (type !== "pack") source.type = type;
 		if (type === "pack" && nonEmptyString(input.ref)) source.ref = input.ref!.trim();
@@ -219,13 +225,14 @@ export class MarketplaceSourceStore {
 	}
 
 	/** Patch sync metadata after a sync. No-op if id unknown. */
-	update(id: string, patch: Partial<Pick<MarketplaceSource, "ref" | "lastSyncedAt" | "lastCommit">>): MarketplaceSource | undefined {
+	update(id: string, patch: Partial<Pick<MarketplaceSource, "ref" | "trustedAt" | "lastSyncedAt" | "lastCommit">>): MarketplaceSource | undefined {
 		const s = this.sources.find((x) => x.id === id);
 		if (!s) return undefined;
 		if (patch.ref !== undefined) {
 			if (s.type === "mcp-registry" && patch.ref) throw new Error("mcp-registry sources do not support ref");
 			s.ref = patch.ref || undefined;
 		}
+		if (patch.trustedAt !== undefined) s.trustedAt = patch.trustedAt || undefined;
 		if (patch.lastSyncedAt !== undefined) s.lastSyncedAt = patch.lastSyncedAt;
 		if (patch.lastCommit !== undefined) s.lastCommit = patch.lastCommit;
 		this.save();

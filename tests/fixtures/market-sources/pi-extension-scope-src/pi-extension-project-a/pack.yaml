@@ -1,0 +1,15 @@
+name: pi-extension-project-a
+description: Project-scoped pi extension fixture A.
+version: 1.0.0
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: [project-a]
+  runtimes: []
+  workflows: []

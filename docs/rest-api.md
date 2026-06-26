@@ -1115,59 +1115,48 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 | `GET` | `/api/maintenance/orphaned-index-rows` | List search index rows whose parent records are gone (`?projectId=`). |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows (`{ projectId }`). |
 
-**`GET /api/maintenance/archived-session-worktrees`** returns:
+**`GET /api/maintenance/archived-session-worktrees`** returns an actionable-first scan for Settings → Maintenance. The response keeps the session-grouped shape and adds UX-oriented flattened data:
 
 ```ts
 interface ArchivedSessionWorktreeScanResponse {
   sessions: ArchivedSessionWorktreeSession[];
+  items: ArchivedSessionWorktreeItem[];
+  groups: ArchivedSessionWorktreeGroup[];
+  selectionPresets: ArchivedSessionWorktreeSelectionPreset[];
   counts: {
     archivedSessions: number;
-    sessionsWithWorktrees: number;
-    removableWorktrees: number;
+    sessionsWithWorktrees: number;      // metadata count, not eligibility
+    removableWorktrees: number;         // legacy name for ready-to-clean
     skippedWorktrees: number;
     alreadyCleanedWorktrees: number;
+    totalItems: number;
+    readyToClean: number;
+    defaultSelected: number;
+    alreadyCleaned: number;
+    ineligible: number;
+    needsAttention: number;
+    failed: number;
+    byDisposition: Record<string, number>;
+    byReason: Record<string, number>;
+    bySelectionCategory: Record<string, number>;
   };
-}
-
-interface ArchivedSessionWorktreeSession {
-  id: string;
-  title: string;
-  archivedAt?: number;
-  projectId?: string;
-  projectName?: string;
-  goalId?: string;
-  teamGoalId?: string;
-  delegateOf?: string;
-  parentSessionId?: string;
-  childKind?: string;
-  sandboxed?: boolean;
-  branch?: string;
-  repoPath?: string;
-  worktreePath?: string;
-  worktrees: ArchivedSessionWorktreeItem[];
-}
-
-interface ArchivedSessionWorktreeItem {
-  key: string;
-  sessionId: string;
-  repo: string;
-  repoPath: string;
-  path: string;
-  branch?: string;
-  pathExists: boolean;
-  gitWorktreeMetadataExists: boolean;
-  localBranchExists: boolean;
-  status: "removable" | "skipped" | "already-cleaned";
-  reason: string;
-  detail: string;
-  willDeleteBranch: boolean;
-  branchDeleteBlockedReason?: string;
+  generatedAt: number;
 }
 ```
 
-Default scans omit sessions whose rows are all `already-cleaned`; those rows still contribute to `counts.alreadyCleanedWorktrees`.
+Items include title/session metadata, project/repo, branch, worktree path, git-existence booleans, `status`, `disposition`, machine-readable `reason` and `reasonCategory`, human-readable `detail`, `actionable` / `selectable` / `defaultSelected`, `selectionCategories`, and branch-deletion hints. Groups include `sampleItems` capped for examples and filtering. Presets include an id, label, enabled/count state, matching keys, and the cleanup request they represent.
 
-**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts either `{ "mode": "all" }` or `{ "mode": "selected", "sessionIds": [...] }` or `{ "mode": "selected", "worktrees": [...] }`. `mode: "all"` rejects selectors. `mode: "selected"` accepts exactly one selector type; an empty selected request is a zero-count no-op. Worktree selectors contain `sessionId` plus optional `repo`, `path`, and `key` strings.
+Default scans omit sessions whose rows are all `already-cleaned`; those rows still contribute to aggregate counts. Use `?includeAlreadyCleaned=1` for diagnostics.
+
+**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts:
+
+- `{ "mode": "all" }`;
+- `{ "mode": "selected", "sessionIds": [...] }`;
+- `{ "mode": "selected", "worktrees": [{ "sessionId": "...", "key": "...", "repo": ".", "path": "..." }] }`;
+- `{ "mode": "category", "categories": [...], "projectId"?: "...", "repoPath"?: "..." }`;
+- `{ "mode": "preset", "presetId": "..." }`.
+
+`mode: "all"` rejects selectors. `mode: "selected"` accepts either session ids or worktree selectors, not both. Category and preset modes are convenience filters over the fresh server scan; they do not bypass safety checks.
 
 The server always re-runs the scan before cleanup and only removes fresh rows with `status: "removable"`. Stale selected rows that are already gone return `already-cleaned`; unmatched selections return `skipped` with `reason: "invalid-selection"`.
 
@@ -1180,8 +1169,14 @@ interface CleanupArchivedSessionWorktreesResponse {
     skipped: number;
     alreadyCleaned: number;
     failed: number;
+    worktreeRemoved: number;
+    invalidSelection: number;
+    notActionable: number;
+    byStatus: Record<string, number>;
+    byReason: Record<string, number>;
   };
   results: ArchivedSessionWorktreeCleanupResult[];
+  generatedAt: number;
 }
 
 interface ArchivedSessionWorktreeCleanupResult {
@@ -1194,6 +1189,7 @@ interface ArchivedSessionWorktreeCleanupResult {
   branch?: string;
   status: "cleaned" | "skipped" | "already-cleaned" | "failed";
   reason?: string;
+  detail?: string;
   error?: string;
   worktreeRemoved: boolean;
   branchDeleted: boolean;

@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ToolManager, ToolProvider } from "./tool-manager.js";
+import type { ScopedToolContext, ToolManager, ToolProvider } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
 import { generateToolGuardExtension, type ToolPolicyEntry } from "./tool-guard-extension.js";
@@ -187,6 +187,7 @@ export function resolveGrantPolicy(
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
+	scopedContext?: ScopedToolContext,
 ): GrantPolicy {
 	// Step 0: system-scope Subgoals feature gate. When the flag is OFF, every
 	// tool in the `Children` group resolves to `never` regardless of role /
@@ -222,7 +223,7 @@ export function resolveGrantPolicy(
 	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
 	// 3. Tool definition default from YAML
-	const toolDef = toolManager?.getToolByName(toolName);
+	const toolDef = toolManager?.getToolByName(toolName, scopedContext);
 	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
 	// 4. Group-level default policy — same precedence (tool key > group key).
@@ -352,7 +353,8 @@ export function mcpPolicyPrefix(toolName: string): string | undefined {
  */
 export type EffectiveTool =
 	| { kind: "yaml"; name: string }
-	| { kind: "mcp"; name: string };
+	| { kind: "mcp"; name: string }
+	| { kind: "pi-extension"; name: string };
 
 /**
  * Tag a flat tool name into an `EffectiveTool` at the boundary where a
@@ -368,10 +370,12 @@ export type EffectiveTool =
  *   3. Otherwise → `yaml` (so unknown-tool typos still surface through the
  *      provider-lookup `"has no provider"` warn in `computeToolActivationArgs`).
  */
-export function tagAllowedTool(name: string, toolManager?: ToolManager): EffectiveTool {
+export function tagAllowedTool(name: string, toolManager?: ToolManager, scopedContext?: ScopedToolContext): EffectiveTool {
 	if (toolManager) {
 		try {
-			if (toolManager.getToolProviders().has(name)) return { kind: "yaml", name };
+			const provider = toolManager.getToolProviders(scopedContext).get(name);
+			if (provider?.type === "pi-extension") return { kind: "pi-extension", name };
+			if (provider) return { kind: "yaml", name };
 		} catch { /* providers unavailable; fall through */ }
 	}
 	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
@@ -395,8 +399,9 @@ export function computeEffectiveAllowedTools(
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	mcpManager?: { getToolInfos(): Array<{ name: string; group: string; serverName: string }> },
+	scopedContext?: ScopedToolContext,
 ): EffectiveTool[] {
-	const availableTools = toolManager.getAvailableTools();
+	const availableTools = toolManager.getAvailableTools(scopedContext);
 	const mcpInfos = mcpManager?.getToolInfos() ?? [];
 
 	// One-time migration warning for renamed/removed tool keys (e.g. `delegate`
@@ -405,7 +410,8 @@ export function computeEffectiveAllowedTools(
 
 	// Content-based fingerprint: same inputs → same cache key → same output.
 	const cacheKey = hashKey({
-		kind: 'effectiveAllowedTools_v3',
+		kind: 'effectiveAllowedTools_v4',
+		scopeKey: scopedContext?.scopeKey ?? "default",
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
@@ -422,9 +428,17 @@ export function computeEffectiveAllowedTools(
 	for (const tool of availableTools) {
 		if (seen.has(tool.name.toLowerCase())) continue;
 		seen.add(tool.name.toLowerCase());
-		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
+		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext);
 		// Include tools with allow OR ask policy (not never)
-		if (!isNeverPolicy(policy)) result.push({ kind: "yaml", name: tool.name });
+		if (!isNeverPolicy(policy)) {
+			let provider: ToolProvider | undefined;
+			if (typeof (toolManager as any).getToolProvider === "function") {
+				provider = toolManager.getToolProvider(tool.name, scopedContext);
+			} else if (typeof (toolManager as any).getToolProviders === "function") {
+				provider = toolManager.getToolProviders(scopedContext).get(tool.name);
+			}
+			result.push({ kind: provider?.type === "pi-extension" ? "pi-extension" : "yaml", name: tool.name });
+		}
 	}
 
 	// MCP tools — collapse per-op entries into one meta-tool per (server, sub-namespace).
@@ -433,14 +447,14 @@ export function computeEffectiveAllowedTools(
 	// Flat servers (no sub) collapse to one meta-tool `mcp_<server>`.
 	const byKey = new Map<string /* server\0sub */, { server: string; sub?: string }>();
 	for (const info of mcpInfos) {
-		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 		if (isNeverPolicy(opPolicy)) continue;
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
 		// Drop ops blocked at the meta level — the meta-tool name's own policy
 		// (which cascades through `mcpPolicyKeys` to the group / tool keys).
 		const metaName = makeMetaToolName(parsed.server, parsed.sub);
-		const serverPolicy = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore);
+		const serverPolicy = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore, scopedContext);
 		if (isNeverPolicy(serverPolicy)) continue;
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
 		if (!byKey.has(k)) byKey.set(k, { server: parsed.server, sub: parsed.sub });
@@ -455,7 +469,7 @@ export function computeEffectiveAllowedTools(
 	// unless policy denies it (role override or group policy on `mcp_describe`).
 	// `mcp_describe` is a YAML-backed builtin discovery tool, NOT an MCP meta-tool.
 	if (mcpInfos.length > 0 && !seen.has('mcp_describe')) {
-		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore);
+		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore, scopedContext);
 		if (!isNeverPolicy(policy)) result.push({ kind: "yaml", name: 'mcp_describe' });
 	}
 
@@ -737,12 +751,14 @@ export function computeToolPolicies(
 	mcpManager: McpManager | undefined,
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
+	scopedContext?: ScopedToolContext,
 ): Record<string, ToolPolicyEntry> {
-	const availableTools = toolManager.getAvailableTools();
+	const availableTools = toolManager.getAvailableTools(scopedContext);
 	const mcpInfos = mcpManager?.getToolInfos() ?? [];
 
 	const cacheKey = hashKey({
-		kind: 'toolPolicies_v2',
+		kind: 'toolPolicies_v3',
+		scopeKey: scopedContext?.scopeKey ?? "default",
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
@@ -756,7 +772,7 @@ export function computeToolPolicies(
 
 	// Builtin + bobbit-extension tools
 	for (const tool of availableTools) {
-		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
+		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext);
 		let policy: string;
 		if (isAllowPolicy(rawPolicy)) policy = 'allow';
 		else if (isAskPolicy(rawPolicy)) policy = 'ask';
@@ -770,7 +786,7 @@ export function computeToolPolicies(
 	// tool name and rejects `never` ops even when the meta-tool is granted).
 	for (const info of mcpInfos) {
 		if (result[info.name]) continue; // already seen
-		const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+		const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 		let policy: string;
 		if (isAllowPolicy(rawPolicy)) policy = 'allow';
 		else if (isAskPolicy(rawPolicy)) policy = 'ask';
@@ -797,7 +813,7 @@ export function computeToolPolicies(
 	for (const info of mcpInfos) {
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
-		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
 		let entry = opsByKey.get(k);
 		if (!entry) {
@@ -813,7 +829,7 @@ export function computeToolPolicies(
 		if (result[metaName]) continue;
 		const group = ops[0]?.group ?? `MCP: ${server}`;
 		// Honour an explicit role-level meta-tool override first.
-		const rawMetaPolicy = resolveGrantPolicy(metaName, group, role, toolManager, groupPolicyStore);
+		const rawMetaPolicy = resolveGrantPolicy(metaName, group, role, toolManager, groupPolicyStore, scopedContext);
 		let aggregated: 'allow' | 'ask' | 'never';
 		if (isNeverPolicy(rawMetaPolicy)) {
 			aggregated = 'never';
@@ -841,8 +857,9 @@ export function writeToolGuardExtension(
 	groupPolicyStore?: GroupPolicyProvider,
 	grantedTools?: string[],
 	disabledTools?: ReadonlySet<string>,
+	scopedContext?: ScopedToolContext,
 ): string | undefined {
-	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore);
+	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore, scopedContext);
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
 
 	// Defense in depth: treat any goal-metadata disabled tool as effective
@@ -921,6 +938,7 @@ export function writeMcpProxyExtensions(
 	toolManager?: ToolManager,
 	groupPolicyStore?: GroupPolicyProvider,
 	disabledTools?: ReadonlySet<string>,
+	scopedContext?: ScopedToolContext,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -946,6 +964,7 @@ export function writeMcpProxyExtensions(
 		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
+		toolScopeKey: scopedContext?.scopeKey ?? "default",
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 	const cachedPaths = mcpProxyCache.get(cacheKey);
@@ -1021,10 +1040,10 @@ export function writeMcpProxyExtensions(
 
 		// Double-check policy: skip 'never' tools explicitly
 		if (role || toolManager || groupPolicyStore) {
-			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 			if (isNeverPolicy(p)) continue;
 			const metaName = makeMetaToolName(parsed.server, parsed.sub);
-			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore);
+			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore, scopedContext);
 			if (isNeverPolicy(sp)) continue;
 		}
 
@@ -1120,7 +1139,7 @@ export function writeMcpProxyExtensions(
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
-export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext): ToolActivationResult {
 	// pi 0.70+ unified `--tools <list>` into an allowlist over BOTH builtins and
 	// extension-registered tools, which broke our old "--tools <only-builtins>
 	// + --extension shell" pattern (every extension tool got stripped). We now
@@ -1163,16 +1182,16 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	const builtinsExtPath = toolManager.getExtensionPath("_builtins", "extension.ts");
 	args.push("--extension", builtinsExtPath);
 
-	const providers = toolManager.getToolProviders();
+	const providers = toolManager.getToolProviders(scopedContext);
 
 	// `kind:"mcp"` entries are satisfied externally via `mcpExtensionPaths` and
 	// MUST NOT be looked up in the YAML provider registry — doing so would
 	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
 	// every session spawn. The `"has no provider"` branch below fires only for
 	// genuinely unknown YAML tool names (typos in role allowedTools, etc.).
-	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp"; name: string }>) => {
+	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>) => {
 		for (const entry of entries) {
-			if (entry.kind === "mcp") continue;
+			if (entry.kind === "mcp" || entry.kind === "pi-extension") continue;
 			// Goal-metadata disabled tool: drop in BOTH the allowlist branch and the
 			// unrestricted/all-tools branch (both flow through here), so a disabled
 			// tool is never registered even for a role-less / all-tools session.
@@ -1180,6 +1199,9 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			const provider = providers.get(entry.name);
 			if (!provider) {
 				console.warn(`[tool-activation] Tool "${entry.name}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
+				continue;
+			}
+			if (provider.type === "pi-extension") {
 				continue;
 			}
 			if (provider.type === "builtin" && provider.tool) {

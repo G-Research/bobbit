@@ -1,0 +1,73 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import path from "node:path";
+
+import {
+	appendPiExtensionToolRows,
+	buildPiExtensionToolRows,
+	normalisePiExtensionCatalogueRefs,
+	piExtensionCatalogueRef,
+} from "../src/server/server.ts";
+import type { ResolvedPiExtensionContribution } from "../src/server/agent/session-setup.ts";
+
+function contribution(opts: {
+	listName: string;
+	toolName: string;
+	packName: string;
+	packId: string;
+	scope?: "server" | "global-user" | "project" | "builtin";
+	status?: ResolvedPiExtensionContribution["diagnostic"]["status"];
+}): ResolvedPiExtensionContribution {
+	const scope = opts.scope ?? "project";
+	const entryPath = path.join("/tmp", opts.packName, "pi-extensions", opts.listName, "extension.ts");
+	return {
+		listName: opts.listName,
+		entryPath,
+		entryRelativePath: path.join("pi-extensions", opts.listName, "extension.ts"),
+		packRoot: path.join("/tmp", opts.packName),
+		origin: { scope, packName: opts.packName, packId: opts.packId },
+		diagnostic: { status: opts.status ?? "ok", code: "ok", message: "ok", updatedAt: "2026-01-01T00:00:00.000Z" },
+		discovery: { status: "ok", tools: [{ name: opts.toolName, description: `${opts.toolName} from ${opts.packName}` }] },
+	};
+}
+
+describe("marketplace pi extension activation catalogue helpers", () => {
+	it("normalises legacy string and metadata object refs for pack activation PUT", () => {
+		assert.equal(piExtensionCatalogueRef("demo"), "demo");
+		assert.equal(piExtensionCatalogueRef({ ref: "object-ref", listName: "fallback" }), "object-ref");
+		assert.equal(piExtensionCatalogueRef({ listName: "fallback" }), "fallback");
+		assert.deepEqual([...normalisePiExtensionCatalogueRefs(["demo", { ref: "other" }, { listName: "third" }])].sort(), ["demo", "other", "third"]);
+	});
+
+	it("builds scoped pi-extension tool rows with provenance and one row per runtime name", () => {
+		const first = contribution({ listName: "a", toolName: "shared_tool", packName: "pack-a", packId: "market:project:pack-a" });
+		const second = contribution({ listName: "b", toolName: "shared_tool", packName: "pack-b", packId: "market:project:pack-b" });
+		const rows = buildPiExtensionToolRows([
+			first,
+			second,
+			contribution({ listName: "disabled", toolName: "hidden_tool", packName: "pack-c", packId: "market:project:pack-c", status: "disabled" }),
+		]);
+
+		assert.equal(first.diagnostic.code, "tool_name_collision");
+		assert.equal(second.diagnostic.code, "tool_name_collision");
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].name, "shared_tool");
+		assert.equal(rows[0].origin, "marketplace-pi-extension");
+		assert.equal(rows[0].providerType, "pi-extension");
+		assert.deepEqual((rows[0].providers as Array<Record<string, unknown>>).map((p) => p.packName), ["pack-a", "pack-b"]);
+	});
+
+	it("merges pi-extension provenance onto an existing tool row so name-based policy remains explicit", () => {
+		const tools: Array<Record<string, unknown>> = [{ name: "shared_tool", origin: "builtin", providers: [{ providerKey: "builtin:shared_tool" }] }];
+		const piRows = buildPiExtensionToolRows([
+			contribution({ listName: "a", toolName: "shared_tool", packName: "pack-a", packId: "market:project:pack-a" }),
+		]);
+
+		appendPiExtensionToolRows(tools, piRows);
+
+		assert.equal(tools.length, 1);
+		assert.equal(tools[0].piExtensionCollision, true);
+		assert.equal(tools[0].piExtensionPolicyScope, "name");
+		assert.deepEqual((tools[0].providers as Array<Record<string, unknown>>).map((p) => p.providerKey), ["builtin:shared_tool", "pi-ext:project:market:project:pack-a:a:shared_tool"]);
+	});
+});

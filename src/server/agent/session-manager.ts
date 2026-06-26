@@ -17,7 +17,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
@@ -90,6 +90,11 @@ import {
 	type SessionSetupPlan,
 	type PipelineContext,
 	type SandboxWiringOptions,
+	type MarketplacePiExtensionResolver,
+	type MarketplacePiExtensionActivation,
+	type PiExtensionDiagnostic,
+	resolveMarketplacePiExtensionActivation,
+	scopedToolContext,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -138,15 +143,81 @@ export function switchSessionPathForAgent(ps: PersistedSession): string {
 	return hostPathToContainer(mountedHostPath);
 }
 
+export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
+export type ArchivedWorktreeDisposition = "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
+export type ArchivedWorktreeReason =
+	| "safe-archived-session-worktree"
+	| "already-cleaned"
+	| "no-worktree-path"
+	| "missing-repo-path"
+	| "sandbox-container-path"
+	| "delegate-shared-worktree"
+	| "stale-worktree-directory"
+	| "referenced-by-live-session"
+	| "referenced-by-live-goal"
+	| "referenced-by-live-team"
+	| "referenced-by-staff"
+	| "scan-error";
+export type ArchivedWorktreeReasonCategory = "safe" | "already-cleaned" | "missing-metadata" | "container-path" | "shared-delegate" | "stale-path" | "referenced-record" | "error";
+export type ArchivedWorktreeSelectionCategory = "archived-session" | "goal-session" | "team-session" | "delegate-session" | "child-session" | "single-repo" | "multi-repo";
+export type ArchivedWorktreeCleanupStatus = "cleaned" | "skipped" | "already-cleaned" | "failed";
+export type ArchivedWorktreeCleanupReason = "worktree-and-branch-cleaned" | "worktree-cleaned" | "already-cleaned" | "invalid-selection" | ArchivedWorktreeReason;
+
+export class CleanupArchivedSessionWorktreesRequestError extends Error {
+	statusCode = 400;
+	constructor(message: string) {
+		super(message);
+		this.name = "CleanupArchivedSessionWorktreesRequestError";
+	}
+}
+
 export interface ArchivedSessionWorktreeScanResponse {
 	sessions: ArchivedSessionWorktreeSession[];
+	items: ArchivedSessionWorktreeItem[];
 	counts: {
 		archivedSessions: number;
 		sessionsWithWorktrees: number;
 		removableWorktrees: number;
 		skippedWorktrees: number;
 		alreadyCleanedWorktrees: number;
+		totalItems: number;
+		readyToClean: number;
+		defaultSelected: number;
+		alreadyCleaned: number;
+		ineligible: number;
+		needsAttention: number;
+		failed: number;
+		byDisposition: Partial<Record<ArchivedWorktreeDisposition, number>>;
+		byReason: Partial<Record<ArchivedWorktreeReason, number>>;
+		bySelectionCategory: Partial<Record<ArchivedWorktreeSelectionCategory, number>>;
 	};
+	groups: ArchivedSessionWorktreeGroup[];
+	selectionPresets: ArchivedSessionWorktreeSelectionPreset[];
+	generatedAt: number;
+}
+
+export interface ArchivedSessionWorktreeGroup {
+	key: string;
+	label: string;
+	description: string;
+	disposition: ArchivedWorktreeDisposition;
+	reason?: ArchivedWorktreeReason;
+	reasonCategory?: ArchivedWorktreeReasonCategory;
+	count: number;
+	sampleKeys: string[];
+	sampleItems: ArchivedSessionWorktreeItem[];
+	hasMore: boolean;
+	actionable: boolean;
+}
+
+export interface ArchivedSessionWorktreeSelectionPreset {
+	id: string;
+	label: string;
+	description: string;
+	enabled: boolean;
+	count: number;
+	worktreeKeys: string[];
+	cleanupRequest: CleanupArchivedSessionWorktreesRequest;
 }
 
 export interface ArchivedSessionWorktreeSession {
@@ -170,23 +241,43 @@ export interface ArchivedSessionWorktreeSession {
 export interface ArchivedSessionWorktreeItem {
 	key: string;
 	sessionId: string;
+	title: string;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
+	goalId?: string;
+	teamGoalId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	sandboxed?: boolean;
 	repo: string;
 	repoPath: string;
+	repoDisplayName: string;
 	path: string;
 	branch?: string;
+	source: "repoWorktrees" | "sessionWorktree";
 	pathExists: boolean;
 	gitWorktreeMetadataExists: boolean;
 	localBranchExists: boolean;
-	status: "removable" | "skipped" | "already-cleaned";
-	reason: string;
+	status: ArchivedWorktreeLegacyStatus;
+	reason: ArchivedWorktreeReason;
 	detail: string;
 	willDeleteBranch: boolean;
-	branchDeleteBlockedReason?: string;
+	branchDeleteBlockedReason?: "branch-referenced-by-live-record" | "branch-referenced-by-archived-record";
+	disposition: ArchivedWorktreeDisposition;
+	reasonCategory: ArchivedWorktreeReasonCategory;
+	actionable: boolean;
+	selectable: boolean;
+	defaultSelected: boolean;
+	selectionCategories: ArchivedWorktreeSelectionCategory[];
 }
 
 export type CleanupArchivedSessionWorktreesRequest =
 	| { mode: "all" }
-	| { mode: "selected"; sessionIds?: string[]; worktrees?: Array<{ sessionId: string; repo?: string; path?: string; key?: string }> };
+	| { mode: "selected"; sessionIds?: string[]; worktrees?: Array<{ sessionId: string; repo?: string; path?: string; key?: string }> }
+	| { mode: "category"; categories: ArchivedWorktreeSelectionCategory[]; projectId?: string; repoPath?: string }
+	| { mode: "preset"; presetId: string };
 
 export interface CleanupArchivedSessionWorktreesResponse {
 	counts: {
@@ -196,8 +287,14 @@ export interface CleanupArchivedSessionWorktreesResponse {
 		skipped: number;
 		alreadyCleaned: number;
 		failed: number;
+		worktreeRemoved: number;
+		invalidSelection: number;
+		notActionable: number;
+		byStatus: Partial<Record<ArchivedWorktreeCleanupStatus, number>>;
+		byReason: Partial<Record<ArchivedWorktreeCleanupReason, number>>;
 	};
 	results: ArchivedSessionWorktreeCleanupResult[];
+	generatedAt: number;
 }
 
 export interface ArchivedSessionWorktreeCleanupResult {
@@ -208,8 +305,9 @@ export interface ArchivedSessionWorktreeCleanupResult {
 	repoPath?: string;
 	path?: string;
 	branch?: string;
-	status: "cleaned" | "skipped" | "already-cleaned" | "failed";
-	reason?: string;
+	status: ArchivedWorktreeCleanupStatus;
+	reason?: ArchivedWorktreeCleanupReason;
+	detail?: string;
 	error?: string;
 	worktreeRemoved: boolean;
 	branchDeleted: boolean;
@@ -240,6 +338,7 @@ interface ArchivedWorktreeScanContext {
 	teamRefs: ArchivedWorktreeGuardRef[];
 	staffRefs: ArchivedWorktreeGuardRef[];
 	branchGuardsByRepo: Map<string, Set<string>>;
+	archivedBranchGuardsByRepo: Map<string, Map<string, Set<string>>>;
 	gitRefsCache: Map<string, Promise<GitWorktreeRefs>>;
 	branchExistsCache: Map<string, Promise<boolean>>;
 }
@@ -919,6 +1018,8 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
+	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -1533,6 +1634,7 @@ export class SessionManager {
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.getMcpManagerForContext(projectId, cwd),
+			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1553,6 +1655,7 @@ export class SessionManager {
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
+			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
@@ -1728,6 +1831,11 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
+		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
+		const projectRootPath = projectContext?.project.rootPath;
+		if (projectRootPath) {
+			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
+		}
 
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
@@ -1788,9 +1896,6 @@ export class SessionManager {
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
 		// Get project-scoped config/secrets when available.
-		const projectContext = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)
-			: null;
 		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
@@ -2109,6 +2214,55 @@ export class SessionManager {
 		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
 	}
 
+	setMarketplacePiExtensionResolver(resolver: MarketplacePiExtensionResolver | null | undefined): void {
+		this.marketplacePiExtensionResolver = resolver ?? null;
+	}
+
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
+		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
+	}
+
+	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
+		const activation = resolveMarketplacePiExtensionActivation((scope) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd), projectId, cwd);
+		return activation;
+	}
+
+	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
+		const keys = [
+			`path:${path.resolve(extension.entryPath)}`,
+			`origin:${extension.origin.scope}:${extension.origin.packId}:${extension.listName}`,
+			`pack:${extension.origin.scope}:${extension.origin.packName}:${extension.listName}`,
+		];
+		return keys;
+	}
+
+	private overlayPiExtensionRuntimeDiagnostics(rows: ReturnType<MarketplacePiExtensionResolver>): ReturnType<MarketplacePiExtensionResolver> {
+		return rows.map((row) => {
+			if (!row.entryPath || row.diagnostic.status === "disabled" || row.diagnostic.status === "unresolved" || row.diagnostic.status === "remap-failed") return row;
+			const diagnostic = this.piExtensionDiagnosticKeys({ entryPath: row.entryPath, listName: row.listName, origin: row.origin })
+				.map((key) => this.piExtensionRuntimeDiagnostics.get(key))
+				.find(Boolean);
+			return diagnostic ? { ...row, diagnostic } : row;
+		});
+	}
+
+	private recordPiExtensionDiagnostic(session: SessionInfo, diagnostic: RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo): void {
+		const piDiagnostic: PiExtensionDiagnostic = { ...diagnostic };
+		for (const key of this.piExtensionDiagnosticKeys(extension)) this.piExtensionRuntimeDiagnostics.set(key, piDiagnostic);
+		console.warn(`[pi-extension] ${diagnostic.status} ${extension.origin.packName}/${extension.listName}: ${diagnostic.message}`);
+		emitSessionEvent(session, {
+			type: "pi_extension_diagnostic",
+			diagnostic: piDiagnostic,
+			extension: {
+				listName: extension.listName,
+				entryPath: extension.entryPath,
+				entryRelativePath: extension.entryRelativePath,
+				packRoot: extension.packRoot,
+				origin: extension.origin,
+			},
+		});
+	}
+
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
@@ -2334,7 +2488,7 @@ export class SessionManager {
 		cwd: string,
 		projectId?: string,
 		effectiveGoalId?: string,
-	): { args: string[]; env: Record<string, string> } {
+	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
 		// so restart/respawn/force-abort keep the same disablement initial setup
@@ -2344,29 +2498,31 @@ export class SessionManager {
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
+		const toolScope = scopedToolContext(projectId, cwd);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = [...activation.args];
+		const args = [...activation.args, ...piExtensionActivation.args];
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -2398,7 +2554,7 @@ export class SessionManager {
 			args.push("--extension", codeAssistPath);
 		}
 
-		return { args, env: activation.env };
+		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string, projectId?: string): import("./role-store.js").Role | undefined {
@@ -4765,6 +4921,7 @@ export class SessionManager {
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
@@ -4968,6 +5125,7 @@ export class SessionManager {
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
@@ -6713,6 +6871,7 @@ export class SessionManager {
 		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
@@ -6743,6 +6902,7 @@ export class SessionManager {
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		await rpcClient.start();
 
 		// Restore conversation from session file.
@@ -7409,12 +7569,23 @@ export class SessionManager {
 	async listArchivedSessionWorktrees(includeAlreadyCleaned = false): Promise<ArchivedSessionWorktreeScanResponse> {
 		const ctx = this.buildArchivedWorktreeScanContext();
 		const sessions: ArchivedSessionWorktreeSession[] = [];
+		const allItems: ArchivedSessionWorktreeItem[] = [];
 		const counts: ArchivedSessionWorktreeScanResponse["counts"] = {
 			archivedSessions: 0,
 			sessionsWithWorktrees: 0,
 			removableWorktrees: 0,
 			skippedWorktrees: 0,
 			alreadyCleanedWorktrees: 0,
+			totalItems: 0,
+			readyToClean: 0,
+			defaultSelected: 0,
+			alreadyCleaned: 0,
+			ineligible: 0,
+			needsAttention: 0,
+			failed: 0,
+			byDisposition: {},
+			byReason: {},
+			bySelectionCategory: {},
 		};
 
 		const archivedRows: Array<{ ps: PersistedSession; projectName?: string }> = [];
@@ -7430,7 +7601,8 @@ export class SessionManager {
 
 		counts.archivedSessions = archivedRows.length;
 		for (const { ps, projectName } of archivedRows) {
-			const worktrees = await this.archivedSessionWorktreeItems(ps, ctx);
+			const worktrees = await this.archivedSessionWorktreeItems(ps, ctx, projectName);
+			allItems.push(...worktrees);
 			for (const item of worktrees) {
 				if (item.status === "removable") counts.removableWorktrees++;
 				else if (item.status === "already-cleaned") counts.alreadyCleanedWorktrees++;
@@ -7457,31 +7629,53 @@ export class SessionManager {
 			});
 		}
 
-		return { sessions, counts };
+		const responseItems = sessions.flatMap(session => session.worktrees);
+		this.populateArchivedWorktreeUxCounts(counts, allItems);
+		return {
+			sessions,
+			items: responseItems,
+			counts,
+			groups: this.buildArchivedWorktreeGroups(allItems),
+			selectionPresets: this.buildArchivedWorktreeSelectionPresets(responseItems),
+			generatedAt: Date.now(),
+		};
 	}
 
 	async cleanupArchivedSessionWorktrees(request: CleanupArchivedSessionWorktreesRequest): Promise<CleanupArchivedSessionWorktreesResponse> {
-		const zeroCounts = (): CleanupArchivedSessionWorktreesResponse["counts"] => ({ requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0 });
-		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [] };
+		const zeroCounts = (): CleanupArchivedSessionWorktreesResponse["counts"] => ({
+			requested: 0,
+			cleaned: 0,
+			branchDeleted: 0,
+			skipped: 0,
+			alreadyCleaned: 0,
+			failed: 0,
+			worktreeRemoved: 0,
+			invalidSelection: 0,
+			notActionable: 0,
+			byStatus: {},
+			byReason: {},
+		});
+		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [], generatedAt: Date.now() };
 		const scan = await this.listArchivedSessionWorktrees(true);
-		const rows = scan.sessions.flatMap(session => session.worktrees.map(item => ({ session, item })));
+		const sessionById = new Map(scan.sessions.map(session => [session.id, session]));
+		const rows = scan.items.map(item => ({ session: sessionById.get(item.sessionId), item }));
 
-		let selected: Array<{ session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> = [];
+		let selected: Array<{ session?: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> = [];
 		const invalidSelections: ArchivedSessionWorktreeCleanupResult[] = [];
 		if (request.mode === "all") {
 			selected = rows.filter(row => row.item.status === "removable");
-		} else if (request.sessionIds) {
+		} else if (request.mode === "selected" && request.sessionIds) {
 			const ids = new Set(request.sessionIds);
-			selected = rows.filter(row => ids.has(row.session.id));
+			selected = rows.filter(row => ids.has(row.item.sessionId));
 			for (const id of ids) {
-				if (!scan.sessions.some(session => session.id === id)) {
+				if (!rows.some(row => row.item.sessionId === id)) {
 					invalidSelections.push({ key: id, sessionId: id, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
 				}
 			}
-		} else if (request.worktrees) {
+		} else if (request.mode === "selected" && request.worktrees) {
 			for (const selector of request.worktrees) {
 				const match = rows.find(row => {
-					if (row.session.id !== selector.sessionId) return false;
+					if (row.item.sessionId !== selector.sessionId) return false;
 					if (selector.key) return row.item.key === selector.key;
 					if (selector.repo !== undefined && row.item.repo !== selector.repo) return false;
 					if (selector.path !== undefined && normalizeWorktreeHostPath(row.item.path) !== normalizeWorktreeHostPath(selector.path)) return false;
@@ -7494,6 +7688,23 @@ export class SessionManager {
 					invalidSelections.push({ key, sessionId: selector.sessionId, repo: selector.repo, path: selector.path, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
 				}
 			}
+		} else if (request.mode === "selected") {
+			selected = [];
+		} else if (request.mode === "category") {
+			const categories = new Set(request.categories);
+			const repoFilter = normalizeWorktreeHostPath(request.repoPath);
+			selected = rows.filter(row => {
+				if (row.item.status !== "removable") return false;
+				if (!row.item.selectionCategories.some(category => categories.has(category))) return false;
+				if (request.projectId && row.item.projectId !== request.projectId) return false;
+				if (repoFilter && normalizeWorktreeHostPath(row.item.repoPath) !== repoFilter) return false;
+				return true;
+			});
+		} else if (request.mode === "preset") {
+			const preset = scan.selectionPresets.find(candidate => candidate.id === request.presetId);
+			if (!preset) throw new CleanupArchivedSessionWorktreesRequestError("Invalid cleanup preset");
+			const keys = new Set(preset.worktreeKeys);
+			selected = rows.filter(row => row.item.status === "removable" && keys.has(row.item.key));
 		}
 
 		const seen = new Set<string>();
@@ -7504,8 +7715,17 @@ export class SessionManager {
 		});
 		response.counts.requested = selected.length + invalidSelections.length;
 
+		const recordResult = (result: ArchivedSessionWorktreeCleanupResult) => {
+			response.results.push(result);
+			response.counts.byStatus[result.status] = (response.counts.byStatus[result.status] ?? 0) + 1;
+			if (result.reason) response.counts.byReason[result.reason] = (response.counts.byReason[result.reason] ?? 0) + 1;
+			if (result.worktreeRemoved) response.counts.worktreeRemoved++;
+			if (result.reason === "invalid-selection") response.counts.invalidSelection++;
+			if (result.status === "skipped" && result.reason !== "invalid-selection") response.counts.notActionable++;
+		};
+
 		for (const invalid of invalidSelections) {
-			response.results.push(invalid);
+			recordResult(invalid);
 			response.counts.skipped++;
 		}
 
@@ -7513,19 +7733,19 @@ export class SessionManager {
 			const base: Omit<ArchivedSessionWorktreeCleanupResult, "status" | "worktreeRemoved" | "branchDeleted"> = {
 				key: item.key,
 				sessionId: item.sessionId,
-				title: session.title,
+				title: session?.title ?? item.title,
 				repo: item.repo,
 				repoPath: item.repoPath,
 				path: item.path,
 				branch: item.branch,
 			};
 			if (item.status === "already-cleaned") {
-				response.results.push({ ...base, status: "already-cleaned", reason: "already-cleaned", worktreeRemoved: false, branchDeleted: false });
+				recordResult({ ...base, status: "already-cleaned", reason: "already-cleaned", detail: item.detail, worktreeRemoved: false, branchDeleted: false });
 				response.counts.alreadyCleaned++;
 				continue;
 			}
 			if (item.status !== "removable") {
-				response.results.push({ ...base, status: "skipped", reason: item.reason, worktreeRemoved: false, branchDeleted: false });
+				recordResult({ ...base, status: "skipped", reason: item.reason, detail: item.detail, worktreeRemoved: false, branchDeleted: false });
 				response.counts.skipped++;
 				continue;
 			}
@@ -7536,13 +7756,13 @@ export class SessionManager {
 
 				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
 				if (!worktreeRemoved) {
-					response.results.push({ ...base, status: "failed", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
+					recordResult({ ...base, status: "failed", reason: "scan-error", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
 					response.counts.failed++;
 					continue;
 				}
 
 				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
-				response.results.push({
+				recordResult({
 					...base,
 					status: "cleaned",
 					reason: branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
@@ -7552,12 +7772,149 @@ export class SessionManager {
 				response.counts.cleaned++;
 				if (branchDeleted) response.counts.branchDeleted++;
 			} catch (err) {
-				response.results.push({ ...base, status: "failed", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
+				recordResult({ ...base, status: "failed", reason: "scan-error", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
 				response.counts.failed++;
 			}
 		}
 
 		return response;
+	}
+
+	private populateArchivedWorktreeUxCounts(counts: ArchivedSessionWorktreeScanResponse["counts"], items: ArchivedSessionWorktreeItem[]): void {
+		counts.totalItems = items.length;
+		for (const item of items) {
+			counts.byDisposition[item.disposition] = (counts.byDisposition[item.disposition] ?? 0) + 1;
+			counts.byReason[item.reason] = (counts.byReason[item.reason] ?? 0) + 1;
+			for (const category of item.selectionCategories) counts.bySelectionCategory[category] = (counts.bySelectionCategory[category] ?? 0) + 1;
+			if (item.disposition === "ready-to-clean") counts.readyToClean++;
+			if (item.defaultSelected) counts.defaultSelected++;
+			if (item.disposition === "already-cleaned") counts.alreadyCleaned++;
+			if (item.disposition === "ineligible") counts.ineligible++;
+			if (item.disposition === "failed") counts.failed++;
+			if (item.disposition === "needs-attention" || item.disposition === "failed") counts.needsAttention++;
+		}
+	}
+
+	private buildArchivedWorktreeGroups(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeGroup[] {
+		const groupSpecs: Array<{ key: string; label: string; description: string; disposition: ArchivedWorktreeDisposition; reason?: ArchivedWorktreeReason }> = [
+			{ key: "ready-to-clean", label: "Ready to clean", description: "Archived-session worktrees that are safe to remove now.", disposition: "ready-to-clean", reason: "safe-archived-session-worktree" },
+			{ key: "already-cleaned", label: "Already cleaned", description: "Archived sessions whose recorded git worktree is already gone.", disposition: "already-cleaned", reason: "already-cleaned" },
+			{ key: "reason:no-worktree-path", label: "Missing worktree path", description: "Archived sessions without a recorded host worktree path.", disposition: "ineligible", reason: "no-worktree-path" },
+			{ key: "reason:missing-repo-path", label: "Missing repository path", description: "Archived sessions without enough repository metadata to evaluate cleanup.", disposition: "ineligible", reason: "missing-repo-path" },
+			{ key: "reason:sandbox-container-path", label: "Sandbox/container path", description: "Recorded paths are container-internal and do not identify a host worktree.", disposition: "ineligible", reason: "sandbox-container-path" },
+			{ key: "reason:delegate-shared-worktree", label: "Shared delegate worktree", description: "Archived delegates that appear to share a parent worktree.", disposition: "ineligible", reason: "delegate-shared-worktree" },
+			{ key: "reason:stale-worktree-directory", label: "Stale worktree directory", description: "A path remains on disk without matching git worktree metadata; manual inspection may be needed.", disposition: "needs-attention", reason: "stale-worktree-directory" },
+			{ key: "reason:referenced-by-live-session", label: "Referenced by live session", description: "A non-archived or runtime session still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-session" },
+			{ key: "reason:referenced-by-live-goal", label: "Referenced by live goal", description: "A persisted goal still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-goal" },
+			{ key: "reason:referenced-by-live-team", label: "Referenced by live team", description: "A team entry or team agent still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-team" },
+			{ key: "reason:referenced-by-staff", label: "Referenced by staff", description: "A staff record still references the worktree.", disposition: "ineligible", reason: "referenced-by-staff" },
+			{ key: "reason:scan-error", label: "Scan errors", description: "Worktrees that could not be evaluated safely.", disposition: "failed", reason: "scan-error" },
+		];
+		return groupSpecs.flatMap(spec => {
+			const matches = spec.key === "ready-to-clean"
+				? items.filter(item => item.disposition === "ready-to-clean")
+				: items.filter(item => item.reason === spec.reason);
+			if (matches.length === 0) return [];
+			const sampleItems = matches.slice(0, 5);
+			return [{
+				key: spec.key,
+				label: spec.label,
+				description: spec.description,
+				disposition: spec.disposition,
+				reason: spec.reason,
+				reasonCategory: spec.reason ? this.archivedWorktreeReasonCategory(spec.reason) : undefined,
+				count: matches.length,
+				sampleKeys: sampleItems.map(item => item.key),
+				sampleItems,
+				hasMore: matches.length > 5,
+				actionable: spec.disposition === "ready-to-clean",
+			}];
+		});
+	}
+
+	private buildArchivedWorktreeSelectionPresets(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeSelectionPreset[] {
+		const actionable = items.filter(item => item.actionable);
+		const makePreset = (id: string, label: string, description: string, matches: ArchivedSessionWorktreeItem[], cleanupRequest: CleanupArchivedSessionWorktreesRequest): ArchivedSessionWorktreeSelectionPreset => ({
+			id,
+			label,
+			description,
+			enabled: matches.length > 0,
+			count: matches.length,
+			worktreeKeys: matches.map(item => item.key),
+			cleanupRequest,
+		});
+		const presets: ArchivedSessionWorktreeSelectionPreset[] = [
+			makePreset("all-removable", "Select all removable", "Select every archived-session worktree that is safe to clean.", actionable, { mode: "all" }),
+			makePreset("category:archived-session", "Archived sessions only", "Select all actionable archived-session worktrees.", actionable.filter(item => item.selectionCategories.includes("archived-session")), { mode: "category", categories: ["archived-session"] }),
+		];
+		const categoryLabels: Partial<Record<ArchivedWorktreeSelectionCategory, string>> = {
+			"goal-session": "Goal sessions",
+			"team-session": "Goal/team worktrees",
+			"delegate-session": "Delegate worktrees",
+		};
+		for (const category of ["goal-session", "team-session", "delegate-session"] as const) {
+			const matches = actionable.filter(item => item.selectionCategories.includes(category));
+			if (matches.length > 0) presets.push(makePreset(`category:${category}`, categoryLabels[category] ?? category, `Select actionable ${category.replace(/-/g, " ")} worktrees.`, matches, { mode: "category", categories: [category] }));
+		}
+		const projects = new Map<string, ArchivedSessionWorktreeItem[]>();
+		const repos = new Map<string, ArchivedSessionWorktreeItem[]>();
+		for (const item of actionable) {
+			if (item.projectId) {
+				const existing = projects.get(item.projectId) ?? [];
+				existing.push(item);
+				projects.set(item.projectId, existing);
+			}
+			const repoKey = normalizeWorktreeHostPath(item.repoPath);
+			if (repoKey) {
+				const existing = repos.get(repoKey) ?? [];
+				existing.push(item);
+				repos.set(repoKey, existing);
+			}
+		}
+		for (const [projectId, matches] of projects) {
+			const label = matches[0]?.projectName ? `Current project: ${matches[0].projectName}` : "Current project";
+			presets.push(makePreset(`project:${projectId}`, label, "Select actionable archived worktrees in this project.", matches, { mode: "category", categories: ["archived-session"], projectId }));
+		}
+		for (const [repoPath, matches] of repos) {
+			const label = matches[0]?.repoDisplayName ? `Repository: ${matches[0].repoDisplayName}` : "Repository";
+			presets.push(makePreset(`repo:${repoPath}`, label, "Select actionable archived worktrees in this repository.", matches, { mode: "category", categories: ["archived-session"], repoPath }));
+		}
+		return presets;
+	}
+
+	private archivedWorktreeDisposition(status: ArchivedWorktreeLegacyStatus, reason: ArchivedWorktreeReason): ArchivedWorktreeDisposition {
+		if (status === "removable") return "ready-to-clean";
+		if (status === "already-cleaned") return "already-cleaned";
+		if (reason === "stale-worktree-directory") return "needs-attention";
+		if (reason === "scan-error") return "failed";
+		return "ineligible";
+	}
+
+	private archivedWorktreeReasonCategory(reason: ArchivedWorktreeReason): ArchivedWorktreeReasonCategory {
+		switch (reason) {
+			case "safe-archived-session-worktree": return "safe";
+			case "already-cleaned": return "already-cleaned";
+			case "no-worktree-path":
+			case "missing-repo-path": return "missing-metadata";
+			case "sandbox-container-path": return "container-path";
+			case "delegate-shared-worktree": return "shared-delegate";
+			case "stale-worktree-directory": return "stale-path";
+			case "referenced-by-live-session":
+			case "referenced-by-live-goal":
+			case "referenced-by-live-team":
+			case "referenced-by-staff": return "referenced-record";
+			case "scan-error": return "error";
+		}
+	}
+
+	private archivedWorktreeSelectionCategories(ps: PersistedSession, source: "repoWorktrees" | "sessionWorktree"): ArchivedWorktreeSelectionCategory[] {
+		const categories: ArchivedWorktreeSelectionCategory[] = ["archived-session"];
+		if (ps.goalId) categories.push("goal-session");
+		if (ps.teamGoalId) categories.push("team-session");
+		if (ps.delegateOf) categories.push("delegate-session");
+		if (ps.parentSessionId || ps.childKind) categories.push("child-session");
+		categories.push(source === "repoWorktrees" ? "multi-repo" : "single-repo");
+		return categories;
 	}
 
 	private buildArchivedWorktreeScanContext(): ArchivedWorktreeScanContext {
@@ -7568,6 +7925,7 @@ export class SessionManager {
 		const teamRefs: ArchivedWorktreeGuardRef[] = [];
 		const staffRefs: ArchivedWorktreeGuardRef[] = [];
 		const branchGuardsByRepo = new Map<string, Set<string>>();
+		const archivedBranchGuardsByRepo = new Map<string, Map<string, Set<string>>>();
 		const addBranchGuard = (repoPath: string | undefined, branch: string | undefined) => {
 			const repoKey = normalizeWorktreeHostPath(repoPath);
 			if (!repoKey || !branch) return;
@@ -7577,6 +7935,21 @@ export class SessionManager {
 				branchGuardsByRepo.set(repoKey, set);
 			}
 			set.add(branch);
+		};
+		const addArchivedBranchGuard = (repoPath: string | undefined, branch: string | undefined, itemKey: string) => {
+			const repoKey = normalizeWorktreeHostPath(repoPath);
+			if (!repoKey || !branch) return;
+			let branches = archivedBranchGuardsByRepo.get(repoKey);
+			if (!branches) {
+				branches = new Map<string, Set<string>>();
+				archivedBranchGuardsByRepo.set(repoKey, branches);
+			}
+			let keys = branches.get(branch);
+			if (!keys) {
+				keys = new Set<string>();
+				branches.set(branch, keys);
+			}
+			keys.add(itemKey);
 		};
 		const addRepoBranches = (repoPath: string | undefined, branch: string | undefined, repoWorktrees?: Record<string, string>) => {
 			if (repoWorktrees && repoPath) {
@@ -7600,6 +7973,20 @@ export class SessionManager {
 				for (const wt of session.repoWorktrees) addBranchGuard(wt.repoPath, session.branch);
 			} else {
 				addBranchGuard(session.repoPath, session.branch);
+			}
+		}
+
+		const archivedSessions = this.projectContextManager
+			? allContexts.flatMap(ctx => ctx.sessionStore.getArchived())
+			: (this._testStore?.getArchived() ?? []);
+		for (const ps of archivedSessions) {
+			if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0 && ps.repoPath) {
+				for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
+					const repoPath = repo === "." ? ps.repoPath : path.join(ps.repoPath, repo);
+					addArchivedBranchGuard(repoPath, ps.branch, this.archivedWorktreeKey(ps.id, repo, wt));
+				}
+			} else {
+				addArchivedBranchGuard(ps.repoPath, ps.branch, this.archivedWorktreeKey(ps.id, ".", ps.worktreePath));
 			}
 		}
 
@@ -7634,24 +8021,25 @@ export class SessionManager {
 			teamRefs,
 			staffRefs,
 			branchGuardsByRepo,
+			archivedBranchGuardsByRepo,
 			gitRefsCache: new Map(),
 			branchExistsCache: new Map(),
 		};
 	}
 
-	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext): Promise<ArchivedSessionWorktreeItem[]> {
-		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string }> = [];
+	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext, projectName?: string): Promise<ArchivedSessionWorktreeItem[]> {
+		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }> = [];
 		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
-				specs.push({ repo, repoPath: ps.repoPath ? (repo === "." ? ps.repoPath : path.join(ps.repoPath, repo)) : undefined, worktreePath: wt, branch: ps.branch });
+				specs.push({ repo, repoPath: ps.repoPath ? (repo === "." ? ps.repoPath : path.join(ps.repoPath, repo)) : undefined, worktreePath: wt, branch: ps.branch, source: "repoWorktrees" });
 			}
 		} else {
-			specs.push({ repo: ".", repoPath: ps.repoPath, worktreePath: ps.worktreePath, branch: ps.branch });
+			specs.push({ repo: ".", repoPath: ps.repoPath, worktreePath: ps.worktreePath, branch: ps.branch, source: "sessionWorktree" });
 		}
 
 		const items: ArchivedSessionWorktreeItem[] = [];
 		for (const spec of specs) {
-			const item = await this.archivedSessionWorktreeItem(ps, spec, ctx);
+			const item = await this.archivedSessionWorktreeItem(ps, spec, ctx, projectName);
 			items.push(item);
 		}
 		return items;
@@ -7659,26 +8047,57 @@ export class SessionManager {
 
 	private async archivedSessionWorktreeItem(
 		ps: PersistedSession,
-		spec: { repo: string; repoPath?: string; worktreePath?: string; branch?: string },
+		spec: { repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" },
 		ctx: ArchivedWorktreeScanContext,
+		projectName?: string,
 	): Promise<ArchivedSessionWorktreeItem> {
 		const key = this.archivedWorktreeKey(ps.id, spec.repo, spec.worktreePath);
-		const base = (overrides: Partial<ArchivedSessionWorktreeItem>): ArchivedSessionWorktreeItem => ({
-			key,
-			sessionId: ps.id,
-			repo: spec.repo,
-			repoPath: spec.repoPath ?? "",
-			path: spec.worktreePath ?? "",
-			branch: spec.branch,
-			pathExists: false,
-			gitWorktreeMetadataExists: false,
-			localBranchExists: false,
-			status: "skipped",
-			reason: "invalid-selection",
-			detail: "Not evaluated.",
-			willDeleteBranch: false,
-			...overrides,
-		});
+		const repoDisplayName = spec.repo === "." ? (projectName ?? (spec.repoPath ? path.basename(spec.repoPath) : ".")) : spec.repo;
+		const base = (overrides: Partial<ArchivedSessionWorktreeItem>): ArchivedSessionWorktreeItem => {
+			const raw = {
+				key,
+				sessionId: ps.id,
+				title: ps.title,
+				archivedAt: ps.archivedAt,
+				projectId: ps.projectId,
+				projectName,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				delegateOf: ps.delegateOf,
+				parentSessionId: ps.parentSessionId,
+				childKind: ps.childKind,
+				sandboxed: ps.sandboxed,
+				repo: spec.repo,
+				repoPath: spec.repoPath ?? "",
+				repoDisplayName,
+				path: spec.worktreePath ?? "",
+				branch: spec.branch,
+				source: spec.source,
+				pathExists: false,
+				gitWorktreeMetadataExists: false,
+				localBranchExists: false,
+				status: "skipped" as ArchivedWorktreeLegacyStatus,
+				reason: "scan-error" as ArchivedWorktreeReason,
+				detail: "Not evaluated.",
+				willDeleteBranch: false,
+				selectionCategories: this.archivedWorktreeSelectionCategories(ps, spec.source),
+				...overrides,
+			};
+			const status = raw.status ?? "skipped";
+			const reason = raw.reason ?? "scan-error";
+			const disposition = raw.disposition ?? this.archivedWorktreeDisposition(status, reason);
+			const actionable = raw.actionable ?? disposition === "ready-to-clean";
+			return {
+				...raw,
+				status,
+				reason,
+				disposition,
+				reasonCategory: raw.reasonCategory ?? this.archivedWorktreeReasonCategory(reason),
+				actionable,
+				selectable: raw.selectable ?? actionable,
+				defaultSelected: raw.defaultSelected ?? actionable,
+			};
+		};
 
 		if (!spec.worktreePath) return base({ status: "skipped", reason: "no-worktree-path", detail: "Archived session has no recorded worktree path." });
 		if (!spec.repoPath) return base({ status: "skipped", reason: "missing-repo-path", detail: "Archived session has no recorded repository path for this worktree." });
@@ -7693,19 +8112,6 @@ export class SessionManager {
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
-		if (!gitWorktreeMetadataExists) {
-			return base({
-				pathExists,
-				gitWorktreeMetadataExists,
-				localBranchExists,
-				status: pathExists ? "skipped" : "already-cleaned",
-				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
-				detail: pathExists
-					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
-					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
-			});
-		}
-
 		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
 		if (sessionReferenced) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
@@ -7719,9 +8125,21 @@ export class SessionManager {
 		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.staffRefs)) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-staff", detail: "A staff record still references this worktree." });
 		}
+		if (!gitWorktreeMetadataExists) {
+			return base({
+				pathExists,
+				gitWorktreeMetadataExists,
+				localBranchExists,
+				status: pathExists ? "skipped" : "already-cleaned",
+				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
+				detail: pathExists
+					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
+					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
+			});
+		}
 
-		const branchDeleteBlockedReason = localBranchExists && !this.branchDeletionAllowed(spec.branch, spec.repoPath, ctx)
-			? "branch-referenced-by-live-record"
+		const branchDeleteBlockedReason = localBranchExists
+			? this.branchDeleteBlockedReason(spec.branch, spec.repoPath, ctx, key)
 			: undefined;
 		const willDeleteBranch = localBranchExists && !branchDeleteBlockedReason;
 		return base({
@@ -7730,9 +8148,11 @@ export class SessionManager {
 			localBranchExists,
 			status: "removable",
 			reason: "safe-archived-session-worktree",
-			detail: branchDeleteBlockedReason
-				? "Archived session worktree is safe to remove; branch deletion is blocked because another record still references the branch."
-				: "Archived session worktree is safe to remove.",
+			detail: branchDeleteBlockedReason === "branch-referenced-by-archived-record"
+				? "Archived session worktree is safe to remove; branch deletion is blocked because another archived record still references the branch."
+				: branchDeleteBlockedReason
+					? "Archived session worktree is safe to remove; branch deletion is blocked because another live record still references the branch."
+					: "Archived session worktree is safe to remove.",
 			willDeleteBranch,
 			branchDeleteBlockedReason,
 		});
@@ -7763,11 +8183,18 @@ export class SessionManager {
 		return false;
 	}
 
-	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext): boolean {
-		if (!branch) return false;
+	private branchDeleteBlockedReason(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): ArchivedSessionWorktreeItem["branchDeleteBlockedReason"] | undefined {
+		if (!branch) return "branch-referenced-by-live-record";
 		const repoKey = normalizeWorktreeHostPath(repoPath);
-		if (!repoKey) return false;
-		return !ctx.branchGuardsByRepo.get(repoKey)?.has(branch);
+		if (!repoKey) return "branch-referenced-by-live-record";
+		if (ctx.branchGuardsByRepo.get(repoKey)?.has(branch)) return "branch-referenced-by-live-record";
+		const archivedKeys = ctx.archivedBranchGuardsByRepo.get(repoKey)?.get(branch);
+		if (archivedKeys && [...archivedKeys].some(key => key !== ownKey)) return "branch-referenced-by-archived-record";
+		return undefined;
+	}
+
+	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): boolean {
+		return !this.branchDeleteBlockedReason(branch, repoPath, ctx, ownKey);
 	}
 
 	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
@@ -7782,7 +8209,7 @@ export class SessionManager {
 	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
 		if (!item.willDeleteBranch || !item.branch || !item.localBranchExists) return false;
 		const ctx = this.buildArchivedWorktreeScanContext();
-		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx)) return false;
+		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx, item.key)) return false;
 		try {
 			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
 		} catch {
@@ -8525,6 +8952,7 @@ export class SessionManager {
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
@@ -8557,6 +8985,7 @@ export class SessionManager {
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
+			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			await rpcClient.start();
 
 			// Resume session if we have the session file.
