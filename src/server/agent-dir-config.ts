@@ -250,8 +250,9 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 
 	const normalizedProjectRoot = normalizeAbsolutePath(projectRoot);
 	const gitRoot = resolveGitWorktreeRoot(normalizedProjectRoot);
+	const gitRootForComparison = safeRealpath(gitRoot) ?? gitRoot;
 	const allowedDefault = defaultAgentDir(normalizedProjectRoot);
-	if (isPathWithinOrEqual(gitRoot, resolvedPath) && !isPathWithinOrEqual(allowedDefault, resolvedPath)) {
+	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefault, resolvedPath)) {
 		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, resolvedPath);
 	}
 
@@ -268,13 +269,19 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 		return validationError("CREATE_FAILED", `Failed to create directory: ${(err as Error).message}`, rawInput, resolvedPath);
 	}
 
+	let realResolvedPath = resolvedPath;
 	try {
 		const stat = fs.statSync(resolvedPath);
 		if (!stat.isDirectory()) {
 			return validationError("NOT_DIRECTORY", "The resolved path exists but is not a directory.", rawInput, resolvedPath);
 		}
+		realResolvedPath = fs.realpathSync(resolvedPath);
 	} catch (err) {
 		return validationError("NOT_DIRECTORY", `Failed to inspect directory: ${(err as Error).message}`, rawInput, resolvedPath);
+	}
+
+	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefault, realResolvedPath)) {
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, realResolvedPath);
 	}
 
 	try {
@@ -540,6 +547,14 @@ function normalizeAbsolutePath(value: string): string {
 function isPathWithinOrEqual(parent: string, child: string): boolean {
 	const relative = path.relative(normalizeAbsolutePath(parent), normalizeAbsolutePath(child));
 	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isDisallowedInsideWorktree(gitRoot: string, allowedDefault: string, target: string): boolean {
+	return isPathWithinOrEqual(gitRoot, target) && !isPathWithinOrEqual(allowedDefault, target);
+}
+
+function safeRealpath(value: string): string | undefined {
+	try { return fs.realpathSync(value); } catch { return undefined; }
 }
 
 function samePath(a: string, b: string): boolean {

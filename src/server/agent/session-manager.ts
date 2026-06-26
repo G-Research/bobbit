@@ -21,7 +21,7 @@ import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ON
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
-import { resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -135,7 +135,8 @@ function sessionFsContextForAgentFile(ps: PersistedSession, filePath: string | u
 function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
 	if (!filePath) return null;
 	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
-	return resolveSafeSessionsPath(filePath);
+	trustPersistedAgentSessionFile(filePath);
+	return resolveReadablePersistedAgentSessionFile(filePath);
 }
 
 function switchSessionPathForAgent(ps: PersistedSession): string {
@@ -7906,11 +7907,13 @@ export class SessionManager {
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
-		// Delete .jsonl file
+		// Delete .jsonl file. Exact persisted paths outside trusted sessions
+		// roots are read-compatible only; never purge/delete them or sidecars.
 		if (ps.agentSessionFile) {
-			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			const safeFile = isHostAbsoluteAgentSessionPath(ps.agentSessionFile)
+				? resolveSafeSessionsPath(ps.agentSessionFile)
+				: ps.agentSessionFile;
 			if (safeFile) {
-				trustPersistedAgentSessionFile(safeFile);
 				const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
 				await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
 					console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);

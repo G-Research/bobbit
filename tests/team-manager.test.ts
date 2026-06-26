@@ -1469,6 +1469,12 @@ describe("TeamManager", () => {
 			assert.equal(session.rpcClient.prompt.mock.callCount(), 1);
 		});
 
+		it("team recovery scans configured and historical sessions roots instead of the legacy home default", () => {
+			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
+			assert.match(source, /trustedAgentSessionsRoots\(\)/, "team recovery must use active, historical, and legacy agent session roots");
+			assert.doesNotMatch(source, /homedir\(\).*\.bobbit.*agent.*sessions/s, "team recovery must not hard-code ~/.bobbit/agent/sessions");
+		});
+
 		it("dispatches the goalProvisioned hook for the member worktree (finding 1)", async () => {
 			// team-manager creates member worktrees directly via createWorktree() and
 			// hands a pre-built cwd to createSession, so session-setup's provisioning
