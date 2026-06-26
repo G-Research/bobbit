@@ -4477,7 +4477,7 @@ function archivedSessionWorktreeReasonDetail(reason: string): string {
 
 function archivedSessionWorktreeSafeReason(item: ArchivedSessionWorktreeItem): string {
 	if (isArchivedSessionWorktreeActionable(item)) return "Safe to remove: no live session, goal, team, staff, or sibling worktree references this path.";
-	return item.detail || archivedSessionWorktreeReasonDetail(item.reasonCategory || item.reason || archivedSessionWorktreeDisposition(item));
+	return item.detail || archivedSessionWorktreeReasonDetail(item.reason || item.reasonCategory || archivedSessionWorktreeDisposition(item));
 }
 
 function sanitizeArchivedWorktreeGroupId(value: string): string {
@@ -4514,7 +4514,7 @@ function showArchivedWorktreeTroubleshootingAndFocus(reason?: string): void {
 
 function renderArchivedWorktreeSummaryChip(label: string, value: number, testId: string, onClick?: () => void) {
 	const content = html`
-		<span class="text-[11px] text-muted-foreground">${label}</span>
+		<span class="text-[11px] text-muted-foreground">${label}:</span>
 		<span class="text-sm font-semibold text-foreground">${value}</span>
 	`;
 	const classes = "flex min-w-[8rem] flex-col gap-0.5 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left";
@@ -4529,7 +4529,7 @@ function renderArchivedWorktreeRow(session: ArchivedSessionWorktreeSession, item
 	const key = archivedSessionWorktreeKey(item);
 	const selected = archivedSessionWorktreeSelection.has(key);
 	const disposition = archivedSessionWorktreeDisposition(item);
-	const reason = item.reasonCategory || item.reason || disposition;
+	const reason = item.reason || item.reasonCategory || disposition;
 	const category = item.selectionCategories?.[0] || disposition;
 	const status = item.status || (disposition === "ready-to-clean" ? "removable" : "skipped");
 	const title = item.title || session.title || "Untitled archived session";
@@ -4631,7 +4631,7 @@ function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: stri
 		const { session, item } = row;
 		if (isArchivedSessionWorktreeActionable(item)) continue;
 		const disposition = archivedSessionWorktreeDisposition(item);
-		const reason = item.reasonCategory || item.reason || disposition;
+		const reason = item.reason || item.reasonCategory || disposition;
 		const key = archivedSessionWorktreeKey(item);
 		const examples = groups.get(reason) ?? [];
 		examples.push({
@@ -4766,7 +4766,7 @@ function renderArchivedWorktreeCleanupResult() {
 		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground mt-1" data-testid="archived-worktree-cleanup-result" aria-live=${attention > 0 ? "assertive" : "polite"}>
 			<div class="text-foreground font-medium">${attention > 0 ? "Cleanup finished with attention needed" : "Cleanup complete"}</div>
 			<div>
-				Cleaned ${cleanup.counts.cleaned}, deleted ${cleanup.counts.branchDeleted} branch${cleanup.counts.branchDeleted === 1 ? "" : "es"}, skipped ${cleanup.counts.skipped}, already cleaned ${cleanup.counts.alreadyCleaned}, failed ${cleanup.counts.failed}.
+				Cleaned: ${cleanup.counts.cleaned}, branches deleted: ${cleanup.counts.branchDeleted}, skipped: ${cleanup.counts.skipped}, already cleaned: ${cleanup.counts.alreadyCleaned}, failed: ${cleanup.counts.failed}.
 			</div>
 			${attention > 0 ? html`
 				<div class="mt-1 text-muted-foreground">Open skipped / ineligible items to inspect skipped or failed cleanup examples.</div>

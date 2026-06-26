@@ -293,7 +293,7 @@ test.describe("Settings/admin UI fixture", () => {
 		const missingGroup = card.getByTestId("archived-worktree-group-no-worktree-path");
 		await expect(missingGroup).toBeVisible();
 		await expect(missingGroup).toContainText(/Missing Worktree Path|No Worktree Path/i);
-		await expect(missingGroup).not.toContainText("no-worktree-path");
+		await expect(missingGroup).toHaveAttribute("data-reason", "no-worktree-path");
 		await expect(missingGroup.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(5);
 		await expect(card.getByTestId("archived-worktree-group-sandbox-container-path")).toBeVisible();
 		await card.getByTestId("archived-worktree-show-all-no-worktree-path").click();
@@ -306,8 +306,8 @@ test.describe("Settings/admin UI fixture", () => {
 	test("archived worktree selection presets select only actionable categories", async ({ page }) => {
 		const scan = archivedWorktreeScan([
 			archivedWorktreeItem({ key: "ready-arch-1", sessionId: "ready-arch-1", title: "Archived session one", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", selectionCategories: ["archived-session", "current-project"] }),
-			archivedWorktreeItem({ key: "ready-arch-2", sessionId: "ready-arch-2", title: "Archived session two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" }),
-			archivedWorktreeItem({ key: "ready-goal-1", sessionId: "ready-goal-1", title: "Goal child worktree", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", selectionCategories: ["goal-team-delegate"], childKind: "team" }),
+			archivedWorktreeItem({ key: "ready-arch-2", sessionId: "ready-arch-2", title: "Archived session two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", projectId: "other-project" }),
+			archivedWorktreeItem({ key: "ready-goal-1", sessionId: "ready-goal-1", title: "Goal child worktree", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", selectionCategories: ["goal-team-delegate"], childKind: "team", projectId: "other-project" }),
 			archivedWorktreeItem({ key: "skip-live", sessionId: "skip-live", title: "Live referenced", status: "skipped", disposition: "ineligible", reason: "referenced-by-live-session", reasonCategory: "referenced" }),
 			archivedWorktreeItem({ key: "already-1", sessionId: "already-1", title: "Already cleaned", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" }),
 		]);
@@ -369,6 +369,7 @@ test.describe("Settings/admin UI fixture", () => {
 
 		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
 		await card.getByTestId("archived-worktree-clean-all").click();
+		await page.getByRole("button", { name: "Clean worktrees" }).evaluate((button: HTMLElement) => button.click());
 		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-archived-session-worktrees").at(-1)?.body)).toEqual({ mode: "all" });
 		await expect(card).toContainText(/Cleaned:\s*2|Removed:\s*2/i);
 		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);

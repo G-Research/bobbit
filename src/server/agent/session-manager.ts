@@ -7516,13 +7516,14 @@ export class SessionManager {
 			});
 		}
 
+		const responseItems = sessions.flatMap(session => session.worktrees);
 		this.populateArchivedWorktreeUxCounts(counts, allItems);
 		return {
 			sessions,
-			items: allItems,
+			items: responseItems,
 			counts,
-			groups: this.buildArchivedWorktreeGroups(allItems),
-			selectionPresets: this.buildArchivedWorktreeSelectionPresets(allItems),
+			groups: this.buildArchivedWorktreeGroups(responseItems),
+			selectionPresets: this.buildArchivedWorktreeSelectionPresets(responseItems),
 			generatedAt: Date.now(),
 		};
 	}
@@ -7965,19 +7966,6 @@ export class SessionManager {
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
-		if (!gitWorktreeMetadataExists) {
-			return base({
-				pathExists,
-				gitWorktreeMetadataExists,
-				localBranchExists,
-				status: pathExists ? "skipped" : "already-cleaned",
-				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
-				detail: pathExists
-					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
-					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
-			});
-		}
-
 		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
 		if (sessionReferenced) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
@@ -7990,6 +7978,18 @@ export class SessionManager {
 		}
 		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.staffRefs)) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-staff", detail: "A staff record still references this worktree." });
+		}
+		if (!gitWorktreeMetadataExists) {
+			return base({
+				pathExists,
+				gitWorktreeMetadataExists,
+				localBranchExists,
+				status: pathExists ? "skipped" : "already-cleaned",
+				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
+				detail: pathExists
+					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
+					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
+			});
 		}
 
 		const branchDeleteBlockedReason = localBranchExists && !this.branchDeletionAllowed(spec.branch, spec.repoPath, ctx)
