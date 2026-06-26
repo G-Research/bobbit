@@ -13,6 +13,7 @@ import {
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsCodexAuth,
 } from "../src/server/agent/host-tokens.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "./helpers/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
 let root: string;
@@ -53,12 +54,14 @@ describe("sandbox OpenAI Codex auth", () => {
 		bobbitDir = path.join(root, ".bobbit");
 		setEnv("BOBBIT_AGENT_DIR", agentDir);
 		setEnv("BOBBIT_DIR", bobbitDir);
+		pinAgentDirForTest(agentDir, { projectRoot: root });
 		setEnv("OPENAI_API_KEY", undefined);
 		setEnv("ANTHROPIC_API_KEY", undefined);
 	});
 
 	afterEach(() => {
 		restoreEnv();
+		resetAgentDirForTest();
 		rmSync(root, { recursive: true, force: true });
 	});
 

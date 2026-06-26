@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../src/server/agent/model-registry.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "./helpers/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;
@@ -27,6 +28,7 @@ let prefs: PreferencesStore;
 beforeEach(() => {
 	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-reg-"));
 	process.env.BOBBIT_AGENT_DIR = dir;
+	pinAgentDirForTest(dir);
 	// Ensure the API-key `google` provider is NOT authenticated by ambient env.
 	delete process.env.GOOGLE_API_KEY;
 	delete process.env.GEMINI_API_KEY;
@@ -39,6 +41,7 @@ afterEach(() => {
 	if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR; else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
 	if (prevGoogleKey === undefined) delete process.env.GOOGLE_API_KEY; else process.env.GOOGLE_API_KEY = prevGoogleKey;
 	if (prevGeminiKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prevGeminiKey;
+	resetAgentDirForTest();
 	rmSync(dir, { recursive: true, force: true });
 	invalidateModelCache();
 });
