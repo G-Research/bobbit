@@ -58,7 +58,7 @@ function formatProposalErrorMessage(result: ToolResultMessage | undefined): stri
 	const details = parseProposalErrorFromResult(result);
 	if (!details) return "Proposal failed.";
 	const parts = [details.message];
-	if (details.availableWorkflowIds.length > 0) {
+	if (details.availableWorkflowIds.length > 0 && !/\b(workflow ids?|available workflows?)\b/i.test(details.message)) {
 		parts.push(`Valid workflows: ${details.availableWorkflowIds.join(", ")}.`);
 	}
 	return parts.join(" ");
