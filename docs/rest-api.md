@@ -1049,6 +1049,110 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
 | `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
 
+### Maintenance
+
+Maintenance endpoints back Settings → Maintenance. They are preview-first and return structured counts so the UI can show cleaned, skipped, already-cleaned, and failed work. See [maintenance.md](maintenance.md) for the user/developer overview.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/maintenance/archived-session-worktrees` | Scan archived sessions for removable git worktrees. `?includeAlreadyCleaned=1` includes disabled diagnostic rows whose worktree path and git metadata are already gone. |
+| `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Remove selected or all currently removable archived-session worktrees and delete branches where safe. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Scan visible project repos for orphaned `session/*` git worktrees. |
+| `POST` | `/api/maintenance/cleanup-worktrees` | Remove selected orphaned worktrees. |
+| `GET` | `/api/maintenance/orphaned-sessions` | List orphaned non-interactive sessions. |
+| `POST` | `/api/maintenance/cleanup-sessions` | Terminate selected orphaned sessions. |
+| `GET` | `/api/maintenance/expired-archives` | Return expired archive purge counts and bytes. |
+| `POST` | `/api/maintenance/purge-archives` | Purge expired archives. |
+| `GET` | `/api/maintenance/orphaned-index-rows` | List search index rows whose parent records are gone (`?projectId=`). |
+| `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows (`{ projectId }`). |
+
+**`GET /api/maintenance/archived-session-worktrees`** returns:
+
+```ts
+interface ArchivedSessionWorktreeScanResponse {
+  sessions: ArchivedSessionWorktreeSession[];
+  counts: {
+    archivedSessions: number;
+    sessionsWithWorktrees: number;
+    removableWorktrees: number;
+    skippedWorktrees: number;
+    alreadyCleanedWorktrees: number;
+  };
+}
+
+interface ArchivedSessionWorktreeSession {
+  id: string;
+  title: string;
+  archivedAt?: number;
+  projectId?: string;
+  projectName?: string;
+  goalId?: string;
+  teamGoalId?: string;
+  delegateOf?: string;
+  parentSessionId?: string;
+  childKind?: string;
+  sandboxed?: boolean;
+  branch?: string;
+  repoPath?: string;
+  worktreePath?: string;
+  worktrees: ArchivedSessionWorktreeItem[];
+}
+
+interface ArchivedSessionWorktreeItem {
+  key: string;
+  sessionId: string;
+  repo: string;
+  repoPath: string;
+  path: string;
+  branch?: string;
+  pathExists: boolean;
+  gitWorktreeMetadataExists: boolean;
+  localBranchExists: boolean;
+  status: "removable" | "skipped" | "already-cleaned";
+  reason: string;
+  detail: string;
+  willDeleteBranch: boolean;
+  branchDeleteBlockedReason?: string;
+}
+```
+
+Default scans omit sessions whose rows are all `already-cleaned`; those rows still contribute to `counts.alreadyCleanedWorktrees`.
+
+**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts either `{ "mode": "all" }` or `{ "mode": "selected", "sessionIds": [...] }` or `{ "mode": "selected", "worktrees": [...] }`. `mode: "all"` rejects selectors. `mode: "selected"` accepts exactly one selector type; an empty selected request is a zero-count no-op. Worktree selectors contain `sessionId` plus optional `repo`, `path`, and `key` strings.
+
+The server always re-runs the scan before cleanup and only removes fresh rows with `status: "removable"`. Stale selected rows that are already gone return `already-cleaned`; unmatched selections return `skipped` with `reason: "invalid-selection"`.
+
+```ts
+interface CleanupArchivedSessionWorktreesResponse {
+  counts: {
+    requested: number;
+    cleaned: number;
+    branchDeleted: number;
+    skipped: number;
+    alreadyCleaned: number;
+    failed: number;
+  };
+  results: ArchivedSessionWorktreeCleanupResult[];
+}
+
+interface ArchivedSessionWorktreeCleanupResult {
+  key: string;
+  sessionId: string;
+  title?: string;
+  repo?: string;
+  repoPath?: string;
+  path?: string;
+  branch?: string;
+  status: "cleaned" | "skipped" | "already-cleaned" | "failed";
+  reason?: string;
+  error?: string;
+  worktreeRemoved: boolean;
+  branchDeleted: boolean;
+}
+```
+
+Archived-session worktree cleanup preserves archived session metadata, transcripts, proposals, and archive visibility. It never routes branch-only cleanup through the worktree cleanup path.
+
 ### Search
 
 Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by a per-project FlexSearch index. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md).

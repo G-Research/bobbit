@@ -32,7 +32,7 @@ import {
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
-import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -52,7 +52,7 @@ import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -73,6 +73,7 @@ import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
+import type { ProjectContext } from "./project-context.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
@@ -104,6 +105,112 @@ const execFileAsync = promisify(execFileCb);
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+}
+
+export interface ArchivedSessionWorktreeScanResponse {
+	sessions: ArchivedSessionWorktreeSession[];
+	counts: {
+		archivedSessions: number;
+		sessionsWithWorktrees: number;
+		removableWorktrees: number;
+		skippedWorktrees: number;
+		alreadyCleanedWorktrees: number;
+	};
+}
+
+export interface ArchivedSessionWorktreeSession {
+	id: string;
+	title: string;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
+	goalId?: string;
+	teamGoalId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	sandboxed?: boolean;
+	branch?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	worktrees: ArchivedSessionWorktreeItem[];
+}
+
+export interface ArchivedSessionWorktreeItem {
+	key: string;
+	sessionId: string;
+	repo: string;
+	repoPath: string;
+	path: string;
+	branch?: string;
+	pathExists: boolean;
+	gitWorktreeMetadataExists: boolean;
+	localBranchExists: boolean;
+	status: "removable" | "skipped" | "already-cleaned";
+	reason: string;
+	detail: string;
+	willDeleteBranch: boolean;
+	branchDeleteBlockedReason?: string;
+}
+
+export type CleanupArchivedSessionWorktreesRequest =
+	| { mode: "all" }
+	| { mode: "selected"; sessionIds?: string[]; worktrees?: Array<{ sessionId: string; repo?: string; path?: string; key?: string }> };
+
+export interface CleanupArchivedSessionWorktreesResponse {
+	counts: {
+		requested: number;
+		cleaned: number;
+		branchDeleted: number;
+		skipped: number;
+		alreadyCleaned: number;
+		failed: number;
+	};
+	results: ArchivedSessionWorktreeCleanupResult[];
+}
+
+export interface ArchivedSessionWorktreeCleanupResult {
+	key: string;
+	sessionId: string;
+	title?: string;
+	repo?: string;
+	repoPath?: string;
+	path?: string;
+	branch?: string;
+	status: "cleaned" | "skipped" | "already-cleaned" | "failed";
+	reason?: string;
+	error?: string;
+	worktreeRemoved: boolean;
+	branchDeleted: boolean;
+}
+
+interface GitWorktreeRef {
+	path: string;
+	branch?: string;
+}
+
+interface GitWorktreeRefs {
+	entries: GitWorktreeRef[];
+}
+
+interface ArchivedWorktreeGuardRef {
+	id?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	cwd?: string;
+	branch?: string;
+	repoWorktrees?: Record<string, string>;
+}
+
+interface ArchivedWorktreeScanContext {
+	candidateContexts: ProjectContext[];
+	sessionPathRecords: WorktreeReferenceRecord[];
+	goalRefs: ArchivedWorktreeGuardRef[];
+	teamRefs: ArchivedWorktreeGuardRef[];
+	staffRefs: ArchivedWorktreeGuardRef[];
+	branchGuardsByRepo: Map<string, Set<string>>;
+	gitRefsCache: Map<string, Promise<GitWorktreeRefs>>;
+	branchExistsCache: Map<string, Promise<boolean>>;
 }
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
@@ -7252,6 +7359,450 @@ export class SessionManager {
 				}
 			}
 		}
+	}
+
+	async listArchivedSessionWorktrees(includeAlreadyCleaned = false): Promise<ArchivedSessionWorktreeScanResponse> {
+		const ctx = this.buildArchivedWorktreeScanContext();
+		const sessions: ArchivedSessionWorktreeSession[] = [];
+		const counts: ArchivedSessionWorktreeScanResponse["counts"] = {
+			archivedSessions: 0,
+			sessionsWithWorktrees: 0,
+			removableWorktrees: 0,
+			skippedWorktrees: 0,
+			alreadyCleanedWorktrees: 0,
+		};
+
+		const archivedRows: Array<{ ps: PersistedSession; projectName?: string }> = [];
+		if (this.projectContextManager) {
+			for (const projectCtx of ctx.candidateContexts) {
+				for (const ps of projectCtx.sessionStore.getArchived()) {
+					archivedRows.push({ ps, projectName: projectCtx.project.name });
+				}
+			}
+		} else {
+			for (const ps of this._testStore?.getArchived() ?? []) archivedRows.push({ ps });
+		}
+
+		counts.archivedSessions = archivedRows.length;
+		for (const { ps, projectName } of archivedRows) {
+			const worktrees = await this.archivedSessionWorktreeItems(ps, ctx);
+			for (const item of worktrees) {
+				if (item.status === "removable") counts.removableWorktrees++;
+				else if (item.status === "already-cleaned") counts.alreadyCleanedWorktrees++;
+				else counts.skippedWorktrees++;
+			}
+			if (worktrees.some(item => item.status !== "already-cleaned" && item.reason !== "no-worktree-path")) counts.sessionsWithWorktrees++;
+			if (!includeAlreadyCleaned && worktrees.every(item => item.status === "already-cleaned")) continue;
+			sessions.push({
+				id: ps.id,
+				title: ps.title,
+				archivedAt: ps.archivedAt,
+				projectId: ps.projectId,
+				projectName,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				delegateOf: ps.delegateOf,
+				parentSessionId: ps.parentSessionId,
+				childKind: ps.childKind,
+				sandboxed: ps.sandboxed,
+				branch: ps.branch,
+				repoPath: ps.repoPath,
+				worktreePath: ps.worktreePath,
+				worktrees,
+			});
+		}
+
+		return { sessions, counts };
+	}
+
+	async cleanupArchivedSessionWorktrees(request: CleanupArchivedSessionWorktreesRequest): Promise<CleanupArchivedSessionWorktreesResponse> {
+		const zeroCounts = (): CleanupArchivedSessionWorktreesResponse["counts"] => ({ requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0 });
+		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [] };
+		const scan = await this.listArchivedSessionWorktrees(true);
+		const rows = scan.sessions.flatMap(session => session.worktrees.map(item => ({ session, item })));
+
+		let selected: Array<{ session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> = [];
+		const invalidSelections: ArchivedSessionWorktreeCleanupResult[] = [];
+		if (request.mode === "all") {
+			selected = rows.filter(row => row.item.status === "removable");
+		} else if (request.sessionIds) {
+			const ids = new Set(request.sessionIds);
+			selected = rows.filter(row => ids.has(row.session.id));
+			for (const id of ids) {
+				if (!scan.sessions.some(session => session.id === id)) {
+					invalidSelections.push({ key: id, sessionId: id, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+				}
+			}
+		} else if (request.worktrees) {
+			for (const selector of request.worktrees) {
+				const match = rows.find(row => {
+					if (row.session.id !== selector.sessionId) return false;
+					if (selector.key) return row.item.key === selector.key;
+					if (selector.repo !== undefined && row.item.repo !== selector.repo) return false;
+					if (selector.path !== undefined && normalizeWorktreeHostPath(row.item.path) !== normalizeWorktreeHostPath(selector.path)) return false;
+					return selector.repo !== undefined || selector.path !== undefined;
+				});
+				if (match) {
+					selected.push(match);
+				} else {
+					const key = selector.key ?? `${selector.sessionId}:${selector.repo ?? ""}:${selector.path ?? ""}`;
+					invalidSelections.push({ key, sessionId: selector.sessionId, repo: selector.repo, path: selector.path, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+				}
+			}
+		}
+
+		const seen = new Set<string>();
+		selected = selected.filter(row => {
+			if (seen.has(row.item.key)) return false;
+			seen.add(row.item.key);
+			return true;
+		});
+		response.counts.requested = selected.length + invalidSelections.length;
+
+		for (const invalid of invalidSelections) {
+			response.results.push(invalid);
+			response.counts.skipped++;
+		}
+
+		for (const { session, item } of selected) {
+			const base: Omit<ArchivedSessionWorktreeCleanupResult, "status" | "worktreeRemoved" | "branchDeleted"> = {
+				key: item.key,
+				sessionId: item.sessionId,
+				title: session.title,
+				repo: item.repo,
+				repoPath: item.repoPath,
+				path: item.path,
+				branch: item.branch,
+			};
+			if (item.status === "already-cleaned") {
+				response.results.push({ ...base, status: "already-cleaned", reason: "already-cleaned", worktreeRemoved: false, branchDeleted: false });
+				response.counts.alreadyCleaned++;
+				continue;
+			}
+			if (item.status !== "removable") {
+				response.results.push({ ...base, status: "skipped", reason: item.reason, worktreeRemoved: false, branchDeleted: false });
+				response.counts.skipped++;
+				continue;
+			}
+
+			try {
+				const { cleanupWorktree } = await import("../skills/git.js");
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+
+				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
+				if (!worktreeRemoved) {
+					response.results.push({ ...base, status: "failed", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
+					response.counts.failed++;
+					continue;
+				}
+
+				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
+				response.results.push({
+					...base,
+					status: "cleaned",
+					reason: branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
+					worktreeRemoved: true,
+					branchDeleted,
+				});
+				response.counts.cleaned++;
+				if (branchDeleted) response.counts.branchDeleted++;
+			} catch (err) {
+				response.results.push({ ...base, status: "failed", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
+				response.counts.failed++;
+			}
+		}
+
+		return response;
+	}
+
+	private buildArchivedWorktreeScanContext(): ArchivedWorktreeScanContext {
+		const candidateContexts = this.projectContextManager ? [...this.projectContextManager.visible()] : [];
+		const allContexts = this.projectContextManager ? [...this.projectContextManager.all()] : [];
+		const sessionPathRecords: WorktreeReferenceRecord[] = [];
+		const goalRefs: ArchivedWorktreeGuardRef[] = [];
+		const teamRefs: ArchivedWorktreeGuardRef[] = [];
+		const staffRefs: ArchivedWorktreeGuardRef[] = [];
+		const branchGuardsByRepo = new Map<string, Set<string>>();
+		const addBranchGuard = (repoPath: string | undefined, branch: string | undefined) => {
+			const repoKey = normalizeWorktreeHostPath(repoPath);
+			if (!repoKey || !branch) return;
+			let set = branchGuardsByRepo.get(repoKey);
+			if (!set) {
+				set = new Set<string>();
+				branchGuardsByRepo.set(repoKey, set);
+			}
+			set.add(branch);
+		};
+		const addRepoBranches = (repoPath: string | undefined, branch: string | undefined, repoWorktrees?: Record<string, string>) => {
+			if (repoWorktrees && repoPath) {
+				for (const repo of Object.keys(repoWorktrees)) addBranchGuard(repo === "." ? repoPath : path.join(repoPath, repo), branch);
+			} else {
+				addBranchGuard(repoPath, branch);
+			}
+		};
+
+		const persistedSessions = this.projectContextManager
+			? allContexts.flatMap(ctx => ctx.sessionStore.getLive())
+			: (this._testStore?.getLive() ?? []);
+		for (const ps of persistedSessions) {
+			sessionPathRecords.push(ps);
+			addRepoBranches(ps.repoPath, ps.branch, ps.repoWorktrees);
+		}
+		for (const session of this.sessions.values()) {
+			const repoWorktrees = session.repoWorktrees ? Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined;
+			sessionPathRecords.push({ id: session.id, worktreePath: session.worktreePath, cwd: session.cwd, repoWorktrees });
+			if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+				for (const wt of session.repoWorktrees) addBranchGuard(wt.repoPath, session.branch);
+			} else {
+				addBranchGuard(session.repoPath, session.branch);
+			}
+		}
+
+		for (const projectCtx of allContexts) {
+			const goalsById = new Map(projectCtx.goalStore.getAll().map(goal => [goal.id, goal]));
+			for (const goal of projectCtx.goalStore.getAll()) {
+				goalRefs.push({ id: goal.id, repoPath: goal.repoPath, worktreePath: goal.worktreePath, cwd: goal.cwd, branch: goal.branch, repoWorktrees: goal.repoWorktrees });
+				addRepoBranches(goal.repoPath, goal.branch, goal.repoWorktrees);
+			}
+			for (const team of projectCtx.teamStore.getAll()) {
+				const ownerGoal = goalsById.get(team.goalId);
+				for (const agent of team.agents) {
+					teamRefs.push({ id: agent.sessionId, repoPath: ownerGoal?.repoPath ?? projectCtx.project.rootPath, worktreePath: agent.worktreePath, branch: agent.branch });
+					addBranchGuard(ownerGoal?.repoPath ?? projectCtx.project.rootPath, agent.branch);
+				}
+				const lead = team.teamLeadSessionId ? projectCtx.sessionStore.get(team.teamLeadSessionId) : undefined;
+				if (lead) {
+					teamRefs.push({ id: lead.id, repoPath: lead.repoPath, worktreePath: lead.worktreePath, cwd: lead.cwd, branch: lead.branch, repoWorktrees: lead.repoWorktrees });
+					addRepoBranches(lead.repoPath, lead.branch, lead.repoWorktrees);
+				}
+			}
+			for (const staff of projectCtx.staffStore.getAll()) {
+				staffRefs.push({ id: staff.id, repoPath: staff.repoPath, worktreePath: staff.worktreePath, cwd: staff.cwd, branch: staff.branch, repoWorktrees: staff.repoWorktrees });
+				addRepoBranches(staff.repoPath, staff.branch, staff.repoWorktrees);
+			}
+		}
+
+		return {
+			candidateContexts,
+			sessionPathRecords,
+			goalRefs,
+			teamRefs,
+			staffRefs,
+			branchGuardsByRepo,
+			gitRefsCache: new Map(),
+			branchExistsCache: new Map(),
+		};
+	}
+
+	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext): Promise<ArchivedSessionWorktreeItem[]> {
+		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string }> = [];
+		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
+			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
+				specs.push({ repo, repoPath: ps.repoPath ? (repo === "." ? ps.repoPath : path.join(ps.repoPath, repo)) : undefined, worktreePath: wt, branch: ps.branch });
+			}
+		} else {
+			specs.push({ repo: ".", repoPath: ps.repoPath, worktreePath: ps.worktreePath, branch: ps.branch });
+		}
+
+		const items: ArchivedSessionWorktreeItem[] = [];
+		for (const spec of specs) {
+			const item = await this.archivedSessionWorktreeItem(ps, spec, ctx);
+			items.push(item);
+		}
+		return items;
+	}
+
+	private async archivedSessionWorktreeItem(
+		ps: PersistedSession,
+		spec: { repo: string; repoPath?: string; worktreePath?: string; branch?: string },
+		ctx: ArchivedWorktreeScanContext,
+	): Promise<ArchivedSessionWorktreeItem> {
+		const key = this.archivedWorktreeKey(ps.id, spec.repo, spec.worktreePath);
+		const base = (overrides: Partial<ArchivedSessionWorktreeItem>): ArchivedSessionWorktreeItem => ({
+			key,
+			sessionId: ps.id,
+			repo: spec.repo,
+			repoPath: spec.repoPath ?? "",
+			path: spec.worktreePath ?? "",
+			branch: spec.branch,
+			pathExists: false,
+			gitWorktreeMetadataExists: false,
+			localBranchExists: false,
+			status: "skipped",
+			reason: "invalid-selection",
+			detail: "Not evaluated.",
+			willDeleteBranch: false,
+			...overrides,
+		});
+
+		if (!spec.worktreePath) return base({ status: "skipped", reason: "no-worktree-path", detail: "Archived session has no recorded worktree path." });
+		if (!spec.repoPath) return base({ status: "skipped", reason: "missing-repo-path", detail: "Archived session has no recorded repository path for this worktree." });
+		if (this.isContainerInternalWorktreePath(spec.worktreePath)) return base({ status: "skipped", reason: "sandbox-container-path", detail: "Recorded worktree path is container-internal and has no host worktree to remove." });
+		if (ps.delegateOf && !ps.branch && (!ps.repoWorktrees || Object.keys(ps.repoWorktrees).length === 0)) {
+			return base({ status: "skipped", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree." });
+		}
+
+		let pathExists = false;
+		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
+		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
+		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
+		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
+		if (!gitWorktreeMetadataExists) {
+			return base({
+				pathExists,
+				gitWorktreeMetadataExists,
+				localBranchExists,
+				status: pathExists ? "skipped" : "already-cleaned",
+				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
+				detail: pathExists
+					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
+					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
+			});
+		}
+
+		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
+		if (sessionReferenced) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.goalRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-goal", detail: "A persisted goal still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.teamRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-team", detail: "A persisted team entry or team agent still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.staffRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-staff", detail: "A staff record still references this worktree." });
+		}
+
+		const branchDeleteBlockedReason = localBranchExists && !this.branchDeletionAllowed(spec.branch, spec.repoPath, ctx)
+			? "branch-referenced-by-live-record"
+			: undefined;
+		const willDeleteBranch = localBranchExists && !branchDeleteBlockedReason;
+		return base({
+			pathExists,
+			gitWorktreeMetadataExists,
+			localBranchExists,
+			status: "removable",
+			reason: "safe-archived-session-worktree",
+			detail: branchDeleteBlockedReason
+				? "Archived session worktree is safe to remove; branch deletion is blocked because another record still references the branch."
+				: "Archived session worktree is safe to remove.",
+			willDeleteBranch,
+			branchDeleteBlockedReason,
+		});
+	}
+
+	private archivedWorktreeKey(sessionId: string, repo: string, worktreePath: string | undefined): string {
+		return `${sessionId}:${repo}:${normalizeWorktreeHostPath(worktreePath) ?? ""}`;
+	}
+
+	private isContainerInternalWorktreePath(candidatePath: string): boolean {
+		const normalized = candidatePath.replace(/\\/g, "/");
+		return normalized === "/workspace" || normalized.startsWith("/workspace/") || normalized === "/workspace-wt" || normalized.startsWith("/workspace-wt/");
+	}
+
+	private isWorktreeReferencedByRefs(candidatePath: string | undefined, refs: ArchivedWorktreeGuardRef[]): boolean {
+		const candidate = normalizeWorktreeHostPath(candidatePath);
+		if (!candidate) return false;
+		for (const ref of refs) {
+			if (normalizeWorktreeHostPath(ref.worktreePath) === candidate) return true;
+			const cwd = normalizeWorktreeHostPath(ref.cwd);
+			if (cwd && (cwd === candidate || cwd.startsWith(`${candidate}/`))) return true;
+			if (ref.repoWorktrees) {
+				for (const wt of Object.values(ref.repoWorktrees)) {
+					if (normalizeWorktreeHostPath(wt) === candidate) return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext): boolean {
+		if (!branch) return false;
+		const repoKey = normalizeWorktreeHostPath(repoPath);
+		if (!repoKey) return false;
+		return !ctx.branchGuardsByRepo.get(repoKey)?.has(branch);
+	}
+
+	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
+		let pathExists = false;
+		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
+		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
+		return !pathExists && !gitWorktreeMetadataExists;
+	}
+
+	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
+		if (!item.willDeleteBranch || !item.branch || !item.localBranchExists) return false;
+		const ctx = this.buildArchivedWorktreeScanContext();
+		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx)) return false;
+		try {
+			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
+		} catch {
+			// Verify below before reporting success; branch deletion may have raced or been blocked.
+		}
+		const branchDeleted = !(await this.localBranchExistsUncached(item.repoPath, item.branch));
+		if (!branchDeleted) return false;
+		if (!(await shouldSkipRemotePushForTests(item.repoPath))) {
+			try {
+				await execFileAsync("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
+			} catch {
+				// Best effort: remote may be missing, unreachable, or already deleted.
+			}
+		}
+		return true;
+	}
+
+	private gitWorktreeMetadataMatches(gitRefs: GitWorktreeRefs, normalizedCandidate: string | undefined, branch: string | undefined): boolean {
+		if (!normalizedCandidate) return false;
+		return gitRefs.entries.some(entry => entry.path === normalizedCandidate && (!branch || entry.branch === branch));
+	}
+
+	private readGitWorktreeRefs(repoPath: string, ctx: ArchivedWorktreeScanContext): Promise<GitWorktreeRefs> {
+		const repoKey = normalizeWorktreeHostPath(repoPath) ?? repoPath;
+		let cached = ctx.gitRefsCache.get(repoKey);
+		if (!cached) {
+			cached = this.readGitWorktreeRefsUncached(repoPath);
+			ctx.gitRefsCache.set(repoKey, cached);
+		}
+		return cached;
+	}
+
+	private async readGitWorktreeRefsUncached(repoPath: string): Promise<GitWorktreeRefs> {
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const entries: GitWorktreeRef[] = [];
+			for (const block of stdout.split("\n\n")) {
+				const pathMatch = block.match(/^worktree (.+)$/m);
+				const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
+				const normalizedPath = normalizeWorktreeHostPath(pathMatch?.[1]);
+				if (!normalizedPath) continue;
+				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
+			}
+			return { entries };
+		} catch {
+			return { entries: [] };
+		}
+	}
+
+	private localBranchExists(repoPath: string, branch: string | undefined, ctx: ArchivedWorktreeScanContext): Promise<boolean> {
+		if (!branch) return Promise.resolve(false);
+		const repoKey = normalizeWorktreeHostPath(repoPath) ?? repoPath;
+		const key = `${repoKey}:${branch}`;
+		let cached = ctx.branchExistsCache.get(key);
+		if (!cached) {
+			cached = this.localBranchExistsUncached(repoPath, branch);
+			ctx.branchExistsCache.set(key, cached);
+		}
+		return cached;
+	}
+
+	private localBranchExistsUncached(repoPath: string, branch: string): Promise<boolean> {
+		return execFileAsync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
+			.then(() => true)
+			.catch(() => false);
 	}
 
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
