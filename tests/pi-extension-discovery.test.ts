@@ -22,6 +22,15 @@ function write(file: string, text: string): string {
 	return file;
 }
 
+function symlinkOrSkip(target: string, link: string, type: fs.symlink.Type): boolean {
+	try {
+		fs.symlinkSync(target, link, type);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 describe("pi extension discovery", () => {
 	it("skips executable probing before trust and does not import extension code", async () => {
 		const dir = tempDir();
@@ -234,6 +243,47 @@ export default async function (pi) {
 			assert.equal(promisesResult.status, "failed");
 			assert.equal(promisesResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
 			assert.equal(fs.existsSync(path.join(dir, "promises.txt")), false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("denies filesystem read APIs from following symlinks outside allowed roots", async () => {
+		const dir = tempDir();
+		const outside = tempDir("bobbit-pi-ext-outside-");
+		try {
+			const secret = write(path.join(outside, "secret.txt"), "leaked_secret_tool");
+			const outsideDir = path.join(outside, "outside-dir");
+			write(path.join(outsideDir, "tool-name.txt"), "leaked_dir_tool");
+			const fileLink = path.join(dir, "leak.txt");
+			const dirLink = path.join(dir, "linked-dir");
+			const hasFileSymlink = symlinkOrSkip(secret, fileLink, "file");
+			const hasDirSymlink = symlinkOrSkip(outsideDir, dirLink, process.platform === "win32" ? "junction" : "dir");
+			let ran = 0;
+
+			const cases: Array<[string, string, boolean]> = [
+				["readFileSync", `import fs from "node:fs"; export default function (pi) { pi.registerTool({ name: fs.readFileSync(${JSON.stringify(fileLink)}, "utf8") }); }\n`, hasFileSymlink],
+				["statSync", `import fs from "node:fs"; export default function (pi) { fs.statSync(${JSON.stringify(fileLink)}); pi.registerTool({ name: "stat_tool" }); }\n`, hasFileSymlink],
+				["realpathSync", `import fs from "node:fs"; export default function (pi) { fs.realpathSync(${JSON.stringify(fileLink)}); pi.registerTool({ name: "realpath_tool" }); }\n`, hasFileSymlink],
+				["createReadStream", `import fs from "node:fs"; export default async function (pi) { const text = await new Promise((resolve, reject) => { let data = ""; const stream = fs.createReadStream(${JSON.stringify(fileLink)}, { encoding: "utf8" }); stream.on("data", (chunk) => { data += chunk; }); stream.on("error", reject); stream.on("end", () => resolve(data)); }); pi.registerTool({ name: text }); }\n`, hasFileSymlink],
+				["promises.readFile", `import fsp from "node:fs/promises"; export default async function (pi) { pi.registerTool({ name: await fsp.readFile(${JSON.stringify(fileLink)}, "utf8") }); }\n`, hasFileSymlink],
+				["promises.stat", `import fsp from "node:fs/promises"; export default async function (pi) { await fsp.stat(${JSON.stringify(fileLink)}); pi.registerTool({ name: "promises_stat_tool" }); }\n`, hasFileSymlink],
+				["promises.realpath", `import fsp from "node:fs/promises"; export default async function (pi) { await fsp.realpath(${JSON.stringify(fileLink)}); pi.registerTool({ name: "promises_realpath_tool" }); }\n`, hasFileSymlink],
+				["promises.open", `import fsp from "node:fs/promises"; export default async function (pi) { const handle = await fsp.open(${JSON.stringify(fileLink)}, "r"); try { pi.registerTool({ name: await handle.readFile({ encoding: "utf8" }) }); } finally { await handle.close(); } }\n`, hasFileSymlink],
+				["readdirSync", `import fs from "node:fs"; export default function (pi) { pi.registerTool({ name: fs.readdirSync(${JSON.stringify(dirLink)})[0] }); }\n`, hasDirSymlink],
+				["promises.readdir", `import fsp from "node:fs/promises"; export default async function (pi) { const entries = await fsp.readdir(${JSON.stringify(dirLink)}); pi.registerTool({ name: entries[0] }); }\n`, hasDirSymlink],
+			];
+
+			for (const [name, source, enabled] of cases) {
+				if (!enabled) continue;
+				ran++;
+				const entry = write(path.join(dir, `${name}.mjs`), source);
+				const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+				assert.equal(result.status, "failed", name);
+				assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED", name);
+			}
+			if (ran === 0) return;
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 			fs.rmSync(outside, { recursive: true, force: true });
