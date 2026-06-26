@@ -14,6 +14,7 @@ import {
 	SERVER_MARKET_PACKS_CONTAINER_DIR,
 	containerPathToHost,
 	hostPathToContainer,
+	tryHostPathToContainer,
 	toDockerPath,
 } from "../src/server/agent/rpc-bridge.ts";
 import { scopePaths } from "../src/server/agent/pack-types.ts";
@@ -110,6 +111,56 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		assert.equal(containerPathToHost(containerPath, { projectBase: projectRoot }), hostPath);
 	});
 
+	it("translates project pack paths in named-volume sandbox mode when host pack root is known", () => {
+		const hostPath = path.join(projectMarketPacksRoot, "project-pack", "pi-extensions", "demo", "index.mjs");
+		const containerPath = `${PROJECT_MARKET_PACKS_CONTAINER_DIR}/project-pack/pi-extensions/demo/index.mjs`;
+		assert.equal(hostPathToContainer(hostPath, { projectBase: "/workspace", projectMarketPacksRoot }), containerPath);
+		assert.equal(tryHostPathToContainer(hostPath, { projectBase: "/workspace", projectMarketPacksRoot }), containerPath);
+	});
+
+	it("records runtime load diagnostics from conservative pi stderr matching", () => {
+		const hostPath = path.join(projectMarketPacksRoot, "project-pack", "pi-extensions", "demo", "index.mjs");
+		const diagnostics: any[] = [];
+		const bridge = new RpcBridge({
+			piExtensions: [{
+				listName: "demo",
+				entryPath: hostPath,
+				entryRelativePath: "pi-extensions/demo/index.mjs",
+				packRoot: path.dirname(path.dirname(path.dirname(hostPath))),
+				origin: { scope: "project", packName: "project-pack", packId: "project-pack" },
+			}],
+			onPiExtensionDiagnostic: (diagnostic, extension) => diagnostics.push({ diagnostic, extension }),
+		});
+
+		(bridge as any).recordPiExtensionLoadFailureFromStderr(`Failed to load extension ${hostPath}: activation boom`);
+		assert.equal(diagnostics.length, 1);
+		assert.equal(diagnostics[0].diagnostic.status, "runtime-load-failed");
+		assert.match(diagnostics[0].diagnostic.message, /activation boom/);
+	});
+
+	it("omits sandboxed pi extensions that cannot be remapped and records a diagnostic", () => {
+		const hostPath = path.join(root, "unmounted-project", ".bobbit", "config", "market-packs", "project-pack", "pi-extensions", "demo", "index.mjs");
+		const diagnostics: any[] = [];
+		const bridge = new RpcBridge({
+			containerId: "container-123",
+			cwd: "/workspace",
+			piExtensions: [{
+				listName: "demo",
+				entryPath: hostPath,
+				entryRelativePath: "pi-extensions/demo/index.mjs",
+				packRoot: path.dirname(path.dirname(path.dirname(hostPath))),
+				origin: { scope: "project", packName: "project-pack", packId: "project-pack" },
+			}],
+			onPiExtensionDiagnostic: (diagnostic, extension) => diagnostics.push({ diagnostic, extension }),
+		});
+
+		const remapped = (bridge as any).remapArgsForContainer(["--extension", hostPath, "--model", "x/y"]);
+		assert.deepEqual(remapped, ["--model", "x/y"]);
+		assert.equal(diagnostics.length, 1);
+		assert.equal(diagnostics[0].diagnostic.status, "remap-failed");
+		assert.equal(diagnostics[0].extension.listName, "demo");
+	});
+
 	it("mounts installed market pack roots read-only for Docker sandboxes", () => {
 		const args = buildDockerRunArgs({
 			image: "bobbit-test:latest",
@@ -119,6 +170,18 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		});
 
 		assert.ok(args.includes(`${toDockerPath(serverMarketPacksRoot)}:${SERVER_MARKET_PACKS_CONTAINER_DIR}:ro`));
+		assert.ok(args.includes(`${toDockerPath(projectMarketPacksRoot)}:${PROJECT_MARKET_PACKS_CONTAINER_DIR}:ro`));
+	});
+
+	it("mounts project market packs in named-volume project sandbox mode", () => {
+		const args = buildDockerRunArgs({
+			image: "bobbit-test:latest",
+			workspaceDir: "",
+			projectId: "proj-remap",
+			projectMarketPacksRoot,
+			stateDir: path.join(root, "state-named-volume"),
+		});
+
 		assert.ok(args.includes(`${toDockerPath(projectMarketPacksRoot)}:${PROJECT_MARKET_PACKS_CONTAINER_DIR}:ro`));
 	});
 });
