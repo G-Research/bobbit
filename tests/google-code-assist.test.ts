@@ -33,6 +33,7 @@ import {
 	type StreamFetchLike,
 } from "../src/server/agent/google-code-assist.js";
 import { getGoogleCodeAssistModels } from "../src/server/agent/google-code-assist-models.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "./helpers/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevProject = process.env.GOOGLE_CLOUD_PROJECT;
@@ -42,6 +43,7 @@ let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-"));
 	process.env.BOBBIT_AGENT_DIR = dir;
+	pinAgentDirForTest(dir);
 	// Project env override must not leak across tests (it short-circuits onboarding).
 	delete process.env.GOOGLE_CLOUD_PROJECT;
 	delete process.env.GOOGLE_CLOUD_PROJECT_ID;
@@ -55,6 +57,7 @@ afterEach(() => {
 	else process.env.GOOGLE_CLOUD_PROJECT = prevProject;
 	if (prevProjectId === undefined) delete process.env.GOOGLE_CLOUD_PROJECT_ID;
 	else process.env.GOOGLE_CLOUD_PROJECT_ID = prevProjectId;
+	resetAgentDirForTest();
 	rmSync(dir, { recursive: true, force: true });
 });
 
