@@ -37,9 +37,38 @@ function workflowId(value: unknown): string | undefined {
 	return undefined;
 }
 
+function uniqueWorkflowIds(ids: string[]): string[] {
+	return Array.from(new Set(ids.filter(Boolean)));
+}
+
 function availableWorkflowIds(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
-	return Array.from(new Set(value.map(workflowId).filter((id): id is string => Boolean(id))));
+	return uniqueWorkflowIds(value.map(workflowId).filter((id): id is string => Boolean(id)));
+}
+
+function inferWorkflowValidationCode(text: string): string | undefined {
+	if (/workflow is required/i.test(text)) return "MISSING_WORKFLOW";
+	if (/unknown workflow/i.test(text)) return "UNKNOWN_WORKFLOW";
+	return undefined;
+}
+
+function parsePlaintextAvailableWorkflowIds(text: string): string[] {
+	const ids: string[] = [];
+	const patterns = [
+		/\bworkflow IDs\s*:\s*([^\n.]+)/gi,
+		/\bavailable workflows(?:\s+for this project)?\s*:\s*([^\n.]+)/gi,
+		/\bone of(?:\s+these IDs)?\s*:\s*([^\n.]+)/gi,
+	];
+	for (const pattern of patterns) {
+		let match: RegExpExecArray | null;
+		while ((match = pattern.exec(text))) {
+			const segment = match[1] ?? "";
+			for (const idMatch of segment.matchAll(/[A-Za-z0-9][A-Za-z0-9_.-]*/g)) {
+				ids.push(idMatch[0]);
+			}
+		}
+	}
+	return uniqueWorkflowIds(ids);
 }
 
 /** Extract the rev integer from a tool-result content stream, or undefined. */
@@ -72,6 +101,7 @@ export function parseProposalErrorFromResult(result: ToolResultMessage | undefin
 	if (!result) return undefined;
 	let fallback: string | undefined;
 	for (const text of resultTextBlocks(result)) {
+		const trimmed = text.trim();
 		try {
 			const j = JSON.parse(text);
 			if (j && typeof j === "object") {
@@ -80,8 +110,11 @@ export function parseProposalErrorFromResult(result: ToolResultMessage | undefin
 					: undefined;
 				const code = typeof (j as any).code === "string" && (j as any).code.trim()
 					? (j as any).code.trim()
-					: undefined;
-				const ids = availableWorkflowIds((j as any).availableWorkflows);
+					: message ? inferWorkflowValidationCode(message) : undefined;
+				const ids = uniqueWorkflowIds([
+					...availableWorkflowIds((j as any).availableWorkflows),
+					...(message ? parsePlaintextAvailableWorkflowIds(message) : []),
+				]);
 				if (message || code || ids.length > 0) {
 					return {
 						code,
@@ -91,8 +124,13 @@ export function parseProposalErrorFromResult(result: ToolResultMessage | undefin
 				}
 			}
 		} catch {
-			fallback ||= text.trim() || undefined;
+			fallback ||= trimmed || undefined;
 		}
 	}
-	return fallback ? { message: fallback, availableWorkflowIds: [] } : undefined;
+	if (!fallback) return undefined;
+	return {
+		code: inferWorkflowValidationCode(fallback),
+		message: fallback,
+		availableWorkflowIds: parsePlaintextAvailableWorkflowIds(fallback),
+	};
 }
