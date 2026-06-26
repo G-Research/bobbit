@@ -1,7 +1,7 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./in-process-harness.js";
 import fs from "node:fs";
 import path from "node:path";
-import { apiFetch, bobbitDir } from "./e2e-setup";
+import { apiFetch, bobbitDir } from "./e2e-setup.js";
 
 test.describe.configure({ mode: "serial" });
 
@@ -63,67 +63,71 @@ test("agent-dir REST flow validates, saves restart-gated pending state, and migr
 	expect(invalid.ok).toBe(false);
 	expect(errorCode(invalid)).toBe("INSIDE_WORKTREE");
 
-	const pending = path.join(bobbitDir(), "pending-agent-dir");
+	const pending = path.join(path.dirname(bobbitDir()), `pending-agent-dir-${process.pid}-${Date.now()}`);
 	fs.rmSync(pending, { recursive: true, force: true });
-	const valid = await expectOkJson(await apiFetch("/api/agent-dir/validate", {
-		method: "POST",
-		body: JSON.stringify({ path: pending }),
-	}));
-	expect(valid.ok).toBe(true);
-	expect(normalize(valid.resolvedPath)).toBe(normalize(pending));
-	expect(fs.statSync(pending).isDirectory()).toBe(true);
+	try {
+		const valid = await expectOkJson(await apiFetch("/api/agent-dir/validate", {
+			method: "POST",
+			body: JSON.stringify({ path: pending }),
+		}));
+		expect(valid.ok).toBe(true);
+		expect(normalize(valid.resolvedPath)).toBe(normalize(pending));
+		expect(fs.statSync(pending).isDirectory()).toBe(true);
 
-	const saved = await expectOkJson(await apiFetch("/api/agent-dir/pending", {
-		method: "PUT",
-		body: JSON.stringify({ path: pending }),
-	}));
-	expect(normalize(activePath(saved))).toBe(normalize(active));
-	expect(normalize(pendingPath(saved)!)).toBe(normalize(pending));
-	expect(normalize(nextStartPath(saved))).toBe(normalize(active));
-	expect(saved.restartRequired).toBe(false);
-	expect(saved.envOverride ?? saved.envOverrideActive).toBeTruthy();
-	expect(String(saved.restartGuidance ?? saved.guidance ?? saved.message)).toMatch(/restart|env/i);
+		const saved = await expectOkJson(await apiFetch("/api/agent-dir/pending", {
+			method: "PUT",
+			body: JSON.stringify({ path: pending }),
+		}));
+		expect(normalize(activePath(saved))).toBe(normalize(active));
+		expect(normalize(pendingPath(saved)!)).toBe(normalize(pending));
+		expect(normalize(nextStartPath(saved))).toBe(normalize(active));
+		expect(saved.restartRequired).toBe(false);
+		expect(saved.envOverride ?? saved.envOverrideActive).toBeTruthy();
+		expect(String(saved.restartGuidance ?? saved.guidance ?? saved.message)).toMatch(/restart|env/i);
 
-	const prefs = JSON.parse(fs.readFileSync(path.join(bobbitDir(), "state", "preferences.json"), "utf-8"));
-	expect(normalize(prefs.agentDir)).toBe(normalize(pending));
-	expect((prefs.agentDirHistory ?? []).map(normalize)).toEqual(expect.arrayContaining([normalize(active), normalize(pending)]));
+		const prefs = JSON.parse(fs.readFileSync(path.join(bobbitDir(), "state", "preferences.json"), "utf-8"));
+		expect(normalize(prefs.agentDir)).toBe(normalize(pending));
+		expect((prefs.agentDirHistory ?? []).map(normalize)).toEqual(expect.arrayContaining([normalize(active), normalize(pending)]));
 
-	fs.mkdirSync(path.join(active, "sessions", "session-a"), { recursive: true });
-	fs.mkdirSync(path.join(active, "bin"), { recursive: true });
-	fs.writeFileSync(path.join(active, "sessions", "session-a", "transcript.jsonl"), "source transcript\n");
-	fs.writeFileSync(path.join(active, "bin", "rg"), "source rg");
-	for (const file of ["auth.json", "models.json", "settings.json", "google-code-assist.json"]) {
-		fs.writeFileSync(path.join(active, file), `${file} source`);
+		fs.mkdirSync(path.join(active, "sessions", "session-a"), { recursive: true });
+		fs.mkdirSync(path.join(active, "bin"), { recursive: true });
+		fs.writeFileSync(path.join(active, "sessions", "session-a", "transcript.jsonl"), "source transcript\n");
+		fs.writeFileSync(path.join(active, "bin", "rg"), "source rg");
+		for (const file of ["auth.json", "models.json", "settings.json", "google-code-assist.json"]) {
+			fs.writeFileSync(path.join(active, file), `${file} source`);
+		}
+		fs.writeFileSync(path.join(active, "not-allowlisted.txt"), "do not copy");
+
+		const migrated = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
+			method: "POST",
+			body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: false }),
+		}));
+		expect(fs.existsSync(active)).toBe(true);
+		expect(fs.readFileSync(path.join(active, "auth.json"), "utf-8")).toBe("auth.json source");
+		expect(fs.readFileSync(path.join(pending, "sessions", "session-a", "transcript.jsonl"), "utf-8")).toBe("source transcript\n");
+		expect(fs.readFileSync(path.join(pending, "bin", "rg"), "utf-8")).toBe("source rg");
+		expect(fs.existsSync(path.join(pending, "not-allowlisted.txt"))).toBe(false);
+		expect(JSON.stringify(migrated)).toMatch(/copied|sessions|auth\.json|models\.json|settings\.json|google-code-assist\.json|bin/);
+
+		fs.writeFileSync(path.join(pending, "auth.json"), "existing auth");
+		const skipped = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
+			method: "POST",
+			body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: false }),
+		}));
+		expect(fs.readFileSync(path.join(pending, "auth.json"), "utf-8")).toBe("existing auth");
+		expect(JSON.stringify(skipped.skipped ?? skipped)).toMatch(/auth\.json/);
+
+		const overwritten = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
+			method: "POST",
+			body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: true }),
+		}));
+		expect(fs.readFileSync(path.join(pending, "auth.json"), "utf-8")).toBe("auth.json source");
+		expect(JSON.stringify(overwritten.overwritten ?? overwritten)).toMatch(/auth\.json/);
+
+		const reloaded = await expectOkJson(await apiFetch("/api/agent-dir"));
+		expect(normalize(activePath(reloaded))).toBe(normalize(active));
+		expect(normalize(pendingPath(reloaded)!)).toBe(normalize(pending));
+	} finally {
+		fs.rmSync(pending, { recursive: true, force: true });
 	}
-	fs.writeFileSync(path.join(active, "not-allowlisted.txt"), "do not copy");
-
-	const migrated = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
-		method: "POST",
-		body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: false }),
-	}));
-	expect(fs.existsSync(active)).toBe(true);
-	expect(fs.readFileSync(path.join(active, "auth.json"), "utf-8")).toBe("auth.json source");
-	expect(fs.readFileSync(path.join(pending, "sessions", "session-a", "transcript.jsonl"), "utf-8")).toBe("source transcript\n");
-	expect(fs.readFileSync(path.join(pending, "bin", "rg"), "utf-8")).toBe("source rg");
-	expect(fs.existsSync(path.join(pending, "not-allowlisted.txt"))).toBe(false);
-	expect(JSON.stringify(migrated)).toMatch(/copied|sessions|auth\.json|models\.json|settings\.json|google-code-assist\.json|bin/);
-
-	fs.writeFileSync(path.join(pending, "auth.json"), "existing auth");
-	const skipped = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
-		method: "POST",
-		body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: false }),
-	}));
-	expect(fs.readFileSync(path.join(pending, "auth.json"), "utf-8")).toBe("existing auth");
-	expect(JSON.stringify(skipped.skipped ?? skipped)).toMatch(/auth\.json/);
-
-	const overwritten = await expectOkJson(await apiFetch("/api/agent-dir/migrate", {
-		method: "POST",
-		body: JSON.stringify({ sourcePath: active, destinationPath: pending, overwrite: true }),
-	}));
-	expect(fs.readFileSync(path.join(pending, "auth.json"), "utf-8")).toBe("auth.json source");
-	expect(JSON.stringify(overwritten.overwritten ?? overwritten)).toMatch(/auth\.json/);
-
-	const reloaded = await expectOkJson(await apiFetch("/api/agent-dir"));
-	expect(normalize(activePath(reloaded))).toBe(normalize(active));
-	expect(normalize(pendingPath(reloaded)!)).toBe(normalize(pending));
 });
