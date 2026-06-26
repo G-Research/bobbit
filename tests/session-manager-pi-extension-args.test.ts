@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 
+import { EventBuffer } from "../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../src/server/agent/session-manager.ts";
 import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../src/server/agent/session-setup.ts";
 import type { ScopedToolContext } from "../src/server/agent/tool-manager.ts";
@@ -84,6 +85,28 @@ describe("marketplace pi extension activation args", () => {
 			assert.ok(noExtensionsIndex >= 0, "Bobbit activation args should still be first");
 			assert.ok(piIndex > noExtensionsIndex, "pi extension should be appended after Bobbit activation args");
 			assert.ok(codeAssistIndex === -1 || piIndex < codeAssistIndex, "pi extension should be before generated guard/provider extensions");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("overlays cached runtime load diagnostics on resolved marketplace contributions", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-runtime-diag-"));
+		try {
+			const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+			const manager: any = new SessionManager();
+			manager.setMarketplacePiExtensionResolver(() => [contribution("demo", extPath)]);
+			const session = { clients: new Set(), eventBuffer: new EventBuffer() };
+			manager.recordPiExtensionDiagnostic(
+				session,
+				{ status: "runtime-load-failed", code: "runtime_load_failed", message: "Pi extension failed to load: boom", updatedAt: "2026-01-02T00:00:00.000Z" },
+				{ listName: "demo", entryPath: extPath, packRoot: tmp, origin: { scope: "project", packName: "pi-pack", packId: "market:project:pi-pack" } },
+			);
+
+			const rows = manager.resolveMarketplacePiExtensionContributions("project-1", tmp);
+			assert.equal(rows[0].diagnostic.status, "runtime-load-failed");
+			assert.equal(rows[0].diagnostic.code, "runtime_load_failed");
+			assert.equal(session.eventBuffer.size, 1);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

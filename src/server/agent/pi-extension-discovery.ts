@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
 	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
@@ -20,6 +21,7 @@ export interface DiscoverPiExtensionToolsOptions {
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
+const require = createRequire(import.meta.url);
 
 function diagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
 	return makePiExtensionDiagnostic(status, code, message);
@@ -142,6 +144,57 @@ function normalizeTools(raw: unknown[]): PiExtensionToolInfo[] {
 	return out;
 }
 
+function transpileTypeScriptEntry(entryPath: string, outFile: string): void {
+	// Prefer esbuild when present because it deterministically bundles local .ts
+	// helpers into the temp probe entry. Production builds may not include a TS
+	// loader, so discovery cannot rely on parent process --import/tsx hooks.
+	try {
+		const esbuild = require("esbuild") as typeof import("esbuild");
+		esbuild.buildSync({
+			entryPoints: [entryPath],
+			outfile: outFile,
+			bundle: true,
+			platform: "node",
+			format: "esm",
+			target: "node20",
+			logLevel: "silent",
+		});
+		return;
+	} catch {
+		// Fall through to TypeScript's emitter (if installed) and finally a small
+		// syntax-stripping fallback for simple plain-pi extension.ts files.
+	}
+	const source = fs.readFileSync(entryPath, "utf-8");
+	try {
+		const ts = require("typescript") as typeof import("typescript");
+		const result = ts.transpileModule(source, {
+			fileName: entryPath,
+			compilerOptions: {
+				module: ts.ModuleKind.ESNext,
+				target: ts.ScriptTarget.ES2022,
+				esModuleInterop: true,
+				moduleResolution: ts.ModuleResolutionKind.NodeNext,
+			},
+		});
+		fs.writeFileSync(outFile, result.outputText, "utf-8");
+		return;
+	} catch {
+		const stripped = source
+			.replace(/^\s*interface\s+\w+[\s\S]*?^}\s*$/gm, "")
+			.replace(/^\s*type\s+\w+[\s\S]*?;\s*$/gm, "")
+			.replace(/\s+as\s+[A-Za-z_$][\w$<>,\s\[\]{}|&?:.]*/g, "")
+			.replace(/(:\s*[A-Za-z_$][\w$<>,\s\[\]{}|&?:.]*)\s*(?=[,)=;])/g, "");
+		fs.writeFileSync(outFile, stripped, "utf-8");
+	}
+}
+
+function prepareProbeEntry(entryPath: string, tempRoot: string): string {
+	if (path.extname(entryPath).toLowerCase() !== ".ts") return entryPath;
+	const outFile = path.join(tempRoot, "entry.mjs");
+	transpileTypeScriptEntry(entryPath, outFile);
+	return outFile;
+}
+
 function probeScript(): string {
 	return `
 import { pathToFileURL } from "node:url";
@@ -242,7 +295,8 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 		fs.mkdirSync(tempRoot, { recursive: true });
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
-		const result = await runProbe(probePath, entryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		const result = await runProbe(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {
@@ -274,7 +328,8 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 		fs.mkdirSync(tempRoot, { recursive: true });
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
-		const result = runProbeSync(probePath, entryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		const result = runProbeSync(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {

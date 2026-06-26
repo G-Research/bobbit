@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
-import type { RpcBridgeOptions } from "./rpc-bridge.js";
+import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -91,9 +91,10 @@ export interface MarketplacePiExtensionActivation {
 	args: string[];
 	tools: PiExtensionToolInfo[];
 	diagnostics: PiExtensionDiagnostic[];
+	runtimeExtensions: RuntimePiExtensionInfo[];
 }
 
-const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved", "remap-failed"]);
+const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
 
 export function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
 	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
@@ -105,11 +106,12 @@ export function resolveMarketplacePiExtensionActivation(
 	projectId: string | undefined,
 	cwd: string | undefined,
 ): MarketplacePiExtensionActivation {
-	if (!resolver) return { args: [], tools: [], diagnostics: [] };
+	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [] };
 	const contributions = resolver({ projectId, cwd });
 	const args: string[] = [];
 	const tools: PiExtensionToolInfo[] = [];
 	const diagnostics: PiExtensionDiagnostic[] = [];
+	const runtimeExtensions: RuntimePiExtensionInfo[] = [];
 	for (const contribution of contributions) {
 		diagnostics.push(contribution.diagnostic);
 		if (contribution.discovery?.diagnostic) diagnostics.push(contribution.discovery.diagnostic);
@@ -119,9 +121,16 @@ export function resolveMarketplacePiExtensionActivation(
 		}
 		if (contribution.entryPath && runtimeEnabled) {
 			args.push("--extension", contribution.entryPath);
+			runtimeExtensions.push({
+				listName: contribution.listName,
+				entryPath: contribution.entryPath,
+				...(contribution.entryRelativePath ? { entryRelativePath: contribution.entryRelativePath } : {}),
+				packRoot: contribution.packRoot,
+				origin: contribution.origin,
+			});
 		}
 	}
-	return { args, tools, diagnostics };
+	return { args, tools, diagnostics, runtimeExtensions };
 }
 
 // ── Extension path helpers ─────────────────────────────────────────────────
@@ -343,6 +352,7 @@ export interface PipelineContext {
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
+	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
@@ -910,6 +920,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = [...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
@@ -1336,6 +1347,8 @@ export async function executeWorktreeAsync(
 		}
 	}
 
+	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
+
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);
 
@@ -1500,6 +1513,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			console.error(`[session-setup] Failed to assign task ${plan.taskId} to session ${plan.id}:`, err);
 		}
 	}
+
+	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);

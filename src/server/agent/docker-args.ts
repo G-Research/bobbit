@@ -53,6 +53,8 @@ export interface DockerRunConfig {
 	// ── Per-project container ────────────────────────────────────────────
 	/** Project ID — when set, uses a named Docker volume instead of bind mount for /workspace. */
 	projectId?: string;
+	/** Host project marketplace pack root to mount in named-volume sandbox mode. */
+	projectMarketPacksRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
 	/**
@@ -192,8 +194,9 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// standalone pi-extension entries and shared pack-local modules resolve in Docker.
 	addReadonlyDirectoryMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
 	addReadonlyDirectoryMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
-	if (workspaceDir) {
-		addReadonlyDirectoryMount(scopePaths("project", workspaceDir).marketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
+	const projectMarketPacksRoot = config.projectMarketPacksRoot ?? (workspaceDir ? scopePaths("project", workspaceDir).marketPacksRoot : undefined);
+	if (projectMarketPacksRoot) {
+		addReadonlyDirectoryMount(projectMarketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
 	}
 
 	// ── Per-session preview mount (WP-A/F) ────────────────────────────

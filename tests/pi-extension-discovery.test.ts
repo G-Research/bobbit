@@ -87,6 +87,20 @@ export default async function (pi) {
 		}
 	});
 
+	it("transpiles trusted TypeScript extension entries without relying on a Node TS loader", () => {
+		const dir = tempDir();
+		try {
+			write(path.join(dir, "helper.ts"), "export const toolName: string = 'ts_tool';\n");
+			const entry = write(path.join(dir, "extension.ts"), "import { toolName } from './helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName, description: 'from ts' }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["ts_tool"]);
+			assert.equal(result.tools[0]?.description, "from ts");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("reports syntax and missing dependency failures without throwing", async () => {
 		const dir = tempDir();
 		try {
