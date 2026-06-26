@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
 	computePiExtensionDiscoveryCacheKey,
 	makePiExtensionDiagnostic,
@@ -56,7 +57,10 @@ function absolutizeNodeFlagValue(flag: string, value: string): string {
 	// paths must be anchored to the parent process cwd before forwarding them.
 	if ((flag === "--import" || flag === "--loader" || flag === "--experimental-loader" || flag === "--require" || flag === "-r")
 		&& value.startsWith(".") && !value.startsWith("data:") && !value.startsWith("node:")) {
-		return path.resolve(process.cwd(), value);
+		const absolute = path.resolve(process.cwd(), value);
+		return (flag === "--import" || flag === "--loader" || flag === "--experimental-loader")
+			? pathToFileURL(absolute).href
+			: absolute;
 	}
 	return value;
 }
