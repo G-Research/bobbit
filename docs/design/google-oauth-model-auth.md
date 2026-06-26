@@ -26,7 +26,7 @@ exact targets for the follow-up implementation task.
     `@earendil-works/pi-ai/oauth` and drives the `OAuthLoginCallbacks` (`onAuth`, `onDeviceCode`,
     `onPrompt`, `onManualCodeInput`, `onSelect`, `onProgress`). Credentials are persisted by
     `storeOAuthCredentials(provider, credentials)`.
-- Storage: `globalAuthPath()` → `~/.bobbit/agent/auth.json`, written 0600 via `writeAuthData`,
+- Storage: `globalAuthPath()` → active `<agentDir>/auth.json`, written 0600 via `writeAuthData`,
   which calls `clearOAuthCache()`. Shape per provider key: `{ type: "oauth", access, refresh,
   expires, ... }`. Anthropic bakes a 5-minute safety buffer into `expires`.
 - `oauthStatus(provider)` returns only `{ authenticated, expires, provider }` — **never echoes

@@ -2,7 +2,13 @@
 
 Bobbit's Maintenance settings collect safe, explicit cleanup tools for resources that can outlive the session or project that created them. These actions are intentionally preview-first: the UI scans, explains what it found, and only then enables cleanup.
 
-The Maintenance tab is user-facing, but the same actions are exposed through `/api/maintenance/*` routes for operators and tests. Cleanup endpoints return structured counts and per-item results so callers can distinguish cleaned, skipped, already-cleaned, and failed work.
+The Maintenance tab is user-facing, but the same actions are exposed through REST routes for operators and tests. Cleanup endpoints return structured counts and per-item results so callers can distinguish cleaned, skipped, already-cleaned, and failed work.
+
+## Agent Directory
+
+**Settings → Maintenance → Agent Directory** controls where Bobbit stores agent transcripts, host credentials, model metadata, Google Code Assist cache data, and staged binaries. It is restart-gated: the current process keeps using the startup active directory, while Settings saves only the next-start directory.
+
+The card shows the active path, startup source, default path, persisted/pending path, effective next-start path, restart guidance, and environment override impact. It also exposes a copy-only migration flow from the active/historical directory to the pending directory. See [Configurable agent directory](configurable-agent-directory.md) and [REST API — Agent directory](rest-api.md#agent-directory).
 
 ## Archived Session Worktrees
 
@@ -70,12 +76,16 @@ Archived-session worktree cleanup never purges the archived session. After clean
 
 ## REST API
 
-See [REST API — Maintenance](rest-api.md#maintenance) for request and response shapes.
+See [REST API — Maintenance](rest-api.md#maintenance) and [REST API — Agent directory](rest-api.md#agent-directory) for request and response shapes.
 
 Key routes:
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/api/agent-dir` | Inspect active and next-start agent-directory state. |
+| `POST` | `/api/agent-dir/validate` | Validate/probe an agent-directory target. |
+| `PUT` | `/api/agent-dir/pending` | Save or clear the next-start agent directory. |
+| `POST` | `/api/agent-dir/migrate` | Copy allowlisted data to the pending directory. |
 | `GET` | `/api/maintenance/archived-session-worktrees` | Preview archived-session worktree candidates. |
 | `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Clean selected or all currently removable archived-session worktrees. |
 | `GET` | `/api/maintenance/orphaned-worktrees` | Preview git worktrees not owned by live session references. |
