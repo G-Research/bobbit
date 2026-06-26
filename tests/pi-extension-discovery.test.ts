@@ -101,6 +101,48 @@ export default async function (pi) {
 		}
 	});
 
+	it("confines trusted probes to read-only source access", async () => {
+		const dir = tempDir();
+		const outside = tempDir("bobbit-pi-ext-outside-");
+		try {
+			const inPack = path.join(dir, "inside.txt").replace(/\\/g, "\\\\");
+			const outPack = path.join(outside, "outside.txt").replace(/\\/g, "\\\\");
+			const entry = write(path.join(dir, "extension.mjs"), `import fs from "node:fs"; export default function () { fs.writeFileSync("${inPack}", "x"); fs.writeFileSync("${outPack}", "x"); }\n`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(path.join(dir, "inside.txt")), false);
+			assert.equal(fs.existsSync(path.join(outside, "outside.txt")), false);
+
+			const promisesTarget = path.join(dir, "promises.txt").replace(/\\/g, "\\\\");
+			const promisesEntry = write(path.join(dir, "extension-promises.mjs"), `import { writeFile } from "node:fs/promises"; export default async function () { await writeFile("${promisesTarget}", "x"); }\n`);
+			const promisesResult = await discoverPiExtensionTools(promisesEntry, { trustAccepted: true });
+			assert.equal(promisesResult.status, "failed");
+			assert.equal(promisesResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(path.join(dir, "promises.txt")), false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("blocks network and child-process modules during trusted probes", async () => {
+		const dir = tempDir();
+		try {
+			const childEntry = write(path.join(dir, "child.mjs"), `import "node:child_process"; export default function () {}\n`);
+			const childResult = await discoverPiExtensionTools(childEntry, { trustAccepted: true });
+			assert.equal(childResult.status, "failed");
+			assert.equal(childResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+
+			const httpEntry = write(path.join(dir, "http.mjs"), `import http from "node:http"; export default function () { http.get("http://127.0.0.1/"); }\n`);
+			const httpResult = await discoverPiExtensionTools(httpEntry, { trustAccepted: true });
+			assert.equal(httpResult.status, "failed");
+			assert.equal(httpResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("reports syntax and missing dependency failures without throwing", async () => {
 		const dir = tempDir();
 		try {

@@ -3,10 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import type {
-	PiExtensionDiagnostic,
-	PiExtensionDiscoveryResult,
-	PiExtensionToolInfo,
+import { pathToFileURL } from "node:url";
+import {
+	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
+	makePiExtensionDiagnostic,
+	type PiExtensionDiagnostic,
+	type PiExtensionDiscoveryResult,
+	type PiExtensionToolInfo,
 } from "./pi-extension-contributions.js";
 
 export interface DiscoverPiExtensionToolsOptions {
@@ -20,14 +23,8 @@ const MAX_OUTPUT_BYTES = 128 * 1024;
 const RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
 const require = createRequire(import.meta.url);
 
-type PiExtensionContributionsModule = typeof import("./pi-extension-contributions.js");
-
-function contributionsModule(): PiExtensionContributionsModule {
-	return require("./pi-extension-contributions.js") as PiExtensionContributionsModule;
-}
-
 function diagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
-	return contributionsModule().makePiExtensionDiagnostic(status, code, message);
+	return makePiExtensionDiagnostic(status, code, message);
 }
 
 function skipped(cacheKey?: string): PiExtensionDiscoveryResult {
@@ -202,6 +199,76 @@ function prepareProbeEntry(entryPath: string, tempRoot: string): string {
 	return outFile;
 }
 
+function inferAllowedSourceRoot(entryPath: string): string {
+	const resolved = path.resolve(entryPath);
+	const parts = resolved.split(path.sep);
+	const idx = parts.lastIndexOf("pi-extensions");
+	if (idx >= 0 && idx + 2 < parts.length) return path.resolve(parts.slice(0, idx + 2).join(path.sep) || path.parse(resolved).root);
+	return path.dirname(resolved);
+}
+
+function confinementCore(allowedRoots: readonly string[], cjs = true): string {
+	const header = cjs
+		? 'const path = require("node:path");\nconst { fileURLToPath } = require("node:url");\n'
+		: 'import path from "node:path";\nimport { fileURLToPath } from "node:url";\nimport { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\n';
+	return `${header}
+const allowedRoots = ${JSON.stringify(allowedRoots)}.map((root) => norm(root));
+const readOps = new Set(["access", "accessSync", "exists", "existsSync", "stat", "statSync", "lstat", "lstatSync", "realpath", "realpathSync", "readFile", "readFileSync", "readdir", "readdirSync", "readlink", "readlinkSync", "createReadStream", "opendir", "opendirSync"]);
+const writeOps = new Set(["appendFile", "appendFileSync", "chmod", "chmodSync", "chown", "chownSync", "copyFile", "copyFileSync", "createWriteStream", "fchmod", "fchmodSync", "fchown", "fchownSync", "fdatasync", "fdatasyncSync", "ftruncate", "ftruncateSync", "futimes", "futimesSync", "link", "linkSync", "lutimes", "lutimesSync", "mkdir", "mkdirSync", "mkdtemp", "mkdtempSync", "rename", "renameSync", "rm", "rmSync", "rmdir", "rmdirSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink", "unlinkSync", "utimes", "utimesSync", "write", "writeSync", "writeFile", "writeFileSync"]);
+function norm(value) { return path.resolve(value); }
+function toPath(value) { if (value == null || typeof value === "number") return null; if (value instanceof URL) return fileURLToPath(value); return path.resolve(String(value)); }
+function inside(value) { const raw = toPath(value); if (!raw) return true; const resolved = norm(raw); return allowedRoots.some((root) => { const rel = path.relative(root, resolved); return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel)); }); }
+function err(code, message) { const e = new Error(message); e.code = code; return e; }
+function assertRead(value, op) { if (!inside(value)) throw err("PROBE_FS_READ_DENIED", "Pi extension discovery probe denied " + op + " outside the extension source root."); }
+function denyWrite(op) { throw err("PROBE_FS_WRITE_DENIED", "Pi extension discovery probe denied mutating filesystem operation " + op + ". Discovery is best-effort and uses read-only source access."); }
+function denyBuiltin(request) { throw err("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied import of " + request + " during executable discovery."); }
+function wrapFs(realFs, label) { return new Proxy(realFs, { get(target, prop, receiver) { if (prop === "promises" && target.promises) return wrapFs(target.promises, label + ".promises"); const value = Reflect.get(target, prop, receiver); if (typeof prop !== "string" || typeof value !== "function") return value; if (prop === "open" || prop === "openSync") return function(file, flags, ...rest) { assertRead(file, label + "." + prop); if (![undefined, null, "r", "rs", "sr"].includes(flags)) denyWrite(label + "." + prop); return value.call(target, file, flags, ...rest); }; if (writeOps.has(prop)) return function() { denyWrite(label + "." + prop); }; if (readOps.has(prop)) return function(file, ...rest) { assertRead(file, label + "." + prop); return value.call(target, file, ...rest); }; return value.bind(target); }}); }
+`;
+}
+
+function writeProbeConfinementFiles(tempRoot: string, entryPath: string): { preloadPath: string; loaderPath: string } {
+	const allowedRoots = [inferAllowedSourceRoot(entryPath), tempRoot].map((root) => path.resolve(root));
+	const preloadPath = path.join(tempRoot, "confinement-preload.cjs");
+	const loaderPath = path.join(tempRoot, "confinement-loader.mjs");
+	const fsShimPath = path.join(tempRoot, "fs-shim.mjs");
+	const fsPromisesShimPath = path.join(tempRoot, "fs-promises-shim.mjs");
+	const denied = '["child_process","cluster","dgram","dns","http","http2","https","inspector","net","repl","tls","worker_threads"]';
+	fs.writeFileSync(preloadPath, `${confinementCore(allowedRoots)}
+const Module = require("node:module");
+const fsShim = wrapFs(require("node:fs"), "fs");
+const fsPromisesShim = wrapFs(require("node:fs/promises"), "fs.promises");
+const denied = new Set(${denied});
+const originalLoad = Module._load;
+Module._load = function(request, parent, isMain) { const normalized = String(request || "").replace(/^node:/, ""); if (normalized === "fs") return fsShim; if (normalized === "fs/promises") return fsPromisesShim; if (denied.has(normalized)) denyBuiltin(request); if (!String(request || "").startsWith("node:")) { try { const resolved = Module._resolveFilename(request, parent, isMain); if (typeof resolved === "string" && path.isAbsolute(resolved)) assertRead(resolved, "module import"); } catch (e) { if (e && (e.code === "PROBE_FS_READ_DENIED" || e.code === "PROBE_CONFINEMENT_DENIED")) throw e; } } return originalLoad.apply(this, arguments); };
+// Best-effort in-process confinement for trusted discovery: this blocks normal
+// JS writes and dangerous builtin imports, but is not OS/container isolation.
+`, "utf-8");
+	const fsShimCore = confinementCore(allowedRoots, false);
+	fs.writeFileSync(fsShimPath, `${fsShimCore}
+import realFs from "node:fs";
+const fs = wrapFs(realFs, "fs");
+export default fs;
+export const constants = realFs.constants;
+export const promises = wrapFs(realFs.promises, "fs.promises");
+export const access = fs.access, accessSync = fs.accessSync, existsSync = fs.existsSync, lstat = fs.lstat, lstatSync = fs.lstatSync, opendir = fs.opendir, opendirSync = fs.opendirSync, open = fs.open, openSync = fs.openSync, readdir = fs.readdir, readdirSync = fs.readdirSync, readFile = fs.readFile, readFileSync = fs.readFileSync, readlink = fs.readlink, readlinkSync = fs.readlinkSync, realpath = fs.realpath, realpathSync = fs.realpathSync, stat = fs.stat, statSync = fs.statSync, createReadStream = fs.createReadStream, createWriteStream = fs.createWriteStream, writeFile = fs.writeFile, writeFileSync = fs.writeFileSync, rm = fs.rm, rmSync = fs.rmSync, mkdir = fs.mkdir, mkdirSync = fs.mkdirSync;
+`, "utf-8");
+	fs.writeFileSync(fsPromisesShimPath, `${fsShimCore}
+import realFs from "node:fs/promises";
+const fs = wrapFs(realFs, "fs.promises");
+export default fs;
+export const constants = realFs.constants;
+export const access = fs.access, lstat = fs.lstat, opendir = fs.opendir, open = fs.open, readdir = fs.readdir, readFile = fs.readFile, readlink = fs.readlink, realpath = fs.realpath, stat = fs.stat, writeFile = fs.writeFile, rm = fs.rm, mkdir = fs.mkdir;
+`, "utf-8");
+	const fsShimUrl = pathToFileUrlString(fsShimPath);
+	const fsPromisesShimUrl = pathToFileUrlString(fsPromisesShimPath);
+	fs.writeFileSync(loaderPath, `import path from "node:path";\nimport { fileURLToPath } from "node:url";\nconst fsShimUrl = ${JSON.stringify(fsShimUrl)};\nconst fsPromisesShimUrl = ${JSON.stringify(fsPromisesShimUrl)};\nconst allowedRoots = ${JSON.stringify(allowedRoots)}.map((root) => path.resolve(root));\nconst denied = new Set(${denied});\nfunction fail(code, message) { const e = new Error(message); e.code = code; throw e; }\nfunction deny(specifier) { fail("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied import of " + specifier + " during executable discovery."); }\nfunction assertResolvedUrl(url) { if (!url.startsWith("file:")) return; const resolved = path.resolve(fileURLToPath(url)); const ok = allowedRoots.some((root) => { const rel = path.relative(root, resolved); return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel)); }); if (!ok) fail("PROBE_FS_READ_DENIED", "Pi extension discovery probe denied module import outside the extension source root."); }\nexport async function resolve(specifier, context, nextResolve) { if (context.parentURL === fsShimUrl || context.parentURL === fsPromisesShimUrl) return nextResolve(specifier, context); const normalized = String(specifier || "").replace(/^node:/, ""); if (normalized === "fs") return { url: fsShimUrl, shortCircuit: true }; if (normalized === "fs/promises") return { url: fsPromisesShimUrl, shortCircuit: true }; if (denied.has(normalized)) deny(specifier); const resolved = await nextResolve(specifier, context); assertResolvedUrl(resolved.url); return resolved; }\n`, "utf-8");
+	return { preloadPath, loaderPath };
+}
+
+function pathToFileUrlString(file: string): string {
+	return pathToFileURL(path.resolve(file)).href;
+}
+
 function probeScript(): string {
 	return `
 import { pathToFileURL } from "node:url";
@@ -287,7 +354,7 @@ try {
 }
 
 export async function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions): Promise<PiExtensionDiscoveryResult> {
-	const cache = contributionsModule().computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
 	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
 	const cacheKey = cache.cacheKey;
 	if (!opts.trustAccepted) return skipped(cacheKey);
@@ -302,8 +369,9 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 		fs.mkdirSync(tempRoot, { recursive: true });
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
+		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
 		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
-		const result = await runProbe(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		const result = await runProbe(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {
@@ -321,7 +389,7 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 }
 
 export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryResult {
-	const cache = contributionsModule().computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
 	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
 	const cacheKey = cache.cacheKey;
 	if (!opts.trustAccepted) return skipped(cacheKey);
@@ -336,8 +404,9 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 		fs.mkdirSync(tempRoot, { recursive: true });
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
+		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
 		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
-		const result = runProbeSync(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		const result = runProbeSync(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {
@@ -354,8 +423,12 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 	}
 }
 
-function runProbeSync(probePath: string, entryPath: string, cwd: string, timeoutMs: number): { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean } {
-	const result = spawnSync(process.execPath, [...safeExecArgv(process.execArgv), probePath, entryPath], {
+function probeNodeArgs(probePath: string, entryPath: string, confinement: { preloadPath: string; loaderPath: string }): string[] {
+	return [...safeExecArgv(process.execArgv), "--require", confinement.preloadPath, "--experimental-loader", pathToFileUrlString(confinement.loaderPath), probePath, entryPath];
+}
+
+function runProbeSync(probePath: string, entryPath: string, cwd: string, timeoutMs: number, confinement: { preloadPath: string; loaderPath: string }): { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean } {
+	const result = spawnSync(process.execPath, probeNodeArgs(probePath, entryPath, confinement), {
 		cwd,
 		env: minimalEnv(),
 		encoding: "utf-8",
@@ -370,13 +443,13 @@ function runProbeSync(probePath: string, entryPath: string, cwd: string, timeout
 	return { stdout, stderr, exitCode: result.status, timedOut };
 }
 
-function runProbe(probePath: string, entryPath: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+function runProbe(probePath: string, entryPath: string, cwd: string, timeoutMs: number, confinement: { preloadPath: string; loaderPath: string }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
 	return new Promise((resolve) => {
 		let stdout = "";
 		let stderr = "";
 		let done = false;
 		let timedOut = false;
-		const child = spawn(process.execPath, [...safeExecArgv(process.execArgv), probePath, entryPath], {
+		const child = spawn(process.execPath, probeNodeArgs(probePath, entryPath, confinement), {
 			cwd,
 			env: minimalEnv(),
 			stdio: ["ignore", "pipe", "pipe"],

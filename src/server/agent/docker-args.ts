@@ -192,11 +192,18 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// Mount installed marketplace pack roots, not only their tools/ subtrees, so
 	// standalone pi-extension entries and shared pack-local modules resolve in Docker.
-	addReadonlyDirectoryMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
-	addReadonlyDirectoryMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
+	// Long-lived project containers must receive these mounts even before any pack
+	// is installed; Docker cannot add a later host bind mount to an existing
+	// container, so create the scope roots before assembling docker run args.
+	const addMarketPacksRootMount = (hostPath: string, containerPath: string): void => {
+		fs.mkdirSync(hostPath, { recursive: true });
+		addReadonlyDirectoryMount(hostPath, containerPath);
+	};
+	addMarketPacksRootMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
+	addMarketPacksRootMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
 	const projectMarketPacksRoot = config.projectMarketPacksRoot ?? (workspaceDir ? scopePaths("project", workspaceDir).marketPacksRoot : undefined);
 	if (projectMarketPacksRoot) {
-		addReadonlyDirectoryMount(projectMarketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
+		addMarketPacksRootMount(projectMarketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
 	}
 
 	// ── Per-session preview mount (WP-A/F) ────────────────────────────

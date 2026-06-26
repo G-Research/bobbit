@@ -40,12 +40,16 @@ describe("marketplace pi extension activation catalogue helpers", () => {
 	});
 
 	it("builds scoped pi-extension tool rows with provenance and one row per runtime name", () => {
+		const first = contribution({ listName: "a", toolName: "shared_tool", packName: "pack-a", packId: "market:project:pack-a" });
+		const second = contribution({ listName: "b", toolName: "shared_tool", packName: "pack-b", packId: "market:project:pack-b" });
 		const rows = buildPiExtensionToolRows([
-			contribution({ listName: "a", toolName: "shared_tool", packName: "pack-a", packId: "market:project:pack-a" }),
-			contribution({ listName: "b", toolName: "shared_tool", packName: "pack-b", packId: "market:project:pack-b" }),
+			first,
+			second,
 			contribution({ listName: "disabled", toolName: "hidden_tool", packName: "pack-c", packId: "market:project:pack-c", status: "disabled" }),
 		]);
 
+		assert.equal(first.diagnostic.code, "tool_name_collision");
+		assert.equal(second.diagnostic.code, "tool_name_collision");
 		assert.equal(rows.length, 1);
 		assert.equal(rows[0].name, "shared_tool");
 		assert.equal(rows[0].origin, "marketplace-pi-extension");
