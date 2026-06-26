@@ -49,6 +49,9 @@
  *  Write:<path>::<content>  Recursive mkdir + writeFileSync.
  *  Edit:<path>::<old>::<new>  read + replace + write.
  *  Bash:<cmd>               execSync(cmd, {cwd, timeout:10_000}).
+ *  PI_EXTENSION_TOOL:<name>::<json>
+ *                           Invoke a tool registered by a loaded --extension
+ *                           in the in-process mock runtime.
  *
  * Proposals (assistant-driven)
  * ----------------------------
@@ -148,6 +151,8 @@ export class MockAgentCore {
 		// transcript at firstKeptEntryId. Null until a compaction fires.
 		this._postCompactionEntries = null;
 		this.currentAbortController = null;
+		this.mockPiTools = options.mockPiTools || new Map();
+		this.mockPiToolCallHandlers = options.mockPiToolCallHandlers || [];
 		// Serializes concurrent handlePrompt calls so a second prompt queued
 		// while the first is still in flight runs after the first completes.
 		// Mirrors the real agent's sequential stream behaviour, which the
@@ -193,7 +198,16 @@ export class MockAgentCore {
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
 
-		// Live-update flow: two consecutive propose_project tool calls in the
+		const piExtensionToolMatch = text.match(/PI_EXTENSION_TOOL:([^:\s]+)(?:::(\{[\s\S]*\}))?/);
+		if (piExtensionToolMatch) {
+			let input = {};
+			if (piExtensionToolMatch[2]) {
+				try { input = JSON.parse(piExtensionToolMatch[2]); } catch { input = { raw: piExtensionToolMatch[2] }; }
+			}
+			return { piExtensionTool: { name: piExtensionToolMatch[1], input } };
+		}
+
+		// Live-update flow: two consecutive propose_project calls in the
 		// same turn. Checked BEFORE the more general project_proposal substring
 		// match because LIVE_UPDATE_PROPOSAL also contains "proposal".
 		if (text.includes("LIVE_UPDATE_PROPOSAL")) {
@@ -940,6 +954,8 @@ export class MockAgentCore {
 
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
+		} else if (toolAction && toolAction.piExtensionTool) {
+			await this._handlePiExtensionTool(toolAction.piExtensionTool.name, toolAction.piExtensionTool.input);
 		} else if (toolAction && toolAction.askUserChoices) {
 			if (toolAction.askUserChoices === "errorThenRetry") {
 				await this._handleAskUserChoicesErrorThenRetry();
@@ -1695,6 +1711,55 @@ export class MockAgentCore {
 		const assistantMsg = { role: "assistant", content: [{ type: "text", text: echo }] };
 		this.conversationMessages.push(assistantMsg);
 		this.emit({ type: "message_end", message: assistantMsg });
+	}
+
+	async _handlePiExtensionTool(toolName, input = {}) {
+		const toolId = `tool_pi_ext_${Date.now()}`;
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: toolName, arguments: input, input }],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "tool_execution_start", toolName, toolId, input });
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		let isError = false;
+		let output;
+		try {
+			for (const handler of this.mockPiToolCallHandlers) {
+				const decision = await handler({ toolName, tool: toolName, input, args: input, toolCallId: toolId });
+				if (decision?.block) {
+					isError = true;
+					output = `Tool blocked: ${decision.reason || "blocked by policy"}`;
+					break;
+				}
+			}
+			if (!isError) {
+				const tool = this.mockPiTools.get(toolName);
+				if (!tool) {
+					isError = true;
+					output = `Pi extension tool not registered in mock runtime: ${toolName}`;
+				} else {
+					const result = await tool.handler(input, { toolCallId: toolId });
+					output = typeof result === "string" ? result : JSON.stringify(result);
+				}
+			}
+		} catch (err) {
+			isError = true;
+			output = `Pi extension tool error: ${err?.message || err}`;
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
 	async _handleToolDenied(deniedTool) {
