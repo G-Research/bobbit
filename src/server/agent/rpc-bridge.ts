@@ -1,19 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
+import { scopePaths } from "./pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
 const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
 /** Container mount for shipped first-party market packs. */
 export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
+/** Container mounts for installed marketplace packs by activation/install scope. */
+export const SERVER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-server";
+export const GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-global-user";
+export const PROJECT_MARKET_PACKS_CONTAINER_DIR = "/market-packs-project";
 
 /**
  * Redact sensitive env vars from Docker arg arrays for logging.
@@ -666,19 +672,8 @@ export class RpcBridge {
 	 * All sandbox sessions use pool containers with session-prompts/ mounted.
 	 */
 	private remapArgsForContainer(agentArgs: string[]): string[] {
-		const toolsDir = TOOLS_DIR;
-		const stateDir = bobbitStateDir();
-		const mcpExtDir = path.join(stateDir, "mcp-extensions");
-		const builtinPacksDir = resolveBuiltinPacksDir();
-		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
-		const normalizedStateDir = stateDir.replace(/\\/g, "/");
-		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
-		const normalizedBuiltinPacksDir = builtinPacksDir.replace(/\\/g, "/");
-
-		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths
+		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths.
 		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
-		const normalizedBuiltinToolsDir = builtinToolsDir?.replace(/\\/g, "/");
-
 		const remappedArgs: string[] = [];
 
 		for (let i = 0; i < agentArgs.length; i++) {
@@ -694,30 +689,7 @@ export class RpcBridge {
 				remappedArgs.push("--system-prompt", `/tmp/session-prompts/${filename}`);
 				i++; // skip the next arg (the host prompt path)
 			} else {
-				const normalized = arg.replace(/\\/g, "/");
-				if (normalized.startsWith(normalizedToolsDir)) {
-					// Remap tool extension paths: config TOOLS_DIR/... → /tools/...
-					const relative = normalized.substring(normalizedToolsDir.length);
-					remappedArgs.push(`/tools${relative}`);
-				} else if (normalizedBuiltinToolsDir && normalized.startsWith(normalizedBuiltinToolsDir)) {
-					// Remap builtin tool extension paths: dist/.../defaults/tools/... → /tools-builtin/...
-					const relative = normalized.substring(normalizedBuiltinToolsDir.length);
-					remappedArgs.push(`/tools-builtin${relative}`);
-				} else if (normalized.startsWith(normalizedBuiltinPacksDir)) {
-					// Remap shipped first-party pack paths: dist/.../builtin-packs/market-packs/... → /market-packs-builtin/...
-					const relative = normalized.substring(normalizedBuiltinPacksDir.length);
-					remappedArgs.push(`${BUILTIN_PACKS_CONTAINER_DIR}${relative}`);
-				} else if (normalized.startsWith(normalizedMcpExtDir)) {
-					// Remap MCP extension paths: .bobbit/state/mcp-extensions/... → /mcp-extensions/...
-					const relative = normalized.substring(normalizedMcpExtDir.length);
-					remappedArgs.push(`/mcp-extensions${relative}`);
-				} else if (normalized.startsWith(normalizedStateDir)) {
-					// Remap state dir paths (tool-guard, etc.): .bobbit/state/... → /bobbit-state/...
-					const relative = normalized.substring(normalizedStateDir.length);
-					remappedArgs.push(`/bobbit-state${relative}`);
-				} else {
-					remappedArgs.push(arg);
-				}
+				remappedArgs.push(hostPathToContainer(arg, { builtinToolsDir, projectBase: this.options.cwd }));
 			}
 		}
 
@@ -784,6 +756,58 @@ interface MountMapping {
 	hostPath: string;
 }
 
+export interface HostPathToContainerOptions {
+	builtinToolsDir?: string;
+	projectBase?: string;
+}
+
+type MountTableOptions = HostPathToContainerOptions;
+
+function normalizePathForPrefix(p: string): string {
+	const normalized = p.replace(/\\/g, "/");
+	return normalized.length > 1 ? normalized.replace(/\/+$/g, "") : normalized;
+}
+
+function isSameOrChildPath(normalizedPath: string, normalizedPrefix: string): boolean {
+	return normalizedPath === normalizedPrefix || normalizedPath.startsWith(normalizedPrefix + "/");
+}
+
+function joinContainerPath(containerPrefix: string, relative: string): string {
+	const clean = relative.replace(/^\/+/, "");
+	return clean ? `${containerPrefix}/${clean}` : containerPrefix;
+}
+
+function marketPackMountMappings(projectBase?: string): MountMapping[] {
+	const mappings: MountMapping[] = [
+		{
+			containerPrefix: SERVER_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: scopePaths("server", getProjectRoot()).marketPacksRoot,
+		},
+		{
+			containerPrefix: GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: scopePaths("global-user", os.homedir()).marketPacksRoot,
+		},
+	];
+	const projectBaseIsContainerPath = projectBase === "/workspace" || projectBase?.startsWith("/workspace/") || projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/");
+	if (projectBase && !projectBaseIsContainerPath) {
+		mappings.push({
+			containerPrefix: PROJECT_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: scopePaths("project", projectBase).marketPacksRoot,
+		});
+	}
+	return mappings;
+}
+
+function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
+	const normalized = normalizePathForPrefix(hostPath);
+	const marker = "/.bobbit/config/market-packs/";
+	const idx = normalized.lastIndexOf(marker);
+	if (idx < 0) return null;
+	const relative = normalized.slice(idx + marker.length);
+	if (!relative || relative.startsWith("../") || relative.includes("/../")) return null;
+	return joinContainerPath(PROJECT_MARKET_PACKS_CONTAINER_DIR, relative);
+}
+
 /**
  * Build the mount table that describes container ↔ host path mappings.
  * This is the single source of truth — both containerPathToHost() and
@@ -791,7 +815,7 @@ interface MountMapping {
  *
  * Accepts optional builtinToolsDir to handle cascade-resolved builtin paths.
  */
-function buildMountTable(builtinToolsDir?: string): MountMapping[] {
+function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
 	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
@@ -805,6 +829,7 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
 		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
 		{ containerPrefix: BUILTIN_PACKS_CONTAINER_DIR, hostPath: builtinPacksDir },
+		...marketPackMountMappings(opts.projectBase),
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
@@ -817,9 +842,9 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 	];
 
 	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
-	if (builtinToolsDir) {
+	if (opts.builtinToolsDir) {
 		// Insert before /tools so /tools-builtin matches first
-		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: builtinToolsDir });
+		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: opts.builtinToolsDir });
 	}
 
 	return table;
@@ -832,12 +857,12 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
  * Returns the original path unchanged if it doesn't match any known mount.
  * On Windows, the returned path uses OS-native separators.
  */
-export function containerPathToHost(containerPath: string): string {
-	const normalized = containerPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath } of buildMountTable(BUILTIN_TOOLS_DIR)) {
+export function containerPathToHost(containerPath: string, opts: HostPathToContainerOptions = {}): string {
+	const normalized = normalizePathForPrefix(containerPath);
+	for (const { containerPrefix, hostPath } of buildMountTable({ builtinToolsDir: BUILTIN_TOOLS_DIR, ...opts })) {
 		// Match exact prefix or prefix followed by "/" to avoid collisions
 		// (e.g. "/bobbit-state/sessions" must not match "/bobbit-state/sessions.json")
-		if (normalized === containerPrefix || normalized.startsWith(containerPrefix + "/")) {
+		if (isSameOrChildPath(normalized, containerPrefix)) {
 			const relative = normalized.substring(containerPrefix.length);
 			return path.join(hostPath, ...relative.split("/").filter(Boolean));
 		}
@@ -851,16 +876,16 @@ export function containerPathToHost(containerPath: string): string {
  *
  * Returns the original path unchanged if it doesn't match any known mount.
  */
-export function hostPathToContainer(hostPath: string): string {
-	const normalized = hostPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath: hp } of buildMountTable(BUILTIN_TOOLS_DIR)) {
-		const normalizedHost = hp.replace(/\\/g, "/");
-		if (normalized.startsWith(normalizedHost)) {
+export function hostPathToContainer(hostPath: string, opts: MountTableOptions = {}): string {
+	const normalized = normalizePathForPrefix(hostPath);
+	for (const { containerPrefix, hostPath: hp } of buildMountTable({ builtinToolsDir: BUILTIN_TOOLS_DIR, ...opts })) {
+		const normalizedHost = normalizePathForPrefix(hp);
+		if (isSameOrChildPath(normalized, normalizedHost)) {
 			const relative = normalized.substring(normalizedHost.length);
-			return containerPrefix + relative;
+			return joinContainerPath(containerPrefix, relative);
 		}
 	}
-	return hostPath;
+	return remapUnknownProjectMarketPackPath(hostPath) ?? hostPath;
 }
 
 /**
