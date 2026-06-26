@@ -677,8 +677,8 @@ gateway scaffold:
 2. Create a project, then a session, with a model whose **real** context
    window is small enough to actually trigger auto‑compaction in a few
    prompts. Default candidate: `anthropic/claude-haiku-4-5` with the
-   `contextWindow` override knocked down via
-   `~/.bobbit/agent/models.json` (the same overrides that
+   `contextWindow` override knocked down via the active agent directory's
+   `models.json` (the same overrides that
    `tests/e2e/context-window-overrides.spec.ts` documents — write a tiny
    value before starting the gateway). Implementer: pick whatever Bobbit's
    default tier‑0 model is at branch HEAD by reading the `naming_model` in

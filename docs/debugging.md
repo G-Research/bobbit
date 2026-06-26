@@ -941,11 +941,25 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 
 Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Architecture summary: [docs/internals.md — Remote branch cleanup](internals.md#remote-branch-cleanup).
 
+## Agent directory settings
+
+Symptom: Settings → Maintenance shows a saved pending directory, but sessions, auth, or model metadata still use the old path.
+
+Checklist:
+
+1. Check `GET /api/agent-dir`. `activePath` is the startup-pinned directory for this process; `nextStart.dir` is only effective after restart.
+2. If `activeSource` is `BOBBIT_AGENT_DIR` or `PI_CODING_AGENT_DIR`, the env override wins over the persisted setting. Remove the env var and restart to use the saved path.
+3. If validation returns `INSIDE_WORKTREE`, choose a path outside the git worktree or use the exact default `<projectRoot>/.bobbit/agent/`. Relative paths are resolved against `<projectRoot>` before this check.
+4. Migration copies only the allowlist and skips existing files unless overwrite is selected. A skipped `auth.json` or `models.json` usually means the destination already had one.
+5. Sandboxed sessions after an agent-dir change require container recreation because Docker bind mounts are immutable. `ProjectSandbox` detects stale active sessions/model mounts and recreates the project container; look for `[project-sandbox] ... stale agent-dir mounts` if a sandbox still sees old transcripts.
+
+See [Configurable agent directory](configurable-agent-directory.md).
+
 ## `models.json` stale / missing AI Gateway headers after gateway upgrade
 
-Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the generated header block.
+Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose active agent-directory `models.json` predates the generated header block.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites the active agent directory's `models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
 
 `BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
 

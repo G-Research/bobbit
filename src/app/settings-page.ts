@@ -4038,6 +4038,53 @@ let searchIndexError: string | null = null;
 let searchIndexWsSubscribed = false;
 let orphanIndexRows: OrphanedIndexRows | null = null;
 
+// Agent directory settings (system Maintenance). Settings are restart-gated: this
+// UI only saves the next-start preference and optionally copy-migrates data.
+type AgentDirDisplayState = {
+	activePath: string;
+	startupSource: string;
+	defaultPath: string;
+	persistedPath: string | null;
+	pendingPath: string | null;
+	nextStartPath: string;
+	nextStartSource: string;
+	restartRequired: boolean;
+	envOverride: string | null;
+	history: string[];
+	guidance?: string;
+};
+
+type AgentDirValidationState = {
+	ok: boolean;
+	resolvedPath?: string;
+	message?: string;
+	code?: string;
+};
+
+type AgentDirMigrationReport = {
+	copied?: number | unknown[];
+	skipped?: number | unknown[];
+	overwritten?: number | unknown[];
+	missing?: number | unknown[];
+	warnings?: string[];
+	errors?: string[];
+	[key: string]: unknown;
+};
+
+let agentDirState: AgentDirDisplayState | null = null;
+let agentDirLoaded = false;
+let agentDirLoading = false;
+let agentDirError = "";
+let agentDirInput = "";
+let agentDirValidation: AgentDirValidationState | null = null;
+let agentDirSaving = false;
+let agentDirSaveMessage = "";
+let agentDirSaveIsError = false;
+let agentDirMigrating = false;
+let agentDirMigrateOverwrite = false;
+let agentDirMigrationReport: AgentDirMigrationReport | null = null;
+let agentDirMigrationError = "";
+
 function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -5012,6 +5059,368 @@ async function purgeArchives(): Promise<void> {
 	await scanArchives();
 }
 
+function stringField(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+	for (const value of values) {
+		const s = stringField(value);
+		if (s) return s;
+	}
+	return undefined;
+}
+
+function parseAgentDirState(data: any): AgentDirDisplayState {
+	const source = data?.state ?? data?.agentDir ?? data;
+	const activePath = firstString(source?.activePath, source?.activeDir, source?.active?.dir, source?.startup?.dir) ?? "";
+	const startupSource = firstString(source?.startupSource, source?.activeSource, source?.active?.source, source?.startup?.source) ?? "unknown";
+	const defaultPath = firstString(source?.defaultPath, source?.defaultDir, source?.startup?.defaultDir, source?.nextStart?.defaultDir) ?? "";
+	const persistedPath = firstString(source?.persistedPath, source?.persisted, source?.pendingPersistedPath) ?? null;
+	const pendingPath = firstString(source?.pendingPath, source?.pendingDir, source?.pending?.dir, source?.pending) ?? persistedPath;
+	const nextStartPath = firstString(source?.nextStartPath, source?.nextStartDir, source?.nextStart?.dir, source?.effectiveNextStartPath, pendingPath, activePath) ?? "";
+	const nextStartSource = firstString(source?.nextStartSource, source?.nextStart?.source, source?.effectiveNextStartSource) ?? startupSource;
+	const envOverride = (() => {
+		const raw = source?.envOverride;
+		if (raw === true) return startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : "environment variable";
+		if (!raw) return startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : null;
+		if (typeof raw === "string") return raw;
+		return firstString(raw.name, raw.source, raw.key, raw.variable) ?? (startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : null);
+	})();
+	return {
+		activePath,
+		startupSource,
+		defaultPath,
+		persistedPath,
+		pendingPath,
+		nextStartPath,
+		nextStartSource,
+		restartRequired: source?.restartRequired === true,
+		envOverride,
+		history: Array.isArray(source?.history) ? source.history.filter((x: unknown): x is string => typeof x === "string") : [],
+		guidance: firstString(source?.guidance, source?.restartGuidance, source?.message, data?.guidance, data?.restartGuidance, data?.message),
+	};
+}
+
+function agentDirInputFromState(s: AgentDirDisplayState): string {
+	return s.persistedPath ?? s.pendingPath ?? "";
+}
+
+function samePathForDisplay(a: string | null | undefined, b: string | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function agentDirMigrationDestination(s: AgentDirDisplayState): string {
+	return s.pendingPath || s.persistedPath || s.nextStartPath;
+}
+
+function loadAgentDirState(force = false): void {
+	if ((agentDirLoaded && !force) || agentDirLoading) return;
+	agentDirLoading = true;
+	agentDirError = "";
+	(async () => {
+		try {
+			const res = await gatewayFetch("/api/agent-dir");
+			if (!res.ok) throw new Error(`Failed to load agent directory settings (HTTP ${res.status})`);
+			agentDirState = parseAgentDirState(await res.json());
+			agentDirLoaded = true;
+			agentDirInput = agentDirInputFromState(agentDirState);
+		} catch (err) {
+			agentDirError = (err as Error).message || "Failed to load agent directory settings";
+		} finally {
+			agentDirLoading = false;
+			renderApp();
+		}
+	})();
+}
+
+function resetAgentDirFlowState(): void {
+	agentDirValidation = null;
+	agentDirSaveMessage = "";
+	agentDirSaveIsError = false;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+}
+
+async function validateAgentDirInput(): Promise<void> {
+	const path = agentDirInput.trim();
+	if (!path) return;
+	agentDirValidation = null;
+	agentDirSaving = true;
+	agentDirSaveMessage = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/validate", {
+			method: "POST",
+			body: JSON.stringify({ path }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok || data?.ok === false) {
+			agentDirValidation = {
+				ok: false,
+				resolvedPath: firstString(data?.resolvedPath, data?.error?.resolvedPath),
+				code: firstString(data?.error?.code, data?.code),
+				message: firstString(data?.error?.message, data?.message) ?? `Validation failed (HTTP ${res.status})`,
+			};
+		} else {
+			agentDirValidation = {
+				ok: true,
+				resolvedPath: firstString(data?.resolvedPath, data?.path) ?? path,
+				message: "Directory is valid and writable.",
+			};
+		}
+	} catch (err) {
+		agentDirValidation = { ok: false, message: (err as Error).message || "Validation failed" };
+	} finally {
+		agentDirSaving = false;
+		renderApp();
+	}
+}
+
+async function saveAgentDirPending(path: string | null): Promise<void> {
+	agentDirSaving = true;
+	agentDirSaveMessage = "";
+	agentDirSaveIsError = false;
+	agentDirValidation = null;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/pending", {
+			method: "PUT",
+			body: JSON.stringify({ path }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(firstString(data?.error?.message, data?.message) ?? `Save failed (HTTP ${res.status})`);
+		agentDirState = parseAgentDirState(data);
+		agentDirLoaded = true;
+		agentDirInput = agentDirInputFromState(agentDirState);
+		agentDirSaveMessage = agentDirState.guidance || "Saved for the next server start.";
+	} catch (err) {
+		agentDirSaveIsError = true;
+		agentDirSaveMessage = (err as Error).message || "Save failed";
+	} finally {
+		agentDirSaving = false;
+		renderApp();
+	}
+}
+
+async function saveAgentDirInput(): Promise<void> {
+	await saveAgentDirPending(agentDirInput.trim() || null);
+}
+
+async function clearAgentDirPending(): Promise<void> {
+	agentDirInput = "";
+	await saveAgentDirPending(null);
+}
+
+function reportCount(value: unknown): number {
+	if (Array.isArray(value)) return value.length;
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	return 0;
+}
+
+async function migrateAgentDirData(): Promise<void> {
+	if (!agentDirState) return;
+	const destinationPath = agentDirMigrationDestination(agentDirState);
+	if (!destinationPath || samePathForDisplay(agentDirState.activePath, destinationPath)) return;
+	agentDirMigrating = true;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/migrate", {
+			method: "POST",
+			body: JSON.stringify({
+				sourcePath: agentDirState.activePath,
+				destinationPath,
+				overwrite: agentDirMigrateOverwrite,
+			}),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(firstString(data?.error?.message, data?.message) ?? `Migration failed (HTTP ${res.status})`);
+		agentDirMigrationReport = (data?.report && typeof data.report === "object" ? data.report : data) as AgentDirMigrationReport;
+	} catch (err) {
+		agentDirMigrationError = (err as Error).message || "Migration failed";
+	} finally {
+		agentDirMigrating = false;
+		renderApp();
+	}
+}
+
+function renderAgentDirPathRow(label: string, value: string | null | undefined, testId: string, badge?: string) {
+	return html`
+		<div class="flex flex-col gap-0.5 min-w-0">
+			<div class="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+				<span>${label}</span>
+				${badge ? html`<span class="normal-case tracking-normal px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${badge}</span>` : ""}
+			</div>
+			<code class="text-xs text-foreground font-mono break-all" data-testid=${testId}>${value || "—"}</code>
+		</div>
+	`;
+}
+
+function renderAgentDirMigrationReport(report: AgentDirMigrationReport) {
+	const counts = [
+		["Copied", reportCount(report.copied), "agent-dir-migrate-copied"],
+		["Skipped", reportCount(report.skipped), "agent-dir-migrate-skipped"],
+		["Overwritten", reportCount(report.overwritten), "agent-dir-migrate-overwritten"],
+		["Missing", reportCount(report.missing), "agent-dir-migrate-missing"],
+		["Warnings", reportCount(report.warnings), "agent-dir-migrate-warnings"],
+		["Errors", reportCount(report.errors), "agent-dir-migrate-errors"],
+	] as const;
+	return html`
+		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground" data-testid="agent-dir-migration-report">
+			<div class="flex flex-wrap gap-1.5">
+				${counts.map(([label, count, testId]) => html`
+					<span class="px-1.5 py-0.5 rounded bg-background border border-border" data-testid=${testId}>${label}: <span class="text-foreground font-medium">${count}</span></span>
+				`)}
+			</div>
+			${Array.isArray(report.warnings) && report.warnings.length > 0 ? html`
+				<div class="mt-2 flex flex-col gap-1">
+					${report.warnings.map((warning) => html`<div class="text-amber-600 dark:text-amber-300 break-all">${warning}</div>`)}
+				</div>
+			` : ""}
+			${Array.isArray(report.errors) && report.errors.length > 0 ? html`
+				<div class="mt-2 flex flex-col gap-1">
+					${report.errors.map((error) => html`<div class="text-destructive break-all">${error}</div>`)}
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
+function renderAgentDirSettingsCard(scanBtnClass: string, actionBtnClass: string) {
+	loadAgentDirState();
+	const s = agentDirState;
+	const destinationPath = s ? agentDirMigrationDestination(s) : "";
+	const showMigration = !!s && !!destinationPath && !samePathForDisplay(s.activePath, destinationPath);
+	const envMessage = s?.envOverride
+		? `${s.envOverride} is active. Saved paths remain pending until that environment override is removed and the server is restarted.`
+		: "No environment override is active; saved settings determine the next server start before the default path.";
+	const restartGuidance = s
+		? `Active now: ${s.activePath || "unknown"}. After restart: ${s.nextStartPath || "unknown"}.`
+		: "";
+
+	return html`
+		<div class="flex flex-col gap-3 rounded-md border border-border p-4" data-section="agent-dir" data-testid="agent-dir-settings">
+			<div class="flex items-start justify-between gap-3">
+				<div>
+					<h3 class="text-sm font-semibold text-foreground">Agent Directory</h3>
+					<p class="text-xs text-muted-foreground mt-1">
+						Stores agent sessions, provider caches, model metadata, and staged agent binaries. Changes apply on the next server start; current sessions keep using the active directory.
+					</p>
+				</div>
+				<button
+					class="${scanBtnClass} shrink-0"
+					?disabled=${agentDirLoading}
+					@click=${() => loadAgentDirState(true)}
+					data-testid="agent-dir-refresh"
+				>${agentDirLoading ? "Refreshing…" : "Refresh"}</button>
+			</div>
+
+			${agentDirError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-load-error">${agentDirError}</p>` : ""}
+			${!s && agentDirLoading ? html`<p class="text-xs text-muted-foreground italic">Loading agent directory settings…</p>` : ""}
+			${s ? html`
+				<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+					${renderAgentDirPathRow("Active directory", s.activePath, "agent-dir-active")}
+					${renderAgentDirPathRow("Startup source", s.startupSource, "agent-dir-startup-source")}
+					${renderAgentDirPathRow("Default", s.defaultPath, "agent-dir-default")}
+					${renderAgentDirPathRow("Persisted / pending", s.pendingPath || s.persistedPath, "agent-dir-persisted")}
+					${renderAgentDirPathRow("Effective after restart", s.nextStartPath, "agent-dir-next-start", s.nextStartSource)}
+				</div>
+
+				<div class="rounded-md border ${s.restartRequired ? "border-amber-500/30 bg-amber-500/10" : "border-border bg-secondary/20"} p-3 text-xs" data-testid="agent-dir-restart-guidance">
+					<div class="font-medium ${s.restartRequired ? "text-amber-700 dark:text-amber-300" : "text-foreground"}">
+						${s.restartRequired ? "Restart required" : "No restart required"}
+					</div>
+					<div class="mt-1 text-muted-foreground break-all">${s.guidance || restartGuidance}</div>
+					<div class="mt-1 text-muted-foreground" data-testid="agent-dir-env-override">${envMessage}</div>
+				</div>
+
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-medium text-foreground" for="agent-dir-path-input">Directory for next server start</label>
+					<p class="text-xs text-muted-foreground">
+						Leave empty and save to clear the persisted setting and use environment/default precedence. Relative paths are resolved by the server against the project root.
+					</p>
+					<div class="flex flex-col sm:flex-row gap-2">
+						<input
+							id="agent-dir-path-input"
+							type="text"
+							placeholder=${s.defaultPath ? `Use default: ${s.defaultPath}` : "Use default"}
+							class="flex-1 min-w-0 px-2 py-1.5 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							.value=${live(agentDirInput)}
+							@input=${(e: Event) => { agentDirInput = (e.target as HTMLInputElement).value; resetAgentDirFlowState(); }}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void saveAgentDirInput(); } }}
+							data-testid="agent-dir-path-input"
+						/>
+						<div class="flex items-center gap-2 shrink-0">
+							<button class="${scanBtnClass}" ?disabled=${agentDirSaving || !agentDirInput.trim()} @click=${validateAgentDirInput} data-testid="agent-dir-validate">Validate</button>
+							<button class="${actionBtnClass}" ?disabled=${agentDirSaving} @click=${saveAgentDirInput} data-testid="agent-dir-save">${agentDirSaving ? "Saving…" : "Save for next restart"}</button>
+						</div>
+					</div>
+					<div>
+						<button
+							class="text-xs text-muted-foreground hover:text-foreground underline disabled:opacity-50"
+							?disabled=${agentDirSaving || (!s.persistedPath && !agentDirInput.trim())}
+							@click=${clearAgentDirPending}
+							data-testid="agent-dir-clear-default"
+						>Clear to default/env precedence</button>
+					</div>
+					${agentDirValidation ? html`
+						<p class="text-xs ${agentDirValidation.ok ? "text-emerald-600 dark:text-emerald-300" : "text-destructive"}" data-testid="agent-dir-validation-result">
+							${agentDirValidation.ok ? "Valid" : "Invalid"}${agentDirValidation.code ? ` (${agentDirValidation.code})` : ""}: ${agentDirValidation.message || ""}${agentDirValidation.resolvedPath ? ` Resolved: ${agentDirValidation.resolvedPath}` : ""}
+						</p>
+					` : ""}
+					${agentDirSaveMessage ? html`
+						<p class="text-xs ${agentDirSaveIsError ? "text-destructive" : "text-muted-foreground"}" data-testid="agent-dir-save-message">${agentDirSaveMessage}</p>
+					` : ""}
+				</div>
+
+				${showMigration ? html`
+					<div class="flex flex-col gap-3 rounded-md border border-border bg-secondary/20 p-3" data-testid="agent-dir-migration-card">
+						<div>
+							<h4 class="text-sm font-semibold text-foreground">Copy data to pending directory</h4>
+							<p class="text-xs text-muted-foreground mt-1">
+								Copies selected agent data from the active directory to the pending directory. The source directory is preserved.
+							</p>
+						</div>
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+							${renderAgentDirPathRow("Source active", s.activePath, "agent-dir-migrate-source")}
+							${renderAgentDirPathRow("Destination pending", destinationPath, "agent-dir-migrate-destination")}
+						</div>
+						<div class="text-xs text-muted-foreground">
+							<div class="font-medium text-foreground mb-1">Copy allowlist</div>
+							<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1" data-testid="agent-dir-migration-allowlist">
+								${["sessions/", "auth.json", "models.json", "settings.json", "google-code-assist.json", "bin/"].map(item => html`
+									<div class="flex items-center gap-1.5"><span class="text-emerald-600 dark:text-emerald-300">✓</span><code>${item}</code></div>
+								`)}
+							</div>
+						</div>
+						<label class="flex items-start gap-2 text-xs text-muted-foreground">
+							<input
+								type="checkbox"
+								class="mt-0.5 w-4 h-4 rounded border-input accent-primary"
+								.checked=${agentDirMigrateOverwrite}
+								@change=${(e: Event) => { agentDirMigrateOverwrite = (e.target as HTMLInputElement).checked; renderApp(); }}
+								data-testid="agent-dir-migrate-overwrite"
+							/>
+							<span><span class="font-medium text-foreground">Overwrite existing destination files</span><br />Default is skip existing files.</span>
+						</label>
+						<div class="flex items-center gap-2">
+							<button class="${actionBtnClass}" ?disabled=${agentDirMigrating} @click=${migrateAgentDirData} data-testid="agent-dir-migrate-start">${agentDirMigrating ? "Copying…" : "Copy data"}</button>
+							<span class="text-xs text-muted-foreground">Restart after saving/migrating to use the next-start directory.</span>
+						</div>
+						${agentDirMigrationReport ? renderAgentDirMigrationReport(agentDirMigrationReport) : ""}
+						${agentDirMigrationError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-migration-error">${agentDirMigrationError}</p>` : ""}
+					</div>
+				` : ""}
+			` : ""}
+		</div>
+	`;
+}
+
 function renderMaintenanceTab() {
 	const scanBtnClass = "px-3 py-1.5 text-sm rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50";
 	const actionBtnClass = "px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50";
@@ -5032,6 +5441,8 @@ function renderMaintenanceTab() {
 			<p class="text-sm text-muted-foreground">
 				Review and clean up orphaned resources. No cleanup happens automatically on server restart — use these tools to manage resources manually.
 			</p>
+
+			${renderAgentDirSettingsCard(scanBtnClass, actionBtnClass)}
 
 			<!-- Search Index -->
 			<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="search-index">

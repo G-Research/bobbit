@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { bobbitDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
@@ -261,10 +262,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		}
 	}
 
-	// Host agent sessions dir (~/.bobbit/agent/sessions/) — mount ONLY sessions, not the
-	// full agent dir, to prevent sandboxed agents from accessing auth.json credentials.
+	// Host agent sessions dir — mount ONLY sessions, not the full agent dir, to
+	// prevent sandboxed agents from accessing host auth.json credentials.
 	const hostAgentDir = globalAgentDir();
-	const hostSessionsDir = path.join(hostAgentDir, "sessions");
+	const hostSessionsDir = activeAgentSessionsDir();
 	fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 

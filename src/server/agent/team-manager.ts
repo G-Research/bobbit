@@ -1,7 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
@@ -39,13 +38,44 @@ import {
 	writeSessionSidecar,
 	buildSessionSidecar,
 } from "./session-sidecar.js";
+import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 
 const execFile = promisify(execFileCb);
 
 /** Production wrapper around the testable `scanSlugDirForJsonlsAt`. */
 function scanSlugDirForJsonls(worktreePath: string) {
-	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
-	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
+	const out: ReturnType<typeof scanSlugDirForJsonlsAt> = [];
+	const seen = new Set<string>();
+	for (const sessionsRoot of trustedAgentSessionsRoots()) {
+		for (const candidate of scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join)) {
+			const key = path.resolve(candidate.jsonlPath);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(candidate);
+		}
+	}
+	return out;
+}
+
+function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
+	const out: ReturnType<typeof discoverAgentsForGoal> = [];
+	const seen = new Set<string>();
+	for (const sessionsRoot of trustedAgentSessionsRoots()) {
+		for (const agent of discoverAgentsForGoal(
+			sessionsRoot,
+			teamLeadWorktreePath,
+			fs,
+			path.join,
+			path.dirname,
+			path.basename,
+		)) {
+			const key = path.resolve(agent.agentWorktreePath);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(agent);
+		}
+	}
+	return out;
 }
 
 async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
@@ -514,8 +544,8 @@ export class TeamManager {
 			//
 			// Recovery policy:
 			//   1. Try to locate the canonical .jsonl in the team-lead's
-			//      worktree slug-dir (`~/.bobbit/agent/sessions/<slug>/`).
-			//      If found → reconstruct a fresh session record pointing
+			//      worktree slug-dir under active, historical, or legacy agent
+			//      sessions roots. If found → reconstruct a fresh session record pointing
 			//      at the surviving .jsonl and write it via sessionStore.put().
 			//      Team-store entry is preserved untouched.
 			//   2. If no .jsonl can be found → there is genuinely nothing
@@ -726,7 +756,7 @@ export class TeamManager {
 			// (e.g. `goal-audit-subg-225e4d3d/` vs `goal-goal-audit-subg-
 			// 225e4d3d-coder-ad801c01/`). The worktree dirs themselves get
 			// cleaned up after the agent merges back, but the agent's .jsonl
-			// transcripts under `~/.bobbit/agent/sessions/<agent-slug>/` are
+			// transcripts under the active/historical/legacy agent sessions roots are
 			// preserved. The user's "Audit subgoals branch" had 14+ agent
 			// slug-dirs surviving with zero session records pointing at them.
 			//
@@ -740,7 +770,6 @@ export class TeamManager {
 			//
 			// Idempotent: each agent worktree path is uniquely keyed; we
 			// skip any agent whose worktreePath already has a session record.
-			const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
 			let agentsRecovered = 0;
 			for (const ctx of this.config.projectContextManager.all()) {
 				for (const goal of ctx.goalStore.getAll()) {
@@ -756,14 +785,7 @@ export class TeamManager {
 							.filter(s => s.teamGoalId === goal.id && s.role !== "team-lead" && s.worktreePath)
 							.map(s => s.worktreePath!),
 					);
-					const discovered = discoverAgentsForGoal(
-						sessionsRoot,
-						goal.worktreePath,
-						fs,
-						path.join,
-						path.dirname,
-						path.basename,
-					);
+					const discovered = discoverAgentsForGoalAcrossSessionRoots(goal.worktreePath);
 					for (const agent of discovered) {
 						if (existingAgentWorktrees.has(agent.agentWorktreePath)) continue;
 						const chosen = pickCanonicalTeamLeadJsonl(agent.candidates);
@@ -791,6 +813,7 @@ export class TeamManager {
 								? reconcileRecoveredSessionWithSidecar(record as unknown as Record<string, unknown>, sidecar)
 								: record;
 							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
+							existingAgentWorktrees.add(agent.agentWorktreePath);
 							agentsRecovered++;
 						} catch (err) {
 							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);

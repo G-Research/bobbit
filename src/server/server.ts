@@ -9,7 +9,20 @@ import path from "node:path";
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
+import {
+	bobbitStateDir,
+	bobbitConfigDir,
+	getProjectRoot,
+	globalAgentDir,
+	getAgentDirApiState,
+	validateAgentDirTarget,
+	refreshAgentDirNextStart,
+	migrateAgentDirData,
+	isKnownAgentDir,
+	isPendingAgentDir,
+	buildAgentDirRestartGuidance,
+	normalizeAgentDirInput,
+} from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
@@ -95,7 +108,7 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
+import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
@@ -296,7 +309,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
-import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
+import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
@@ -1340,6 +1353,9 @@ export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
+	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
+	// they do not enter through cli.ts. This is a no-op after CLI initialization.
+	globalAgentDir();
 	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
 
 	// Initialize module-level caches for parameterized modules
@@ -2573,8 +2589,9 @@ export function createGateway(config: GatewayConfig) {
 				// they don't leak into .git/config — the container's credential helper
 				// reads GITHUB_TOKEN from env instead). Without one, the canonical main
 				// repo root (resolved via `resolveSandboxMountRoot`, which handles linked
-				// worktrees) is bind-mounted read-only and cloned via `file://`. A LOCAL
-				// origin throws here — propagating through the awaited bootstrap so
+				// worktrees) is copied into a sanitized git source (excluding `.bobbit/` and
+				// `auth.json`) before that source is bind-mounted read-only and cloned via
+				// `file://`. A LOCAL origin throws here — propagating through the awaited bootstrap so
 				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
@@ -2584,8 +2601,16 @@ export function createGateway(config: GatewayConfig) {
 						return null;
 					}
 				};
-				const mountSourcePath = await resolveSandboxMountRoot(repoPath);
-				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), mountSourcePath });
+				const sandboxStateDir = path.join(projectDir, ".bobbit", "state");
+				const originUrl = await resolveOrigin(repoPath);
+				const mountSourcePath = originUrl
+					? await resolveSandboxMountRoot(repoPath)
+					: prepareSanitizedSandboxCloneSource({
+						repoPath: await resolveSandboxMountRoot(repoPath),
+						stateDir: sandboxStateDir,
+						key: "root",
+					});
+				const cloneSource = resolveSandboxCloneSource({ originUrl, mountSourcePath });
 				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
@@ -2621,13 +2646,22 @@ export function createGateway(config: GatewayConfig) {
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
 						// Same resolution as the single-repo path: never fall back to a
-						// raw host path. Remote-less repos bind-mount their canonical main
-						// repo root (resolved via `resolveSandboxMountRoot`, which handles
-						// linked worktrees) at a per-repo container mount path and clone
-						// via `file://`. A local origin throws (caller's awaited boundary).
-						const perRepoMountSource = await resolveSandboxMountRoot(rp);
+						// raw host path. Remote-less repos copy their canonical main repo
+						// root (resolved via `resolveSandboxMountRoot`, which handles linked
+						// worktrees) into a sanitized git source, then bind-mount that source
+						// at a per-repo container mount path and clone via `file://`. A local
+						// origin throws (caller's awaited boundary).
+						const perRepoOriginUrl = await resolveOrigin(rp);
+						const perRepoMountRoot = await resolveSandboxMountRoot(rp);
+						const perRepoMountSource = perRepoOriginUrl
+							? perRepoMountRoot
+							: prepareSanitizedSandboxCloneSource({
+								repoPath: perRepoMountRoot,
+								stateDir: sandboxStateDir,
+								key: c.repo,
+							});
 						const perRepoSrc = resolveSandboxCloneSource({
-							originUrl: await resolveOrigin(rp),
+							originUrl: perRepoOriginUrl,
 							mountSourcePath: perRepoMountSource,
 							mountPath: `/workspace-src/${c.repo}`,
 						});
@@ -6604,7 +6638,7 @@ async function handleApiRoute(
 		const verifyToolUse = async (sid: string, toolUseId: string, t: string): Promise<boolean> => {
 			const ps = sessionManager.getPersistedSession(sid);
 			if (!ps?.agentSessionFile) return false;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			const content = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return transcriptHasToolUse(content, toolUseId, t);
 		};
@@ -6647,7 +6681,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -6930,7 +6964,7 @@ async function handleApiRoute(
 		const extPs = sessionManager.getPersistedSession(extGuard.sessionId);
 		let extJsonl: string | null = null;
 		if (extPs?.agentSessionFile) {
-			const fsCtx: SessionFsContext = { sandboxed: extPs.sandboxed, projectId: extPs.projectId };
+			const fsCtx = sessionFsContextForAgentFile(extPs, extPs.agentSessionFile);
 			extJsonl = await sessionFileRead(fsCtx, extPs.agentSessionFile, sandboxManager);
 		}
 		if (extSessionToolCall) {
@@ -7035,7 +7069,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -7253,6 +7287,79 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
+	// GET /api/agent-dir — return startup-resolved active dir plus next-start state.
+	if (url.pathname === "/api/agent-dir" && req.method === "GET") {
+		json(getAgentDirApiState());
+		return;
+	}
+
+	// POST /api/agent-dir/validate — validate and probe an agent-dir target.
+	if (url.pathname === "/api/agent-dir/validate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ ok: false, error: { code: "MISSING_BODY", message: "Missing body" } }, 400); return; }
+		const result = validateAgentDirTarget((body as any).path, getProjectRoot());
+		json(result);
+		return;
+	}
+
+	// PUT /api/agent-dir/pending — save the next-start agent dir without live-switching.
+	if (url.pathname === "/api/agent-dir/pending" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const rawPath = (body as any).path;
+		let persistedPath: string | undefined;
+		if (rawPath === null || rawPath === undefined || (typeof rawPath === "string" && rawPath.trim().length === 0)) {
+			preferencesStore.remove("agentDir");
+		} else if (typeof rawPath === "string") {
+			const validation = validateAgentDirTarget(rawPath, getProjectRoot());
+			if (!validation.ok) { json(validation, 400); return; }
+			persistedPath = validation.resolvedPath;
+			preferencesStore.set("agentDir", persistedPath);
+		} else {
+			json({ error: "path must be a string, null, or empty" }, 400);
+			return;
+		}
+
+		const state = refreshAgentDirNextStart(persistedPath, bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastPreferencesChanged();
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...getAgentDirApiState(), guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
+	// POST /api/agent-dir/migrate — copy allowlisted agent data; never delete or move source.
+	if (url.pathname === "/api/agent-dir/migrate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const sourceRaw = (body as any).sourcePath;
+		const destinationRaw = (body as any).destinationPath;
+		if (typeof sourceRaw !== "string" || typeof destinationRaw !== "string" || sourceRaw.trim().length === 0 || destinationRaw.trim().length === 0) {
+			json({ error: "sourcePath and destinationPath are required" }, 400);
+			return;
+		}
+		const sourcePath = normalizeAgentDirInput(sourceRaw, getProjectRoot());
+		const destinationPath = normalizeAgentDirInput(destinationRaw, getProjectRoot());
+		if (!isKnownAgentDir(sourcePath)) {
+			json({ error: "sourcePath must be the active or a historical agent directory", code: "INVALID_SOURCE" }, 400);
+			return;
+		}
+		if (!isPendingAgentDir(destinationPath)) {
+			json({ error: "destinationPath must be the pending next-start agent directory", code: "INVALID_DESTINATION" }, 400);
+			return;
+		}
+		const report = migrateAgentDirData(sourcePath, destinationPath, (body as any).overwrite === true);
+		if (report.error) {
+			json(report, 400);
+			return;
+		}
+		const state = refreshAgentDirNextStart((preferencesStore.get("agentDir") as string | undefined), bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...report, guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
 	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
 		json(getSafePreferences());
@@ -7263,6 +7370,17 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preferences" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
+		const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
+		if (blockedKey) {
+			json({
+				error: `${blockedKey} is managed by the agent directory settings workflow. Use PUT /api/agent-dir/pending instead.`,
+				code: "AGENT_DIR_PREFERENCE_FORBIDDEN",
+				key: blockedKey,
+				use: "/api/agent-dir/pending",
+			}, 400);
+			return;
+		}
 		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
@@ -10540,9 +10658,10 @@ async function handleApiRoute(
 		// worktree is ready, adopting this clone via switch_session.
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
 
-		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
 		try {
-			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -11028,8 +11147,8 @@ async function handleApiRoute(
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
 
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
-		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
-		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
@@ -12028,7 +12147,7 @@ async function handleApiRoute(
 				context: parseIntParam("context"),
 				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
 			};
-			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 			});
@@ -12104,7 +12223,7 @@ async function handleApiRoute(
 			}
 			return;
 		}
-		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+		const ctx2 = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 		try {
 			const envelope = await readOrphanedBeforeCompaction(
 				{ compactionId, cursor, limit, verbose },

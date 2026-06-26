@@ -858,7 +858,7 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
 1. Resolve the source `agentSessionFile` from `getPersistedSession(archivedId)`. Falls back to `sessionManager.recoverSessionFile(ps)` (promoted to public) for legacy persisted rows that never carried the field. Missing on both paths → **404**.
-2. Compute the destination path via `formatAgentSessionFilePath(cwd, createdAtMs, sessionId)` in `src/server/agent/agent-session-path.ts`. Format matches the agent CLI's own naming - `<globalAgentDir()>/sessions/--<cwd-slug>--/<isoTs>_<uuid>.jsonl` - so the path round-trips through `recoverSessionFile`'s parser regex.
+2. Compute the destination path via `formatAgentSessionFilePath(cwd, createdAtMs, sessionId)` in `src/server/agent/agent-session-path.ts`. Format matches the agent CLI's own naming under the startup active `<agentDir>/sessions/--<cwd-slug>--/<isoTs>_<uuid>.jsonl`, so the path round-trips through `recoverSessionFile`'s parser regex.
 3. Copy via `sessionFileCopy(srcCtx, srcPath, dstCtx, dstPath, mgr)` in `src/server/agent/session-fs.ts`. Two-tier dispatch mirroring `sessionFileDelete`:
    - **host↔host**: `fs.copyFileSync` after `mkdirSync({recursive:true})`.
    - **same-project sandboxed↔same-project sandboxed**: `docker exec cp` inside the container.
@@ -1595,11 +1595,11 @@ Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as 
 The converted `cost` values flow through two surfaces:
 
 - `GET /api/models` returns them in each `ApiModel.cost` entry so the UI and server model registry see non-zero AIGW pricing when the gateway provides it.
-- `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in `~/.bobbit/agent/models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data.
+- `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in the active agent directory's `models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data. See [Configurable agent directory](configurable-agent-directory.md).
 
 ### Generated `providers.aigw.headers`
 
-`writeAigwModelsJson()` writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
+`writeAigwModelsJson()` writes the AI Gateway provider into the active agent directory's `models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
 
 ```json
 {
@@ -1630,7 +1630,7 @@ pi-ai's Bedrock provider does not normally forward provider-level `headers` into
 
 ### Startup refresh behavior
 
-On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
+On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites the active agent directory's `models.json` with:
 
 - the current gateway model list,
 - the current gateway-derived per-model `cost` values when `/v1/models` provides pricing,
@@ -2196,9 +2196,9 @@ Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
 ### Sandbox agent auth.json
 
-Sandbox containers need Pi's agent auth path for OpenAI Codex models, but mounting the host `~/.bobbit/agent/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only `~/.bobbit/agent/sessions/` from the host agent directory and writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`.
+Sandbox containers need Pi's agent auth path for OpenAI Codex and Google Code Assist models, but mounting the host `<agentDir>/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only the active `<agentDir>/sessions/` directory and optional read-only `<agentDir>/models.json`, then writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`. See [Configurable agent directory](configurable-agent-directory.md#sandbox-safeguards).
 
-The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex credentials while another denies them without sharing a stale mount.
+The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex/Google credentials while another denies them without sharing a stale mount.
 
 Policy rules:
 
@@ -3106,9 +3106,15 @@ Only truly global state lives in the server's central state directory.
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
-### Global
+### Active agent directory
 
-| File | Purpose |
+The agent CLI data root is configurable and startup-pinned. The default is `<projectRoot>/.bobbit/agent/`; env and Settings precedence, validation, migration, transcript compatibility, and sandbox boundaries are covered in [Configurable agent directory](configurable-agent-directory.md).
+
+| File / Directory | Purpose |
 |---|---|
-| `~/.bobbit/agent/auth.json` | API auth credentials |
-| `~/.bobbit/agent/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@bobbit/binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |
+| `<agentDir>/sessions/` | Agent `.jsonl` transcripts and sidecars for new sessions. |
+| `<agentDir>/auth.json` | Host provider credentials. Never mounted directly into sandboxes. |
+| `<agentDir>/models.json` | Model registry, AI Gateway provider metadata, and model overrides. |
+| `<agentDir>/google-code-assist.json` | Google Code Assist cache/config data. |
+| `<agentDir>/settings.json` | Agent CLI compatibility settings. |
+| `<agentDir>/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@bobbit/binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |

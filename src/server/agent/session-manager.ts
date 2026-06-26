@@ -17,11 +17,11 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
-import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -78,7 +78,8 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
+import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
@@ -110,6 +111,36 @@ const execFileAsync = promisify(execFileCb);
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+}
+
+function isWindowsAbsolutePath(filePath: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function isContainerAgentSessionPath(filePath: string): boolean {
+	const normalized = filePath.replace(/\\/g, "/");
+	return normalized === "/home/node/.bobbit/agent/sessions"
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
+		|| normalized === "/bobbit-state/sessions"
+		|| normalized.startsWith("/bobbit-state/sessions/");
+}
+
+function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
+	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
+	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
+}
+
+function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
+	if (!filePath) return null;
+	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
+	trustPersistedAgentSessionFile(filePath);
+	return resolveReadablePersistedAgentSessionFile(filePath);
+}
+
+export function switchSessionPathForAgent(ps: PersistedSession): string {
+	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
+	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
+	return hostPathToContainer(mountedHostPath);
 }
 
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
@@ -4548,7 +4579,7 @@ export class SessionManager {
 		// Scan for orphaned agent-CLI transcripts — surface a banner if the
 		// session-metadata index has diverged from the on-disk JSONLs.
 		try {
-			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const agentSessionsRoot = activeAgentSessionsDir();
 			const tracked = new Set<string>();
 			let mostRecent = 0;
 			const allPersisted = this.projectContextManager
@@ -4665,7 +4696,8 @@ export class SessionManager {
 				return;
 			}
 		}
-		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+		trustPersistedAgentSessionFile(ps.agentSessionFile);
+		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
 			// `agentSessionFile` is set (persistSessionMetadata only records it after a
@@ -5098,16 +5130,18 @@ export class SessionManager {
 
 		await rpcClient.start();
 
-		// Resume the agent's previous session file
-		// Session files are now stored on the host via bind-mounted state dir.
-		// No path translation needed — the agent session file is always a host path.
-		const switchSessionPath = ps.agentSessionFile;
+		// Resume the agent's previous session file. Persisted host paths are still
+		// readable by Bobbit; sandboxed agents receive the active mount's container
+		// path when the host path maps to the active sessions mount.
+		trustPersistedAgentSessionFile(ps.agentSessionFile);
+		const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+		const switchSessionPath = switchSessionPathForAgent(ps);
 		// Un-poison any blank-text user messages persisted before the
 		// attachment-only fix, so the agent doesn't re-send an invalid blank
 		// ContentBlock on resume (best-effort, non-fatal).
 		await sanitizeAgentTranscriptFile(
-			{ sandboxed: ps.sandboxed, projectId: ps.projectId },
-			switchSessionPath,
+			transcriptFileCtx,
+			ps.agentSessionFile,
 			this.sandboxManager,
 		);
 		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
@@ -5752,8 +5786,11 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 		if (!ps?.agentSessionFile) return "";
 		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return "";
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (!content) return "";
 			const messages: unknown[] = [];
 			for (const line of content.split(/\r?\n/)) {
@@ -6868,12 +6905,14 @@ export class SessionManager {
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		await rpcClient.start();
 
-		// Restore conversation from session file — path is already in agent coordinate system.
-		const roleFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
+		// Restore conversation from session file.
+		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
+		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
+		if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
 		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
+				{ type: "switch_session", sessionPath: switchSessionPathForAgent(rolePs) },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -6990,8 +7029,11 @@ export class SessionManager {
 		if (!ps || !ps.agentSessionFile) return null;
 		let messages: unknown[] = [];
 		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return null;
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (content) {
 				for (const line of content.trim().split("\n")) {
 					if (!line.trim()) continue;
@@ -7408,8 +7450,11 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return [];
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (!content) return [];
 			const lines = content.trim().split("\n");
 			const messages: unknown[] = [];
@@ -8283,22 +8328,30 @@ export class SessionManager {
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
-		// Delete .jsonl file
+		// Delete .jsonl file. Exact persisted paths outside trusted sessions
+		// roots are read-compatible only; never purge/delete them or sidecars.
 		if (ps.agentSessionFile) {
-			const purgeCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
-				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
-			});
+			const safeFile = isHostAbsoluteAgentSessionPath(ps.agentSessionFile)
+				? resolveSafeSessionsPath(ps.agentSessionFile)
+				: ps.agentSessionFile;
+			if (safeFile) {
+				const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
+				await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
+					console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+				});
+			}
 			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
 			// host-side path lookup (sidecars are bobbit-owned, never written
 			// by sandboxed agents). Missing file is fine.
-			try {
-				const sidecarPath = sidecarPathFor(ps.agentSessionFile);
-				if (fs.existsSync(sidecarPath)) {
-					fs.unlinkSync(sidecarPath);
+			if (safeFile) {
+				try {
+					const sidecarPath = sidecarPathFor(safeFile);
+					if (fs.existsSync(sidecarPath)) {
+						fs.unlinkSync(sidecarPath);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 				}
-			} catch (err) {
-				console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 			}
 		}
 
@@ -8422,40 +8475,68 @@ export class SessionManager {
 	 */
 	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
-			const sessionsDir = path.join(globalAgentDir(), "sessions");
-			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
-			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
-			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
-			const cwdDir = path.join(sessionsDir, cwdSlug);
-			if (!fs.existsSync(cwdDir)) return null;
-
-			const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
-			if (files.length === 0) return null;
-
-			// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
-			// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt
-			const TOLERANCE_MS = 60_000;
-			let bestFile: string | null = null;
-			let bestDelta = Infinity;
-
-			for (const file of files) {
-				const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
-				if (!tsMatch) continue;
-				// Convert filename timestamp back to ISO: replace hyphens in time part with colons
-				const isoStr = tsMatch[1]
-					.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
-				const fileTime = new Date(isoStr).getTime();
-				if (isNaN(fileTime)) continue;
-
-				const delta = Math.abs(fileTime - ps.createdAt);
-				if (delta < TOLERANCE_MS && delta < bestDelta) {
-					bestDelta = delta;
-					bestFile = file;
+			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
+				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+				if (safePath) {
+					trustPersistedAgentSessionFile(safePath);
+					return safePath.replace(/\\/g, "/");
 				}
 			}
 
-			if (bestFile) {
-				return path.join(cwdDir, bestFile).replace(/\\/g, "/");
+			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
+			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
+			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
+			const TOLERANCE_MS = 60_000;
+
+			const sessionRoots = trustedAgentSessionsRoots();
+
+			// Prefer an exact filename/session-id match across all known roots before
+			// falling back to timestamp proximity. This preserves historical-root
+			// recovery when another root has a different session with the same createdAt.
+			for (const sessionsDir of sessionRoots) {
+				const cwdDir = path.join(sessionsDir, cwdSlug);
+				if (!fs.existsSync(cwdDir)) continue;
+				const exactFile = fs.readdirSync(cwdDir).find(f => f.endsWith(`_${ps.id}.jsonl`));
+				if (exactFile) {
+					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
+					trustPersistedAgentSessionFile(recovered);
+					return recovered;
+				}
+			}
+
+			for (const sessionsDir of sessionRoots) {
+				const cwdDir = path.join(sessionsDir, cwdSlug);
+				if (!fs.existsSync(cwdDir)) continue;
+
+				const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
+				if (files.length === 0) continue;
+
+				// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
+				// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt.
+				let bestFile: string | null = null;
+				let bestDelta = Infinity;
+
+				for (const file of files) {
+					const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
+					if (!tsMatch) continue;
+					// Convert filename timestamp back to ISO: replace hyphens in time part with colons.
+					const isoStr = tsMatch[1]
+						.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
+					const fileTime = new Date(isoStr).getTime();
+					if (isNaN(fileTime)) continue;
+
+					const delta = Math.abs(fileTime - ps.createdAt);
+					if (delta < TOLERANCE_MS && delta < bestDelta) {
+						bestDelta = delta;
+						bestFile = file;
+					}
+				}
+
+				if (bestFile) {
+					const recovered = path.join(cwdDir, bestFile).replace(/\\/g, "/");
+					trustPersistedAgentSessionFile(recovered);
+					return recovered;
+				}
 			}
 		} catch {
 			// Recovery is best-effort — don't break restore flow
@@ -8907,15 +8988,17 @@ export class SessionManager {
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			await rpcClient.start();
 
-			// Resume session if we have the session file — path in agent coordinate system
-			const abortFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
+			// Resume session if we have the session file.
+			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
+			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
+			if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
 			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 				// Un-poison blank-text user messages before rehydrating — this is
 				// the route a live already-stuck session takes (forceAbort →
 				// respawn), so the re-spawned agent reads a sanitized transcript.
 				await sanitizeAgentTranscriptFile(abortFileCtx, agentSessionFile, this.sandboxManager);
 				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: agentSessionFile },
+					{ type: "switch_session", sessionPath: switchSessionPathForAgent(abortPs) },
 					15_000,
 				);
 				if (!switchResp.success) {

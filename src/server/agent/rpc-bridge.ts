@@ -5,6 +5,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
@@ -936,7 +937,7 @@ function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
  */
 function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
-	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
+	const agentSessionsDir = activeAgentSessionsDir();
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
 	const builtinPacksDir = resolveBuiltinPacksDir();

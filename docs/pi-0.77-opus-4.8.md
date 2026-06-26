@@ -113,7 +113,7 @@ The client still has a short-lived placeholder model object for pre-state render
 
 Pi `0.77.0` added headless OpenAI Codex login support, so sandboxed agents need a safe way to see Codex credentials without mounting the host agent directory wholesale.
 
-Bobbit never mounts host `~/.bobbit/agent/auth.json` into Docker containers. It mounts only the host sessions directory and `models.json`, then writes a generated, sandbox-scoped auth file under `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` and mounts that file read-only as `/home/node/.bobbit/agent/auth.json`. The scope is normally the project id, which prevents one project's allowed Codex auth file from being reused by another project whose policy denies it.
+Bobbit never mounts host `<agentDir>/auth.json` into Docker containers. It mounts only the active agent directory's `sessions/` directory and `models.json`, then writes a generated, sandbox-scoped auth file under `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` and mounts that file read-only as `/home/node/.bobbit/agent/auth.json`. The scope is normally the project id, which prevents one project's allowed Codex auth file from being reused by another project whose policy denies it. See [Configurable agent directory](configurable-agent-directory.md#sandbox-safeguards).
 
 The generated auth file follows sandbox token policy:
 
