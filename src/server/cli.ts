@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir, globalAgentDir } from "./bobbit-dir.js";
+import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir, globalAgentDir, initializeAgentDirRuntime } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
 import { stageBundledBinaries } from "./binaries.js";
 import { resolveSystemPromptPath } from "./agent/system-prompt.js";
@@ -147,11 +147,16 @@ async function main() {
 	// Set project root early — all stores resolve paths from this
 	setProjectRoot(args.cwd);
 
-	// Migrate legacy ~/.pi/agent/ to ~/.bobbit/agent/ if needed
-	migrateFromLegacyPiDir();
-
 	// Scaffold .bobbit/ on first run (creates config, extensions, state dirs)
 	scaffoldBobbitDir(args.cwd);
+
+	// Migrate legacy ~/.pi/agent/ to ~/.bobbit/agent/ if needed. This only preserves
+	// the historical Pi rename path; project-default migration is user-initiated.
+	migrateFromLegacyPiDir();
+
+	// Resolve the agent dir once for this process. Settings changes only affect the
+	// next start; runtime callers keep using this startup-resolved directory.
+	initializeAgentDirRuntime({ projectRoot: args.cwd, stateDir: bobbitStateDir(args.cwd) });
 
 	// Stage bundled fd/rg binaries into <agentDir>/bin so pi-coding-agent
 	// finds them via its existing getToolPath() lookup. Idempotent; failures
