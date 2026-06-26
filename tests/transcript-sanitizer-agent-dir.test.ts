@@ -29,6 +29,7 @@ const sanitizer = await import("../src/server/agent/transcript-sanitizer.ts");
 
 const {
 	isWithinAgentSessionsDir,
+	resolveReadablePersistedAgentSessionFile,
 	resolveSafeSessionsPath,
 	sanitizeAgentTranscriptFile,
 	trustPersistedAgentSessionFile,
@@ -118,16 +119,28 @@ describe("transcript sanitizer trusted agent directory roots", () => {
 		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED);
 	});
 
-	it("does not trust an arbitrary exact persisted agentSessionFile outside known sessions roots", async () => {
-		const outside = path.join(tmpRoot, "corrupt-persisted-agent-session-file.jsonl");
+	it("allows an exact persisted outside agentSessionFile for read compatibility but not sanitizer writes", async () => {
+		const outside = path.join(tmpRoot, "persisted-outside-agent-session-file.jsonl");
 		fs.writeFileSync(outside, POISONED, "utf-8");
 
 		trustPersistedAgentSessionFile(outside);
 
-		assert.equal(isWithinAgentSessionsDir(outside), false, "exact persisted paths outside trusted sessions roots must not be trusted");
-		assert.equal(resolveSafeSessionsPath(outside), null);
+		assert.equal(isWithinAgentSessionsDir(outside), true, "exact persisted paths are accepted for read compatibility");
+		assert.equal(resolveReadablePersistedAgentSessionFile(outside), fs.realpathSync(outside));
+		assert.equal(resolveSafeSessionsPath(outside), null, "outside exact paths must not become write-safe sessions paths");
 		assert.equal(await sanitizeAgentTranscriptFile({ sandboxed: false }, outside, null), 0);
 		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED, "outside file must remain untouched");
+	});
+
+	it("rejects an exact persisted outside path without a transcript-shaped jsonl", async () => {
+		const outside = path.join(tmpRoot, "not-a-transcript.jsonl");
+		fs.writeFileSync(outside, JSON.stringify({ hello: "world" }) + "\n", "utf-8");
+
+		trustPersistedAgentSessionFile(outside);
+
+		assert.equal(isWithinAgentSessionsDir(outside), false);
+		assert.equal(resolveReadablePersistedAgentSessionFile(outside), null);
+		assert.equal(resolveSafeSessionsPath(outside), null);
 	});
 
 	it("rejects a final symlink inside a historical sessions root", async (t) => {

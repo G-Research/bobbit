@@ -91,6 +91,31 @@ describe("validateAgentDirTarget", () => {
 		assertSamePath(result.error?.resolvedPath ?? result.resolvedPath, path.join(projectRoot, "relative-agent-dir"));
 	});
 
+	it("rejects an existing symlink outside the worktree when it resolves inside the worktree", async (t) => {
+		const validate = await loadValidationFn();
+		const projectRoot = makeGitProject("bobbit-agent-dir-validation-symlink-inside-");
+		const insideTarget = path.join(projectRoot, "credentials", "agent");
+		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-symlink-outside-"));
+		t.after(() => {
+			cleanup(projectRoot);
+			cleanup(outsideRoot);
+		});
+		fs.mkdirSync(insideTarget, { recursive: true });
+		const link = path.join(outsideRoot, "agent-link");
+		try {
+			fs.symlinkSync(insideTarget, link, process.platform === "win32" ? "junction" : "dir");
+		} catch {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+
+		const result = await validate(link, projectRoot);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.error?.code, "INSIDE_WORKTREE");
+		assertSamePath(result.error?.resolvedPath ?? result.resolvedPath, insideTarget);
+	});
+
 	it("creates outside-worktree targets and verifies read/write access", async (t) => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-project-");

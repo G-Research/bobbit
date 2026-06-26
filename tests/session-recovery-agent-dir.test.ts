@@ -54,6 +54,7 @@ function makeStore(initial: any[] = []): any {
 		put: (record: any) => { records.set(record.id, record); },
 		update: (id: string, fields: any) => { records.set(id, { ...records.get(id), ...fields }); },
 		archive: (id: string) => { const existing = records.get(id); if (existing) records.set(id, { ...existing, archived: true }); },
+		purge: (id: string) => records.delete(id),
 		getAll: () => [...records.values()],
 	};
 }
@@ -167,9 +168,42 @@ describe("recoverSessionFile with configurable agent directories", () => {
 		assert.deepEqual(messages[0], { role: "user", content: "read me from the historical persisted absolute path" });
 	});
 
+	it("keeps an exact persisted absolute agentSessionFile readable outside known sessions roots", async () => {
+		const outside = path.join(tmpRoot, "outside-readable-transcript.jsonl");
+		fs.writeFileSync(outside, JSON.stringify({ type: "message", message: { role: "user", content: "read from exact outside path" } }) + "\n", "utf-8");
+		const ps = makePersistedSession({
+			id: "outside-readable-session",
+			archived: true,
+			agentSessionFile: outside,
+			createdAt: Date.parse("2036-04-03T15:15:12.009Z"),
+		});
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+
+		samePath(manager.recoverSessionFile(ps), outside);
+		assert.deepEqual(await manager.getArchivedMessages(ps.id), [{ role: "user", content: "read from exact outside path" }]);
+	});
+
+	it("does not delete exact persisted outside transcript files during purge", async () => {
+		const outside = path.join(tmpRoot, "outside-purge-readonly.jsonl");
+		fs.writeFileSync(outside, JSON.stringify({ type: "message", message: { role: "user", content: "do not delete" } }) + "\n", "utf-8");
+		fs.writeFileSync(outside.replace(/\.jsonl$/, ".bobbit.json"), JSON.stringify({ version: 1, bobbitSessionId: "outside-purge-session", agentSessionId: "agent", role: "general", title: "Outside", createdAt: Date.now() }), "utf-8");
+		const ps = makePersistedSession({
+			id: "outside-purge-session",
+			archived: true,
+			agentSessionFile: outside,
+		});
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+
+		assert.equal(await manager.purgeArchivedSession(ps.id), true);
+		assert.equal(fs.existsSync(outside), true, "outside exact transcript must not be deleted by purge");
+		assert.equal(fs.existsSync(outside.replace(/\.jsonl$/, ".bobbit.json")), true, "outside exact sidecar must not be deleted by purge");
+	});
+
 	it("rejects a corrupted persisted absolute agentSessionFile outside known sessions roots", async () => {
-		const outside = path.join(tmpRoot, "arbitrary-outside-transcript.jsonl");
-		fs.writeFileSync(outside, JSON.stringify({ type: "message", message: { role: "user", content: "must not be read" } }) + "\n", "utf-8");
+		const outside = path.join(tmpRoot, "arbitrary-outside-not-transcript.jsonl");
+		fs.writeFileSync(outside, JSON.stringify({ hello: "world" }) + "\n", "utf-8");
 		const ps = makePersistedSession({
 			id: "corrupt-outside-session",
 			archived: true,

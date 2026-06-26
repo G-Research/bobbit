@@ -227,20 +227,91 @@ function isWithinTrustedSessionsRoot(hostPath: string): boolean {
 }
 
 /**
- * Trust an exact persisted absolute `agentSessionFile` path for sanitizer I/O only
- * when it already lives under an active, historical, or legacy sessions root.
- * Corrupted persisted metadata must not turn an arbitrary host file into a
- * readable/writable transcript.
+ * Trust an exact persisted absolute `agentSessionFile` path for read-only
+ * compatibility after agent-dir migrations. Paths outside trusted sessions roots
+ * are accepted only when they already point at a regular, non-symlink `.jsonl`
+ * with recognizable transcript content; they never become sanitizer write or
+ * purge-delete targets.
  */
 export function trustPersistedAgentSessionFile(filePath: string | null | undefined): void {
-	if (!filePath || hasTraversalSegment(filePath)) return;
-	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return;
-	if (!isWithinTrustedSessionsRoot(filePath)) return;
-	trustedExactSessionFiles.add(normalizeComparablePath(filePath));
+	const rootSafe = resolveSafeSessionsPath(filePath ?? "");
+	if (rootSafe) {
+		trustedExactSessionFiles.add(normalizeComparablePath(rootSafe));
+		return;
+	}
+	const readable = validateReadableOutsideTranscriptFile(filePath);
+	if (!readable) return;
+	trustedExactSessionFiles.add(normalizeComparablePath(readable));
 }
 
 function isTrustedExactSessionFile(filePath: string): boolean {
 	return trustedExactSessionFiles.has(normalizeComparablePath(filePath));
+}
+
+export function resolveReadablePersistedAgentSessionFile(filePath: string | null | undefined): string | null {
+	if (!filePath || hasTraversalSegment(filePath)) return null;
+	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return null;
+	const rootSafe = resolveSafeSessionsPath(filePath);
+	if (rootSafe) return rootSafe;
+	const realPath = realpathRegularJsonlFile(path.resolve(filePath));
+	if (!realPath || !isTrustedExactSessionFile(realPath)) return null;
+	return realPath;
+}
+
+function validateReadableOutsideTranscriptFile(filePath: string | null | undefined): string | null {
+	if (!filePath || hasTraversalSegment(filePath)) return null;
+	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return null;
+	const resolved = path.resolve(filePath);
+	return isReadableTranscriptFile(resolved) ? realpathRegularJsonlFile(resolved) : null;
+}
+
+function isReadableTranscriptFile(filePath: string): boolean {
+	const realPath = realpathRegularJsonlFile(filePath);
+	if (!realPath) return false;
+	try {
+		const fd = fs.openSync(realPath, "r");
+		try {
+			const buffer = Buffer.alloc(64 * 1024);
+			const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+			const lines = buffer.toString("utf-8", 0, bytes).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+			for (const line of lines) {
+				try {
+					const entry = JSON.parse(line);
+					if (isTranscriptShape(entry)) return true;
+				} catch {
+					return false;
+				}
+			}
+			return false;
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return false;
+	}
+}
+
+function realpathRegularJsonlFile(filePath: string): string | null {
+	if (path.extname(filePath).toLowerCase() !== ".jsonl") return null;
+	try {
+		const lstat = fs.lstatSync(filePath);
+		if (lstat.isSymbolicLink() || !lstat.isFile()) return null;
+		const realPath = fs.realpathSync(filePath);
+		const stat = fs.statSync(realPath);
+		if (!stat.isFile()) return null;
+		return realPath;
+	} catch {
+		return null;
+	}
+}
+
+function isTranscriptShape(entry: unknown): boolean {
+	if (!entry || typeof entry !== "object") return false;
+	const obj = entry as Record<string, unknown>;
+	if (obj.type === "session") return typeof obj.cwd === "string" || typeof obj.id === "string";
+	if (obj.type === "message") return !!obj.message && typeof obj.message === "object";
+	if (obj.type === "system") return true;
+	return false;
 }
 
 /**
@@ -288,22 +359,19 @@ export function resolveSafeSessionsPath(hostPath: string): string | null {
 		return null; // parent missing/unreadable
 	}
 
-	const trustedExact = isTrustedExactSessionFile(resolved);
-	if (!trustedExact) {
-		let insideTrustedRoot = false;
-		for (const root of trustedAgentSessionsRoots()) {
-			try {
-				const rootReal = fs.realpathSync(path.resolve(root));
-				if (isInsideOrEqual(rootReal, parentReal)) {
-					insideTrustedRoot = true;
-					break;
-				}
-			} catch {
-				// Historical roots may no longer exist; ignore them.
+	let insideTrustedRoot = false;
+	for (const root of trustedAgentSessionsRoots()) {
+		try {
+			const rootReal = fs.realpathSync(path.resolve(root));
+			if (isInsideOrEqual(rootReal, parentReal)) {
+				insideTrustedRoot = true;
+				break;
 			}
+		} catch {
+			// Historical roots may no longer exist; ignore them.
 		}
-		if (!insideTrustedRoot) return null;
 	}
+	if (!insideTrustedRoot) return null;
 
 	const realPath = path.join(parentReal, path.basename(resolved));
 
@@ -402,13 +470,18 @@ async function transformAgentTranscriptFile(
 		// bind-mounted sessions dir (container path → host path).
 		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
 
-		// For non-sandboxed sessions, validate the real host path BEFORE reading
-		// — a symlink/traversal/out-of-root path must trigger neither a read nor
-		// a write. (For sandboxed, the read is in-container; the write below is
-		// still validated.)
-		if (!ctx.sandboxed && resolveSafeSessionsPath(hostPath) === null) {
-			console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
-			return 0;
+		// For non-sandboxed sessions, validate the real host path BEFORE reading.
+		// Exact persisted paths outside trusted roots are read-compatible only; they
+		// must never become sanitizer write/truncate targets.
+		let writableRealPath: string | null = null;
+		let readAllowed = true;
+		if (!ctx.sandboxed) {
+			writableRealPath = resolveSafeSessionsPath(hostPath);
+			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath) !== null;
+			if (!readAllowed) {
+				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
+				return 0;
+			}
 		}
 
 		const content = await sessionFileRead(ctx, filePath, sandboxManager);
@@ -421,7 +494,7 @@ async function transformAgentTranscriptFile(
 		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
 		// check is not followed. A malformed/hostile agentSessionFile must never
 		// let us clobber an arbitrary file.
-		const realPath = resolveSafeSessionsPath(hostPath);
+		const realPath = writableRealPath ?? resolveSafeSessionsPath(hostPath);
 		if (realPath === null) {
 			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
 			return 0;
