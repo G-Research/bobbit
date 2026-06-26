@@ -43,6 +43,8 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
+
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
 that hold a `host`.
@@ -90,6 +92,8 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
+  pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
     SharedRenderer.js
     ArtifactViewerPanel.js
@@ -131,6 +135,7 @@ Rules:
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
   server routes from `module`, gated by the `names` allowlist. Absent ⇒ no routes.
 - **`contents.mcp` is schema-2 only** — it lists `mcp/<name>.yaml|yml|json` Marketplace MCP contributions. It is not an Extension-Host surface; see [Marketplace MCP](marketplace.md#marketplace-mcp). Schema-1 packs still reject it.
+- **`contents.pi-extensions` is schema-2 only** — it lists standalone pi runtime extension basenames. Each ref resolves to `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs`, is toggleable in Market, and loads into matching agent sessions via pi `--extension` when enabled. It is not an Extension-Host surface; see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
 - **No `stores` key** — stores are implicit (see [Stores](#stores--implicit-pack-scoped-persistence-hoststore)).
 - **No `permissions` key** — there is no permission system; trusted pack server code has
   ambient OS access (see [Server-module confinement](#server-module-confinement)).
@@ -834,6 +839,46 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
   packs declaring the same `routeId` is a hard rejection at registry build). Panel ids referenced
   by `target.panelId` are pack-local.
 
+### Standalone pi extensions (`pi-extensions/<id>/`) — schema 2
+
+**Status:** a `schema: 2` pack may ship standalone pi runtime extensions. This is compatibility support for plain pi extensions, not an Extension Host contribution point. Bobbit preserves the upstream source layout, resolves an entry path, and passes it to matching agent sessions with pi's native `--extension` flag.
+
+Declare refs in `pack.yaml`:
+
+```yaml
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  pi-extensions: [demo]
+```
+
+Ship either a directory extension:
+
+```text
+pi-extensions/demo/
+  package.json      # optional; exports/module/main can choose the entry
+  extension.ts      # otherwise Bobbit tries extension.ts/js, then index.ts/js/mjs/cjs
+```
+
+or a single entry module:
+
+```text
+pi-extensions/demo.ts   # also .js, .mjs, or .cjs
+```
+
+Author-facing rules:
+
+- `contents.pi-extensions` refs are safe basenames and are the Market activation keys.
+- Enabled, resolved extensions load into every session in their install scope by default.
+- Disabling the extension in Market omits the runtime `--extension` flag but keeps the row visible for re-enable.
+- Best-effort discovery may identify model-facing tools. Discovered tools appear on the Tools page with pi-extension/pack provenance, and explicit Bobbit `never` / `ask` policies are enforced by discovered tool name.
+- Discovery failure does not block runtime loading. It only means Bobbit could not surface tool provenance/policy mapping for that extension.
+- Pi extensions are trusted host/runtime code. Executable discovery is skipped until the marketplace source trust warning is accepted; runtime loading then uses pi's normal extension mechanism.
+
+Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
+
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
 **Status:** a `schema: 2` pack may ship **provider** contributions — a pack-scoped
@@ -1308,6 +1353,7 @@ The Host API is the single security boundary. As an author, your obligations are
 - [ ] **Never supply a pack id, `tool`, or token to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
 - [ ] **Keep paths inside the pack root** — `renderer`, `actions.module`, panel `entry`, and `routes.module` resolve relative to their declaring file; `../lib/...` is fine, escaping the pack root is rejected.
 - [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are available directly (no declaration). The worker is resource/crash isolation only; design handlers to be fast.
+- [ ] **Standalone pi extensions are host/runtime code** — source-level trust is required before executable discovery, and enabled extensions load into matching agent sessions by default via `--extension`.
 - [ ] **Feature-detect via `host.capabilities`**, never member presence.
 
 The deeper model — the allowlist-bypass fix, `toolUseId` ownership verification, the
