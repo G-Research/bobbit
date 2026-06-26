@@ -61,8 +61,14 @@ function archivedWorktreeScan() {
 						gitWorktreeMetadataExists: true,
 						localBranchExists: true,
 						status: "removable",
-						reason: "Safe to remove",
+						disposition: "ready-to-clean",
+						reason: "safe-archived-session-worktree",
+						reasonCategory: "safe",
 						detail: "No live session, goal, team, staff, or sibling record references this path.",
+						actionable: true,
+						selectable: true,
+						defaultSelected: true,
+						selectionCategories: ["archived-session", "multi-repo"],
 						willDeleteBranch: true,
 					},
 				],
@@ -87,10 +93,16 @@ function archivedWorktreeScan() {
 						gitWorktreeMetadataExists: true,
 						localBranchExists: true,
 						status: "skipped",
-						reason: "Still referenced",
+						disposition: "ineligible",
+						reason: "referenced-by-live-team",
+						reasonCategory: "referenced-record",
 						detail: "A live team member still uses this worktree path.",
+						actionable: false,
+						selectable: false,
+						defaultSelected: false,
+						selectionCategories: [],
 						willDeleteBranch: false,
-						branchDeleteBlockedReason: "Branch is referenced by a live team member.",
+						branchDeleteBlockedReason: "branch-referenced-by-live-record",
 					},
 				],
 			},
@@ -128,8 +140,14 @@ function alreadyCleanedArchivedWorktreeScan() {
 						gitWorktreeMetadataExists: false,
 						localBranchExists: true,
 						status: "already-cleaned",
-						reason: "Already cleaned",
+						disposition: "already-cleaned",
+						reason: "already-cleaned",
+						reasonCategory: "already-cleaned",
 						detail: "The worktree path and git worktree metadata are gone.",
+						actionable: false,
+						selectable: false,
+						defaultSelected: false,
+						selectionCategories: [],
 						willDeleteBranch: false,
 					},
 				],
@@ -179,7 +197,7 @@ test.describe("Maintenance tab fixture", () => {
 		await expect(page.getByText(/No orphaned worktrees found/)).toBeVisible({ timeout: 5_000 });
 
 		await archivedWorktreeCard(page).locator('[data-action="scan-archived-session-worktrees"]').click();
-		await expect(archivedWorktreeCard(page).getByText(/No archived(?: session)? worktrees found/i)).toBeVisible({ timeout: 5_000 });
+		await expect(archivedWorktreeCard(page).getByTestId("archived-worktree-empty-state")).toContainText(/Nothing safe to clean right now/i, { timeout: 5_000 });
 
 		await maintenanceCardByHeading(page, "Orphaned Sessions").getByRole("button", { name: "Scan" }).click();
 		await expect(page.getByText(/No orphaned sessions found/)).toBeVisible({ timeout: 5_000 });
@@ -195,36 +213,39 @@ test.describe("Maintenance tab fixture", () => {
 		]));
 	});
 
-	test("archived worktree scan renders removable and skipped rows with safety details", async ({ page }) => {
+	test("archived worktree scan defaults to actionable rows and exposes skipped details on demand", async ({ page }) => {
 		await setupMaintenance(page, { archivedWorktreeScan: archivedWorktreeScan() });
 
 		await archivedWorktreeCard(page).locator('[data-action="scan-archived-session-worktrees"]').click();
 		const card = archivedWorktreeCard(page);
 		await expect(card.getByText("Archived cleanup target")).toBeVisible({ timeout: 5_000 });
-		await expect(card.getByText("Guarded archived delegate")).toBeVisible();
-		await expect(card.getByText("arch-rem")).toBeVisible();
-		await expect(card.getByText("arch-ski")).toBeVisible();
+		await expect(card.getByText("Guarded archived delegate")).toHaveCount(0);
+		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*1/);
+		await expect(card.getByTestId("archived-worktree-summary-needs-attention")).toContainText(/Needs attention:\s*1/);
 
 		const removableRow = card.locator('[data-archived-worktree-key="arch-alpha::packages-web"]');
-		await expect(removableRow).toContainText("removable");
+		await expect(removableRow).toContainText("Ready to clean");
 		await expect(removableRow).toContainText("repo: packages/web");
 		await expect(removableRow).toContainText("branch: session/archived-alpha");
-		await expect(removableRow).toContainText("branch will be deleted");
+		await expect(removableRow).toContainText("Branch will be deleted");
 		await expect(removableRow).toContainText("worktree: C:/repo-wt/session-archived-alpha/packages/web");
 		await expect(removableRow).toContainText("repo path: C:/repo/packages/web");
-		await expect(removableRow).toContainText("No live session, goal, team, staff, or sibling record references this path.");
+		await expect(removableRow).toContainText("Safe to remove: no live session, goal, team, staff, or sibling worktree references this path.");
 		await expect(removableRow.getByRole("checkbox")).toBeEnabled();
 		await expect(removableRow.getByRole("checkbox")).toBeChecked();
 
+		await expect(card.locator('[data-archived-worktree-key="arch-skip::root"]')).toHaveCount(0);
+		await card.getByTestId("archived-worktree-show-skipped").click();
 		const skippedRow = card.locator('[data-archived-worktree-key="arch-skip::root"]');
-		await expect(skippedRow).toContainText("skipped");
+		await expect(skippedRow).toContainText("Skipped");
+		await expect(skippedRow).toHaveAttribute("data-reason", "referenced-by-live-team");
 		await expect(skippedRow).toContainText("repo: .");
 		await expect(skippedRow).toContainText("branch: session/shared-branch");
 		await expect(skippedRow).toContainText("worktree: C:/repo-wt/shared-worktree");
 		await expect(skippedRow).toContainText("repo path: C:/repo");
 		await expect(skippedRow).toContainText("A live team member still uses this worktree path.");
-		await expect(skippedRow).toContainText("Branch kept: Branch is referenced by a live team member.");
-		await expect(skippedRow.getByRole("checkbox")).toBeDisabled();
+		await expect(skippedRow).toContainText("Branch will be kept: branch-referenced-by-live-record");
+		await expect(skippedRow.getByRole("checkbox")).toHaveCount(0);
 	});
 
 	test("archived selected cleanup posts selected worktrees, shows counts, clears cleaned rows, and rescans", async ({ page }) => {
@@ -236,7 +257,8 @@ test.describe("Maintenance tab fixture", () => {
 		await card.locator('[data-action="cleanup-archived-session-worktrees"]').click();
 
 		await expect(card.locator('[data-archived-worktree-key="arch-alpha::packages-web"]')).toHaveCount(0, { timeout: 5_000 });
-		await expect(card.locator('[data-archived-worktree-key="arch-skip::root"]')).toBeVisible();
+		await expect(card.getByTestId("archived-worktree-empty-state")).toContainText(/Nothing safe to clean right now/i);
+		await expect(card.locator('[data-archived-worktree-key="arch-skip::root"]')).toHaveCount(0);
 		await expect.poll(async () => await card.textContent()).toMatch(/(cleaned\D+1|1\D+cleaned)/i);
 		await expect.poll(async () => await card.textContent()).toMatch(/(branch\D+1|1\D+branch)/i);
 
@@ -257,28 +279,28 @@ test.describe("Maintenance tab fixture", () => {
 		expect(log.filter(entry => entry.method === "GET" && entry.url.startsWith("/api/maintenance/archived-session-worktrees"))).toHaveLength(2);
 	});
 
-	test("already-cleaned archived diagnostic rows are disabled when the UI exposes them", async ({ page }) => {
+	test("already-cleaned archived diagnostic rows are hidden until troubleshooting is expanded", async ({ page }) => {
 		await setupMaintenance(page, { archivedWorktreeScan: alreadyCleanedArchivedWorktreeScan() });
 		const card = archivedWorktreeCard(page);
 
-		const diagnosticsControl = card.getByRole("checkbox", { name: /already cleaned|diagnostic/i })
-			.or(card.getByRole("button", { name: /already cleaned|diagnostic/i }));
-		if (await diagnosticsControl.count()) await diagnosticsControl.first().click();
-
 		await card.locator('[data-action="scan-archived-session-worktrees"]').click();
-		const cleanedRow = card.locator('[data-archived-worktree-key="arch-cleaned::root"]');
-		if (await cleanedRow.count() === 0) test.skip(true, "Archived worktree diagnostics are not exposed by this UI.");
+		await expect(card.getByTestId("archived-worktree-empty-state")).toContainText(/Nothing safe to clean right now/i, { timeout: 5_000 });
+		await expect(card.locator('[data-archived-worktree-key="arch-cleaned::root"]')).toHaveCount(0);
+		await expect(card.locator('[data-action="cleanup-archived-session-worktrees"]')).toBeDisabled();
 
+		await card.getByTestId("archived-worktree-show-skipped").click();
+		const cleanedRow = card.locator('[data-archived-worktree-key="arch-cleaned::root"]');
+		await expect(cleanedRow).toBeVisible();
 		await expect(card.getByText("Already cleaned archive")).toBeVisible();
-		await expect(card.getByText("arch-cle")).toBeVisible();
-		await expect(cleanedRow).toContainText("already-cleaned");
+		await expect(cleanedRow.getByText("arch-cle", { exact: true })).toBeVisible();
+		await expect(cleanedRow).toContainText("Already cleaned");
+		await expect(cleanedRow).toHaveAttribute("data-reason", "already-cleaned");
 		await expect(cleanedRow).toContainText("repo: .");
 		await expect(cleanedRow).toContainText("branch: session/already-cleaned");
 		await expect(cleanedRow).toContainText("worktree: C:/repo-wt/already-cleaned");
 		await expect(cleanedRow).toContainText("repo path: C:/repo");
 		await expect(cleanedRow).toContainText("The worktree path and git worktree metadata are gone.");
-		await expect(cleanedRow.getByRole("checkbox")).toBeDisabled();
-		await expect(card.locator('[data-action="cleanup-archived-session-worktrees"]')).toBeDisabled();
+		await expect(cleanedRow.getByRole("checkbox")).toHaveCount(0);
 	});
 
 	test("cleanup actions POST and then rescan", async ({ page }) => {
