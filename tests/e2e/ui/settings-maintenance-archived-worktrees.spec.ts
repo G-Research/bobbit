@@ -158,6 +158,7 @@ test.describe("Settings Maintenance archived worktree UX", () => {
 		await expect(page.locator('[data-testid="archived-worktree-row"][data-status="skipped"]:visible')).toHaveCount(0);
 
 		await card.getByTestId("archived-worktree-clean-all").click();
+		await page.getByRole("button", { name: "Clean worktrees" }).evaluate((button: HTMLElement) => button.click());
 		await expect.poll(() => state.cleanupBodies).toEqual([{ mode: "all" }]);
 		await expect(card).toContainText(/Cleaned:\s*1|Removed:\s*1/i);
 		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
