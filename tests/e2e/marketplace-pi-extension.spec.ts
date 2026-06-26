@@ -49,6 +49,14 @@ async function addSource(sourceDir: string): Promise<string> {
 		body: JSON.stringify({ url: sourceDir }),
 	});
 	const text = await add.text();
+	if (add.status === 409) {
+		const sourcesResp = await apiFetch("/api/marketplace/sources");
+		expect(sourcesResp.status).toBe(200);
+		const source = ((await sourcesResp.json()).sources ?? []).find((item: any) => item.url === sourceDir);
+		expect(source, text).toBeTruthy();
+		sourceIds.add(source.id);
+		return source.id;
+	}
 	expect(add.status, text).toBe(201);
 	const sourceId = (JSON.parse(text) as { source: { id: string } }).source.id;
 	sourceIds.add(sourceId);
