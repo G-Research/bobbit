@@ -199,4 +199,30 @@ test.describe("Settings Maintenance archived worktree UX", () => {
 		await card.getByTestId("archived-worktree-show-all-no-worktree-path").click();
 		await expect(missingGroup.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(6);
 	});
+
+	test("zero-removable all-already-cleaned scan shows representative already-cleaned examples", async ({ page }) => {
+		const alreadyCleaned = archivedWorktreeItem({ key: "already-only-1", sessionId: "already-only-1", title: "Already cleaned only", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" });
+		const scan = scanResponse([alreadyCleaned]);
+		scan.sessions = [];
+		scan.items = [];
+		const state: MaintenanceStubState = {
+			scan,
+			cleanup: cleanupResponse({}),
+			cleanupBodies: [],
+		};
+		await installMaintenanceRoutes(page, state);
+		await openMaintenance(page);
+
+		const card = page.getByTestId("archived-worktree-maintenance");
+		await card.getByTestId("archived-worktree-scan").click();
+		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
+		await expect(card.getByTestId("archived-worktree-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
+		await expect(card.getByTestId("archived-worktree-empty-state")).toBeVisible();
+		await expect(page.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(0);
+		await card.getByTestId("archived-worktree-show-skipped").click();
+		const alreadyGroup = card.getByTestId("archived-worktree-group-already-cleaned");
+		await expect(alreadyGroup).toBeVisible();
+		await expect(alreadyGroup).toContainText("Already cleaned only");
+		await expect(alreadyGroup.locator('[data-testid="archived-worktree-row"][data-status="already-cleaned"]:visible')).toHaveCount(1);
+	});
 });

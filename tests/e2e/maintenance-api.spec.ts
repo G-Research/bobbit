@@ -118,7 +118,7 @@ function expectArchivedWorktreeItemShape(item: any, parentSession?: any): void {
 	expect([...archivedWorktreeReasons]).toContain(item.reason);
 	expect(typeof item.detail).toBe("string");
 	expect(typeof item.willDeleteBranch).toBe("boolean");
-	if (item.branchDeleteBlockedReason !== undefined) expect(item.branchDeleteBlockedReason).toBe("branch-referenced-by-live-record");
+	if (item.branchDeleteBlockedReason !== undefined) expect(["branch-referenced-by-live-record", "branch-referenced-by-archived-record"]).toContain(item.branchDeleteBlockedReason);
 	expect([...archivedWorktreeDispositions]).toContain(item.disposition);
 	expect([...archivedWorktreeReasonCategories]).toContain(item.reasonCategory);
 	expect(typeof item.actionable).toBe("boolean");
@@ -185,6 +185,9 @@ function expectArchivedScanShape(body: any): void {
 		expect(Array.isArray(group.sampleKeys)).toBe(true);
 		expect(group.sampleKeys.length).toBeLessThanOrEqual(5);
 		for (const key of group.sampleKeys) expect(typeof key, `group ${group.key} sample key`).toBe("string");
+		expect(Array.isArray(group.sampleItems)).toBe(true);
+		expect(group.sampleItems.length).toBe(group.sampleKeys.length);
+		for (const item of group.sampleItems) expectArchivedWorktreeItemShape(item);
 		expect(typeof group.hasMore).toBe("boolean");
 		expect(typeof group.actionable).toBe("boolean");
 	}
@@ -694,6 +697,15 @@ test.describe("archived session worktree maintenance", () => {
 
 			const defaultScan = await getArchivedWorktreeScan();
 			expect(findArchivedSession(defaultScan, seeded.session.id)).toBeUndefined();
+			expect(findArchivedWorktreeItem(defaultScan, seeded.session.id)).toBeUndefined();
+			expect(defaultScan.counts.alreadyCleaned).toBeGreaterThanOrEqual(1);
+			const defaultAlreadyGroup = findArchivedWorktreeGroup(defaultScan, "already-cleaned");
+			expect(defaultAlreadyGroup).toBeTruthy();
+			expect(defaultAlreadyGroup.sampleItems).toContainEqual(expect.objectContaining({
+				sessionId: seeded.session.id,
+				status: "already-cleaned",
+				reason: "already-cleaned",
+			}));
 
 			const diagnosticScan = await getArchivedWorktreeScan("?includeAlreadyCleaned=1");
 			const diagnosticSession = findArchivedSession(diagnosticScan, seeded.session.id);
@@ -751,6 +763,67 @@ test.describe("archived session worktree maintenance", () => {
 			expect(branchExists(repoPath, branch)).toBe(true);
 		} finally {
 			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			tryDeleteBranch(repoPath, branch);
+			rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	test("branch deletion is blocked when another archived record in the same repo references the branch", async ({ gateway }) => {
+		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-archived-branch-guard-"));
+		const repoPath = join(baseDir, "repo");
+		const removablePath = join(baseDir, "removable-worktree");
+		const alreadyCleanedPath = join(baseDir, "already-cleaned-worktree");
+		const branch = `archived-branch-guard-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		let removable: SeededSession | undefined;
+		let archivedReference: SeededSession | undefined;
+		try {
+			initGitRepo(repoPath);
+			git(repoPath, ["worktree", "add", "-b", branch, removablePath, "HEAD"]);
+			removable = await seedArchivedSession(gateway, {
+				baseDir,
+				title: "Archived removable with shared branch",
+				cwd: removablePath,
+				repoPath,
+				worktreePath: removablePath,
+				branch,
+			});
+			archivedReference = await seedArchivedSession(gateway, {
+				baseDir,
+				title: "Archived already cleaned branch reference",
+				cwd: alreadyCleanedPath,
+				repoPath,
+				worktreePath: alreadyCleanedPath,
+				branch,
+			});
+
+			const before = await getArchivedWorktreeScan("?includeAlreadyCleaned=1");
+			const candidate = findArchivedWorktreeItem(before, removable.session.id);
+			expect(candidate).toMatchObject({
+				status: "removable",
+				localBranchExists: true,
+				willDeleteBranch: false,
+				branchDeleteBlockedReason: "branch-referenced-by-archived-record",
+			});
+			expect(findArchivedWorktreeItem(before, archivedReference.session.id)).toMatchObject({ status: "already-cleaned", branch });
+
+			const cleanup = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+				method: "POST",
+				body: JSON.stringify({ mode: "all" }),
+			});
+			expect(cleanup.status).toBe(200);
+			const cleanupBody = await cleanup.json();
+			expectArchivedCleanupShape(cleanupBody);
+			expect(cleanupBody.results).toContainEqual(expect.objectContaining({
+				sessionId: removable.session.id,
+				status: "cleaned",
+				worktreeRemoved: true,
+				branchDeleted: false,
+			}));
+			expect(branchExists(repoPath, branch)).toBe(true);
+		} finally {
+			if (removable) removable.ctx.sessionStore.remove(removable.session.id);
+			if (archivedReference) archivedReference.ctx.sessionStore.remove(archivedReference.session.id);
+			tryRemoveWorktree(repoPath, removablePath);
 			tryDeleteBranch(repoPath, branch);
 			rmSync(baseDir, { recursive: true, force: true });
 		}

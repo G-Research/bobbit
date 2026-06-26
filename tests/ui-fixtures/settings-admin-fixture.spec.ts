@@ -277,6 +277,26 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(card).not.toContainText(/With worktrees\s*:/);
 	});
 
+	test("archived worktree maintenance exposes already-cleaned examples from group samples", async ({ page }) => {
+		const alreadyCleaned = archivedWorktreeItem({ key: "already-only-1", sessionId: "already-only-1", title: "Already cleaned only", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" });
+		const scan = archivedWorktreeScan([alreadyCleaned]);
+		scan.sessions = [];
+		scan.items = [];
+		await setArchivedWorktreeScan(page, scan);
+		await renderSettings(page, "#/settings/system/maintenance");
+
+		const card = await scanArchivedWorktrees(page);
+		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
+		await expect(card.getByTestId("archived-worktree-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
+		await expect(card.getByTestId("archived-worktree-empty-state")).toBeVisible();
+		await expect(page.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(0);
+		await card.getByTestId("archived-worktree-show-skipped").click();
+		const alreadyGroup = card.getByTestId("archived-worktree-group-already-cleaned");
+		await expect(alreadyGroup).toBeVisible();
+		await expect(alreadyGroup).toContainText("Already cleaned only");
+		await expect(alreadyGroup.locator('[data-testid="archived-worktree-row"][data-status="already-cleaned"]:visible')).toHaveCount(1);
+	});
+
 	test("archived worktree skipped disclosure groups examples and expands one reason at a time", async ({ page }) => {
 		const scan = archivedWorktreeScan([
 			...Array.from({ length: 6 }, (_, i) => archivedWorktreeItem({ key: `missing-${i}`, sessionId: `missing-${i}`, title: `Missing path ${i}`, status: "skipped", disposition: "ineligible", reason: "no-worktree-path", reasonCategory: "missing-worktree-path", path: "" })),

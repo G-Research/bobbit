@@ -3952,8 +3952,12 @@ type ArchivedSessionWorktreeGroup = {
 	category?: string;
 	label?: string;
 	detail?: string;
+	description?: string;
 	count: number;
 	itemKeys?: string[];
+	sampleKeys?: string[];
+	items?: ArchivedSessionWorktreeItem[];
+	sampleItems?: ArchivedSessionWorktreeItem[];
 };
 
 type ArchivedSessionWorktreeSelectionPreset = {
@@ -4625,16 +4629,29 @@ type ArchivedWorktreeExample = {
 	row?: { session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem };
 };
 
-function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: string; detail: string; examples: ArchivedWorktreeExample[] }> {
-	const groups = new Map<string, ArchivedWorktreeExample[]>();
-	for (const row of archivedSessionWorktreeRows()) {
-		const { session, item } = row;
-		if (isArchivedSessionWorktreeActionable(item)) continue;
+function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: string; detail: string; count: number; examples: ArchivedWorktreeExample[] }> {
+	type GroupBucket = { label?: string; detail?: string; count?: number; examples: ArchivedWorktreeExample[]; keys: Set<string> };
+	const groups = new Map<string, GroupBucket>();
+	const bucketFor = (reason: string): GroupBucket => {
+		let bucket = groups.get(reason);
+		if (!bucket) {
+			bucket = { examples: [], keys: new Set() };
+			groups.set(reason, bucket);
+		}
+		return bucket;
+	};
+	const addRowExample = (session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem, preferredReason?: string, bucketMeta?: { label?: string; detail?: string; count?: number }): void => {
+		if (isArchivedSessionWorktreeActionable(item)) return;
 		const disposition = archivedSessionWorktreeDisposition(item);
-		const reason = item.reason || item.reasonCategory || disposition;
+		const reason = preferredReason || item.reason || item.reasonCategory || disposition;
 		const key = archivedSessionWorktreeKey(item);
-		const examples = groups.get(reason) ?? [];
-		examples.push({
+		const bucket = bucketFor(reason);
+		if (bucketMeta?.label) bucket.label = bucketMeta.label;
+		if (bucketMeta?.detail) bucket.detail = bucketMeta.detail;
+		if (bucketMeta?.count !== undefined) bucket.count = Math.max(bucket.count ?? 0, bucketMeta.count);
+		if (bucket.keys.has(key)) return;
+		bucket.keys.add(key);
+		bucket.examples.push({
 			key,
 			status: item.status,
 			disposition,
@@ -4647,15 +4664,45 @@ function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: stri
 			branch: item.branch,
 			path: item.path,
 			detail: item.detail || archivedSessionWorktreeReasonDetail(reason),
-			row,
+			row: { session, item },
 		});
-		groups.set(reason, examples);
+	};
+	for (const row of archivedSessionWorktreeRows()) addRowExample(row.session, row.item);
+	for (const group of archivedSessionWorktreeScan?.groups ?? []) {
+		const sampleItems = group.items ?? group.sampleItems ?? [];
+		if (sampleItems.length === 0) continue;
+		const disposition = group.disposition ?? sampleItems[0]?.disposition ?? archivedSessionWorktreeDisposition(sampleItems[0]);
+		if (disposition === "ready-to-clean") continue;
+		const reason = group.reason || group.reasonCategory || disposition;
+		const meta = { label: group.label, detail: group.detail || group.description, count: group.count };
+		for (const item of sampleItems) {
+			const session: ArchivedSessionWorktreeSession = {
+				id: item.sessionId,
+				title: item.title || "Untitled archived session",
+				archivedAt: item.archivedAt,
+				projectId: item.projectId,
+				projectName: item.projectName,
+				goalId: item.goalId,
+				teamGoalId: item.teamGoalId,
+				delegateOf: item.delegateOf,
+				parentSessionId: item.parentSessionId,
+				childKind: item.childKind,
+				sandboxed: item.sandboxed,
+				repoPath: item.repoPath,
+				worktreePath: item.path,
+				branch: item.branch,
+				worktrees: [item],
+			};
+			addRowExample(session, item, reason, meta);
+		}
 	}
 	for (const result of archivedSessionWorktreeCleanup?.results ?? []) {
 		if (result.status !== "failed" && result.status !== "skipped" && result.status !== "already-cleaned") continue;
 		const reason = result.status === "failed" ? "cleanup-failed" : (result.reason || result.status);
-		const examples = groups.get(reason) ?? [];
-		examples.push({
+		const bucket = bucketFor(reason);
+		if (bucket.keys.has(result.key)) continue;
+		bucket.keys.add(result.key);
+		bucket.examples.push({
 			key: result.key,
 			status: result.status,
 			disposition: result.status === "failed" ? "failed" : result.status === "already-cleaned" ? "already-cleaned" : "needs-attention",
@@ -4669,14 +4716,14 @@ function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: stri
 			path: result.path,
 			detail: result.error || result.detail || result.reason,
 		});
-		groups.set(reason, examples);
 	}
-	return Array.from(groups.entries()).map(([reason, examples]) => ({
+	return Array.from(groups.entries()).map(([reason, bucket]) => ({
 		reason,
-		label: archivedSessionWorktreeReasonLabel(reason),
-		detail: archivedSessionWorktreeReasonDetail(reason),
-		examples,
-	})).sort((a, b) => a.label.localeCompare(b.label));
+		label: bucket.label || archivedSessionWorktreeReasonLabel(reason),
+		detail: bucket.detail || archivedSessionWorktreeReasonDetail(reason),
+		count: bucket.count ?? bucket.examples.length,
+		examples: bucket.examples,
+	})).filter(group => group.examples.length > 0).sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function renderArchivedWorktreeExample(example: ArchivedWorktreeExample) {
@@ -4730,7 +4777,7 @@ function renderArchivedWorktreeTroubleshooting() {
 					>
 						<div class="flex flex-wrap items-start justify-between gap-2">
 							<div>
-								<h4 class="text-xs font-semibold text-foreground">${group.label} (${group.examples.length})</h4>
+								<h4 class="text-xs font-semibold text-foreground">${group.label} (${group.count})</h4>
 								<p class="text-[11px] text-muted-foreground">${group.detail}</p>
 							</div>
 							${group.examples.length > 5 ? html`
