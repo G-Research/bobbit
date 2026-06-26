@@ -2,6 +2,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir } from "./bobbit-dir.js";
 
+const BOBBIT_GITIGNORE_PATTERNS = ["state/", "agent/"];
+
+function ensureBobbitGitignore(dotBobbit: string): void {
+  const gitignorePath = path.join(dotBobbit, ".gitignore");
+  let content = "";
+  if (fs.existsSync(gitignorePath)) {
+    content = fs.readFileSync(gitignorePath, "utf-8");
+  }
+
+  const lines = content.split(/\r?\n/).map((line) => line.trim());
+  const additions = BOBBIT_GITIGNORE_PATTERNS.filter((pattern) => !lines.includes(pattern) && !lines.includes(`/${pattern}`));
+  if (additions.length === 0) return;
+
+  const prefix = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+  fs.writeFileSync(gitignorePath, `${content}${prefix}${additions.join("\n")}\n`);
+}
+
 /**
  * Scaffold the .bobbit directory structure in the project root.
  * Only runs if .bobbit/ doesn't already exist — never overwrites user config.
@@ -27,6 +44,7 @@ export function scaffoldBobbitDir(projectRoot: string): void {
     if (!fs.existsSync(toolsConfigDir)) {
       fs.mkdirSync(toolsConfigDir, { recursive: true });
     }
+    ensureBobbitGitignore(dotBobbit);
 
     return;
   }
@@ -47,7 +65,7 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
   // Create .gitignore
-  fs.writeFileSync(path.join(dotBobbit, ".gitignore"), "state/\n");
+  ensureBobbitGitignore(dotBobbit);
 
   console.log(
     `Created .bobbit/ in ${projectRoot}. Customize roles, workflows, and system prompt in .bobbit/config/`,

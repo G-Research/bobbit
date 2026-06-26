@@ -107,7 +107,7 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
+import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
@@ -6422,7 +6422,7 @@ async function handleApiRoute(
 		const verifyToolUse = async (sid: string, toolUseId: string, t: string): Promise<boolean> => {
 			const ps = sessionManager.getPersistedSession(sid);
 			if (!ps?.agentSessionFile) return false;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			const content = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return transcriptHasToolUse(content, toolUseId, t);
 		};
@@ -6465,7 +6465,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -6748,7 +6748,7 @@ async function handleApiRoute(
 		const extPs = sessionManager.getPersistedSession(extGuard.sessionId);
 		let extJsonl: string | null = null;
 		if (extPs?.agentSessionFile) {
-			const fsCtx: SessionFsContext = { sandboxed: extPs.sandboxed, projectId: extPs.projectId };
+			const fsCtx = sessionFsContextForAgentFile(extPs, extPs.agentSessionFile);
 			extJsonl = await sessionFileRead(fsCtx, extPs.agentSessionFile, sandboxManager);
 		}
 		if (extSessionToolCall) {
@@ -6853,7 +6853,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -10422,9 +10422,10 @@ async function handleApiRoute(
 		// worktree is ready, adopting this clone via switch_session.
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
 
-		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
 		try {
-			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -10910,8 +10911,8 @@ async function handleApiRoute(
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
 
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
-		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
-		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
@@ -11910,7 +11911,7 @@ async function handleApiRoute(
 				context: parseIntParam("context"),
 				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
 			};
-			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 			});
@@ -11986,7 +11987,7 @@ async function handleApiRoute(
 			}
 			return;
 		}
-		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+		const ctx2 = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 		try {
 			const envelope = await readOrphanedBeforeCompaction(
 				{ compactionId, cursor, limit, verbose },
