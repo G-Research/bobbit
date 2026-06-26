@@ -252,6 +252,13 @@ function workflowErrorMessageWithAvailable(error: GoalWorkflowValidationError | 
 	return `${error.message} Available workflows: ${ids.join(", ")}.`;
 }
 
+function failedGoalWorkflowId(error: GoalWorkflowValidationError | undefined): string | null {
+	if (!error) return null;
+	const fields = state.activeProposals.goal?.fields as { workflow?: unknown } | undefined;
+	if (typeof fields?.workflow === "string") return fields.workflow;
+	return error.workflowId ?? "";
+}
+
 function clearActiveGoalWorkflowValidationError(): void {
 	const slot = state.activeProposals.goal as any;
 	if (!slot?.workflowValidationError) return;
@@ -500,6 +507,7 @@ interface GoalFormConfig {
 
 	/** Draft-scoped workflow validation failure returned by propose_goal seed. */
 	workflowErrorMessage?: string;
+	workflowValidationFailed?: boolean;
 
 	// Field change callbacks
 	onTitleChange: (e: Event) => void;
@@ -963,7 +971,8 @@ function renderGoalForm(config: GoalFormConfig) {
 		: worktreePreviewPath(config.cwd, config.title);
 	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
 	const workflowInvalid = isWorkflowSelectionInvalid(config.workflowId, config.inlineWorkflow);
-	const workflowErrorMessage = config.workflowErrorMessage && workflowInvalid ? config.workflowErrorMessage : "";
+	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
+	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
 	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
 	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
@@ -1042,12 +1051,12 @@ function renderGoalForm(config: GoalFormConfig) {
 					<div class="flex items-center gap-2 md:shrink-0">
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
-							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowInvalid ? "border-[color:var(--negative)]" : "border-border"}"
+							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
 							.value=${config.workflowId}
-							aria-invalid=${workflowInvalid ? "true" : "false"}
+							aria-invalid=${workflowProblem ? "true" : "false"}
 							@change=${config.onWorkflowChange}
 						>
-							${workflowInvalid ? html`
+							${workflowProblem ? html`
 								<option value=${config.workflowId} ?selected=${true} disabled>
 									${config.workflowId ? `Unknown workflow: ${config.workflowId}` : "Select workflow"}
 								</option>
@@ -1229,7 +1238,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || workflowInvalid,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || workflowProblem,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 				</div>
@@ -1341,7 +1350,8 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? null;
 	const displayWf = inline ?? selectedLibrary;
 	const workflowInvalid = isWorkflowSelectionInvalid(selectedId, inline);
-	const workflowErrorMessage = config.workflowErrorMessage && workflowInvalid ? config.workflowErrorMessage : "";
+	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
+	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
 	return html`
 		<div class="flex-1 overflow-hidden flex flex-col min-h-0 min-w-0"
 			role="tabpanel"
@@ -1354,12 +1364,12 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
 						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
 						<select
-							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowInvalid ? "border-[color:var(--negative)]" : "border-border"}"
+							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
 							data-testid="goal-proposal-workflow-select"
 							.value=${selectedId}
-							aria-invalid=${workflowInvalid ? "true" : "false"}
+							aria-invalid=${workflowProblem ? "true" : "false"}
 							@change=${config.onWorkflowChange}>
-							${workflowInvalid ? html`
+							${workflowProblem ? html`
 								<option value=${selectedId} ?selected=${true} disabled>
 									${selectedId ? `Unknown workflow: ${selectedId}` : "Select workflow"}
 								</option>
@@ -1385,7 +1395,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 					</div>
 					<hr class="shrink-0 border-t border-border" />
 					<div class="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-3">
-						${workflowInvalid ? html`
+						${workflowProblem ? html`
 							<div class="rounded-md border p-3 text-sm" style="border-color: color-mix(in oklch, var(--negative) 45%, transparent); background: color-mix(in oklch, var(--negative) 8%, transparent); color: var(--negative);">
 								${workflowErrorMessage || (selectedId ? `Unknown workflow: ${selectedId}` : "Select a workflow before creating this goal.")}
 							</div>
@@ -1603,6 +1613,13 @@ function goalPreviewPanel() {
 	const maxNestingDepth = getSystemMaxNestingDepth();
 	const workflowValidationError = activeGoalWorkflowValidationError();
 	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
+	const failedWorkflowId = failedGoalWorkflowId(workflowValidationError);
+	const assistantWorkflowId = failedWorkflowId ?? _selectedWorkflowId;
+	const assistantWorkflowBlocked = !!workflowValidationError || isWorkflowSelectionInvalid(assistantWorkflowId, _proposalInlineWorkflow);
+	const setAssistantWorkflowId = (id: string) => {
+		_selectedWorkflowId = id;
+		if (isKnownWorkflowId(_selectedWorkflowId)) clearActiveGoalWorkflowValidationError();
+	};
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1621,6 +1638,11 @@ function goalPreviewPanel() {
 			return;
 		}
 
+		if (assistantWorkflowBlocked) {
+			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
+			return;
+		}
+
 		// Snapshot form state up-front so a retry after createGoal() rejection
 		// reads the latest values (the user may have edited the workflow id /
 		// title between attempts).
@@ -1630,7 +1652,7 @@ function goalPreviewPanel() {
 		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 			? _proposalInlineRoles as Record<string, unknown>
 			: undefined;
-		const workflowId = inlineWorkflowField ? undefined : (_selectedWorkflowId || undefined);
+		const workflowId = inlineWorkflowField ? undefined : (assistantWorkflowId || undefined);
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
@@ -1756,13 +1778,14 @@ function goalPreviewPanel() {
 				title: state.previewTitle,
 				spec: state.previewSpec,
 				cwd: state.previewCwd,
-				workflowId: _selectedWorkflowId,
+				workflowId: assistantWorkflowId,
 				sandboxed: _goalSandboxed,
 				specEditMode: state.previewSpecEditMode,
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
 				linkedProjectId: state.previewProjectId || undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
 				workflowErrorMessage,
+				workflowValidationFailed: !!workflowValidationError,
 				onOpenProjectAssistant: handleOpenProjectAssistant,
 				onTitleChange: (e: Event) => {
 					state.previewTitle = (e.target as HTMLInputElement).value;
@@ -1803,7 +1826,7 @@ function goalPreviewPanel() {
 					renderApp();
 				},
 				onWorkflowChange: (e: Event) => {
-					_selectedWorkflowId = (e.target as HTMLSelectElement).value;
+					setAssistantWorkflowId((e.target as HTMLSelectElement).value);
 					_proposalInlineWorkflow = null;
 					_proposalCustomizingWorkflow = false;
 					clearWorkflowEditorController();
@@ -1835,6 +1858,7 @@ function goalPreviewPanel() {
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
 				createDisabled: (() => {
+					if (assistantWorkflowBlocked) return true;
 					if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 						const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
 						if (pDepth + 1 > maxNestingDepth) return true;
@@ -1858,7 +1882,7 @@ function goalPreviewPanel() {
 				maxConcurrentChildrenValue: _proposalMaxConcurrentChildren,
 				onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
 				onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
-				...goalProposalTabsConfig(_selectedWorkflowId, (id) => { _selectedWorkflowId = id; }),
+				...goalProposalTabsConfig(assistantWorkflowId, setAssistantWorkflowId),
 			})}
 		</div>
 	`;
@@ -3458,7 +3482,7 @@ function goalProposalPanel() {
 			);
 			return;
 		}
-		if (workflowInvalid) {
+		if (workflowInvalid || !!workflowValidationError) {
 			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
 			return;
 		}
@@ -3626,6 +3650,7 @@ function goalProposalPanel() {
 		linkedProjectId: state.previewProjectId || undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
 		workflowErrorMessage,
+		workflowValidationFailed: !!workflowValidationError,
 		onOpenProjectAssistant: handleOpenProjectAssistant,
 		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
@@ -3662,7 +3687,7 @@ function goalProposalPanel() {
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
 		createDisabled: (() => {
-			if (!_proposalTitle.trim() || _proposalSaving || workflowInvalid) return true;
+			if (!_proposalTitle.trim() || _proposalSaving || workflowInvalid || !!workflowValidationError) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
 			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 				const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
