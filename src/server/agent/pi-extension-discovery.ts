@@ -3,13 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
-import {
-	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
-	makePiExtensionDiagnostic,
-	type PiExtensionDiagnostic,
-	type PiExtensionDiscoveryResult,
-	type PiExtensionToolInfo,
+import type {
+	PiExtensionDiagnostic,
+	PiExtensionDiscoveryResult,
+	PiExtensionToolInfo,
 } from "./pi-extension-contributions.js";
 
 export interface DiscoverPiExtensionToolsOptions {
@@ -23,8 +20,14 @@ const MAX_OUTPUT_BYTES = 128 * 1024;
 const RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
 const require = createRequire(import.meta.url);
 
+type PiExtensionContributionsModule = typeof import("./pi-extension-contributions.js");
+
+function contributionsModule(): PiExtensionContributionsModule {
+	return require("./pi-extension-contributions.js") as PiExtensionContributionsModule;
+}
+
 function diagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
-	return makePiExtensionDiagnostic(status, code, message);
+	return contributionsModule().makePiExtensionDiagnostic(status, code, message);
 }
 
 function skipped(cacheKey?: string): PiExtensionDiscoveryResult {
@@ -53,36 +56,25 @@ function ok(tools: PiExtensionToolInfo[], cacheKey?: string): PiExtensionDiscove
 	};
 }
 
-function absolutizeNodeFlagValue(flag: string, value: string): string {
-	// Unit tests often run under tsx via a relative --import/--loader hook. The
-	// probe process intentionally runs from an empty temp cwd, so relative hook
-	// paths must be anchored to the parent process cwd before forwarding them.
-	if ((flag === "--import" || flag === "--loader" || flag === "--experimental-loader" || flag === "--require" || flag === "-r")
-		&& value.startsWith(".") && !value.startsWith("data:") && !value.startsWith("node:")) {
-		const absolute = path.resolve(process.cwd(), value);
-		return (flag === "--import" || flag === "--loader" || flag === "--experimental-loader")
-			? pathToFileURL(absolute).href
-			: absolute;
-	}
-	return value;
-}
-
 function safeExecArgv(argv: readonly string[]): string[] {
 	const out: string[] = [];
-	const flagsWithValue = new Set(["--require", "-r", "--import", "--loader", "--experimental-loader", "--conditions", "-C"]);
-	const safePrefixes = ["--require=", "--import=", "--loader=", "--experimental-loader=", "--conditions="];
+	const flagsWithValue = new Set(["--conditions", "-C"]);
+	const safePrefixes = ["--conditions="];
+	// The probe imports only generated .mjs files. Forwarding parent loader hooks
+	// (tsx/playwright transform caches, --require shims, etc.) can make a built
+	// E2E probe execute CommonJS-shaped helper JS inside Bobbit's ESM package and
+	// fail before our probe script runs.
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
 		const prefix = safePrefixes.find((p) => arg.startsWith(p));
 		if (prefix) {
-			const flag = prefix.slice(0, -1);
-			out.push(prefix + absolutizeNodeFlagValue(flag, arg.slice(prefix.length)));
+			out.push(arg);
 			continue;
 		}
 		if (flagsWithValue.has(arg)) {
 			const value = argv[i + 1];
 			if (typeof value === "string") {
-				out.push(arg, absolutizeNodeFlagValue(arg, value));
+				out.push(arg, value);
 				i++;
 			}
 		}
@@ -112,6 +104,10 @@ function boundedAppend(current: string, chunk: Buffer): string {
 function sanitizeMessage(value: unknown): string {
 	const raw = value instanceof Error ? value.message : String(value ?? "unknown error");
 	return raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 1000) || "unknown error";
+}
+
+function isUnsettledTopLevelAwaitOutput(output: string): boolean {
+	return /unsettled top-level await/i.test(output);
 }
 
 function parseProbeResult(stdout: string): { status: "ok"; tools: PiExtensionToolInfo[] } | { status: "failed"; code: string; message: string } | null {
@@ -167,15 +163,26 @@ function transpileTypeScriptEntry(entryPath: string, outFile: string): void {
 	const source = fs.readFileSync(entryPath, "utf-8");
 	try {
 		const ts = require("typescript") as typeof import("typescript");
+		const moduleResolution = (ts.ModuleResolutionKind as any).Bundler
+			?? (ts.ModuleResolutionKind as any).Node10
+			?? (ts.ModuleResolutionKind as any).NodeJs;
 		const result = ts.transpileModule(source, {
-			fileName: entryPath,
+			// The probe entry is written as .mjs. Do not let NodeNext resolution infer
+			// CommonJS from an extension.ts file living in a pack without package.json
+			// "type":"module"; that emits `exports.default = ...` into entry.mjs.
+			fileName: entryPath.replace(/\.tsx?$/i, ".mts"),
 			compilerOptions: {
-				module: ts.ModuleKind.ESNext,
+				module: (ts.ModuleKind as any).ES2022 ?? ts.ModuleKind.ESNext,
 				target: ts.ScriptTarget.ES2022,
 				esModuleInterop: true,
-				moduleResolution: ts.ModuleResolutionKind.NodeNext,
+				allowSyntheticDefaultImports: true,
+				isolatedModules: true,
+				moduleResolution,
 			},
 		});
+		if (/Object\.defineProperty\(exports,\s*["']__esModule/.test(result.outputText) || /^\s*exports\./m.test(result.outputText) || /\bmodule\.exports\s*=/.test(result.outputText)) {
+			throw new Error("TypeScript fallback produced CommonJS output for an ESM probe entry.");
+		}
 		fs.writeFileSync(outFile, result.outputText, "utf-8");
 		return;
 	} catch {
@@ -280,7 +287,7 @@ try {
 }
 
 export async function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions): Promise<PiExtensionDiscoveryResult> {
-	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	const cache = contributionsModule().computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
 	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
 	const cacheKey = cache.cacheKey;
 	if (!opts.trustAccepted) return skipped(cacheKey);
@@ -300,6 +307,7 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {
+			if (isUnsettledTopLevelAwaitOutput(result.stderr || result.stdout)) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 			const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
 			return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
 		}
@@ -313,7 +321,7 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 }
 
 export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryResult {
-	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	const cache = contributionsModule().computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
 	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
 	const cacheKey = cache.cacheKey;
 	if (!opts.trustAccepted) return skipped(cacheKey);
@@ -333,6 +341,7 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
 		if (!parsed) {
+			if (isUnsettledTopLevelAwaitOutput(result.stderr || result.stdout)) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 			const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
 			return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
 		}
