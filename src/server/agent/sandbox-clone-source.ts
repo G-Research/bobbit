@@ -25,6 +25,10 @@
  *   origin to fall back to the mounted project repo.
  */
 
+import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { stripTokenFromGitUrl } from "../skills/git.js";
 
 /** Fixed container-internal mount point for the remote-less bind-mount source. */
@@ -35,6 +39,126 @@ export const MOUNTED_SRC_CLONE_URL = "file:///workspace-src";
 export type SandboxCloneSource =
 	| { kind: "remote"; cloneUrl: string }
 	| { kind: "mounted"; hostPath: string; mountPath: string; cloneUrl: string };
+
+const SANITIZED_CLONE_SOURCE_VERSION = "v1";
+const UNSAFE_CLONE_SOURCE_SEGMENTS = new Set([".bobbit"]);
+
+function isUnsafeCloneSourcePath(gitPath: string): boolean {
+	const parts = gitPath.split("/").filter(Boolean);
+	return parts.some((part) => UNSAFE_CLONE_SOURCE_SEGMENTS.has(part) || part.toLowerCase() === "auth.json");
+}
+
+function slugForPathPart(value: string): string {
+	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "repo";
+}
+
+function runGit(repoPath: string, args: string[], options: { encoding: "utf8" } | { encoding: "buffer" }): string | Buffer {
+	return execFileSync("git", args, {
+		cwd: repoPath,
+		encoding: options.encoding,
+		maxBuffer: 256 * 1024 * 1024,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+function tryGit(repoPath: string, args: string[]): string | null {
+	try {
+		return String(runGit(repoPath, args, { encoding: "utf8" })).trim() || null;
+	} catch {
+		return null;
+	}
+}
+
+function validateBranchName(branch: string | null): string {
+	const candidate = branch || "master";
+	try {
+		execFileSync("git", ["check-ref-format", "--branch", candidate], { stdio: "ignore" });
+		return candidate;
+	} catch {
+		return "master";
+	}
+}
+
+function safeWritePath(root: string, gitPath: string): string {
+	const target = path.resolve(root, ...gitPath.split("/"));
+	const rel = path.relative(root, target);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) {
+		throw new Error(`[sandbox] refusing unsafe path in sanitized clone source: ${gitPath}`);
+	}
+	return target;
+}
+
+/**
+ * Build a temporary git clone source for remote-less sandbox bootstraps.
+ *
+ * The sandbox must clone from `file://<mountPath>` for remote-less projects, but
+ * bind-mounting the project root exposes project-local private state such as
+ * `<projectRoot>/.bobbit/agent/auth.json`. This helper creates a fresh, minimal
+ * git repository containing only safe tracked HEAD content. It deliberately
+ * excludes every `.bobbit/` subtree and every `auth.json`, then commits the
+ * sanitized snapshot into a new local repository whose object database contains
+ * only those copied files.
+ */
+export function prepareSanitizedSandboxCloneSource(opts: {
+	repoPath: string;
+	stateDir: string;
+	key?: string;
+}): string {
+	const repoPath = path.resolve(opts.repoPath);
+	const stateDir = path.resolve(opts.stateDir);
+	const head = tryGit(repoPath, ["rev-parse", "--verify", "HEAD"]);
+	const sourceId = `${SANITIZED_CLONE_SOURCE_VERSION}\0${repoPath}\0${opts.key ?? ""}\0${head ?? "empty"}`;
+	const hash = crypto.createHash("sha256").update(sourceId).digest("hex").slice(0, 16);
+	const dest = path.join(stateDir, "sandbox-clone-sources", `${slugForPathPart(opts.key ?? path.basename(repoPath))}-${hash}`);
+
+	if (fs.existsSync(path.join(dest, ".git"))) return dest;
+
+	const staging = `${dest}.tmp-${process.pid}-${Date.now()}`;
+	fs.rmSync(staging, { recursive: true, force: true });
+	fs.mkdirSync(staging, { recursive: true });
+	try {
+		if (head) {
+			const tree = runGit(repoPath, ["ls-tree", "-r", "-z", "--full-tree", head], { encoding: "buffer" }) as Buffer;
+			for (const rawEntry of tree.toString("utf8").split("\0")) {
+				if (!rawEntry) continue;
+				const tab = rawEntry.indexOf("\t");
+				if (tab < 0) continue;
+				const meta = rawEntry.slice(0, tab).split(" ");
+				const gitPath = rawEntry.slice(tab + 1);
+				const [mode, type, object] = meta;
+				if (type !== "blob" || !object || isUnsafeCloneSourcePath(gitPath)) continue;
+
+				const target = safeWritePath(staging, gitPath);
+				fs.mkdirSync(path.dirname(target), { recursive: true });
+				const content = runGit(repoPath, ["cat-file", "blob", object], { encoding: "buffer" }) as Buffer;
+				if (mode === "120000" && process.platform !== "win32") {
+					fs.symlinkSync(content.toString("utf8"), target);
+				} else {
+					fs.writeFileSync(target, content);
+					if (mode === "100755") fs.chmodSync(target, 0o755);
+				}
+			}
+		}
+
+		execFileSync("git", ["init"], { cwd: staging, stdio: "ignore" });
+		const branch = validateBranchName(tryGit(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]));
+		execFileSync("git", ["checkout", "-B", branch], { cwd: staging, stdio: "ignore" });
+		execFileSync("git", ["add", "-A"], { cwd: staging, stdio: "ignore" });
+		execFileSync("git", [
+			"-c", "user.name=Bobbit",
+			"-c", "user.email=bobbit@bobbit.ai",
+			"commit", "--allow-empty", "-m", "Sanitized sandbox clone source",
+		], { cwd: staging, stdio: "ignore" });
+
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* a previous mounted source may still be in use */ }
+		fs.renameSync(staging, dest);
+		return dest;
+	} catch (err) {
+		fs.rmSync(staging, { recursive: true, force: true });
+		throw err;
+	}
+}
 
 /**
  * URL-scheme network remote git can reach from inside the container.

@@ -308,7 +308,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
-import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
+import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
@@ -2382,8 +2382,9 @@ export function createGateway(config: GatewayConfig) {
 				// they don't leak into .git/config — the container's credential helper
 				// reads GITHUB_TOKEN from env instead). Without one, the canonical main
 				// repo root (resolved via `resolveSandboxMountRoot`, which handles linked
-				// worktrees) is bind-mounted read-only and cloned via `file://`. A LOCAL
-				// origin throws here — propagating through the awaited bootstrap so
+				// worktrees) is copied into a sanitized git source (excluding `.bobbit/` and
+				// `auth.json`) before that source is bind-mounted read-only and cloned via
+				// `file://`. A LOCAL origin throws here — propagating through the awaited bootstrap so
 				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
@@ -2393,8 +2394,16 @@ export function createGateway(config: GatewayConfig) {
 						return null;
 					}
 				};
-				const mountSourcePath = await resolveSandboxMountRoot(repoPath);
-				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), mountSourcePath });
+				const sandboxStateDir = path.join(projectDir, ".bobbit", "state");
+				const originUrl = await resolveOrigin(repoPath);
+				const mountSourcePath = originUrl
+					? await resolveSandboxMountRoot(repoPath)
+					: prepareSanitizedSandboxCloneSource({
+						repoPath: await resolveSandboxMountRoot(repoPath),
+						stateDir: sandboxStateDir,
+						key: "root",
+					});
+				const cloneSource = resolveSandboxCloneSource({ originUrl, mountSourcePath });
 				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
@@ -2430,13 +2439,22 @@ export function createGateway(config: GatewayConfig) {
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
 						// Same resolution as the single-repo path: never fall back to a
-						// raw host path. Remote-less repos bind-mount their canonical main
-						// repo root (resolved via `resolveSandboxMountRoot`, which handles
-						// linked worktrees) at a per-repo container mount path and clone
-						// via `file://`. A local origin throws (caller's awaited boundary).
-						const perRepoMountSource = await resolveSandboxMountRoot(rp);
+						// raw host path. Remote-less repos copy their canonical main repo
+						// root (resolved via `resolveSandboxMountRoot`, which handles linked
+						// worktrees) into a sanitized git source, then bind-mount that source
+						// at a per-repo container mount path and clone via `file://`. A local
+						// origin throws (caller's awaited boundary).
+						const perRepoOriginUrl = await resolveOrigin(rp);
+						const perRepoMountRoot = await resolveSandboxMountRoot(rp);
+						const perRepoMountSource = perRepoOriginUrl
+							? perRepoMountRoot
+							: prepareSanitizedSandboxCloneSource({
+								repoPath: perRepoMountRoot,
+								stateDir: sandboxStateDir,
+								key: c.repo,
+							});
 						const perRepoSrc = resolveSandboxCloneSource({
-							originUrl: await resolveOrigin(rp),
+							originUrl: perRepoOriginUrl,
 							mountSourcePath: perRepoMountSource,
 							mountPath: `/workspace-src/${c.repo}`,
 						});
