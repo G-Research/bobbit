@@ -1601,6 +1601,8 @@ function goalPreviewPanel() {
 	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
+	const workflowValidationError = activeGoalWorkflowValidationError();
+	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1760,6 +1762,7 @@ function goalPreviewPanel() {
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
 				linkedProjectId: state.previewProjectId || undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
+				workflowErrorMessage,
 				onOpenProjectAssistant: handleOpenProjectAssistant,
 				onTitleChange: (e: Event) => {
 					state.previewTitle = (e.target as HTMLInputElement).value;
