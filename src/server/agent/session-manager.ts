@@ -79,7 +79,7 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
-import { activeAgentSessionsDir, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
@@ -139,9 +139,10 @@ function safePersistedHostAgentSessionFile(filePath: string | undefined): string
 	return resolveReadablePersistedAgentSessionFile(filePath);
 }
 
-function switchSessionPathForAgent(ps: PersistedSession): string {
+export function switchSessionPathForAgent(ps: PersistedSession): string {
 	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
-	return hostPathToContainer(ps.agentSessionFile);
+	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
+	return hostPathToContainer(mountedHostPath);
 }
 
 export interface ArchivedSessionWorktreeScanResponse {

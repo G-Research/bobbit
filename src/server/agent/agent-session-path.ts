@@ -14,6 +14,7 @@
  * `^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)` for round-trip verification.
  */
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as BobbitDir from "../bobbit-dir.js";
@@ -76,6 +77,34 @@ export function trustedAgentSessionsRoots(): string[] {
 	for (const dir of configuredAgentDirHistory()) pushUniquePath(roots, path.join(dir, "sessions"));
 	for (const dir of legacyAgentDirs()) pushUniquePath(roots, path.join(dir, "sessions"));
 	return roots;
+}
+
+function relativePathInside(root: string, candidate: string): string | null {
+	const relative = path.relative(normalizeHostPath(root), normalizeHostPath(candidate));
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+	return relative;
+}
+
+/**
+ * If `hostSessionFile` points at an old/historical agent sessions root and the
+ * same relative transcript exists under the active sessions root, return that
+ * active host path. Sandboxed agents can only see the active sessions mount, but
+ * Bobbit keeps the persisted historical path authoritative for host-side reads.
+ */
+export function migratedActiveAgentSessionFileForHostPath(hostSessionFile: string): string | null {
+	const activeRoot = activeAgentSessionsDir();
+	for (const historicalRoot of trustedAgentSessionsRoots()) {
+		if (normalizeHostPath(historicalRoot) === normalizeHostPath(activeRoot)) continue;
+		const relative = relativePathInside(historicalRoot, hostSessionFile);
+		if (!relative) continue;
+		const activeCandidate = path.join(activeRoot, relative);
+		try {
+			if (fs.lstatSync(activeCandidate).isFile()) return activeCandidate.replace(/\\/g, "/");
+		} catch {
+			return null;
+		}
+	}
+	return null;
 }
 
 /**
