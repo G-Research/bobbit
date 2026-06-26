@@ -9,7 +9,6 @@ import path from "node:path";
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
@@ -55,6 +54,7 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surfa
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -99,8 +99,6 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
-
-const requireServerModule = createRequire(import.meta.url);
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -459,19 +457,8 @@ export function buildMarketToolRootsForProject(options: {
 	return roots;
 }
 
-type LoadPiExtensionContributions = (packRoot: string, manifest: NonNullable<PackEntry["manifest"]>) => ResolvedPiExtensionContribution[];
-type LoadPiExtensionContributionsWithDiscoverySync = (
-	packRoot: string,
-	manifest: NonNullable<PackEntry["manifest"]>,
-	opts: { trustAccepted: boolean; origin?: Partial<ResolvedPiExtensionContribution["origin"]>; disabledRefs?: Iterable<string> },
-) => ResolvedPiExtensionContribution[];
-
 function loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: NonNullable<PackEntry["manifest"]>): ResolvedPiExtensionContribution[] {
-	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributions?: LoadPiExtensionContributions };
-	if (typeof mod.loadPiExtensionContributions !== "function") {
-		throw new Error("pi-extension-contributions loader is unavailable");
-	}
-	return mod.loadPiExtensionContributions(packRoot, manifest);
+	return loadPiExtensionContributions(packRoot, manifest);
 }
 
 function loadPiExtensionContributionsWithDiscoverySyncFromRuntime(
@@ -479,11 +466,7 @@ function loadPiExtensionContributionsWithDiscoverySyncFromRuntime(
 	manifest: NonNullable<PackEntry["manifest"]>,
 	opts: { trustAccepted: boolean; origin?: Partial<ResolvedPiExtensionContribution["origin"]>; disabledRefs?: Iterable<string> },
 ): ResolvedPiExtensionContribution[] {
-	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributionsWithDiscoverySync?: LoadPiExtensionContributionsWithDiscoverySync };
-	if (typeof mod.loadPiExtensionContributionsWithDiscoverySync !== "function") {
-		throw new Error("pi-extension-contributions sync discovery loader is unavailable");
-	}
-	return mod.loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest, opts);
+	return loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest, opts);
 }
 
 function piExtensionDiagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
