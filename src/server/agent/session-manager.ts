@@ -18,7 +18,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
@@ -123,13 +123,6 @@ function isContainerAgentSessionPath(filePath: string): boolean {
 function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
 	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
 	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
-}
-
-function sessionFsContextForAgentFile(ps: PersistedSession, filePath: string | undefined): SessionFsContext {
-	return {
-		sandboxed: !!ps.sandboxed && !isHostAbsoluteAgentSessionPath(filePath),
-		projectId: ps.projectId,
-	};
 }
 
 function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {

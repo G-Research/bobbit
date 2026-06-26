@@ -12,8 +12,12 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { containerPathToHost } from "./rpc-bridge.js";
 import type { SandboxManager } from "./sandbox-manager.js";
+
+async function containerPathToHostLazy(filePath: string): Promise<string> {
+	const { containerPathToHost } = await import("./rpc-bridge.js");
+	return containerPathToHost(filePath);
+}
 
 /**
  * Thrown by `sessionFileCopy` when the (src, dst) sandbox/project realms
@@ -33,6 +37,30 @@ export class CrossRealmCopyError extends Error {
 export interface SessionFsContext {
 	sandboxed?: boolean;
 	projectId?: string;
+}
+
+function isWindowsAbsolutePath(filePath: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function isContainerAgentSessionPath(filePath: string): boolean {
+	const normalized = filePath.replace(/\\/g, "/");
+	return normalized === "/home/node/.bobbit/agent/sessions"
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
+		|| normalized === "/bobbit-state/sessions"
+		|| normalized.startsWith("/bobbit-state/sessions/");
+}
+
+function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
+	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
+	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
+}
+
+export function sessionFsContextForAgentFile(ps: Pick<SessionFsContext, "sandboxed" | "projectId">, filePath: string | undefined): SessionFsContext {
+	return {
+		sandboxed: !!ps.sandboxed && !isHostAbsoluteAgentSessionPath(filePath),
+		projectId: ps.projectId,
+	};
 }
 
 /**
@@ -78,7 +106,7 @@ export async function sessionFileExists(
 	}
 
 	// Fallback: translate container path → host path
-	const hostPath = containerPathToHost(filePath);
+	const hostPath = await containerPathToHostLazy(filePath);
 	if (hostPath === filePath) {
 		// No mount mapping found — can't translate, give up
 		return false;
@@ -133,7 +161,7 @@ export async function sessionFileRead(
 	}
 
 	// Fallback: translate container path → host path
-	const hostPath = containerPathToHost(filePath);
+	const hostPath = await containerPathToHostLazy(filePath);
 	if (hostPath === filePath) {
 		// No mount mapping found — can't translate
 		return null;
@@ -243,7 +271,7 @@ export async function sessionFileDelete(
 	}
 
 	// Fallback: translate container path → host path
-	const hostPath = containerPathToHost(filePath);
+	const hostPath = await containerPathToHostLazy(filePath);
 	if (hostPath === filePath) {
 		// No mount mapping found — can't translate
 		return false;
