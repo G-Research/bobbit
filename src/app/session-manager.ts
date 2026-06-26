@@ -53,7 +53,7 @@ import {
 } from "./proposal-helpers.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { shouldApplyProposalUpdate } from "./proposal-update-policy.js";
-import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type GoalWorkflowValidationError, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	activePanelTabIdForSession,
@@ -240,6 +240,47 @@ function liveProposalSlotForSession(type: ProposalType, sessionId: string): Prop
 	if (!slot) return undefined;
 	if (slot.sessionId && slot.sessionId !== sessionId) return undefined;
 	return slot;
+}
+
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function workflowValidationErrorFromSlot(slot: ProposalSlot | undefined): GoalWorkflowValidationError | undefined {
+	return (slot as any)?.workflowValidationError;
+}
+
+function workflowValidationErrorFromDetail(value: unknown): GoalWorkflowValidationError | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const raw = value as Record<string, unknown>;
+	if (raw.code !== "MISSING_WORKFLOW" && raw.code !== "UNKNOWN_WORKFLOW") return undefined;
+	const message = typeof raw.message === "string" && raw.message.trim()
+		? raw.message.trim()
+		: raw.code === "MISSING_WORKFLOW"
+			? "Workflow is required for this project."
+			: "Unknown workflow for this project.";
+	const workflowId = typeof raw.workflowId === "string" ? raw.workflowId : undefined;
+	const availableWorkflows = Array.isArray(raw.availableWorkflows)
+		? raw.availableWorkflows
+			.map((workflow) => {
+				if (typeof workflow === "string" && workflow.trim()) return { id: workflow.trim() };
+				if (!workflow || typeof workflow !== "object") return null;
+				const id = typeof (workflow as any).id === "string" ? (workflow as any).id.trim() : "";
+				if (!id) return null;
+				const name = typeof (workflow as any).name === "string" && (workflow as any).name.trim()
+					? (workflow as any).name.trim()
+					: undefined;
+				return name ? { id, name } : { id };
+			})
+			.filter((workflow): workflow is { id: string; name?: string } => !!workflow)
+		: undefined;
+	return {
+		code: raw.code,
+		message,
+		...(workflowId !== undefined ? { workflowId } : {}),
+		...(availableWorkflows && availableWorkflows.length > 0 ? { availableWorkflows } : {}),
+	};
 }
 
 function hasObjectFields(value: unknown): value is Record<string, unknown> {
@@ -1874,6 +1915,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const nextRev = hasServerRev
 				? Math.max(Math.trunc(serverRev as number), prevRev)
 				: prevRev;
+			const preservedWorkflowValidation = type === "goal" && !hasServerRev && sameProposalFields(prev?.fields, merged)
+				? workflowValidationErrorFromSlot(prev)
+				: undefined;
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
@@ -1882,6 +1926,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					? (prev?.mode ?? resolveProjectMode(sessionId))
 					: undefined,
 				rev: nextRev,
+				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),
 			};
 			state.activeProposals[type] = slot;
 			state.assistantHasProposal = true;
@@ -1940,6 +1985,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields, rev } = ce.detail || {};
 			if (!type || !isProposalType(type)) return;
+			const workflowValidationError = type === "goal"
+				? workflowValidationErrorFromDetail((ce.detail as any)?.workflowValidationError)
+				: undefined;
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
@@ -1966,6 +2014,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					remote.onProposal(type, liveFields, false, liveRev, "tool");
 				}
 			};
+			const openFailedGoalSnapshot = (failedFields: Record<string, unknown>, error: GoalWorkflowValidationError) => {
+				const failedSlot = (): ProposalSlot => ({
+					sessionId,
+					fields: { ...failedFields },
+					streaming: false,
+					rev: 0,
+					workflowValidationError: error,
+				});
+				state.activeProposals.goal = failedSlot();
+				state.assistantHasProposal = true;
+				revealActiveProposalPanel("goal", sessionId);
+				const cb = callbackMap.goal;
+				if (cb) cb(failedFields, /* streaming */ false);
+				state.activeProposals.goal = failedSlot();
+				state.assistantHasProposal = true;
+				renderApp();
+			};
+
+			if (!numericRev && type === "goal" && proposalFields && workflowValidationError) {
+				openFailedGoalSnapshot(proposalFields, workflowValidationError);
+				return;
+			}
 
 			if (numericRev) {
 				const activeSlot = state.activeProposals[type];
