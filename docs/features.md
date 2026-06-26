@@ -12,6 +12,10 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 - **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).
 - **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
 
+## Maintenance
+
+Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Archived Session Worktrees reclaim archived-session git checkouts and safe branches while preserving archives, transcripts, and proposals; related cards cover orphaned worktrees, orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md).
+
 ## Goals
 
 Goals are a task-tracking layer on top of sessions. A goal has a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`).
