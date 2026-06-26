@@ -460,11 +460,11 @@ export function buildMarketToolRootsForProject(options: {
 }
 
 type LoadPiExtensionContributions = (packRoot: string, manifest: NonNullable<PackEntry["manifest"]>) => ResolvedPiExtensionContribution[];
-type LoadPiExtensionContributionsWithDiscovery = (
+type LoadPiExtensionContributionsWithDiscoverySync = (
 	packRoot: string,
 	manifest: NonNullable<PackEntry["manifest"]>,
 	opts: { trustAccepted: boolean; origin?: Partial<ResolvedPiExtensionContribution["origin"]>; disabledRefs?: Iterable<string> },
-) => Promise<ResolvedPiExtensionContribution[]>;
+) => ResolvedPiExtensionContribution[];
 
 function loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: NonNullable<PackEntry["manifest"]>): ResolvedPiExtensionContribution[] {
 	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributions?: LoadPiExtensionContributions };
@@ -474,16 +474,16 @@ function loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: Non
 	return mod.loadPiExtensionContributions(packRoot, manifest);
 }
 
-function loadPiExtensionContributionsWithDiscoveryFromRuntime(
+function loadPiExtensionContributionsWithDiscoverySyncFromRuntime(
 	packRoot: string,
 	manifest: NonNullable<PackEntry["manifest"]>,
 	opts: { trustAccepted: boolean; origin?: Partial<ResolvedPiExtensionContribution["origin"]>; disabledRefs?: Iterable<string> },
-): Promise<ResolvedPiExtensionContribution[]> {
-	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributionsWithDiscovery?: LoadPiExtensionContributionsWithDiscovery };
-	if (typeof mod.loadPiExtensionContributionsWithDiscovery !== "function") {
-		throw new Error("pi-extension-contributions discovery loader is unavailable");
+): ResolvedPiExtensionContribution[] {
+	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributionsWithDiscoverySync?: LoadPiExtensionContributionsWithDiscoverySync };
+	if (typeof mod.loadPiExtensionContributionsWithDiscoverySync !== "function") {
+		throw new Error("pi-extension-contributions sync discovery loader is unavailable");
 	}
-	return mod.loadPiExtensionContributionsWithDiscovery(packRoot, manifest, opts);
+	return mod.loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest, opts);
 }
 
 function piExtensionDiagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
@@ -1665,6 +1665,13 @@ export function createGateway(config: GatewayConfig) {
 		}
 		return contributions;
 	};
+	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
+		if (entry.scope === "builtin") return true;
+		const sourceUrl = entry.meta?.sourceUrl;
+		if (!sourceUrl) return true;
+		const source = marketplaceSourceStore.getByUrl(sourceUrl);
+		return typeof source?.trustedAt === "string" && source.trustedAt.trim().length > 0;
+	};
 	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
 		const contributions: ResolvedPiExtensionContribution[] = [];
 		const projectId = scope.projectId;
@@ -1681,6 +1688,7 @@ export function createGateway(config: GatewayConfig) {
 				...(entry.meta?.sourceUrl ? { sourceUrl: entry.meta.sourceUrl } : {}),
 			};
 			try {
+				const trustAccepted = marketplacePiExtensionDiscoveryTrusted(entry);
 				const staticRows = loadPiExtensionContributionsFromRuntime(entry.path, manifest).map((piExtension) => {
 					if (disabled.has(piExtension.listName)) {
 						return {
@@ -1697,30 +1705,22 @@ export function createGateway(config: GatewayConfig) {
 					entry.id,
 					path.resolve(entry.path),
 					entry.meta?.updatedAt ?? entry.meta?.installedAt ?? "",
+					entry.meta?.sourceUrl ?? "",
+					trustAccepted ? "trusted" : "untrusted",
 					[...disabled].sort().join(","),
-					staticRows.map((row) => `${row.listName}:${row.entryPath ?? ""}:${row.discovery?.cacheKey ?? ""}`).join("|"),
+					staticRows.map((row) => `${row.listName}:${row.entryPath ?? ""}:${row.discovery?.cacheKey ?? ""}:${row.discovery?.diagnostic?.code ?? ""}`).join("|"),
 				].join("\0");
 				let rows = piExtensionDiscoveryCache.get(discoveryKey)?.rows;
 				if (!rows) {
-					rows = staticRows;
-					const cacheEntry = piExtensionDiscoveryCache.get(discoveryKey);
-					const shouldProbe = staticRows.some((row) => row.entryPath && row.diagnostic.status !== "disabled" && row.diagnostic.status !== "unresolved");
-					if (shouldProbe && !cacheEntry?.pending) {
-						const pending = loadPiExtensionContributionsWithDiscoveryFromRuntime(entry.path, manifest, {
-							trustAccepted: true,
+					const shouldResolveDiscovery = staticRows.some((row) => row.entryPath && row.diagnostic.status !== "disabled" && row.diagnostic.status !== "unresolved" && row.discovery.status !== "failed");
+					rows = shouldResolveDiscovery
+						? loadPiExtensionContributionsWithDiscoverySyncFromRuntime(entry.path, manifest, {
+							trustAccepted,
 							origin,
 							disabledRefs: disabled,
-						}).then((discovered) => {
-							const cache = piExtensionDiscoveryCache.get(discoveryKey);
-							if (cache) cache.rows = discovered;
-							toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools([...contributions, ...discovered]));
-							return discovered;
-						}).catch((err) => {
-							console.warn(`[pi-extension] discovery failed for Marketplace pack ${manifest.name}:`, (err as Error).message);
-							return staticRows;
-						});
-						piExtensionDiscoveryCache.set(discoveryKey, { pending });
-					}
+						})
+						: staticRows;
+					piExtensionDiscoveryCache.set(discoveryKey, { rows });
 				}
 				for (const resolved of rows) {
 					if (!resolved.entryPath || resolved.diagnostic.status === "unresolved") {

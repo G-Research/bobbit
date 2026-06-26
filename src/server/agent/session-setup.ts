@@ -95,7 +95,7 @@ export interface MarketplacePiExtensionActivation {
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved", "remap-failed"]);
 
-function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
+export function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
 	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
 	return { ...(projectId ? { projectId } : {}), ...(cwd ? { cwd } : {}), scopeKey };
 }
@@ -901,11 +901,11 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	applyDisabledToolsFilter(plan, disabledTools);
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
+	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
-	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 

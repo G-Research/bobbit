@@ -938,6 +938,7 @@ export function writeMcpProxyExtensions(
 	toolManager?: ToolManager,
 	groupPolicyStore?: GroupPolicyProvider,
 	disabledTools?: ReadonlySet<string>,
+	scopedContext?: ScopedToolContext,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -963,6 +964,7 @@ export function writeMcpProxyExtensions(
 		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
+		toolScopeKey: scopedContext?.scopeKey ?? "default",
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 	const cachedPaths = mcpProxyCache.get(cacheKey);
@@ -1038,10 +1040,10 @@ export function writeMcpProxyExtensions(
 
 		// Double-check policy: skip 'never' tools explicitly
 		if (role || toolManager || groupPolicyStore) {
-			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 			if (isNeverPolicy(p)) continue;
 			const metaName = makeMetaToolName(parsed.server, parsed.sub);
-			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore);
+			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore, scopedContext);
 			if (isNeverPolicy(sp)) continue;
 		}
 
