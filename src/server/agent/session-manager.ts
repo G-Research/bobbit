@@ -8044,7 +8044,23 @@ export class SessionManager {
 			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
 			const TOLERANCE_MS = 60_000;
 
-			for (const sessionsDir of trustedAgentSessionsRoots()) {
+			const sessionRoots = trustedAgentSessionsRoots();
+
+			// Prefer an exact filename/session-id match across all known roots before
+			// falling back to timestamp proximity. This preserves historical-root
+			// recovery when another root has a different session with the same createdAt.
+			for (const sessionsDir of sessionRoots) {
+				const cwdDir = path.join(sessionsDir, cwdSlug);
+				if (!fs.existsSync(cwdDir)) continue;
+				const exactFile = fs.readdirSync(cwdDir).find(f => f.endsWith(`_${ps.id}.jsonl`));
+				if (exactFile) {
+					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
+					trustPersistedAgentSessionFile(recovered);
+					return recovered;
+				}
+			}
+
+			for (const sessionsDir of sessionRoots) {
 				const cwdDir = path.join(sessionsDir, cwdSlug);
 				if (!fs.existsSync(cwdDir)) continue;
 
