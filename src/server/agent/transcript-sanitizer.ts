@@ -220,13 +220,22 @@ function normalizeComparablePath(hostPath: string): string {
 
 const trustedExactSessionFiles = new Set<string>();
 
+function isWithinTrustedSessionsRoot(hostPath: string): boolean {
+	if (!hostPath || hasTraversalSegment(hostPath)) return false;
+	const resolved = path.resolve(hostPath);
+	return trustedAgentSessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
+}
+
 /**
- * Trust an exact persisted absolute `agentSessionFile` path for sanitizer I/O.
- * This is intentionally an exact-file allowlist, not a parent-directory trust.
+ * Trust an exact persisted absolute `agentSessionFile` path for sanitizer I/O only
+ * when it already lives under an active, historical, or legacy sessions root.
+ * Corrupted persisted metadata must not turn an arbitrary host file into a
+ * readable/writable transcript.
  */
 export function trustPersistedAgentSessionFile(filePath: string | null | undefined): void {
 	if (!filePath || hasTraversalSegment(filePath)) return;
 	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return;
+	if (!isWithinTrustedSessionsRoot(filePath)) return;
 	trustedExactSessionFiles.add(normalizeComparablePath(filePath));
 }
 
@@ -246,7 +255,7 @@ export function isWithinAgentSessionsDir(hostPath: string): boolean {
 	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
 	if (isTrustedExactSessionFile(resolved)) return true;
-	return trustedAgentSessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
+	return isWithinTrustedSessionsRoot(resolved);
 }
 
 /**

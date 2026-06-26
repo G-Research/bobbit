@@ -53,6 +53,8 @@ export interface AgentDirApiState {
 	history: string[];
 }
 
+export type AgentDirMigrationErrorCode = "SAME_PATH" | "DESTINATION_INSIDE_SOURCE" | "SOURCE_INSIDE_DESTINATION";
+
 export interface AgentDirMigrationReport {
 	sourcePath: string;
 	destinationPath: string;
@@ -63,6 +65,7 @@ export interface AgentDirMigrationReport {
 	missing: string[];
 	warnings: string[];
 	errors: string[];
+	error?: { code: AgentDirMigrationErrorCode; message: string };
 }
 
 interface ResolveAgentDirInput {
@@ -309,6 +312,13 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 		errors: [],
 	};
 
+	const relationshipError = agentDirMigrationRelationshipError(source, destination);
+	if (relationshipError) {
+		report.error = relationshipError;
+		report.errors.push(relationshipError.message);
+		return report;
+	}
+
 	if (!fs.existsSync(source)) {
 		report.errors.push("Source directory does not exist.");
 		return report;
@@ -500,6 +510,19 @@ function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boole
 	fs.mkdirSync(path.dirname(dst), { recursive: true, mode: 0o700 });
 	fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
 	report.copied.push(rel);
+}
+
+function agentDirMigrationRelationshipError(source: string, destination: string): AgentDirMigrationReport["error"] | null {
+	if (samePath(source, destination)) {
+		return { code: "SAME_PATH", message: "sourcePath and destinationPath must be different agent directories." };
+	}
+	if (isPathWithinOrEqual(source, destination)) {
+		return { code: "DESTINATION_INSIDE_SOURCE", message: "destinationPath must not be inside sourcePath." };
+	}
+	if (isPathWithinOrEqual(destination, source)) {
+		return { code: "SOURCE_INSIDE_DESTINATION", message: "sourcePath must not be inside destinationPath." };
+	}
+	return null;
 }
 
 function validationError(code: AgentDirValidationErrorCode, message: string, rawInput: string, resolvedPath?: string): AgentDirValidationResult {

@@ -7115,6 +7115,10 @@ async function handleApiRoute(
 			return;
 		}
 		const report = migrateAgentDirData(sourcePath, destinationPath, (body as any).overwrite === true);
+		if (report.error) {
+			json(report, 400);
+			return;
+		}
 		const state = refreshAgentDirNextStart((preferencesStore.get("agentDir") as string | undefined), bobbitStateDir());
 		preferencesStore.set("agentDirHistory", state.history);
 		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
@@ -7132,6 +7136,17 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preferences" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
+		const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
+		if (blockedKey) {
+			json({
+				error: `${blockedKey} is managed by the agent directory settings workflow. Use PUT /api/agent-dir/pending instead.`,
+				code: "AGENT_DIR_PREFERENCE_FORBIDDEN",
+				key: blockedKey,
+				use: "/api/agent-dir/pending",
+			}, 400);
+			return;
+		}
 		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is

@@ -31,6 +31,7 @@ const {
 	isWithinAgentSessionsDir,
 	resolveSafeSessionsPath,
 	sanitizeAgentTranscriptFile,
+	trustPersistedAgentSessionFile,
 } = sanitizer;
 
 const POISONED = JSON.stringify({
@@ -115,6 +116,18 @@ describe("transcript sanitizer trusted agent directory roots", () => {
 		assert.equal(resolveSafeSessionsPath(traversal), null);
 		assert.equal(await sanitizeAgentTranscriptFile({ sandboxed: false }, outside, null), 0);
 		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED);
+	});
+
+	it("does not trust an arbitrary exact persisted agentSessionFile outside known sessions roots", async () => {
+		const outside = path.join(tmpRoot, "corrupt-persisted-agent-session-file.jsonl");
+		fs.writeFileSync(outside, POISONED, "utf-8");
+
+		trustPersistedAgentSessionFile(outside);
+
+		assert.equal(isWithinAgentSessionsDir(outside), false, "exact persisted paths outside trusted sessions roots must not be trusted");
+		assert.equal(resolveSafeSessionsPath(outside), null);
+		assert.equal(await sanitizeAgentTranscriptFile({ sandboxed: false }, outside, null), 0);
+		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED, "outside file must remain untouched");
 	});
 
 	it("rejects a final symlink inside a historical sessions root", async (t) => {

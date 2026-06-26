@@ -63,6 +63,25 @@ test("agent-dir REST flow validates, saves restart-gated pending state, and migr
 	expect(invalid.ok).toBe(false);
 	expect(errorCode(invalid)).toBe("INSIDE_WORKTREE");
 
+	const bypassPath = path.join(path.dirname(bobbitDir()), `bypass-agent-dir-${process.pid}-${Date.now()}`);
+	const bypassResp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ agentDir: bypassPath, agentDirHistory: [bypassPath] }),
+	});
+	const bypass = await json(bypassResp);
+	expect(bypassResp.status).toBe(400);
+	const bypassPrefsPath = path.join(bobbitDir(), "state", "preferences.json");
+	const bypassPrefs = fs.existsSync(bypassPrefsPath) ? JSON.parse(fs.readFileSync(bypassPrefsPath, "utf-8")) : {};
+	const safePref = await expectOkJson(await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ agentDirBypassRegressionSafeKey: true }),
+	}));
+	expect(safePref.ok).toBe(true);
+	expect(String(bypass.error ?? bypass.message)).toMatch(/agentDir|agent directory|agent-dir\/pending/i);
+	expect(bypass.code).toBe("AGENT_DIR_PREFERENCE_FORBIDDEN");
+	expect(bypassPrefs.agentDir).toBeUndefined();
+	expect((bypassPrefs.agentDirHistory ?? []).map(normalize)).not.toContain(normalize(bypassPath));
+
 	const pending = path.join(path.dirname(bobbitDir()), `pending-agent-dir-${process.pid}-${Date.now()}`);
 	fs.rmSync(pending, { recursive: true, force: true });
 	try {

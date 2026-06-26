@@ -21,7 +21,7 @@ import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ON
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
-import { sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -130,6 +130,12 @@ function sessionFsContextForAgentFile(ps: PersistedSession, filePath: string | u
 		sandboxed: !!ps.sandboxed && !isHostAbsoluteAgentSessionPath(filePath),
 		projectId: ps.projectId,
 	};
+}
+
+function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
+	if (!filePath) return null;
+	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
+	return resolveSafeSessionsPath(filePath);
 }
 
 function switchSessionPathForAgent(ps: PersistedSession): string {
@@ -5627,9 +5633,11 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 		if (!ps?.agentSessionFile) return "";
 		try {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const ctx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return "";
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (!content) return "";
 			const messages: unknown[] = [];
 			for (const line of content.split(/\r?\n/)) {
@@ -6866,9 +6874,11 @@ export class SessionManager {
 		if (!ps || !ps.agentSessionFile) return null;
 		let messages: unknown[] = [];
 		try {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const ctx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return null;
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (content) {
 				for (const line of content.trim().split("\n")) {
 					if (!line.trim()) continue;
@@ -7285,9 +7295,11 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const ctx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return [];
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (!content) return [];
 			const lines = content.trim().split("\n");
 			const messages: unknown[] = [];
@@ -7896,21 +7908,26 @@ export class SessionManager {
 
 		// Delete .jsonl file
 		if (ps.agentSessionFile) {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const purgeCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
-				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
-			});
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (safeFile) {
+				trustPersistedAgentSessionFile(safeFile);
+				const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
+				await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
+					console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+				});
+			}
 			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
 			// host-side path lookup (sidecars are bobbit-owned, never written
 			// by sandboxed agents). Missing file is fine.
-			try {
-				const sidecarPath = sidecarPathFor(ps.agentSessionFile);
-				if (fs.existsSync(sidecarPath)) {
-					fs.unlinkSync(sidecarPath);
+			if (safeFile) {
+				try {
+					const sidecarPath = sidecarPathFor(safeFile);
+					if (fs.existsSync(sidecarPath)) {
+						fs.unlinkSync(sidecarPath);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 				}
-			} catch (err) {
-				console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 			}
 		}
 
@@ -8035,8 +8052,11 @@ export class SessionManager {
 	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
 			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
-				trustPersistedAgentSessionFile(ps.agentSessionFile);
-				return ps.agentSessionFile.replace(/\\/g, "/");
+				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+				if (safePath) {
+					trustPersistedAgentSessionFile(safePath);
+					return safePath.replace(/\\/g, "/");
+				}
 			}
 
 			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
