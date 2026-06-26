@@ -9,6 +9,7 @@ import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 type FetchLogEntry = { url: string; method: string; body: any };
 type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
+type ArchivedWorktreeFixture = Record<string, any>;
 
 const STORE_PREFIX = "bobbit-settings-admin-fixture";
 const PREFS_KEY = `${STORE_PREFIX}:prefs`;
@@ -81,6 +82,40 @@ function defaultStructuredProjects(): Record<string, StructuredProject> {
 	};
 }
 
+function defaultArchivedWorktreeScan(): ArchivedWorktreeFixture {
+	return {
+		sessions: [],
+		items: [],
+		counts: {
+			archivedSessions: 0,
+			sessionsWithWorktrees: 0,
+			removableWorktrees: 0,
+			skippedWorktrees: 0,
+			alreadyCleanedWorktrees: 0,
+			totalItems: 0,
+			readyToClean: 0,
+			defaultSelected: 0,
+			alreadyCleaned: 0,
+			ineligible: 0,
+			needsAttention: 0,
+			failed: 0,
+			byDisposition: {},
+			byReason: {},
+			bySelectionCategory: {},
+		},
+		groups: [],
+		selectionPresets: [],
+		generatedAt: Date.now(),
+	};
+}
+
+function defaultArchivedWorktreeCleanup(): ArchivedWorktreeFixture {
+	return {
+		counts: { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0 },
+		results: [],
+	};
+}
+
 let currentPage: "settings" | "roles" | "tools" = "settings";
 let prefs: Record<string, any> = readJson(PREFS_KEY, {});
 let roles: RoleData[] = readJson(ROLES_KEY, defaultRoles());
@@ -92,6 +127,9 @@ let oauthStatus: OAuthStatus = {
 	anthropic: { authenticated: true },
 	"openai-codex": { authenticated: false },
 };
+let archivedWorktreeScan: ArchivedWorktreeFixture = defaultArchivedWorktreeScan();
+let archivedWorktreeCleanup: ArchivedWorktreeFixture = defaultArchivedWorktreeCleanup();
+let archivedWorktreeNextScan: ArchivedWorktreeFixture | null = null;
 let fetchLog: FetchLogEntry[] = [];
 
 function readJson<T>(key: string, fallback: T): T {
@@ -273,6 +311,15 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (pathname === "/api/sandbox-status") return response({ available: false, configured: false });
 	if (pathname === "/api/worktree-pool") return response({ enabled: false });
 	if (pathname === "/api/sandbox/host-tokens") return response([]);
+	if (pathname === "/api/maintenance/archived-session-worktrees" && method === "GET") return response(archivedWorktreeScan);
+	if (pathname === "/api/maintenance/cleanup-archived-session-worktrees" && method === "POST") {
+		const cleanup = archivedWorktreeCleanup;
+		if (archivedWorktreeNextScan) {
+			archivedWorktreeScan = archivedWorktreeNextScan;
+			archivedWorktreeNextScan = null;
+		}
+		return response(cleanup);
+	}
 	if (pathname.startsWith("/api/search/") || pathname.startsWith("/api/maintenance/")) return response({ count: 0, sample: [] });
 
 	return response({ ok: true });
@@ -318,6 +365,9 @@ updatePlayFinishDataset();
 		"openai-codex": { authenticated: false },
 		...(opts.oauthStatus || {}),
 	};
+	archivedWorktreeScan = defaultArchivedWorktreeScan();
+	archivedWorktreeCleanup = defaultArchivedWorktreeCleanup();
+	archivedWorktreeNextScan = null;
 	fetchLog = [];
 	setConfigScope("system");
 	persistStores();
@@ -358,6 +408,11 @@ updatePlayFinishDataset();
 (window as any).__getSettingsAdminPrefs = () => ({ ...prefs });
 (window as any).__getSettingsAdminRoles = () => roles.map((r) => ({ ...r }));
 (window as any).__getSettingsAdminStructured = (projectId = "proj-1") => JSON.parse(JSON.stringify(structuredProjects[projectId] || null));
+(window as any).__setArchivedWorktreeScan = (scan: ArchivedWorktreeFixture) => { archivedWorktreeScan = scan; };
+(window as any).__setArchivedWorktreeCleanup = (cleanup: ArchivedWorktreeFixture, nextScan?: ArchivedWorktreeFixture) => {
+	archivedWorktreeCleanup = cleanup;
+	archivedWorktreeNextScan = nextScan || null;
+};
 (window as any).__getSettingsAdminFetchLog = () => fetchLog.slice();
 (window as any).__clearSettingsAdminFetchLog = () => { fetchLog = []; };
 (window as any).__settingsAdminReady = true;

@@ -15,6 +15,7 @@ toolPolicies:
   goal_archive_child: never
   goal_decide_mutation: never
   goal_set_policy: never
+  verification_result: allow
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |
@@ -27,7 +28,7 @@ promptTemplate: |
 
 
   ## Before You Start
-  Read the design doc first — use `gate_list` then `gate_status` to understand the intended security model and trust boundaries. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
+  Read the design doc first — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` or `gate_status` to understand the intended security model and trust boundaries. Use `task_list` only if you were spawned as a normal assigned team task rather than by the gate verification harness.
 
   ## Working Directory
   Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do NOT run `git checkout` or `git pull`** — the directory is already in the right state.
@@ -67,10 +68,21 @@ promptTemplate: |
     Recommendation: How to fix it
   ```
 
-  If no security issues are found, state "No security issues found."
+  If no actionable security issues are found, state exactly: `No actionable security issues found.`
+
+  ## Submitting Gate Verification Results
+  When reviewing as part of a gate verification, you **must** call `verification_result` when done. This is how the verification system receives your verdict; chat text or `task_update` alone is not enough.
+
+  Use:
+  - `verdict: "pass"` if you found no critical or high severity actionable security issues.
+  - `verdict: "fail"` if you found any critical or high severity actionable security issue.
+  - `summary`: detailed markdown containing what you reviewed, all findings with file:line references, reproduction conditions, impact, recommendations, and verdict rationale.
+
+  Do **not** emit XML verdict tags. Do **not** call `gate_signal`.
 
   ## When Done
-  Go idle — the team lead will read your findings and handle next steps. **Do NOT call `gate_signal`** — you are not responsible for signaling gates.
+  - For gate verification: call `verification_result`, then go idle.
+  - For a manually assigned team task outside the verification harness: update your task with `task_update` and include the same findings in `result_summary`, then go idle.
 
   ## What You Do NOT Do
   - Write or modify production code — ever.

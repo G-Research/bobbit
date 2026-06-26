@@ -44,12 +44,20 @@ export function hasCurrentProposalSlotForSession(stateLike: any, type: string, s
 	return !hasTypedSlots && stateLike?.assistantHasProposal === true && assistantProposalTypeFromState(stateLike) === type;
 }
 
+export interface GoalWorkflowValidationError {
+	code: "MISSING_WORKFLOW" | "UNKNOWN_WORKFLOW";
+	message: string;
+	workflowId?: string;
+	availableWorkflows?: Array<{ id: string; name?: string }>;
+}
+
 export interface ProposalSlot {
 	sessionId: string;
 	fields: Record<string, unknown>;
 	streaming: boolean;
 	mode?: "provisional" | "registered";
 	rev: number;
+	workflowValidationError?: GoalWorkflowValidationError;
 }
 
 export interface ProposalFirstEmitOpts {

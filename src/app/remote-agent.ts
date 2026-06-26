@@ -30,7 +30,7 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 	maxTokens: 128000,
 };
 
-import { isProposalType, type ProposalType } from "./proposal-registry.js";
+import { isProposalType, type GoalWorkflowValidationError, type ProposalType } from "./proposal-registry.js";
 
 export type ProposalSource = "tool" | "legacy" | "edit" | "seed" | "rehydrate" | "restore";
 const SERVER_PROPOSAL_SOURCES = new Set<ProposalSource>(["edit", "seed", "rehydrate", "restore"]);
@@ -221,6 +221,78 @@ function toolEventId(event: any): string | undefined {
 	return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
+function normalizeAvailableWorkflows(value: unknown): Array<{ id: string; name?: string }> | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const workflows = value
+		.map((w) => {
+			if (typeof w === "string" && w.trim()) return { id: w.trim() };
+			if (!w || typeof w !== "object") return null;
+			const id = typeof (w as any).id === "string" ? (w as any).id.trim() : "";
+			if (!id) return null;
+			const name = typeof (w as any).name === "string" && (w as any).name.trim() ? (w as any).name.trim() : undefined;
+			return name ? { id, name } : { id };
+		})
+		.filter((w): w is { id: string; name?: string } => !!w);
+	return workflows.length > 0 ? workflows : undefined;
+}
+
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function parseGoalWorkflowValidationError(result: any, input?: Record<string, unknown>): GoalWorkflowValidationError | null {
+	if (!result?.isError) return null;
+	const texts: string[] = [];
+	const payloads: any[] = [];
+	const inspect = (value: unknown): void => {
+		if (typeof value === "string") {
+			const text = value.trim();
+			if (text) texts.push(text);
+			try {
+				const parsed = JSON.parse(text);
+				if (parsed && typeof parsed === "object") payloads.push(parsed);
+			} catch { /* not json */ }
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) inspect(item);
+			return;
+		}
+		if (!value || typeof value !== "object") return;
+		const block = value as Record<string, unknown>;
+		if (typeof block.code === "string" || typeof block.message === "string") payloads.push(block);
+		if (typeof block.text === "string") inspect(block.text);
+		inspect(block.content);
+		inspect(block.output);
+		inspect(block.result);
+	};
+	inspect(result.content);
+	inspect(result.output);
+	inspect(result.result);
+	const plain = texts.join("\n").trim();
+	const structured = payloads.find((p) => p && typeof p === "object" && (p.code === "MISSING_WORKFLOW" || p.code === "UNKNOWN_WORKFLOW"));
+	const fallbackCode = /workflow is required/i.test(plain)
+		? "MISSING_WORKFLOW"
+		: /unknown workflow/i.test(plain)
+			? "UNKNOWN_WORKFLOW"
+			: undefined;
+	const code = structured?.code === "MISSING_WORKFLOW" || structured?.code === "UNKNOWN_WORKFLOW"
+		? structured.code
+		: fallbackCode;
+	if (code !== "MISSING_WORKFLOW" && code !== "UNKNOWN_WORKFLOW") return null;
+	const availableWorkflows = normalizeAvailableWorkflows(structured?.availableWorkflows);
+	const ids = availableWorkflows?.map(w => w.id).filter(Boolean) ?? [];
+	let message = typeof structured?.message === "string" && structured.message.trim()
+		? structured.message.trim()
+		: plain || (code === "MISSING_WORKFLOW" ? "Workflow is required for this project." : "Unknown workflow for this project.");
+	if (ids.length > 0 && !ids.some(id => message.includes(id))) {
+		message = `${message} Available workflows: ${ids.join(", ")}.`;
+	}
+	const workflowId = typeof input?.workflow === "string" ? input.workflow : undefined;
+	return { code, message, workflowId, availableWorkflows };
+}
+
 /**
  * A remote agent adapter that connects to the Bobbit Gateway via WebSocket.
  * Duck-types the Agent interface from pi-agent-core so it can be used
@@ -265,6 +337,7 @@ export class RemoteAgent {
 	private _authToken = "";
 	private _sessionId = "";
 	private _toolCallInputsById = new Map<string, unknown>();
+	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Client-side outbox for user-intent frames issued while the WS is not OPEN
@@ -1139,11 +1212,18 @@ export class RemoteAgent {
 		this._deferProposalCheck = false;
 		if (this._hasDeferredProposals) {
 			this._hasDeferredProposals = false;
-			for (const m of this._state.messages) {
-				if (m.role === "assistant") {
-					this._checkToolProposals(m);
-					this._checkProposals(m);
-				}
+			this._scanLoadedProposalMessages();
+		}
+	}
+
+	private _scanLoadedProposalMessages(): void {
+		for (const m of this._state.messages) {
+			if (m.role === "assistant") {
+				const normalizedMessage = normalizeProposalToolCallInputs(m, (id) => this._toolCallInputsById.get(id));
+				this._checkToolProposals(normalizedMessage);
+				this._checkProposals(normalizedMessage);
+			} else {
+				this._checkProposalToolResult(m);
 			}
 		}
 	}
@@ -1640,12 +1720,7 @@ export class RemoteAgent {
 					if (this._deferProposalCheck) {
 						this._hasDeferredProposals = true;
 					} else {
-						for (const m of this._state.messages) {
-							if (m.role === "assistant") {
-								this._checkToolProposals(m);
-								this._checkProposals(m);
-							}
-						}
+						this._scanLoadedProposalMessages();
 					}
 					// Rebuild review pane state from message history (same persistence as preview pane).
 					// Hydrate annotation cache from server before checking submitted state.
@@ -2089,6 +2164,46 @@ export class RemoteAgent {
 	 * message_end of non-assistant clears it, agent_end clears it) so the
 	 * tool call never appears in both message-list and streaming-container.
 	 */
+	private _checkProposalToolResult(message: any): void {
+		if (message?.role !== "toolResult" && message?.role !== "tool_result" && message?.type !== "tool_result") return;
+		if (!message?.isError) return;
+		const toolCallId = typeof message.toolCallId === "string"
+			? message.toolCallId
+			: typeof message.tool_use_id === "string"
+				? message.tool_use_id
+				: "";
+		const remembered = toolCallId ? this._proposalToolCallsById.get(toolCallId) : undefined;
+		const toolName = typeof message.toolName === "string" ? message.toolName : "";
+		const typeFromName = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
+		const proposalType = remembered?.type ?? (isProposalType(typeFromName) ? typeFromName : undefined);
+		if (proposalType !== "goal") return;
+		const input = remembered?.input ?? (toolCallId ? parseToolPayload(this._toolCallInputsById.get(toolCallId)) ?? undefined : undefined);
+		const validation = parseGoalWorkflowValidationError(message, input);
+		if (!validation) return;
+		const current = state.activeProposals.goal;
+		if (!current || current.sessionId !== this._sessionId) {
+			if (input && this.onProposal) this.onProposal("goal", input, false, undefined, "tool");
+		} else if ((current.rev ?? 0) > 0 && input && !sameProposalFields(current.fields, input)) {
+			// Historical replay may encounter an older failed no-rev tool result after a
+			// later successful retry has already rehydrated a rev-backed draft. Keep the
+			// failed metadata tied to its own tool card/open event instead of poisoning
+			// the current successful proposal slot.
+			return;
+		}
+		const slot = state.activeProposals.goal;
+		if (!slot || slot.sessionId !== this._sessionId) return;
+		if (input && (slot.rev ?? 0) === 0 && !sameProposalFields(slot.fields, input)) {
+			(state.activeProposals.goal as any) = { ...slot, fields: { ...input } };
+		}
+		const target = state.activeProposals.goal;
+		if (!target || target.sessionId !== this._sessionId) return;
+		(state.activeProposals.goal as any) = { ...target, workflowValidationError: validation };
+		if (validation.workflowId !== undefined) {
+			(state.activeProposals.goal as any).fields = { ...target.fields, workflow: validation.workflowId };
+		}
+		renderApp();
+	}
+
 	/**
 	 * Check an assistant message for propose_* tool calls and fire the matching callback.
 	 * @param streaming — true during message_update (live streaming). In streaming mode,
@@ -2110,10 +2225,7 @@ export class RemoteAgent {
 			// Either may be unset — we keep going as long as one is wired.
 			if (!callback && !this.onProposal) continue;
 
-			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
-			// During streaming we still check this so we don't re-fire after message_end marks it.
 			const blockId = block.id || block.toolCallId || "";
-			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			// Extract input — tool_use blocks use `input`, toolCall blocks may use `arguments`
 			let input = block.input;
@@ -2127,6 +2239,20 @@ export class RemoteAgent {
 			// During streaming, tool arguments arrive incrementally (e.g. "{}" → {"title":""} → full).
 			// Skip empty objects to avoid firing with no meaningful data.
 			if (Object.keys(input).length === 0) continue;
+
+			if (blockId && isProposalType(proposalType)) {
+				this._proposalToolCallsById.set(blockId, { type: proposalType, input: { ...input } });
+			}
+
+			// Track that this message had a tool-based proposal before the dedupe
+			// return, so historical scans do not also parse any legacy XML fallback.
+			const msgId = message.id || "";
+			if (msgId) this._toolProposalMessageIds.add(msgId);
+
+			// Deduplicate callbacks — but only after remembering the input above, so a
+			// later historical toolResult row can still reconstruct failed workflow
+			// metadata from a processed propose_goal call.
+			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			const tagKey = `${proposalType}_proposal`;
 			if (streaming) {
@@ -2163,9 +2289,7 @@ export class RemoteAgent {
 					} catch { /* ignore quota errors */ }
 				}
 			}
-			// Track that this message had a tool-based proposal
-			const msgId = message.id || "";
-			if (msgId) this._toolProposalMessageIds.add(msgId);
+			// Message id was recorded before callback dedupe.
 		}
 	}
 
@@ -2733,6 +2857,7 @@ export class RemoteAgent {
 						}
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
+						this._checkProposalToolResult(msg);
 
 						// Slice C2: bridge the live message onto the typed Host session
 						// event bus for `host.session.subscribe` (contract shapes, scoped
@@ -2765,6 +2890,9 @@ export class RemoteAgent {
 					this._state.pendingToolCalls.add(id);
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
+					const toolName = typeof event.toolName === "string" ? event.toolName : "";
+					const proposalType = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
+					if (input && isProposalType(proposalType)) this._proposalToolCallsById.set(id, { type: proposalType, input: { ...input } });
 				}
 				break;
 			}
@@ -2774,6 +2902,8 @@ export class RemoteAgent {
 				if (id) {
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
+					const existing = this._proposalToolCallsById.get(id);
+					if (input && existing) this._proposalToolCallsById.set(id, { ...existing, input: { ...existing.input, ...input } });
 				}
 				// Store partial results from long-running tools (e.g., skill invocations)
 				// so the UI can show real-time progress.

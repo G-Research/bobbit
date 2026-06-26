@@ -237,7 +237,7 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
-| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. A rejected goal workflow seed writes no draft, creates no rev, and broadcasts no `proposal_update`; the UI can still render/open the failed attempt from the transcript tool-call input plus the `isError` tool result. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
@@ -272,13 +272,16 @@ Structured proposal validation failures share this JSON shape across seed, edit,
 | `FRONTMATTER_MALFORMED` | `400` | edit, seed | `goal.md` frontmatter fence is broken or unparseable. |
 | `YAML_PARSE_ERROR` | `400` | edit, seed | Post-edit YAML body fails to parse. |
 | `MISSING_REQUIRED_FIELD` | `400` | edit, seed | Per-type required-field whitelist failed (`field` set). |
+| `MISSING_WORKFLOW` | `400` | goal seed | Project workflows exist but `propose_goal.workflow` was omitted, empty, or whitespace-only. Response includes `availableWorkflows` when known. |
+| `UNKNOWN_WORKFLOW` | `400` | goal seed | `propose_goal.workflow` is not one of the linked project's workflow IDs. Response includes `availableWorkflows` when known. |
+| `UNKNOWN_OPTIONAL_STEP` | `400` | goal seed | `propose_goal.options` names a step that is not an optional verify step on the selected workflow. Response includes `validOptionalSteps` when known. |
 | `STRUCTURAL_VALIDATION_FAILED` | `400` | edit, seed | Project YAML fails the structural validator shared with `PUT /api/projects/:id/config`. |
 
 **Atomic rollback.** Any failure in `edit` or `seed` after the per-type parse step leaves the file on disk byte-for-byte identical to its pre-call state — the implementation writes to `<file>.tmp` and `fs.rename`s only after parse + validate succeed. A failed edit followed by `GET` returns the original body unchanged.
 
 **Path safety.** `:id` is validated against `/^[A-Za-z0-9_-]+$/` and `:type` against the union literal; invalid values return `400 {error:"Unknown proposal type: ..."}` before any disk access.
 
-**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate", rev}` per surviving file (where `rev` is computed from the highest integer in the `<type>.history/` dir, or `0` for legacy sessions predating the snapshot system), so reloading a browser or restarting the server mid-edit yields the same proposal content without a separate content persistence layer. Rehydrate does not open tabs; the side-panel workspace remains authoritative for whether `proposal:<type>` is present.
+**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate", rev}` per surviving file (where `rev` is computed from the highest integer in the `<type>.history/` dir, or `0` for legacy sessions predating the snapshot system), so reloading a browser or restarting the server mid-edit yields the same proposal content without a separate content persistence layer. Rehydrate does not open tabs; the side-panel workspace remains authoritative for whether `proposal:<type>` is present. Failed goal workflow-validation attempts are the exception: because no file/rev exists, their reopen metadata is recovered from the persisted transcript tool call/result rather than from this endpoint.
 
 **Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
@@ -1063,59 +1066,48 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 | `GET` | `/api/maintenance/orphaned-index-rows` | List search index rows whose parent records are gone (`?projectId=`). |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows (`{ projectId }`). |
 
-**`GET /api/maintenance/archived-session-worktrees`** returns:
+**`GET /api/maintenance/archived-session-worktrees`** returns an actionable-first scan for Settings → Maintenance. The response keeps the session-grouped shape and adds UX-oriented flattened data:
 
 ```ts
 interface ArchivedSessionWorktreeScanResponse {
   sessions: ArchivedSessionWorktreeSession[];
+  items: ArchivedSessionWorktreeItem[];
+  groups: ArchivedSessionWorktreeGroup[];
+  selectionPresets: ArchivedSessionWorktreeSelectionPreset[];
   counts: {
     archivedSessions: number;
-    sessionsWithWorktrees: number;
-    removableWorktrees: number;
+    sessionsWithWorktrees: number;      // metadata count, not eligibility
+    removableWorktrees: number;         // legacy name for ready-to-clean
     skippedWorktrees: number;
     alreadyCleanedWorktrees: number;
+    totalItems: number;
+    readyToClean: number;
+    defaultSelected: number;
+    alreadyCleaned: number;
+    ineligible: number;
+    needsAttention: number;
+    failed: number;
+    byDisposition: Record<string, number>;
+    byReason: Record<string, number>;
+    bySelectionCategory: Record<string, number>;
   };
-}
-
-interface ArchivedSessionWorktreeSession {
-  id: string;
-  title: string;
-  archivedAt?: number;
-  projectId?: string;
-  projectName?: string;
-  goalId?: string;
-  teamGoalId?: string;
-  delegateOf?: string;
-  parentSessionId?: string;
-  childKind?: string;
-  sandboxed?: boolean;
-  branch?: string;
-  repoPath?: string;
-  worktreePath?: string;
-  worktrees: ArchivedSessionWorktreeItem[];
-}
-
-interface ArchivedSessionWorktreeItem {
-  key: string;
-  sessionId: string;
-  repo: string;
-  repoPath: string;
-  path: string;
-  branch?: string;
-  pathExists: boolean;
-  gitWorktreeMetadataExists: boolean;
-  localBranchExists: boolean;
-  status: "removable" | "skipped" | "already-cleaned";
-  reason: string;
-  detail: string;
-  willDeleteBranch: boolean;
-  branchDeleteBlockedReason?: string;
+  generatedAt: number;
 }
 ```
 
-Default scans omit sessions whose rows are all `already-cleaned`; those rows still contribute to `counts.alreadyCleanedWorktrees`.
+Items include title/session metadata, project/repo, branch, worktree path, git-existence booleans, `status`, `disposition`, machine-readable `reason` and `reasonCategory`, human-readable `detail`, `actionable` / `selectable` / `defaultSelected`, `selectionCategories`, and branch-deletion hints. Groups include `sampleItems` capped for examples and filtering. Presets include an id, label, enabled/count state, matching keys, and the cleanup request they represent.
 
-**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts either `{ "mode": "all" }` or `{ "mode": "selected", "sessionIds": [...] }` or `{ "mode": "selected", "worktrees": [...] }`. `mode: "all"` rejects selectors. `mode: "selected"` accepts exactly one selector type; an empty selected request is a zero-count no-op. Worktree selectors contain `sessionId` plus optional `repo`, `path`, and `key` strings.
+Default scans omit sessions whose rows are all `already-cleaned`; those rows still contribute to aggregate counts. Use `?includeAlreadyCleaned=1` for diagnostics.
+
+**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts:
+
+- `{ "mode": "all" }`;
+- `{ "mode": "selected", "sessionIds": [...] }`;
+- `{ "mode": "selected", "worktrees": [{ "sessionId": "...", "key": "...", "repo": ".", "path": "..." }] }`;
+- `{ "mode": "category", "categories": [...], "projectId"?: "...", "repoPath"?: "..." }`;
+- `{ "mode": "preset", "presetId": "..." }`.
+
+`mode: "all"` rejects selectors. `mode: "selected"` accepts either session ids or worktree selectors, not both. Category and preset modes are convenience filters over the fresh server scan; they do not bypass safety checks.
 
 The server always re-runs the scan before cleanup and only removes fresh rows with `status: "removable"`. Stale selected rows that are already gone return `already-cleaned`; unmatched selections return `skipped` with `reason: "invalid-selection"`.
 
@@ -1128,8 +1120,14 @@ interface CleanupArchivedSessionWorktreesResponse {
     skipped: number;
     alreadyCleaned: number;
     failed: number;
+    worktreeRemoved: number;
+    invalidSelection: number;
+    notActionable: number;
+    byStatus: Record<string, number>;
+    byReason: Record<string, number>;
   };
   results: ArchivedSessionWorktreeCleanupResult[];
+  generatedAt: number;
 }
 
 interface ArchivedSessionWorktreeCleanupResult {
@@ -1142,6 +1140,7 @@ interface ArchivedSessionWorktreeCleanupResult {
   branch?: string;
   status: "cleaned" | "skipped" | "already-cleaned" | "failed";
   reason?: string;
+  detail?: string;
   error?: string;
   worktreeRemoved: boolean;
   branchDeleted: boolean;
