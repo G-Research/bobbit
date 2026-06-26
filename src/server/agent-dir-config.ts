@@ -252,8 +252,17 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	const gitRoot = resolveGitWorktreeRoot(normalizedProjectRoot);
 	const gitRootForComparison = safeRealpath(gitRoot) ?? gitRoot;
 	const allowedDefault = defaultAgentDir(normalizedProjectRoot);
-	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefault, resolvedPath)) {
+	const allowedDefaultCandidates = [allowedDefault, realpathForExistingPrefix(allowedDefault) ?? allowedDefault];
+	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, resolvedPath)) {
 		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, resolvedPath);
+	}
+
+	// Before creating a missing directory, resolve the deepest existing parent.
+	// This catches outside symlinks/junctions that would make mkdir land inside
+	// the git worktree, without leaving behind a rejected directory in the repo.
+	const preCreateRealTarget = realpathForExistingPrefix(resolvedPath);
+	if (preCreateRealTarget && isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, preCreateRealTarget)) {
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, preCreateRealTarget);
 	}
 
 	try {
@@ -280,7 +289,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 		return validationError("NOT_DIRECTORY", `Failed to inspect directory: ${(err as Error).message}`, rawInput, resolvedPath);
 	}
 
-	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefault, realResolvedPath)) {
+	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, realResolvedPath)) {
 		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, realResolvedPath);
 	}
 
@@ -577,8 +586,9 @@ function isPathWithinOrEqual(parent: string, child: string): boolean {
 	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function isDisallowedInsideWorktree(gitRoot: string, allowedDefault: string, target: string): boolean {
-	return isPathWithinOrEqual(gitRoot, target) && !isPathWithinOrEqual(allowedDefault, target);
+function isDisallowedInsideWorktree(gitRoot: string, allowedDefault: string | string[], target: string): boolean {
+	const allowedDefaults = Array.isArray(allowedDefault) ? allowedDefault : [allowedDefault];
+	return isPathWithinOrEqual(gitRoot, target) && !allowedDefaults.some((entry) => isPathWithinOrEqual(entry, target));
 }
 
 function safeRealpath(value: string): string | undefined {
