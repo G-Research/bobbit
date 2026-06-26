@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { discoverPiExtensionTools, discoverPiExtensionToolsSync } from "../src/server/agent/pi-extension-discovery.js";
@@ -101,6 +102,46 @@ export default async function (pi) {
 		}
 	});
 
+	it("rejects TypeScript imports that resolve outside the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.ts"), "export const toolName = 'outside_tool';\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from '../../outside/helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const absoluteSpecifier = outsideHelper.split(path.sep).join(path.posix.sep);
+			const absoluteEntry = write(path.join(extensionRoot, "absolute.ts"), `import { toolName } from ${JSON.stringify(absoluteSpecifier)};\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n`);
+			const absoluteResult = discoverPiExtensionToolsSync(absoluteEntry, { trustAccepted: true });
+			assert.equal(absoluteResult.status, "failed");
+			assert.equal(absoluteResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects TypeScript symlink imports that escape the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.ts"), "export const toolName = 'symlink_tool';\n");
+			fs.mkdirSync(extensionRoot, { recursive: true });
+			try {
+				fs.symlinkSync(outsideHelper, path.join(extensionRoot, "linked-helper.ts"), "file");
+			} catch {
+				return;
+			}
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from './linked-helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("confines trusted probes to read-only source access", async () => {
 		const dir = tempDir();
 		const outside = tempDir("bobbit-pi-ext-outside-");
@@ -138,7 +179,34 @@ export default async function (pi) {
 			const httpResult = await discoverPiExtensionTools(httpEntry, { trustAccepted: true });
 			assert.equal(httpResult.status, "failed");
 			assert.equal(httpResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+
+			const undiciEntry = write(path.join(dir, "undici.mjs"), `import "undici"; export default function () {}\n`);
+			const undiciResult = await discoverPiExtensionTools(undiciEntry, { trustAccepted: true });
+			assert.equal(undiciResult.status, "failed");
+			assert.equal(undiciResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
 		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("blocks global fetch during trusted probes without sending a request", async () => {
+		const dir = tempDir();
+		let requests = 0;
+		const server = createServer((_req, res) => {
+			requests++;
+			res.end("ok");
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			assert.ok(address && typeof address === "object");
+			const entry = write(path.join(dir, "fetch.mjs"), `export default async function () { await globalThis.fetch("http://127.0.0.1:${address.port}/leak"); }\n`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+			assert.equal(requests, 0);
+		} finally {
+			await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});

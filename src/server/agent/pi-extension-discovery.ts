@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
 	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
@@ -21,6 +21,7 @@ export interface DiscoverPiExtensionToolsOptions {
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
+const DENIED_PROBE_IMPORTS = ["child_process", "cluster", "dgram", "dns", "http", "http2", "https", "inspector", "net", "repl", "tls", "undici", "worker_threads"] as const;
 const require = createRequire(import.meta.url);
 
 function diagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
@@ -137,11 +138,138 @@ function normalizeTools(raw: unknown[]): PiExtensionToolInfo[] {
 	return out;
 }
 
+class ProbePreparationError extends Error {
+	constructor(public readonly code: string, message: string) {
+		super(message);
+	}
+}
+
+function isDeniedProbeImport(specifier: string): boolean {
+	const normalized = specifier.replace(/^node:/, "");
+	return DENIED_PROBE_IMPORTS.some((denied) => normalized === denied || normalized.startsWith(`${denied}/`));
+}
+
+function isNodeBuiltinImport(specifier: string): boolean {
+	const normalized = specifier.replace(/^node:/, "");
+	return builtinModules.includes(normalized) || builtinModules.includes(`node:${normalized}`);
+}
+
+function isPathInside(root: string, target: string): boolean {
+	const rel = path.relative(root, target);
+	return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function assertRealPathInsideSource(sourceRootReal: string, target: string, detail: string): string {
+	let targetReal: string;
+	try {
+		targetReal = fs.realpathSync(target);
+	} catch (err) {
+		throw new ProbePreparationError("probe_build_failed", `Pi extension discovery could not resolve ${detail}: ${sanitizeMessage(err)}`);
+	}
+	if (!isPathInside(sourceRootReal, targetReal)) {
+		throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to bundle ${detail} outside the extension source root.`);
+	}
+	return targetReal;
+}
+
+function packageJsonEntry(pkgPath: string): string | null {
+	try {
+		const data = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as Record<string, unknown>;
+		for (const key of ["module", "main"]) {
+			const value = data[key];
+			if (typeof value === "string" && value.trim()) return path.resolve(path.dirname(pkgPath), value);
+		}
+	} catch { /* ignore invalid package metadata; try index candidates */ }
+	return null;
+}
+
+function resolveImportCandidate(base: string): string | null {
+	const candidates = [base];
+	if (!path.extname(base)) candidates.push(...[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json"].map((ext) => `${base}${ext}`));
+	for (const candidate of candidates) {
+		try {
+			const st = fs.lstatSync(candidate);
+			if (st.isSymbolicLink() || st.isFile()) return candidate;
+		} catch { /* continue */ }
+	}
+	try {
+		const st = fs.lstatSync(base);
+		if (st.isSymbolicLink()) return base;
+		if (st.isDirectory()) {
+			const pkgEntry = packageJsonEntry(path.join(base, "package.json"));
+			if (pkgEntry) {
+				const resolved = resolveImportCandidate(pkgEntry);
+				if (resolved) return resolved;
+			}
+			for (const name of ["index.ts", "index.tsx", "index.mts", "index.cts", "index.js", "index.mjs", "index.cjs", "index.json"]) {
+				const resolved = resolveImportCandidate(path.join(base, name));
+				if (resolved) return resolved;
+			}
+		}
+	} catch { /* continue */ }
+	return null;
+}
+
+function packageImportBase(specifier: string, sourceRootReal: string): string {
+	const parts = specifier.split("/");
+	const packageName = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0] ?? "";
+	const subpath = specifier.startsWith("@") ? parts.slice(2) : parts.slice(1);
+	return path.join(sourceRootReal, "node_modules", packageName, ...subpath);
+}
+
+function resolveConfinedImport(specifier: string, fromDir: string, sourceRootReal: string): string | null {
+	if (isDeniedProbeImport(specifier)) throw new ProbePreparationError("PROBE_CONFINEMENT_DENIED", `Pi extension discovery probe denied import of ${specifier} during executable discovery.`);
+	if (isNodeBuiltinImport(specifier)) return null;
+	if (!path.isAbsolute(specifier) && /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier)) throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to bundle URL import ${specifier}.`);
+	const base = (path.isAbsolute(specifier) || specifier.startsWith(".") || specifier.startsWith("/"))
+		? path.resolve(fromDir, specifier)
+		: packageImportBase(specifier, sourceRootReal);
+	if (!isPathInside(sourceRootReal, base)) {
+		throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to resolve import ${specifier} outside the extension source root.`);
+	}
+	const resolved = resolveImportCandidate(base);
+	if (!resolved) throw new ProbePreparationError("probe_build_failed", `Pi extension discovery could not resolve import ${specifier}.`);
+	return assertRealPathInsideSource(sourceRootReal, resolved, `import ${specifier}`);
+}
+
+function importSpecifiers(source: string): string[] {
+	const specifiers: string[] = [];
+	const patterns = [
+		/\bimport\s+(?:[^"'()]*?\s+from\s+)?["']([^"']+)["']/g,
+		/\bexport\s+[^"']*?\s+from\s+["']([^"']+)["']/g,
+		/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+	];
+	for (const pattern of patterns) {
+		for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+			if (match[1]) specifiers.push(match[1]);
+		}
+	}
+	return specifiers;
+}
+
+function assertTypeScriptBundleConfined(entryPath: string): void {
+	const sourceRootReal = fs.realpathSync(inferAllowedSourceRoot(entryPath));
+	const seen = new Set<string>();
+	const visit = (file: string): void => {
+		const real = assertRealPathInsideSource(sourceRootReal, file, seen.size ? `import ${file}` : "entry file");
+		if (seen.has(real)) return;
+		seen.add(real);
+		if (![".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"].includes(path.extname(real).toLowerCase())) return;
+		const source = fs.readFileSync(real, "utf-8");
+		for (const specifier of importSpecifiers(source)) {
+			const resolved = resolveConfinedImport(specifier, path.dirname(real), sourceRootReal);
+			if (resolved) visit(resolved);
+		}
+	};
+	visit(entryPath);
+}
+
 function transpileTypeScriptEntry(entryPath: string, outFile: string): void {
 	// Prefer esbuild when present because it deterministically bundles local .ts
 	// helpers into the temp probe entry. Production builds may not include a TS
 	// loader, so discovery cannot rely on parent process --import/tsx hooks.
 	try {
+		assertTypeScriptBundleConfined(entryPath);
 		const esbuild = require("esbuild") as typeof import("esbuild");
 		esbuild.buildSync({
 			entryPoints: [entryPath],
@@ -153,7 +281,8 @@ function transpileTypeScriptEntry(entryPath: string, outFile: string): void {
 			logLevel: "silent",
 		});
 		return;
-	} catch {
+	} catch (err) {
+		if (err instanceof ProbePreparationError) throw err;
 		// Fall through to TypeScript's emitter (if installed) and finally a small
 		// syntax-stripping fallback for simple plain-pi extension.ts files.
 	}
@@ -232,16 +361,19 @@ function writeProbeConfinementFiles(tempRoot: string, entryPath: string): { prel
 	const loaderPath = path.join(tempRoot, "confinement-loader.mjs");
 	const fsShimPath = path.join(tempRoot, "fs-shim.mjs");
 	const fsPromisesShimPath = path.join(tempRoot, "fs-promises-shim.mjs");
-	const denied = '["child_process","cluster","dgram","dns","http","http2","https","inspector","net","repl","tls","worker_threads"]';
+	const denied = JSON.stringify(DENIED_PROBE_IMPORTS);
 	fs.writeFileSync(preloadPath, `${confinementCore(allowedRoots)}
 const Module = require("node:module");
 const fsShim = wrapFs(require("node:fs"), "fs");
 const fsPromisesShim = wrapFs(require("node:fs/promises"), "fs.promises");
 const denied = new Set(${denied});
+function isDeniedImport(request) { const normalized = String(request || "").replace(/^node:/, ""); return Array.from(denied).some((value) => normalized === value || normalized.startsWith(value + "/")); }
+function denyNetworkGlobal(name) { const blocked = function blockedPiExtensionDiscoveryNetworkGlobal() { throw err("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied global " + name + " during executable discovery."); }; try { Object.defineProperty(globalThis, name, { value: blocked, writable: false, configurable: false }); } catch { try { globalThis[name] = blocked; } catch {} } }
+for (const name of ["fetch", "WebSocket", "EventSource", "Request", "Response", "Headers", "FormData"]) { if (name in globalThis) denyNetworkGlobal(name); }
 const originalLoad = Module._load;
-Module._load = function(request, parent, isMain) { const normalized = String(request || "").replace(/^node:/, ""); if (normalized === "fs") return fsShim; if (normalized === "fs/promises") return fsPromisesShim; if (denied.has(normalized)) denyBuiltin(request); if (!String(request || "").startsWith("node:")) { try { const resolved = Module._resolveFilename(request, parent, isMain); if (typeof resolved === "string" && path.isAbsolute(resolved)) assertRead(resolved, "module import"); } catch (e) { if (e && (e.code === "PROBE_FS_READ_DENIED" || e.code === "PROBE_CONFINEMENT_DENIED")) throw e; } } return originalLoad.apply(this, arguments); };
+Module._load = function(request, parent, isMain) { const normalized = String(request || "").replace(/^node:/, ""); if (normalized === "fs") return fsShim; if (normalized === "fs/promises") return fsPromisesShim; if (isDeniedImport(request)) denyBuiltin(request); if (!String(request || "").startsWith("node:")) { try { const resolved = Module._resolveFilename(request, parent, isMain); if (typeof resolved === "string" && path.isAbsolute(resolved)) assertRead(resolved, "module import"); } catch (e) { if (e && (e.code === "PROBE_FS_READ_DENIED" || e.code === "PROBE_CONFINEMENT_DENIED")) throw e; } } return originalLoad.apply(this, arguments); };
 // Best-effort in-process confinement for trusted discovery: this blocks normal
-// JS writes and dangerous builtin imports, but is not OS/container isolation.
+// JS writes, network-capable globals, and dangerous imports, but is not OS/container isolation.
 `, "utf-8");
 	const fsShimCore = confinementCore(allowedRoots, false);
 	fs.writeFileSync(fsShimPath, `${fsShimCore}
@@ -261,7 +393,7 @@ export const access = fs.access, lstat = fs.lstat, opendir = fs.opendir, open = 
 `, "utf-8");
 	const fsShimUrl = pathToFileUrlString(fsShimPath);
 	const fsPromisesShimUrl = pathToFileUrlString(fsPromisesShimPath);
-	fs.writeFileSync(loaderPath, `import path from "node:path";\nimport { fileURLToPath } from "node:url";\nconst fsShimUrl = ${JSON.stringify(fsShimUrl)};\nconst fsPromisesShimUrl = ${JSON.stringify(fsPromisesShimUrl)};\nconst allowedRoots = ${JSON.stringify(allowedRoots)}.map((root) => path.resolve(root));\nconst denied = new Set(${denied});\nfunction fail(code, message) { const e = new Error(message); e.code = code; throw e; }\nfunction deny(specifier) { fail("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied import of " + specifier + " during executable discovery."); }\nfunction assertResolvedUrl(url) { if (!url.startsWith("file:")) return; const resolved = path.resolve(fileURLToPath(url)); const ok = allowedRoots.some((root) => { const rel = path.relative(root, resolved); return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel)); }); if (!ok) fail("PROBE_FS_READ_DENIED", "Pi extension discovery probe denied module import outside the extension source root."); }\nexport async function resolve(specifier, context, nextResolve) { if (context.parentURL === fsShimUrl || context.parentURL === fsPromisesShimUrl) return nextResolve(specifier, context); const normalized = String(specifier || "").replace(/^node:/, ""); if (normalized === "fs") return { url: fsShimUrl, shortCircuit: true }; if (normalized === "fs/promises") return { url: fsPromisesShimUrl, shortCircuit: true }; if (denied.has(normalized)) deny(specifier); const resolved = await nextResolve(specifier, context); assertResolvedUrl(resolved.url); return resolved; }\n`, "utf-8");
+	fs.writeFileSync(loaderPath, `import path from "node:path";\nimport { fileURLToPath } from "node:url";\nconst fsShimUrl = ${JSON.stringify(fsShimUrl)};\nconst fsPromisesShimUrl = ${JSON.stringify(fsPromisesShimUrl)};\nconst allowedRoots = ${JSON.stringify(allowedRoots)}.map((root) => path.resolve(root));\nconst denied = new Set(${denied});\nfunction fail(code, message) { const e = new Error(message); e.code = code; throw e; }\nfunction deny(specifier) { fail("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied import of " + specifier + " during executable discovery."); }\nfunction isDeniedImport(specifier) { const normalized = String(specifier || "").replace(/^node:/, ""); return Array.from(denied).some((value) => normalized === value || normalized.startsWith(value + "/")); }\nfunction assertResolvedUrl(url) { if (!url.startsWith("file:")) return; const resolved = path.resolve(fileURLToPath(url)); const ok = allowedRoots.some((root) => { const rel = path.relative(root, resolved); return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel)); }); if (!ok) fail("PROBE_FS_READ_DENIED", "Pi extension discovery probe denied module import outside the extension source root."); }\nexport async function resolve(specifier, context, nextResolve) { if (context.parentURL === fsShimUrl || context.parentURL === fsPromisesShimUrl) return nextResolve(specifier, context); const normalized = String(specifier || "").replace(/^node:/, ""); if (normalized === "fs") return { url: fsShimUrl, shortCircuit: true }; if (normalized === "fs/promises") return { url: fsPromisesShimUrl, shortCircuit: true }; if (isDeniedImport(specifier)) deny(specifier); const resolved = await nextResolve(specifier, context); assertResolvedUrl(resolved.url); return resolved; }\n`, "utf-8");
 	return { preloadPath, loaderPath };
 }
 
@@ -370,7 +502,13 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
 		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
-		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		let preparedEntryPath: string;
+		try {
+			preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		} catch (err) {
+			if (err instanceof ProbePreparationError) return failed(err.code, sanitizeMessage(err.message), cacheKey);
+			return failed("probe_build_failed", sanitizeMessage(err), cacheKey);
+		}
 		const result = await runProbe(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
@@ -405,7 +543,13 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
 		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
-		const preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		let preparedEntryPath: string;
+		try {
+			preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
+		} catch (err) {
+			if (err instanceof ProbePreparationError) return failed(err.code, sanitizeMessage(err.message), cacheKey);
+			return failed("probe_build_failed", sanitizeMessage(err), cacheKey);
+		}
 		const result = runProbeSync(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
 		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
 		const parsed = parseProbeResult(result.stdout);
@@ -424,7 +568,9 @@ export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPi
 }
 
 function probeNodeArgs(probePath: string, entryPath: string, confinement: { preloadPath: string; loaderPath: string }): string[] {
-	return [...safeExecArgv(process.execArgv), "--require", confinement.preloadPath, "--experimental-loader", pathToFileUrlString(confinement.loaderPath), probePath, entryPath];
+	const args = [...safeExecArgv(process.execArgv)];
+	if (process.allowedNodeEnvironmentFlags?.has("--no-experimental-fetch")) args.push("--no-experimental-fetch");
+	return [...args, "--require", confinement.preloadPath, "--experimental-loader", pathToFileUrlString(confinement.loaderPath), probePath, entryPath];
 }
 
 function runProbeSync(probePath: string, entryPath: string, cwd: string, timeoutMs: number, confinement: { preloadPath: string; loaderPath: string }): { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean } {
