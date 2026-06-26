@@ -22,11 +22,13 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
-import { BUILTIN_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
+import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
+import { scopePaths } from "./pack-types.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -175,12 +177,23 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// Mount shipped first-party market packs so pack-owned bobbit-extension tools
 	// (and any shared pack modules they import) resolve inside Docker sandboxes.
-	try {
-		if (fs.statSync(builtinPacksDir).isDirectory()) {
-			args.push("-v", `${toDockerPath(builtinPacksDir)}:${BUILTIN_PACKS_CONTAINER_DIR}:ro`);
+	const addReadonlyDirectoryMount = (hostPath: string, containerPath: string): void => {
+		try {
+			if (fs.statSync(hostPath).isDirectory()) {
+				args.push("-v", `${toDockerPath(hostPath)}:${containerPath}:ro`);
+			}
+		} catch {
+			// Optional mount roots are absent until their corresponding feature/scope is used.
 		}
-	} catch {
-		// Built-in pack dir is absent in source-only/dev test layouts before build:packs.
+	};
+	addReadonlyDirectoryMount(builtinPacksDir, BUILTIN_PACKS_CONTAINER_DIR);
+
+	// Mount installed marketplace pack roots, not only their tools/ subtrees, so
+	// standalone pi-extension entries and shared pack-local modules resolve in Docker.
+	addReadonlyDirectoryMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
+	addReadonlyDirectoryMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
+	if (workspaceDir) {
+		addReadonlyDirectoryMount(scopePaths("project", workspaceDir).marketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
 	}
 
 	// ── Per-session preview mount (WP-A/F) ────────────────────────────
