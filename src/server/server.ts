@@ -9,7 +9,20 @@ import path from "node:path";
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
+import {
+	bobbitStateDir,
+	bobbitConfigDir,
+	getProjectRoot,
+	globalAgentDir,
+	getAgentDirApiState,
+	validateAgentDirTarget,
+	refreshAgentDirNextStart,
+	migrateAgentDirData,
+	isKnownAgentDir,
+	isPendingAgentDir,
+	buildAgentDirRestartGuidance,
+	normalizeAgentDirInput,
+} from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
@@ -1204,6 +1217,9 @@ export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
+	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
+	// they do not enter through cli.ts. This is a no-op after CLI initialization.
+	globalAgentDir();
 	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
 
 	// Initialize module-level caches for parameterized modules
@@ -7035,6 +7051,75 @@ async function handleApiRoute(
 	/** Broadcast preferences_changed with sensitive keys filtered out. */
 	function broadcastPreferencesChanged(): void {
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
+	}
+
+	// GET /api/agent-dir — return startup-resolved active dir plus next-start state.
+	if (url.pathname === "/api/agent-dir" && req.method === "GET") {
+		json(getAgentDirApiState());
+		return;
+	}
+
+	// POST /api/agent-dir/validate — validate and probe an agent-dir target.
+	if (url.pathname === "/api/agent-dir/validate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ ok: false, error: { code: "MISSING_BODY", message: "Missing body" } }, 400); return; }
+		const result = validateAgentDirTarget((body as any).path, getProjectRoot());
+		json(result);
+		return;
+	}
+
+	// PUT /api/agent-dir/pending — save the next-start agent dir without live-switching.
+	if (url.pathname === "/api/agent-dir/pending" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const rawPath = (body as any).path;
+		let persistedPath: string | undefined;
+		if (rawPath === null || rawPath === undefined || (typeof rawPath === "string" && rawPath.trim().length === 0)) {
+			preferencesStore.remove("agentDir");
+		} else if (typeof rawPath === "string") {
+			const validation = validateAgentDirTarget(rawPath, getProjectRoot());
+			if (!validation.ok) { json(validation, 400); return; }
+			persistedPath = validation.resolvedPath;
+			preferencesStore.set("agentDir", persistedPath);
+		} else {
+			json({ error: "path must be a string, null, or empty" }, 400);
+			return;
+		}
+
+		const state = refreshAgentDirNextStart(persistedPath, bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastPreferencesChanged();
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...getAgentDirApiState(), guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
+	// POST /api/agent-dir/migrate — copy allowlisted agent data; never delete or move source.
+	if (url.pathname === "/api/agent-dir/migrate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const sourceRaw = (body as any).sourcePath;
+		const destinationRaw = (body as any).destinationPath;
+		if (typeof sourceRaw !== "string" || typeof destinationRaw !== "string" || sourceRaw.trim().length === 0 || destinationRaw.trim().length === 0) {
+			json({ error: "sourcePath and destinationPath are required" }, 400);
+			return;
+		}
+		const sourcePath = normalizeAgentDirInput(sourceRaw, getProjectRoot());
+		const destinationPath = normalizeAgentDirInput(destinationRaw, getProjectRoot());
+		if (!isKnownAgentDir(sourcePath)) {
+			json({ error: "sourcePath must be the active or a historical agent directory", code: "INVALID_SOURCE" }, 400);
+			return;
+		}
+		if (!isPendingAgentDir(destinationPath)) {
+			json({ error: "destinationPath must be the pending next-start agent directory", code: "INVALID_DESTINATION" }, 400);
+			return;
+		}
+		const report = migrateAgentDirData(sourcePath, destinationPath, (body as any).overwrite === true);
+		const state = refreshAgentDirNextStart((preferencesStore.get("agentDir") as string | undefined), bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...report, guidance: buildAgentDirRestartGuidance() });
+		return;
 	}
 
 	// GET /api/preferences — return all preferences (filter sensitive keys)

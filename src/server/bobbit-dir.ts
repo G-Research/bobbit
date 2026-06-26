@@ -1,12 +1,42 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  defaultAgentDir as resolveDefaultAgentDir,
+  getAgentDirState as getRuntimeAgentDirState,
+  initializeAgentDirRuntime as initializeRuntimeAgentDir,
+} from "./agent-dir-config.js";
+
+export {
+  buildAgentDirRestartGuidance,
+  getAgentDirApiState,
+  getAgentDirState,
+  initializeAgentDirRuntime,
+  isKnownAgentDir,
+  isPendingAgentDir,
+  migrateAgentDirData,
+  normalizeAgentDirInput,
+  readPersistedAgentDir,
+  readPersistedAgentDirHistory,
+  recordAgentDirHistory,
+  refreshAgentDirNextStart,
+  resolveAgentDir,
+  validateAgentDirTarget,
+  type AgentDirApiState,
+  type AgentDirMigrationReport,
+  type AgentDirResolution,
+  type AgentDirRuntimeState,
+  type AgentDirSource,
+  type AgentDirValidationError,
+  type AgentDirValidationErrorCode,
+  type AgentDirValidationResult,
+} from "./agent-dir-config.js";
 
 let _projectRoot: string | undefined;
 
 /** Set the project root directory. Called once from cli.ts at startup. */
 export function setProjectRoot(root: string): void {
-  _projectRoot = root;
+  _projectRoot = path.resolve(root);
 }
 
 /** Get the project root directory. Falls back to process.cwd(). */
@@ -35,24 +65,22 @@ export function bobbitStateDir(projectRoot?: string): string {
   return path.join(bobbitDir(projectRoot), "state");
 }
 
+/** Returns the project-local default agent directory. */
+export function defaultAgentDir(projectRoot = getProjectRoot()): string {
+  return resolveDefaultAgentDir(projectRoot);
+}
+
 /**
- * Returns the global agent directory.
- * Priority: BOBBIT_AGENT_DIR env > PI_CODING_AGENT_DIR env > ~/.bobbit/agent/
+ * Returns the startup-resolved global agent directory.
+ * Priority at initialization: BOBBIT_AGENT_DIR env > PI_CODING_AGENT_DIR env > persisted agentDir > <projectRoot>/.bobbit/agent/.
  */
 export function globalAgentDir(): string {
-  const bobbitEnv = process.env.BOBBIT_AGENT_DIR;
-  if (bobbitEnv) {
-    if (bobbitEnv === "~") return os.homedir();
-    if (bobbitEnv.startsWith("~/")) return os.homedir() + bobbitEnv.slice(1);
-    return bobbitEnv;
+  try {
+    return getRuntimeAgentDirState().startup.dir;
+  } catch {
+    const projectRoot = getProjectRoot();
+    return initializeRuntimeAgentDir({ projectRoot, stateDir: bobbitStateDir(projectRoot) }).startup.dir;
   }
-  const piEnv = process.env.PI_CODING_AGENT_DIR;
-  if (piEnv) {
-    if (piEnv === "~") return os.homedir();
-    if (piEnv.startsWith("~/")) return os.homedir() + piEnv.slice(1);
-    return piEnv;
-  }
-  return path.join(os.homedir(), ".bobbit", "agent");
 }
 
 /**
