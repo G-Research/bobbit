@@ -155,16 +155,31 @@ describe("recoverSessionFile with configurable agent directories", () => {
 		samePath(manager.recoverSessionFile(legacyPiPs), legacyPi);
 	});
 
-	it("keeps an exact persisted absolute agentSessionFile readable after the active dir changes", async () => {
-		const oldAgentDir = path.join(tmpRoot, "old-agent-dir-not-in-history");
-		const ps = makePersistedSession({ id: "persisted-absolute-session", archived: true });
-		const persistedPath = writeRecoverableTranscript(oldAgentDir, { ...ps, text: "read me from the persisted absolute path" });
+	it("keeps an exact persisted absolute agentSessionFile readable under a historical sessions root", async () => {
+		const ps = makePersistedSession({ id: "persisted-historical-session", archived: true });
+		const persistedPath = writeRecoverableTranscript(historicalAgentDir, { ...ps, text: "read me from the historical persisted absolute path" });
 		ps.agentSessionFile = persistedPath;
 		const store = makeStore([ps]);
 		const manager = makeManager(store);
 
 		const messages = await manager.getArchivedMessages(ps.id);
 		assert.equal(messages.length, 1);
-		assert.deepEqual(messages[0], { role: "user", content: "read me from the persisted absolute path" });
+		assert.deepEqual(messages[0], { role: "user", content: "read me from the historical persisted absolute path" });
+	});
+
+	it("rejects a corrupted persisted absolute agentSessionFile outside known sessions roots", async () => {
+		const outside = path.join(tmpRoot, "arbitrary-outside-transcript.jsonl");
+		fs.writeFileSync(outside, JSON.stringify({ type: "message", message: { role: "user", content: "must not be read" } }) + "\n", "utf-8");
+		const ps = makePersistedSession({
+			id: "corrupt-outside-session",
+			archived: true,
+			agentSessionFile: outside,
+			createdAt: Date.parse("2036-04-03T15:15:12.009Z"),
+		});
+		const store = makeStore([ps]);
+		const manager = makeManager(store);
+
+		assert.equal(manager.recoverSessionFile(ps), null);
+		assert.deepEqual(await manager.getArchivedMessages(ps.id), []);
 	});
 });

@@ -151,4 +151,43 @@ describe("agent directory copy migration", () => {
 		assert.equal(fs.existsSync(path.join(dest, "auth.json")), false);
 		assert.match(reportBucket(report, "missing"), /auth\.json|models\.json|settings\.json|google-code-assist\.json|bin/);
 	});
+
+	it("rejects same source and destination before copying", async (t) => {
+		const migrate = await loadMigrationFn();
+		const { root, source } = makeTree();
+		t.after(() => cleanup(root));
+
+		const report = await migrate({ sourcePath: source, destinationPath: source, overwrite: true });
+
+		assert.match(reportText(report), /SAME_PATH|must be different/i);
+		assert.equal(fs.existsSync(path.join(source, "auth.json")), true, "source is preserved");
+	});
+
+	it("rejects destination nested inside source before creating it", async (t) => {
+		const migrate = await loadMigrationFn();
+		const { root, source } = makeTree();
+		t.after(() => cleanup(root));
+		const nestedDest = path.join(source, "nested-destination");
+
+		const report = await migrate({ sourcePath: source, destinationPath: nestedDest, overwrite: true });
+
+		assert.match(reportText(report), /DESTINATION_INSIDE_SOURCE|destinationPath must not be inside sourcePath/i);
+		assert.equal(fs.existsSync(nestedDest), false, "nested destination must not be created");
+	});
+
+	it("rejects source nested inside destination before copying", async (t) => {
+		const migrate = await loadMigrationFn();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-migration-nested-source-"));
+		t.after(() => cleanup(root));
+		const dest = path.join(root, "dest-agent");
+		const source = path.join(dest, "nested-source");
+		fs.mkdirSync(path.join(source, "sessions"), { recursive: true });
+		fs.writeFileSync(path.join(source, "auth.json"), "nested auth");
+		fs.writeFileSync(path.join(source, "sessions", "nested.jsonl"), "nested transcript");
+
+		const report = await migrate({ sourcePath: source, destinationPath: dest, overwrite: true });
+
+		assert.match(reportText(report), /SOURCE_INSIDE_DESTINATION|sourcePath must not be inside destinationPath/i);
+		assert.equal(fs.existsSync(path.join(dest, "auth.json")), false, "migration must not copy files into the parent destination");
+	});
 });
