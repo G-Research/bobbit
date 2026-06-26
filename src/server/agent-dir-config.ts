@@ -77,6 +77,7 @@ interface RuntimeInitInput extends ResolveAgentDirInput {
 
 let runtimeState: AgentDirRuntimeState | undefined;
 let runtimeStateDir: string | undefined;
+let inMemoryAgentDirHistory: string[] = [];
 
 const PREFERENCE_AGENT_DIR = "agentDir";
 const PREFERENCE_AGENT_DIR_HISTORY = "agentDirHistory";
@@ -133,8 +134,34 @@ export function initializeAgentDirRuntime(input: RuntimeInitInput): AgentDirRunt
 		restartRequired: !samePath(startup.dir, nextStart.dir),
 		history,
 	};
-	writeAgentDirHistory(stateDir, history);
+	inMemoryAgentDirHistory = history;
+	writeAgentDirHistoryIfReady(stateDir, history);
 	return cloneRuntimeState(runtimeState);
+}
+
+export function initializeAgentDirRuntimeState(input: ResolveAgentDirInput & { stateDir?: string }): AgentDirRuntimeState {
+	const projectRoot = normalizeAbsolutePath(input.projectRoot);
+	return initializeAgentDirRuntime({
+		...input,
+		projectRoot,
+		stateDir: input.stateDir ? normalizeAbsolutePath(input.stateDir) : path.join(projectRoot, ".bobbit", "state"),
+	});
+}
+
+export const initializeAgentDirState = initializeAgentDirRuntimeState;
+
+export function resetAgentDirStateForTests(): void {
+	runtimeState = undefined;
+	runtimeStateDir = undefined;
+	inMemoryAgentDirHistory = [];
+}
+
+export const resetAgentDirRuntimeForTests = resetAgentDirStateForTests;
+
+export function globalAgentDir(): string {
+	if (runtimeState) return runtimeState.startup.dir;
+	const projectRoot = normalizeAbsolutePath(process.cwd());
+	return initializeAgentDirRuntime({ projectRoot, stateDir: path.join(projectRoot, ".bobbit", "state") }).startup.dir;
 }
 
 export function getAgentDirState(): AgentDirRuntimeState {
@@ -180,7 +207,8 @@ export function refreshAgentDirNextStart(persistedRaw?: string, stateDir = runti
 		restartRequired: !samePath(runtimeState.startup.dir, nextStart.dir),
 		history,
 	};
-	if (stateDir) writeAgentDirHistory(stateDir, history);
+	inMemoryAgentDirHistory = history;
+	if (stateDir) writeAgentDirHistoryIfReady(stateDir, history);
 	return cloneRuntimeState(runtimeState);
 }
 
@@ -197,10 +225,10 @@ export function readPersistedAgentDirHistory(stateDir: string): string[] {
 }
 
 export function recordAgentDirHistory(dir: string, stateDir = runtimeStateDir, projectRoot = runtimeState?.startup.projectRoot): string[] {
-	if (!stateDir) throw new Error("Cannot record agentDirHistory before stateDir is known");
-	if (!projectRoot) throw new Error("Cannot record agentDirHistory before projectRoot is known");
-	const history = mergeAgentDirHistory(projectRoot, stateDir, [dir]);
-	writeAgentDirHistory(stateDir, history);
+	const resolvedProjectRoot = normalizeAbsolutePath(projectRoot ?? process.cwd());
+	const history = mergeAgentDirHistory(resolvedProjectRoot, stateDir, [dir]);
+	inMemoryAgentDirHistory = history;
+	if (stateDir) writeAgentDirHistoryIfReady(stateDir, history);
 	if (runtimeState) runtimeState = { ...runtimeState, history };
 	return history;
 }
@@ -225,7 +253,14 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	}
 
 	try {
-		fs.mkdirSync(resolvedPath, { recursive: true, mode: 0o700 });
+		if (fs.existsSync(resolvedPath)) {
+			const existing = fs.statSync(resolvedPath);
+			if (!existing.isDirectory()) {
+				return validationError("NOT_DIRECTORY", "The resolved path exists but is not a directory.", rawInput, resolvedPath);
+			}
+		} else {
+			fs.mkdirSync(resolvedPath, { recursive: true, mode: 0o700 });
+		}
 	} catch (err) {
 		return validationError("CREATE_FAILED", `Failed to create directory: ${(err as Error).message}`, rawInput, resolvedPath);
 	}
@@ -371,11 +406,23 @@ function writeAgentDirHistory(stateDir: string, history: string[]): void {
 	writePreferences(stateDir, prefs);
 }
 
+function writeAgentDirHistoryIfReady(stateDir: string, history: string[]): void {
+	if (!fs.existsSync(stateDir)) return;
+	try {
+		writeAgentDirHistory(stateDir, history);
+	} catch {
+		// History is compatibility metadata. Never let a best-effort history write
+		// initialize or break pure path translation/test contexts before startup
+		// has scaffolded .bobbit/state.
+	}
+}
+
 function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined, dirs: Array<string | undefined>): string[] {
 	const seeded = [
 		path.join(os.homedir(), ".bobbit", "agent"),
 		path.join(os.homedir(), ".pi", "agent"),
 		defaultAgentDir(projectRoot),
+		...inMemoryAgentDirHistory,
 		...(stateDir ? readPersistedAgentDirHistory(stateDir) : []),
 		...dirs,
 	];
