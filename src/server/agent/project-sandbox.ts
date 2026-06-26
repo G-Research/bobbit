@@ -742,9 +742,10 @@ export class ProjectSandbox {
 		);
 
 		// Collect read-only bind mounts for any `mounted` clone sources (remote-less
-		// repos). The host repo is mounted at a fixed container path so the init
-		// sequence clones it via `file://<mountPath>` instead of an unreachable
-		// host path. De-dupe by mountPath so multi-repo sources can't collide.
+		// repos). The caller supplies sanitized git sources (not the full project
+		// root) at fixed container paths so the init sequence clones them via
+		// `file://<mountPath>` instead of an unreachable host path. De-dupe by
+		// mountPath so multi-repo sources can't collide.
 		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
 		const seenMountPaths = new Set<string>();
 		const addMount = (src?: SandboxCloneSource): void => {
