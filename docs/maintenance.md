@@ -6,36 +6,81 @@ The Maintenance tab is user-facing, but the same actions are exposed through `/a
 
 ## Archived Session Worktrees
 
-**Settings → Maintenance → Archived Session Worktrees** finds git worktrees that are still owned by archived session records. It solves a different problem from **Orphaned Worktrees**:
+**Settings → Maintenance → Archived Session Worktrees** finds git worktrees that are still recorded on archived session records. It solves a different problem from **Orphaned Worktrees**:
 
 - **Orphaned Worktrees** are branch-centric git entries with no owning live session reference.
 - **Archived Session Worktrees** are still referenced by archived session metadata, but the user may want to reclaim the checkout and branch while keeping the archive.
 
-This cleanup removes only git worktrees and, when safe, their corresponding branches. It does **not** delete archived session rows, transcripts, proposals, prompt records, search visibility, or archive list entries.
+This cleanup removes only host git worktrees and, when safe, their corresponding local branches. It does **not** delete archived session rows, transcripts, proposal drafts, prompt records, search visibility, or archive list entries.
 
-### Scan behavior
+### Actionable-first scan
 
-Click **Scan** to call `GET /api/maintenance/archived-session-worktrees`. The scan groups results by archived session and shows:
+Click **Scan** or **Rescan** to call `GET /api/maintenance/archived-session-worktrees`. The default UI is organized around the question: "What can I clean up right now?"
 
-- session title and id;
-- project and repo/component;
-- branch;
-- worktree path;
-- status and explanatory detail.
+The primary panel shows actionable rows first:
 
-Rows can have three statuses:
+- rows classified as `Ready to clean` are selectable and checked by default unless the server says otherwise;
+- skipped, ineligible, already-cleaned, and failed rows are hidden behind the troubleshooting disclosure;
+- the historical metadata count is secondary and labelled as metadata, not as eligibility.
 
-| Status | Meaning | UI behavior |
+This avoids treating "has worktree metadata" as "safe to remove." A scan can find many archived sessions with old worktree-related fields and still have `Ready to clean: 0`.
+
+### Summary labels
+
+| Label | Meaning | User action |
 |---|---|---|
-| `removable` | The worktree path or git worktree metadata still exists, and no guard references it. | Checked by default and eligible for cleanup. |
-| `skipped` | The row is not safe or actionable, with `reason`/`detail` explaining why. | Disabled. |
-| `already-cleaned` | The worktree path and git worktree metadata are already gone. A remaining branch alone does not make the row actionable. | Hidden by default; diagnostics may show it disabled. |
+| **Ready to clean** | Server-classified removable archived-session worktrees. These have a host path or git worktree entry and no protected references. | Use **Clean all safe candidates** or selection presets. |
+| **Selected** | Current number of ready-to-clean rows selected in the UI. | Use **Clean selected** when non-zero. |
+| **Already cleaned** | Archived records whose remembered worktree/git metadata is already gone. | No cleanup needed; inspect examples only when troubleshooting. |
+| **Needs attention** | Non-actionable rows such as stale paths, scan errors, or protected references that may need manual inspection. | Open **Show skipped / ineligible items** or **Show why not removable**. |
 
-The default scan omits sessions whose rows are all `already-cleaned`. Add `?includeAlreadyCleaned=1` to the API request for diagnostics.
+`Has worktree metadata` may appear as secondary scan detail. It means Bobbit found historical worktree-related data on archived records; it does not mean those records are removable.
 
-### Cleanup behavior
+### Zero-removable empty state
 
-The UI posts selected rows to `POST /api/maintenance/cleanup-archived-session-worktrees` as:
+When `Ready to clean` is zero, cleanup actions are disabled and the panel shows **Nothing safe to clean right now**. This is a successful scan, not an error.
+
+Common explanations include:
+
+- the worktree and git metadata are already gone;
+- the archived record has no host worktree path;
+- the recorded path is sandbox/container-internal, such as `/workspace` or `/workspace-wt`;
+- the path or branch is still referenced by a live session, goal, delegate, team member, staff agent, or multi-repo sibling;
+- the path exists on disk but is not a git worktree entry, so Bobbit leaves it for manual inspection.
+
+Skipped, ineligible, already-cleaned, and failed examples stay hidden by default. The disclosure shows grouped examples by reason, capped to a small sample with a **Show all** option for each group.
+
+### Troubleshooting examples
+
+The scan response includes groups such as:
+
+- **Ready to clean**;
+- **Already cleaned**;
+- **Missing worktree path**;
+- **Missing repository path**;
+- **Sandbox/container path**;
+- **Shared delegate worktree**;
+- **Stale worktree directory**;
+- **Referenced by live session / goal / team / staff**;
+- **Scan errors**.
+
+Each group includes representative `sampleItems` so the UI can explain why records are not removable without rendering hundreds of skipped rows. Rows show practical details first: title, session id, project/repo, branch, worktree path, and a human-readable reason. Technical fields are secondary details.
+
+### Cleanup flows
+
+#### Clean all safe candidates
+
+Use **Clean all safe candidates** when the scan reports `Ready to clean > 0`. The UI sends:
+
+```json
+{ "mode": "all" }
+```
+
+The server re-scans before cleanup and removes only rows that are still classified as removable. If a row became unsafe or already cleaned after the UI scan, it is skipped or reported as already cleaned in the result.
+
+#### Clean selected
+
+The scan selects ready-to-clean rows by default. The user can narrow that set with row checkboxes or presets, then use **Clean selected**. The UI sends selected worktree selectors, usually including `sessionId`, `key`, `repo`, and `path`.
 
 ```json
 {
@@ -46,38 +91,57 @@ The UI posts selected rows to `POST /api/maintenance/cleanup-archived-session-wo
 }
 ```
 
-The server re-runs the scan before deleting anything, so stale UI selections cannot bypass safety checks. It cleans only rows that are still `removable` in the fresh scan. One item failure does not abort the rest of the request.
+Empty selected cleanup is a no-op. Invalid or stale selectors are reported as skipped; they do not make the server delete anything outside the fresh scan's removable set.
 
-Successful cleanup removes the host git worktree. Branch deletion is best-effort and only happens when the branch is local to the same repo and not referenced by any protected live or durable owner. If branch deletion is blocked, the worktree can still be removed and the result reports `branchDeleted: false`.
+### Selection presets and categories
 
-### Safety rules
+The UI provides one-click selection controls for common cleanup choices:
 
-A candidate is skipped rather than removed when any protected owner still references the same worktree path or branch. Guards include:
+- **Select all removable**;
+- **Archived sessions only**;
+- **Current project** when the active project matches scan data;
+- **Goal/team/delegate worktrees** when represented in the scan;
+- **Clear selection**.
 
-- non-archived persisted sessions and current runtime sessions;
-- persisted goals, including archived goals that still exist in the goal store;
+The API also exposes `selectionPresets` and `selectionCategories` so clients can render equivalent controls without hardcoding every rule. Categories are descriptive filters over already-removable rows, such as `archived-session`, `goal-session`, `team-session`, `delegate-session`, `child-session`, `single-repo`, and `multi-repo`.
+
+### Safety guarantees
+
+The server is the source of truth for cleanup eligibility. UI selection can only request cleanup; it cannot bypass guards.
+
+Before deleting anything, cleanup re-runs the archived-session worktree scan and only acts on fresh `removable` / `ready-to-clean` rows. Protected rows are skipped.
+
+Cleanup preserves:
+
+- archived session metadata and archive visibility;
+- transcripts and prompt history;
+- proposal drafts and proposal history;
+- search/index records until their normal maintenance paths handle them.
+
+Cleanup refuses to remove worktrees or branches still referenced by:
+
+- non-archived persisted sessions or current runtime sessions;
+- persisted goals;
+- delegates or shared-worktree parent/child records;
 - team entries and team agents;
 - staff records, including paused staff;
 - multi-repo sibling `repoWorktrees` entries;
-- delegate/shared-worktree records without an independent worktree;
-- container-internal sandbox paths such as `/workspace` or `/workspace-wt`.
+- sandbox/container-internal paths that do not identify a host worktree.
 
-Multi-repo archived sessions are evaluated per repo item. One component worktree may be removable while another is skipped.
+Branch deletion is best-effort and narrower than worktree deletion. Bobbit deletes an eligible local branch only when it belongs to the same repo and no protected live or durable record still references it. A cleanup result can therefore report `worktreeRemoved: true` and `branchDeleted: false`.
 
-### What is preserved
+Multi-repo archived sessions are evaluated per repo item. One component worktree may be removable while another component is skipped.
 
-Archived-session worktree cleanup never purges the archived session. After cleanup, the archived session can still appear in archive/search surfaces and its transcript/proposals remain available. The archived metadata may still display the historical worktree path, but that path can now point to a removed directory.
+## API shape
 
-## REST API
-
-See [REST API — Maintenance](rest-api.md#maintenance) for request and response shapes.
+See [REST API — Maintenance](rest-api.md#maintenance) for the route table and interface sketch.
 
 Key routes:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/maintenance/archived-session-worktrees` | Preview archived-session worktree candidates. |
-| `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Clean selected or all currently removable archived-session worktrees. |
+| `GET` | `/api/maintenance/archived-session-worktrees` | Preview archived-session worktree candidates and UX grouping data. |
+| `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Clean all, selected, category-filtered, or preset-filtered removable archived-session worktrees. |
 | `GET` | `/api/maintenance/orphaned-worktrees` | Preview git worktrees not owned by live session references. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Clean selected orphaned worktrees. |
 | `GET` | `/api/maintenance/orphaned-sessions` | Preview non-interactive session records that can be terminated. |
@@ -86,3 +150,5 @@ Key routes:
 | `POST` | `/api/maintenance/purge-archives` | Purge expired archives. |
 | `GET` | `/api/maintenance/orphaned-index-rows` | Preview search index rows whose parent records are gone. |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows. |
+
+The archived-session scan keeps the older `sessions` and `counts` fields while adding flattened `items`, `groups`, `sampleItems`, reason categories, selection categories, and `selectionPresets`. These additive fields exist for UX filtering and examples; clients should tolerate new reasons, groups, and presets over time.
