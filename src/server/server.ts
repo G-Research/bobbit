@@ -14060,55 +14060,106 @@ async function handleApiRoute(
 			json({ error: "Request body must be an object" }, 400);
 			return;
 		}
-		const mode = (body as any).mode;
+		const rec = body as Record<string, unknown>;
+		const mode = rec.mode;
 		const hasSessionIds = Object.prototype.hasOwnProperty.call(body, "sessionIds");
 		const hasWorktrees = Object.prototype.hasOwnProperty.call(body, "worktrees");
-		if (mode !== "all" && mode !== "selected") {
+		const hasCategories = Object.prototype.hasOwnProperty.call(body, "categories");
+		const hasPresetId = Object.prototype.hasOwnProperty.call(body, "presetId");
+		const hasProjectId = Object.prototype.hasOwnProperty.call(body, "projectId");
+		const hasRepoPath = Object.prototype.hasOwnProperty.call(body, "repoPath");
+		const cleanup = async (request: any) => {
+			try {
+				const result = await sessionManager.cleanupArchivedSessionWorktrees(request);
+				json(result);
+			} catch (err) {
+				if (err instanceof Error && (err.name === "CleanupArchivedSessionWorktreesRequestError" || (err as any).statusCode === 400)) {
+					json({ error: err.message }, 400);
+					return;
+				}
+				throw err;
+			}
+		};
+		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") {
 			json({ error: "Invalid cleanup mode" }, 400);
 			return;
 		}
 		if (mode === "all") {
-			if (hasSessionIds || hasWorktrees) {
+			if (hasSessionIds || hasWorktrees || hasCategories || hasPresetId) {
 				json({ error: "mode=all does not accept selectors" }, 400);
 				return;
 			}
-			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "all" });
-			json(result);
+			await cleanup({ mode: "all" });
 			return;
 		}
-		if (hasSessionIds && hasWorktrees) {
-			json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400);
-			return;
-		}
-		if (hasSessionIds) {
-			const sessionIds = (body as any).sessionIds;
-			if (!Array.isArray(sessionIds) || sessionIds.some((id: unknown) => typeof id !== "string")) {
-				json({ error: "sessionIds must be an array of strings" }, 400);
+		if (mode === "selected") {
+			if (hasCategories || hasPresetId) {
+				json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400);
 				return;
 			}
-			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected", sessionIds });
-			json(result);
-			return;
-		}
-		if (hasWorktrees) {
-			const worktrees = (body as any).worktrees;
-			if (!Array.isArray(worktrees) || worktrees.some((wt: unknown) => {
-				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
-				const rec = wt as Record<string, unknown>;
-				return typeof rec.sessionId !== "string"
-					|| (rec.repo !== undefined && typeof rec.repo !== "string")
-					|| (rec.path !== undefined && typeof rec.path !== "string")
-					|| (rec.key !== undefined && typeof rec.key !== "string");
-			})) {
-				json({ error: "worktrees must be an array of selector objects with string fields" }, 400);
+			if (hasSessionIds && hasWorktrees) {
+				json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400);
 				return;
 			}
-			const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected", worktrees });
-			json(result);
+			if (hasSessionIds) {
+				const sessionIds = rec.sessionIds;
+				if (!Array.isArray(sessionIds) || sessionIds.some((id: unknown) => typeof id !== "string")) {
+					json({ error: "sessionIds must be an array of strings" }, 400);
+					return;
+				}
+				await cleanup({ mode: "selected", sessionIds });
+				return;
+			}
+			if (hasWorktrees) {
+				const worktrees = rec.worktrees;
+				if (!Array.isArray(worktrees) || worktrees.some((wt: unknown) => {
+					if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
+					const selector = wt as Record<string, unknown>;
+					return typeof selector.sessionId !== "string"
+						|| (selector.repo !== undefined && typeof selector.repo !== "string")
+						|| (selector.path !== undefined && typeof selector.path !== "string")
+						|| (selector.key !== undefined && typeof selector.key !== "string");
+				})) {
+					json({ error: "worktrees must be an array of selector objects with string fields" }, 400);
+					return;
+				}
+				await cleanup({ mode: "selected", worktrees });
+				return;
+			}
+			await cleanup({ mode: "selected" });
 			return;
 		}
-		const result = await sessionManager.cleanupArchivedSessionWorktrees({ mode: "selected" });
-		json(result);
+		if (mode === "category") {
+			if (hasSessionIds || hasWorktrees || hasPresetId) {
+				json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400);
+				return;
+			}
+			const categories = rec.categories;
+			const validCategories = new Set(["archived-session", "goal-session", "team-session", "delegate-session", "child-session", "single-repo", "multi-repo"]);
+			if (!Array.isArray(categories) || categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) {
+				json({ error: "categories must be an array of supported category strings" }, 400);
+				return;
+			}
+			if (rec.projectId !== undefined && typeof rec.projectId !== "string") {
+				json({ error: "projectId must be a string" }, 400);
+				return;
+			}
+			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") {
+				json({ error: "repoPath must be a string" }, 400);
+				return;
+			}
+			await cleanup({ mode: "category", categories, projectId: rec.projectId, repoPath: rec.repoPath });
+			return;
+		}
+		if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) {
+			json({ error: "mode=preset accepts presetId only" }, 400);
+			return;
+		}
+		if (typeof rec.presetId !== "string") {
+			json({ error: "presetId must be a string" }, 400);
+			return;
+		}
+		await cleanup({ mode: "preset", presetId: rec.presetId });
 		return;
 	}
 
