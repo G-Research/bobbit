@@ -30,6 +30,9 @@ All packs here use the **V1 on-disk schema** (see
 | `conflict-dup-panel-id-src` | `dup-panel-id` | HARD CONFLICT: two `panels/*.yaml` with the same `id`. |
 | `conflict-dup-entrypoint-id-src` | `dup-entrypoint-id` | HARD CONFLICT: two `entrypoints/*.yaml` with the same `id`. |
 | `conflict-dup-routeid-src` | `dup-routeid-a`, `dup-routeid-b` | HARD CONFLICT: two packs claiming the same host-global `routeId` — install both, register neither. |
+| `pi-extension-demo-src` | `pi-extension-demo` | Schema-2 standalone pi extension fixture; registers `pi_demo_echo`. |
+| `pi-extension-failure-src` | `pi-extension-failure` | Schema-2 pi extension fixture with a missing dependency for discovery diagnostics. |
+| `pi-extension-scope-src` | `pi-extension-project-a`, `pi-extension-project-b` | Project-scoped pi extension fixtures with isolated and overlapping runtime tool names. |
 
 These `*-src/` sources are the **marketplace-install + E2E** fixtures, consumed by
 `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, and
