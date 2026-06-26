@@ -217,10 +217,15 @@ function packageImportBase(specifier: string, sourceRootReal: string): string {
 	return path.join(sourceRootReal, "node_modules", packageName, ...subpath);
 }
 
+function isPackageSpecifier(specifier: string): boolean {
+	return !path.isAbsolute(specifier) && !specifier.startsWith(".") && !specifier.startsWith("/") && !/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier) && !isNodeBuiltinImport(specifier);
+}
+
 function resolveConfinedImport(specifier: string, fromDir: string, sourceRootReal: string): string | null {
 	if (isDeniedProbeImport(specifier)) throw new ProbePreparationError("PROBE_CONFINEMENT_DENIED", `Pi extension discovery probe denied import of ${specifier} during executable discovery.`);
 	if (isNodeBuiltinImport(specifier)) return null;
 	if (!path.isAbsolute(specifier) && /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier)) throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to bundle URL import ${specifier}.`);
+	const packageSpecifier = isPackageSpecifier(specifier);
 	const base = (path.isAbsolute(specifier) || specifier.startsWith(".") || specifier.startsWith("/"))
 		? path.resolve(fromDir, specifier)
 		: packageImportBase(specifier, sourceRootReal);
@@ -228,7 +233,12 @@ function resolveConfinedImport(specifier: string, fromDir: string, sourceRootRea
 		throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to resolve import ${specifier} outside the extension source root.`);
 	}
 	const resolved = resolveImportCandidate(base);
-	if (!resolved) throw new ProbePreparationError("probe_build_failed", `Pi extension discovery could not resolve import ${specifier}.`);
+	if (!resolved) {
+		if (packageSpecifier) {
+			throw new ProbePreparationError("PROBE_FS_READ_DENIED", `Pi extension discovery refused to resolve package import ${specifier} outside the extension source root. Only extension-local node_modules packages may be bundled.`);
+		}
+		throw new ProbePreparationError("probe_build_failed", `Pi extension discovery could not resolve import ${specifier}.`);
+	}
 	return assertRealPathInsideSource(sourceRootReal, resolved, `import ${specifier}`);
 }
 
@@ -238,6 +248,8 @@ function importSpecifiers(source: string): string[] {
 		/\bimport\s+(?:[^"'()]*?\s+from\s+)?["']([^"']+)["']/g,
 		/\bexport\s+[^"']*?\s+from\s+["']([^"']+)["']/g,
 		/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+		/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+		/\brequire\s*\.\s*resolve\s*\(\s*["']([^"']+)["']\s*\)/g,
 	];
 	for (const pattern of patterns) {
 		for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
@@ -264,23 +276,90 @@ function assertTypeScriptBundleConfined(entryPath: string): void {
 	visit(entryPath);
 }
 
+function typeScriptBundleWorkerScript(): string {
+	return String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const { builtinModules } = require("node:module");
+const [entryPath, outFile, sourceRootReal, esbuildPath] = process.argv.slice(2);
+const DENIED_PROBE_IMPORTS = ${JSON.stringify(DENIED_PROBE_IMPORTS)};
+let preparationError = null;
+class ProbePreparationError extends Error { constructor(code, message) { super(message); this.code = code; } }
+function isDeniedProbeImport(specifier) { const normalized = String(specifier || "").replace(/^node:/, ""); return DENIED_PROBE_IMPORTS.some((denied) => normalized === denied || normalized.startsWith(denied + "/")); }
+function isNodeBuiltinImport(specifier) { const normalized = String(specifier || "").replace(/^node:/, ""); return builtinModules.includes(normalized) || builtinModules.includes("node:" + normalized); }
+function isPathInside(root, target) { const rel = path.relative(root, target); return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel)); }
+function assertRealPathInsideSource(target, detail) { let targetReal; try { targetReal = fs.realpathSync(target); } catch (err) { throw new ProbePreparationError("probe_build_failed", "Pi extension discovery could not resolve " + detail + ": " + sanitizeMessage(err)); } if (!isPathInside(sourceRootReal, targetReal)) throw new ProbePreparationError("PROBE_FS_READ_DENIED", "Pi extension discovery refused to bundle " + detail + " outside the extension source root."); return targetReal; }
+function sanitizeMessage(value) { const raw = value && value.message ? String(value.message) : String(value ?? "unknown error"); return raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 1000) || "unknown error"; }
+function packageJsonEntry(pkgPath) { try { const data = JSON.parse(fs.readFileSync(pkgPath, "utf-8")); for (const key of ["module", "main"]) { const value = data[key]; if (typeof value === "string" && value.trim()) return path.resolve(path.dirname(pkgPath), value); } } catch {} return null; }
+function resolveImportCandidate(base) { const candidates = [base]; if (!path.extname(base)) candidates.push(...[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json"].map((ext) => base + ext)); for (const candidate of candidates) { try { const st = fs.lstatSync(candidate); if (st.isSymbolicLink() || st.isFile()) return candidate; } catch {} } try { const st = fs.lstatSync(base); if (st.isSymbolicLink()) return base; if (st.isDirectory()) { const pkgEntry = packageJsonEntry(path.join(base, "package.json")); if (pkgEntry) { const resolved = resolveImportCandidate(pkgEntry); if (resolved) return resolved; } for (const name of ["index.ts", "index.tsx", "index.mts", "index.cts", "index.js", "index.mjs", "index.cjs", "index.json"]) { const resolved = resolveImportCandidate(path.join(base, name)); if (resolved) return resolved; } } } catch {} return null; }
+function packageImportBase(specifier) { const parts = String(specifier).split("/"); const packageName = String(specifier).startsWith("@") ? parts.slice(0, 2).join("/") : parts[0] || ""; const subpath = String(specifier).startsWith("@") ? parts.slice(2) : parts.slice(1); return path.join(sourceRootReal, "node_modules", packageName, ...subpath); }
+function isPackageSpecifier(specifier) { return !path.isAbsolute(specifier) && !String(specifier).startsWith(".") && !String(specifier).startsWith("/") && !/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier) && !isNodeBuiltinImport(specifier); }
+function resolveConfinedImport(specifier, fromDir) { if (isDeniedProbeImport(specifier)) throw new ProbePreparationError("PROBE_CONFINEMENT_DENIED", "Pi extension discovery probe denied import of " + specifier + " during executable discovery."); if (isNodeBuiltinImport(specifier)) return null; if (!path.isAbsolute(specifier) && /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier)) throw new ProbePreparationError("PROBE_FS_READ_DENIED", "Pi extension discovery refused to bundle URL import " + specifier + "."); const packageSpecifier = isPackageSpecifier(specifier); const base = (path.isAbsolute(specifier) || String(specifier).startsWith(".") || String(specifier).startsWith("/")) ? path.resolve(fromDir, specifier) : packageImportBase(specifier); if (!isPathInside(sourceRootReal, base)) throw new ProbePreparationError("PROBE_FS_READ_DENIED", "Pi extension discovery refused to resolve import " + specifier + " outside the extension source root."); const resolved = resolveImportCandidate(base); if (!resolved) { if (packageSpecifier) throw new ProbePreparationError("PROBE_FS_READ_DENIED", "Pi extension discovery refused to resolve package import " + specifier + " outside the extension source root. Only extension-local node_modules packages may be bundled."); throw new ProbePreparationError("probe_build_failed", "Pi extension discovery could not resolve import " + specifier + "."); } return assertRealPathInsideSource(resolved, "import " + specifier); }
+function esbuildLoaderForPath(file) { const ext = path.extname(file).toLowerCase(); if (ext === ".json") return "json"; if (ext === ".tsx") return "tsx"; if ([".ts", ".mts", ".cts"].includes(ext)) return "ts"; return "js"; }
+function fail(err) { preparationError = err; throw err; }
+(async () => {
+  try {
+    const esbuild = require(esbuildPath);
+    await esbuild.build({
+      entryPoints: [entryPath],
+      outfile: outFile,
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node20",
+      logLevel: "silent",
+      plugins: [{ name: "bobbit-pi-extension-bundle-confinement", setup(build) {
+        build.onResolve({ filter: /.*/ }, (args) => { try { const importerDir = args.importer ? path.dirname(args.importer) : path.dirname(path.resolve(entryPath)); const resolved = resolveConfinedImport(args.path, importerDir); if (!resolved) return { path: args.path, external: true }; return { path: resolved }; } catch (err) { if (err instanceof ProbePreparationError) return fail(err); throw err; } });
+        build.onLoad({ filter: /.*/ }, (args) => { try { const real = assertRealPathInsideSource(args.path, "bundle load " + args.path); return { contents: fs.readFileSync(real, "utf-8"), loader: esbuildLoaderForPath(real), resolveDir: path.dirname(real) }; } catch (err) { if (err instanceof ProbePreparationError) return fail(err); throw err; } });
+      }}],
+    });
+  } catch (err) {
+    const prepared = preparationError instanceof ProbePreparationError ? preparationError : new ProbePreparationError("probe_build_failed", sanitizeMessage(err));
+    process.stderr.write(JSON.stringify({ code: prepared.code, message: prepared.message }));
+    process.exit(1);
+  }
+})();
+`;
+}
+
+function bundleTypeScriptEntryWithEsbuild(entryPath: string, outFile: string): boolean {
+	let esbuildPath: string;
+	try {
+		esbuildPath = require.resolve("esbuild");
+	} catch {
+		return false;
+	}
+	const sourceRootReal = fs.realpathSync(inferAllowedSourceRoot(entryPath));
+	const workerPath = path.join(path.dirname(outFile), "bundle-worker.cjs");
+	fs.writeFileSync(workerPath, typeScriptBundleWorkerScript(), "utf-8");
+	const result = spawnSync(process.execPath, [workerPath, entryPath, outFile, sourceRootReal, esbuildPath], {
+		cwd: path.dirname(outFile),
+		env: minimalEnv(),
+		encoding: "utf-8",
+		windowsHide: true,
+		timeout: DEFAULT_TIMEOUT_MS,
+		maxBuffer: MAX_OUTPUT_BYTES,
+	});
+	if (result.status === 0 && fs.existsSync(outFile)) return true;
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal === "SIGTERM") {
+		throw new ProbePreparationError("probe_timeout", `Pi extension discovery TypeScript bundling timed out after ${DEFAULT_TIMEOUT_MS}ms.`);
+	}
+	try {
+		const parsed = JSON.parse(String(result.stderr || "").trim()) as { code?: string; message?: string };
+		if (parsed?.code) throw new ProbePreparationError(parsed.code, parsed.message || "Pi extension discovery TypeScript bundling failed.");
+	} catch (err) {
+		if (err instanceof ProbePreparationError) throw err;
+	}
+	throw new ProbePreparationError("probe_build_failed", sanitizeMessage(result.stderr || result.stdout || result.error || "Pi extension discovery TypeScript bundling failed."));
+}
+
 function transpileTypeScriptEntry(entryPath: string, outFile: string): void {
 	// Prefer esbuild when present because it deterministically bundles local .ts
 	// helpers into the temp probe entry. Production builds may not include a TS
 	// loader, so discovery cannot rely on parent process --import/tsx hooks.
 	try {
 		assertTypeScriptBundleConfined(entryPath);
-		const esbuild = require("esbuild") as typeof import("esbuild");
-		esbuild.buildSync({
-			entryPoints: [entryPath],
-			outfile: outFile,
-			bundle: true,
-			platform: "node",
-			format: "esm",
-			target: "node20",
-			logLevel: "silent",
-		});
-		return;
+		if (bundleTypeScriptEntryWithEsbuild(entryPath, outFile)) return;
 	} catch (err) {
 		if (err instanceof ProbePreparationError) throw err;
 		// Fall through to TypeScript's emitter (if installed) and finally a small
