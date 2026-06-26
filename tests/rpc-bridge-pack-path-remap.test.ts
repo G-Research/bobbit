@@ -184,4 +184,34 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 
 		assert.ok(args.includes(`${toDockerPath(projectMarketPacksRoot)}:${PROJECT_MARKET_PACKS_CONTAINER_DIR}:ro`));
 	});
+
+	it("creates missing market-pack roots before long-lived sandbox mount assembly", () => {
+		const missingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-missing-market-roots-"));
+		const missingServerRoot = path.join(missingRoot, "server");
+		const missingProjectRoot = path.join(missingRoot, "project");
+		const missingProjectMarketPacksRoot = path.join(missingProjectRoot, ".bobbit", "config", "market-packs");
+		const previousRoot = getProjectRoot();
+		try {
+			setProjectRoot(missingServerRoot);
+			const missingServerMarketPacksRoot = scopePaths("server", missingServerRoot).marketPacksRoot;
+			assert.equal(fs.existsSync(missingServerMarketPacksRoot), false);
+			assert.equal(fs.existsSync(missingProjectMarketPacksRoot), false);
+
+			const args = buildDockerRunArgs({
+				image: "bobbit-test:latest",
+				workspaceDir: "",
+				projectId: "proj-missing-roots",
+				projectMarketPacksRoot: missingProjectMarketPacksRoot,
+				stateDir: path.join(missingRoot, "state"),
+			});
+
+			assert.equal(fs.statSync(missingServerMarketPacksRoot).isDirectory(), true);
+			assert.equal(fs.statSync(missingProjectMarketPacksRoot).isDirectory(), true);
+			assert.ok(args.includes(`${toDockerPath(missingServerMarketPacksRoot)}:${SERVER_MARKET_PACKS_CONTAINER_DIR}:ro`));
+			assert.ok(args.includes(`${toDockerPath(missingProjectMarketPacksRoot)}:${PROJECT_MARKET_PACKS_CONTAINER_DIR}:ro`));
+		} finally {
+			setProjectRoot(previousRoot);
+			fs.rmSync(missingRoot, { recursive: true, force: true });
+		}
+	});
 });

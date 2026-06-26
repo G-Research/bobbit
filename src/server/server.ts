@@ -484,6 +484,7 @@ export function normalisePiExtensionCatalogueRefs(entries: readonly (string | Re
 }
 
 export function buildPiExtensionToolRows(contributions: readonly ResolvedPiExtensionContribution[]): Array<Record<string, unknown>> {
+	annotatePiExtensionToolNameCollisions(contributions);
 	const byName = new Map<string, Record<string, unknown>>();
 	for (const contribution of contributions) {
 		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
@@ -542,7 +543,29 @@ function piExtensionToolScopeContext(scope: { projectId?: string; cwd?: string }
 	return { ...scope, scopeKey };
 }
 
+function annotatePiExtensionToolNameCollisions(contributions: readonly ResolvedPiExtensionContribution[]): void {
+	const byName = new Map<string, ResolvedPiExtensionContribution[]>();
+	for (const contribution of contributions) {
+		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
+		for (const tool of contribution.discovery?.tools ?? []) {
+			if (!tool.name) continue;
+			const providers = byName.get(tool.name) ?? [];
+			providers.push(contribution);
+			byName.set(tool.name, providers);
+		}
+	}
+	for (const [name, providers] of byName) {
+		const unique = new Set(providers.map((provider) => `${provider.origin.scope}:${provider.origin.packId}:${provider.listName}`));
+		if (unique.size < 2) continue;
+		for (const contribution of providers) {
+			if (contribution.diagnostic.status !== "ok") continue;
+			contribution.diagnostic = piExtensionDiagnostic("ok", "tool_name_collision", `Multiple pi extensions expose runtime tool name "${name}" in this scope; one name-based policy applies to all providers.`);
+		}
+	}
+}
+
 function piExtensionExternalTools(contributions: readonly ResolvedPiExtensionContribution[]): PiExtensionExternalTool[] {
+	annotatePiExtensionToolNameCollisions(contributions);
 	const out: PiExtensionExternalTool[] = [];
 	for (const contribution of contributions) {
 		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
