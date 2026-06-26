@@ -18,15 +18,26 @@ test.describe("ProposalRenderer — failed goal proposal", () => {
 		await page.waitForFunction(() => (window as any).__ready === true);
 	});
 
-	test("renders MISSING_WORKFLOW as a failed but openable proposal card", async ({ page }) => {
+	test("renders plaintext MISSING_WORKFLOW extension errors as a failed but reopenable proposal card", async ({ page }) => {
 		const result = await page.evaluate(() => (window as any).__renderFailedGoalProposal());
 
 		expect(result.failedCard, "failed propose_goal results must use the failed proposal card state").toBe(true);
-		expect(result.errorText).toContain("Workflow is required for this project");
-		expect(result.errorText).toContain("general");
-		expect(result.errorText).toContain("feature");
+		expect(result.errorText).toBe("Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: general, feature.");
 		expect(result.text).toContain("Missing Workflow Goal");
 		expect(result.hasOpenButton, "failed proposal drafts must remain inspectable").toBe(true);
 		expect(result.hasRev, "failed proposal attempts must not masquerade as server-stamped revisions").toBe(false);
+		expect(result.openDetail, "opening a plaintext workflow failure must preserve failed workflow metadata").toMatchObject({
+			type: "goal",
+			fields: {
+				title: "Missing Workflow Goal",
+				spec: "Draft body without a workflow.",
+			},
+			workflowValidationError: {
+				code: "MISSING_WORKFLOW",
+				message: "Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: general, feature.",
+			},
+		});
+		const workflowIds = result.openDetail?.workflowValidationError?.availableWorkflows?.map((workflow: { id: string }) => workflow.id) ?? [];
+		expect(workflowIds, "plaintext workflow failures should keep valid workflow IDs available for the proposal panel").toEqual(["general", "feature"]);
 	});
 });
