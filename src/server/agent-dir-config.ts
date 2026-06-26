@@ -53,7 +53,7 @@ export interface AgentDirApiState {
 	history: string[];
 }
 
-export type AgentDirMigrationErrorCode = "SAME_PATH" | "DESTINATION_INSIDE_SOURCE" | "SOURCE_INSIDE_DESTINATION";
+export type AgentDirMigrationErrorCode = "SAME_PATH" | "DESTINATION_INSIDE_SOURCE" | "SOURCE_INSIDE_DESTINATION" | "DESTINATION_SYMLINK";
 
 export interface AgentDirMigrationReport {
 	sourcePath: string;
@@ -335,7 +335,25 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 			report.errors.push("Source path is not a directory.");
 			return report;
 		}
+		const existingDestination = lstatIfExists(destination);
+		if (existingDestination?.isSymbolicLink()) {
+			const message = "destinationPath must not be a symlink.";
+			report.error = { code: "DESTINATION_SYMLINK", message };
+			report.errors.push(message);
+			return report;
+		}
 		fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+		const destinationStat = fs.lstatSync(destination);
+		if (destinationStat.isSymbolicLink()) {
+			const message = "destinationPath must not be a symlink.";
+			report.error = { code: "DESTINATION_SYMLINK", message };
+			report.errors.push(message);
+			return report;
+		}
+		if (!destinationStat.isDirectory()) {
+			report.errors.push("Destination path is not a directory.");
+			return report;
+		}
 	} catch (err) {
 		report.errors.push(`Failed to prepare migration directories: ${(err as Error).message}`);
 		return report;
@@ -359,13 +377,13 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 					report.warnings.push(`Skipped unexpected directory ${name}.`);
 					continue;
 				}
-				copyAllowedDirectory(src, dst, name, overwrite, report);
+				copyAllowedDirectory(src, dst, name, overwrite, report, destination);
 			} else if (stat.isFile()) {
 				if (!MIGRATION_FILES.has(name)) {
 					report.warnings.push(`Skipped unexpected file ${name}.`);
 					continue;
 				}
-				copyAllowedFile(src, dst, name, overwrite, report);
+				copyAllowedFile(src, dst, name, overwrite, report, destination);
 			} else {
 				report.warnings.push(`Skipped special filesystem entry ${name}.`);
 			}
@@ -467,7 +485,7 @@ function resolveGitWorktreeRoot(projectRoot: string): string {
 	return normalizeAbsolutePath(projectRoot);
 }
 
-function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport): void {
+function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport, destinationRoot: string): void {
 	const stat = fs.lstatSync(src);
 	if (stat.isSymbolicLink()) {
 		report.warnings.push(`Skipped symlink ${rel}.`);
@@ -477,6 +495,7 @@ function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: 
 		report.warnings.push(`Skipped non-directory ${rel}.`);
 		return;
 	}
+	if (!ensureDestinationPathHasNoSymlinks(dst, destinationRoot, rel, report)) return;
 	fs.mkdirSync(dst, { recursive: true, mode: 0o700 });
 	for (const entry of fs.readdirSync(src)) {
 		const childRel = path.join(rel, entry);
@@ -486,27 +505,30 @@ function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: 
 		if (childStat.isSymbolicLink()) {
 			report.warnings.push(`Skipped symlink ${childRel}.`);
 		} else if (childStat.isDirectory()) {
-			copyAllowedDirectory(childSrc, childDst, childRel, overwrite, report);
+			copyAllowedDirectory(childSrc, childDst, childRel, overwrite, report, destinationRoot);
 		} else if (childStat.isFile()) {
-			copyAllowedFile(childSrc, childDst, childRel, overwrite, report);
+			copyAllowedFile(childSrc, childDst, childRel, overwrite, report, destinationRoot);
 		} else {
 			report.warnings.push(`Skipped special filesystem entry ${childRel}.`);
 		}
 	}
 }
 
-function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport): void {
-	if (fs.existsSync(dst)) {
+function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport, destinationRoot: string): void {
+	const parentRel = path.dirname(rel);
+	const parentLabel = parentRel === "." ? rel : parentRel;
+	if (!ensureDestinationPathHasNoSymlinks(path.dirname(dst), destinationRoot, parentLabel, report)) return;
+	const existingDestination = lstatIfExists(dst);
+	if (existingDestination) {
 		if (!overwrite) {
 			report.skipped.push(rel);
 			return;
 		}
-		const dstStat = fs.lstatSync(dst);
-		if (dstStat.isDirectory()) {
+		if (existingDestination.isDirectory()) {
 			report.errors.push(`${rel}: destination exists as a directory.`);
 			return;
 		}
-		if (dstStat.isSymbolicLink()) {
+		if (existingDestination.isSymbolicLink()) {
 			report.errors.push(`${rel}: destination exists as a symlink.`);
 			return;
 		}
@@ -520,14 +542,20 @@ function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boole
 }
 
 function agentDirMigrationRelationshipError(source: string, destination: string): AgentDirMigrationReport["error"] | null {
-	if (samePath(source, destination)) {
-		return { code: "SAME_PATH", message: "sourcePath and destinationPath must be different agent directories." };
-	}
-	if (isPathWithinOrEqual(source, destination)) {
-		return { code: "DESTINATION_INSIDE_SOURCE", message: "destinationPath must not be inside sourcePath." };
-	}
-	if (isPathWithinOrEqual(destination, source)) {
-		return { code: "SOURCE_INSIDE_DESTINATION", message: "sourcePath must not be inside destinationPath." };
+	const candidates: Array<[string, string]> = [[source, destination]];
+	const realSource = realpathForExistingPrefix(source);
+	const realDestination = realpathForExistingPrefix(destination);
+	if (realSource && realDestination) candidates.push([realSource, realDestination]);
+	for (const [sourceCandidate, destinationCandidate] of candidates) {
+		if (samePath(sourceCandidate, destinationCandidate)) {
+			return { code: "SAME_PATH", message: "sourcePath and destinationPath must be different agent directories." };
+		}
+		if (isPathWithinOrEqual(sourceCandidate, destinationCandidate)) {
+			return { code: "DESTINATION_INSIDE_SOURCE", message: "destinationPath must not be inside sourcePath." };
+		}
+		if (isPathWithinOrEqual(destinationCandidate, sourceCandidate)) {
+			return { code: "SOURCE_INSIDE_DESTINATION", message: "sourcePath must not be inside destinationPath." };
+		}
 	}
 	return null;
 }
@@ -555,6 +583,56 @@ function isDisallowedInsideWorktree(gitRoot: string, allowedDefault: string, tar
 
 function safeRealpath(value: string): string | undefined {
 	try { return fs.realpathSync(value); } catch { return undefined; }
+}
+
+function lstatIfExists(value: string): fs.Stats | undefined {
+	try { return fs.lstatSync(value); } catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw err;
+	}
+}
+
+function realpathForExistingPrefix(value: string): string | undefined {
+	const normalized = normalizeAbsolutePath(value);
+	const missing: string[] = [];
+	let current = normalized;
+	while (true) {
+		const real = safeRealpath(current);
+		if (real) return normalizeAbsolutePath(path.join(real, ...missing));
+		const parent = path.dirname(current);
+		if (samePath(parent, current)) return undefined;
+		missing.unshift(path.basename(current));
+		current = parent;
+	}
+}
+
+function ensureDestinationPathHasNoSymlinks(target: string, destinationRoot: string, rel: string, report: AgentDirMigrationReport): boolean {
+	const root = normalizeAbsolutePath(destinationRoot);
+	const normalizedTarget = normalizeAbsolutePath(target);
+	if (!isPathWithinOrEqual(root, normalizedTarget)) {
+		report.errors.push(`${rel}: destination path escapes the selected pending directory.`);
+		return false;
+	}
+	const rootStat = lstatIfExists(root);
+	if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
+		report.errors.push(`${rel}: destination directory is not a real directory.`);
+		return false;
+	}
+	const relative = path.relative(root, normalizedTarget);
+	if (!relative) return true;
+	let current = root;
+	const seen: string[] = [];
+	for (const part of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, part);
+		seen.push(part);
+		const stat = lstatIfExists(current);
+		if (!stat) return true;
+		if (stat.isSymbolicLink()) {
+			report.errors.push(`${rel}: destination path contains symlink ${path.join(...seen)}.`);
+			return false;
+		}
+	}
+	return true;
 }
 
 function samePath(a: string, b: string): boolean {

@@ -70,6 +70,15 @@ function read(file: string): string {
 	return fs.readFileSync(file, "utf-8");
 }
 
+function symlinkDirectory(target: string, linkPath: string): boolean {
+	try {
+		fs.symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function reportText(report: unknown): string {
 	return JSON.stringify(report, (_key, value) => value instanceof Error ? value.message : value);
 }
@@ -173,6 +182,41 @@ describe("agent directory copy migration", () => {
 
 		assert.match(reportText(report), /DESTINATION_INSIDE_SOURCE|destinationPath must not be inside sourcePath/i);
 		assert.equal(fs.existsSync(nestedDest), false, "nested destination must not be created");
+	});
+
+	it("rejects destination symlinked to a source child before copying", async (t) => {
+		const migrate = await loadMigrationFn();
+		const { root, source, dest } = makeTree();
+		t.after(() => cleanup(root));
+		if (!symlinkDirectory(path.join(source, "sessions"), dest)) {
+			t.skip("directory symlinks are unavailable on this platform");
+			return;
+		}
+
+		const report = await migrate({ sourcePath: source, destinationPath: dest, overwrite: true });
+
+		assert.match(reportText(report), /DESTINATION_INSIDE_SOURCE|destinationPath must not be inside sourcePath/i);
+		assert.equal(fs.existsSync(path.join(source, "sessions", "auth.json")), false, "migration must not copy root files through the symlinked destination");
+		assert.equal(fs.existsSync(path.join(source, "sessions", "sessions")), false, "migration must not recursively copy sessions through the symlinked destination");
+	});
+
+	it("refuses to copy through top-level destination allowlist directory symlinks", async (t) => {
+		const migrate = await loadMigrationFn();
+		const { root, source, dest } = makeTree();
+		t.after(() => cleanup(root));
+		const outside = path.join(root, "outside-target");
+		fs.mkdirSync(dest, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+		if (!symlinkDirectory(outside, path.join(dest, "sessions"))) {
+			t.skip("directory symlinks are unavailable on this platform");
+			return;
+		}
+
+		const report = await migrate({ sourcePath: source, destinationPath: dest, overwrite: true });
+
+		assert.match(reportText(report), /sessions.*symlink|symlink.*sessions/i);
+		assert.equal(fs.existsSync(path.join(outside, "session-a", "transcript.jsonl")), false, "migration must not write through destination directory symlinks");
+		assert.equal(read(path.join(dest, "auth.json")), "auth.json-source", "safe root files may still be copied into the selected destination");
 	});
 
 	it("rejects source nested inside destination before copying", async (t) => {
