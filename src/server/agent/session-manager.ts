@@ -169,6 +169,7 @@ export interface ArchivedSessionWorktreeGroup {
 	reasonCategory?: ArchivedWorktreeReasonCategory;
 	count: number;
 	sampleKeys: string[];
+	sampleItems: ArchivedSessionWorktreeItem[];
 	hasMore: boolean;
 	actionable: boolean;
 }
@@ -227,7 +228,7 @@ export interface ArchivedSessionWorktreeItem {
 	reason: ArchivedWorktreeReason;
 	detail: string;
 	willDeleteBranch: boolean;
-	branchDeleteBlockedReason?: "branch-referenced-by-live-record";
+	branchDeleteBlockedReason?: "branch-referenced-by-live-record" | "branch-referenced-by-archived-record";
 	disposition: ArchivedWorktreeDisposition;
 	reasonCategory: ArchivedWorktreeReasonCategory;
 	actionable: boolean;
@@ -301,6 +302,7 @@ interface ArchivedWorktreeScanContext {
 	teamRefs: ArchivedWorktreeGuardRef[];
 	staffRefs: ArchivedWorktreeGuardRef[];
 	branchGuardsByRepo: Map<string, Set<string>>;
+	archivedBranchGuardsByRepo: Map<string, Map<string, Set<string>>>;
 	gitRefsCache: Map<string, Promise<GitWorktreeRefs>>;
 	branchExistsCache: Map<string, Promise<boolean>>;
 }
@@ -7522,7 +7524,7 @@ export class SessionManager {
 			sessions,
 			items: responseItems,
 			counts,
-			groups: this.buildArchivedWorktreeGroups(responseItems),
+			groups: this.buildArchivedWorktreeGroups(allItems),
 			selectionPresets: this.buildArchivedWorktreeSelectionPresets(responseItems),
 			generatedAt: Date.now(),
 		};
@@ -7702,6 +7704,7 @@ export class SessionManager {
 				? items.filter(item => item.disposition === "ready-to-clean")
 				: items.filter(item => item.reason === spec.reason);
 			if (matches.length === 0) return [];
+			const sampleItems = matches.slice(0, 5);
 			return [{
 				key: spec.key,
 				label: spec.label,
@@ -7710,7 +7713,8 @@ export class SessionManager {
 				reason: spec.reason,
 				reasonCategory: spec.reason ? this.archivedWorktreeReasonCategory(spec.reason) : undefined,
 				count: matches.length,
-				sampleKeys: matches.slice(0, 5).map(item => item.key),
+				sampleKeys: sampleItems.map(item => item.key),
+				sampleItems,
 				hasMore: matches.length > 5,
 				actionable: spec.disposition === "ready-to-clean",
 			}];
@@ -7810,6 +7814,7 @@ export class SessionManager {
 		const teamRefs: ArchivedWorktreeGuardRef[] = [];
 		const staffRefs: ArchivedWorktreeGuardRef[] = [];
 		const branchGuardsByRepo = new Map<string, Set<string>>();
+		const archivedBranchGuardsByRepo = new Map<string, Map<string, Set<string>>>();
 		const addBranchGuard = (repoPath: string | undefined, branch: string | undefined) => {
 			const repoKey = normalizeWorktreeHostPath(repoPath);
 			if (!repoKey || !branch) return;
@@ -7819,6 +7824,21 @@ export class SessionManager {
 				branchGuardsByRepo.set(repoKey, set);
 			}
 			set.add(branch);
+		};
+		const addArchivedBranchGuard = (repoPath: string | undefined, branch: string | undefined, itemKey: string) => {
+			const repoKey = normalizeWorktreeHostPath(repoPath);
+			if (!repoKey || !branch) return;
+			let branches = archivedBranchGuardsByRepo.get(repoKey);
+			if (!branches) {
+				branches = new Map<string, Set<string>>();
+				archivedBranchGuardsByRepo.set(repoKey, branches);
+			}
+			let keys = branches.get(branch);
+			if (!keys) {
+				keys = new Set<string>();
+				branches.set(branch, keys);
+			}
+			keys.add(itemKey);
 		};
 		const addRepoBranches = (repoPath: string | undefined, branch: string | undefined, repoWorktrees?: Record<string, string>) => {
 			if (repoWorktrees && repoPath) {
@@ -7842,6 +7862,20 @@ export class SessionManager {
 				for (const wt of session.repoWorktrees) addBranchGuard(wt.repoPath, session.branch);
 			} else {
 				addBranchGuard(session.repoPath, session.branch);
+			}
+		}
+
+		const archivedSessions = this.projectContextManager
+			? allContexts.flatMap(ctx => ctx.sessionStore.getArchived())
+			: (this._testStore?.getArchived() ?? []);
+		for (const ps of archivedSessions) {
+			if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0 && ps.repoPath) {
+				for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
+					const repoPath = repo === "." ? ps.repoPath : path.join(ps.repoPath, repo);
+					addArchivedBranchGuard(repoPath, ps.branch, this.archivedWorktreeKey(ps.id, repo, wt));
+				}
+			} else {
+				addArchivedBranchGuard(ps.repoPath, ps.branch, this.archivedWorktreeKey(ps.id, ".", ps.worktreePath));
 			}
 		}
 
@@ -7876,6 +7910,7 @@ export class SessionManager {
 			teamRefs,
 			staffRefs,
 			branchGuardsByRepo,
+			archivedBranchGuardsByRepo,
 			gitRefsCache: new Map(),
 			branchExistsCache: new Map(),
 		};
@@ -7992,8 +8027,8 @@ export class SessionManager {
 			});
 		}
 
-		const branchDeleteBlockedReason = localBranchExists && !this.branchDeletionAllowed(spec.branch, spec.repoPath, ctx)
-			? "branch-referenced-by-live-record"
+		const branchDeleteBlockedReason = localBranchExists
+			? this.branchDeleteBlockedReason(spec.branch, spec.repoPath, ctx, key)
 			: undefined;
 		const willDeleteBranch = localBranchExists && !branchDeleteBlockedReason;
 		return base({
@@ -8002,9 +8037,11 @@ export class SessionManager {
 			localBranchExists,
 			status: "removable",
 			reason: "safe-archived-session-worktree",
-			detail: branchDeleteBlockedReason
-				? "Archived session worktree is safe to remove; branch deletion is blocked because another record still references the branch."
-				: "Archived session worktree is safe to remove.",
+			detail: branchDeleteBlockedReason === "branch-referenced-by-archived-record"
+				? "Archived session worktree is safe to remove; branch deletion is blocked because another archived record still references the branch."
+				: branchDeleteBlockedReason
+					? "Archived session worktree is safe to remove; branch deletion is blocked because another live record still references the branch."
+					: "Archived session worktree is safe to remove.",
 			willDeleteBranch,
 			branchDeleteBlockedReason,
 		});
@@ -8035,11 +8072,18 @@ export class SessionManager {
 		return false;
 	}
 
-	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext): boolean {
-		if (!branch) return false;
+	private branchDeleteBlockedReason(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): ArchivedSessionWorktreeItem["branchDeleteBlockedReason"] | undefined {
+		if (!branch) return "branch-referenced-by-live-record";
 		const repoKey = normalizeWorktreeHostPath(repoPath);
-		if (!repoKey) return false;
-		return !ctx.branchGuardsByRepo.get(repoKey)?.has(branch);
+		if (!repoKey) return "branch-referenced-by-live-record";
+		if (ctx.branchGuardsByRepo.get(repoKey)?.has(branch)) return "branch-referenced-by-live-record";
+		const archivedKeys = ctx.archivedBranchGuardsByRepo.get(repoKey)?.get(branch);
+		if (archivedKeys && [...archivedKeys].some(key => key !== ownKey)) return "branch-referenced-by-archived-record";
+		return undefined;
+	}
+
+	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): boolean {
+		return !this.branchDeleteBlockedReason(branch, repoPath, ctx, ownKey);
 	}
 
 	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
@@ -8054,7 +8098,7 @@ export class SessionManager {
 	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
 		if (!item.willDeleteBranch || !item.branch || !item.localBranchExists) return false;
 		const ctx = this.buildArchivedWorktreeScanContext();
-		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx)) return false;
+		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx, item.key)) return false;
 		try {
 			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
 		} catch {
