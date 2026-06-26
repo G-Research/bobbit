@@ -102,6 +102,19 @@ export default async function (pi) {
 		}
 	});
 
+	it("bundles trusted TypeScript entries that use local CommonJS require", () => {
+		const dir = tempDir();
+		try {
+			write(path.join(dir, "helper.js"), "module.exports = { toolName: 'local_cjs_tool' };\n");
+			const entry = write(path.join(dir, "extension.ts"), "const { toolName } = require('./helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["local_cjs_tool"]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects TypeScript imports that resolve outside the extension source root", () => {
 		const dir = tempDir();
 		try {
@@ -134,6 +147,66 @@ export default async function (pi) {
 				return;
 			}
 			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from './linked-helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects TypeScript CommonJS require forms that resolve outside the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			write(path.join(dir, "outside", "data.json"), JSON.stringify({ toolName: "outside_json_tool" }));
+			write(path.join(dir, "outside", "helper.js"), "module.exports = { toolName: 'outside_js_tool' };\n");
+
+			const jsonEntry = write(path.join(extensionRoot, "json-require.ts"), "const data = require('../../outside/data.json');\nexport default function (pi: any): void { pi.registerTool({ name: data.toolName }); }\n");
+			const jsonResult = discoverPiExtensionToolsSync(jsonEntry, { trustAccepted: true });
+			assert.equal(jsonResult.status, "failed");
+			assert.equal(jsonResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const jsEntry = write(path.join(extensionRoot, "js-require.ts"), "const helper = require('../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
+			const jsResult = discoverPiExtensionToolsSync(jsEntry, { trustAccepted: true });
+			assert.equal(jsResult.status, "failed");
+			assert.equal(jsResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const resolveEntry = write(path.join(extensionRoot, "resolve-require.ts"), "const helperPath = require.resolve('../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helperPath }); }\n");
+			const resolveResult = discoverPiExtensionToolsSync(resolveEntry, { trustAccepted: true });
+			assert.equal(resolveResult.status, "failed");
+			assert.equal(resolveResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects TypeScript CommonJS bare package require outside the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			write(path.join(dir, "node_modules", "leaky-package", "index.js"), "module.exports = { toolName: 'leaky_package_tool' };\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "const pkg = require('leaky-package');\nexport default function (pi: any): void { pi.registerTool({ name: pkg.toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects TypeScript CommonJS symlink targets that escape the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.js"), "module.exports = { toolName: 'symlink_cjs_tool' };\n");
+			fs.mkdirSync(extensionRoot, { recursive: true });
+			try {
+				fs.symlinkSync(outsideHelper, path.join(extensionRoot, "linked-helper.js"), "file");
+			} catch {
+				return;
+			}
+			const entry = write(path.join(extensionRoot, "extension.ts"), "const helper = require('./linked-helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
