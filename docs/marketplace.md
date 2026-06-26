@@ -138,16 +138,17 @@ The MVP ships exactly one configured resolution mechanism: **`pack_order`**, the
 ### Activation controls
 
 Each installed pack exposes per-entity **activation toggles** on the Market installed-pack
-surface, so you can disable individual entities without uninstalling the pack. **Only
-user-facing entities are toggleable:** roles, tools, skills, and entrypoints. Support surfaces
-— panels, routes, stores, renderers, actions, `lib/` — are **not** independently toggleable
-(panels may be shown read-only as "support surfaces").
+surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
+toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle selected
+runtime contribution kinds such as providers, MCP, and pi extensions. Support surfaces — panels,
+routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
+shown read-only as "support surfaces").
 
 > **Extension Platform (`schema: 2`).** The activation system also covers the pack-scoped
-> kinds — `providers`, `mcp`, plus the reserved siblings `hooks` / `piExtensions` / `runtimes`
+> kinds — `providers`, `mcp`, `piExtensions`, plus the reserved siblings `hooks` / `runtimes`
 > / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
 > `pack-activation` catalogue includes their arrays only for schema-2 packs, so toggles round-trip through the same
-> REST without changing schema-1 catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads through `McpManager` discovery. The remaining reserved kinds toggle purely as catalogue metadata until their loaders land. See
+> REST without changing schema-1 catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads through `McpManager` discovery; **pi extensions** resolve to standalone pi `--extension` entries. The remaining reserved kinds toggle purely as catalogue metadata until their loaders land. See
 > [pack.yaml schema 2](#packyaml-schema-2-extension-platform).
 
 What disabling does:
@@ -160,6 +161,7 @@ What disabling does:
   targets stays available** to any enabled tool/entrypoint that opens it — disabling an
   entrypoint never disables a panel.
 - **Disable an MCP contribution** — its `contents.mcp` list name is added to `DisabledRefs.mcp`, so the contribution is omitted from Marketplace MCP discovery/connection. Runtime status and external `mcp_*` tools are refreshed immediately; the disabled row remains visible in the activation catalogue so it can be re-enabled.
+- **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -174,10 +176,10 @@ resolution. Disabling one tool in a group does not disable its siblings.
 **Why a catalogue/runtime split.** Toggles persist in `pack_activation` (per scope/project,
 keyed by pack name + entity kind + name; tool refs are concrete tool names; entrypoints are
 keyed by their `contents.entrypoints` basename, so one toggle covers both the launcher id and
-the deep-link `routeId` from that file; MCP refs are keyed by their `contents.mcp` basename). The toggle UI must render from the **unfiltered
+the deep-link `routeId` from that file; MCP refs are keyed by their `contents.mcp` basename; pi-extension refs are keyed by their `contents.pi-extensions` basename). The toggle UI must render from the **unfiltered
 catalogue** — read from the installed pack's manifest plus its declared tool-group files via
 `GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools`,
-`/api/ext/contributions`, or `/api/mcp-servers`. If the UI read the filtered runtime endpoints, a disabled entity
+`/api/ext/contributions`, `/api/mcp-servers`, or session spawn args. If the UI read the filtered runtime endpoints, a disabled entity
 would vanish from the list and become impossible to re-enable. So the catalogue stays complete
 (every toggle visible, `checked = name ∉ disabled[kind]`) while the runtime registries stay
 filtered (a disabled entity does not register/resolve). The `PUT` returns the refreshed
@@ -200,6 +202,126 @@ become impossible to re-enable. Manifest-declared entity names are **path-valida
 basename + a realpath-aware pack-root containment check) before any file is read, because the
 manifest's `contents` names are publisher-authored and this helper also runs on Browse, before
 any install. A rejected name simply yields no description row.
+
+## Marketplace pi extensions
+
+Marketplace pi extensions let a schema-2 pack ship an unmodified standalone pi runtime extension. They are intentionally not Bobbit tools: Bobbit installs the pack, resolves the extension entry, and passes it to `pi-coding-agent` with `--extension <path>` so existing bare-pi extensions keep their source layout and runtime behavior.
+
+### Authoring `contents.pi-extensions`
+
+Declare pi extensions with the schema-2 YAML key `contents.pi-extensions`. Each item is a pack-local safe basename and becomes the stable activation key (`DisabledRefs.piExtensions`). The parsed manifest field is `piExtensions`.
+
+```yaml
+schema: 2
+name: demo-pi-pack
+description: Demo standalone pi extension.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  pi-extensions: [demo]
+```
+
+Supported source layouts are:
+
+```text
+demo-pi-pack/
+  pack.yaml
+  pi-extensions/
+    demo/
+      package.json          # optional; exports, module, or main may choose the entry
+      extension.ts          # fallback order: extension.ts, extension.js,
+      index.ts              # then index.ts, index.js, index.mjs, index.cjs
+      node_modules/         # optional extension-local dependencies for discovery
+```
+
+or a single module beside the extension directories:
+
+```text
+demo-pi-pack/
+  pack.yaml
+  pi-extensions/
+    demo.ts                 # also .js, .mjs, or .cjs
+```
+
+Resolution is deterministic and path-safe:
+
+- `contents.pi-extensions` refs must be safe basenames: no separators, NUL, dot segments, absolute paths, drive paths, leading dots, or Windows device names.
+- Directory entries resolve inside `pi-extensions/<id>/`. A valid `package.json` entry (`exports`, `module`, or `main`) wins when it points to an existing contained file; otherwise Bobbit tries the fixed entry-file order above.
+- File entries resolve as `pi-extensions/<id>.ts/.js/.mjs/.cjs`.
+- Every resolved path is realpath-contained in the pack root and, for directory layout, in that extension's directory. Unsafe or missing entries produce an `unresolved` diagnostic instead of a runtime flag.
+- Bobbit never rewrites extension source. Install metadata (`.pack-meta.yaml`) and discovery cache keys are generated separately from `pi-extensions/`.
+
+### Install, activation, and runtime loading
+
+Installed, enabled pi extensions load by default for every matching session. During session setup Bobbit resolves active marketplace packs for the session scope, applies `DisabledRefs.piExtensions`, and appends each enabled resolved entry as:
+
+```text
+--extension <absolute-entry-path>
+```
+
+This mirrors bare pi harness semantics: no per-tool Bobbit policy is required for an extension to load. Activation is extension-level in Market:
+
+- enabled + resolved entries are passed to agent startup;
+- disabled entries stay visible in `GET /api/marketplace/pack-activation` but are omitted from runtime args;
+- unresolved entries stay visible with an `unresolved` diagnostic and are omitted from runtime args;
+- discovery failures do **not** block runtime loading when the entry path resolved, because discovery is only for UI/provenance/policy mapping;
+- runtime load failures are recorded as `runtime-load-failed` diagnostics and overlaid onto the catalogue and session events.
+
+Scope follows marketplace install scope:
+
+- **Server** installs apply to all sessions on that gateway.
+- **Global-user** installs apply to sessions for the current OS user.
+- **Project** installs apply only to sessions in that project context. In multi-project setups, project pi extensions do not bleed into sibling projects.
+
+### Discovery, metadata, and diagnostics
+
+Bobbit performs best-effort deterministic discovery to identify model-facing tools exposed by an extension. Discovery exists to improve UI provenance and map explicit Bobbit tool policies; it is not a gate for runtime loading.
+
+Discovery behavior:
+
+- Before marketplace source trust is accepted, executable discovery is skipped with a trust-required diagnostic. Static manifest/path resolution still runs so the extension-level row remains visible.
+- After trust is accepted, Bobbit runs a bounded child-process probe with fixed inputs, a minimal environment, denied network globals/imports, and read confinement to the extension source root plus extension-local dependencies.
+- The probe imports the extension, observes registered tool metadata when possible, normalizes stable tool names/descriptions/schemas, and returns them to the activation catalogue and Tools UI.
+- Cache keys are derived from the probe harness version, manifest identity, resolved entry, and bounded hashes of extension source files and lockfiles. Changing source or manifest metadata invalidates discovery without modifying the extension source tree.
+- Discovery can fail for invalid code, missing dependencies, incompatible pi APIs, syntax/transpile errors, platform-specific imports, top-level-await issues, denied imports/network access, hash-size limits, or tools registered only behind environment-dependent branches.
+
+Visible diagnostic statuses include:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Entry resolved; discovery either succeeded or found no tools. |
+| `disabled` | Activation toggle is off; runtime arg omitted. |
+| `unresolved` | Manifest ref or entry path is invalid/missing; runtime arg omitted. |
+| `discovery-failed` | Entry resolved, but deterministic discovery failed; runtime loading still proceeds. |
+| `runtime-load-failed` | Pi reported a load/activation/import failure for the extension at session runtime. |
+| `remap-failed` | A sandboxed session could not translate the host extension path into a mounted container path; that sandbox spawn omits the extension. |
+
+### Tools UI provenance and policy enforcement
+
+When discovery identifies tools, Bobbit adds external Tools UI rows with `providerType: "pi-extension"`, a Pi-extension badge, origin pack chips, and per-provider provenance. If more than one extension reports the same tool name, the Tools UI shows the collision; policy is still name-based.
+
+Policy rules are deliberately minimal:
+
+- Default policy matches bare pi: discovered tools do not need an explicit Bobbit allow/ask/never policy for the extension to load.
+- If a discovered tool name has an explicit non-default Bobbit policy, Bobbit's generated tool guard enforces it at runtime by name.
+- Explicit `never` blocks the tool call.
+- Explicit `ask` routes through the existing Bobbit approval flow where the runtime tool-call guard can intercept the call.
+- Undiscovered tools cannot be shown or policy-mapped by Bobbit ahead of time, but the extension may still load. Authors should prefer stable deterministic tool registration so users can see provenance and configure policy.
+
+### Docker and sandbox behavior
+
+Sandboxed sessions need both a container mount and an argument remap. Bobbit mounts marketplace pack roots read-only into agent containers:
+
+| Scope | Container prefix |
+|---|---|
+| Built-in packs | `/market-packs-builtin` |
+| Server installs | `/market-packs-server` |
+| Global-user installs | `/market-packs-global-user` |
+| Project installs | `/market-packs-project` |
+
+Long-lived project containers receive these mounts when the container is created, even if no pack is installed yet, because Docker cannot add bind mounts later. At spawn time, Bobbit rewrites marketplace pi-extension `--extension` host paths to the matching container prefix. If no safe mapping exists, Bobbit records `remap-failed`, skips that extension for the sandboxed spawn, and keeps the activation row visible with the diagnostic.
 
 ## Marketplace MCP
 
@@ -451,12 +573,13 @@ contents:                        # REQUIRED. roles/tools/skills required; each M
                                  #   OPTIONAL — entrypoints/<name>.yaml basenames (toggleable).
   # schema: 2 only:
   mcp:         [github]          #   OPTIONAL — mcp/<name>.yaml|yml|json basenames (toggleable).
+  pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs (toggleable).
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
   names:  [bundle, publish]       #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. `contents.mcp` and `contents.pi-extensions` are **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)), and schema-2 pi-extension basenames resolve standalone pi entries from `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs` (see [Marketplace pi extensions](#marketplace-pi-extensions)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
@@ -514,11 +637,11 @@ each defaults to `[]` when absent:
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
 | `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
-| `piExtensions` | `pi-extensions` | No (reserved) | PI-extension basenames. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
+| `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers` and `mcp` have loaders.** `providers` load through the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path described above. The other reserved keys are accepted, normalised onto `contents`, and surfaced in the activation catalogue, but no runtime loader reads their files yet.
+**`providers`, `mcp`, and `pi-extensions` have loaders.** `providers` load through the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). The other reserved keys are accepted, normalised onto `contents`, and surfaced in the activation catalogue, but no runtime loader reads their files yet.
 
 #### Minimal schema-2 example
 
@@ -536,8 +659,9 @@ contents:
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
-  # hooks / pi-extensions / runtimes / workflows are accepted here at
-  # schema 2 but remain reserved for later goals.
+  pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
+  # hooks / runtimes / workflows are accepted here at schema 2 but remain
+  # reserved for later goals.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
@@ -618,7 +742,7 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
 
 - **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
   `workflows` arrays, and all six are in `ACTIVATION_KINDS` so normalisation, hydration,
-  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename.
+  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same
@@ -629,6 +753,7 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
 - An MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
+- A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 
 These REST shapes are **purely additive** — a schema-1 pack produces a byte-identical
 catalogue, so existing clients and the existing marketplace test suite are unaffected.
@@ -827,7 +952,7 @@ See [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md) fo
 
 - **AGENTS are not installable.** AGENTS/CLAUDE.md prompt assembly keeps its own loader because these files describe a specific project and agent-operational contract. MCP is installable through schema-2 Marketplace contributions or MCP registry sources; manual `.mcp.json` sources remain supported and override Marketplace.
 - **Per-conflict pinning is deferred.** The only conflict-resolution mechanism is `pack_order` (plus user-pack customization). A future `pack_conflicts` schema is sketched in the design doc but not implemented, surfaced, or tested.
-- **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, MCP packs can run host stdio commands or call trusted remote endpoints, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool or MCP server; there is no capability concept. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
+- **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, MCP packs can run host stdio commands or call trusted remote endpoints, pi-extension packs load host/runtime code into agent processes, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool, MCP server, or pi extension; there is no capability concept. Pi-extension discovery is more confined than runtime loading, but it is still executable probing of trusted source after the source-level trust warning is accepted. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
 - **Git sync is synchronous.** Add-source, re-sync, and install run git inline and block until done.
 - **No hosted pack registry yet.** Generic pack sources are still git repos or local dirs. Official MCP Registry API sources are supported specifically for MCP server discovery, not as a searchable hosted pack marketplace.
 - **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; staff templates are noted as a gap. (UI panels are now shipped as auto-discovered `panels/<panel>.yaml` pack contributions — see the [Extension Host](#extension-contributions-tool-renderers--server-actions) section.)

@@ -758,7 +758,8 @@ export class ProjectSandbox {
 
 		const dockerArgs = buildDockerRunArgs({
 			image,
-			workspaceDir: "", // unused — named volume instead
+			workspaceDir: "", // unused for /workspace — named volume instead
+			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
 			label: projectId,
 			labelPrefix: "bobbit-project",
 			projectId,

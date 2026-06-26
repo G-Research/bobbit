@@ -17,7 +17,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
@@ -89,6 +89,11 @@ import {
 	type SessionSetupPlan,
 	type PipelineContext,
 	type SandboxWiringOptions,
+	type MarketplacePiExtensionResolver,
+	type MarketplacePiExtensionActivation,
+	type PiExtensionDiagnostic,
+	resolveMarketplacePiExtensionActivation,
+	scopedToolContext,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -982,6 +987,8 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
+	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -1596,6 +1603,7 @@ export class SessionManager {
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.getMcpManagerForContext(projectId, cwd),
+			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1616,6 +1624,7 @@ export class SessionManager {
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
+			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
@@ -1791,6 +1800,11 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
+		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
+		const projectRootPath = projectContext?.project.rootPath;
+		if (projectRootPath) {
+			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
+		}
 
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
@@ -1851,9 +1865,6 @@ export class SessionManager {
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
 		// Get project-scoped config/secrets when available.
-		const projectContext = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)
-			: null;
 		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
@@ -2172,6 +2183,55 @@ export class SessionManager {
 		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
 	}
 
+	setMarketplacePiExtensionResolver(resolver: MarketplacePiExtensionResolver | null | undefined): void {
+		this.marketplacePiExtensionResolver = resolver ?? null;
+	}
+
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
+		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
+	}
+
+	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
+		const activation = resolveMarketplacePiExtensionActivation((scope) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd), projectId, cwd);
+		return activation;
+	}
+
+	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
+		const keys = [
+			`path:${path.resolve(extension.entryPath)}`,
+			`origin:${extension.origin.scope}:${extension.origin.packId}:${extension.listName}`,
+			`pack:${extension.origin.scope}:${extension.origin.packName}:${extension.listName}`,
+		];
+		return keys;
+	}
+
+	private overlayPiExtensionRuntimeDiagnostics(rows: ReturnType<MarketplacePiExtensionResolver>): ReturnType<MarketplacePiExtensionResolver> {
+		return rows.map((row) => {
+			if (!row.entryPath || row.diagnostic.status === "disabled" || row.diagnostic.status === "unresolved" || row.diagnostic.status === "remap-failed") return row;
+			const diagnostic = this.piExtensionDiagnosticKeys({ entryPath: row.entryPath, listName: row.listName, origin: row.origin })
+				.map((key) => this.piExtensionRuntimeDiagnostics.get(key))
+				.find(Boolean);
+			return diagnostic ? { ...row, diagnostic } : row;
+		});
+	}
+
+	private recordPiExtensionDiagnostic(session: SessionInfo, diagnostic: RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo): void {
+		const piDiagnostic: PiExtensionDiagnostic = { ...diagnostic };
+		for (const key of this.piExtensionDiagnosticKeys(extension)) this.piExtensionRuntimeDiagnostics.set(key, piDiagnostic);
+		console.warn(`[pi-extension] ${diagnostic.status} ${extension.origin.packName}/${extension.listName}: ${diagnostic.message}`);
+		emitSessionEvent(session, {
+			type: "pi_extension_diagnostic",
+			diagnostic: piDiagnostic,
+			extension: {
+				listName: extension.listName,
+				entryPath: extension.entryPath,
+				entryRelativePath: extension.entryRelativePath,
+				packRoot: extension.packRoot,
+				origin: extension.origin,
+			},
+		});
+	}
+
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
@@ -2397,7 +2457,7 @@ export class SessionManager {
 		cwd: string,
 		projectId?: string,
 		effectiveGoalId?: string,
-	): { args: string[]; env: Record<string, string> } {
+	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
 		// so restart/respawn/force-abort keep the same disablement initial setup
@@ -2407,29 +2467,31 @@ export class SessionManager {
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
+		const toolScope = scopedToolContext(projectId, cwd);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = [...activation.args];
+		const args = [...activation.args, ...piExtensionActivation.args];
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -2461,7 +2523,7 @@ export class SessionManager {
 			args.push("--extension", codeAssistPath);
 		}
 
-		return { args, env: activation.env };
+		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string, projectId?: string): import("./role-store.js").Role | undefined {
@@ -4827,6 +4889,7 @@ export class SessionManager {
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
@@ -5030,6 +5093,7 @@ export class SessionManager {
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
@@ -6770,6 +6834,7 @@ export class SessionManager {
 		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
@@ -6800,6 +6865,7 @@ export class SessionManager {
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		await rpcClient.start();
 
 		// Restore conversation from session file — path is already in agent coordinate system.
@@ -8805,6 +8871,7 @@ export class SessionManager {
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
@@ -8837,6 +8904,7 @@ export class SessionManager {
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
+			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			await rpcClient.start();
 
 			// Resume session if we have the session file — path in agent coordinate system

@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
-import type { RpcBridgeOptions } from "./rpc-bridge.js";
+import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -27,7 +27,7 @@ import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
 import type { RoleManager } from "./role-manager.js";
-import type { ToolManager } from "./tool-manager.js";
+import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
@@ -50,6 +50,88 @@ import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
+
+export interface PiExtensionDiagnostic {
+	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
+	code: string;
+	message: string;
+	updatedAt: string;
+	stale?: boolean;
+}
+
+export interface PiExtensionToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: Record<string, unknown>;
+}
+
+export interface ResolvedPiExtensionContribution {
+	listName: string;
+	entryPath?: string;
+	entryRelativePath?: string;
+	packRoot: string;
+	origin: {
+		scope: "server" | "global-user" | "project" | "builtin";
+		packName: string;
+		packId: string;
+		sourceUrl?: string;
+	};
+	diagnostic: PiExtensionDiagnostic;
+	discovery: {
+		status: "ok" | "failed" | "skipped";
+		tools: PiExtensionToolInfo[];
+		diagnostic?: PiExtensionDiagnostic;
+		cacheKey?: string;
+	};
+}
+
+export type MarketplacePiExtensionResolver = (scope: { projectId?: string; cwd?: string }) => ResolvedPiExtensionContribution[];
+
+export interface MarketplacePiExtensionActivation {
+	args: string[];
+	tools: PiExtensionToolInfo[];
+	diagnostics: PiExtensionDiagnostic[];
+	runtimeExtensions: RuntimePiExtensionInfo[];
+}
+
+const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
+
+export function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
+	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
+	return { ...(projectId ? { projectId } : {}), ...(cwd ? { cwd } : {}), scopeKey };
+}
+
+export function resolveMarketplacePiExtensionActivation(
+	resolver: MarketplacePiExtensionResolver | null | undefined,
+	projectId: string | undefined,
+	cwd: string | undefined,
+): MarketplacePiExtensionActivation {
+	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [] };
+	const contributions = resolver({ projectId, cwd });
+	const args: string[] = [];
+	const tools: PiExtensionToolInfo[] = [];
+	const diagnostics: PiExtensionDiagnostic[] = [];
+	const runtimeExtensions: RuntimePiExtensionInfo[] = [];
+	for (const contribution of contributions) {
+		diagnostics.push(contribution.diagnostic);
+		if (contribution.discovery?.diagnostic) diagnostics.push(contribution.discovery.diagnostic);
+		const runtimeEnabled = !RUNTIME_OMIT_PI_EXTENSION_STATUSES.has(contribution.diagnostic.status);
+		if (runtimeEnabled) {
+			for (const tool of contribution.discovery?.tools ?? []) tools.push(tool);
+		}
+		if (contribution.entryPath && runtimeEnabled) {
+			args.push("--extension", contribution.entryPath);
+			runtimeExtensions.push({
+				listName: contribution.listName,
+				entryPath: contribution.entryPath,
+				...(contribution.entryRelativePath ? { entryRelativePath: contribution.entryRelativePath } : {}),
+				packRoot: contribution.packRoot,
+				origin: contribution.origin,
+			});
+		}
+	}
+	return { args, tools, diagnostics, runtimeExtensions };
+}
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -240,6 +322,7 @@ export interface PipelineContext {
 	roleManager: RoleManager | null;
 	toolManager: ToolManager | null;
 	mcpManager: McpManager | null;
+	marketplacePiExtensionResolver?: MarketplacePiExtensionResolver | null;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
@@ -269,6 +352,7 @@ export interface PipelineContext {
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
+	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
@@ -572,7 +656,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 		if (role && ctx.toolManager) {
 			effectiveAllowedTools = computeEffectiveAllowedTools(
-				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
 			);
 		}
 	}
@@ -679,7 +763,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		// Use assistant role's tool restrictions
 		if (assistantRole && ctx.toolManager) {
 			plan.effectiveAllowedTools = computeEffectiveAllowedTools(
-				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
 			);
 			// Re-filter: the assistant recompute above replaced the allowlist, so
 			// strip disabled tools again before the prompt/tool-docs are assembled.
@@ -827,13 +911,16 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	applyDisabledToolsFilter(plan, disabledTools);
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
+	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools);
+	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
-	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.args = [...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
@@ -845,6 +932,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		ctx.groupPolicyStore ?? undefined,
 		[],
 		disabledTools,
+		toolScope,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
@@ -1259,6 +1347,8 @@ export async function executeWorktreeAsync(
 		}
 	}
 
+	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
+
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);
 
@@ -1423,6 +1513,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			console.error(`[session-setup] Failed to assign task ${plan.taskId} to session ${plan.id}:`, err);
 		}
 	}
+
+	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);

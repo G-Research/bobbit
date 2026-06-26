@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo } from "./api.js";
+import { fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError } from "./dialogs.js";
@@ -17,6 +17,40 @@ import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, 
 // ============================================================================
 
 const TOOL_GROUPS = ["File System", "Shell", "Web", "Browser", "Agent", "Team", "Tasks", "Gates", "Other"];
+
+function isConfigOrigin(origin: unknown): origin is ConfigOrigin {
+	return origin === "builtin" || origin === "server" || origin === "user" || origin === "project";
+}
+
+function isPiExtensionTool(tool: ToolInfo | null | undefined): boolean {
+	if (!tool) return false;
+	return tool.providerType === "pi-extension"
+		|| tool.origin === "marketplace-pi-extension"
+		|| (tool.providers ?? []).some((provider) => provider.providerKey?.startsWith("pi-ext:"));
+}
+
+function piProviderSummary(provider: ToolProviderProvenance): string {
+	const pack = provider.packName || "unknown pack";
+	const list = provider.listName ? ` / ${provider.listName}` : "";
+	const scope = provider.scope ? ` (${provider.scope})` : "";
+	return `${pack}${list}${scope}`;
+}
+
+function renderToolOriginBadges(tool: ToolInfo): TemplateResult | string {
+	if (isPiExtensionTool(tool)) {
+		const providers = tool.providers ?? [];
+		const packName = tool.originPackName || providers[0]?.packName || "marketplace";
+		return html`
+			<span class="inline-flex items-center gap-1 shrink-0">
+				<span class="tools-provider-badge tools-provider-badge--pi" data-testid="tool-pi-extension-badge" title="Pi runtime extension tool">Pi extension</span>
+				<span class="config-origin-pack" data-testid="origin-pack-chip" title="From pack: ${packName}">${packName}</span>
+			</span>
+		`;
+	}
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
+	const overrides = isConfigOrigin((tool as any).overrides) ? (tool as any).overrides : undefined;
+	return renderOriginBadge(origin, overrides, tool.originPackName);
+}
 
 /** Build a mock ToolResultMessage with the correct content array format. */
 function mockResult(text: string): any {
@@ -525,7 +559,7 @@ async function handleSave(): Promise<void> {
 
 	if (ok) {
 		// Refresh tools list and update selectedTool
-		const [t] = await Promise.all([fetchTools()]);
+		const [t] = await Promise.all([fetchToolsScoped()]);
 		tools = t;
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
@@ -801,14 +835,13 @@ async function handleScopeChange(scope: string): Promise<void> {
 }
 
 function renderToolRow(tool: ToolInfo): TemplateResult {
-	const origin = (tool as any).origin as ConfigOrigin | undefined;
-	const overrides = (tool as any).overrides as ConfigOrigin | undefined;
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
 	const inherited = isInherited(origin);
 	return html`
 		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides, (tool as any).originPackName)}</span>
+			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -1005,6 +1038,33 @@ function renderContextTab(): TemplateResult {
 	`;
 }
 
+function renderPiExtensionProvenance(tool: ToolInfo): TemplateResult | string {
+	if (!isPiExtensionTool(tool)) return "";
+	const providers = tool.providers ?? [];
+	const hasCollision = providers.length > 1;
+	return html`
+		<div class="tools-pi-extension-card" data-testid="tool-pi-extension-provenance">
+			<div class="tools-pi-extension-title">Pi extension runtime tool</div>
+			<div class="tools-pi-extension-copy">This tool is registered by a standalone pi extension at session runtime. Bobbit policy is enforced by runtime tool name.</div>
+			${hasCollision ? html`
+				<div class="tools-pi-extension-warning" data-testid="tool-pi-extension-collision">
+					Multiple providers share this runtime tool name; policy applies to all calls named <code>${tool.name}</code>.
+				</div>
+			` : ""}
+			${providers.length ? html`
+				<div class="tools-pi-extension-providers">
+					${providers.map((provider) => html`
+						<div class="tools-pi-extension-provider" data-testid="tool-pi-extension-provider" title=${provider.sourcePath ?? provider.providerKey}>
+							<span>${piProviderSummary(provider)}</span>
+							${provider.sourcePath ? html`<code>${provider.sourcePath}</code>` : ""}
+						</div>
+					`)}
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
 function renderRendererTab(): TemplateResult {
 	if (!selectedTool) return html``;
 
@@ -1041,7 +1101,8 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
-					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides, (selectedTool as any).originPackName)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${selectedTool.origin || isPiExtensionTool(selectedTool) ? html`<div class="mb-1 inline-flex items-center gap-2">${renderToolOriginBadges(selectedTool)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${renderPiExtensionProvenance(selectedTool)}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
@@ -1086,19 +1147,20 @@ function renderEditView(): TemplateResult {
 
 function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!selectedTool) return "";
-	const origin = (selectedTool as any).origin as ConfigOrigin | undefined;
-	if (!origin) return "";
+	const origin = isConfigOrigin(selectedTool.origin) ? selectedTool.origin : undefined;
+	const providers = selectedTool.providers ?? [];
 
 	// Market-pack entities are read-only — managed via the Marketplace (install/
 	// uninstall), NOT the legacy customize/override endpoints (which can't remove
 	// an installed pack). Gate the actions off when the entity carries a pack tag.
 	// See docs/design/pack-based-marketplace.md §3.2 / finding #2.
-	const originPackName = (selectedTool as any).originPackName as string | null | undefined;
-	const originPackId = (selectedTool as any).originPackId as string | null | undefined;
-	if (originPackName || originPackId) {
+	const originPackName = selectedTool.originPackName || providers[0]?.packName || null;
+	const originPackId = selectedTool.originPackId || null;
+	if (originPackName || originPackId || isPiExtensionTool(selectedTool)) {
 		return html`<span class="config-readonly-note" data-testid="market-readonly-note"
-			title="Installed from pack '${originPackName ?? originPackId}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
+			title="Installed from pack '${originPackName ?? originPackId ?? "pi extension"}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
 	}
+	if (!origin) return "";
 
 	const scope = getConfigScope();
 	const projectId = getConfigProjectId();

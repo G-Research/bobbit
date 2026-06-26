@@ -58,8 +58,18 @@ export default function(pi) {
   // can still appear in the agent's tool registry — the guard rejects it here.
   const neverPolicies = ${JSON.stringify(neverPolicies)};
 
+  const askPolicyNamesByLower = new Map(Object.keys(askPolicies).map((name) => [name.toLowerCase(), name]));
+  const neverPolicyNamesByLower = new Map(Object.keys(neverPolicies).map((name) => [name.toLowerCase(), name]));
+
+  function policyEntry(map, namesByLower, toolName) {
+    if (map[toolName]) return { canonicalName: toolName, entry: map[toolName] };
+    const canonicalName = namesByLower.get(String(toolName || "").toLowerCase());
+    return canonicalName ? { canonicalName, entry: map[canonicalName] } : undefined;
+  }
+
   // In-memory grant set — tools that have been granted during this session
   const grantedTools = new Set(${JSON.stringify(grantedTools)});
+  const grantedToolsLower = new Set(${JSON.stringify(grantedTools.map((name) => name.toLowerCase()))});
 
   // Read gateway URL and auth token (same pattern as MCP proxy extensions)
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
@@ -73,20 +83,26 @@ export default function(pi) {
     // Hard-block 'never' tools immediately with a clear reason. The agent sees
     // this as a tool error so it can adapt (e.g. reviewers falling back to
     // read-only analysis instead of running bash_bg).
-    if (neverPolicies[toolName]) {
+    const directNeverPolicy = neverPolicies[toolName];
+    const neverPolicy = directNeverPolicy
+      ? { canonicalName: toolName, entry: directNeverPolicy }
+      : policyEntry(neverPolicies, neverPolicyNamesByLower, toolName);
+    if (neverPolicy) {
       return {
         block: true,
         reason: 'Tool "' + toolName + '" is not permitted for this role. Do not call it again — choose a different approach.'
       };
     }
 
+    const askPolicy = policyEntry(askPolicies, askPolicyNamesByLower, toolName);
+
     // If tool is already granted or not in the ask-policies map, pass through
-    if (grantedTools.has(toolName) || !askPolicies[toolName]) {
+    if (grantedTools.has(toolName) || grantedToolsLower.has(String(toolName || "").toLowerCase()) || !askPolicy) {
       return undefined;
     }
 
     // Tool has 'ask' policy and is not yet granted — request permission via gateway
-    const entry = askPolicies[toolName];
+    const entry = askPolicy.entry;
     const body = JSON.stringify({ toolName, toolGroup: entry.group });
     const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
     const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
@@ -117,6 +133,7 @@ export default function(pi) {
       if (r && r.granted) {
         // Permission granted — add to in-memory set so future calls pass through
         grantedTools.add(toolName);
+        grantedToolsLower.add(String(toolName || "").toLowerCase());
         return { block: false };
       } else {
         const reason = (r && r.reason) ? r.reason : "Permission denied by user";

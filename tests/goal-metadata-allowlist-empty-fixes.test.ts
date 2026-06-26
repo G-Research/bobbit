@@ -146,13 +146,15 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 			.replace(": EffectiveTool[] | undefined", "");
 	}
 	const BLOCK = extractResolveBlock();
-	// `computeEffectiveAllowedTools` is a free identifier; inject as a sentinel so
-	// a wrongful fallback is observable.
-	const runBlock = new Function("plan", "ctx", "computeEffectiveAllowedTools", BLOCK) as (
-		plan: { effectiveAllowedTools?: unknown[]; roleName?: string; projectId?: string },
+	// `computeEffectiveAllowedTools` and `scopedToolContext` are free identifiers;
+	// inject sentinels so a wrongful fallback and scoped context drift are observable.
+	const runBlock = new Function("plan", "ctx", "computeEffectiveAllowedTools", "scopedToolContext", BLOCK) as (
+		plan: { effectiveAllowedTools?: unknown[]; roleName?: string; projectId?: string; cwd?: string },
 		ctx: unknown,
 		ceat: (...a: unknown[]) => unknown[],
+		scope: (projectId: string | undefined, cwd: string | undefined) => unknown,
 	) => void;
+	const defaultScope = (projectId: string | undefined, cwd: string | undefined) => ({ projectId, cwd, scopeKey: projectId ? `project:${projectId}` : cwd ? `cwd:${cwd}` : "default" });
 
 	const sentinel = [{ name: "ROLE_FALLBACK" }];
 	const ctxWithRole = {
@@ -165,21 +167,37 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 
 	it("explicit empty allowlist is preserved — NO fallback to role defaults", () => {
 		const plan = { effectiveAllowedTools: [] as unknown[], roleName: "coder" };
-		runBlock(plan, ctxWithRole, () => sentinel);
+		runBlock(plan, ctxWithRole, () => sentinel, defaultScope);
 		assert.ok(Array.isArray(plan.effectiveAllowedTools) && plan.effectiveAllowedTools.length === 0,
 			"explicit [] must survive first spawn so lower activation sees no tools");
 	});
 
-	it("undefined allowlist falls back to the role's resolved tools", () => {
-		const plan: { effectiveAllowedTools?: unknown[]; roleName?: string } = { roleName: "coder" };
-		runBlock(plan, ctxWithRole, () => sentinel);
+	it("undefined allowlist falls back to the role's resolved tools with scoped context", () => {
+		const plan = { roleName: "coder", projectId: "project-a", cwd: "/tmp/project-a" } as { effectiveAllowedTools?: unknown[]; roleName?: string; projectId?: string; cwd?: string };
+		const scoped = { projectId: "project-a", cwd: "/tmp/project-a", scopeKey: "project:project-a" };
+		const seenScopeArgs: Array<[string | undefined, string | undefined]> = [];
+		let computeScopeArg: unknown;
+		runBlock(
+			plan,
+			ctxWithRole,
+			(...args: unknown[]) => {
+				computeScopeArg = args[4];
+				return sentinel;
+			},
+			(projectId, cwd) => {
+				seenScopeArgs.push([projectId, cwd]);
+				return scoped;
+			},
+		);
 		assert.deepEqual(plan.effectiveAllowedTools, sentinel);
+		assert.deepEqual(seenScopeArgs, [["project-a", "/tmp/project-a"]]);
+		assert.equal(computeScopeArg, scoped);
 	});
 
 	it("non-empty allowlist is preserved untouched", () => {
 		const keep = [{ name: "read" }];
 		const plan = { effectiveAllowedTools: keep, roleName: "coder" };
-		runBlock(plan, ctxWithRole, () => sentinel);
+		runBlock(plan, ctxWithRole, () => sentinel, defaultScope);
 		assert.deepEqual(plan.effectiveAllowedTools, keep);
 	});
 

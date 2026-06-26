@@ -51,9 +51,11 @@ import {
 	type MarketScope,
 	type McpServerInfo,
 	type PackActivationMcpEntry,
+	type PackActivationPiExtensionEntry,
 	type PackActivationResponse,
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
+	type PiExtensionDiagnostic,
 } from "./api.js";
 
 // ============================================================================
@@ -303,12 +305,13 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 }
 
 /** Maps the singular testid kind → the `DisabledRefs` array key. */
-const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mcp", keyof DisabledRefs> = {
+const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension", keyof DisabledRefs> = {
 	role: "roles",
 	tool: "tools",
 	skill: "skills",
 	entrypoint: "entrypoints",
 	mcp: "mcp",
+	"pi-extension": "piExtensions",
 };
 
 /** Toggle a user-facing pack entity's activation. Computes the new `disabled`
@@ -318,7 +321,7 @@ const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mc
  *  (pack schema V1 §9). Entrypoints are keyed by `listName`. */
 async function handleToggleActivation(
 	pack: InstalledPackWire,
-	kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
+	kind: "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension",
 	name: string,
 	enable: boolean,
 ): Promise<void> {
@@ -337,13 +340,14 @@ async function handleToggleAllActivation(pack: InstalledPackWire, enable: boolea
 	if (!current) return;
 	const cat = current.catalogue;
 	const disabled: DisabledRefs = enable
-		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [] }
+		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [], piExtensions: [] }
 		: {
 			roles: [...cat.roles],
 			tools: [...cat.tools],
 			skills: [...cat.skills],
 			entrypoints: cat.entrypoints.map((e) => e.listName),
 			mcp: normalizedActivationMcp(cat.mcp).map((e) => e.ref),
+			piExtensions: normalizedActivationPiExtensions(cat.piExtensions).map((e) => e.ref),
 		};
 	await savePackActivation(pack, disabled, `activation:${cacheKey}:all`);
 }
@@ -629,6 +633,11 @@ function packMcpRefs(pack: BrowsePackWire | InstalledPackWire): string[] {
 	return contents?.mcp ?? [];
 }
 
+function packPiExtensionRefs(pack: BrowsePackWire | InstalledPackWire): string[] {
+	const contents = "contents" in pack ? pack.contents : (pack as InstalledPackWire).manifest.contents;
+	return contents?.piExtensions ?? [];
+}
+
 function packHasMcp(pack: BrowsePackWire | InstalledPackWire): boolean {
 	return packMcpRefs(pack).length > 0 || normalizedBrowseMcp(pack as BrowsePackWire).length > 0;
 }
@@ -654,6 +663,18 @@ function normalizedActivationMcp(entries: PackActivationResponse["catalogue"]["m
 			serverName: entry.serverName || entry.ref || entry.listName,
 		};
 	});
+}
+
+function normalizedActivationPiExtensions(entries: PackActivationResponse["catalogue"]["piExtensions"] | undefined): PackActivationPiExtensionEntry[] {
+	return (entries ?? []).map((entry) => {
+		if (typeof entry === "string") return { ref: entry, listName: entry, label: entry };
+		const ref = entry.ref || entry.listName || entry.label || "pi-extension";
+		return { ...entry, ref, listName: entry.listName || ref, label: entry.label || ref };
+	});
+}
+
+function piExtensionLabel(entry: PackActivationPiExtensionEntry): string {
+	return entry.label && entry.label !== entry.ref ? `${entry.label} · ${entry.ref}` : entry.ref;
 }
 
 function mcpEntryLabel(entry: PackActivationMcpEntry | PackMcpContributionWire): string {
@@ -773,6 +794,7 @@ function entityChips(pack: BrowsePackWire | InstalledPackWire): TemplateResult {
 		["tool", contents?.tools || []],
 		["skill", contents?.skills || []],
 		["mcp", contents?.mcp || []],
+		["pi-extension", contents?.piExtensions || []],
 	];
 	const chips = groups.flatMap(([kind, names]) =>
 		names.map((n) => html`<span class="market-entity-chip" data-kind=${kind}>${kind}: ${n}</span>`),
@@ -795,6 +817,7 @@ interface EntityNameLists {
 	skills: string[];
 	entrypoints: Array<{ listName: string; label?: string }>;
 	mcp?: Array<{ ref: string; label?: string }>;
+	piExtensions?: Array<{ ref: string; label?: string }>;
 }
 
 /** Shared collapsed "Show details" disclosure (R3) — one row per declared
@@ -808,7 +831,7 @@ function renderEntityDetails(packName: string, descriptions: PackEntityDescripti
 	if (!descriptions) return html``;
 	const rows: TemplateResult[] = [];
 	const pushRows = (
-		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
+		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension",
 		map: Record<string, string> | undefined,
 		names: string[],
 		labelFor?: (n: string) => string,
@@ -832,6 +855,8 @@ function renderEntityDetails(packName: string, descriptions: PackEntityDescripti
 	pushRows("entrypoint", descriptions.entrypoints, entities.entrypoints.map((e) => e.listName), (n) => epLabel.get(n) || n);
 	const mcpLabel = new Map((entities.mcp ?? []).map((e) => [e.ref, e.label || e.ref]));
 	pushRows("mcp", descriptions.mcp, (entities.mcp ?? []).map((e) => e.ref), (n) => mcpLabel.get(n) || n);
+	const piExtensionLabel = new Map((entities.piExtensions ?? []).map((e) => [e.ref, e.label || e.ref]));
+	pushRows("pi-extension", descriptions.piExtensions, (entities.piExtensions ?? []).map((e) => e.ref), (n) => piExtensionLabel.get(n) || n);
 	if (rows.length === 0) return html``;
 	return html`
 		<details class="market-entity-details" data-testid="market-entity-details-${packName}">
@@ -869,7 +894,7 @@ function renderSourcesPanel(): TemplateResult {
 				<div class="market-trust-warning" data-testid="market-trust-warning">
 					${icon(AlertTriangle, "xs")}
 					<div class="flex flex-col gap-1.5">
-						<span>Only add sources you trust. Packs, MCP servers, and registry entries can run code, connect to remote services, or instruct agents on your machine.</span>
+						<span>Only add sources you trust. Packs, MCP servers, registry entries, and pi extensions can run code, connect to remote services, or instruct agents on your machine.</span>
 						<details class="market-trust-why" data-testid="market-trust-why">
 							<summary>Why?</summary>
 							<div class="market-trust-why-body">
@@ -877,6 +902,7 @@ function renderSourcesPanel(): TemplateResult {
 								<p data-kind="skill"><strong>Skills</strong> are free-form instructions an agent tends to follow literally; an agent with shell access can be directed to do damage.</p>
 								<p data-kind="role"><strong>Roles</strong> steer persona/behavior; influential but more diffuse. Still drives an LLM with tool access.</p>
 								<p data-kind="mcp"><strong>MCP servers</strong> run trusted stdio commands on the host or call trusted remote HTTP endpoints that may receive prompts, tool arguments, headers, and project-derived data.</p>
+								<p data-kind="pi-extension"><strong>Pi extensions</strong> are host-code/runtime extensions loaded into matching agent sessions. They can register model-facing tools. Before trust is accepted Bobbit only does static/path discovery; executable probing runs later in a bounded child process.</p>
 							</div>
 						</details>
 					</div>
@@ -1073,6 +1099,7 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 						skills: pack.contents?.skills ?? [],
 						entrypoints: entrypointNames,
 						mcp: normalizedBrowseMcp(pack).map((e) => ({ ref: e.ref || e.listName || e.serverName || "mcp", label: e.label || e.serverName })),
+						piExtensions: packPiExtensionRefs(pack).map((ref) => ({ ref })),
 					})}
 					${renderMcpTransportPreview(pack)}
 				</div>
@@ -1295,7 +1322,7 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 
 function activationEntityTotal(activation: PackActivationResponse): number {
 	const cat = activation.catalogue;
-	return cat.roles.length + cat.tools.length + cat.skills.length + cat.entrypoints.length + normalizedActivationMcp(cat.mcp).length;
+	return cat.roles.length + cat.tools.length + cat.skills.length + cat.entrypoints.length + normalizedActivationMcp(cat.mcp).length + normalizedActivationPiExtensions(cat.piExtensions).length;
 }
 
 function activationEntityEnabledCount(activation: PackActivationResponse): number {
@@ -1305,7 +1332,8 @@ function activationEntityEnabledCount(activation: PackActivationResponse): numbe
 		(disabled.tools ?? []).length +
 		(disabled.skills ?? []).length +
 		(disabled.entrypoints ?? []).length +
-		(disabled.mcp ?? []).length;
+		(disabled.mcp ?? []).length +
+		(disabled.piExtensions ?? []).length;
 	return Math.max(0, activationEntityTotal(activation) - disabledCount);
 }
 
@@ -1333,6 +1361,7 @@ function renderActivationEntityDetails(pack: InstalledPackWire): TemplateResult 
 		skills: cat.skills,
 		entrypoints: cat.entrypoints.map((e) => ({ listName: e.listName, label: entrypointDisplayLabel(e) })),
 		mcp: normalizedActivationMcp(cat.mcp).map((e) => ({ ref: e.ref, label: mcpEntryLabel(e) })),
+		piExtensions: normalizedActivationPiExtensions(cat.piExtensions).map((e) => ({ ref: e.ref, label: piExtensionLabel(e) })),
 	});
 }
 
@@ -1382,6 +1411,42 @@ function renderMcpRuntimeStatus(pack: InstalledPackWire, entry: PackActivationMc
 	return html`<span class="market-lozenge market-lozenge--warning" data-testid="market-mcp-status-${entry.ref}">${ownerText || "Not loaded"}</span>`;
 }
 
+function piExtensionStatusLabel(status: PiExtensionDiagnostic["status"] | undefined): string {
+	switch (status) {
+		case "ok": return "Ready";
+		case "disabled": return "Disabled";
+		case "unresolved": return "Unresolved";
+		case "discovery-failed": return "Discovery failed";
+		case "runtime-load-failed": return "Runtime load failed";
+		case "remap-failed": return "Sandbox remap failed";
+		default: return "Pending discovery";
+	}
+}
+
+function piExtensionStatusClass(status: PiExtensionDiagnostic["status"] | undefined): string {
+	switch (status) {
+		case "ok": return "market-lozenge--positive";
+		case "disabled": return "market-lozenge--muted";
+		case "unresolved":
+		case "discovery-failed":
+		case "runtime-load-failed":
+		case "remap-failed": return "market-lozenge--error";
+		default: return "market-lozenge--warning";
+	}
+}
+
+function renderPiExtensionRuntimeStatus(entry: PackActivationPiExtensionEntry, checked: boolean): TemplateResult {
+	if (!checked) return html`<span class="market-lozenge market-lozenge--muted" data-testid="market-pi-extension-status-${entry.ref}">Disabled</span>`;
+	const diagnostic = entry.diagnostic;
+	const tools = entry.tools ?? [];
+	return html`
+		<span class="market-lozenge ${piExtensionStatusClass(diagnostic?.status)}" data-testid="market-pi-extension-status-${entry.ref}" title=${diagnostic?.message ?? "Pi extension runtime status"}>${piExtensionStatusLabel(diagnostic?.status)}</span>
+		${entry.entryRelativePath ? html`<span class="market-pi-extension-path" title=${entry.entryRelativePath}>${entry.entryRelativePath}</span>` : ""}
+		${tools.length ? html`<span class="market-mcp-policy-link" data-testid="market-pi-extension-tools-${entry.ref}">${tools.length} discovered tool${tools.length === 1 ? "" : "s"} · Policy in Tools</span>` : ""}
+		${diagnostic?.message && diagnostic.status !== "ok" ? html`<span class="market-pi-extension-diagnostic" data-testid="market-pi-extension-diagnostic-${entry.ref}" title=${diagnostic.message}>${diagnostic.message}</span>` : ""}
+	`;
+}
+
 function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
 	if (!activation) return html``;
@@ -1390,7 +1455,7 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	const isEnabled = (kindKey: keyof DisabledRefs, name: string) => !(disabled[kindKey] ?? []).includes(name);
 
 	const toggle = (
-		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp",
+		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension",
 		name: string,
 		label: string,
 		kindLabel?: string,
@@ -1446,6 +1511,18 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 			}),
 			"market-activation-mcp-group",
 			html`<div class="market-activation-help">Activation controls whether this MCP server is installed into Bobbit. Allow/ask/never policy is managed on the Tools page.</div>`,
+		));
+	}
+	const piExtensionEntries = normalizedActivationPiExtensions(cat.piExtensions);
+	if (piExtensionEntries.length) {
+		groups.push(group(
+			"Pi extensions",
+			piExtensionEntries.map((entry) => {
+				const checked = isEnabled("piExtensions", entry.ref);
+				return toggle("pi-extension", entry.ref, piExtensionLabel(entry), undefined, renderPiExtensionRuntimeStatus(entry, checked));
+			}),
+			"market-activation-pi-extension-group",
+			html`<div class="market-activation-help">Pi extensions are host-code/runtime extensions loaded into every matching agent session when enabled. Discovered tools appear on the Tools page for allow/ask/never policy.</div>`,
 		));
 	}
 	if (groups.length === 0) return html``;

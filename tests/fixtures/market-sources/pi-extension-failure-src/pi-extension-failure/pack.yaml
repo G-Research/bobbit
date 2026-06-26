@@ -1,0 +1,15 @@
+name: pi-extension-failure
+description: E2E fixture pack whose pi extension fails deterministic discovery.
+version: 1.0.0
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: [broken]
+  runtimes: []
+  workflows: []
