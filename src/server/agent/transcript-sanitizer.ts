@@ -30,7 +30,7 @@
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
 import { sessionFileRead, type SessionFsContext } from "./session-fs.js";
 import { containerPathToHost } from "./rpc-bridge.js";
-import { globalAgentDir } from "../bobbit-dir.js";
+import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -204,22 +204,49 @@ function isInsideOrEqual(root: string, target: string): boolean {
 	return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+/** True iff `target` is strictly nested inside `root` (not root itself). */
+function isStrictlyInside(root: string, target: string): boolean {
+	const rel = path.relative(root, target);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function hasTraversalSegment(hostPath: string): boolean {
+	return hostPath.replace(/\\/g, "/").split("/").includes("..");
+}
+
+function normalizeComparablePath(hostPath: string): string {
+	return path.resolve(hostPath).replace(/[\\/]+$/, "");
+}
+
+const trustedExactSessionFiles = new Set<string>();
+
+/**
+ * Trust an exact persisted absolute `agentSessionFile` path for sanitizer I/O.
+ * This is intentionally an exact-file allowlist, not a parent-directory trust.
+ */
+export function trustPersistedAgentSessionFile(filePath: string | null | undefined): void {
+	if (!filePath || hasTraversalSegment(filePath)) return;
+	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return;
+	trustedExactSessionFiles.add(normalizeComparablePath(filePath));
+}
+
+function isTrustedExactSessionFile(filePath: string): boolean {
+	return trustedExactSessionFiles.has(normalizeComparablePath(filePath));
+}
+
 /**
  * Lexical-only guard kept for callers/tests that want a cheap prefix check:
  * a transcript path is acceptable iff it has no `..` segment and resolves
- * (lexically) strictly inside `globalAgentDir()/sessions`. Does NOT touch the
- * filesystem — see `resolveSafeSessionsPath` for the symlink/TOCTOU-resistant
- * variant used on the real I/O path.
+ * (lexically) strictly inside an active/historical/legacy agent sessions root,
+ * or exactly matches a persisted `agentSessionFile` registered by the session
+ * manager. Does NOT touch the filesystem — see `resolveSafeSessionsPath` for
+ * the symlink/TOCTOU-resistant variant used on the real I/O path.
  */
 export function isWithinAgentSessionsDir(hostPath: string): boolean {
-	if (!hostPath) return false;
-	const segments = hostPath.replace(/\\/g, "/").split("/");
-	if (segments.includes("..")) return false;
-
-	const sessionsRoot = path.resolve(globalAgentDir(), "sessions");
+	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
-	const rel = path.relative(sessionsRoot, resolved);
-	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+	if (isTrustedExactSessionFile(resolved)) return true;
+	return trustedAgentSessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
 }
 
 /**
@@ -229,8 +256,9 @@ export function isWithinAgentSessionsDir(hostPath: string): boolean {
  * Rejects (returns `null`) when the path:
  *  - is empty or contains a `..` traversal segment;
  *  - has a parent directory that doesn't exist or, after `realpathSync`
- *    (which follows directory symlinks), is NOT inside the real sessions root
- *    (`realpath(globalAgentDir()/sessions)`);
+ *    (which follows directory symlinks), is NOT inside a real trusted sessions
+ *    root (active, historical, or legacy) and is not an exact trusted persisted
+ *    `agentSessionFile` path;
  *  - resolves to an existing entry that is a symlink or not a regular file.
  *
  * On success returns the concrete real path (real parent + basename), which the
@@ -242,13 +270,6 @@ export function resolveSafeSessionsPath(hostPath: string): string | null {
 	const segments = hostPath.replace(/\\/g, "/").split("/");
 	if (segments.includes("..")) return null;
 
-	let sessionsRootReal: string;
-	try {
-		sessionsRootReal = fs.realpathSync(path.resolve(globalAgentDir(), "sessions"));
-	} catch {
-		return null; // no sessions root → nothing legitimate to sanitize
-	}
-
 	const resolved = path.resolve(hostPath);
 	const parent = path.dirname(resolved);
 	let parentReal: string;
@@ -258,8 +279,22 @@ export function resolveSafeSessionsPath(hostPath: string): string | null {
 		return null; // parent missing/unreadable
 	}
 
-	// The real parent must be the sessions root or nested inside it.
-	if (!isInsideOrEqual(sessionsRootReal, parentReal)) return null;
+	const trustedExact = isTrustedExactSessionFile(resolved);
+	if (!trustedExact) {
+		let insideTrustedRoot = false;
+		for (const root of trustedAgentSessionsRoots()) {
+			try {
+				const rootReal = fs.realpathSync(path.resolve(root));
+				if (isInsideOrEqual(rootReal, parentReal)) {
+					insideTrustedRoot = true;
+					break;
+				}
+			} catch {
+				// Historical roots may no longer exist; ignore them.
+			}
+		}
+		if (!insideTrustedRoot) return null;
+	}
 
 	const realPath = path.join(parentReal, path.basename(resolved));
 
