@@ -2,7 +2,7 @@
 
 **Goal:** add an explicit Settings → Maintenance tool that previews and removes git worktrees owned by archived sessions without deleting archived session metadata, transcripts, proposals, or archive visibility.
 
-**Status:** design.
+**Status:** implemented. See [Maintenance](../maintenance.md#archived-session-worktrees) for the durable user/developer reference.
 
 **Scope:** production/API/UI/test plan for archived-session worktree cleanup. This is separate from the existing branch-centric orphaned worktree cleanup.
 
