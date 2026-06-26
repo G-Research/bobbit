@@ -89,6 +89,9 @@ import {
 	type SessionSetupPlan,
 	type PipelineContext,
 	type SandboxWiringOptions,
+	type MarketplacePiExtensionResolver,
+	type MarketplacePiExtensionActivation,
+	resolveMarketplacePiExtensionActivation,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -888,6 +891,7 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
+	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -1502,6 +1506,7 @@ export class SessionManager {
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.getMcpManagerForContext(projectId, cwd),
+			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -2078,6 +2083,18 @@ export class SessionManager {
 		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
 	}
 
+	setMarketplacePiExtensionResolver(resolver: MarketplacePiExtensionResolver | null | undefined): void {
+		this.marketplacePiExtensionResolver = resolver ?? null;
+	}
+
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
+		return this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? [];
+	}
+
+	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
+		return resolveMarketplacePiExtensionActivation(this.marketplacePiExtensionResolver, projectId, cwd);
+	}
+
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
@@ -2323,8 +2340,9 @@ export class SessionManager {
 
 		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = [...activation.args];
+		const args = [...activation.args, ...piExtensionActivation.args];
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager

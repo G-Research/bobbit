@@ -9,6 +9,7 @@ import path from "node:path";
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
@@ -98,6 +99,8 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
+
+const requireServerModule = createRequire(import.meta.url);
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -339,6 +342,7 @@ import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-sou
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
@@ -453,6 +457,84 @@ export function buildMarketToolRootsForProject(options: {
 		for (const entry of options.marketEntries(scope, options.projectId)) push(entry, scope);
 	}
 	return roots;
+}
+
+type LoadPiExtensionContributions = (packRoot: string, manifest: NonNullable<PackEntry["manifest"]>) => ResolvedPiExtensionContribution[];
+
+function loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: NonNullable<PackEntry["manifest"]>): ResolvedPiExtensionContribution[] {
+	const mod = requireServerModule("./agent/pi-extension-contributions.js") as { loadPiExtensionContributions?: LoadPiExtensionContributions };
+	if (typeof mod.loadPiExtensionContributions !== "function") {
+		throw new Error("pi-extension-contributions loader is unavailable");
+	}
+	return mod.loadPiExtensionContributions(packRoot, manifest);
+}
+
+function piExtensionDiagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
+	return { status, code, message, updatedAt: new Date().toISOString() };
+}
+
+export function piExtensionCatalogueRef(entry: string | Record<string, unknown>): string {
+	return typeof entry === "string"
+		? entry
+		: String(entry.ref ?? entry.listName ?? "");
+}
+
+export function normalisePiExtensionCatalogueRefs(entries: readonly (string | Record<string, unknown>)[] | undefined): Set<string> {
+	return new Set((entries ?? []).map(piExtensionCatalogueRef).filter(Boolean));
+}
+
+export function buildPiExtensionToolRows(contributions: readonly ResolvedPiExtensionContribution[]): Array<Record<string, unknown>> {
+	const byName = new Map<string, Record<string, unknown>>();
+	for (const contribution of contributions) {
+		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
+		for (const tool of contribution.discovery?.tools ?? []) {
+			if (!tool.name) continue;
+			const provider = {
+				providerKey: `pi-ext:${contribution.origin.scope}:${contribution.origin.packId}:${contribution.listName}:${tool.name}`,
+				packName: contribution.origin.packName,
+				listName: contribution.listName,
+				scope: contribution.origin.scope,
+				...(contribution.entryPath ? { sourcePath: contribution.entryPath } : {}),
+			};
+			const existing = byName.get(tool.name);
+			if (existing) {
+				(existing.providers as Array<Record<string, unknown>>).push(provider);
+				continue;
+			}
+			byName.set(tool.name, {
+				name: tool.name,
+				description: tool.description ?? "Pi extension tool",
+				inputSchema: tool.inputSchema,
+				providerType: "pi-extension",
+				origin: "marketplace-pi-extension",
+				originPackName: contribution.origin.packName,
+				originPackId: contribution.origin.packId,
+				group: "Pi Extension",
+				readOnly: true,
+				...(contribution.entryPath ? { sourcePath: contribution.entryPath } : {}),
+				providers: [provider],
+			});
+		}
+	}
+	return [...byName.values()];
+}
+
+export function appendPiExtensionToolRows(tools: Array<Record<string, unknown>>, piRows: readonly Record<string, unknown>[]): void {
+	const byName = new Map(tools.map((tool) => [String(tool.name), tool]));
+	for (const row of piRows) {
+		const name = String(row.name ?? "");
+		if (!name) continue;
+		const existing = byName.get(name);
+		if (!existing) {
+			tools.push({ ...row });
+			byName.set(name, tools[tools.length - 1]);
+			continue;
+		}
+		const providers = Array.isArray(existing.providers) ? existing.providers : [];
+		existing.providers = [...providers, ...((row.providers as Array<Record<string, unknown>> | undefined) ?? [])];
+		existing.piExtensionCollision = true;
+		existing.piExtensionPolicyScope = "name";
+	}
 }
 
 /**
@@ -1535,7 +1617,43 @@ export function createGateway(config: GatewayConfig) {
 		}
 		return contributions;
 	};
+	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
+		const contributions: ResolvedPiExtensionContribution[] = [];
+		const projectId = scope.projectId;
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
+			const store = packActivationStore(entry.scope, projectId);
+			const disabled = new Set(store?.getPackActivation(entry.scope as PackOrderScope, entry.manifest.name).piExtensions ?? []);
+			try {
+				for (const piExtension of loadPiExtensionContributionsFromRuntime(entry.path, entry.manifest)) {
+					const origin = {
+						scope: entry.scope,
+						packName: entry.manifest.name,
+						packId: entry.id,
+						...(entry.meta?.sourceUrl ? { sourceUrl: entry.meta.sourceUrl } : {}),
+					};
+					if (disabled.has(piExtension.listName)) {
+						contributions.push({
+							...piExtension,
+							origin,
+							diagnostic: piExtensionDiagnostic("disabled", "disabled_by_activation", `Pi extension "${piExtension.listName}" is disabled for pack "${entry.manifest.name}".`),
+						});
+						continue;
+					}
+					const resolved = { ...piExtension, origin };
+					if (!resolved.entryPath || resolved.diagnostic.status === "unresolved") {
+						console.warn(`[pi-extension] Marketplace pi extension ${entry.manifest.name}/${resolved.listName} could not be resolved: ${resolved.diagnostic.message}`);
+					}
+					contributions.push(resolved);
+				}
+			} catch (err) {
+				console.warn(`[pi-extension] failed to load Marketplace pi extension contributions from ${entry.path}:`, (err as Error).message);
+			}
+		}
+		return contributions;
+	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
+	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -6148,6 +6266,7 @@ async function handleApiRoute(
 				}
 			}
 		}
+		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId)));
 		json({ tools });
 		return;
 	}
@@ -6164,21 +6283,29 @@ async function handleApiRoute(
 			// server-level manager (server + global-user market packs + builtins).
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
+			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId));
+			const piTool = piRows.find((row) => row.name === name);
 			const tool = tm.getToolByName(name);
-			if (!tool) { json({ error: "Tool not found" }, 404); return; }
+			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
 			// Merge in cascade origin metadata so the detail payload carries the same
 			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
 			// Without this, the tools edit page replaces the cascade list item with the
 			// raw detail and a market-pack tool loses its origin badge + read-only state.
 			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
-			if (cascadeEntry) {
+			if (cascadeEntry && tool) {
 				const withMeta = withOrigin(cascadeEntry as any);
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
 				// tools edit page keeps the same own-pack identity for a market-pack tool.
 				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
-				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) });
+				const detail: Record<string, unknown> = { ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) };
+				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				json(detail);
+			} else if (tool) {
+				const detail: Record<string, unknown> = { ...tool };
+				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				json(detail);
 			} else {
-				json(tool);
+				json(piTool);
 			}
 			return;
 		}
@@ -7404,7 +7531,7 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -7428,6 +7555,7 @@ async function handleApiRoute(
 			// render as activation toggles.
 			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "session-menu" | "route"; routeId?: string }>();
 			const mcpByListName = new Map<string, Record<string, unknown>>();
+			const piExtensionByListName = new Map<string, Record<string, unknown>>();
 			try {
 				const contributions = loadPackContributions(entry.path, entry.manifest);
 				for (const ep of contributions.entrypoints) {
@@ -7464,6 +7592,21 @@ async function handleApiRoute(
 					}
 				}
 			} catch { /* metadata is optional; listName is the stable key */ }
+			try {
+				const disabledPiExtensions = new Set(((store as unknown as ProjectConfigStore).getPackActivation?.(scope as PackOrderScope, packName).piExtensions) ?? []);
+				for (const piExtension of loadPiExtensionContributionsFromRuntime(entry.path, entry.manifest)) {
+					const diagnostic = disabledPiExtensions.has(piExtension.listName)
+						? piExtensionDiagnostic("disabled", "disabled_by_activation", `Pi extension "${piExtension.listName}" is disabled for pack "${entry.manifest.name}".`)
+						: piExtension.diagnostic;
+					piExtensionByListName.set(piExtension.listName, {
+						ref: piExtension.listName,
+						listName: piExtension.listName,
+						...(piExtension.entryRelativePath ? { entryRelativePath: piExtension.entryRelativePath } : {}),
+						diagnostic,
+						tools: (piExtension.discovery?.tools ?? []).map((tool) => ({ name: tool.name, ...(tool.description ? { description: tool.description } : {}) })),
+					});
+				}
+			} catch { /* pi extension metadata is optional; listName is the stable key */ }
 			const baseCatalogue = {
 				roles: [...c.roles],
 				tools: concreteTools.tools,
@@ -7486,7 +7629,7 @@ async function handleApiRoute(
 				providers: [...(c.providers ?? [])],
 				hooks: [...(c.hooks ?? [])],
 				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
-				piExtensions: [...(c.piExtensions ?? [])],
+				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
 				workflows: [...(c.workflows ?? [])],
 				descriptions,
@@ -7522,6 +7665,7 @@ async function handleApiRoute(
 			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
 			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
 			const catalogueMcpNames = new Set((catalogue.mcp ?? []).map((e) => typeof e === "string" ? e : String((e as Record<string, unknown>).ref ?? (e as Record<string, unknown>).listName ?? "")).filter(Boolean));
+			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
 			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
@@ -7535,7 +7679,7 @@ async function handleApiRoute(
 				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
 				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
 				mcp: normaliseKind("mcp", catalogueMcpNames),
-				piExtensions: normaliseKind("piExtensions", new Set(catalogue.piExtensions ?? [])),
+				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};

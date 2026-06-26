@@ -51,6 +51,74 @@ import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
+export interface PiExtensionDiagnostic {
+	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
+	code: string;
+	message: string;
+	updatedAt: string;
+	stale?: boolean;
+}
+
+export interface PiExtensionToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: Record<string, unknown>;
+}
+
+export interface ResolvedPiExtensionContribution {
+	listName: string;
+	entryPath?: string;
+	entryRelativePath?: string;
+	packRoot: string;
+	origin: {
+		scope: "server" | "global-user" | "project" | "builtin";
+		packName: string;
+		packId: string;
+		sourceUrl?: string;
+	};
+	diagnostic: PiExtensionDiagnostic;
+	discovery: {
+		status: "ok" | "failed" | "skipped";
+		tools: PiExtensionToolInfo[];
+		diagnostic?: PiExtensionDiagnostic;
+		cacheKey?: string;
+	};
+}
+
+export type MarketplacePiExtensionResolver = (scope: { projectId?: string; cwd?: string }) => ResolvedPiExtensionContribution[];
+
+export interface MarketplacePiExtensionActivation {
+	args: string[];
+	tools: PiExtensionToolInfo[];
+	diagnostics: PiExtensionDiagnostic[];
+}
+
+const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved", "remap-failed"]);
+
+export function resolveMarketplacePiExtensionActivation(
+	resolver: MarketplacePiExtensionResolver | null | undefined,
+	projectId: string | undefined,
+	cwd: string | undefined,
+): MarketplacePiExtensionActivation {
+	if (!resolver) return { args: [], tools: [], diagnostics: [] };
+	const contributions = resolver({ projectId, cwd });
+	const args: string[] = [];
+	const tools: PiExtensionToolInfo[] = [];
+	const diagnostics: PiExtensionDiagnostic[] = [];
+	for (const contribution of contributions) {
+		diagnostics.push(contribution.diagnostic);
+		if (contribution.discovery?.diagnostic) diagnostics.push(contribution.discovery.diagnostic);
+		const runtimeEnabled = !RUNTIME_OMIT_PI_EXTENSION_STATUSES.has(contribution.diagnostic.status);
+		if (runtimeEnabled) {
+			for (const tool of contribution.discovery?.tools ?? []) tools.push(tool);
+		}
+		if (contribution.entryPath && runtimeEnabled) {
+			args.push("--extension", contribution.entryPath);
+		}
+	}
+	return { args, tools, diagnostics };
+}
+
 // ── Extension path helpers ─────────────────────────────────────────────────
 
 /** Resolve goal tools extension path via the cascade (lazy, not module-level). */
@@ -240,6 +308,7 @@ export interface PipelineContext {
 	roleManager: RoleManager | null;
 	toolManager: ToolManager | null;
 	mcpManager: McpManager | null;
+	marketplacePiExtensionResolver?: MarketplacePiExtensionResolver | null;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
@@ -832,8 +901,9 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools);
+	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
-	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.args = [...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
