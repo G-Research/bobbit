@@ -540,6 +540,18 @@ test.describe("archived session worktree maintenance", () => {
 		});
 		expect(emptyBody.results).toEqual([]);
 
+		const allWithProjectSelector = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+			method: "POST",
+			body: JSON.stringify({ mode: "all", projectId: "project-a" }),
+		});
+		expect(allWithProjectSelector.status).toBe(400);
+
+		const allWithRepoSelector = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+			method: "POST",
+			body: JSON.stringify({ mode: "all", repoPath: "/tmp/repo-a" }),
+		});
+		expect(allWithRepoSelector.status).toBe(400);
+
 		const allMode = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
 			method: "POST",
 			body: JSON.stringify({ mode: "all" }),

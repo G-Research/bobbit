@@ -14085,7 +14085,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (mode === "all") {
-			if (hasSessionIds || hasWorktrees || hasCategories || hasPresetId) {
+			if (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath) {
 				json({ error: "mode=all does not accept selectors" }, 400);
 				return;
 			}
