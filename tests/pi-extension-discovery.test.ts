@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { discoverPiExtensionTools } from "../src/server/agent/pi-extension-discovery.js";
-import { computePiExtensionDiscoveryCacheKey } from "../src/server/agent/pi-extension-contributions.js";
+import { discoverPiExtensionTools, discoverPiExtensionToolsSync } from "../src/server/agent/pi-extension-discovery.js";
+import {
+	computePiExtensionDiscoveryCacheKey,
+	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
+	PI_EXTENSION_DISCOVERY_HASH_LIMITS,
+	loadPiExtensionContributionsWithDiscoverySync,
+} from "../src/server/agent/pi-extension-contributions.js";
 
 function tempDir(prefix = "bobbit-pi-ext-discovery-"): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -47,6 +52,35 @@ export default async function (pi) {
 			assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["nested_tool", "object_tool", "string_tool"]);
 			assert.equal(result.tools.find((tool) => tool.name === "object_tool")?.description, "object desc");
 			assert.deepEqual(result.tools.find((tool) => tool.name === "string_tool")?.inputSchema, { type: "object" });
+			assert.ok(result.cacheKey);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("sync contribution discovery preserves static rows without executing untrusted extension code", () => {
+		const dir = tempDir();
+		try {
+			const packRoot = path.join(dir, "pack");
+			const marker = path.join(packRoot, "executed.txt").replace(/\\/g, "\\\\");
+			write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), `import fs from "node:fs"; fs.writeFileSync("${marker}", "ran"); export default function (pi) { pi.registerTool({ name: "should_not_run" }); }`);
+			const rows = loadPiExtensionContributionsWithDiscoverySync(packRoot, { schema: 2, name: "pack", contents: { piExtensions: ["demo"] } } as any, { trustAccepted: false });
+			assert.equal(rows.length, 1);
+			assert.equal(rows[0].discovery.status, "skipped");
+			assert.equal(rows[0].discovery.diagnostic?.code, "trust_required");
+			assert.equal(fs.existsSync(path.join(packRoot, "executed.txt")), false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("records tools synchronously for session-start resolver cache misses", () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "extension.mjs"), "export default function (pi) { pi.registerTool({ name: 'sync_tool' }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["sync_tool"]);
 			assert.ok(result.cacheKey);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -106,6 +140,40 @@ export default async function (pi) {
 			assert.ok(first);
 			assert.ok(second);
 			assert.notEqual(first, second);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("bounds discovery cache key file count", () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
+			for (let i = 0; i < PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFiles + 1; i++) {
+				write(path.join(dir, `helper-${i}.js`), `export const value${i} = ${i};\n`);
+			}
+			const result = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			assert.equal(result.cacheKey, undefined);
+			assert.equal(result.diagnostic?.code, "hash_file_count_limit");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("bounds discovery cache key depth and per-file size", () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
+			let nested = dir;
+			for (let i = 0; i < PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxDepth + 1; i++) nested = path.join(nested, `d${i}`);
+			write(path.join(nested, "too-deep.js"), "export const deep = true;\n");
+			const depthResult = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			assert.equal(depthResult.diagnostic?.code, "hash_depth_limit");
+
+			fs.rmSync(path.join(dir, "d0"), { recursive: true, force: true });
+			write(path.join(dir, "large.js"), "x".repeat(PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes + 1));
+			const sizeResult = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			assert.equal(sizeResult.diagnostic?.code, "hash_file_size_limit");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

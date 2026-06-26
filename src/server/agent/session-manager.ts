@@ -92,6 +92,7 @@ import {
 	type MarketplacePiExtensionResolver,
 	type MarketplacePiExtensionActivation,
 	resolveMarketplacePiExtensionActivation,
+	scopedToolContext,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -2330,30 +2331,31 @@ export class SessionManager {
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
+		const toolScope = scopedToolContext(projectId, cwd);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		const args = [...activation.args, ...piExtensionActivation.args];
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);

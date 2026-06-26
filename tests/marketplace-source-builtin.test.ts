@@ -55,6 +55,14 @@ describe("built-in source guards (§11.1)", () => {
 		assert.throws(() => store.add({ url: "/abs/path/builtin" }), /built-in source cannot be added/);
 	});
 
+	it("defaults newly-added marketplace sources to trusted for executable pi-extension discovery", () => {
+		const store = new MarketplaceSourceStore(dir);
+		const source = store.add({ url: "https://example.com/trusted-repo.git" });
+		assert.ok(source.trustedAt, "new sources should persist source-level trust acceptance");
+		const reloaded = new MarketplaceSourceStore(dir).get(source.id);
+		assert.equal(reloaded?.trustedAt, source.trustedAt);
+	});
+
 	it("does NOT persist a builtin source across a simulated restart", () => {
 		const store = new MarketplaceSourceStore(dir);
 		// A normal source persists fine.

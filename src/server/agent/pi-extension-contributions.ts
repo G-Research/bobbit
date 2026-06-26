@@ -5,6 +5,7 @@ import type { PackManifest, PackScope } from "./pack-types.js";
 import { readMeta } from "./pack-manifest.js";
 import { PackContributionError, packIdFromRoot } from "./pack-contributions.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { discoverPiExtensionToolsSync } from "./pi-extension-discovery.js";
 
 export interface ResolvedPiExtensionContribution {
 	/** Manifest contents.pi-extensions[] key and DisabledRefs key. */
@@ -202,7 +203,20 @@ export interface PiExtensionEntryResolution {
 	entryRelativePath?: string;
 	diagnostic: PiExtensionDiagnostic;
 	cacheKey?: string;
+	cacheDiagnostic?: PiExtensionDiagnostic;
 }
+
+export interface PiExtensionDiscoveryCacheKeyResult {
+	cacheKey?: string;
+	diagnostic?: PiExtensionDiagnostic;
+}
+
+export const PI_EXTENSION_DISCOVERY_HASH_LIMITS = {
+	maxDepth: 12,
+	maxFiles: 1000,
+	maxFileBytes: 1024 * 1024,
+	maxTotalBytes: 8 * 1024 * 1024,
+} as const;
 
 /** Resolve one contents.pi-extensions ref to a safe runtime entry path, preserving source layout. */
 export function resolvePiExtensionEntry(packRoot: string, listName: string, manifest?: PackManifest, opts?: { cacheSalt?: string }): PiExtensionEntryResolution {
@@ -229,12 +243,13 @@ export function resolvePiExtensionEntry(packRoot: string, listName: string, mani
 			}
 			const st = statIfExists(candidate);
 			if (st?.isFile()) {
-				const cacheKey = computePiExtensionDiscoveryCacheKey(candidate, { packRoot: absPackRoot, manifest, cacheSalt: opts?.cacheSalt });
+				const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(candidate, { packRoot: absPackRoot, manifest, cacheSalt: opts?.cacheSalt });
 				return {
 					entryPath: candidate,
 					entryRelativePath: relativeToPack(absPackRoot, candidate),
-					diagnostic: makePiExtensionDiagnostic("ok", "resolved", `Pi extension ${listName} resolved to ${relativeToPack(absPackRoot, candidate)}.`),
-					cacheKey,
+					diagnostic: cache.diagnostic ?? makePiExtensionDiagnostic("ok", "resolved", `Pi extension ${listName} resolved to ${relativeToPack(absPackRoot, candidate)}.`),
+					...(cache.cacheKey ? { cacheKey: cache.cacheKey } : {}),
+					...(cache.diagnostic ? { cacheDiagnostic: cache.diagnostic } : {}),
 				};
 			}
 		}
@@ -251,12 +266,13 @@ export function resolvePiExtensionEntry(packRoot: string, listName: string, mani
 		}
 		const st = statIfExists(file);
 		if (st?.isFile()) {
-			const cacheKey = computePiExtensionDiscoveryCacheKey(file, { packRoot: absPackRoot, manifest, cacheSalt: opts?.cacheSalt });
+			const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(file, { packRoot: absPackRoot, manifest, cacheSalt: opts?.cacheSalt });
 			return {
 				entryPath: file,
 				entryRelativePath: relativeToPack(absPackRoot, file),
-				diagnostic: makePiExtensionDiagnostic("ok", "resolved", `Pi extension ${listName} resolved to ${relativeToPack(absPackRoot, file)}.`),
-				cacheKey,
+				diagnostic: cache.diagnostic ?? makePiExtensionDiagnostic("ok", "resolved", `Pi extension ${listName} resolved to ${relativeToPack(absPackRoot, file)}.`),
+				...(cache.cacheKey ? { cacheKey: cache.cacheKey } : {}),
+				...(cache.diagnostic ? { cacheDiagnostic: cache.diagnostic } : {}),
 			};
 		}
 	}
@@ -284,6 +300,9 @@ export function loadPiExtensionContributions(
 		const diagnostic = isDisabled
 			? makePiExtensionDiagnostic("disabled", "activation_disabled", `Pi extension ${listName} is disabled by marketplace activation.`)
 			: resolved.diagnostic;
+		const discovery = resolved.cacheDiagnostic
+			? { status: "failed" as const, tools: [], diagnostic: resolved.cacheDiagnostic }
+			: skippedDiscovery(resolved.cacheKey);
 		out.push({
 			listName,
 			...(resolved.entryPath ? { entryPath: resolved.entryPath } : {}),
@@ -291,7 +310,7 @@ export function loadPiExtensionContributions(
 			packRoot: path.resolve(packRoot),
 			origin,
 			diagnostic,
-			discovery: skippedDiscovery(resolved.cacheKey),
+			discovery,
 		});
 	}
 	return out;
@@ -306,8 +325,29 @@ export async function loadPiExtensionContributionsWithDiscovery(
 	const rows = loadPiExtensionContributions(packRoot, manifest, opts);
 	const { discoverPiExtensionTools } = await import("./pi-extension-discovery.js");
 	for (const row of rows) {
-		if (!row.entryPath || row.diagnostic.status === "disabled") continue;
+		if (!row.entryPath || row.diagnostic.status === "disabled" || row.discovery.status === "failed") continue;
 		row.discovery = await discoverPiExtensionTools(row.entryPath, {
+			trustAccepted: opts.trustAccepted,
+			...(opts.discoveryTimeoutMs !== undefined ? { timeoutMs: opts.discoveryTimeoutMs } : {}),
+			...(opts.discoveryCwd ? { cwd: opts.discoveryCwd } : {}),
+		});
+		if (row.discovery.status === "failed" && row.discovery.diagnostic) {
+			row.diagnostic = row.discovery.diagnostic;
+		}
+	}
+	return rows;
+}
+
+/** Static loader plus bounded synchronous discovery for sync session-start paths. */
+export function loadPiExtensionContributionsWithDiscoverySync(
+	packRoot: string,
+	manifest: PackManifest,
+	opts: LoadPiExtensionContributionsWithDiscoveryOptions,
+): ResolvedPiExtensionContribution[] {
+	const rows = loadPiExtensionContributions(packRoot, manifest, opts);
+	for (const row of rows) {
+		if (!row.entryPath || row.diagnostic.status === "disabled" || row.discovery.status === "failed") continue;
+		row.discovery = discoverPiExtensionToolsSync(row.entryPath, {
 			trustAccepted: opts.trustAccepted,
 			...(opts.discoveryTimeoutMs !== undefined ? { timeoutMs: opts.discoveryTimeoutMs } : {}),
 			...(opts.discoveryCwd ? { cwd: opts.discoveryCwd } : {}),
@@ -323,9 +363,21 @@ function shouldHashFile(name: string): boolean {
 	return HASHED_SOURCE_EXTS.has(path.extname(name)) || HASHED_LOCKFILES.has(path.basename(name));
 }
 
-function collectHashFiles(root: string): string[] {
+function hashLimitDiagnostic(code: string, message: string): PiExtensionDiagnostic {
+	return makePiExtensionDiagnostic("discovery-failed", code, message);
+}
+
+function collectHashFiles(root: string): { files: string[]; diagnostic?: PiExtensionDiagnostic } {
 	const out: string[] = [];
-	const walk = (dir: string): void => {
+	let visitedEntries = 0;
+	let diagnostic: PiExtensionDiagnostic | undefined;
+	const limits = PI_EXTENSION_DISCOVERY_HASH_LIMITS;
+	const walk = (dir: string, depth: number): void => {
+		if (diagnostic) return;
+		if (depth > limits.maxDepth) {
+			diagnostic = hashLimitDiagnostic("hash_depth_limit", `Pi extension discovery cache key exceeded maximum directory depth of ${limits.maxDepth}.`);
+			return;
+		}
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -333,26 +385,34 @@ function collectHashFiles(root: string): string[] {
 			return;
 		}
 		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (diagnostic) return;
 			if (entry.name === "node_modules" || entry.name === ".git") continue;
+			visitedEntries++;
+			if (visitedEntries > limits.maxFiles) {
+				diagnostic = hashLimitDiagnostic("hash_file_count_limit", `Pi extension discovery cache key exceeded maximum visited entry count of ${limits.maxFiles}.`);
+				return;
+			}
 			const full = path.join(dir, entry.name);
 			if (!isPackPathWithinRoot(root, full)) continue;
-			if (entry.isDirectory()) walk(full);
-			else if (entry.isFile() && shouldHashFile(entry.name)) out.push(full);
+			if (entry.isDirectory()) walk(full, depth + 1);
+			else if (entry.isFile() && shouldHashFile(entry.name)) {
+				out.push(full);
+			}
 		}
 	};
-	walk(root);
-	return out;
+	walk(root, 0);
+	return diagnostic ? { files: out, diagnostic } : { files: out };
 }
 
-export function computePiExtensionDiscoveryCacheKey(
+export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 	entryPath: string,
 	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string } = {},
-): string | undefined {
+): PiExtensionDiscoveryCacheKeyResult {
 	let st: fs.Stats;
 	try {
 		st = fs.statSync(entryPath);
 	} catch {
-		return undefined;
+		return {};
 	}
 	const hash = createHash("sha256");
 	const packRoot = opts.packRoot ? path.resolve(opts.packRoot) : undefined;
@@ -366,10 +426,19 @@ export function computePiExtensionDiscoveryCacheKey(
 	if (packRoot) {
 		try {
 			const metaPath = path.join(packRoot, ".pack-meta.yaml");
-			if (fs.existsSync(metaPath)) hash.update(fs.readFileSync(metaPath));
+			if (fs.existsSync(metaPath)) {
+				const metaStat = fs.statSync(metaPath);
+				if (metaStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes) {
+					return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `.pack-meta.yaml exceeds maximum hashed file size of ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes} bytes.`) };
+				}
+				hash.update(fs.readFileSync(metaPath));
+			}
 		} catch { /* best-effort metadata salt */ }
 	}
-	for (const file of collectHashFiles(root)) {
+	const collected = collectHashFiles(root);
+	if (collected.diagnostic) return { diagnostic: collected.diagnostic };
+	let totalBytes = 0;
+	for (const file of collected.files) {
 		let fileStat: fs.Stats;
 		try {
 			fileStat = fs.statSync(file);
@@ -378,9 +447,23 @@ export function computePiExtensionDiscoveryCacheKey(
 		}
 		const rel = path.relative(root, file).split(path.sep).join("/");
 		hash.update(JSON.stringify({ rel, size: fileStat.size, mtimeMs: Math.trunc(fileStat.mtimeMs) }));
+		if (fileStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes) {
+			return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `Pi extension discovery cache key refused to hash ${rel}: file size ${fileStat.size} exceeds ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes} bytes.`) };
+		}
+		if (totalBytes + fileStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxTotalBytes) {
+			return { diagnostic: hashLimitDiagnostic("hash_total_size_limit", `Pi extension discovery cache key exceeded maximum total hashed bytes of ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxTotalBytes}.`) };
+		}
+		totalBytes += fileStat.size;
 		try {
 			hash.update(createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
 		} catch { /* ignore unreadable files; stat data remains */ }
 	}
-	return hash.digest("hex");
+	return { cacheKey: hash.digest("hex") };
+}
+
+export function computePiExtensionDiscoveryCacheKey(
+	entryPath: string,
+	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string } = {},
+): string | undefined {
+	return computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath, opts).cacheKey;
 }

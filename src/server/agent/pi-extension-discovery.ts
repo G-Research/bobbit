@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
-	computePiExtensionDiscoveryCacheKey,
+	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
 	makePiExtensionDiagnostic,
 	type PiExtensionDiagnostic,
 	type PiExtensionDiscoveryResult,
@@ -227,7 +227,9 @@ try {
 }
 
 export async function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions): Promise<PiExtensionDiscoveryResult> {
-	const cacheKey = computePiExtensionDiscoveryCacheKey(entryPath);
+	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
+	const cacheKey = cache.cacheKey;
 	if (!opts.trustAccepted) return skipped(cacheKey);
 	const st = (() => {
 		try { return fs.statSync(entryPath); } catch { return null; }
@@ -254,6 +256,54 @@ export async function discoverPiExtensionTools(entryPath: string, opts: Discover
 			try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	}
+}
+
+export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryResult {
+	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
+	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
+	const cacheKey = cache.cacheKey;
+	if (!opts.trustAccepted) return skipped(cacheKey);
+	const st = (() => {
+		try { return fs.statSync(entryPath); } catch { return null; }
+	})();
+	if (!st?.isFile()) return failed("entry_not_found", `Pi extension entry does not exist or is not a file: ${entryPath}`, cacheKey);
+
+	const tempRoot = opts.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-probe-"));
+	let createdTemp = !opts.cwd;
+	try {
+		fs.mkdirSync(tempRoot, { recursive: true });
+		const probePath = path.join(tempRoot, "probe.mjs");
+		fs.writeFileSync(probePath, probeScript(), "utf-8");
+		const result = runProbeSync(probePath, entryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
+		const parsed = parseProbeResult(result.stdout);
+		if (!parsed) {
+			const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
+			return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
+		}
+		if (parsed.status === "failed") return failed(parsed.code || "probe_failed", parsed.message, cacheKey);
+		return ok(parsed.tools, cacheKey);
+	} finally {
+		if (createdTemp) {
+			try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	}
+}
+
+function runProbeSync(probePath: string, entryPath: string, cwd: string, timeoutMs: number): { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean } {
+	const result = spawnSync(process.execPath, [...safeExecArgv(process.execArgv), probePath, entryPath], {
+		cwd,
+		env: minimalEnv(),
+		encoding: "utf-8",
+		windowsHide: true,
+		timeout: timeoutMs,
+		maxBuffer: MAX_OUTPUT_BYTES,
+	});
+	const stdout = String(result.stdout ?? "").slice(-MAX_OUTPUT_BYTES);
+	let stderr = String(result.stderr ?? "").slice(-MAX_OUTPUT_BYTES);
+	if (result.error) stderr = boundedAppend(stderr, Buffer.from(sanitizeMessage(result.error)));
+	const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal === "SIGTERM";
+	return { stdout, stderr, exitCode: result.status, timedOut };
 }
 
 function runProbe(probePath: string, entryPath: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
