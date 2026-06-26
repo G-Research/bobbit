@@ -789,6 +789,55 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 
 Model-related preference keys include `default.sessionModel`, `default.reviewModel`, `default.imageModel`, and `allowSessionModelFallback`. The fallback setting defaults to off when absent; see [Controlled session model fallback](session-model-fallback.md).
 
+`agentDir` and `agentDirHistory` are managed by the dedicated agent-directory workflow, not generic preferences. `PUT /api/preferences` rejects those keys with `400 { code: "AGENT_DIR_PREFERENCE_FORBIDDEN", use: "/api/agent-dir/pending" }` so callers cannot bypass validation, migration guidance, or restart-gated semantics.
+
+### Agent directory
+
+These endpoints back Settings → Maintenance → Agent Directory. They are restart-gated: they expose the active startup directory and save only the next-start preference. See [Configurable agent directory](configurable-agent-directory.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/agent-dir` | Return active, default, persisted/pending, next-start, restart, env override, and history state. |
+| `POST` | `/api/agent-dir/validate` | Validate/probe a candidate target path. Body `{ path }`. May create the directory to prove access. |
+| `PUT` | `/api/agent-dir/pending` | Save or clear the persisted next-start agent dir. Body `{ path }`, where `null` or empty clears. |
+| `POST` | `/api/agent-dir/migrate` | Copy allowlisted data from active/historical source to pending destination. Body `{ sourcePath, destinationPath, overwrite? }`. |
+
+`GET /api/agent-dir` returns:
+
+```ts
+type AgentDirSource = "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR" | "persisted" | "default";
+
+interface AgentDirResolution {
+  dir: string;
+  source: AgentDirSource;
+  raw?: string;
+  projectRoot: string;
+  defaultDir: string;
+}
+
+interface AgentDirApiState {
+  activePath: string;
+  activeSource: AgentDirSource;
+  startup: AgentDirResolution;
+  defaultPath: string;
+  persistedPath?: string;
+  pendingPath?: string;
+  nextStart: AgentDirResolution;
+  restartRequired: boolean;
+  envOverride?: {
+    active: true;
+    source: "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR";
+    value: string;
+    savedPathIgnored: boolean;
+  };
+  history: string[];
+}
+```
+
+`PUT /api/agent-dir/pending` returns the same state plus `guidance`. Non-empty paths are validated with the same rules as `POST /api/agent-dir/validate`: `~` expansion, relative-to-project resolution, git-worktree exclusion except `<projectRoot>/.bobbit/agent/`, symlink/realpath checks, `mkdir`, and read/write probe. Validation failures return `{ ok:false, error:{ code, message, rawInput, resolvedPath? } }` with HTTP 400 on save.
+
+`POST /api/agent-dir/migrate` accepts only sources known from the active or historical agent-directory set and destinations equal to the pending next-start directory. It copies only `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`; existing files are skipped unless `overwrite:true`. The response is an `AgentDirMigrationReport` with `copied`, `skipped`, `overwritten`, `missing`, `warnings`, `errors`, and `guidance`. Relationship/symlink violations return HTTP 400 with a report-level `error.code`.
+
 ### Models
 
 | Method | Path | Description |

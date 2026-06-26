@@ -19,3 +19,13 @@ The `GET/POST /api/preview` endpoints accept an optional `sessionId` query param
 - **UUID validation**: `sessionId` is validated against a strict regex (`/^[a-f0-9-]{36}$/i`). Non-UUID values (including path traversal sequences like `../`, backslashes, or colons) return 400. This prevents sandbox agents from writing `.html` files outside the state directory.
 - **Vite filesystem deny**: `server.fs.deny` rules block the `.bobbit` directory and `node_modules/.vite`, preventing Vite's `/@fs/` route from serving sensitive files.
 - **Vite plugin hardening**: `blockDangerousGlobs` rejects `import.meta.glob` calls targeting `.bobbit` paths. `localhostGuard` rejects non-localhost requests to the Vite dev server, preventing sandbox containers from reaching it over the Docker bridge network.
+
+## Sandbox agent-directory boundaries
+
+The configurable agent directory can contain provider credentials, so sandbox containers receive only narrow mounts:
+
+- active `<agentDir>/sessions/` for transcript continuity;
+- active `<agentDir>/models.json` read-only when present;
+- a generated, project-scoped auth file mounted as `/home/node/.bobbit/agent/auth.json`.
+
+Bobbit never mounts the full host agent directory or host `<agentDir>/auth.json` into Docker. Remote-less sandbox clone sources are generated from sanitized tracked content that excludes `.bobbit/` and `auth.json`, then mounted read-only. See [Configurable agent directory](configurable-agent-directory.md#sandbox-safeguards).
