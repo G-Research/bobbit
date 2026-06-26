@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "../src/server/agent/docker-args.js";
+import { toDockerPath } from "../src/server/agent/rpc-bridge.js";
 
 describe("buildDockerRunArgs", () => {
 	it("includes resource limits", () => {
@@ -139,4 +140,73 @@ describe("buildDockerRunArgs", () => {
 			else process.env.BOBBIT_BUILTIN_PACKS_DIR = previousBuiltinPacksDir;
 		}
 	});
+
+	it("mounts the configured active agent sessions and models but never host auth.json", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-agent-dir-"));
+		const agentDir = path.join(root, "active-agent");
+		const stateDir = path.join(root, "state");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "models.json"), "{}");
+		fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({ secret: "host-auth-must-not-mount" }));
+
+		const oldBobbitDir = process.env.BOBBIT_DIR;
+		const oldBobbitAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const oldPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+		try {
+			process.env.BOBBIT_DIR = root;
+			process.env.BOBBIT_AGENT_DIR = agentDir;
+			delete process.env.PI_CODING_AGENT_DIR;
+			await configureAgentDirForDockerTest(agentDir, root);
+
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test",
+				stateDir,
+			});
+			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const hostSessionsDir = path.join(agentDir, "sessions");
+			const hostModelsJson = path.join(agentDir, "models.json");
+			const hostAuthJson = path.join(agentDir, "auth.json");
+
+			assert.ok(
+				mounts.includes(`${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`),
+				`expected configured sessions mount, got: ${JSON.stringify(mounts)}`,
+			);
+			assert.ok(
+				mounts.includes(`${toDockerPath(hostModelsJson)}:/home/node/.bobbit/agent/models.json:ro`),
+				`expected configured models.json read-only mount, got: ${JSON.stringify(mounts)}`,
+			);
+			assert.ok(
+				!mounts.some((m) => m.startsWith(`${toDockerPath(agentDir)}:`) && !m.includes("/sessions")),
+				"must not mount the whole active agent directory",
+			);
+			assert.ok(
+				!mounts.some((m) => m.startsWith(`${toDockerPath(hostAuthJson)}:`)),
+				"must not mount host agent auth.json into the sandbox",
+			);
+			const sandboxAuthMount = mounts.find((m) => m.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
+			assert.ok(sandboxAuthMount, `expected scoped sandbox auth mount, got: ${JSON.stringify(mounts)}`);
+			assert.ok(
+				!sandboxAuthMount!.startsWith(`${toDockerPath(hostAuthJson)}:`),
+				"sandbox auth mount must use the scoped generated auth file, not host auth.json",
+			);
+		} finally {
+			if (oldBobbitDir === undefined) delete process.env.BOBBIT_DIR; else process.env.BOBBIT_DIR = oldBobbitDir;
+			if (oldBobbitAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR; else process.env.BOBBIT_AGENT_DIR = oldBobbitAgentDir;
+			if (oldPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldPiAgentDir;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
+
+async function configureAgentDirForDockerTest(agentDir: string, projectRoot: string): Promise<void> {
+	const mod = await import("../src/server/bobbit-dir.ts") as Record<string, any>;
+	const reset = mod.resetAgentDirStateForTests || mod.resetAgentDirRuntimeForTests;
+	if (typeof reset === "function") reset();
+	if (typeof mod.setProjectRoot === "function") mod.setProjectRoot(projectRoot);
+	if (typeof mod.initializeAgentDirState === "function") {
+		mod.initializeAgentDirState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
+	} else if (typeof mod.initializeAgentDirRuntimeState === "function") {
+		mod.initializeAgentDirRuntimeState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
+	}
+}
