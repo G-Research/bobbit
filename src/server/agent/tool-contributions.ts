@@ -59,7 +59,7 @@ export interface EntrypointContribution {
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
 	routeId?: string;
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 }
 
@@ -223,6 +223,8 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 		const panelId = rawTarget && typeof rawTarget.panelId === "string" ? rawTarget.panelId : undefined;
 		const route = rawTarget && typeof rawTarget.route === "string" ? rawTarget.route : undefined;
 		const action = rawTarget && typeof rawTarget.action === "string" ? rawTarget.action : undefined;
+		const channel = rawTarget && typeof rawTarget.channel === "string" ? rawTarget.channel : undefined;
+		const singletonKey = rawTarget && typeof rawTarget.singletonKey === "string" ? rawTarget.singletonKey : undefined;
 		const params = rawTarget && rawTarget.params && typeof rawTarget.params === "object"
 			? rawTarget.params as Record<string, unknown>
 			: undefined;
@@ -253,23 +255,31 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 				console.warn(`[tool-contributions] Dropping launcher entrypoint '${id}' with no structured target in ${filePath}`);
 				continue;
 			}
-			// A spawn launcher (`action:"spawn"`) carries ALL of { action, route, panelId }:
-			// the client calls `route` to spawn the child, then opens `panelId` in the
-			// returned child session. Both are required — drop with a warning if either
-			// is missing. Non-spawn launchers keep the legacy shape (panelId wins, else route).
+			// Action launchers carry a `panelId` like a plain panel target, but the
+			// client dispatches them through a trusted host-owned flow first.
 			if (action === "spawn") {
 				if (!route || !panelId) {
 					console.warn(`[tool-contributions] Dropping spawn launcher entrypoint '${id}' missing target.route or target.panelId in ${filePath}`);
 					continue;
 				}
+			} else if (action === "channel-panel") {
+				if (!channel || !panelId) {
+					console.warn(`[tool-contributions] Dropping channel-panel launcher entrypoint '${id}' missing target.channel or target.panelId in ${filePath}`);
+					continue;
+				}
 			}
 			if (seen.has(id)) continue;
 			seen.add(id);
-			const target: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> } = {};
+			const target: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> } = {};
 			if (action === "spawn") {
 				target.action = "spawn";
 				target.route = route;
 				target.panelId = panelId;
+			} else if (action === "channel-panel") {
+				target.action = "channel-panel";
+				target.channel = channel;
+				target.panelId = panelId;
+				if (singletonKey) target.singletonKey = singletonKey;
 			} else if (panelId) {
 				target.panelId = panelId;
 			} else if (route) {

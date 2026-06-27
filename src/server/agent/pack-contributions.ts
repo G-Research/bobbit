@@ -124,7 +124,7 @@ export interface EntrypointContribution {
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string; // required for launcher kinds
 	routeId?: string; // required for kind:"route"; host-global
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	/** The contents.entrypoints[] basename that lists this file — the SINGLE
 	 *  activation toggle key. Maps one toggle onto BOTH the launcher id AND the
