@@ -116,6 +116,9 @@ export interface ChannelRegistryOptions {
 	moduleHost?: ChannelModuleHost | unknown;
 	/** Defaults to a bounded production interval. Set false to disable in tests. */
 	idleSweepIntervalMs?: number | false;
+	/** Closed channel records are diagnostics only; keep them bounded in memory. */
+	tombstoneTtlMs?: number;
+	maxTombstones?: number;
 }
 
 interface ClientAttachment {
@@ -124,6 +127,9 @@ interface ClientAttachment {
 	autoDrain: boolean;
 	queuedFrames: HostChannelFrame[];
 	queuedBytes: number;
+	inFlightFrames: number;
+	inFlightBytes: number;
+	attaching: boolean;
 }
 
 interface ChannelRecord {
@@ -186,6 +192,8 @@ export class ChannelRegistry {
 	private readonly surfaceBindings?: SurfaceBindingResolver;
 	private readonly contributionRegistry?: ChannelContributionResolver;
 	private readonly idleSweepTimer?: TimerHandle;
+	private readonly tombstoneTtlMs: number;
+	private readonly maxTombstones: number;
 	private readonly channels = new Map<string, ChannelRecord>();
 	private readonly tupleIndex = new Map<string, string>();
 	private readonly singletonIndex = new Map<string, string>();
@@ -197,6 +205,8 @@ export class ChannelRegistry {
 		this.surfaceBindings = opts.surfaceBindings;
 		this.contributionRegistry = opts.contributionRegistry;
 		this.quotas = mergeChannelQuotas(opts.quotas);
+		this.tombstoneTtlMs = opts.tombstoneTtlMs ?? Math.max(this.quotas.idleTimeoutMs, 5 * 60_000);
+		this.maxTombstones = opts.maxTombstones ?? 512;
 		this.permits = opts.permits ?? opts.openPermits ?? new ChannelOpenPermitStore({ now: this.now, audit: this.audit });
 		const moduleHost = isChannelModuleHost(opts.moduleHost) ? opts.moduleHost : new LocalChannelModuleHost();
 		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher({ moduleHost });
@@ -229,7 +239,7 @@ export class ChannelRegistry {
 			return this.openResult(existing, clientId, true);
 		}
 
-		const quotas = mergeChannelQuotas(this.quotas, contribution.quotas);
+		const quotas = this.effectiveQuotas(contribution.quotas);
 		this.assertCanOpen(sessionId, packId, quotas);
 		const id = this.idGenerator();
 		const at = this.now();
@@ -257,7 +267,7 @@ export class ChannelRegistry {
 		if (clientId) await this.attachInternal(record, clientId, client);
 
 		try {
-			record.handler = await this.withTimeout(
+			const handler = await this.withTimeout(
 				this.dispatcher.open({
 					contribution,
 					ctx: {
@@ -276,7 +286,13 @@ export class ChannelRegistry {
 				}),
 				quotas.openTimeoutMs,
 				"channel handler open timed out",
+				(lateHandler) => this.closeLateHandler(record, lateHandler, "channel handler open timed out"),
 			);
+			if (record.state === "closed") {
+				await this.closeLateHandler(record, handler, record.closeReason ?? "channel closed during open");
+				throw new ChannelError(410, "channel_closed", "channel closed during open");
+			}
+			record.handler = handler;
 			record.state = "open";
 			record.lastActiveAt = this.now();
 			this.emit({ type: "channel.open", at: record.lastActiveAt, ...auditRecord(record) });
@@ -296,6 +312,7 @@ export class ChannelRegistry {
 	}
 
 	list(req: ChannelListRequest): ChannelInfo[] {
+		this.purgeTombstones();
 		const packId = this.resolvePackId(req);
 		const infos: ChannelInfo[] = [];
 		for (const record of this.channels.values()) {
@@ -370,27 +387,39 @@ export class ChannelRegistry {
 		if (!record || (record.state !== "open" && record.state !== "opening")) throw new ChannelError(404, "channel_not_found", "channel is not open");
 		const typed = this.validateFrameFor(record, frame);
 		const bytes = frameByteLength(typed);
-		this.assertOutboundCapacity(record, bytes);
-		const slowClients = Array.from(record.clients.values()).filter((client) => !client.autoDrain || !client.sink?.onFrame);
-		for (const client of slowClients) this.assertClientOutboundCapacity(record, client, bytes);
-		for (const client of slowClients) {
-			client.queuedFrames.push(typed);
-			client.queuedBytes += bytes;
+		const recipients = Array.from(record.clients.values());
+		this.assertOutboundCapacity(record, bytes * recipients.length, recipients.length);
+		for (const client of recipients) this.assertClientOutboundCapacity(record, client, bytes);
+		for (const client of recipients) {
+			if (!client.attaching && client.autoDrain && client.sink?.onFrame) {
+				client.inFlightFrames++;
+				client.inFlightBytes += bytes;
+			} else {
+				client.queuedFrames.push(typed);
+				client.queuedBytes += bytes;
+			}
 			record.outboundBytes += bytes;
 			record.outboundFrames++;
 		}
 		const at = this.now();
 		record.lastActiveAt = at;
 		this.emit({ type: "channel.frame.out", at, ...auditRecord(record), frameKind: typed.kind, frameBytes: bytes });
-		for (const client of record.clients.values()) {
-			if (!client.autoDrain || !client.sink?.onFrame) continue;
+		await Promise.all(recipients.map(async (client) => {
+			if (client.attaching || !client.autoDrain || !client.sink?.onFrame) return;
 			try {
 				await client.sink.onFrame(typed);
 			} catch (err) {
 				this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: err instanceof Error ? err.message : String(err) });
 				record.clients.delete(client.clientId);
+			} finally {
+				if (client.inFlightFrames > 0 && client.inFlightBytes >= bytes) {
+					client.inFlightFrames--;
+					client.inFlightBytes -= bytes;
+					record.outboundBytes -= bytes;
+					record.outboundFrames--;
+				}
 			}
-		}
+		}));
 	}
 
 	drainClient(sessionId: string, packId: string, channelId: string, clientId: string, maxFrames = Number.POSITIVE_INFINITY): HostChannelFrame[] {
@@ -425,6 +454,7 @@ export class ChannelRegistry {
 			await this.closeInternal(record, reason, "registry");
 			count++;
 		}
+		this.purgeTombstones();
 		return count;
 	}
 
@@ -472,6 +502,7 @@ export class ChannelRegistry {
 		for (const record of Array.from(this.channels.values())) {
 			await this.closeInternal(record, reason, "registry");
 		}
+		this.tombstones.clear();
 		this.dispatcher.invalidate();
 	}
 
@@ -547,8 +578,18 @@ export class ChannelRegistry {
 			existing.sink = sink;
 			existing.autoDrain = sink?.autoDrain !== false;
 		} else {
-			record.clients.set(clientId, { clientId, sink, autoDrain: sink?.autoDrain !== false, queuedFrames: [], queuedBytes: 0 });
-			await record.handler?.onAttach?.(clientId);
+			const attachment: ClientAttachment = { clientId, sink, autoDrain: sink?.autoDrain !== false, queuedFrames: [], queuedBytes: 0, inFlightFrames: 0, inFlightBytes: 0, attaching: true };
+			record.clients.set(clientId, attachment);
+			try {
+				await record.handler?.onAttach?.(clientId);
+				attachment.attaching = false;
+				await this.flushAutoDrainQueue(record, attachment);
+			} catch (err) {
+				this.removeClientAccounting(record, attachment);
+				record.clients.delete(clientId);
+				this.emit({ type: "channel.attach.reject", at: this.now(), ...auditRecord(record), clientId, error: err instanceof Error ? err.message : String(err) });
+				throw err;
+			}
 		}
 		record.lastActiveAt = this.now();
 		this.emit({ type: "channel.attach", at: record.lastActiveAt, ...auditRecord(record), clientId });
@@ -557,8 +598,7 @@ export class ChannelRegistry {
 	private async detachInternal(record: ChannelRecord, clientId: string): Promise<boolean> {
 		const client = record.clients.get(clientId);
 		if (!client) return false;
-		record.outboundBytes -= client.queuedBytes;
-		record.outboundFrames -= client.queuedFrames.length;
+		this.removeClientAccounting(record, client);
 		record.clients.delete(clientId);
 		await record.handler?.onDetach?.(clientId);
 		record.lastActiveAt = this.now();
@@ -582,12 +622,27 @@ export class ChannelRegistry {
 			await Promise.resolve(client.sink?.onClose?.({ reason })).catch((err: unknown) => {
 				this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: err instanceof Error ? err.message : String(err) });
 			});
+			this.removeClientAccounting(record, client);
 		}
 		record.clients.clear();
 		record.outboundBytes = 0;
 		record.outboundFrames = 0;
 		this.tombstones.set(record.id, this.info(record));
+		this.purgeTombstones(record.lastActiveAt);
 		this.emit({ type: "channel.close", at: record.lastActiveAt, ...auditRecord(record), reason });
+	}
+
+	private effectiveQuotas(contributionQuotas: Partial<ChannelQuotaConfig> | undefined): ChannelQuotaConfig {
+		const narrowed: Partial<ChannelQuotaConfig> = {};
+		if (contributionQuotas) {
+			for (const key of Object.keys(this.quotas) as Array<keyof ChannelQuotaConfig>) {
+				const declared = contributionQuotas[key];
+				if (typeof declared === "number" && Number.isSafeInteger(declared) && declared >= 0) {
+					narrowed[key] = Math.min(this.quotas[key], declared);
+				}
+			}
+		}
+		return mergeChannelQuotas(this.quotas, narrowed);
 	}
 
 	private assertCanOpen(sessionId: string, packId: string, quotas: ChannelQuotaConfig): void {
@@ -619,14 +674,14 @@ export class ChannelRegistry {
 		if (record.inboundFrames + 1 > record.quotas.maxInboundFrames) this.rejectFrame(record, "maxInboundFrames", "inbound frame quota exceeded");
 	}
 
-	private assertOutboundCapacity(record: ChannelRecord, bytes: number): void {
+	private assertOutboundCapacity(record: ChannelRecord, bytes: number, frames = 1): void {
 		if (record.outboundBytes + bytes > record.quotas.maxOutboundBytes) this.rejectFrame(record, "maxOutboundBytes", "outbound byte quota exceeded");
-		if (record.outboundFrames + 1 > record.quotas.maxOutboundFrames) this.rejectFrame(record, "maxOutboundFrames", "outbound frame quota exceeded");
+		if (record.outboundFrames + frames > record.quotas.maxOutboundFrames) this.rejectFrame(record, "maxOutboundFrames", "outbound frame quota exceeded");
 	}
 
 	private assertClientOutboundCapacity(record: ChannelRecord, client: ClientAttachment, bytes: number): void {
-		if (client.queuedBytes + bytes > record.quotas.maxClientOutboundBytes) this.rejectFrame(record, "maxClientOutboundBytes", "client outbound byte quota exceeded");
-		if (client.queuedFrames.length + 1 > record.quotas.maxClientOutboundFrames) this.rejectFrame(record, "maxClientOutboundFrames", "client outbound frame quota exceeded");
+		if (client.queuedBytes + client.inFlightBytes + bytes > record.quotas.maxClientOutboundBytes) this.rejectFrame(record, "maxClientOutboundBytes", "client outbound byte quota exceeded");
+		if (client.queuedFrames.length + client.inFlightFrames + 1 > record.quotas.maxClientOutboundFrames) this.rejectFrame(record, "maxClientOutboundFrames", "client outbound frame quota exceeded");
 	}
 
 	private rejectFrame(record: ChannelRecord, quota: string, message: string): never {
@@ -667,6 +722,56 @@ export class ChannelRegistry {
 		if (record.singletonKey) this.singletonIndex.delete(singletonIndexKey(record.sessionId, record.packId, record.name, record.singletonKey));
 	}
 
+	private async flushAutoDrainQueue(record: ChannelRecord, client: ClientAttachment): Promise<void> {
+		if (!client.autoDrain || !client.sink?.onFrame) return;
+		while (client.queuedFrames.length > 0) {
+			const frame = client.queuedFrames.shift()!;
+			const bytes = frameByteLength(frame);
+			client.queuedBytes -= bytes;
+			client.inFlightFrames++;
+			client.inFlightBytes += bytes;
+			try {
+				await client.sink.onFrame(frame);
+			} finally {
+				if (client.inFlightFrames > 0 && client.inFlightBytes >= bytes) {
+					client.inFlightFrames--;
+					client.inFlightBytes -= bytes;
+					record.outboundBytes -= bytes;
+					record.outboundFrames--;
+				}
+			}
+		}
+	}
+
+	private removeClientAccounting(record: ChannelRecord, client: ClientAttachment): void {
+		record.outboundBytes -= client.queuedBytes + client.inFlightBytes;
+		record.outboundFrames -= client.queuedFrames.length + client.inFlightFrames;
+		client.queuedFrames.length = 0;
+		client.queuedBytes = 0;
+		client.inFlightFrames = 0;
+		client.inFlightBytes = 0;
+		client.attaching = false;
+	}
+
+	private async closeLateHandler(record: ChannelRecord, handler: ChannelHandlerSession | undefined, reason: string): Promise<void> {
+		if (!handler?.close) return;
+		await Promise.resolve(handler.close(reason)).catch((err: unknown) => {
+			this.emit({ type: "channel.close", at: this.now(), ...auditRecord(record), error: err instanceof Error ? err.message : String(err) });
+		});
+	}
+
+	private purgeTombstones(now = this.now()): void {
+		if (this.tombstoneTtlMs >= 0) {
+			for (const [id, info] of this.tombstones) {
+				if (info.lastActiveAt + this.tombstoneTtlMs < now) this.tombstones.delete(id);
+			}
+		}
+		if (this.maxTombstones >= 0 && this.tombstones.size > this.maxTombstones) {
+			const ordered = [...this.tombstones.entries()].sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt || a[0].localeCompare(b[0]));
+			for (const [id] of ordered.slice(0, this.tombstones.size - this.maxTombstones)) this.tombstones.delete(id);
+		}
+	}
+
 	private info(record: ChannelRecord, clientId?: string): ChannelInfo {
 		return {
 			id: record.id,
@@ -681,7 +786,7 @@ export class ChannelRegistry {
 		};
 	}
 
-	private withTimeout<T>(work: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	private withTimeout<T>(work: Promise<T>, timeoutMs: number, message: string, onLateResolve?: (value: T) => void | Promise<void>): Promise<T> {
 		return new Promise<T>((resolve, reject) => {
 			let settled = false;
 			const timer = setTimeout(() => {
@@ -691,7 +796,12 @@ export class ChannelRegistry {
 			}, timeoutMs);
 			work.then(
 				(value) => {
-					if (settled) return;
+					if (settled) {
+						void Promise.resolve(onLateResolve?.(value)).catch((err: unknown) => {
+							this.emit({ type: "channel.cleanup", at: this.now(), error: err instanceof Error ? err.message : String(err), reason: "late_open_cleanup_failed" });
+						});
+						return;
+					}
 					settled = true;
 					clearTimeout(timer);
 					resolve(value);

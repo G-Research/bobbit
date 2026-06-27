@@ -198,6 +198,16 @@ function send(ws: WebSocket, msg: ServerMessage): void {
 	}
 }
 
+function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
+	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	return new Promise((resolve, reject) => {
+		ws.send(JSON.stringify(msg), (err) => {
+			if (err) reject(err);
+			else resolve();
+		});
+	});
+}
+
 function getViewerGoalIds(ws: WebSocket): Set<string> {
 	const existing = (ws as any).viewerGoalIds;
 	if (existing instanceof Set) return existing;
@@ -245,7 +255,7 @@ type ChannelOpenPermitService = {
 };
 
 type ExtensionChannelClient = {
-	onFrame(frame: HostChannelFrame): void;
+	onFrame(frame: HostChannelFrame): void | Promise<void>;
 	onClose(ev: { reason?: string; error?: string }): void;
 };
 
@@ -290,7 +300,7 @@ export function handleWebSocketConnection(
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
 	const channelClientFor = (channelId: string): ExtensionChannelClient => ({
-		onFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId, frame }),
+		onFrame: (frame) => sendAsync(ws, { type: "ext_channel_frame", channelId, frame }),
 		onClose: (ev) => {
 			attachedExtChannels.delete(channelId);
 			send(ws, { type: "ext_channel_close", channelId, reason: ev.reason, error: ev.error });
@@ -1172,8 +1182,11 @@ export function handleWebSocketConnection(
 							clientId,
 							client: {
 								onFrame: (frame) => {
-									if (!openedChannelId) pendingChannelEvents.push({ type: "frame", frame });
-									else send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame });
+									if (!openedChannelId) {
+										pendingChannelEvents.push({ type: "frame", frame });
+										return;
+									}
+									return sendAsync(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame });
 								},
 								onClose: (ev) => {
 									if (!openedChannelId) pendingChannelEvents.push({ type: "close", ev });
