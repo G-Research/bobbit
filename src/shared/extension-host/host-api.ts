@@ -40,7 +40,8 @@ export const HOST_API_VERSION = 1 as const;
 // v3 (additive): added optional `PanelTarget.instanceKey` for durable, parameterized
 // side-panel tab identity. Packs feature-detect via `host.contractVersion >= 3` and
 // fall back to host-derived singleton/allowlisted param identity. See PanelTarget.
-export const HOST_CONTRACT_VERSION = 3 as const;
+// v4 (additive): added generic host.channels data contracts.
+export const HOST_CONTRACT_VERSION = 4 as const;
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
@@ -118,6 +119,9 @@ export interface HostApi {
 
 	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
 	readonly store: HostStoreApi;
+
+	/** Long-lived pack-scoped framed channels. Additive v1 capability; feature-detect with `capabilities.channels`. */
+	readonly channels?: HostChannelsApi;
 }
 
 /**
@@ -140,6 +144,8 @@ export interface HostCapabilities {
 	readonly ui: boolean;
 	/** Phase-2 — ownership-scoped persistence. False on a Phase-1 host. */
 	readonly store: boolean;
+	/** Long-lived pack-scoped framed channels. False/absent until the host wires the bridge. */
+	readonly channels?: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -212,6 +218,46 @@ export interface HostStoreApi {
 	delete(key: string): Promise<boolean>;
 	deletePrefix(prefix: string): Promise<number>;
 	stats(prefix?: string): Promise<StoreStats>;
+}
+
+// ── Generic Extension Host channels (contract v4) ──
+export type HostChannelFrame =
+	| { kind: "text"; data: string }
+	| { kind: "json"; data: unknown };
+
+export interface HostChannelOpenInit {
+	data?: unknown;
+	singletonKey?: string;
+}
+
+export type HostChannelState = "opening" | "open" | "closing" | "closed";
+
+export interface ChannelInfo {
+	id: string;
+	name: string;
+	packId: string;
+	sessionId: string;
+	state: HostChannelState;
+	createdAt: number;
+	lastActiveAt: number;
+	attached: boolean;
+	closeReason?: string;
+}
+
+export interface HostChannel {
+	readonly id: string;
+	readonly name: string;
+	readonly state: Exclude<HostChannelState, "opening">;
+	send(frame: HostChannelFrame): Promise<void>;
+	close(reason?: string): Promise<void>;
+	onFrame(cb: (frame: HostChannelFrame) => void): () => void;
+	onClose(cb: (ev: { reason?: string; error?: string }) => void): () => void;
+}
+
+export interface HostChannelsApi {
+	open(name: string, init?: HostChannelOpenInit): Promise<HostChannel>;
+	attach(id: string): Promise<HostChannel>;
+	list(opts?: { name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]>;
 }
 
 // ── Structured UI addressing (frozen; no hash strings) ──
