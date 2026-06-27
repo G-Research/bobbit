@@ -8,18 +8,16 @@
  * (not `Date.now()`) to <live-timer>.
  */
 import { test, expect, type Page } from "@playwright/test";
-import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = `file://${path.resolve("tests/fixtures/bg-wait-timer.html").replace(/\\/g, "/")}`;
 const ENTRY = path.resolve("tests/fixtures/bg-wait-timer-entry.ts");
-const BUNDLE = path.resolve("test-results/bg-wait-timer-bundle.js");
+const BUNDLE = path.resolve("tests/fixtures/bg-wait-timer-bundle.js");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/BgProcessRenderer.ts");
 const LIVE_TIMER_SRC = path.resolve("src/ui/components/LiveTimer.ts");
 
 test.beforeAll(() => {
-	fs.mkdirSync(path.dirname(BUNDLE), { recursive: true });
 	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, RENDERER_SRC, LIVE_TIMER_SRC] });
 });
 
