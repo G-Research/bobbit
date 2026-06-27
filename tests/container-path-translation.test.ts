@@ -13,17 +13,13 @@ import assert from "node:assert/strict";
 const TEST_AGENT_DIR = process.platform === "win32"
 	? "C:\\Users\\test\\project\\.bobbit\\agent"
 	: "/home/test/project/.bobbit/agent";
-const LEGACY_AGENT_DIR = process.platform === "win32"
-	? "C:\\Users\\test\\legacy-pi-agent"
-	: "/home/test/legacy-pi-agent";
 const TEST_BOBBIT_DIR = process.platform === "win32"
 	? "C:\\Users\\test\\project\\.bobbit"
 	: "/home/test/project/.bobbit";
 
 // Set env vars before importing the module so the startup-resolved active
-// agent dir is configurable. BOBBIT_AGENT_DIR must win over the legacy env var.
+// agent dir is configurable via BOBBIT_AGENT_DIR.
 process.env.BOBBIT_AGENT_DIR = TEST_AGENT_DIR;
-process.env.PI_CODING_AGENT_DIR = LEGACY_AGENT_DIR;
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
 const { containerPathToHost, hostPathToContainer } = await import("../src/server/agent/rpc-bridge.ts");
@@ -36,7 +32,7 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 			? "C:\\Users\\test\\project\\.bobbit\\agent\\sessions\\--workspace--\\2026-01-01.jsonl"
 			: "/home/test/project/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
 		assert.equal(hostPath, expected);
-		assert.ok(!hostPath.includes("legacy-pi-agent"), "must use the configured active agent dir, not the legacy env fallback");
+		assert.ok(hostPath.includes(".bobbit"), "must use the configured active Bobbit agent dir");
 	});
 
 	it("translates /bobbit-state subdirectory paths", () => {

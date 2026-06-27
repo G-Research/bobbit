@@ -47,7 +47,7 @@ const MOCK_MODELS = {
 };
 
 function getModelsJsonPath(): string {
-	const envDir = process.env.BOBBIT_AGENT_DIR || process.env.PI_CODING_AGENT_DIR;
+	const envDir = process.env.BOBBIT_AGENT_DIR;
 	let agentDir: string;
 	if (envDir) {
 		if (envDir === "~") agentDir = homedir();
