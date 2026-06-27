@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-export type AgentDirSource = "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR" | "persisted" | "default";
+export type AgentDirSource = "BOBBIT_AGENT_DIR" | "persisted" | "default";
 
 export interface AgentDirResolution {
 	dir: string;
@@ -46,7 +46,7 @@ export interface AgentDirApiState {
 	restartRequired: boolean;
 	envOverride?: {
 		active: true;
-		source: "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR";
+		source: "BOBBIT_AGENT_DIR";
 		value: string;
 		savedPathIgnored: boolean;
 	};
@@ -109,10 +109,6 @@ export function resolveAgentDir(input: ResolveAgentDirInput): AgentDirResolution
 	const bobbitEnv = nonEmptyString(env.BOBBIT_AGENT_DIR);
 	if (bobbitEnv) {
 		return { dir: normalizeAgentDirInput(bobbitEnv, projectRoot), source: "BOBBIT_AGENT_DIR", raw: bobbitEnv, projectRoot, defaultDir };
-	}
-	const piEnv = nonEmptyString(env.PI_CODING_AGENT_DIR);
-	if (piEnv) {
-		return { dir: normalizeAgentDirInput(piEnv, projectRoot), source: "PI_CODING_AGENT_DIR", raw: piEnv, projectRoot, defaultDir };
 	}
 	const persisted = nonEmptyString(input.persisted);
 	if (persisted) {
@@ -177,7 +173,7 @@ export function getAgentDirState(): AgentDirRuntimeState {
 export function getAgentDirApiState(): AgentDirApiState {
 	const state = getAgentDirState();
 	const persistedPath = state.persisted;
-	const envSource = state.startup.source === "BOBBIT_AGENT_DIR" || state.startup.source === "PI_CODING_AGENT_DIR" ? state.startup.source : undefined;
+	const envSource = state.startup.source === "BOBBIT_AGENT_DIR" ? state.startup.source : undefined;
 	return {
 		activePath: state.startup.dir,
 		activeSource: state.startup.source,
@@ -418,7 +414,7 @@ export function isPendingAgentDir(dir: string, state = runtimeState): boolean {
 
 export function buildAgentDirRestartGuidance(): string {
 	const state = getAgentDirState();
-	if (state.startup.source === "BOBBIT_AGENT_DIR" || state.startup.source === "PI_CODING_AGENT_DIR") {
+	if (state.startup.source === "BOBBIT_AGENT_DIR") {
 		const pending = state.persisted ? ` Saved pending directory: ${state.persisted}.` : " No persisted pending directory is set.";
 		return `${state.startup.source} is active, so this process continues using ${state.startup.dir}.${pending} Remove the environment override and restart to use the persisted setting.`;
 	}
@@ -464,7 +460,6 @@ function writeAgentDirHistoryIfReady(stateDir: string, history: string[]): void 
 function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined, dirs: Array<string | undefined>): string[] {
 	const seeded = [
 		path.join(os.homedir(), ".bobbit", "agent"),
-		path.join(os.homedir(), ".pi", "agent"),
 		defaultAgentDir(projectRoot),
 		...inMemoryAgentDirHistory,
 		...(stateDir ? readPersistedAgentDirHistory(stateDir) : []),

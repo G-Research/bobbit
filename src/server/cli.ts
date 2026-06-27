@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir, globalAgentDir, initializeAgentDirRuntime } from "./bobbit-dir.js";
+import { setProjectRoot, bobbitStateDir, globalAgentDir, initializeAgentDirRuntime } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
 import { stageBundledBinaries } from "./binaries.js";
 import { resolveSystemPromptPath } from "./agent/system-prompt.js";
@@ -149,10 +149,6 @@ async function main() {
 
 	// Scaffold .bobbit/ on first run (creates config, extensions, state dirs)
 	scaffoldBobbitDir(args.cwd);
-
-	// Migrate legacy ~/.pi/agent/ to ~/.bobbit/agent/ if needed. This only preserves
-	// the historical Pi rename path; project-default migration is user-initiated.
-	migrateFromLegacyPiDir();
 
 	// Resolve the agent dir once for this process. Settings changes only affect the
 	// next start; runtime callers keep using this startup-resolved directory.
