@@ -36,6 +36,14 @@ import type { ToolManager } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
+export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
+	{ sub: "sessions" },
+	{ sub: "tool-guard" },
+	{ sub: "html-snapshots" },
+	{ sub: "google-code-assist", readOnly: true },
+	{ sub: "tool-result-error-bridge", readOnly: true },
+];
+
 export interface DockerRunConfig {
 	image: string;
 	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */
@@ -244,14 +252,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// defense-in-depth (see google-code-assist-provider-extension.ts and
 	// tool-result-error-bridge-extension.ts).
 	if (stateDir) {
-		const sandboxStateDirs: Array<{ sub: string; readOnly?: boolean }> = [
-			{ sub: "sessions" },
-			{ sub: "tool-guard" },
-			{ sub: "html-snapshots" },
-			{ sub: "google-code-assist", readOnly: true },
-			{ sub: "tool-result-error-bridge", readOnly: true },
-		];
-		for (const { sub, readOnly } of sandboxStateDirs) {
+		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 			const hostPath = path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";

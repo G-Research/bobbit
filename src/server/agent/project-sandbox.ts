@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs } from "./docker-args.js";
+import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -55,6 +55,10 @@ export interface AgentDirMountExpectation {
 export interface AgentDirMountStalenessResult {
 	stale: boolean;
 	reason?: string;
+}
+
+export interface StateDirMountExpectation {
+	stateDir: string;
 }
 
 function childErrorCode(err: unknown): string {
@@ -141,6 +145,28 @@ export function getAgentDirMountStaleness(
 	if (modelMounts.length === 0) return { stale: true, reason: "missing active agent models.json mount" };
 	if (modelMounts.some((mount) => !mountSourceMatches(mount.Source, expected.modelsJson) || !isMountReadOnly(mount))) {
 		return { stale: true, reason: "agent models.json mount source does not match the active agent directory" };
+	}
+	return { stale: false };
+}
+
+export function getStateDirMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: StateDirMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
+		const destination = `/bobbit-state/${sub}`;
+		const hostPath = path.join(expected.stateDir, sub);
+		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
+		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
+		const compatible = stateMounts.some((mount) => {
+			if (!mountSourceMatches(mount.Source, hostPath)) return false;
+			return readOnly ? isMountReadOnly(mount) : !isMountReadOnly(mount);
+		});
+		if (!compatible) {
+			const mode = readOnly ? "read-only" : "writable";
+			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
+		}
 	}
 	return { stale: false };
 }
@@ -750,6 +776,20 @@ export class ProjectSandbox {
 				return;
 			}
 
+			// Docker bind mounts are immutable. Containers created before new
+			// sandbox-visible state subdirs were added (for example the generated
+			// tool-result-error bridge extension mount) cannot load remapped
+			// /bobbit-state/... paths. Recreate stale containers before reuse so the
+			// current buildDockerRunArgs mount contract is applied.
+			const staleStateMounts = await this._hasStaleStateDirMounts(existingId);
+			if (staleStateMounts) {
+				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale state mounts; recreating`);
+				await this._removeContainer(existingId);
+				await this._createContainer();
+				await this._runInitSequence();
+				return;
+			}
+
 			// Stale-image check: if the container was created from an older image
 			// than the current tag (e.g. host upgraded pi-coding-agent and
 			// `ensureImageAgentVersion` rebuilt the image), the container still
@@ -1085,6 +1125,29 @@ export class ProjectSandbox {
 			return result.stale;
 		} catch (err: any) {
 			console.warn(`[project-sandbox] Could not inspect agent-dir mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
+			return false;
+		}
+	}
+
+	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
+		const expected = {
+			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
+		};
+		try {
+			const { stdout } = await execDocker([
+				"inspect", "--format", "{{json .Mounts}}", containerId,
+			], {
+				timeout: 5_000,
+				env: DOCKER_ENV,
+			});
+			const mounts = JSON.parse(stdout.trim() || "[]") as DockerMountInfo[];
+			const result = getStateDirMountStaleness(mounts, expected);
+			if (result.stale && result.reason) {
+				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
+			}
+			return result.stale;
+		} catch (err: any) {
+			console.warn(`[project-sandbox] Could not inspect state mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
 			return false;
 		}
 	}
