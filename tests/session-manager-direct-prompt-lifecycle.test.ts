@@ -396,4 +396,21 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(client.sent.some((msg) => msg.type === "queue_update"), false);
 	});
+
+	it("closes extension channels when process_exit terminates a session", () => {
+		const manager = makeManager();
+		const closeSession = mock.fn(() => {});
+		manager.setExtensionChannelServices({ registry: { closeSession } });
+		const { session, client } = putSession(manager, { status: "streaming" });
+
+		manager.handleAgentLifecycle(session, { type: "process_exit", code: 17, signal: null });
+
+		assert.equal(closeSession.mock.callCount(), 1);
+		assert.deepEqual(closeSession.mock.calls[0].arguments, [session.id, "session-process-exit"]);
+		assert.equal(session.status, "terminated");
+		assert.deepEqual(
+			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			["terminated"],
+		);
+	});
 });

@@ -3790,6 +3790,7 @@ export class SessionManager {
 			});
 			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
 			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
+			void this.closeExtensionChannelsForSession(session.id, "session-process-exit");
 			broadcastStatus(session, "terminated");
 		}
 
