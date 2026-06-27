@@ -113,12 +113,21 @@ export default function(pi) {
 }
 
 let cachedPath: string | undefined;
-let cachedCode: string | undefined;
 
 export function writeToolResultErrorBridgeExtension(): string | undefined {
-	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
-	const code = cachedCode ?? generateToolResultErrorBridgeExtension();
-	cachedCode = code;
+	const code = generateToolResultErrorBridgeExtension();
+
+	// Revalidate a cached path before reuse. The file lives under a shared,
+	// content-addressed dir that is bind-mounted into Docker sandboxes. Even
+	// with a read-only sandbox mount, repair-on-reuse prevents a tampered or
+	// truncated bridge.ts from being loaded into later sessions.
+	if (cachedPath) {
+		try {
+			if (fs.readFileSync(cachedPath, "utf-8") === code) return cachedPath;
+		} catch { /* missing/unreadable — fall through to rewrite below */ }
+		cachedPath = undefined;
+	}
+
 	try {
 		const baseDir = path.join(bobbitStateDir(), "tool-result-error-bridge");
 		const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
@@ -131,12 +140,19 @@ export function writeToolResultErrorBridgeExtension(): string | undefined {
 				return filePath;
 			}
 		} catch { /* file does not exist yet */ }
+		// File missing OR contents drifted from the freshly generated source
+		// (tampering / partial write) — repair by rewriting canonical bytes.
 		fs.writeFileSync(filePath, code, "utf-8");
 		cachedPath = filePath;
 		return filePath;
 	} catch {
 		return undefined;
 	}
+}
+
+/** Reset the in-memory codegen cache (test seam). */
+export function resetToolResultErrorBridgeExtensionCache(): void {
+	cachedPath = undefined;
 }
 
 export function prependToolResultErrorBridge(args: string[]): string[] {

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { generateToolResultErrorBridgeExtension } from "../src/server/agent/tool-result-error-bridge-extension.js";
+import {
+	generateToolResultErrorBridgeExtension,
+	resetToolResultErrorBridgeExtensionCache,
+	writeToolResultErrorBridgeExtension,
+} from "../src/server/agent/tool-result-error-bridge-extension.js";
 
 async function loadGeneratedExtension(): Promise<(pi: any) => void> {
 	const source = generateToolResultErrorBridgeExtension();
@@ -53,5 +60,27 @@ describe("tool result error bridge extension", () => {
 		pi.tool({ name: "x" }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 
 		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
+	});
+
+	it("repairs tampered cached bridge source before reuse", () => {
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tool-result-bridge-"));
+		try {
+			process.env.BOBBIT_DIR = root;
+			resetToolResultErrorBridgeExtensionCache();
+
+			const firstPath = writeToolResultErrorBridgeExtension();
+			assert.ok(firstPath, "expected bridge extension path");
+			fs.writeFileSync(firstPath!, "throw new Error('tampered');\n", "utf-8");
+
+			const secondPath = writeToolResultErrorBridgeExtension();
+			assert.equal(secondPath, firstPath);
+			assert.equal(fs.readFileSync(secondPath!, "utf-8"), generateToolResultErrorBridgeExtension());
+		} finally {
+			resetToolResultErrorBridgeExtensionCache();
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
