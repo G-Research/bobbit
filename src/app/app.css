@@ -154,6 +154,159 @@ details.wf-proposal-workflow .wf-proposal-gates {
 }
 
 /* ============================================================================
+ * SIDEBAR — scalable icon, chevron, and action affordances
+ * ============================================================================ */
+.sidebar-root {
+	--sidebar-icon-size: 1em;
+	--sidebar-compound-icon-size: 0.8571em;
+	--sidebar-compound-icon-size-lg: 1.1429em;
+	--sidebar-compound-plus-size: 0.5em;
+	--sidebar-compound-plus-size-lg: 0.6429em;
+	--sidebar-chevron-w: 1em;
+	--sidebar-header-chevron-w: 1.4286em;
+	--sidebar-project-chevron-w: 0.8571em;
+	--sidebar-action-gap: 0.1429em;
+	--sidebar-action-pad: 0.1429em;
+}
+
+.sidebar-root .flex-1,
+.sidebar-root .truncate,
+.sidebar-root .sidebar-action-cluster,
+.sidebar-root .sidebar-actions,
+.sidebar-root .sidebar-top-actions,
+.sidebar-root .sidebar-top-actions > div,
+.sidebar-root .sidebar-top-actions button {
+	max-width: 100%;
+	overflow: hidden;
+}
+
+.sidebar-root button,
+.sidebar-root .sidebar-top-actions button {
+	min-width: 0;
+}
+
+.sidebar-root button > span:not(.shrink-0):not(.sidebar-compound-icon):not(.sidebar-chevron):not(.project-reorder-slot) {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-top-actions button > span {
+	display: block;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-top-actions svg {
+	width: var(--sidebar-icon-size) !important;
+	height: var(--sidebar-icon-size) !important;
+	flex-shrink: 0;
+}
+
+.sidebar-root .sidebar-scale-icon,
+.sidebar-root .sidebar-scale-icon svg {
+	width: var(--sidebar-icon-size) !important;
+	height: var(--sidebar-icon-size) !important;
+}
+
+.sidebar-root .sidebar-compound-icon {
+	width: var(--sidebar-compound-icon-size);
+	height: var(--sidebar-compound-icon-size);
+}
+
+.sidebar-root .sidebar-compound-icon--lg {
+	width: var(--sidebar-compound-icon-size-lg);
+	height: var(--sidebar-compound-icon-size-lg);
+}
+
+.sidebar-root .sidebar-compound-icon > svg:not(.sidebar-compound-plus) {
+	width: 100% !important;
+	height: 100% !important;
+}
+
+.sidebar-root .sidebar-compound-plus {
+	position: absolute;
+	right: -0.0714em;
+	bottom: 0;
+	width: var(--sidebar-compound-plus-size);
+	height: var(--sidebar-compound-plus-size);
+	filter: drop-shadow(0 0 1.5px var(--background));
+}
+
+.sidebar-root .sidebar-compound-plus--lg {
+	width: var(--sidebar-compound-plus-size-lg);
+	height: var(--sidebar-compound-plus-size-lg);
+}
+
+.sidebar-root .sidebar-chevron {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 var(--sidebar-chevron-w);
+	width: var(--sidebar-chevron-w);
+	min-width: var(--sidebar-chevron-w);
+	line-height: 1;
+	text-align: center;
+}
+
+.sidebar-root .sidebar-chevron--header {
+	flex-basis: var(--sidebar-header-chevron-w);
+	width: var(--sidebar-header-chevron-w);
+	min-width: var(--sidebar-header-chevron-w);
+}
+
+.sidebar-root .sidebar-chevron--project {
+	flex-basis: var(--sidebar-project-chevron-w);
+	width: var(--sidebar-project-chevron-w);
+	min-width: var(--sidebar-project-chevron-w);
+}
+
+.sidebar-root .sidebar-chevron-glyph--lg {
+	font-size: 1.1667em;
+}
+
+.sidebar-root .sidebar-chevron-glyph--sm {
+	font-size: 0.9167em;
+}
+
+.sidebar-root[data-testid="sidebar-collapsed"] {
+	--sidebar-chevron-w: 0.75em;
+}
+
+.sidebar-root[data-testid="sidebar-collapsed"],
+.sidebar-root[data-testid="sidebar-collapsed"] .overflow-y-auto,
+.sidebar-root[data-testid="sidebar-collapsed"] button {
+	max-width: 100%;
+	overflow-x: hidden;
+}
+
+.sidebar-root[data-testid="sidebar-collapsed"] button {
+	min-width: 0;
+	overflow-y: hidden;
+}
+
+.sidebar-root[data-testid="sidebar-collapsed"] .font-extrabold {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: clip;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-action-cluster,
+.sidebar-root .sidebar-actions {
+	gap: var(--sidebar-action-gap);
+}
+
+.sidebar-root .sidebar-pr-badge {
+	padding: var(--sidebar-action-pad);
+	border-radius: 0.25rem;
+	line-height: 0;
+}
+
+/* ============================================================================
  * SIDEBAR — project drag reorder
  * ============================================================================ */
 .project-header {
