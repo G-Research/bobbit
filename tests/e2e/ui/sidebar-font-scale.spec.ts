@@ -112,7 +112,7 @@ type IconDimensionName =
 	| "collapsedDisclosureChevron";
 
 type IconDimensionSnapshot = Record<IconDimensionName, { width: number; height: number }> & { rootFontSize: number };
-type OverflowSnapshot = Array<{ label: string; scrollWidth: number; clientWidth: number; overflow: number }>;
+type OverflowSnapshot = Array<{ label: string; scrollWidth: number; clientWidth: number; overflow: number; overflowY: string }>;
 type ActionGapSnapshot = { prToFirstAction: number; firstToSecondAction: number; delta: number };
 
 async function applySidebarFontSizePx(page: Page, px: number): Promise<void> {
@@ -212,6 +212,81 @@ function assertDimensionScales(
 	}
 }
 
+type MobileIconDimensionName =
+	| "mobileNewGoalIcon"
+	| "mobileProjectChevron"
+	| "mobileProjectAddGoalBox"
+	| "mobileProjectAddGoalPlus"
+	| "mobileSessionsChevron"
+	| "mobileAddSessionBox"
+	| "mobileAddSessionPlus"
+	| "mobileRolePickerChevron";
+
+type MobileIconDimensionSnapshot = Record<MobileIconDimensionName, { width: number; height: number }> & { rootFontSize: number; overflow: number; overflowY: string };
+
+async function waitForMobileSidebarFixture(page: Page): Promise<void> {
+	await expect(page.locator(".sidebar-root").first()).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator("[data-testid='project-header']").first()).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator("[data-new-goal-trigger]").first()).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator("button[title^='New goal in']").first()).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator("button[title^='New session in']").first()).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator("button[title='New session with role']").first()).toBeVisible({ timeout: 5_000 });
+}
+
+async function measureMobileIconDimensions(page: Page): Promise<MobileIconDimensionSnapshot> {
+	return page.evaluate(() => {
+		const requireEl = <T extends Element>(selector: string, root: ParentNode = document): T => {
+			const el = root.querySelector<T>(selector);
+			if (!el) throw new Error(`missing mobile sidebar measurement target: ${selector}`);
+			return el;
+		};
+		const rectOf = (el: Element) => {
+			const r = el.getBoundingClientRect();
+			return { width: r.width, height: r.height };
+		};
+		const root = requireEl<HTMLElement>(".sidebar-root");
+		const newGoalButton = requireEl<HTMLElement>("[data-new-goal-trigger]", root);
+		const projectHeader = requireEl<HTMLElement>("[data-testid='project-header']", root);
+		const projectAddButton = requireEl<HTMLElement>("button[title^='New goal in']", root);
+		const addSessionButton = requireEl<HTMLElement>("button[title^='New session in']", root);
+		const sessionsHeader = addSessionButton.closest<HTMLElement>(".cursor-pointer");
+		if (!sessionsHeader) throw new Error("missing mobile sessions header");
+		const rolePickerButton = requireEl<HTMLElement>("button[title='New session with role']", root);
+		const style = getComputedStyle(root);
+		return {
+			rootFontSize: parseFloat(style.fontSize),
+			overflow: root.scrollWidth - root.clientWidth,
+			overflowY: style.overflowY,
+			mobileNewGoalIcon: rectOf(requireEl("svg", newGoalButton)),
+			mobileProjectChevron: rectOf(requireEl(".sidebar-chevron", projectHeader)),
+			mobileProjectAddGoalBox: rectOf(requireEl(".sidebar-compound-icon", projectAddButton)),
+			mobileProjectAddGoalPlus: rectOf(requireEl(".sidebar-compound-plus", projectAddButton)),
+			mobileSessionsChevron: rectOf(requireEl(".sidebar-chevron", sessionsHeader)),
+			mobileAddSessionBox: rectOf(requireEl(".sidebar-compound-icon", addSessionButton)),
+			mobileAddSessionPlus: rectOf(requireEl(".sidebar-compound-plus", addSessionButton)),
+			mobileRolePickerChevron: rectOf(requireEl("svg", rolePickerButton)),
+		};
+	});
+}
+
+function assertMobileDimensionScales(
+	failures: string[],
+	name: MobileIconDimensionName,
+	baseline: MobileIconDimensionSnapshot,
+	large: MobileIconDimensionSnapshot,
+	small: MobileIconDimensionSnapshot,
+): void {
+	const base = baseline[name].width;
+	const largeWidth = large[name].width;
+	const smallWidth = small[name].width;
+	if (!(largeWidth > base * 1.35)) {
+		failures.push(`${name}: large dimension should grow with sidebar font size (baseline=${base.toFixed(2)}px, large=${largeWidth.toFixed(2)}px)`);
+	}
+	if (!(smallWidth < base * 0.9)) {
+		failures.push(`${name}: small dimension should shrink with sidebar font size (baseline=${base.toFixed(2)}px, small=${smallWidth.toFixed(2)}px)`);
+	}
+}
+
 async function measureCollapsedChevronDimension(page: Page): Promise<{ width: number; height: number }> {
 	return page.evaluate(() => {
 		const collapsed = document.querySelector<HTMLElement>("[data-testid='sidebar-collapsed']");
@@ -226,12 +301,16 @@ async function measureCollapsedChevronDimension(page: Page): Promise<{ width: nu
 async function measureHorizontalOverflow(page: Page): Promise<OverflowSnapshot> {
 	return page.evaluate(() => {
 		const roots = Array.from(document.querySelectorAll<HTMLElement>("[data-testid='sidebar-expanded'], [data-testid='sidebar-collapsed']"));
-		const items: Array<{ label: string; scrollWidth: number; clientWidth: number; overflow: number }> = [];
+		const items: Array<{ label: string; scrollWidth: number; clientWidth: number; overflow: number; overflowY: string }> = [];
+		const snap = (label: string, el: HTMLElement) => {
+			const style = getComputedStyle(el);
+			items.push({ label, scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, overflow: el.scrollWidth - el.clientWidth, overflowY: style.overflowY });
+		};
 		for (const root of roots) {
 			const label = root.dataset.testid || "sidebar-root";
-			items.push({ label, scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, overflow: root.scrollWidth - root.clientWidth });
+			snap(label, root);
 			const scroller = root.querySelector<HTMLElement>(".overflow-y-auto");
-			if (scroller) items.push({ label: `${label} scroller`, scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth, overflow: scroller.scrollWidth - scroller.clientWidth });
+			if (scroller) snap(`${label} scroller`, scroller);
 		}
 		return items;
 	});
@@ -313,6 +392,9 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 					if (item.overflow > 2) {
 						failures.push(`${item.label}: horizontal overflow at ${px}px (scrollWidth=${item.scrollWidth}, clientWidth=${item.clientWidth})`);
 					}
+					if (item.label.endsWith("scroller") && item.overflowY === "hidden") {
+						failures.push(`${item.label}: vertical scrolling must remain enabled at ${px}px`);
+					}
 				}
 			}
 
@@ -332,6 +414,9 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 				for (const item of await measureHorizontalOverflow(page)) {
 					if (item.overflow > 2) {
 						failures.push(`${item.label}: horizontal overflow at ${px}px collapsed (scrollWidth=${item.scrollWidth}, clientWidth=${item.clientWidth})`);
+					}
+					if (item.label.endsWith("scroller") && item.overflowY === "hidden") {
+						failures.push(`${item.label}: vertical scrolling must remain enabled at ${px}px collapsed`);
 					}
 				}
 			}
@@ -362,6 +447,68 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 			).toEqual([]);
 		} finally {
 			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			if (goalId) await deleteGoal(goalId).catch(() => {});
+		}
+	});
+
+	test("mobile project sidebar affordances follow sidebar font size @repro", async ({ page }) => {
+		const project = await defaultProject();
+		const tag = Date.now();
+		let goalId: string | undefined;
+		let sessionId: string | undefined;
+
+		try {
+			const goal = await createGoal({ title: `MobileFontScaleGoal${tag}`, projectId: project.id, cwd: project.rootPath, worktree: false, team: false });
+			goalId = goal.id as string;
+			sessionId = await createSession({ projectId: project.id, cwd: project.rootPath });
+
+			await page.setViewportSize({ width: 375, height: 667 });
+			await openApp(page);
+			await resetSidebarVisualState(page, goalId);
+			await page.reload();
+			await waitForMobileSidebarFixture(page);
+
+			await applySidebarFontSizePx(page, 14);
+			const baseline = await measureMobileIconDimensions(page);
+			expect(baseline.rootFontSize).toBeCloseTo(14, 1);
+
+			await applySidebarFontSizePx(page, 24);
+			const large = await measureMobileIconDimensions(page);
+			expect(large.rootFontSize).toBeCloseTo(24, 1);
+
+			await applySidebarFontSizePx(page, MIN_PX);
+			const small = await measureMobileIconDimensions(page);
+			expect(small.rootFontSize).toBeCloseTo(MIN_PX, 1);
+
+			const failures: string[] = [];
+			for (const name of [
+				"mobileNewGoalIcon",
+				"mobileProjectChevron",
+				"mobileProjectAddGoalBox",
+				"mobileProjectAddGoalPlus",
+				"mobileSessionsChevron",
+				"mobileAddSessionBox",
+				"mobileAddSessionPlus",
+				"mobileRolePickerChevron",
+			] satisfies MobileIconDimensionName[]) {
+				assertMobileDimensionScales(failures, name, baseline, large, small);
+			}
+
+			await applySidebarFontSizePx(page, MAX_PX);
+			const max = await measureMobileIconDimensions(page);
+			if (max.overflow > 2) {
+				failures.push(`mobile sidebar: horizontal overflow at ${MAX_PX}px (overflow=${max.overflow})`);
+			}
+			if (max.overflowY === "hidden") {
+				failures.push("mobile sidebar: vertical scrolling must remain enabled");
+			}
+
+			expect(
+				failures,
+				"SIDEBAR_MOBILE_ICON_SCALE_REGRESSION: mobile sidebar project affordances must follow sidebar font size",
+			).toEqual([]);
+		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			if (goalId) await deleteGoal(goalId).catch(() => {});
 		}
