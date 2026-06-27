@@ -173,10 +173,11 @@ async function instantiateExtensionChannelServices(deps: {
 	toolManager: ToolManager;
 }): Promise<ExtensionChannelServices | undefined> {
 	try {
-		const [registryModule, grantsModule, channelModuleHostModule] = await Promise.all([
+		const [registryModule, grantsModule, channelModuleHostModule, channelPtyModule] = await Promise.all([
 			import("./extension-host/" + "channel-registry.js"),
 			import("./extension-host/" + "channel-open-permits.js"),
 			import("./extension-host/" + "channel-module-host.js"),
+			import("./extension-host/" + "channel-pty-helper.js"),
 		]);
 		const OpenPermitsCtor = (grantsModule as any).ChannelOpenPermitService
 			?? (grantsModule as any).ChannelOpenPermits
@@ -189,7 +190,15 @@ async function instantiateExtensionChannelServices(deps: {
 		const ChannelModuleHostCtor = (channelModuleHostModule as any).LocalChannelModuleHost
 			?? (channelModuleHostModule as any).ChannelModuleHost;
 		const openPermits = new OpenPermitsCtor();
-		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor() : undefined;
+		const ChannelPtyServiceCtor = (channelPtyModule as any).ChannelPtyService;
+		const channelPtyService = typeof ChannelPtyServiceCtor === "function"
+			? new ChannelPtyServiceCtor({ sessionManager: deps.sessionManager })
+			: undefined;
+		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor({
+			buildHost: channelPtyService
+				? (contribution: any, ctx: any) => channelPtyService.buildHost(contribution, ctx.sessionId)
+				: undefined,
+		}) : undefined;
 		const registry = new RegistryCtor({
 			openPermits,
 			openPermitService: openPermits,

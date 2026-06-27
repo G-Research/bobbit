@@ -1,0 +1,12 @@
+name: terminal
+schema: 2
+description: First-party xterm.js terminal side panel over generic Extension Host channels.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  channels: [terminal]
+  entrypoints:
+    - terminal-session-menu
+    - terminal-slash

@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ChannelDispatcher, ChannelHandlerContext, ChannelHandlerSession } from "./channel-dispatcher.js";
+import type { ChannelHandlerHostSurface } from "./channel-pty-helper.js";
 import { ChannelError, type ChannelContributionRef } from "./channel-types.js";
 import { isPackPathWithinRoot } from "./path-guard.js";
 
@@ -24,15 +25,25 @@ export interface ChannelModuleHost {
 	dispose?(): void;
 }
 
+export interface LocalChannelModuleHostOptions {
+	buildHost?: (contribution: ChannelContributionRef, ctx: ChannelHandlerContext) => ChannelHandlerHostSurface;
+}
+
 export class LocalChannelModuleHost implements ChannelModuleHost {
 	private readonly cache = new Map<string, { mtimeMs: number; url: string }>();
+	private readonly buildHost?: (contribution: ChannelContributionRef, ctx: ChannelHandlerContext) => ChannelHandlerHostSurface;
 	private epoch = 0;
+
+	constructor(opts: LocalChannelModuleHostOptions = {}) {
+		this.buildHost = opts.buildHost;
+	}
 
 	async open(req: ChannelModuleHostOpenRequest): Promise<ChannelHandlerSession> {
 		const resolved = this.resolveModule(req.contribution);
 		const mod = await import(resolved.url) as Record<string, unknown>;
 		const handler = resolveHandler(mod, req.contribution.handler ?? req.contribution.name);
-		const result = await handler(req.ctx);
+		const host = this.buildHost?.(req.contribution, req.ctx) ?? req.ctx.host;
+		const result = await handler({ ...req.ctx, host });
 		return normalizeHandlerSession(result);
 	}
 

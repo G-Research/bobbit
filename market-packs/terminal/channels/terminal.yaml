@@ -1,0 +1,19 @@
+name: terminal
+protocol: terminal.v1
+module: ../lib/terminal-channel.mjs
+handler: terminal
+capabilities: [sessionPty]
+requiresUserGesture: true
+quotas:
+  maxChannelsPerSessionPerPack: 1
+  maxFrameBytes: 65536
+  maxInboundBytes: 262144
+  maxInboundFrames: 128
+  maxOutboundBytes: 1048576
+  maxOutboundFrames: 256
+  maxClientOutboundBytes: 1048576
+  maxClientOutboundFrames: 256
+  maxClientSendRatePerSecond: 120
+  idleTimeoutMs: 1800000
+  openTimeoutMs: 10000
+  closeGraceMs: 2000

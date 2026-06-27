@@ -5,6 +5,7 @@
 
 import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type HostChannelFrame } from "./channel-types.js";
 import { type ChannelModuleHost } from "./channel-module-host.js";
+import type { ChannelHandlerHostSurface } from "./channel-pty-helper.js";
 
 export interface ChannelHandlerContext {
 	readonly sessionId: string;
@@ -14,7 +15,7 @@ export interface ChannelHandlerContext {
 	readonly name: string;
 	readonly protocol?: string;
 	readonly init?: unknown;
-	readonly host: Record<string, never>;
+	readonly host: ChannelHandlerHostSurface;
 	send(frame: HostChannelFrame): Promise<void>;
 	close(reason?: string): Promise<void>;
 	audit(event: Omit<ChannelAuditEvent, "at" | "sessionId" | "packId" | "contributionId" | "channelName" | "channelId">): void;

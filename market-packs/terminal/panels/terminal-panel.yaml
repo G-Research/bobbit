@@ -1,0 +1,4 @@
+id: terminal.panel
+title: Terminal
+entry: ../lib/terminal-panel.js
+instanceMode: singleton
