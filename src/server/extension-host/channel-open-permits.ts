@@ -15,7 +15,6 @@ interface StoredPermit {
 	binding: Required<Pick<ChannelOpenPermitBinding, "sessionId" | "packId" | "contributionId" | "channelName">> & Pick<ChannelOpenPermitBinding, "singletonKey">;
 	createdAt: number;
 	expiresAt: number;
-	consumedAt?: number;
 }
 
 export interface ChannelOpenPermitStoreOptions {
@@ -36,6 +35,7 @@ const DEFAULT_TTL_MS = 30_000;
 
 export class ChannelOpenPermitStore {
 	private readonly permits = new Map<string, StoredPermit>();
+	private readonly consumedPermits = new Map<string, number>();
 	private readonly ttlMs: number;
 	private readonly now: () => number;
 	private readonly randomToken: () => string;
@@ -51,6 +51,7 @@ export class ChannelOpenPermitStore {
 	mint(binding: ChannelOpenPermitBinding): string {
 		const normalized = normalizeBinding(binding);
 		const createdAt = this.now();
+		this.cleanupExpiredAt(createdAt);
 		const expiresAt = createdAt + this.ttlMs;
 		let token = this.randomToken();
 		while (this.permits.has(token)) token = this.randomToken();
@@ -65,28 +66,44 @@ export class ChannelOpenPermitStore {
 		if (typeof token !== "string" || token.length === 0) {
 			this.reject(at, normalized, "missing");
 		}
+		const consumedExpiresAt = this.consumedPermits.get(token);
+		if (consumedExpiresAt !== undefined) {
+			if (consumedExpiresAt > at) this.reject(at, normalized, "replayed");
+			this.consumedPermits.delete(token);
+		}
 		const permit = this.permits.get(token);
 		if (!permit) {
+			this.cleanupExpiredAt(at);
 			this.reject(at, normalized, "unknown");
-		}
-		if (permit.consumedAt !== undefined) {
-			this.reject(at, normalized, "replayed");
 		}
 		if (permit.expiresAt <= at) {
 			this.permits.delete(token);
 			this.reject(at, normalized, "expired");
 		}
+		this.permits.delete(token);
+		this.cleanupExpiredAt(at);
+		this.consumedPermits.set(token, permit.expiresAt);
 		if (!bindingsEqual(permit.binding, normalized)) {
-			permit.consumedAt = at;
 			this.reject(at, normalized, "mismatch");
 		}
-		permit.consumedAt = at;
 		this.emit({ type: "permit.consume", at, ...auditBinding(normalized) });
 		return { token, createdAt: permit.createdAt, expiresAt: permit.expiresAt, consumedAt: at };
 	}
 
 	cleanupExpired(): number {
-		const at = this.now();
+		return this.cleanupExpiredAt(this.now());
+	}
+
+	pendingCount(): number {
+		return this.permits.size;
+	}
+
+	clear(): void {
+		this.permits.clear();
+		this.consumedPermits.clear();
+	}
+
+	private cleanupExpiredAt(at: number): number {
 		let removed = 0;
 		for (const [token, permit] of this.permits) {
 			if (permit.expiresAt <= at) {
@@ -94,11 +111,13 @@ export class ChannelOpenPermitStore {
 				removed++;
 			}
 		}
+		for (const [token, expiresAt] of this.consumedPermits) {
+			if (expiresAt <= at) {
+				this.consumedPermits.delete(token);
+				removed++;
+			}
+		}
 		return removed;
-	}
-
-	clear(): void {
-		this.permits.clear();
 	}
 
 	private reject(at: number, binding: StoredPermit["binding"], reason: string): never {

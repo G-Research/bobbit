@@ -409,8 +409,9 @@ export class ChannelRegistry {
 			try {
 				await client.sink.onFrame(typed);
 			} catch (err) {
-				this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: err instanceof Error ? err.message : String(err) });
-				record.clients.delete(client.clientId);
+				await this.detachInternal(record, client.clientId, err).catch((detachErr: unknown) => {
+					this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: detachErr instanceof Error ? detachErr.message : String(detachErr) });
+				});
 			} finally {
 				if (client.inFlightFrames > 0 && client.inFlightBytes >= bytes) {
 					client.inFlightFrames--;
@@ -595,14 +596,22 @@ export class ChannelRegistry {
 		this.emit({ type: "channel.attach", at: record.lastActiveAt, ...auditRecord(record), clientId });
 	}
 
-	private async detachInternal(record: ChannelRecord, clientId: string): Promise<boolean> {
+	private async detachInternal(record: ChannelRecord, clientId: string, cause?: unknown): Promise<boolean> {
 		const client = record.clients.get(clientId);
 		if (!client) return false;
 		this.removeClientAccounting(record, client);
 		record.clients.delete(clientId);
-		await record.handler?.onDetach?.(clientId);
+		let detachError: unknown;
+		try {
+			await record.handler?.onDetach?.(clientId);
+		} catch (err) {
+			detachError = err;
+		}
 		record.lastActiveAt = this.now();
-		this.emit({ type: "channel.detach", at: record.lastActiveAt, ...auditRecord(record), clientId });
+		const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : undefined;
+		const detachErrorMessage = detachError instanceof Error ? detachError.message : typeof detachError === "string" ? detachError : undefined;
+		this.emit({ type: "channel.detach", at: record.lastActiveAt, ...auditRecord(record), clientId, error: causeMessage ?? detachErrorMessage });
+		if (detachError) throw detachError;
 		return true;
 	}
 
