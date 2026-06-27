@@ -177,7 +177,7 @@ details.wf-proposal-workflow .wf-proposal-gates {
 .sidebar-root .sidebar-top-actions > div,
 .sidebar-root .sidebar-top-actions button {
 	max-width: 100%;
-	overflow: hidden;
+	overflow-x: hidden;
 }
 
 .sidebar-root button,
@@ -285,7 +285,6 @@ details.wf-proposal-workflow .wf-proposal-gates {
 
 .sidebar-root[data-testid="sidebar-collapsed"] button {
 	min-width: 0;
-	overflow-y: hidden;
 }
 
 .sidebar-root[data-testid="sidebar-collapsed"] .font-extrabold {
