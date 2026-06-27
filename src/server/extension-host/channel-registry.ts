@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { ChannelDispatcher, type ChannelHandlerSession } from "./channel-dispatcher.js";
 import { ChannelOpenPermitStore } from "./channel-open-permits.js";
+import { isChannelModuleHost, LocalChannelModuleHost, type ChannelModuleHost } from "./channel-module-host.js";
 import {
 	ChannelError,
 	frameByteLength,
@@ -38,6 +39,7 @@ interface LegacyChannelClient {
 type SurfaceBinding = { sessionId: string; packId: string; contributionId: string };
 type SurfaceBindingResolver = { resolve?: (token: string) => SurfaceBinding | undefined; validate?: (token: string) => SurfaceBinding | undefined };
 type ChannelContributionResolver = { getChannel?: (projectId: string | undefined, packId: string, name: string) => unknown };
+type TimerHandle = ReturnType<typeof setInterval>;
 
 export interface ChannelOpenRequest {
 	sessionId: string;
@@ -111,6 +113,9 @@ export interface ChannelRegistryOptions {
 	auditLog?: { write?: (event: ChannelAuditEvent) => void };
 	surfaceBindings?: SurfaceBindingResolver;
 	contributionRegistry?: ChannelContributionResolver;
+	moduleHost?: ChannelModuleHost | unknown;
+	/** Defaults to a bounded production interval. Set false to disable in tests. */
+	idleSweepIntervalMs?: number | false;
 }
 
 interface ClientAttachment {
@@ -124,6 +129,7 @@ interface ClientAttachment {
 interface ChannelRecord {
 	id: string;
 	sessionId: string;
+	projectId?: string;
 	packId: string;
 	contributionId: string;
 	name: string;
@@ -179,6 +185,7 @@ export class ChannelRegistry {
 	private readonly audit?: (event: ChannelAuditEvent) => void;
 	private readonly surfaceBindings?: SurfaceBindingResolver;
 	private readonly contributionRegistry?: ChannelContributionResolver;
+	private readonly idleSweepTimer?: TimerHandle;
 	private readonly channels = new Map<string, ChannelRecord>();
 	private readonly tupleIndex = new Map<string, string>();
 	private readonly singletonIndex = new Map<string, string>();
@@ -191,8 +198,22 @@ export class ChannelRegistry {
 		this.contributionRegistry = opts.contributionRegistry;
 		this.quotas = mergeChannelQuotas(opts.quotas);
 		this.permits = opts.permits ?? opts.openPermits ?? new ChannelOpenPermitStore({ now: this.now, audit: this.audit });
-		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher();
+		const moduleHost = isChannelModuleHost(opts.moduleHost) ? opts.moduleHost : new LocalChannelModuleHost();
+		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher({ moduleHost });
 		this.idGenerator = opts.idGenerator ?? (() => randomUUID());
+		if (opts.idleSweepIntervalMs !== false) {
+			const intervalMs = typeof opts.idleSweepIntervalMs === "number"
+				? opts.idleSweepIntervalMs
+				: Math.min(60_000, Math.max(1_000, this.quotas.idleTimeoutMs));
+			if (intervalMs > 0) {
+				this.idleSweepTimer = setInterval(() => {
+					void this.sweepIdle().catch((err) => {
+						this.emit({ type: "channel.cleanup", at: this.now(), error: err instanceof Error ? err.message : String(err), reason: "idle_sweep_failed" });
+					});
+				}, intervalMs);
+				(this.idleSweepTimer as any).unref?.();
+			}
+		}
 	}
 
 	async open(req: ChannelOpenRequest): Promise<ChannelOpenResult> {
@@ -215,6 +236,7 @@ export class ChannelRegistry {
 		const record: ChannelRecord = {
 			id,
 			sessionId,
+			projectId: req.projectId,
 			packId,
 			contributionId,
 			name: channelName,
@@ -345,7 +367,7 @@ export class ChannelRegistry {
 
 	async sendFromHandler(channelId: string, frame: unknown): Promise<void> {
 		const record = this.channels.get(channelId);
-		if (!record || record.state !== "open") throw new ChannelError(404, "channel_not_found", "channel is not open");
+		if (!record || (record.state !== "open" && record.state !== "opening")) throw new ChannelError(404, "channel_not_found", "channel is not open");
 		const typed = this.validateFrameFor(record, frame);
 		const bytes = frameByteLength(typed);
 		this.assertOutboundCapacity(record, bytes);
@@ -416,6 +438,19 @@ export class ChannelRegistry {
 		return count;
 	}
 
+	async closeUnavailablePacks(reason = "pack unavailable"): Promise<number> {
+		if (!this.contributionRegistry?.getChannel) return 0;
+		let count = 0;
+		for (const record of Array.from(this.channels.values())) {
+			const contribution = this.contributionRegistry.getChannel(record.projectId, record.packId, record.name);
+			if (contribution) continue;
+			await this.closeInternal(record, reason, "registry");
+			this.emit({ type: "channel.cleanup", at: this.now(), ...auditRecord(record), reason: "pack_unavailable" });
+			count++;
+		}
+		return count;
+	}
+
 	async sweepIdle(now = this.now()): Promise<number> {
 		let count = 0;
 		for (const record of Array.from(this.channels.values())) {
@@ -430,6 +465,14 @@ export class ChannelRegistry {
 
 	activeCount(): number {
 		return this.channels.size;
+	}
+
+	async dispose(reason = "registry disposed"): Promise<void> {
+		if (this.idleSweepTimer) clearInterval(this.idleSweepTimer);
+		for (const record of Array.from(this.channels.values())) {
+			await this.closeInternal(record, reason, "registry");
+		}
+		this.dispatcher.invalidate();
 	}
 
 	private resolveOpenRequest(req: ChannelOpenRequest): {
@@ -689,6 +732,7 @@ function normalizeContributionRef(raw: ChannelContributionRef | Record<string, u
 		name: requireNonEmpty(name, "channelName"),
 		protocol: typeof record.protocol === "string" ? record.protocol : undefined,
 		modulePath: typeof record.modulePath === "string" ? record.modulePath : typeof record.module === "string" ? record.module : undefined,
+		sourceFile: typeof record.sourceFile === "string" ? record.sourceFile : undefined,
 		handler: typeof record.handler === "string" ? record.handler : undefined,
 		packRoot: typeof record.packRoot === "string" ? record.packRoot : undefined,
 		capabilities: Array.isArray(record.capabilities) ? record.capabilities.filter((cap): cap is string => typeof cap === "string") : undefined,

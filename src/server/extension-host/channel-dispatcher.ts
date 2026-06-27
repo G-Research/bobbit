@@ -3,7 +3,8 @@
 // Minimal generic channel handler dispatch substrate. It is intentionally protocol
 // agnostic: terminal-like behavior is implemented by a pack handler, not here.
 
-import type { ChannelAuditEvent, ChannelContributionRef, HostChannelFrame } from "./channel-types.js";
+import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type HostChannelFrame } from "./channel-types.js";
+import { type ChannelModuleHost } from "./channel-module-host.js";
 
 export interface ChannelHandlerContext {
 	readonly sessionId: string;
@@ -33,16 +34,23 @@ export interface ChannelDispatcherOpenRequest {
 	ctx: ChannelHandlerContext;
 }
 
+export interface ChannelDispatcherOptions {
+	moduleHost?: ChannelModuleHost;
+}
+
 /**
- * Dispatches channel opens to registered generic factories. Integration code can
- * register factories by contribution id, protocol, or channel name. The fallback
- * is a no-op session, which keeps the registry independently testable until the
- * pack-schema/WS integration wires real module loading.
+ * Dispatches channel opens to registered generic factories or the pack-declared
+ * module handler. If neither path can load a handler, opening fails closed.
  */
 export class ChannelDispatcher {
 	private readonly byContributionId = new Map<string, ChannelHandlerFactory>();
 	private readonly byProtocol = new Map<string, ChannelHandlerFactory>();
 	private readonly byName = new Map<string, ChannelHandlerFactory>();
+	private readonly moduleHost?: ChannelModuleHost;
+
+	constructor(opts: ChannelDispatcherOptions = {}) {
+		this.moduleHost = opts.moduleHost;
+	}
 
 	registerContribution(contributionId: string, factory: ChannelHandlerFactory): () => void {
 		this.byContributionId.set(contributionId, factory);
@@ -63,13 +71,15 @@ export class ChannelDispatcher {
 		const factory = this.byContributionId.get(req.contribution.contributionId)
 			?? (req.contribution.protocol ? this.byProtocol.get(req.contribution.protocol) : undefined)
 			?? this.byName.get(req.contribution.name);
-		if (!factory) return {};
-		return (await factory(req.ctx)) ?? {};
+		if (factory) return (await factory(req.ctx)) ?? {};
+		if (this.moduleHost) return await this.moduleHost.open({ ...req, dispatcher: this, channelId: req.ctx.channelId });
+		throw new ChannelError(500, "channel_handler_unavailable", "no channel handler is registered or declared");
 	}
 
 	invalidate(): void {
 		this.byContributionId.clear();
 		this.byProtocol.clear();
 		this.byName.clear();
+		this.moduleHost?.invalidate?.();
 	}
 }

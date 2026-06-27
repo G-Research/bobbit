@@ -40,6 +40,8 @@ export interface ChannelContributionRef {
 	name: string;
 	protocol?: string;
 	modulePath?: string;
+	/** Original YAML source file, used to resolve module paths relative to channels/<name>.yaml. */
+	sourceFile?: string;
 	handler?: string;
 	packRoot?: string;
 	quotas?: Partial<ChannelQuotaConfig>;
@@ -155,6 +157,9 @@ export function validateChannelFrame(
 		return typed;
 	}
 	if (candidate.kind === "json") {
+		if (!Object.prototype.hasOwnProperty.call(candidate, "data") || candidate.data === undefined) {
+			throw new ChannelError(400, "invalid_frame", "json channel frame data is required");
+		}
 		const typed: HostChannelFrame = { kind: "json", data: candidate.data };
 		assertJsonSerializable(typed.data);
 		assertFrameSize(typed, maxFrameBytes);

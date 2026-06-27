@@ -263,7 +263,8 @@ type ExtensionChannelRegistry = {
 function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 	if (!frame || typeof frame !== "object") return false;
 	const f = frame as { kind?: unknown; data?: unknown };
-	return (f.kind === "text" && typeof f.data === "string") || f.kind === "json";
+	return (f.kind === "text" && typeof f.data === "string")
+		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
 }
 
 export function handleWebSocketConnection(
@@ -295,6 +296,13 @@ export function handleWebSocketConnection(
 			send(ws, { type: "ext_channel_close", channelId, reason: ev.reason, error: ev.error });
 		},
 	});
+	const sendExtChannelFailure = (requestId: string, err: unknown, fallback = "channel operation failed"): void => {
+		const record = err as { code?: unknown; status?: unknown; message?: unknown };
+		const message = typeof record?.message === "string" && record.message.length > 0 ? record.message : fallback;
+		const error = typeof record?.code === "string" && record.code.length > 0 ? record.code : message;
+		const status = typeof record?.status === "number" ? record.status : undefined;
+		send(ws, { type: "ext_channel_result", requestId, ok: false, error, message, status });
+	};
 
 	// 5-second window to authenticate before disconnection
 	const authTimeout = setTimeout(() => {
@@ -1126,124 +1134,165 @@ export function handleWebSocketConnection(
 				case "ext_channel_open": {
 					const openMsg = msg as Extract<ClientMessage, { type: "ext_channel_open" }>;
 					const requestId = typeof openMsg.requestId === "string" ? openMsg.requestId : "";
-					const name = typeof openMsg.name === "string" ? openMsg.name.trim() : "";
-					if (!channelRegistry || !channelOpenPermits) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry/open grants are not configured" });
-						break;
-					}
-					const surf = resolveExtChannelSurface(openMsg.surfaceToken);
-					if (!surf.ok || !name) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel name" : surf.error });
-						break;
-					}
-					const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => ChannelContributionLike | undefined }) | undefined;
-					const contribution = resolver?.getChannel?.(session.projectId, surf.packId, name);
-					if (!contribution) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not declared by this pack" });
-						break;
-					}
-					let openedChannelId = "";
-					const channel = await channelRegistry.open({
-						sessionId,
-						projectId: session.projectId,
-						packId: surf.packId,
-						contribution: { ...contribution, contributionId: surf.contributionId },
-						init: openMsg.init,
-						openPermit: openMsg.openGrant,
-						clientId,
-						client: {
-							onFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame }),
-							onClose: (ev) => {
-								attachedExtChannels.delete(openedChannelId);
-								send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: ev.reason, error: ev.error });
+					try {
+						const name = typeof openMsg.name === "string" ? openMsg.name.trim() : "";
+						if (!channelRegistry || !channelOpenPermits) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry/open grants are not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(openMsg.surfaceToken);
+						if (!surf.ok || !name) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel name" : surf.error });
+							break;
+						}
+						const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => ChannelContributionLike | undefined }) | undefined;
+						const contribution = resolver?.getChannel?.(session.projectId, surf.packId, name);
+						if (!contribution) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not declared by this pack" });
+							break;
+						}
+						let openedChannelId = "";
+						const pendingChannelEvents: Array<{ type: "frame"; frame: HostChannelFrame } | { type: "close"; ev: { reason?: string; error?: string } }> = [];
+						const flushPendingChannelEvents = () => {
+							for (const event of pendingChannelEvents.splice(0)) {
+								if (event.type === "frame") send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame: event.frame });
+								else {
+									attachedExtChannels.delete(openedChannelId);
+									send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: event.ev.reason, error: event.ev.error });
+								}
+							}
+						};
+						const channel = await channelRegistry.open({
+							sessionId,
+							projectId: session.projectId,
+							packId: surf.packId,
+							contribution: { ...contribution, contributionId: surf.contributionId },
+							init: openMsg.init,
+							openPermit: openMsg.openGrant,
+							clientId,
+							client: {
+								onFrame: (frame) => {
+									if (!openedChannelId) pendingChannelEvents.push({ type: "frame", frame });
+									else send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame });
+								},
+								onClose: (ev) => {
+									if (!openedChannelId) pendingChannelEvents.push({ type: "close", ev });
+									else {
+										attachedExtChannels.delete(openedChannelId);
+										send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: ev.reason, error: ev.error });
+									}
+								},
 							},
-						},
-					});
-					openedChannelId = channel.id;
-					attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
-					send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+						});
+						openedChannelId = channel.id;
+						attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+						flushPendingChannelEvents();
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
 					break;
 				}
 				case "ext_channel_attach": {
 					const attachMsg = msg as Extract<ClientMessage, { type: "ext_channel_attach" }>;
 					const requestId = typeof attachMsg.requestId === "string" ? attachMsg.requestId : "";
-					const channelId = typeof attachMsg.channelId === "string" ? attachMsg.channelId : "";
-					if (!channelRegistry) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
-						break;
+					try {
+						const channelId = typeof attachMsg.channelId === "string" ? attachMsg.channelId : "";
+						if (!channelRegistry) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(attachMsg.surfaceToken);
+						if (!surf.ok || !channelId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel id" : surf.error });
+							break;
+						}
+						const channel = await channelRegistry.attach({ sessionId, packId: surf.packId, channelId, clientId, client: channelClientFor(channelId) });
+						attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
 					}
-					const surf = resolveExtChannelSurface(attachMsg.surfaceToken);
-					if (!surf.ok || !channelId) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel id" : surf.error });
-						break;
-					}
-					const channel = await channelRegistry.attach({ sessionId, packId: surf.packId, channelId, clientId, client: channelClientFor(channelId) });
-					attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
-					send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
 					break;
 				}
 				case "ext_channel_list": {
 					const listMsg = msg as Extract<ClientMessage, { type: "ext_channel_list" }>;
 					const requestId = typeof listMsg.requestId === "string" ? listMsg.requestId : "";
-					if (!channelRegistry) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
-						break;
+					try {
+						if (!channelRegistry) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(listMsg.surfaceToken);
+						if (!surf.ok) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.error });
+							break;
+						}
+						const channels = await channelRegistry.list({
+							sessionId,
+							packId: surf.packId,
+							clientId,
+							name: typeof listMsg.opts?.name === "string" ? listMsg.opts.name : undefined,
+							includeClosed: listMsg.opts?.includeClosed === true,
+						});
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channels });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
 					}
-					const surf = resolveExtChannelSurface(listMsg.surfaceToken);
-					if (!surf.ok) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.error });
-						break;
-					}
-					const channels = await channelRegistry.list({
-						sessionId,
-						packId: surf.packId,
-						clientId,
-						name: typeof listMsg.opts?.name === "string" ? listMsg.opts.name : undefined,
-						includeClosed: listMsg.opts?.includeClosed === true,
-					});
-					send(ws, { type: "ext_channel_result", requestId, ok: true, channels });
 					break;
 				}
 				case "ext_channel_send": {
 					const sendMsg = msg as Extract<ClientMessage, { type: "ext_channel_send" }>;
 					const requestId = typeof sendMsg.requestId === "string" ? sendMsg.requestId : "";
-					const attached = attachedExtChannels.get(sendMsg.channelId);
-					if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
-						break;
+					try {
+						const attached = attachedExtChannels.get(sendMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						if (!isHostChannelFrame(sendMsg.frame)) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "invalid channel frame" });
+							break;
+						}
+						await channelRegistry.send({ sessionId, packId: attached.packId, channelId: sendMsg.channelId, clientId, frame: sendMsg.frame });
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
 					}
-					if (!isHostChannelFrame(sendMsg.frame)) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "invalid channel frame" });
-						break;
-					}
-					await channelRegistry.send({ sessionId, packId: attached.packId, channelId: sendMsg.channelId, clientId, frame: sendMsg.frame });
-					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
 				}
 				case "ext_channel_close": {
 					const closeMsg = msg as Extract<ClientMessage, { type: "ext_channel_close" }>;
 					const requestId = typeof closeMsg.requestId === "string" ? closeMsg.requestId : "";
-					const attached = attachedExtChannels.get(closeMsg.channelId);
-					if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
-						break;
+					try {
+						const attached = attachedExtChannels.get(closeMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						await channelRegistry.close({ sessionId, packId: attached.packId, channelId: closeMsg.channelId, clientId, reason: closeMsg.reason });
+						attachedExtChannels.delete(closeMsg.channelId);
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
 					}
-					await channelRegistry.close({ sessionId, packId: attached.packId, channelId: closeMsg.channelId, clientId, reason: closeMsg.reason });
-					attachedExtChannels.delete(closeMsg.channelId);
-					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
 				}
 				case "ext_channel_detach": {
 					const detachMsg = msg as Extract<ClientMessage, { type: "ext_channel_detach" }>;
 					const requestId = typeof detachMsg.requestId === "string" ? detachMsg.requestId : "";
-					const attached = attachedExtChannels.get(detachMsg.channelId);
-					if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
-						break;
+					try {
+						const attached = attachedExtChannels.get(detachMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						await channelRegistry.detach({ sessionId, packId: attached.packId, channelId: detachMsg.channelId, clientId });
+						attachedExtChannels.delete(detachMsg.channelId);
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
 					}
-					await channelRegistry.detach({ sessionId, packId: attached.packId, channelId: detachMsg.channelId, clientId });
-					attachedExtChannels.delete(detachMsg.channelId);
-					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
 				}
 				case "ext_session_write_permit": {

@@ -47,7 +47,15 @@ describe("host.channels — public Host API contract", () => {
 	it("WebSocket protocol requires openGrant on raw ext_channel_open frames", () => {
 		const src = fs.readFileSync(path.join(process.cwd(), "src", "server", "ws", "protocol.ts"), "utf-8");
 		assert.match(src, /type:\s*["']ext_channel_open["'][\s\S]*openGrant:\s*string/, "ext_channel_open must require openGrant on the wire type");
+		assert.match(src, /ext_channel_result[\s\S]*message\?:\s*string[\s\S]*status\?:\s*number/, "channel operation failures must carry correlated message/status details");
 		assert.doesNotMatch(src, /trustedLauncher|userGesture|requiresUserGesture:\s*boolean/, "raw WS frames must not trust client launcher/gesture booleans");
+	});
+
+	it("WebSocket channel operations settle requestIds and buffer synchronous open events", () => {
+		const src = fs.readFileSync(path.join(process.cwd(), "src", "server", "ws", "handler.ts"), "utf-8");
+		assert.match(src, /sendExtChannelFailure\(requestId, err\)/, "thrown channel operation failures must return ext_channel_result for the original requestId");
+		assert.match(src, /pendingChannelEvents/, "open must buffer handler frames until the channel id is known");
+		assert.match(src, /if \(!openedChannelId\) pendingChannelEvents\.push/, "synchronous open events must be queued before the channel id is known");
 	});
 
 	it("older/no-channel hosts remain safely feature-detectable", () => {
