@@ -214,6 +214,39 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 		await first;
 	});
 
+	it("detaches a rejecting auto-drain sink through handler detach semantics", async () => {
+		let ctx!: ChannelHandlerContext;
+		let detached = 0;
+		const detachedClients: string[] = [];
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", (opened) => {
+			ctx = opened;
+			return {
+				onDetach: (clientId) => {
+					detached++;
+					detachedClients.push(clientId);
+				},
+			};
+		});
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1" });
+		await registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution(),
+			clientId: "client-1",
+			client: { onFrame: () => { throw new Error("client gone"); } },
+			openPermit: permit(registry),
+		});
+
+		await ctx.send({ kind: "text", data: "first" });
+
+		assert.equal(detached, 1);
+		assert.deepEqual(detachedClients, ["client-1"]);
+		assert.equal(registry.list({ sessionId: "sess-1", packId: "pack-a", clientId: "client-1" })[0].attached, false);
+		assert.equal(await registry.detach("sess-1", "pack-a", "chan-1", "client-1"), false);
+		assert.equal(detached, 1, "later detach remains idempotent after delivery-failure cleanup");
+	});
+
 	it("bounds outbound in-flight bytes for auto-drain clients", async () => {
 		let ctx!: ChannelHandlerContext;
 		let release!: () => void;

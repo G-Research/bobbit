@@ -24,13 +24,27 @@ describe("ChannelOpenPermitStore", () => {
 		const store = new ChannelOpenPermitStore({ now: () => now, randomToken: () => `token-${++seq}`, audit: (e) => events.push(e) });
 		const token = store.mint(binding());
 		assert.equal(token, "token-1");
+		assert.equal(store.pendingCount(), 1);
 		const consumed = store.consume(token, binding());
 		assert.equal(consumed.createdAt, 10);
 		assert.equal(consumed.consumedAt, 10);
+		assert.equal(store.pendingCount(), 0, "consumed one-shot permits are removed from the pending store");
 		now = 11;
 		assertPermitReject(() => store.consume(token, binding()), "replayed");
 		assert.deepEqual(events.map((e) => e.type), ["permit.mint", "permit.consume", "permit.reject"]);
 		assert.ok(!JSON.stringify(events).includes("payload"));
+	});
+
+	it("bounds replay tombstones to the original permit expiry", () => {
+		let now = 0;
+		const store = new ChannelOpenPermitStore({ ttlMs: 5, now: () => now, randomToken: () => "short" });
+		const token = store.mint(binding());
+		store.consume(token, binding());
+		assert.equal(store.pendingCount(), 0);
+		assertPermitReject(() => store.consume(token, binding()), "replayed");
+		now = 5;
+		assert.equal(store.cleanupExpired(), 1);
+		assertPermitReject(() => store.consume(token, binding()), "unknown");
 	});
 
 	it("rejects missing and forged permits", () => {
