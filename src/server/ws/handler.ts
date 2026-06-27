@@ -231,7 +231,7 @@ function getClientIp(req: IncomingMessage): string {
 	return req.socket.remoteAddress || "unknown";
 }
 
-type ChannelOpenGrantBinding = {
+type ChannelOpenPermitBinding = {
 	sessionId: string;
 	packId: string;
 	contributionId: string;
@@ -239,9 +239,9 @@ type ChannelOpenGrantBinding = {
 	singletonKey?: string;
 };
 
-type ChannelOpenGrantService = {
-	mint(binding: ChannelOpenGrantBinding): string;
-	consume?(openGrant: string | undefined, binding: ChannelOpenGrantBinding): unknown;
+type ChannelOpenPermitService = {
+	mint(binding: ChannelOpenPermitBinding): string;
+	consume?(openPermit: string | undefined, binding: ChannelOpenPermitBinding): unknown;
 };
 
 type ExtensionChannelClient = {
@@ -252,7 +252,7 @@ type ExtensionChannelClient = {
 type ChannelContributionLike = { name: string; protocol?: string; module?: string; handler?: string; quotas?: unknown; capabilities?: unknown };
 
 type ExtensionChannelRegistry = {
-	open(input: { sessionId: string; projectId?: string; packId: string; contribution: ChannelContributionLike & { contributionId: string }; init?: { data?: unknown; singletonKey?: string }; openGrant: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
+	open(input: { sessionId: string; projectId?: string; packId: string; contribution: ChannelContributionLike & { contributionId: string }; init?: { data?: unknown; singletonKey?: string }; openPermit: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
 	attach(input: { sessionId: string; packId: string; channelId: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
 	list(input: { sessionId: string; packId: string; clientId?: string; name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]> | ChannelInfo[];
 	send(input: { sessionId: string; packId: string; channelId: string; clientId: string; frame: HostChannelFrame }): Promise<void> | void;
@@ -281,7 +281,7 @@ export function handleWebSocketConnection(
 	packContributionRegistry?: PackContributionResolver,
 	preferencesStore?: PreferencesStore,
 	channelRegistry?: ExtensionChannelRegistry,
-	channelOpenGrants?: ChannelOpenGrantService,
+	channelOpenPermits?: ChannelOpenPermitService,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -1106,7 +1106,7 @@ export function handleWebSocketConnection(
 					const requestId = typeof grantMsg.requestId === "string" ? grantMsg.requestId : "";
 					const name = typeof grantMsg.name === "string" ? grantMsg.name.trim() : "";
 					const singletonKey = typeof grantMsg.singletonKey === "string" ? grantMsg.singletonKey : undefined;
-					if (!channelOpenGrants) {
+					if (!channelOpenPermits) {
 						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel open grants are not configured" });
 						break;
 					}
@@ -1119,7 +1119,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel is not declared by this pack" });
 						break;
 					}
-					const openGrant = channelOpenGrants.mint({ sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, singletonKey });
+					const openGrant = channelOpenPermits.mint({ sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, singletonKey });
 					send(ws, { type: "ext_channel_open_grant_result", requestId, ok: true, openGrant });
 					break;
 				}
@@ -1127,7 +1127,7 @@ export function handleWebSocketConnection(
 					const openMsg = msg as Extract<ClientMessage, { type: "ext_channel_open" }>;
 					const requestId = typeof openMsg.requestId === "string" ? openMsg.requestId : "";
 					const name = typeof openMsg.name === "string" ? openMsg.name.trim() : "";
-					if (!channelRegistry || !channelOpenGrants) {
+					if (!channelRegistry || !channelOpenPermits) {
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry/open grants are not configured" });
 						break;
 					}
@@ -1149,7 +1149,7 @@ export function handleWebSocketConnection(
 						packId: surf.packId,
 						contribution: { ...contribution, contributionId: surf.contributionId },
 						init: openMsg.init,
-						openGrant: openMsg.openGrant,
+						openPermit: openMsg.openGrant,
 						clientId,
 						client: {
 							onFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame }),

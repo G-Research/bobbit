@@ -3,7 +3,7 @@
  *
  * The production channel modules are expected to land in parallel implementation
  * branches. Until then these tests fail with explicit "expected dependency" text;
- * after merge they exercise grants, frame validation, lifecycle, quotas, singleton
+ * after merge they exercise permits, frame validation, lifecycle, quotas, singleton
  * reuse, tombstones, detach-vs-close, and session cleanup without terminal code.
  */
 import { describe, it } from "node:test";
@@ -42,17 +42,17 @@ function construct(mod: AnyRecord, names: string[], args: unknown, label: string
 	assert.fail(`${label} module must export one of: ${names.join(", ")}`);
 }
 
-async function mintGrant(store: any, target: ChannelTarget): Promise<string> {
-	const fn = pick(store, ["mint", "mintGrant", "mintOpenGrant", "create", "createGrant"], "open grant service");
-	const grant = await fn(target);
-	assert.equal(typeof grant, "string");
-	assert.match(grant, /\S/);
-	return grant;
+async function mintPermit(store: any, target: ChannelTarget): Promise<string> {
+	const fn = pick(store, ["mint", "mintPermit", "mintOpenPermit", "create", "createPermit"], "open permit service");
+	const permit = await fn(target);
+	assert.equal(typeof permit, "string");
+	assert.match(permit, /\S/);
+	return permit;
 }
 
-async function consumeGrant(store: any, grant: string | undefined, target: ChannelTarget): Promise<void> {
-	const fn = pick(store, ["consume", "consumeGrant", "consumeOpenGrant", "validateAndConsume"], "open grant service");
-	await fn(grant, target);
+async function consumePermit(store: any, permit: string | undefined, target: ChannelTarget): Promise<void> {
+	const fn = pick(store, ["consume", "consumePermit", "consumeOpenPermit", "validateAndConsume"], "open permit service");
+	await fn(permit, target);
 }
 
 function assertFrameAccepted(mod: AnyRecord, frame: unknown, opts?: AnyRecord): void {
@@ -110,7 +110,7 @@ function contribution(overrides: AnyRecord = {}): AnyRecord {
 }
 
 async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => number } = {}): Promise<AnyRecord> {
-	const grantsMod = await importExpected("../src/server/extension-host/channel-open-grants.ts");
+	const permitsMod = await importExpected("../src/server/extension-host/channel-open-permits.ts");
 	const registryMod = await importExpected("../src/server/extension-host/channel-registry.ts");
 	const contrib = opts.contrib ?? contribution();
 	const opened: AnyRecord[] = [];
@@ -120,7 +120,7 @@ async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => numb
 	let closed = 0;
 	let now = opts.now?.() ?? 1_000;
 	const nowFn = opts.now ?? (() => now);
-	const grantStore = construct(grantsMod, ["ChannelOpenGrantStore", "ChannelOpenGrantService", "OpenGrantService"], { now: nowFn, ttlMs: 1_000 }, "open grants");
+	const permitStore = construct(permitsMod, ["ChannelOpenPermitStore", "ChannelOpenPermitService", "OpenPermitService"], { now: nowFn, ttlMs: 1_000 }, "open permits");
 	const surfaceBindings = new Map<string, AnyRecord>([
 		["surface-a", { sessionId: "session-a", packId: "pack-a", contributionId: "panel-a" }],
 		["surface-b", { sessionId: "session-b", packId: "pack-a", contributionId: "panel-a" }],
@@ -128,8 +128,8 @@ async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => numb
 	]);
 	const registry = construct(registryMod, ["ChannelRegistry", "ExtensionHostChannelRegistry"], {
 		now: nowFn,
-		openGrants: grantStore,
-		grants: grantStore,
+		openPermits: permitStore,
+		permits: permitStore,
 		audit: (event: AnyRecord) => audits.push(event),
 		auditLog: { write: (event: AnyRecord) => audits.push(event) },
 		surfaceBindings: { resolve: (token: string) => surfaceBindings.get(token), validate: (token: string) => surfaceBindings.get(token) },
@@ -155,7 +155,7 @@ async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => numb
 			},
 		},
 	});
-	return { registry, grantStore, opened, inbound, outbound, audits, get closed() { return closed; }, tick: (ms: number) => { now += ms; } };
+	return { registry, permitStore, opened, inbound, outbound, audits, get closed() { return closed; }, tick: (ms: number) => { now += ms; } };
 }
 
 async function registryCall(registry: any, names: string[], args: AnyRecord): Promise<any> {
@@ -189,23 +189,23 @@ function channelId(ch: AnyRecord): string {
 	return ch.id;
 }
 
-describe("channel open grants", () => {
-	it("requires valid one-shot grants bound to session/pack/contribution/channel/singleton", async () => {
+describe("channel open permits", () => {
+	it("requires valid one-shot permits bound to session/pack/contribution/channel/singleton", async () => {
 		let now = 1_000;
-		const mod = await importExpected("../src/server/extension-host/channel-open-grants.ts");
-		const grants = construct(mod, ["ChannelOpenGrantStore", "ChannelOpenGrantService", "OpenGrantService"], { now: () => now, ttlMs: 100 }, "open grants");
+		const mod = await importExpected("../src/server/extension-host/channel-open-permits.ts");
+		const permits = construct(mod, ["ChannelOpenPermitStore", "ChannelOpenPermitService", "OpenPermitService"], { now: () => now, ttlMs: 100 }, "open permits");
 		const base = target({ singletonKey: "primary" });
 
-		await assert.rejects(() => consumeGrant(grants, undefined, base), /grant|required|missing/i);
-		await assert.rejects(() => consumeGrant(grants, "forged", base), /grant|invalid|unknown|forged/i);
+		await assert.rejects(() => consumePermit(permits, undefined, base), /permit|required|missing/i);
+		await assert.rejects(() => consumePermit(permits, "forged", base), /permit|invalid|unknown|forged/i);
 
-		const grant = await mintGrant(grants, base);
-		await assert.rejects(() => consumeGrant(grants, grant, target({ singletonKey: "other" })), /mismatch|bound|singleton/i);
-		await assert.rejects(() => consumeGrant(grants, grant, base), /used|replay|consumed/i);
+		const permit = await mintPermit(permits, base);
+		await assert.rejects(() => consumePermit(permits, permit, target({ singletonKey: "other" })), /mismatch|bound|singleton/i);
+		await assert.rejects(() => consumePermit(permits, permit, base), /used|replay|consumed/i);
 
-		const expiring = await mintGrant(grants, base);
+		const expiring = await mintPermit(permits, base);
 		now += 101;
-		await assert.rejects(() => consumeGrant(grants, expiring, base), /expired|ttl/i);
+		await assert.rejects(() => consumePermit(permits, expiring, base), /expired|ttl/i);
 	});
 });
 
@@ -223,7 +223,7 @@ describe("channel frame validation", () => {
 });
 
 describe("channel registry lifecycle and authorization", () => {
-	it("rejects raw open without a grant before handler creation", async () => {
+	it("rejects raw open without a permit before handler creation", async () => {
 		const h = await makeRegistryHarness();
 		await assert.rejects(() => openChannel(h, {
 			sessionId: "session-a",
@@ -232,30 +232,30 @@ describe("channel registry lifecycle and authorization", () => {
 			surfaceToken: "surface-a",
 			name: "echo",
 			init: {},
-		}), /grant|required|missing/i);
-		assert.equal(h.opened.length, 0, "missing grants must be rejected before handler/PTY creation");
+		}), /permit|required|missing/i);
+		assert.equal(h.opened.length, 0, "missing permits must be rejected before handler/PTY creation");
 	});
 
-	it("rejects cross-session/cross-pack opens and mismatched grants before handler creation", async () => {
+	it("rejects cross-session/cross-pack opens and mismatched permits before handler creation", async () => {
 		const h = await makeRegistryHarness();
-		const grant = await mintGrant(h.grantStore, target());
+		const permit = await mintPermit(h.permitStore, target());
 		await assert.rejects(() => openChannel(h, {
 			sessionId: "session-a",
 			projectId: "project-a",
 			clientId: "client-a",
 			surfaceToken: "surface-b",
 			name: "echo",
-			openGrant: grant,
+			openPermit: permit,
 			init: {},
 		}), /session|scope|token|mismatch/i);
-		const otherPackGrant = await mintGrant(h.grantStore, target({ packId: "pack-b", contributionId: "panel-b" }));
+		const otherPackPermit = await mintPermit(h.permitStore, target({ packId: "pack-b", contributionId: "panel-b" }));
 		await assert.rejects(() => openChannel(h, {
 			sessionId: "session-a",
 			projectId: "project-a",
 			clientId: "client-a",
 			surfaceToken: "surface-other-pack",
 			name: "echo",
-			openGrant: otherPackGrant,
+			openPermit: otherPackPermit,
 			init: {},
 		}), /pack|scope|handler|channel/i);
 		assert.equal(h.opened.length, 0);
@@ -263,14 +263,14 @@ describe("channel registry lifecycle and authorization", () => {
 
 	it("opens, lists, sends text/json, detaches without close, attaches, then closes with a tombstone", async () => {
 		const h = await makeRegistryHarness();
-		const openGrant = await mintGrant(h.grantStore, target({ singletonKey: "primary" }));
+		const openPermit = await mintPermit(h.permitStore, target({ singletonKey: "primary" }));
 		const ch = await openChannel(h, {
 			sessionId: "session-a",
 			projectId: "project-a",
 			clientId: "client-a",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant,
+			openPermit,
 			init: { singletonKey: "primary", data: { hello: true } },
 		});
 		const id = channelId(ch);
@@ -306,7 +306,7 @@ describe("channel registry lifecycle and authorization", () => {
 			clientId: "client-a",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant: await mintGrant(h.grantStore, target({ singletonKey: "primary" })),
+			openPermit: await mintPermit(h.permitStore, target({ singletonKey: "primary" })),
 			init: { singletonKey: "primary" },
 		});
 		const second = await openChannel(h, {
@@ -315,7 +315,7 @@ describe("channel registry lifecycle and authorization", () => {
 			clientId: "client-b",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant: await mintGrant(h.grantStore, target({ singletonKey: "primary" })),
+			openPermit: await mintPermit(h.permitStore, target({ singletonKey: "primary" })),
 			init: { singletonKey: "primary" },
 		});
 		assert.equal(channelId(second), channelId(first), "same session+pack+name+singletonKey reuses the live channel");
@@ -328,7 +328,7 @@ describe("channel registry lifecycle and authorization", () => {
 			clientId: "client-c",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant: await mintGrant(h.grantStore, target({ singletonKey: "primary" })),
+			openPermit: await mintPermit(h.permitStore, target({ singletonKey: "primary" })),
 			init: { singletonKey: "primary" },
 		});
 		assert.notEqual(channelId(reopened), channelId(first), "closing a singleton preserves the old tombstone but permits an explicit restart");
@@ -343,7 +343,7 @@ describe("channel registry lifecycle and authorization", () => {
 			clientId: "client-a",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant: await mintGrant(h.grantStore, target()),
+			openPermit: await mintPermit(h.permitStore, target()),
 			init: {},
 		});
 		const id = channelId(ch);
@@ -361,7 +361,7 @@ describe("channel registry lifecycle and authorization", () => {
 			clientId: "client-a",
 			surfaceToken: "surface-a",
 			name: "echo",
-			openGrant: await mintGrant(h.grantStore, target()),
+			openPermit: await mintPermit(h.permitStore, target()),
 			init: {},
 		});
 		const id = channelId(ch);

@@ -163,7 +163,7 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null)?.code;
 	const message = err instanceof Error ? err.message : String(err);
-	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-grants"));
+	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
 }
 
 async function instantiateExtensionChannelServices(deps: {
@@ -176,21 +176,21 @@ async function instantiateExtensionChannelServices(deps: {
 	try {
 		const [registryModule, grantsModule] = await Promise.all([
 			import("./extension-host/" + "channel-registry.js"),
-			import("./extension-host/" + "channel-open-grants.js"),
+			import("./extension-host/" + "channel-open-permits.js"),
 		]);
-		const OpenGrantsCtor = (grantsModule as any).ChannelOpenGrantService
-			?? (grantsModule as any).ChannelOpenGrants
-			?? (grantsModule as any).ChannelOpenGrantStore
+		const OpenPermitsCtor = (grantsModule as any).ChannelOpenPermitService
+			?? (grantsModule as any).ChannelOpenPermits
+			?? (grantsModule as any).ChannelOpenPermitStore
 			?? (grantsModule as any).OpenGrantStore;
 		const RegistryCtor = (registryModule as any).ChannelRegistry;
-		if (typeof OpenGrantsCtor !== "function" || typeof RegistryCtor !== "function") {
-			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-grant service");
+		if (typeof OpenPermitsCtor !== "function" || typeof RegistryCtor !== "function") {
+			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-permit service");
 		}
-		const openGrants = new OpenGrantsCtor();
+		const openPermits = new OpenPermitsCtor();
 		const registry = new RegistryCtor({
-			openGrants,
-			openGrantService: openGrants,
-			grants: openGrants,
+			openPermits,
+			openPermitService: openPermits,
+			grants: openPermits,
 			packContributionRegistry: deps.packContributionRegistry,
 			contributionRegistry: deps.packContributionRegistry,
 			contributions: deps.packContributionRegistry,
@@ -200,7 +200,7 @@ async function instantiateExtensionChannelServices(deps: {
 			toolManager: deps.toolManager,
 			getPackStore,
 		});
-		return { registry, openGrants };
+		return { registry, openPermits };
 	} catch (err) {
 		if (isMissingOptionalExtensionChannelModule(err)) return undefined;
 		throw err;
@@ -220,22 +220,22 @@ function resolveChannelContributionForGrant(
 	return channels.find((channel: any) => channel && channel.name === name);
 }
 
-async function mintExtensionChannelOpenGrant(openGrants: unknown, binding: {
+async function mintExtensionChannelOpenGrant(openPermits: unknown, binding: {
 	sessionId: string;
 	packId: string;
 	contributionId: string;
 	channelName: string;
 	singletonKey?: string;
 }): Promise<string> {
-	const issuer = openGrants as any;
+	const issuer = openPermits as any;
 	const mint = issuer?.mint ?? issuer?.mintGrant ?? issuer?.createGrant ?? issuer?.issue;
-	if (typeof mint !== "function") throw new Error("channel open-grant service is unavailable");
+	if (typeof mint !== "function") throw new Error("channel open-permit service is unavailable");
 	const result = await mint.call(issuer, binding);
 	if (typeof result === "string") return result;
 	if (result && typeof result.grant === "string") return result.grant;
 	if (result && typeof result.openGrant === "string") return result.openGrant;
 	if (result && typeof result.token === "string") return result.token;
-	throw new Error("channel open-grant service returned no grant");
+	throw new Error("channel open-permit service returned no grant");
 }
 
 async function disposeExtensionChannelServices(services: ExtensionChannelServices | undefined, reason: string): Promise<void> {
@@ -6934,11 +6934,11 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/ext/channel-open-grant — mint the one-shot permit required by
+	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
 	// `ext_channel_open`. This is a typed, scoped server path: identity is derived
 	// from the surface token and channel name is resolved inside that pack only.
-	if (url.pathname === "/api/ext/channel-open-grant" && req.method === "POST") {
-		if (!extensionChannelServices?.openGrants) {
+	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
+		if (!extensionChannelServices?.openPermits) {
 			json({ error: "extension channels are not available" }, 503);
 			return;
 		}
@@ -6986,7 +6986,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const openGrant = await mintExtensionChannelOpenGrant(extensionChannelServices.openGrants, {
+			const openGrant = await mintExtensionChannelOpenGrant(extensionChannelServices.openPermits, {
 				sessionId: guard.sessionId,
 				packId: surf.packId,
 				contributionId: surf.contributionId,

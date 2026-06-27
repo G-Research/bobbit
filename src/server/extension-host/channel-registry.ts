@@ -2,12 +2,12 @@
 //
 // Process-lifetime in-memory Extension Host channel registry. Integration code is
 // responsible for authenticating surface tokens and resolving pack-local channel
-// contributions before calling this class; the registry enforces grant-gated open,
+// contributions before calling this class; the registry enforces permit-gated open,
 // tuple scoping, lifecycle, quotas/backpressure, and payload-free audit records.
 
 import { randomUUID } from "node:crypto";
 import { ChannelDispatcher, type ChannelHandlerSession } from "./channel-dispatcher.js";
-import { ChannelOpenGrantStore } from "./channel-open-grants.js";
+import { ChannelOpenPermitStore } from "./channel-open-permits.js";
 import {
 	ChannelError,
 	frameByteLength,
@@ -49,7 +49,7 @@ export interface ChannelOpenRequest {
 	name?: string;
 	surfaceToken?: string;
 	init?: HostChannelOpenInit | { data?: unknown; singletonKey?: string } | unknown;
-	openGrant?: string;
+	openPermit?: string;
 	clientId?: string;
 	client?: ChannelClientSink | LegacyChannelClient;
 }
@@ -101,8 +101,8 @@ export interface ChannelCloseRequest {
 }
 
 export interface ChannelRegistryOptions {
-	grants?: ChannelOpenGrantStore;
-	openGrants?: ChannelOpenGrantStore;
+	permits?: ChannelOpenPermitStore;
+	openPermits?: ChannelOpenPermitStore;
 	dispatcher?: ChannelDispatcher;
 	quotas?: Partial<ChannelQuotaConfig>;
 	now?: () => number;
@@ -171,7 +171,7 @@ class TokenBucket {
 }
 
 export class ChannelRegistry {
-	readonly grants: ChannelOpenGrantStore;
+	readonly permits: ChannelOpenPermitStore;
 	readonly dispatcher: ChannelDispatcher;
 	private readonly quotas: ChannelQuotaConfig;
 	private readonly now: () => number;
@@ -190,7 +190,7 @@ export class ChannelRegistry {
 		this.surfaceBindings = opts.surfaceBindings;
 		this.contributionRegistry = opts.contributionRegistry;
 		this.quotas = mergeChannelQuotas(opts.quotas);
-		this.grants = opts.grants ?? opts.openGrants ?? new ChannelOpenGrantStore({ now: this.now, audit: this.audit });
+		this.permits = opts.permits ?? opts.openPermits ?? new ChannelOpenPermitStore({ now: this.now, audit: this.audit });
 		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher();
 		this.idGenerator = opts.idGenerator ?? (() => randomUUID());
 	}
@@ -198,7 +198,7 @@ export class ChannelRegistry {
 	async open(req: ChannelOpenRequest): Promise<ChannelOpenResult> {
 		const resolved = this.resolveOpenRequest(req);
 		const { sessionId, packId, contributionId, channelName, contribution, singletonKey, clientId, client, initData } = resolved;
-		this.grants.consume(req.openGrant, { sessionId, packId, contributionId, channelName, singletonKey });
+		this.permits.consume(req.openPermit, { sessionId, packId, contributionId, channelName, singletonKey });
 
 		const singletonId = singletonKey ? this.singletonIndex.get(singletonIndexKey(sessionId, packId, channelName, singletonKey)) : undefined;
 		const existing = singletonId ? this.channels.get(singletonId) : undefined;

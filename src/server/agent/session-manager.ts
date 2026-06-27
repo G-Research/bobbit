@@ -957,7 +957,7 @@ export interface ExtensionChannelLifecycle {
 
 export interface ExtensionChannelServices {
 	registry?: ExtensionChannelLifecycle;
-	openGrants?: unknown;
+	openPermits?: unknown;
 }
 
 export interface SessionManagerOptions {

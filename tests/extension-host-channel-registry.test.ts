@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ChannelDispatcher, type ChannelHandlerContext } from "../src/server/extension-host/channel-dispatcher.ts";
 import { ChannelRegistry } from "../src/server/extension-host/channel-registry.ts";
-import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenGrantBinding } from "../src/server/extension-host/channel-types.ts";
+import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenPermitBinding } from "../src/server/extension-host/channel-types.ts";
 
 const contribution = (quotas: ChannelContributionRef["quotas"] = {}): ChannelContributionRef => ({
 	contributionId: "terminal-panel",
@@ -11,8 +11,8 @@ const contribution = (quotas: ChannelContributionRef["quotas"] = {}): ChannelCon
 	quotas,
 });
 
-function grant(registry: ChannelRegistry, overrides: Partial<ChannelOpenGrantBinding> = {}): string {
-	return registry.grants.mint({
+function permit(registry: ChannelRegistry, overrides: Partial<ChannelOpenPermitBinding> = {}): string {
+	return registry.permits.mint({
 		sessionId: "sess-1",
 		packId: "pack-a",
 		contributionId: "terminal-panel",
@@ -29,7 +29,7 @@ async function open(registry: ChannelRegistry, opts: { clientId?: string; single
 		contribution: contribution(opts.quotas),
 		init: { singletonKey },
 		clientId: opts.clientId ?? "client-1",
-		openGrant: grant(registry, { singletonKey }),
+		openPermit: permit(registry, { singletonKey }),
 	});
 }
 
@@ -37,13 +37,13 @@ function assertChannelReject(fn: () => unknown | Promise<unknown>, code: string)
 	return assert.rejects(fn, (err) => err instanceof ChannelError && err.code === code);
 }
 
-describe("ChannelRegistry — grant-gated open and scoping", () => {
-	it("rejects a missing openGrant before handler creation", async () => {
+describe("ChannelRegistry — permit-gated open and scoping", () => {
+	it("rejects a missing openPermit before handler creation", async () => {
 		let handlerOpened = 0;
 		const dispatcher = new ChannelDispatcher();
 		dispatcher.registerName("terminal", () => { handlerOpened++; return {}; });
 		const registry = new ChannelRegistry({ dispatcher });
-		await assertChannelReject(() => registry.open({ sessionId: "sess-1", packId: "pack-a", contribution: contribution(), clientId: "client-1" }), "invalid_open_grant");
+		await assertChannelReject(() => registry.open({ sessionId: "sess-1", packId: "pack-a", contribution: contribution(), clientId: "client-1" }), "invalid_open_permit");
 		assert.equal(handlerOpened, 0);
 		assert.equal(registry.activeCount(), 0);
 	});
@@ -123,7 +123,7 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 			contribution: contribution({ maxOutboundFrames: 1, maxClientOutboundFrames: 1 }),
 			clientId: "client-1",
 			client: { autoDrain: false },
-			openGrant: grant(registry),
+			openPermit: permit(registry),
 		});
 		await ctx.send({ kind: "text", data: "first" });
 		await assertChannelReject(() => ctx.send({ kind: "text", data: "second" }), "channel_backpressure");

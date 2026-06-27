@@ -27,7 +27,7 @@ export interface ChannelInfo {
 	closeReason?: string;
 }
 
-export interface ChannelOpenGrantBinding {
+export interface ChannelOpenPermitBinding {
 	sessionId: string;
 	packId: string;
 	contributionId: string;
@@ -83,9 +83,9 @@ export function mergeChannelQuotas(...parts: Array<Partial<ChannelQuotaConfig> |
 }
 
 export type ChannelAuditEventType =
-	| "grant.mint"
-	| "grant.consume"
-	| "grant.reject"
+	| "permit.mint"
+	| "permit.consume"
+	| "permit.reject"
 	| "channel.open"
 	| "channel.open.reject"
 	| "channel.attach"
