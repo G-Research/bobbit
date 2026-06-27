@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -42,7 +43,7 @@ describe("agent directory resolver", () => {
 		assertSamePath(resolved.defaultDir!, path.join(projectRoot, ".bobbit", "agent"));
 	});
 
-	it("uses exact precedence BOBBIT_AGENT_DIR > PI_CODING_AGENT_DIR > persisted > default", async () => {
+	it("uses exact precedence BOBBIT_AGENT_DIR > persisted > default and ignores PI_CODING_AGENT_DIR", async () => {
 		const mod = await loadAgentDirConfigModule();
 		assert.equal(typeof mod.resolveAgentDir, "function", "resolveAgentDir must be exported");
 		const projectRoot = tempProjectRoot("precedence");
@@ -56,7 +57,11 @@ describe("agent directory resolver", () => {
 		);
 		assert.deepEqual(
 			pick(mod.resolveAgentDir({ env: { PI_CODING_AGENT_DIR: pi }, projectRoot, persisted })),
-			{ source: "PI_CODING_AGENT_DIR", dir: path.normalize(pi), raw: pi },
+			{ source: "persisted", dir: path.normalize(persisted), raw: persisted },
+		);
+		assert.deepEqual(
+			pick(mod.resolveAgentDir({ env: { PI_CODING_AGENT_DIR: pi }, projectRoot })),
+			{ source: "default", dir: path.normalize(path.join(projectRoot, ".bobbit", "agent")), raw: undefined },
 		);
 		assert.deepEqual(
 			pick(mod.resolveAgentDir({ env: {}, projectRoot, persisted })),
@@ -117,8 +122,94 @@ describe("agent directory resolver", () => {
 			"globalAgentDir must not recompute from env after startup initialization",
 		);
 	});
+
+	it("scaffold and agent-dir runtime leave existing ~/.pi/agent untouched", async (t) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-agent-untouched-"));
+		const projectRoot = path.join(root, "project");
+		const tempHome = path.join(root, "home");
+		const legacyAgentDir = path.join(tempHome, ".pi", "agent");
+		const bobbitAgentDir = path.join(projectRoot, ".bobbit", "agent");
+		fs.mkdirSync(path.join(legacyAgentDir, "sessions", "--legacy-project--"), { recursive: true });
+		fs.mkdirSync(projectRoot, { recursive: true });
+		fs.writeFileSync(path.join(legacyAgentDir, "auth.json"), JSON.stringify({ token: "raw-pi-auth" }), "utf-8");
+		fs.writeFileSync(path.join(legacyAgentDir, "models.json"), JSON.stringify({ models: ["raw-pi-model"] }), "utf-8");
+		fs.writeFileSync(path.join(legacyAgentDir, "settings.json"), JSON.stringify({ setting: "raw-pi-setting" }), "utf-8");
+		fs.writeFileSync(
+			path.join(legacyAgentDir, "sessions", "--legacy-project--", "2026-06-27T00-00-00.000Z_session.jsonl"),
+			'{"message":"raw pi session"}\n',
+			"utf-8",
+		);
+		const before = snapshotTree(legacyAgentDir);
+
+		const envKeys = ["BOBBIT_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"] as const;
+		const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+		t.after(() => {
+			for (const key of envKeys) {
+				const value = oldEnv.get(key);
+				if (value === undefined) delete process.env[key]; else process.env[key] = value;
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+		});
+
+		process.env.HOME = tempHome;
+		process.env.USERPROFILE = tempHome;
+		delete process.env.HOMEDRIVE;
+		delete process.env.HOMEPATH;
+		process.env.BOBBIT_DIR = path.join(projectRoot, ".bobbit");
+		delete process.env.BOBBIT_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = legacyAgentDir;
+
+		const bobbitDirMod = await import("../src/server/bobbit-dir.ts") as Record<string, any>;
+		const scaffoldMod = await import("../src/server/scaffold.ts") as Record<string, any>;
+		assert.equal(bobbitDirMod.migrateFromLegacyPiDir, undefined, "Bobbit must not export or call automatic ~/.pi/agent migration");
+		assert.equal(typeof scaffoldMod.scaffoldBobbitDir, "function", "scaffoldBobbitDir must be exported");
+		assert.equal(typeof bobbitDirMod.initializeAgentDirRuntime, "function", "initializeAgentDirRuntime must be exported");
+		assert.equal(typeof bobbitDirMod.globalAgentDir, "function", "globalAgentDir must be exported");
+
+		bobbitDirMod.resetAgentDirStateForTests?.();
+		bobbitDirMod.setProjectRoot?.(projectRoot);
+		scaffoldMod.scaffoldBobbitDir(projectRoot);
+		const state = bobbitDirMod.initializeAgentDirRuntime({
+			env: { PI_CODING_AGENT_DIR: legacyAgentDir },
+			projectRoot,
+			stateDir: path.join(projectRoot, ".bobbit", "state"),
+		});
+
+		assert.deepEqual(snapshotTree(legacyAgentDir), before, "raw pi-owned ~/.pi/agent tree must remain byte-for-byte unchanged");
+		assert.ok(!fs.existsSync(path.join(tempHome, ".pi", "agent.pre-bobbit")), "startup must not write a ~/.pi/agent.pre-bobbit marker");
+		assert.ok(!fs.existsSync(path.join(tempHome, ".bobbit", "agent", "auth.json")), "startup must not copy auth.json out of ~/.pi/agent");
+		assertSamePath(state.startup.dir, bobbitAgentDir, "PI_CODING_AGENT_DIR must not become Bobbit's active agent dir");
+		assert.equal(state.startup.source, "default");
+		assert.ok(
+			!state.history.some((entry: string) => path.normalize(entry) === path.normalize(legacyAgentDir)),
+			"~/.pi/agent must not be seeded into agent-dir history as an implicit migration source",
+		);
+		assertSamePath(bobbitDirMod.globalAgentDir(), bobbitAgentDir, "runtime global agent dir stays on Bobbit's resolved directory");
+	});
 });
 
 function pick(value: AgentDirResolution): { source: string; dir: string; raw?: string } {
 	return { source: value.source, dir: path.normalize(value.dir), raw: value.raw };
+}
+
+type TreeSnapshot = Record<string, { type: "dir" } | { type: "file"; content: string }>;
+
+function snapshotTree(root: string): TreeSnapshot {
+	const snapshot: TreeSnapshot = {};
+	function walk(dir: string, rel: string): void {
+		snapshot[rel || "."] = { type: "dir" };
+		const entries = fs.readdirSync(dir).sort((a, b) => a.localeCompare(b));
+		for (const entry of entries) {
+			const abs = path.join(dir, entry);
+			const childRel = rel ? path.join(rel, entry) : entry;
+			const stat = fs.statSync(abs);
+			if (stat.isDirectory()) {
+				walk(abs, childRel);
+			} else if (stat.isFile()) {
+				snapshot[childRel] = { type: "file", content: fs.readFileSync(abs, "utf-8") };
+			}
+		}
+	}
+	walk(root, "");
+	return snapshot;
 }
