@@ -83,6 +83,13 @@ export interface HostChannelsApi {
 
 Add `readonly channels: boolean` to `HostCapabilities` and `readonly channels: HostChannelsApi` to `HostApi`. `HOST_API_VERSION` remains `1` because this is additive. Bump `HOST_CONTRACT_VERSION` to `4` because `HostChannelFrame`, `ChannelInfo`, and channel close events are new Host-API-owned data contracts.
 
+Compatibility rules:
+
+- Existing packs compiled against older contracts continue to run unchanged; existing renderer/action/panel/route/store/session surfaces remain byte-compatible except for the additive optional namespace and capability flag.
+- Runtime feature detection is mandatory: pack code must check `host.capabilities.channels === true` or `host.capabilities.has("channels")` before using `host.channels`.
+- Hosts that do not implement channels must either omit `host.channels` or expose the same reserved-namespace throwing pattern used by earlier Phase-2 capabilities, but `capabilities.channels` must be the single source of truth and remain `false`.
+- Contract/regression tests must assert older host surfaces remain valid and that a no-channels host does not break existing Extension Host renderer/action/panel/route/store/session tests.
+
 `send()` returns a `Promise<void>` so backpressure, closed-channel, quota, and frame-validation errors are observable. The frame union is deliberately small: text and JSON only.
 
 ## 4. Client transport design
@@ -149,11 +156,12 @@ This lets a terminal launcher create or focus a session-persistent terminal with
 3. Reject if the surface token session does not match the WS session.
 4. Reject if channel creation lacks either:
    - a real user gesture propagated by the client bridge, or
-   - a trusted platform launcher flag set only by Bobbit-owned launcher dispatch code.
-5. Resolve `name` against `PackContributionRegistry.getChannel(projectId, packId, name)`.
-6. Enforce quotas and singleton reuse.
-7. Allocate the channel and start the pack handler.
-8. Attach the current WS connection and return `ChannelInfo`.
+   - a server-verifiable one-shot `openGrant` minted for a trusted Bobbit platform launcher and bound to this session, pack, contribution, channel name, and singleton key.
+5. Reject forged, expired, replayed, or mismatched grants; never accept a client-supplied launcher-trust boolean.
+6. Resolve `name` against `PackContributionRegistry.getChannel(projectId, packId, name)`.
+7. Enforce quotas and singleton reuse.
+8. Allocate the channel and start the pack handler.
+9. Attach the current WS connection and return `ChannelInfo`.
 
 ### Attach
 
@@ -173,7 +181,9 @@ Cross-pack and cross-session attach attempts should be indistinguishable from no
 
 A browser panel unmount or WebSocket close detaches the connection only. It does not close the server channel. While detached, the channel remains alive until explicit close, process cleanup, handler exit, quota enforcement, or idle timeout.
 
-On browser reload, the panel reconstructs its Host API, mints a fresh surface token, calls `host.channels.list({ name: "terminal" })` or `attach(channelId)`, and receives the still-live process channel when the gateway has not restarted.
+V1 does not replay historical frames by default. Server outbound queues are delivery buffers for currently attached or briefly disconnected clients, not durable scrollback. Terminal scrollback is owned by the xterm client while the panel/tab survives; a full browser reload may reattach to the live PTY without restoring old output unless a future protocol adds explicit replay.
+
+On browser reload, the panel reconstructs its Host API, mints a fresh surface token, calls `host.channels.list({ name: "terminal" })` or `attach(channelId)`, and receives the still-live process channel when the gateway has not restarted. The UI should clearly distinguish live reattach with no replay from closed/disconnected restart cases.
 
 ### Close
 
@@ -242,16 +252,50 @@ contents:
 
 ### `channels/<name>.yaml`
 
+Canonical schema:
+
+```ts
+interface ChannelContribution {
+  name: string;
+  protocol?: string;
+  module: string;
+  handler?: string;
+  capabilities?: Array<"sessionPty">;
+  requiresUserGesture?: boolean;
+  quotas?: {
+    maxChannelsPerSessionPerPack?: number;
+    idleTimeoutMs?: number;
+    maxFrameBytes?: number;
+    maxInboundBufferedBytesPerChannel?: number;
+    maxInboundBufferedFramesPerChannel?: number;
+    maxOutboundBufferedBytesPerChannel?: number;
+    maxOutboundBufferedFramesPerChannel?: number;
+    maxBufferedBytesPerAttachedClient?: number;
+    sendRateFramesPerSecond?: number;
+    sendRateBurstFrames?: number;
+    openTimeoutMs?: number;
+    closeGraceMs?: number;
+  };
+}
+```
+
+Example terminal declaration:
+
 ```yaml
 name: terminal                 # pack-local channel name; basename must match unless explicitly aliased
 protocol: terminal.v1          # documentation/diagnostics string
 module: ../lib/terminal-channel.mjs
 handler: terminal              # export member under `channels`, default = name
+capabilities: [sessionPty]
 quotas:
-  maxChannelsPerSession: 1
+  maxChannelsPerSessionPerPack: 1
   idleTimeoutMs: 1800000
   maxFrameBytes: 65536
-  maxBufferedBytes: 1048576
+  maxInboundBufferedBytesPerChannel: 1048576
+  maxInboundBufferedFramesPerChannel: 256
+  maxOutboundBufferedBytesPerChannel: 1048576
+  maxOutboundBufferedFramesPerChannel: 256
+  maxBufferedBytesPerAttachedClient: 262144
 requiresUserGesture: true
 ```
 
@@ -261,7 +305,9 @@ Validation rules:
 - `module` resolves relative to the channel YAML and must stay inside the pack root using `isPackPathWithinRoot`.
 - `handler` is an export member name; default is `name`.
 - `protocol` is metadata only; it does not affect dispatch.
-- Unknown fields are tolerated for forward compatibility, but ignored.
+- `capabilities` accepts only known privileged capability tokens. `sessionPty` is authorized only for built-in/first-party packs or an explicit reviewed allowlist; unauthorized declarations are rejected or loaded without the helper and surfaced as a validation problem.
+- Quota keys are exactly the canonical names above. Values are integers clamped by server global minimum/maximum bounds; omitted values use server defaults from §9. Legacy aliases such as `maxChannelsPerSession` or `maxBufferedBytes` are not part of v1 and should be rejected or warned/dropped rather than silently interpreted.
+- Unknown fields are tolerated for forward compatibility, retained only as inert metadata/diagnostics, and never grant authority or quota changes.
 - Malformed channel files are warned and dropped; duplicate channel names are a hard pack-contribution conflict.
 
 Extend:

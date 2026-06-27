@@ -105,7 +105,8 @@ Design notes:
 
 ## Scrollback, keyboard, copy/paste
 
-- Default bounded scrollback should be large enough for real work but finite. Recommend starting at 10,000 lines, with server/client quotas documented in the channel design.
+- Default bounded scrollback should be large enough for real work but finite. Recommend starting at 10,000 lines in xterm client state, distinct from server channel delivery buffers.
+- V1 channel reattach is live-only by default: it does not replay historical terminal frames after full browser reload. If the side-panel DOM/tab survives, existing xterm scrollback remains visible; after reload, the panel may reattach to the live PTY with an empty/new viewport plus a status note such as `Reattached; previous scrollback is not replayed.`
 - Keyboard focus:
   - Opening/focusing the terminal panel places focus in xterm once attached.
   - `Tab`, arrows, Ctrl/Meta combinations, and shell shortcuts go to xterm while it is focused.
