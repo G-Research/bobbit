@@ -225,7 +225,8 @@ export function readPersistedAgentDirHistory(stateDir: string): string[] {
 
 export function recordAgentDirHistory(dir: string, stateDir = runtimeStateDir, projectRoot = runtimeState?.startup.projectRoot): string[] {
 	const resolvedProjectRoot = normalizeAbsolutePath(projectRoot ?? process.cwd());
-	const history = mergeAgentDirHistory(resolvedProjectRoot, stateDir, [dir]);
+	const legacyAllowDirs = runtimeState ? [runtimeState.startup.dir, runtimeState.persisted, runtimeState.nextStart.dir] : [];
+	const history = mergeAgentDirHistory(resolvedProjectRoot, stateDir, [dir], legacyAllowDirs);
 	inMemoryAgentDirHistory = history;
 	if (stateDir) writeAgentDirHistoryIfReady(stateDir, history);
 	if (runtimeState) runtimeState = { ...runtimeState, history };
@@ -457,7 +458,14 @@ function writeAgentDirHistoryIfReady(stateDir: string, history: string[]): void 
 	}
 }
 
-function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined, dirs: Array<string | undefined>): string[] {
+function mergeAgentDirHistory(
+	projectRoot: string,
+	stateDir: string | undefined,
+	dirs: Array<string | undefined>,
+	legacyAllowDirs: Array<string | undefined> = dirs,
+): string[] {
+	const legacyRawPiAgentDir = normalizeAbsolutePath(path.join(os.homedir(), ".pi", "agent"));
+	const allowLegacyRawPiAgentDir = legacyAllowDirs.some((dir) => dir && samePath(normalizeAgentDirInput(dir, projectRoot), legacyRawPiAgentDir));
 	const seeded = [
 		path.join(os.homedir(), ".bobbit", "agent"),
 		defaultAgentDir(projectRoot),
@@ -469,6 +477,7 @@ function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined,
 	for (const dir of seeded) {
 		if (!dir) continue;
 		const normalized = normalizeAgentDirInput(dir, projectRoot);
+		if (!allowLegacyRawPiAgentDir && samePath(normalized, legacyRawPiAgentDir)) continue;
 		if (!history.some((entry) => samePath(entry, normalized))) history.push(normalized);
 	}
 	return history;

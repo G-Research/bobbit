@@ -186,6 +186,71 @@ describe("agent directory resolver", () => {
 		);
 		assertSamePath(bobbitDirMod.globalAgentDir(), bobbitAgentDir, "runtime global agent dir stays on Bobbit's resolved directory");
 	});
+
+	it("filters stale persisted ~/.pi/agent history but preserves explicit config", async (t) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-history-filter-"));
+		const projectRoot = path.join(root, "project");
+		const tempHome = path.join(root, "home");
+		const legacyAgentDir = path.join(tempHome, ".pi", "agent");
+		const stateDir = path.join(projectRoot, ".bobbit", "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.mkdirSync(legacyAgentDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, "preferences.json"), JSON.stringify({ agentDirHistory: [legacyAgentDir, "~/.pi/agent"] }, null, 2), "utf-8");
+
+		const envKeys = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR"] as const;
+		const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+		t.after(() => {
+			for (const key of envKeys) {
+				const value = oldEnv.get(key);
+				if (value === undefined) delete process.env[key]; else process.env[key] = value;
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+		});
+
+		process.env.HOME = tempHome;
+		process.env.USERPROFILE = tempHome;
+		delete process.env.HOMEDRIVE;
+		delete process.env.HOMEPATH;
+		delete process.env.BOBBIT_AGENT_DIR;
+		delete process.env.PI_CODING_AGENT_DIR;
+
+		const mod = await loadAgentDirConfigModule();
+		mod.resetAgentDirStateForTests?.();
+		const state = mod.initializeAgentDirRuntime({ env: {}, projectRoot, stateDir });
+		const rewrittenPrefs = JSON.parse(fs.readFileSync(path.join(stateDir, "preferences.json"), "utf-8"));
+		assert.ok(
+			!state.history.some((entry: string) => path.normalize(entry) === path.normalize(legacyAgentDir)),
+			"stale ~/.pi/agent history must not remain known after runtime init",
+		);
+		assert.ok(
+			!rewrittenPrefs.agentDirHistory.some((entry: string) => path.normalize(entry) === path.normalize(legacyAgentDir)),
+			"rewritten preferences must drop stale ~/.pi/agent history",
+		);
+
+		const persistedStateDir = path.join(projectRoot, ".bobbit", "state-persisted");
+		fs.mkdirSync(persistedStateDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(persistedStateDir, "preferences.json"),
+			JSON.stringify({ agentDir: "~/.pi/agent", agentDirHistory: ["~/.pi/agent"] }, null, 2),
+			"utf-8",
+		);
+		mod.resetAgentDirStateForTests?.();
+		const persistedState = mod.initializeAgentDirRuntime({ env: {}, projectRoot, stateDir: persistedStateDir });
+		assert.ok(
+			persistedState.history.some((entry: string) => path.normalize(entry) === path.normalize(legacyAgentDir)),
+			"~/.pi/agent remains known when explicitly configured as persisted agent dir",
+		);
+
+		const envStateDir = path.join(projectRoot, ".bobbit", "state-env");
+		fs.mkdirSync(envStateDir, { recursive: true });
+		fs.writeFileSync(path.join(envStateDir, "preferences.json"), JSON.stringify({ agentDirHistory: ["~/.pi/agent"] }, null, 2), "utf-8");
+		mod.resetAgentDirStateForTests?.();
+		const envState = mod.initializeAgentDirRuntime({ env: { BOBBIT_AGENT_DIR: "~/.pi/agent" }, projectRoot, stateDir: envStateDir });
+		assert.ok(
+			envState.history.some((entry: string) => path.normalize(entry) === path.normalize(legacyAgentDir)),
+			"~/.pi/agent remains known when explicitly configured via BOBBIT_AGENT_DIR",
+		);
+	});
 });
 
 function pick(value: AgentDirResolution): { source: string; dir: string; raw?: string } {
