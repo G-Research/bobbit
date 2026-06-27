@@ -1446,10 +1446,10 @@ export class SessionManager {
 	}
 
 	private async closeExtensionChannelsForSession(sessionId: string, reason: string): Promise<void> {
-		const closeSession = this._extensionChannels?.registry?.closeSession;
-		if (!closeSession) return;
+		const registry = this._extensionChannels?.registry;
+		if (!registry?.closeSession) return;
 		try {
-			await closeSession.call(this._extensionChannels.registry, sessionId, reason);
+			await registry.closeSession(sessionId, reason);
 		} catch (err) {
 			console.warn(`[session-manager] Failed to close extension channels for ${sessionId}:`, err);
 		}
