@@ -1,0 +1,15 @@
+name: propose-goal-iserror
+version: 1.0.0
+description: E2E fixture pack for propose_goal returned isError bridge preservation.
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: [proposal-iserror]
+  runtimes: []
+  workflows: []
