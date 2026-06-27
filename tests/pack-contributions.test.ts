@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { validateManifest } from "../src/server/agent/pack-manifest.ts";
 import { loadPackContributions, packIdFromRoot, PackContributionError } from "../src/server/agent/pack-contributions.ts";
+import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.ts";
 import { isPackPathWithinRoot } from "../src/server/extension-host/path-guard.ts";
 import type { PackEntry, PackManifest } from "../src/server/agent/pack-types.ts";
@@ -31,6 +32,27 @@ import type { PackEntry, PackManifest } from "../src/server/agent/pack-types.ts"
 let tmp: string;
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pack-contributions-")); });
 after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+describe("Extension Host channel contract", () => {
+	it("keeps HOST_API_VERSION stable and bumps HOST_CONTRACT_VERSION for channel contracts", () => {
+		assert.equal(HOST_API_VERSION, 1);
+		assert.equal(HOST_CONTRACT_VERSION, 4);
+		const textFrame: HostChannelFrame = { kind: "text", data: "hello" };
+		const jsonFrame: HostChannelFrame = { kind: "json", data: { ok: true } };
+		assert.deepEqual([textFrame.kind, jsonFrame.kind], ["text", "json"]);
+	});
+
+	it("exposes a typed generic HostChannelsApi without transport details", () => {
+		const channels: HostChannelsApi = {
+			open: async (name) => ({ id: "c1", name, state: "open", send: async () => {}, close: async () => {}, onFrame: () => () => {}, onClose: () => () => {} }),
+			attach: async (id) => ({ id, name: "terminal", state: "open", send: async () => {}, close: async () => {}, onFrame: () => () => {}, onClose: () => () => {} }),
+			list: async () => [{ id: "c1", name: "terminal", packId: "terminal", sessionId: "s1", state: "open", createdAt: 1, lastActiveAt: 2, attached: true }],
+		};
+		const host = { capabilities: { channels: true, has: (name: string) => name === "channels" }, channels } as HostApi;
+		assert.equal(host.capabilities.has("channels"), true);
+		assert.equal(typeof host.channels.open, "function");
+	});
+});
 
 function w(file: string, content: string): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -102,6 +124,7 @@ describe("validateManifest (§1.2)", () => {
 		assert.equal(m.provides, undefined);
 		assert.equal(m.requires, undefined);
 		assert.deepEqual(m.contents.providers, []);
+		assert.deepEqual(m.contents.channels, []);
 		assert.deepEqual(m.contents.hooks, []);
 		assert.deepEqual(m.contents.mcp, []);
 		assert.deepEqual(m.contents.piExtensions, []);
@@ -118,6 +141,7 @@ describe("validateManifest (§1.2)", () => {
 			contents: {
 				...ok.contents,
 				providers: ["memory"],
+				channels: ["terminal"],
 				hooks: ["turn"],
 				mcp: ["local"],
 				"pi-extensions": ["pi"],
@@ -130,11 +154,24 @@ describe("validateManifest (§1.2)", () => {
 		assert.deepEqual(m.provides, ["memory-api"]);
 		assert.deepEqual(m.requires, ["host-api"]);
 		assert.deepEqual(m.contents.providers, ["memory"]);
+		assert.deepEqual(m.contents.channels, ["terminal"]);
 		assert.deepEqual(m.contents.hooks, ["turn"]);
 		assert.deepEqual(m.contents.mcp, ["local"]);
 		assert.deepEqual(m.contents.piExtensions, ["pi"]);
 		assert.deepEqual(m.contents.runtimes, ["node"]);
 		assert.deepEqual(m.contents.workflows, ["review"]);
+	});
+
+	it("schema 2 rejects unsafe contents.channels basenames", () => {
+		for (const bad of ["../outside", "..", "a/b", "a\\b", "/abs", "C:\\drive", "with\0null", ""]) {
+			const problems: string[] = [];
+			assert.equal(
+				validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, channels: [bad] } }, problems),
+				null,
+				`expected ${JSON.stringify(bad)} to be rejected`,
+			);
+			assert.match(problems.join("; "), /channels entry/);
+		}
 	});
 
 	it("rejects bad capability names and warns on newer schemas without failing", () => {
@@ -143,10 +180,11 @@ describe("validateManifest (§1.2)", () => {
 		assert.equal(badProblems[0], 'pack.yaml: provides entry "Bad_Name" must match /^[a-z0-9][a-z0-9-]*$/');
 
 		const problems: string[] = [];
-		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"] } }, problems);
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
 		assert.ok(m);
 		assert.equal(m.schema, 3);
 		assert.deepEqual(m.contents.providers, ["memory"]);
+		assert.deepEqual(m.contents.channels, ["terminal"]);
 		assert.deepEqual(problems, ["pack.yaml: schema 3 is newer than supported (2)"]);
 	});
 });
@@ -162,6 +200,7 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			skills: [],
 			entrypoints: opts.entrypoints ?? [],
 			providers: opts.providers ?? [],
+			channels: opts.channels ?? [],
 			hooks: opts.hooks ?? [],
 			mcp: opts.mcp ?? [],
 			piExtensions: opts.piExtensions ?? [],
@@ -233,16 +272,85 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		assert.deepEqual(c.entrypoints.map((e) => e.id), ["evil.ok"]);
 	});
 
-	it("a no-tools pack still loads panels + entrypoints + routes", () => {
+	it("loads channels listed by contents.channels with canonical fields and inert unknowns", () => {
+		const root = packRoot("chan", "terminal-pack");
+		w(path.join(root, "pack.yaml"), "name: terminal-pack\n");
+		w(path.join(root, "channels", "terminal.yaml"), [
+			"name: terminal",
+			"protocol: terminal.v1",
+			"module: ../lib/terminal-channel.mjs",
+			"handler: terminal",
+			"capabilities: [sessionPty, futurePower]",
+			"requiresUserGesture: true",
+			"unknownTopLevel: ignored",
+			"quotas:",
+			"  maxChannelsPerSessionPerPack: 1",
+			"  maxFrameBytes: 65536",
+			"  maxInboundBufferedBytesPerChannel: 1048576",
+			"  maxInboundBufferedFramesPerChannel: 256",
+			"  maxOutboundBufferedBytesPerChannel: 1048576",
+			"  maxOutboundBufferedFramesPerChannel: 256",
+			"  maxBufferedBytesPerAttachedClient: 262144",
+			"  sendRateFramesPerSecond: 120",
+			"  sendRateBurstFrames: 240",
+			"  idleTimeoutMs: 1800000",
+			"  openTimeoutMs: 10000",
+			"  closeGraceMs: 2000",
+			"  maxBufferedBytes: 999999",
+			"  badNumber: nope",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "terminal-channel.mjs"), "export const channels = {};\n");
+		const c = loadPackContributions(root, { ...manifest("terminal-pack", { channels: ["terminal"] }), schema: 2 });
+		assert.equal(c.channels.length, 1);
+		assert.deepEqual(c.channels[0], {
+			name: "terminal",
+			protocol: "terminal.v1",
+			module: "../lib/terminal-channel.mjs",
+			handler: "terminal",
+			capabilities: ["sessionPty"],
+			requiresUserGesture: true,
+			quotas: {
+				maxChannelsPerSessionPerPack: 1,
+				maxFrameBytes: 65536,
+				maxInboundBufferedBytesPerChannel: 1048576,
+				maxInboundBufferedFramesPerChannel: 256,
+				maxOutboundBufferedBytesPerChannel: 1048576,
+				maxOutboundBufferedFramesPerChannel: 256,
+				maxBufferedBytesPerAttachedClient: 262144,
+				sendRateFramesPerSecond: 120,
+				sendRateBurstFrames: 240,
+				idleTimeoutMs: 1800000,
+				openTimeoutMs: 10000,
+				closeGraceMs: 2000,
+			},
+			listName: "terminal",
+			sourceFile: path.join(root, "channels", "terminal.yaml"),
+			packRoot: root,
+		});
+	});
+
+	it("drops channel declarations whose module resolves outside the pack root", () => {
+		const root = packRoot("chan-escape", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "channels", "bad.yaml"), "name: bad\nmodule: ../../../outside.mjs\n");
+		const c = loadPackContributions(root, { ...manifest("p", { channels: ["bad"] }), schema: 2 });
+		assert.deepEqual(c.channels, []);
+	});
+
+	it("a no-tools pack still loads panels + entrypoints + routes + channels", () => {
 		const root = packRoot("s1d", "ui-only");
 		w(path.join(root, "pack.yaml"), "name: ui-only\n");
 		w(path.join(root, "panels", "main.yaml"), "id: ui.main\nentry: lib/panel.js\n");
 		w(path.join(root, "entrypoints", "open.yaml"), "id: ui.open\nkind: composer-slash\nlabel: Open\ntarget:\n  panelId: ui.main\n");
+		w(path.join(root, "channels", "debug.yaml"), "name: debug\nmodule: ../lib/channel.js\n");
 		w(path.join(root, "lib", "panel.js"), "export default {};\n");
+		w(path.join(root, "lib", "channel.js"), "export default {};\n");
 		w(path.join(root, "lib", "routes.mjs"), "export const routes = {};\n");
-		const c = loadPackContributions(root, manifest("ui-only", { entrypoints: ["open"], routes: { module: "lib/routes.mjs", names: ["bundle"] } }));
+		const c = loadPackContributions(root, { ...manifest("ui-only", { entrypoints: ["open"], channels: ["debug"], routes: { module: "lib/routes.mjs", names: ["bundle"] } }), schema: 2 });
 		assert.equal(c.panels.length, 1);
 		assert.equal(c.entrypoints.length, 1);
+		assert.deepEqual(c.channels.map((ch) => ch.name), ["debug"]);
 		assert.deepEqual(c.routes?.names, ["bundle"]);
 	});
 });
@@ -270,6 +378,14 @@ describe("hard conflicts (§5.4)", () => {
 		const root = packRoot("c3", "p");
 		w(path.join(root, "pack.yaml"), "name: p\n");
 		assert.throws(() => loadPackContributions(root, manifest("p", { routes: { module: "lib/r.mjs", names: ["bundle", "bundle"] } })), (e) => e instanceof PackContributionError && /route name "bundle"/.test(e.message));
+	});
+
+	it("duplicate channel name within a pack → PackContributionError", () => {
+		const root = packRoot("c3-channel", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "channels", "a.yaml"), "name: dup\nmodule: ../lib/a.mjs\n");
+		w(path.join(root, "channels", "b.yaml"), "name: dup\nmodule: ../lib/b.mjs\n");
+		assert.throws(() => loadPackContributions(root, { ...manifest("p", { channels: ["a", "b"] }), schema: 2 }), (e) => e instanceof PackContributionError && /channel name "dup"/.test(e.message));
 	});
 
 	it("duplicate host-global routeId across DISTINCT packs → registry registers NEITHER deep-link", () => {
@@ -310,6 +426,45 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(all.filter((p) => p.packId === "artifacts").length, 1);
 		const pack = reg.getPack(undefined, "artifacts")!;
 		assert.deepEqual(pack.panels.map((p) => p.id), ["project.panel"]);
+	});
+
+	it("getChannel resolves a channel by packId/name without exposing module paths to wire metadata", () => {
+		const root = packRoot("reg-channel", "terminal-pack");
+		w(path.join(root, "pack.yaml"), "name: terminal-pack\n");
+		w(path.join(root, "channels", "terminal.yaml"), "name: terminal\nmodule: ../lib/channel.mjs\n");
+		w(path.join(root, "lib", "channel.mjs"), "export default {};\n");
+		const m = { ...manifest("terminal-pack", { channels: ["terminal"] }), schema: 2 };
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		const channel = reg.getChannel(undefined, "terminal-pack", "terminal")!;
+		assert.equal(channel.name, "terminal");
+		assert.equal(channel.module, "../lib/channel.mjs");
+		const wire = { packId: reg.getPack(undefined, "terminal-pack")!.packId, channelNames: reg.getPack(undefined, "terminal-pack")!.channels.map((c) => c.name) };
+		assert.deepEqual(wire, { packId: "terminal-pack", channelNames: ["terminal"] });
+		assert.equal(Object.hasOwn(wire, "module"), false);
+	});
+
+	it("strips unauthorized sessionPty capabilities but retains first-party declarations", () => {
+		const thirdPartyRoot = packRoot("reg-channel-auth-user", "third-party");
+		const builtinRoot = packRoot("reg-channel-auth-builtin", "builtin-terminal");
+		for (const [root, name] of [[thirdPartyRoot, "third-party"], [builtinRoot, "builtin-terminal"]] as const) {
+			w(path.join(root, "pack.yaml"), `name: ${name}\n`);
+			w(path.join(root, "channels", "terminal.yaml"), "name: terminal\nmodule: ../lib/channel.mjs\ncapabilities: [sessionPty]\n");
+			w(path.join(root, "lib", "channel.mjs"), "export default {};\n");
+		}
+		const thirdPartyManifest = { ...manifest("third-party", { channels: ["terminal"] }), schema: 2 };
+		const builtinManifest = { ...manifest("builtin-terminal", { channels: ["terminal"] }), schema: 2 };
+		const builtinEntry: PackEntry = {
+			...entry(builtinRoot, "server", builtinManifest),
+			id: "builtin-pack:builtin-terminal",
+			readOnly: true,
+			meta: { sourceUrl: "builtin:", sourceRef: "", commit: "", packName: "builtin-terminal", version: "1", installedAt: "", updatedAt: "", scope: "server" },
+		};
+		const reg = new PackContributionRegistry(() => [
+			entry(thirdPartyRoot, "project", thirdPartyManifest),
+			builtinEntry,
+		]);
+		assert.equal(reg.getChannel(undefined, "third-party", "terminal")!.capabilities, undefined);
+		assert.deepEqual(reg.getChannel(undefined, "builtin-terminal", "terminal")!.capabilities, ["sessionPty"]);
 	});
 
 	it("activation filtering: a disabled entrypoint is omitted; panels stay present", () => {

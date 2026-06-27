@@ -2560,6 +2560,8 @@ export interface PackContributionsWire {
 	packName: string;
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
+	/** Pack-local channel names only; module/handler paths stay server-side. */
+	channelNames?: string[];
 	routeNames: string[];
 }
 
