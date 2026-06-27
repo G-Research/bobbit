@@ -66,6 +66,27 @@ export interface SessionCostSnapshot {
 	cacheHitRate?: number | null;
 }
 
+export type HostChannelFrame =
+	| { kind: "text"; data: string }
+	| { kind: "json"; data: unknown };
+
+export interface HostChannelOpenInit {
+	data?: unknown;
+	singletonKey?: string;
+}
+
+export interface ChannelInfo {
+	id: string;
+	name: string;
+	packId: string;
+	sessionId: string;
+	state: "opening" | "open" | "closing" | "closed";
+	createdAt: number;
+	lastActiveAt: number;
+	attached: boolean;
+	closeReason?: string;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	| { type: "auth"; token: string }
@@ -94,6 +115,13 @@ export type ClientMessage =
 	| { type: "restart_agent" }
 	| { type: "resume"; fromSeq: number }
 	| { type: "status_resync" }
+	| { type: "ext_channel_open_grant"; requestId: string; surfaceToken: string; name: string; singletonKey?: string }
+	| { type: "ext_channel_open"; requestId: string; surfaceToken: string; name: string; init?: HostChannelOpenInit; openGrant: string }
+	| { type: "ext_channel_attach"; requestId: string; surfaceToken: string; channelId: string }
+	| { type: "ext_channel_list"; requestId: string; surfaceToken: string; opts?: { name?: string; includeClosed?: boolean } }
+	| { type: "ext_channel_send"; requestId: string; channelId: string; frame: HostChannelFrame }
+	| { type: "ext_channel_close"; requestId: string; channelId: string; reason?: string }
+	| { type: "ext_channel_detach"; requestId: string; channelId: string }
 	/**
 	 * C2 session-WRITE permit MINT (`host.session.postMessage` step 1) — design
 	 * extension-host-phase2.md §8 C2.1. The client requests a server-minted, one-time,
@@ -139,6 +167,10 @@ export interface SnapshotServerTiming {
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
 	| { type: "auth_ok" }
+	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
+	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string }
+	| { type: "ext_channel_frame"; channelId: string; frame: HostChannelFrame }
+	| { type: "ext_channel_close"; channelId: string; reason?: string; error?: string }
 	/** Async reply to an `ext_session_write_permit` mint (C2 session write, step 1).
 	 *  On success carries the opaque one-time `nonce` to attach to `ext_session_post`;
 	 *  on failure carries the server-side reason. */
