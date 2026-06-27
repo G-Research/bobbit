@@ -18,6 +18,7 @@ import { inferMeta } from "../agent/aigw-manager.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
+import { normalizeToolResultErrorSnapshot } from "../agent/tool-result-error-normalizer.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
@@ -861,7 +862,7 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = msgsResp.data as any;
+						const raw = normalizeToolResultErrorSnapshot(msgsResp.data as any);
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
@@ -982,7 +983,7 @@ export function handleWebSocketConnection(
 							restored.rpcClient.getMessages?.()
 								.then((msgs: any) => {
 									if (!msgs) return;
-									const raw = msgs.data ?? msgs;
+									const raw = normalizeToolResultErrorSnapshot(msgs.data ?? msgs);
 									let data: any = raw;
 									if (Array.isArray(raw)) {
 										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);

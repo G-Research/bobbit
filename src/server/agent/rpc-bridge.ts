@@ -11,6 +11,7 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
+import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -612,8 +613,10 @@ export class RpcBridge {
 		return this.sendCommand({ type: "compact" }, timeoutMs);
 	}
 
-	getMessages() {
-		return this.sendCommand({ type: "get_messages" });
+	async getMessages() {
+		const response = await this.sendCommand({ type: "get_messages" });
+		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+		return response;
 	}
 
 	async stop(): Promise<void> {
@@ -802,9 +805,10 @@ export class RpcBridge {
 				p.resolve(parsed);
 			} else {
 				this.recordPiExtensionLoadFailureFromEvent(parsed);
+				const normalized = normalizeToolResultErrorEvent(parsed);
 				// Agent event — forward to listeners
 				for (const listener of this.eventListeners) {
-					listener(parsed);
+					listener(normalized);
 				}
 			}
 		}
