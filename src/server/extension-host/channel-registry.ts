@@ -30,17 +30,31 @@ export interface ChannelClientSink {
 	autoDrain?: boolean;
 }
 
-export interface ChannelOpenRequest {
-	sessionId: string;
-	packId: string;
-	contribution: ChannelContributionRef;
-	init?: HostChannelOpenInit;
-	openGrant?: string;
-	clientId?: string;
-	client?: ChannelClientSink;
+interface LegacyChannelClient {
+	sendFrame?: (frame: HostChannelFrame) => void | Promise<void>;
+	close?: (ev: { reason?: string; error?: string }) => void | Promise<void>;
 }
 
-export interface ChannelOpenResult {
+type SurfaceBinding = { sessionId: string; packId: string; contributionId: string };
+type SurfaceBindingResolver = { resolve?: (token: string) => SurfaceBinding | undefined; validate?: (token: string) => SurfaceBinding | undefined };
+type ChannelContributionResolver = { getChannel?: (projectId: string | undefined, packId: string, name: string) => unknown };
+
+export interface ChannelOpenRequest {
+	sessionId: string;
+	projectId?: string;
+	packId?: string;
+	contribution?: ChannelContributionRef | Record<string, unknown>;
+	contributionId?: string;
+	channelName?: string;
+	name?: string;
+	surfaceToken?: string;
+	init?: HostChannelOpenInit | { data?: unknown; singletonKey?: string } | unknown;
+	openGrant?: string;
+	clientId?: string;
+	client?: ChannelClientSink | LegacyChannelClient;
+}
+
+export interface ChannelOpenResult extends ChannelInfo {
 	channelId: string;
 	info: ChannelInfo;
 	reused: boolean;
@@ -48,7 +62,9 @@ export interface ChannelOpenResult {
 
 export interface ChannelAttachRequest {
 	sessionId: string;
-	packId: string;
+	projectId?: string;
+	packId?: string;
+	surfaceToken?: string;
 	channelId: string;
 	clientId: string;
 	client?: ChannelClientSink;
@@ -56,7 +72,9 @@ export interface ChannelAttachRequest {
 
 export interface ChannelListRequest {
 	sessionId: string;
-	packId: string;
+	projectId?: string;
+	packId?: string;
+	surfaceToken?: string;
 	clientId?: string;
 	name?: string;
 	includeClosed?: boolean;
@@ -64,15 +82,19 @@ export interface ChannelListRequest {
 
 export interface ChannelSendRequest {
 	sessionId: string;
-	packId: string;
+	projectId?: string;
+	packId?: string;
+	surfaceToken?: string;
 	channelId: string;
-	clientId: string;
+	clientId?: string;
 	frame: unknown;
 }
 
 export interface ChannelCloseRequest {
 	sessionId: string;
-	packId: string;
+	projectId?: string;
+	packId?: string;
+	surfaceToken?: string;
 	channelId: string;
 	clientId?: string;
 	reason?: string;
@@ -80,11 +102,15 @@ export interface ChannelCloseRequest {
 
 export interface ChannelRegistryOptions {
 	grants?: ChannelOpenGrantStore;
+	openGrants?: ChannelOpenGrantStore;
 	dispatcher?: ChannelDispatcher;
 	quotas?: Partial<ChannelQuotaConfig>;
 	now?: () => number;
 	idGenerator?: () => string;
 	audit?: (event: ChannelAuditEvent) => void;
+	auditLog?: { write?: (event: ChannelAuditEvent) => void };
+	surfaceBindings?: SurfaceBindingResolver;
+	contributionRegistry?: ChannelContributionResolver;
 }
 
 interface ClientAttachment {
@@ -151,6 +177,8 @@ export class ChannelRegistry {
 	private readonly now: () => number;
 	private readonly idGenerator: () => string;
 	private readonly audit?: (event: ChannelAuditEvent) => void;
+	private readonly surfaceBindings?: SurfaceBindingResolver;
+	private readonly contributionRegistry?: ChannelContributionResolver;
 	private readonly channels = new Map<string, ChannelRecord>();
 	private readonly tupleIndex = new Map<string, string>();
 	private readonly singletonIndex = new Map<string, string>();
@@ -158,45 +186,39 @@ export class ChannelRegistry {
 
 	constructor(opts: ChannelRegistryOptions = {}) {
 		this.now = opts.now ?? Date.now;
-		this.audit = opts.audit;
+		this.audit = opts.audit ?? opts.auditLog?.write;
+		this.surfaceBindings = opts.surfaceBindings;
+		this.contributionRegistry = opts.contributionRegistry;
 		this.quotas = mergeChannelQuotas(opts.quotas);
-		this.grants = opts.grants ?? new ChannelOpenGrantStore({ now: this.now, audit: opts.audit });
+		this.grants = opts.grants ?? opts.openGrants ?? new ChannelOpenGrantStore({ now: this.now, audit: this.audit });
 		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher();
 		this.idGenerator = opts.idGenerator ?? (() => randomUUID());
 	}
 
 	async open(req: ChannelOpenRequest): Promise<ChannelOpenResult> {
-		const contributionId = requireNonEmpty(req.contribution.contributionId, "contributionId");
-		const channelName = requireNonEmpty(req.contribution.name, "channelName");
-		if (channelName !== req.contribution.name) throw new ChannelError(400, "invalid_channel", "channel name mismatch");
-		const singletonKey = normalizeSingletonKey(req.init?.singletonKey);
-		this.grants.consume(req.openGrant, {
-			sessionId: req.sessionId,
-			packId: req.packId,
-			contributionId,
-			channelName,
-			singletonKey,
-		});
+		const resolved = this.resolveOpenRequest(req);
+		const { sessionId, packId, contributionId, channelName, contribution, singletonKey, clientId, client, initData } = resolved;
+		this.grants.consume(req.openGrant, { sessionId, packId, contributionId, channelName, singletonKey });
 
-		const singletonId = singletonKey ? this.singletonIndex.get(singletonIndexKey(req.sessionId, req.packId, channelName, singletonKey)) : undefined;
+		const singletonId = singletonKey ? this.singletonIndex.get(singletonIndexKey(sessionId, packId, channelName, singletonKey)) : undefined;
 		const existing = singletonId ? this.channels.get(singletonId) : undefined;
 		if (existing && existing.state !== "closed") {
-			if (req.clientId) await this.attachInternal(existing, req.clientId, req.client);
+			if (clientId) await this.attachInternal(existing, clientId, client);
 			this.emit({ type: "channel.open", at: this.now(), ...auditRecord(existing), reason: "singleton_reuse" });
-			return { channelId: existing.id, info: this.info(existing, req.clientId), reused: true };
+			return this.openResult(existing, clientId, true);
 		}
 
-		const quotas = mergeChannelQuotas(this.quotas, req.contribution.quotas);
-		this.assertCanOpen(req.sessionId, req.packId, quotas);
+		const quotas = mergeChannelQuotas(this.quotas, contribution.quotas);
+		this.assertCanOpen(sessionId, packId, quotas);
 		const id = this.idGenerator();
 		const at = this.now();
 		const record: ChannelRecord = {
 			id,
-			sessionId: req.sessionId,
-			packId: req.packId,
+			sessionId,
+			packId,
 			contributionId,
 			name: channelName,
-			protocol: req.contribution.protocol,
+			protocol: contribution.protocol,
 			singletonKey,
 			state: "opening",
 			createdAt: at,
@@ -210,12 +232,12 @@ export class ChannelRegistry {
 			outboundFrames: 0,
 		};
 		this.index(record);
-		if (req.clientId) await this.attachInternal(record, req.clientId, req.client);
+		if (clientId) await this.attachInternal(record, clientId, client);
 
 		try {
 			record.handler = await this.withTimeout(
 				this.dispatcher.open({
-					contribution: req.contribution,
+					contribution,
 					ctx: {
 						sessionId: record.sessionId,
 						packId: record.packId,
@@ -223,7 +245,7 @@ export class ChannelRegistry {
 						channelId: record.id,
 						name: record.name,
 						protocol: record.protocol,
-						init: req.init?.data,
+						init: initData,
 						host: {},
 						send: async (frame) => { await this.sendFromHandler(record.id, frame); },
 						close: async (reason) => { await this.closeInternal(record, reason, "handler"); },
@@ -236,7 +258,7 @@ export class ChannelRegistry {
 			record.state = "open";
 			record.lastActiveAt = this.now();
 			this.emit({ type: "channel.open", at: record.lastActiveAt, ...auditRecord(record) });
-			return { channelId: id, info: this.info(record, req.clientId), reused: false };
+			return this.openResult(record, clientId, false);
 		} catch (err) {
 			await this.closeInternal(record, err instanceof Error ? err.message : "open failed", "handler");
 			this.emit({ type: "channel.open.reject", at: this.now(), ...auditRecord(record), error: err instanceof Error ? err.message : String(err) });
@@ -245,33 +267,42 @@ export class ChannelRegistry {
 	}
 
 	async attach(req: ChannelAttachRequest): Promise<ChannelInfo> {
-		const record = this.requireChannel(req.sessionId, req.packId, req.channelId, "attach");
-		await this.attachInternal(record, req.clientId, req.client);
+		const packId = this.resolvePackId(req);
+		const record = this.requireChannel(req.sessionId, packId, req.channelId, "attach");
+		await this.attachInternal(record, req.clientId, normalizeClientSink(req.client));
 		return this.info(record, req.clientId);
 	}
 
 	list(req: ChannelListRequest): ChannelInfo[] {
+		const packId = this.resolvePackId(req);
 		const infos: ChannelInfo[] = [];
 		for (const record of this.channels.values()) {
-			if (record.sessionId !== req.sessionId || record.packId !== req.packId) continue;
+			if (record.sessionId !== req.sessionId || record.packId !== packId) continue;
 			if (req.name && record.name !== req.name) continue;
 			infos.push(this.info(record, req.clientId));
 		}
 		if (req.includeClosed) {
 			for (const info of this.tombstones.values()) {
-				if (info.sessionId !== req.sessionId || info.packId !== req.packId) continue;
+				if (info.sessionId !== req.sessionId || info.packId !== packId) continue;
 				if (req.name && info.name !== req.name) continue;
 				infos.push({ ...info, attached: false });
 			}
 		}
-		this.emit({ type: "channel.list", at: this.now(), sessionId: req.sessionId, packId: req.packId, channelName: req.name });
+		this.emit({ type: "channel.list", at: this.now(), sessionId: req.sessionId, packId, channelName: req.name });
 		return infos.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 	}
 
-	async detach(sessionId: string, packId: string, channelId: string, clientId: string): Promise<boolean> {
-		const record = this.channels.get(channelId);
-		if (!record || record.sessionId !== sessionId || record.packId !== packId) return false;
-		return await this.detachInternal(record, clientId);
+	async detach(req: { sessionId: string; packId?: string; surfaceToken?: string; channelId: string; clientId?: string } | string, packId?: string, channelId?: string, clientId?: string): Promise<boolean> {
+		const input = typeof req === "string" ? { sessionId: req, packId, channelId, clientId } : req;
+		const resolvedPackId = this.resolvePackId(input);
+		const record = this.channels.get(String(input.channelId));
+		if (!record || record.sessionId !== input.sessionId || record.packId !== resolvedPackId) return false;
+		if (!input.clientId) {
+			let detached = false;
+			for (const attached of [...record.clients.keys()]) detached = (await this.detachInternal(record, attached)) || detached;
+			return detached;
+		}
+		return await this.detachInternal(record, input.clientId);
 	}
 
 	async detachClient(clientId: string): Promise<number> {
@@ -282,18 +313,28 @@ export class ChannelRegistry {
 		return detached;
 	}
 
+	async send(req: ChannelSendRequest): Promise<void> {
+		await this.sendFromClient(req);
+	}
+
+	async receiveClientFrame(req: ChannelSendRequest): Promise<void> {
+		await this.sendFromClient(req);
+	}
+
 	async sendFromClient(req: ChannelSendRequest): Promise<void> {
-		const record = this.requireChannel(req.sessionId, req.packId, req.channelId, "send");
-		if (!record.clients.has(req.clientId)) throw new ChannelError(403, "not_attached", "client is not attached to this channel");
+		const packId = this.resolvePackId(req);
+		const record = this.requireChannel(req.sessionId, packId, req.channelId, "send");
+		const clientId = req.clientId ?? (record.clients.size === 1 ? record.clients.keys().next().value : undefined);
+		if (!clientId || !record.clients.has(clientId)) throw new ChannelError(403, "not_attached", "client is not attached to this channel");
 		if (record.state !== "open") throw new ChannelError(409, "channel_not_open", "channel is not open");
 		const frame = this.validateFrameFor(record, req.frame);
 		const bytes = frameByteLength(frame);
-		this.assertClientSendRate(record, req.clientId);
+		this.assertClientSendRate(record, clientId);
 		this.assertInboundCapacity(record, bytes);
 		record.inboundBytes += bytes;
 		record.inboundFrames++;
 		record.lastActiveAt = this.now();
-		this.emit({ type: "channel.frame.in", at: record.lastActiveAt, ...auditRecord(record), clientId: req.clientId, frameKind: frame.kind, frameBytes: bytes });
+		this.emit({ type: "channel.frame.in", at: record.lastActiveAt, ...auditRecord(record), clientId, frameKind: frame.kind, frameBytes: bytes });
 		try {
 			await record.handler?.onClientFrame?.(frame);
 		} finally {
@@ -344,10 +385,15 @@ export class ChannelRegistry {
 	}
 
 	async close(req: ChannelCloseRequest): Promise<ChannelInfo> {
-		const record = this.requireChannel(req.sessionId, req.packId, req.channelId, "close");
+		const packId = this.resolvePackId(req);
+		const record = this.requireChannel(req.sessionId, packId, req.channelId, "close");
 		if (req.clientId && !record.clients.has(req.clientId)) throw new ChannelError(403, "not_attached", "client is not attached to this channel");
 		await this.closeInternal(record, req.reason, "registry");
 		return this.tombstones.get(record.id) ?? this.info(record);
+	}
+
+	async cleanupSession(req: { sessionId: string; reason?: string } | string): Promise<number> {
+		return this.closeSession(typeof req === "string" ? req : req.sessionId, typeof req === "string" ? undefined : req.reason);
 	}
 
 	async closeSession(sessionId: string, reason = "session closed"): Promise<number> {
@@ -384,6 +430,71 @@ export class ChannelRegistry {
 
 	activeCount(): number {
 		return this.channels.size;
+	}
+
+	private resolveOpenRequest(req: ChannelOpenRequest): {
+		sessionId: string;
+		packId: string;
+		contributionId: string;
+		channelName: string;
+		contribution: ChannelContributionRef;
+		singletonKey?: string;
+		clientId?: string;
+		client?: ChannelClientSink;
+		initData?: unknown;
+	} {
+		const initRecord = isRecord(req.init) ? req.init : undefined;
+		const singletonKey = normalizeSingletonKey(initRecord?.singletonKey);
+		let packId = req.packId;
+		let contributionId = req.contributionId;
+		const requestedName = typeof req.name === "string" ? req.name : req.channelName;
+		let rawContribution = req.contribution;
+		if (!rawContribution) {
+			const token = typeof req.surfaceToken === "string" ? req.surfaceToken : "";
+			const binding = this.resolveSurfaceBinding(token);
+			if (!binding) throw new ChannelError(403, "invalid_surface_token", "surface token is invalid or out of scope");
+			if (binding.sessionId !== req.sessionId) throw new ChannelError(403, "invalid_surface_token", "surface token session mismatch");
+			packId = binding.packId;
+			contributionId = binding.contributionId;
+			const channelName = requireNonEmpty(requestedName, "channelName");
+			rawContribution = this.contributionRegistry?.getChannel?.(req.projectId, packId, channelName) as Record<string, unknown> | undefined;
+			if (!rawContribution) throw new ChannelError(404, "channel_not_declared", "channel is not declared by this pack");
+		}
+		const contribution = normalizeContributionRef(rawContribution, {
+			contributionId: requireNonEmpty(contributionId ?? (rawContribution as ChannelContributionRef).contributionId, "contributionId"),
+			name: requestedName,
+		});
+		const channelName = requireNonEmpty(contribution.name, "channelName");
+		if (requestedName && channelName !== requestedName) throw new ChannelError(400, "invalid_channel", "channel name mismatch");
+		return {
+			sessionId: requireNonEmpty(req.sessionId, "sessionId"),
+			packId: requireNonEmpty(packId, "packId"),
+			contributionId: contribution.contributionId,
+			channelName,
+			contribution,
+			singletonKey,
+			clientId: req.clientId,
+			client: normalizeClientSink(req.client),
+			initData: initRecord && "data" in initRecord ? initRecord.data : req.init,
+		};
+	}
+
+	private resolveSurfaceBinding(token: string): SurfaceBinding | undefined {
+		return this.surfaceBindings?.resolve?.(token) ?? this.surfaceBindings?.validate?.(token);
+	}
+
+	private resolvePackId(req: { sessionId: string; packId?: string; surfaceToken?: string }): string {
+		if (req.packId) return req.packId;
+		const token = typeof req.surfaceToken === "string" ? req.surfaceToken : "";
+		const binding = this.resolveSurfaceBinding(token);
+		if (!binding) throw new ChannelError(403, "invalid_surface_token", "surface token is invalid or out of scope");
+		if (binding.sessionId !== req.sessionId) throw new ChannelError(403, "invalid_surface_token", "surface token session mismatch");
+		return binding.packId;
+	}
+
+	private openResult(record: ChannelRecord, clientId: string | undefined, reused: boolean): ChannelOpenResult {
+		const info = this.info(record, clientId);
+		return { ...info, channelId: record.id, info, reused };
 	}
 
 	private async attachInternal(record: ChannelRecord, clientId: string, sink?: ChannelClientSink): Promise<void> {
@@ -557,7 +668,68 @@ export class ChannelRegistry {
 	}
 }
 
-function requireNonEmpty(value: string, field: string): string {
+function normalizeClientSink(client: ChannelOpenRequest["client"] | ChannelAttachRequest["client"]): ChannelClientSink | undefined {
+	if (!client) return undefined;
+	const legacy = client as LegacyChannelClient;
+	if (legacy.sendFrame || legacy.close) {
+		return {
+			onFrame: legacy.sendFrame,
+			onClose: legacy.close,
+			autoDrain: (client as ChannelClientSink).autoDrain,
+		};
+	}
+	return client as ChannelClientSink;
+}
+
+function normalizeContributionRef(raw: ChannelContributionRef | Record<string, unknown>, fallback: { contributionId: string; name?: string }): ChannelContributionRef {
+	const record = raw as Record<string, unknown>;
+	const name = typeof record.name === "string" ? record.name : fallback.name;
+	return {
+		contributionId: typeof record.contributionId === "string" && record.contributionId ? record.contributionId : fallback.contributionId,
+		name: requireNonEmpty(name, "channelName"),
+		protocol: typeof record.protocol === "string" ? record.protocol : undefined,
+		modulePath: typeof record.modulePath === "string" ? record.modulePath : typeof record.module === "string" ? record.module : undefined,
+		handler: typeof record.handler === "string" ? record.handler : undefined,
+		packRoot: typeof record.packRoot === "string" ? record.packRoot : undefined,
+		capabilities: Array.isArray(record.capabilities) ? record.capabilities.filter((cap): cap is string => typeof cap === "string") : undefined,
+		quotas: normalizeContributionQuotas(record),
+	};
+}
+
+function normalizeContributionQuotas(record: Record<string, unknown>): Partial<ChannelQuotaConfig> | undefined {
+	const source = isRecord(record.quotas) ? { ...record, ...record.quotas } : record;
+	const out: Partial<ChannelQuotaConfig> = {};
+	copyInt(source, out, "maxChannelsPerSessionPerPack", "maxChannelsPerSessionPerPack");
+	copyInt(source, out, "maxGatewayChannels", "maxGatewayChannels");
+	copyInt(source, out, "maxFrameBytes", "maxFrameBytes");
+	copyInt(source, out, "maxInboundBytes", "maxInboundBytes", "maxInboundBufferedBytesPerChannel", "maxInboundBufferedBytes");
+	copyInt(source, out, "maxInboundFrames", "maxInboundFrames", "maxInboundBufferedFramesPerChannel", "maxInboundBufferedFrames");
+	copyInt(source, out, "maxOutboundBytes", "maxOutboundBytes", "maxOutboundBufferedBytesPerChannel", "maxOutboundBufferedBytes");
+	copyInt(source, out, "maxOutboundFrames", "maxOutboundFrames", "maxOutboundBufferedFramesPerChannel", "maxOutboundBufferedFrames");
+	copyInt(source, out, "maxClientOutboundBytes", "maxClientOutboundBytes", "maxBufferedBytesPerAttachedClient");
+	copyInt(source, out, "maxClientOutboundFrames", "maxClientOutboundFrames", "maxAttachedClientBufferedFrames");
+	copyInt(source, out, "maxClientSendRatePerSecond", "maxClientSendRatePerSecond", "sendRateFramesPerSecond", "maxInboundFramesPerSecond");
+	copyInt(source, out, "idleTimeoutMs", "idleTimeoutMs");
+	copyInt(source, out, "openTimeoutMs", "openTimeoutMs");
+	copyInt(source, out, "closeGraceMs", "closeGraceMs");
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function copyInt(source: Record<string, unknown>, out: Partial<ChannelQuotaConfig>, target: keyof ChannelQuotaConfig, ...keys: string[]): void {
+	for (const key of keys) {
+		const value = source[key];
+		if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+			out[target] = value;
+			return;
+		}
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireNonEmpty(value: unknown, field: string): string {
 	if (typeof value !== "string" || value.length === 0) throw new ChannelError(400, "invalid_channel", `${field} is required`);
 	return value;
 }
