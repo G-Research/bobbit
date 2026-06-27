@@ -40,4 +40,40 @@ test.describe("ProposalRenderer — failed goal proposal", () => {
 		const workflowIds = result.openDetail?.workflowValidationError?.availableWorkflows?.map((workflow: { id: string }) => workflow.id) ?? [];
 		expect(workflowIds, "plaintext workflow failures should keep valid workflow IDs available for the proposal panel").toEqual(["general", "feature"]);
 	});
+
+	test("infers missing-workflow failures when older transcripts have isError false", async ({ page }) => {
+		const result = await page.evaluate(() => (window as any).__renderUnflaggedFailedGoalProposal());
+
+		expect(result.failedCard, "known workflow-validation text should render as failed even if isError was dropped").toBe(true);
+		expect(result.hasRev, "inferred failures must not emit a successful rev marker").toBe(false);
+		expect(result.openDetail).toMatchObject({
+			type: "goal",
+			workflowValidationError: {
+				code: "MISSING_WORKFLOW",
+				message: "Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: general, feature.",
+			},
+		});
+	});
+
+	test("infers structured UNKNOWN_WORKFLOW failures without poisoning available workflow details", async ({ page }) => {
+		const result = await page.evaluate(() => (window as any).__renderStructuredUnknownWorkflow());
+
+		expect(result.failedCard).toBe(true);
+		expect(result.errorText).toContain('Unknown workflow "legacy"');
+		expect(result.openDetail?.workflowValidationError?.code).toBe("UNKNOWN_WORKFLOW");
+		expect(result.openDetail?.workflowValidationError?.availableWorkflows).toEqual([
+			{ id: "general", name: "General" },
+			{ id: "feature", name: "Feature" },
+		]);
+	});
+
+	test("does not infer failure for normal unflagged rev-backed proposal results", async ({ page }) => {
+		const result = await page.evaluate(() => (window as any).__renderNormalUnflaggedGoalProposal());
+
+		expect(result.failedCard).toBe(false);
+		expect(result.errorText).toBe("");
+		expect(result.hasRev).toBe(true);
+		expect(result.openDetail).toMatchObject({ type: "goal", rev: 3 });
+		expect(result.openDetail?.workflowValidationError).toBeUndefined();
+	});
 });

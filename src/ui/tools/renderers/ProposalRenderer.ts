@@ -8,9 +8,19 @@ import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import "../../../ui/components/ExpandableSection.js";
-import { parseProposalErrorFromResult, parseRevFromResult } from "./proposal-rev-marker.js";
+import {
+	isWorkflowValidationProposalError,
+	parseProposalErrorFromResult,
+	parseRevFromResult,
+	workflowValidationErrorFromProposalResult,
+} from "./proposal-rev-marker.js";
 import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
-export { parseProposalErrorFromResult, parseRevFromResult } from "./proposal-rev-marker.js";
+export {
+	isWorkflowValidationProposalError,
+	parseProposalErrorFromResult,
+	parseRevFromResult,
+	workflowValidationErrorFromProposalResult,
+} from "./proposal-rev-marker.js";
 
 /** Map tool name → display label and proposal type key */
 const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField: string; previewField: string }> = {
@@ -64,23 +74,6 @@ function formatProposalErrorMessage(result: ToolResultMessage | undefined): stri
 	return parts.join(" ");
 }
 
-function workflowValidationErrorDetail(
-	result: ToolResultMessage | undefined,
-	fields: Record<string, any> | null,
-): Record<string, unknown> | undefined {
-	const details = parseProposalErrorFromResult(result);
-	if (!details || (details.code !== "MISSING_WORKFLOW" && details.code !== "UNKNOWN_WORKFLOW")) return undefined;
-	const workflowId = typeof fields?.workflow === "string" ? fields.workflow : undefined;
-	return {
-		code: details.code,
-		message: details.message,
-		...(workflowId !== undefined ? { workflowId } : {}),
-		...(details.availableWorkflowIds.length > 0
-			? { availableWorkflows: details.availableWorkflowIds.map((id) => ({ id })) }
-			: {}),
-	};
-}
-
 export class ProposalRenderer implements ToolRenderer {
 	private _toolName: string;
 
@@ -113,10 +106,13 @@ export class ProposalRenderer implements ToolRenderer {
 
 		const title = fields?.[meta.titleField] || "";
 		const preview = fields?.[meta.previewField] || "";
-		const isFailedGoalProposal = this._toolName === "propose_goal" && Boolean(result?.isError);
+		const isWorkflowValidationFailure = this._toolName === "propose_goal" && isWorkflowValidationProposalError(result);
+		const isFailedGoalProposal = this._toolName === "propose_goal" && (Boolean(result?.isError) || isWorkflowValidationFailure);
 		const rev = isFailedGoalProposal ? undefined : parseRevFromResult(result);
 		const errorMessage = isFailedGoalProposal ? formatProposalErrorMessage(result) : "";
-		const workflowValidationError = isFailedGoalProposal ? workflowValidationErrorDetail(result, fields) : undefined;
+		const workflowValidationError = isFailedGoalProposal
+			? workflowValidationErrorFromProposalResult(result, fields)
+			: undefined;
 
 		// Handler for the "Open proposal" button
 		const openProposal = (e: Event) => {
