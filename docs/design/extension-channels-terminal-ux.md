@@ -8,7 +8,7 @@
 Research targets: `src/app/pack-panels.ts`, `src/app/pack-entrypoints.ts`, `src/app/side-panel-workspace.ts`, `src/app/session-actions.ts`, `src/ui/components/MessageEditor.ts`, `market-packs/pr-walkthrough/entrypoints/*.yaml`, `market-packs/artifacts/src/ArtifactViewerPanel.ts`.
 
 - **Panels are pack-scoped side-panel tabs.** A pack panel is opened through `host.ui.openPanel({ panelId, params, sessionId? })`, mounted as a `kind:"pack"` side-panel tab, and restored from per-session panel workspace state. Terminal must follow this model, not add a bespoke core panel path.
-- **Entrypoints are explicit user launchers.** `session-menu` launchers render in the session actions overflow; `composer-slash` launchers render as synthetic slash menu rows and dispatch only after send. Selecting/clicking the launcher is the trusted user gesture.
+- **Entrypoints are explicit user launchers.** `session-menu` launchers render in the session actions overflow; `composer-slash` launchers render as synthetic slash menu rows and dispatch only after send. Selecting/clicking the launcher lets Bobbit-owned launcher code mint the required one-shot channel open grant; the server never trusts a client-only gesture flag.
 - **Open means focus.** Existing `openPackPanel` mounts/focuses the tab and, when `sessionId` is supplied, switches through the canonical session switcher. Terminal should reuse that open/focus behavior.
 - **Panels rehydrate by stable identity.** Existing pack panels receive small typed params and rehydrate via Host APIs/stores. Terminal should rehydrate by `{ protocol:"terminal", channelName:"terminal", sessionId }`/channel id, never by raw URL or token.
 - **Styling should match pack panels.** Use compact header rows, `border-border`, `bg-background`, `text-foreground`, `text-muted-foreground`, and small rounded action buttons, matching the artifact viewer and side-panel shell.
@@ -56,8 +56,8 @@ Header control rules:
 - Render as a normal session-menu entry in the existing session actions overflow, near other session-level actions.
 - Label: `Open Terminal`.
 - On click:
-  1. Treat the click as the trusted user gesture.
-  2. Resolve/open the session-persistent terminal channel for the selected session.
+  1. Consume the click in Bobbit-owned launcher code and mint a server-verifiable one-shot channel open grant bound to the selected session and terminal singleton.
+  2. Resolve/open the session-persistent terminal channel for the selected session using that grant.
   3. Open or focus the terminal side-panel tab for that same session.
   4. If a terminal already exists, attach/focus it instead of creating a second session terminal.
 
@@ -136,7 +136,7 @@ Use Bobbit tokens directly; do not hardcode palettes in the panel or pack CSS.
 
 ## Empty, error, and quota states
 
-- **No channel yet:** shown only before launcher completes; prefer `Connecting terminal…` rather than a manual `Start` button because launch is already the user gesture.
+- **No channel yet:** shown only before launcher completes; prefer `Connecting terminal…` rather than a manual `Start` button because launch already minted a one-shot server open grant from the user action.
 - **Quota denied:** explain the limit and next step: `Terminal limit reached for this session. Close or kill another terminal, then retry.` If v1 supports only one terminal per session, say so directly.
 - **Read-only/sandbox constraints:** show a non-blocking note only when behavior differs from a normal shell. The PTY itself should already run in the correct session/worktree/sandbox context.
 - **Channel closed remotely:** keep scrollback visible; replace prompt interaction with a status strip and `Restart`.

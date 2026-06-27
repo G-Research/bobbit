@@ -111,7 +111,7 @@ Proposed WS protocol additions in `src/server/ws/protocol.ts`:
 
 ```ts
 // client -> server
-| { type: "ext_channel_open"; requestId: string; surfaceToken: string; name: string; init?: HostChannelOpenInit; openGrant?: string }
+| { type: "ext_channel_open"; requestId: string; surfaceToken: string; name: string; init?: HostChannelOpenInit; openGrant: string }
 | { type: "ext_channel_attach"; requestId: string; surfaceToken: string; channelId: string }
 | { type: "ext_channel_list"; requestId: string; surfaceToken: string; name?: string; includeClosed?: boolean }
 | { type: "ext_channel_send"; requestId: string; channelId: string; frame: HostChannelFrame }
@@ -124,7 +124,7 @@ Proposed WS protocol additions in `src/server/ws/protocol.ts`:
 | { type: "ext_channel_close"; channelId: string; reason?: string; error?: string };
 ```
 
-`openGrant` is an opaque, one-shot, server-minted token, not a client assertion. It is optional because direct `host.channels.open()` calls can rely on the existing synchronous browser gesture check, while trusted Bobbit launchers use a server-verifiable grant. The server rejects unknown, expired, mismatched, or replayed grants. There is no `trustedLauncher` boolean or equivalent authority-bearing client flag.
+`openGrant` is an opaque, one-shot, server-minted permit, not a client assertion, and it is required for every process-creating `ext_channel_open`. Direct user-gesture opens and trusted Bobbit launcher opens both first mint a server-verifiable grant bound to `{ sessionId, packId, contributionId, channelName, singletonKey }`, then consume it on `ext_channel_open`. The server rejects missing, unknown, expired, mismatched, or replayed grants before handler or PTY creation. There is no `trustedLauncher` boolean or equivalent authority-bearing client flag.
 
 `ext_channel_send` and close frames do not carry a surface token. The server only accepts them from a WebSocket connection that has already successfully opened or attached that `{ sessionId, packId, channelId }` tuple; otherwise it rejects with `UNAUTHORIZED` or `CHANNEL_NOT_FOUND`.
 
@@ -154,10 +154,8 @@ This lets a terminal launcher create or focus a session-persistent terminal with
 1. WS handler receives `ext_channel_open` on an authenticated session connection.
 2. Resolve the surface token with `resolveSurfaceIdentity({ headerSessionId: sessionId, ... })`.
 3. Reject if the surface token session does not match the WS session.
-4. Reject if channel creation lacks either:
-   - a real user gesture propagated by the client bridge, or
-   - a server-verifiable one-shot `openGrant` minted for a trusted Bobbit platform launcher and bound to this session, pack, contribution, channel name, and singleton key.
-5. Reject forged, expired, replayed, or mismatched grants; never accept a client-supplied launcher-trust boolean.
+4. Require a server-verifiable one-shot `openGrant` bound to this session, pack, contribution, channel name, and singleton key. The grant may have been minted from a synchronous direct user gesture or by trusted Bobbit platform launcher code, but the WS open path never accepts bare gesture claims.
+5. Reject missing, forged, expired, replayed, or mismatched grants; never accept a client-supplied launcher-trust boolean.
 6. Resolve `name` against `PackContributionRegistry.getChannel(projectId, packId, name)`.
 7. Enforce quotas and singleton reuse.
 8. Allocate the channel and start the pack handler.
@@ -407,24 +405,27 @@ Minimum fields: timestamp, event, sessionId, projectId, packId, channelName, cha
 
 The immediate implementation can use the existing server logger/console style, but should centralize event construction in `channel-registry.ts` so it can later route to a durable audit sink.
 
-## 11. User gesture and trusted launcher requirement
+## 11. User gesture, open grants, and trusted launcher requirement
 
-Interactive channel creation can create durable processes. Therefore:
+Interactive channel creation can create durable processes. Therefore every `ext_channel_open` requires a server-verifiable one-shot `openGrant`; a bare WS open with only a surface token must be rejected even if the client claims a gesture.
 
-- Direct pack calls to `host.channels.open()` require a real user gesture by default, using the same `consumeGesture()` style as `host.session.postMessage` before any asynchronous work.
-- `attach()` and `list()` do not require a gesture; they are needed for remount/reload recovery and do not create a new process.
-- Trusted Bobbit platform launchers may open a channel without relying on the panel's later mount stack, but trust is represented by a server-verifiable one-shot open grant, never by a client-supplied boolean.
+Grant minting has two allowed sources:
+
+- **Direct pack call from a real user gesture:** `host.channels.open()` synchronously consumes browser user activation (same prologue pattern as `host.session.postMessage`), asks the gateway to mint a short-lived open grant bound to `{ sessionId, packId, contributionId, channelName, singletonKey }`, then sends `ext_channel_open` with that grant. If user activation is absent, grant minting fails and no open frame is sent.
+- **Trusted Bobbit platform launcher:** launcher-owned app code asks the gateway to mint the same bound one-shot grant as part of the click/slash dispatch. The grant is opaque to pack code and is never a pack-callable bypass.
+
+`attach()` and `list()` do not require a grant; they are needed for remount/reload recovery and do not create a new process.
 
 For terminal, the preferred flow is:
 
 1. User clicks a session-menu entrypoint such as **Open Terminal**.
 2. `runLauncherEntrypoint()` recognizes a structured channel-panel target, e.g. `{ action: "open-channel-panel", channel: "terminal", panelId: "terminal.panel", singletonKey: "default" }`.
 3. Bobbit-owned launcher code asks the gateway to mint a short-lived open grant bound to `{ sessionId, packId, contributionId, channelName: "terminal", singletonKey: "default" }`. The grant is stored/validated server-side or encoded as an opaque signed nonce; it expires quickly and is consumed once.
-4. The launcher calls `host.channels.open("terminal", { singletonKey: "default" })` through the bridge with that opaque `openGrant`. The server independently validates the grant against the surface token, WS session, channel name, singleton key, and contribution before creating any process.
+4. The launcher calls `host.channels.open("terminal", { singletonKey: "default" })` through the bridge with that opaque `openGrant`. The server independently validates the grant against the surface token, WS session, channel name, singleton key, and contribution before creating any process. Direct user-gesture opens use the same grant-mint-and-consume sequence.
 5. It opens/focuses the pack panel with `{ channelId }` params.
 6. Closing the panel tab detaches UI only. Kill/Restart are explicit terminal actions.
 
-A forged `ext_channel_open` carrying a made-up, expired, replayed, or mismatched `openGrant` must be rejected. There is no accepted `trustedLauncher` field. This avoids the anti-pattern where a panel auto-opens a process on mount without a gesture, while also avoiding a client-asserted trust bypass.
+An `ext_channel_open` with no grant, or with a made-up, expired, replayed, or mismatched `openGrant`, must be rejected. There is no accepted `trustedLauncher` field. This avoids the anti-pattern where a panel auto-opens a process on mount without a gesture, while also avoiding a client-asserted trust bypass.
 
 ## 12. Terminal protocol convention
 
@@ -529,7 +530,7 @@ UI behavior:
 4. **Server substrate:** add `channel-registry.ts`, `channel-dispatcher.ts`, `channel-module-host.ts`, and channel quota/error types under `src/server/extension-host/`.
 5. **WS transport:** extend `src/server/ws/protocol.ts` and `src/server/ws/handler.ts`; add `src/app/channel-bridge.ts`; wire `host.channels` in `src/app/host-api.ts`.
 6. **Lifecycle hooks:** thread the registry into server bootstrap, `handleWebSocketConnection`, resolver invalidation, gateway shutdown, and `SessionManager.terminateSession()` cleanup.
-7. **Trusted launcher support:** extend `src/app/pack-entrypoints.ts`, `src/app/session-actions.ts`, and `src/ui/components/MessageEditor.ts` only as needed for channel-panel launcher targets plus server-minted one-shot open grants; never introduce a client-trusted `trustedLauncher` flag.
+7. **Open-grant support:** extend `src/app/pack-entrypoints.ts`, `src/app/session-actions.ts`, and `src/ui/components/MessageEditor.ts` only as needed for channel-panel launcher targets plus server-minted one-shot open grants for both direct gestures and trusted launchers; never allow bare WS opens or introduce a client-trusted `trustedLauncher` flag.
 8. **PTY helper:** add `src/server/extension-host/pty-helper.ts` and proxy support in the channel module host. Gate `ctx.host.pty` on an authorized `capabilities: [sessionPty]` channel declaration restricted to first-party/reviewed packs. Ensure sandboxed sessions fail closed unless launched inside the sandbox.
 9. **Built-in terminal pack:** add `market-packs/terminal/` with channel, panel, entrypoint, xterm UI, and terminal handler.
 10. **Docs/tests follow-up:** update authoring docs and add unit/API/browser E2E tests for registry auth, open/send/attach/close, quota denial, session cleanup, reload reattach, restart disconnected state, and terminal UX.
@@ -538,7 +539,7 @@ UI behavior:
 
 - Unit: channel frame validation, inbound/outbound quota and backpressure, singleton reuse, idle close, `PackContributionRegistry.getChannel`, duplicate channel rejection.
 - Unit: surface token auth rejects wrong session, wrong pack, stale pack, missing handler, caller-supplied pack identity attempts, generic channel handlers without `sessionPty`, and `sessionPty` declarations from packs outside the first-party/reviewed allowlist.
-- API/WS E2E: open, send both directions, attach from remount, detach on WS close without handler close, explicit close, session termination cleanup, quota denial, sustained client input backpressure, sustained handler output backpressure, and forged/expired/replayed/mismatched open-grant rejection.
+- API/WS E2E: open, send both directions, attach from remount, detach on WS close without handler close, explicit close, session termination cleanup, quota denial, sustained client input backpressure, sustained handler output backpressure, and missing/forged/expired/replayed/mismatched open-grant rejection before handler/PTY creation.
 - Restart E2E: open channel, restart gateway, reload/attach shows closed/disconnected and allows a new open.
 - Browser E2E: Open Terminal from session menu, run a simple command, resize, reload and reattach, type `exit`, Kill, Restart, Close panel detach.
 - Existing Extension Host tests must remain green: renderer/action/panel/route/store/session/surface-token invariants.
