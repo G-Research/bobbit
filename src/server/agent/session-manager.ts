@@ -49,6 +49,8 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
@@ -885,7 +887,8 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
-	const sanitized = sanitizeProviderAuthEventForEmit(truncated);
+	const normalized = normalizeToolResultErrorEvent(truncated);
+	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
 	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
 	const entry = session.eventBuffer.push(spliced);
 	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
@@ -2511,7 +2514,7 @@ export class SessionManager {
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = [...activation.args, ...piExtensionActivation.args];
+		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		const roleBaseTools = role && this.toolManager
@@ -5836,7 +5839,7 @@ export class SessionManager {
 
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = msgs.data;
+				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
 				let data: any = raw;
 				if (Array.isArray(raw)) {
 					const spliced = spliceInFlightSteers(
@@ -6943,7 +6946,7 @@ export class SessionManager {
 		try {
 			const msgs = await rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = msgs.data;
+				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
 				let data: any = raw;
 				if (Array.isArray(raw)) {
 					data = spliceInFlightSteers(
@@ -7469,7 +7472,7 @@ export class SessionManager {
 					// Skip malformed lines
 				}
 			}
-			return truncateLargeToolContentInMessages(messages) as unknown[];
+			return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
 		} catch {
 			return [];
 		}

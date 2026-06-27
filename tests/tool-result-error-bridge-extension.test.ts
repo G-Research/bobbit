@@ -1,0 +1,57 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { generateToolResultErrorBridgeExtension } from "../src/server/agent/tool-result-error-bridge-extension.js";
+
+async function loadGeneratedExtension(): Promise<(pi: any) => void> {
+	const source = generateToolResultErrorBridgeExtension();
+	const mod = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+	return mod.default;
+}
+
+function makePi() {
+	const handlers = new Map<string, Function>();
+	const pi: any = {
+		tool(spec: any, handler?: Function) {
+			const name = typeof spec === "string" ? spec : spec.name;
+			const fn = handler ?? spec.handler ?? spec.execute;
+			handlers.set(name, fn);
+		},
+	};
+	pi.tools = { register: (...args: any[]) => pi.tool(...args) };
+	return { pi, handlers };
+}
+
+describe("tool result error bridge extension", () => {
+	it("throws returned isError:true results so pi marks the tool result errored", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "x" }, async () => ({ content: [{ type: "text", text: "validation failed" }], isError: true }));
+
+		await assert.rejects(
+			() => handlers.get("x")!({}),
+			(err: any) => err?.isError === true && /validation failed/.test(err.message),
+		);
+	});
+
+	it("throws returned is_error:true results", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tools.register({ name: "x" }, async () => ({ content: [{ type: "text", text: "snake failed" }], is_error: true }));
+
+		await assert.rejects(
+			() => handlers.get("x")!({}),
+			(err: any) => err?.is_error === true && /snake failed/.test(err.message),
+		);
+	});
+
+	it("preserves successful returned results", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "x" }, async () => ({ content: [{ type: "text", text: "ok" }] }));
+
+		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
+	});
+});
