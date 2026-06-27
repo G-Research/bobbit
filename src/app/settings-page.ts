@@ -5082,10 +5082,10 @@ function parseAgentDirState(data: any): AgentDirDisplayState {
 	const nextStartSource = firstString(source?.nextStartSource, source?.nextStart?.source, source?.effectiveNextStartSource) ?? startupSource;
 	const envOverride = (() => {
 		const raw = source?.envOverride;
-		if (raw === true) return startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : "environment variable";
-		if (!raw) return startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : null;
+		if (raw === true) return startupSource === "BOBBIT_AGENT_DIR" ? startupSource : "environment variable";
+		if (!raw) return startupSource === "BOBBIT_AGENT_DIR" ? startupSource : null;
 		if (typeof raw === "string") return raw;
-		return firstString(raw.name, raw.source, raw.key, raw.variable) ?? (startupSource === "BOBBIT_AGENT_DIR" || startupSource === "PI_CODING_AGENT_DIR" ? startupSource : null);
+		return firstString(raw.name, raw.source, raw.key, raw.variable) ?? (startupSource === "BOBBIT_AGENT_DIR" ? startupSource : null);
 	})();
 	return {
 		activePath,
