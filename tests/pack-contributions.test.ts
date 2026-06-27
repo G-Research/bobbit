@@ -313,13 +313,12 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 			quotas: {
 				maxChannelsPerSessionPerPack: 1,
 				maxFrameBytes: 65536,
-				maxInboundBufferedBytesPerChannel: 1048576,
-				maxInboundBufferedFramesPerChannel: 256,
-				maxOutboundBufferedBytesPerChannel: 1048576,
-				maxOutboundBufferedFramesPerChannel: 256,
-				maxBufferedBytesPerAttachedClient: 262144,
-				sendRateFramesPerSecond: 120,
-				sendRateBurstFrames: 240,
+				maxInboundBytes: 1048576,
+				maxInboundFrames: 256,
+				maxOutboundBytes: 1048576,
+				maxOutboundFrames: 256,
+				maxClientOutboundBytes: 262144,
+				maxClientSendRatePerSecond: 120,
 				idleTimeoutMs: 1800000,
 				openTimeoutMs: 10000,
 				closeGraceMs: 2000,
@@ -330,12 +329,14 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		});
 	});
 
-	it("drops channel declarations whose module resolves outside the pack root", () => {
+	it("rejects channel declarations whose module resolves outside the pack root", () => {
 		const root = packRoot("chan-escape", "p");
 		w(path.join(root, "pack.yaml"), "name: p\n");
 		w(path.join(root, "channels", "bad.yaml"), "name: bad\nmodule: ../../../outside.mjs\n");
-		const c = loadPackContributions(root, { ...manifest("p", { channels: ["bad"] }), schema: 2 });
-		assert.deepEqual(c.channels, []);
+		assert.throws(
+			() => loadPackContributions(root, { ...manifest("p", { channels: ["bad"] }), schema: 2 }),
+			(err: unknown) => err instanceof PackContributionError && /outside the pack root/i.test(err.message),
+		);
 	});
 
 	it("a no-tools pack still loads panels + entrypoints + routes + channels", () => {

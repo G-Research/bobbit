@@ -37,7 +37,9 @@ describe("host.channels — public Host API contract", () => {
 		const src = fs.readFileSync(path.join(process.cwd(), "src", "app", "host-api.ts"), "utf-8");
 		assert.match(src, /channels:\s*true/, "client capability flags must include channels: true");
 		assert.match(src, /has:\s*\(name:\s*string\).*channels|\(flags as Record<string, boolean>\)\[name\]/s, "capabilities.has(name) must reflect the flags map, including channels");
-		assert.match(src, /channels:\s*\{[\s\S]*open[\s\S]*attach[\s\S]*list/, "client host must expose host.channels.open/attach/list");
+		assert.match(src, /channels:\s*createHostChannelsApi/, "client host must expose host.channels through the private channel bridge");
+		const bridgeSrc = fs.readFileSync(path.join(process.cwd(), "src", "app", "channel-bridge.ts"), "utf-8");
+		assert.match(bridgeSrc, /return\s*\{[\s\S]*open\(name, init\)[\s\S]*attach\(id\)[\s\S]*list\(optsList\)/, "channel bridge must expose open/attach/list only through HostChannel abstraction");
 		assert.doesNotMatch(src, /terminal:\s*\{|host\.terminal/i, "no host.terminal shortcut");
 		assert.doesNotMatch(src, /gateway:\s*\{|return\s+.*gateway/i, "no raw gateway passthrough on the host object");
 	});

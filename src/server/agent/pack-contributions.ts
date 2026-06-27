@@ -146,15 +146,16 @@ export type ChannelCapability = "sessionPty";
 
 export interface ChannelQuotas {
 	maxChannelsPerSessionPerPack?: number;
-	idleTimeoutMs?: number;
+	maxGatewayChannels?: number;
 	maxFrameBytes?: number;
-	maxInboundBufferedBytesPerChannel?: number;
-	maxInboundBufferedFramesPerChannel?: number;
-	maxOutboundBufferedBytesPerChannel?: number;
-	maxOutboundBufferedFramesPerChannel?: number;
-	maxBufferedBytesPerAttachedClient?: number;
-	sendRateFramesPerSecond?: number;
-	sendRateBurstFrames?: number;
+	maxInboundBytes?: number;
+	maxInboundFrames?: number;
+	maxOutboundBytes?: number;
+	maxOutboundFrames?: number;
+	maxClientOutboundBytes?: number;
+	maxClientOutboundFrames?: number;
+	maxClientSendRatePerSecond?: number;
+	idleTimeoutMs?: number;
 	openTimeoutMs?: number;
 	closeGraceMs?: number;
 }
@@ -413,18 +414,29 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 const CHANNEL_CAPABILITIES = new Set<ChannelCapability>(["sessionPty"]);
 const CHANNEL_QUOTA_KEYS = new Set<keyof ChannelQuotas>([
 	"maxChannelsPerSessionPerPack",
-	"idleTimeoutMs",
+	"maxGatewayChannels",
 	"maxFrameBytes",
-	"maxInboundBufferedBytesPerChannel",
-	"maxInboundBufferedFramesPerChannel",
-	"maxOutboundBufferedBytesPerChannel",
-	"maxOutboundBufferedFramesPerChannel",
-	"maxBufferedBytesPerAttachedClient",
-	"sendRateFramesPerSecond",
-	"sendRateBurstFrames",
+	"maxInboundBytes",
+	"maxInboundFrames",
+	"maxOutboundBytes",
+	"maxOutboundFrames",
+	"maxClientOutboundBytes",
+	"maxClientOutboundFrames",
+	"maxClientSendRatePerSecond",
+	"idleTimeoutMs",
 	"openTimeoutMs",
 	"closeGraceMs",
 ]);
+const CHANNEL_QUOTA_ALIASES: Record<string, keyof ChannelQuotas> = {
+	maxInboundBufferedBytesPerChannel: "maxInboundBytes",
+	maxInboundBufferedFramesPerChannel: "maxInboundFrames",
+	maxOutboundBufferedBytesPerChannel: "maxOutboundBytes",
+	maxOutboundBufferedFramesPerChannel: "maxOutboundFrames",
+	maxBufferedBytesPerAttachedClient: "maxClientOutboundBytes",
+	maxAttachedClientBufferedFrames: "maxClientOutboundFrames",
+	sendRateFramesPerSecond: "maxClientSendRatePerSecond",
+	maxInboundFramesPerSecond: "maxClientSendRatePerSecond",
+};
 
 function parseChannelCapabilities(raw: unknown, sourceFile: string, channelName: string): ChannelCapability[] | undefined {
 	if (raw === undefined) return undefined;
@@ -451,15 +463,13 @@ function parseChannelQuotas(raw: unknown, sourceFile: string, channelName: strin
 	}
 	const quotas: ChannelQuotas = {};
 	for (const [key, value] of Object.entries(raw)) {
-		if (!CHANNEL_QUOTA_KEYS.has(key as keyof ChannelQuotas)) {
-			console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) declares unknown quota ${JSON.stringify(key)}; ignoring`);
-			continue;
-		}
+		const quotaKey = CHANNEL_QUOTA_KEYS.has(key as keyof ChannelQuotas) ? key as keyof ChannelQuotas : CHANNEL_QUOTA_ALIASES[key];
+		if (!quotaKey) continue; // unknown fields are inert metadata
 		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
 			console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) quota ${JSON.stringify(key)} must be a non-negative integer; ignoring`);
 			continue;
 		}
-		quotas[key as keyof ChannelQuotas] = value;
+		quotas[quotaKey] = value;
 	}
 	return Object.keys(quotas).length > 0 ? quotas : undefined;
 }
@@ -519,8 +529,9 @@ export function loadChannels(packRoot: string, manifest: PackManifest): ChannelC
 		}
 		const resolvedModule = path.resolve(path.dirname(sourceFile), mod);
 		if (!isPackPathWithinRoot(packRoot, resolvedModule)) {
-			console.warn(`[pack-contributions] channel '${name}' (${sourceFile}) module resolves outside pack root; dropping`);
-			continue;
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" channel "${name}" module resolves outside the pack root`,
+			);
 		}
 		if (seenName.has(name)) {
 			throw new PackContributionError(
@@ -538,7 +549,7 @@ export function loadChannels(packRoot: string, manifest: PackManifest): ChannelC
 		const capabilities = parseChannelCapabilities(data.capabilities, sourceFile, name);
 		if (capabilities) channel.capabilities = capabilities;
 		if (typeof data.requiresUserGesture === "boolean") channel.requiresUserGesture = data.requiresUserGesture;
-		const quotas = parseChannelQuotas(data.quotas, sourceFile, name);
+		const quotas = parseChannelQuotas({ ...data, ...(isPlainObject(data.quotas) ? data.quotas : {}) }, sourceFile, name);
 		if (quotas) channel.quotas = quotas;
 		out.push(channel);
 	}

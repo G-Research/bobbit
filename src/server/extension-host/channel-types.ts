@@ -137,7 +137,11 @@ export function frameByteLength(frame: HostChannelFrame): number {
 	return Buffer.byteLength(JSON.stringify(frame.data) ?? "null", "utf8");
 }
 
-export function validateChannelFrame(frame: unknown, maxFrameBytes = DEFAULT_CHANNEL_QUOTAS.maxFrameBytes): HostChannelFrame {
+export function validateChannelFrame(
+	frame: unknown,
+	options: number | { maxFrameBytes?: number } = DEFAULT_CHANNEL_QUOTAS.maxFrameBytes,
+): HostChannelFrame {
+	const maxFrameBytes = typeof options === "number" ? options : options.maxFrameBytes ?? DEFAULT_CHANNEL_QUOTAS.maxFrameBytes;
 	if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
 		throw new ChannelError(400, "invalid_frame", "channel frame must be an object");
 	}

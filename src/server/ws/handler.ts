@@ -241,39 +241,29 @@ type ChannelOpenGrantBinding = {
 
 type ChannelOpenGrantService = {
 	mint(binding: ChannelOpenGrantBinding): string;
-	consume(openGrant: string, binding: ChannelOpenGrantBinding): boolean | { ok: boolean; error?: string };
+	consume?(openGrant: string | undefined, binding: ChannelOpenGrantBinding): unknown;
 };
 
 type ExtensionChannelClient = {
-	sendFrame(frame: HostChannelFrame): void;
-	close(ev: { reason?: string; error?: string }): void;
+	onFrame(frame: HostChannelFrame): void;
+	onClose(ev: { reason?: string; error?: string }): void;
 };
 
+type ChannelContributionLike = { name: string; protocol?: string; module?: string; handler?: string; quotas?: unknown; capabilities?: unknown };
+
 type ExtensionChannelRegistry = {
-	open(input: ChannelOpenGrantBinding & { init?: unknown; openGrant: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
-	attach(input: { sessionId: string; packId: string; channelId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
-	list(input: { sessionId: string; packId: string; name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]> | ChannelInfo[];
-	send(input: { sessionId: string; packId: string; channelId: string; frame: HostChannelFrame }): Promise<void> | void;
-	close(input: { sessionId: string; packId: string; channelId: string; reason?: string }): Promise<void> | void;
-	detach(input: { sessionId: string; packId: string; channelId: string }): Promise<void> | void;
+	open(input: { sessionId: string; projectId?: string; packId: string; contribution: ChannelContributionLike & { contributionId: string }; init?: { data?: unknown; singletonKey?: string }; openGrant: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
+	attach(input: { sessionId: string; packId: string; channelId: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
+	list(input: { sessionId: string; packId: string; clientId?: string; name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]> | ChannelInfo[];
+	send(input: { sessionId: string; packId: string; channelId: string; clientId: string; frame: HostChannelFrame }): Promise<void> | void;
+	close(input: { sessionId: string; packId: string; channelId: string; clientId?: string; reason?: string }): Promise<void> | void;
+	detach(input: { sessionId: string; packId: string; channelId: string; clientId?: string }): Promise<void> | void;
 };
 
 function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 	if (!frame || typeof frame !== "object") return false;
 	const f = frame as { kind?: unknown; data?: unknown };
 	return (f.kind === "text" && typeof f.data === "string") || f.kind === "json";
-}
-
-function consumeChannelOpenGrant(
-	service: ChannelOpenGrantService | undefined,
-	openGrant: string,
-	binding: ChannelOpenGrantBinding,
-): { ok: true } | { ok: false; error: string } {
-	if (!openGrant) return { ok: false, error: "missing openGrant" };
-	if (!service) return { ok: false, error: "channel open grants are not configured" };
-	const consumed = service.consume(openGrant, binding);
-	if (typeof consumed === "boolean") return consumed ? { ok: true } : { ok: false, error: "invalid openGrant" };
-	return consumed.ok ? { ok: true } : { ok: false, error: consumed.error || "invalid openGrant" };
 }
 
 export function handleWebSocketConnection(
@@ -299,8 +289,8 @@ export function handleWebSocketConnection(
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
 	const channelClientFor = (channelId: string): ExtensionChannelClient => ({
-		sendFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId, frame }),
-		close: (ev) => {
+		onFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId, frame }),
+		onClose: (ev) => {
 			attachedExtChannels.delete(channelId);
 			send(ws, { type: "ext_channel_close", channelId, reason: ev.reason, error: ev.error });
 		},
@@ -1137,7 +1127,6 @@ export function handleWebSocketConnection(
 					const openMsg = msg as Extract<ClientMessage, { type: "ext_channel_open" }>;
 					const requestId = typeof openMsg.requestId === "string" ? openMsg.requestId : "";
 					const name = typeof openMsg.name === "string" ? openMsg.name.trim() : "";
-					const singletonKey = openMsg.init && typeof openMsg.init.singletonKey === "string" ? openMsg.init.singletonKey : undefined;
 					if (!channelRegistry || !channelOpenGrants) {
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry/open grants are not configured" });
 						break;
@@ -1147,27 +1136,24 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel name" : surf.error });
 						break;
 					}
-					if (!hasChannelContribution(surf.packId, name)) {
+					const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => ChannelContributionLike | undefined }) | undefined;
+					const contribution = resolver?.getChannel?.(session.projectId, surf.packId, name);
+					if (!contribution) {
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not declared by this pack" });
-						break;
-					}
-					const grantCheck = consumeChannelOpenGrant(channelOpenGrants, openMsg.openGrant, { sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, singletonKey });
-					if (!grantCheck.ok) {
-						send(ws, { type: "ext_channel_result", requestId, ok: false, error: grantCheck.error });
 						break;
 					}
 					let openedChannelId = "";
 					const channel = await channelRegistry.open({
 						sessionId,
+						projectId: session.projectId,
 						packId: surf.packId,
-						contributionId: surf.contributionId,
-						channelName: name,
-						singletonKey,
-						init: openMsg.init?.data,
+						contribution: { ...contribution, contributionId: surf.contributionId },
+						init: openMsg.init,
 						openGrant: openMsg.openGrant,
+						clientId,
 						client: {
-							sendFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame }),
-							close: (ev) => {
+							onFrame: (frame) => send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame }),
+							onClose: (ev) => {
 								attachedExtChannels.delete(openedChannelId);
 								send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: ev.reason, error: ev.error });
 							},
@@ -1191,7 +1177,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel id" : surf.error });
 						break;
 					}
-					const channel = await channelRegistry.attach({ sessionId, packId: surf.packId, channelId, client: channelClientFor(channelId) });
+					const channel = await channelRegistry.attach({ sessionId, packId: surf.packId, channelId, clientId, client: channelClientFor(channelId) });
 					attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
 					send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
 					break;
@@ -1211,6 +1197,7 @@ export function handleWebSocketConnection(
 					const channels = await channelRegistry.list({
 						sessionId,
 						packId: surf.packId,
+						clientId,
 						name: typeof listMsg.opts?.name === "string" ? listMsg.opts.name : undefined,
 						includeClosed: listMsg.opts?.includeClosed === true,
 					});
@@ -1229,7 +1216,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "invalid channel frame" });
 						break;
 					}
-					await channelRegistry.send({ sessionId, packId: attached.packId, channelId: sendMsg.channelId, frame: sendMsg.frame });
+					await channelRegistry.send({ sessionId, packId: attached.packId, channelId: sendMsg.channelId, clientId, frame: sendMsg.frame });
 					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
 				}
@@ -1241,7 +1228,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
 						break;
 					}
-					await channelRegistry.close({ sessionId, packId: attached.packId, channelId: closeMsg.channelId, reason: closeMsg.reason });
+					await channelRegistry.close({ sessionId, packId: attached.packId, channelId: closeMsg.channelId, clientId, reason: closeMsg.reason });
 					attachedExtChannels.delete(closeMsg.channelId);
 					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
@@ -1254,7 +1241,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
 						break;
 					}
-					await channelRegistry.detach({ sessionId, packId: attached.packId, channelId: detachMsg.channelId });
+					await channelRegistry.detach({ sessionId, packId: attached.packId, channelId: detachMsg.channelId, clientId });
 					attachedExtChannels.delete(detachMsg.channelId);
 					send(ws, { type: "ext_channel_result", requestId, ok: true });
 					break;
@@ -1377,7 +1364,7 @@ export function handleWebSocketConnection(
 		clearTimeout(authTimeout);
 		if (channelRegistry && attachedExtChannels.size > 0) {
 			for (const [channelId, attached] of attachedExtChannels) {
-				void Promise.resolve(channelRegistry.detach({ sessionId: attached.sessionId, packId: attached.packId, channelId })).catch((err) => {
+				void Promise.resolve(channelRegistry.detach({ sessionId: attached.sessionId, packId: attached.packId, channelId, clientId })).catch((err) => {
 					console.warn(`[ext-channel] detach failed for ${channelId}:`, err);
 				});
 			}

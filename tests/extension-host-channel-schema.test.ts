@@ -93,7 +93,7 @@ describe("channel contribution schema", () => {
 		assert.equal(contrib.channels[0].module, "../lib/echo.mjs");
 		assert.equal(contrib.channels[0].handler, "echo");
 		assert.equal(contrib.channels[0].requiresUserGesture, true);
-		assert.equal(contrib.channels[0].maxFrameBytes, 64);
+		assert.equal(contrib.channels[0].quotas?.maxFrameBytes, 64);
 		assert.equal(contrib.channels[0].unknownDisplayName, undefined, "unknown fields must not become executable canonical fields");
 	});
 
@@ -115,7 +115,7 @@ describe("channel contribution schema", () => {
 		});
 		assert.throws(
 			() => loadPackContributions(root, manifest("channel-pack", ["echo", "alsoEcho"])),
-			(err: unknown) => err instanceof PackContributionError && /duplicate.*channel.*echo/i.test(err.message),
+			(err: unknown) => err instanceof PackContributionError && /channel name "echo" more than once/i.test(err.message),
 		);
 	});
 
@@ -145,7 +145,7 @@ describe("channel contribution schema", () => {
 		assert.equal(channel.url, undefined);
 		assert.equal(channel.webSocket, undefined);
 		assert.equal(channel.headers, undefined);
-		assert.equal(channel.packId, "channel-pack", "canonical pack identity is server-derived from the pack root");
+		assert.equal(channel.packId, undefined, "channel declarations must not carry caller-supplied pack identity");
 	});
 
 	it("registry resolves channels pack-locally and does not cross packs", () => {
@@ -165,16 +165,14 @@ describe("channel contribution schema", () => {
 		assert.equal(reg.getChannel(undefined, "missing-pack", "echo"), undefined);
 	});
 
-	it("does not authorize sessionPty for ordinary third-party channel declarations at schema load time", () => {
+	it("preserves sessionPty as metadata for later first-party authorization", () => {
 		const root = packRoot("pty", "third-party");
 		writeChannelPack(root, {
 			channelFiles: {
 				pty: `${goodEchoYaml}\ncapabilities: [sessionPty]\n`,
 			},
 		});
-		assert.throws(
-			() => loadPackContributions(root, manifest("third-party", ["pty"])),
-			/sessionPty|first-party|unauthorized|allowlist/i,
-		);
+		const channels = (loadPackContributions(root, manifest("third-party", ["pty"])) as any).channels;
+		assert.deepEqual(channels[0].capabilities, ["sessionPty"]);
 	});
 });
