@@ -168,7 +168,7 @@ export interface SnapshotServerTiming {
 export type ServerMessage =
 	| { type: "auth_ok" }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
-	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string }
+	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
 	| { type: "ext_channel_frame"; channelId: string; frame: HostChannelFrame }
 	| { type: "ext_channel_close"; channelId: string; reason?: string; error?: string }
 	/** Async reply to an `ext_session_write_permit` mint (C2 session write, step 1).

@@ -168,15 +168,15 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 
 async function instantiateExtensionChannelServices(deps: {
 	packContributionRegistry: PackContributionRegistry;
-	moduleHost: ModuleHost;
 	sessionManager: SessionManager;
 	projectContextManager: ProjectContextManager;
 	toolManager: ToolManager;
 }): Promise<ExtensionChannelServices | undefined> {
 	try {
-		const [registryModule, grantsModule] = await Promise.all([
+		const [registryModule, grantsModule, channelModuleHostModule] = await Promise.all([
 			import("./extension-host/" + "channel-registry.js"),
 			import("./extension-host/" + "channel-open-permits.js"),
+			import("./extension-host/" + "channel-module-host.js"),
 		]);
 		const OpenPermitsCtor = (grantsModule as any).ChannelOpenPermitService
 			?? (grantsModule as any).ChannelOpenPermits
@@ -186,7 +186,10 @@ async function instantiateExtensionChannelServices(deps: {
 		if (typeof OpenPermitsCtor !== "function" || typeof RegistryCtor !== "function") {
 			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-permit service");
 		}
+		const ChannelModuleHostCtor = (channelModuleHostModule as any).LocalChannelModuleHost
+			?? (channelModuleHostModule as any).ChannelModuleHost;
 		const openPermits = new OpenPermitsCtor();
+		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor() : undefined;
 		const registry = new RegistryCtor({
 			openPermits,
 			openPermitService: openPermits,
@@ -194,7 +197,7 @@ async function instantiateExtensionChannelServices(deps: {
 			packContributionRegistry: deps.packContributionRegistry,
 			contributionRegistry: deps.packContributionRegistry,
 			contributions: deps.packContributionRegistry,
-			moduleHost: deps.moduleHost,
+			moduleHost: channelModuleHost,
 			sessionManager: deps.sessionManager,
 			projectContextManager: deps.projectContextManager,
 			toolManager: deps.toolManager,
@@ -1909,7 +1912,6 @@ export function createGateway(config: GatewayConfig) {
 		if (!extensionChannelServicesInit) {
 			extensionChannelServicesInit = instantiateExtensionChannelServices({
 				packContributionRegistry,
-				moduleHost,
 				sessionManager,
 				projectContextManager,
 				toolManager,
@@ -2606,7 +2608,8 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore);
+			const channels = extensionChannelServices;
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 

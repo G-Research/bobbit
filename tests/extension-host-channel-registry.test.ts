@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ChannelDispatcher, type ChannelHandlerContext } from "../src/server/extension-host/channel-dispatcher.ts";
 import { ChannelRegistry } from "../src/server/extension-host/channel-registry.ts";
 import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenPermitBinding } from "../src/server/extension-host/channel-types.ts";
@@ -35,6 +38,12 @@ async function open(registry: ChannelRegistry, opts: { clientId?: string; single
 
 function assertChannelReject(fn: () => unknown | Promise<unknown>, code: string): Promise<void> {
 	return assert.rejects(fn, (err) => err instanceof ChannelError && err.code === code);
+}
+
+function noopDispatcher(): ChannelDispatcher {
+	const dispatcher = new ChannelDispatcher();
+	dispatcher.registerName("terminal", () => ({}));
+	return dispatcher;
 }
 
 describe("ChannelRegistry — permit-gated open and scoping", () => {
@@ -85,6 +94,57 @@ describe("ChannelRegistry — permit-gated open and scoping", () => {
 		assert.equal(openCount, 1);
 		assert.equal(registry.activeCount(), 1);
 	});
+
+	it("runs pack-declared channel modules and fails closed when a handler cannot be loaded", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-host-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => {
+    await ctx.send({ kind: "text", data: ` + "`welcome:${ctx.channelId}`" + ` });
+    return {
+      onClientFrame: async (frame) => { await ctx.send({ kind: "json", data: { echo: frame } }); },
+      close: async () => {}
+    };
+  }
+};
+`, "utf-8");
+			const frames: unknown[] = [];
+			const registry = new ChannelRegistry({ idGenerator: () => "chan-module" });
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+			};
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: { onFrame: (frame) => { frames.push(frame); } },
+				openPermit: permit(registry),
+			});
+			assert.deepEqual(frames.shift(), { kind: "text", data: "welcome:chan-module" });
+			await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-module", clientId: "client-1", frame: { kind: "text", data: "ping" } });
+			assert.deepEqual(frames.shift(), { kind: "json", data: { echo: { kind: "text", data: "ping" } } });
+
+			await assertChannelReject(() => registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: { ...declared, handler: "missing" },
+				clientId: "client-2",
+				openPermit: permit(registry),
+			}), "channel_handler_not_found");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () => {
@@ -134,7 +194,7 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 
 	it("omits frame payloads from audit events", async () => {
 		const events: ChannelAuditEvent[] = [];
-		const registry = new ChannelRegistry({ idGenerator: () => "chan-1", audit: (event) => events.push(event) });
+		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), idGenerator: () => "chan-1", audit: (event) => events.push(event) });
 		await open(registry);
 		await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-1", frame: { kind: "text", data: "SECRET_PAYLOAD" } });
 		assert.ok(!JSON.stringify(events).includes("SECRET_PAYLOAD"));
@@ -162,7 +222,7 @@ describe("ChannelRegistry — lifecycle cleanup", () => {
 	it("supports idle and session cleanup hooks", async () => {
 		let now = 0;
 		let seq = 0;
-		const registry = new ChannelRegistry({ now: () => now, idGenerator: () => `chan-${++seq}` });
+		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), now: () => now, idGenerator: () => `chan-${++seq}` });
 		await open(registry, { quotas: { idleTimeoutMs: 5 } });
 		await registry.detach("sess-1", "pack-a", "chan-1", "client-1");
 		now = 6;
@@ -173,5 +233,32 @@ describe("ChannelRegistry — lifecycle cleanup", () => {
 		assert.equal(await registry.closeSession("sess-1", "session ended"), 1);
 		assert.equal(registry.activeCount(), 0);
 		assert.equal(registry.list({ sessionId: "sess-1", packId: "pack-a", includeClosed: true }).at(-1)?.closeReason, "session ended");
+		await registry.dispose();
+	});
+
+	it("schedules detached idle cleanup and disposes the timer", async () => {
+		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), idGenerator: () => "chan-1", quotas: { idleTimeoutMs: 1 }, idleSweepIntervalMs: 5 });
+		await open(registry, { quotas: { idleTimeoutMs: 1 } });
+		await registry.detach("sess-1", "pack-a", "chan-1", "client-1");
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.equal(registry.activeCount(), 0);
+		await registry.dispose();
+	});
+
+	it("closes channels whose pack contribution becomes unavailable", async () => {
+		let available = true;
+		let closedReason: string | undefined;
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", () => ({ close: (reason) => { closedReason = reason; } }));
+		const registry = new ChannelRegistry({
+			dispatcher,
+			idGenerator: () => "chan-1",
+			contributionRegistry: { getChannel: (_projectId, packId, name) => available && packId === "pack-a" && name === "terminal" ? contribution() : undefined },
+		});
+		await registry.open({ sessionId: "sess-1", projectId: "project-a", packId: "pack-a", contribution: contribution(), clientId: "client-1", openPermit: permit(registry) });
+		available = false;
+		assert.equal(await registry.closeUnavailablePacks(), 1);
+		assert.equal(registry.activeCount(), 0);
+		assert.equal(closedReason, "pack unavailable");
 	});
 });
