@@ -192,6 +192,90 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-2"), []);
 	});
 
+	it("bounds outbound in-flight frames for auto-drain clients", async () => {
+		let ctx!: ChannelHandlerContext;
+		let release!: () => void;
+		const events: ChannelAuditEvent[] = [];
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", (opened) => { ctx = opened; return {}; });
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1", audit: (event) => events.push(event) });
+		await registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution({ maxOutboundFrames: 1, maxClientOutboundFrames: 1 }),
+			clientId: "client-1",
+			client: { onFrame: () => new Promise<void>((resolve) => { release = resolve; }) },
+			openPermit: permit(registry),
+		});
+		const first = ctx.send({ kind: "text", data: "first" });
+		await assertChannelReject(() => ctx.send({ kind: "text", data: "second" }), "channel_backpressure");
+		assert.ok(events.some((event) => event.type === "channel.frame.reject" && event.quota === "maxOutboundFrames"));
+		release();
+		await first;
+	});
+
+	it("bounds outbound in-flight bytes for auto-drain clients", async () => {
+		let ctx!: ChannelHandlerContext;
+		let release!: () => void;
+		const events: ChannelAuditEvent[] = [];
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", (opened) => { ctx = opened; return {}; });
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1", audit: (event) => events.push(event) });
+		await registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution({ maxOutboundBytes: 5, maxClientOutboundBytes: 5 }),
+			clientId: "client-1",
+			client: { onFrame: () => new Promise<void>((resolve) => { release = resolve; }) },
+			openPermit: permit(registry),
+		});
+		const first = ctx.send({ kind: "text", data: "first" });
+		await assertChannelReject(() => ctx.send({ kind: "text", data: "x" }), "channel_backpressure");
+		assert.ok(events.some((event) => event.type === "channel.frame.reject" && event.quota === "maxOutboundBytes"));
+		release();
+		await first;
+	});
+
+	it("rolls back failed attaches and their queued outbound accounting", async () => {
+		let ctx!: ChannelHandlerContext;
+		const dispatcher = new ChannelDispatcher();
+		let failNextAttach = true;
+		dispatcher.registerName("terminal", (opened) => {
+			ctx = opened;
+			return {
+				onAttach: async () => {
+					if (!failNextAttach) return;
+					failNextAttach = false;
+					await ctx.send({ kind: "text", data: "during attach" });
+					throw new Error("attach denied");
+				},
+			};
+		});
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1" });
+		await registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution({ maxOutboundFrames: 1, maxClientOutboundFrames: 1 }),
+			clientId: "client-1",
+			openPermit: permit(registry),
+		});
+		await registry.detach("sess-1", "pack-a", "chan-1", "client-1");
+		const failedAttachFrames: unknown[] = [];
+		await assert.rejects(() => registry.attach({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			channelId: "chan-1",
+			clientId: "client-2",
+			client: { onFrame: (frame) => { failedAttachFrames.push(frame); } },
+		}), /attach denied/);
+		assert.deepEqual(failedAttachFrames, [], "frames emitted during a failed attach must not reach that client");
+		assert.equal(registry.list({ sessionId: "sess-1", packId: "pack-a", clientId: "client-2" })[0].attached, false);
+		assert.throws(() => registry.drainClient("sess-1", "pack-a", "chan-1", "client-2"), (err) => err instanceof ChannelError && err.code === "not_attached");
+		await registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-3", client: { autoDrain: false } });
+		await ctx.send({ kind: "text", data: "after rollback" });
+		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-3"), [{ kind: "text", data: "after rollback" }]);
+	});
+
 	it("omits frame payloads from audit events", async () => {
 		const events: ChannelAuditEvent[] = [];
 		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), idGenerator: () => "chan-1", audit: (event) => events.push(event) });
@@ -203,6 +287,73 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 });
 
 describe("ChannelRegistry — lifecycle cleanup", () => {
+	it("does not revive a channel closed by the handler during open", async () => {
+		let ctx!: ChannelHandlerContext;
+		let handlerClosed = 0;
+		const frames: unknown[] = [];
+		const closes: unknown[] = [];
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", async (opened) => {
+			ctx = opened;
+			await ctx.send({ kind: "text", data: "hello" });
+			await ctx.close("closed during open");
+			return { close: () => { handlerClosed++; } };
+		});
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1" });
+		await assertChannelReject(() => registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution(),
+			clientId: "client-1",
+			client: { onFrame: (frame) => { frames.push(frame); }, onClose: (ev) => { closes.push(ev); } },
+			openPermit: permit(registry),
+		}), "channel_closed");
+		assert.deepEqual(frames, [{ kind: "text", data: "hello" }]);
+		assert.deepEqual(closes, [{ reason: "closed during open" }]);
+		assert.equal(handlerClosed, 1, "late returned handler must be closed instead of leaked");
+		assert.equal(registry.activeCount(), 0);
+		assert.equal(registry.list({ sessionId: "sess-1", packId: "pack-a", includeClosed: true })[0].state, "closed");
+		await assertChannelReject(() => registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-2" }), "channel_not_found");
+	});
+
+	it("closes late handler sessions after an open timeout", async () => {
+		let resolveOpen!: (value: { close: () => void }) => void;
+		let handlerClosed = 0;
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", () => new Promise((resolve) => { resolveOpen = resolve; }));
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1" });
+		await assertChannelReject(() => registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution({ openTimeoutMs: 1 }),
+			clientId: "client-1",
+			openPermit: permit(registry),
+		}), "channel_timeout");
+		assert.equal(registry.activeCount(), 0);
+		resolveOpen({ close: () => { handlerClosed++; } });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(handlerClosed, 1);
+	});
+
+	it("clamps pack quotas so declarations cannot loosen registry limits", async () => {
+		let seq = 0;
+		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), idGenerator: () => `chan-${++seq}`, quotas: { maxChannelsPerSessionPerPack: 1, maxFrameBytes: 8 } });
+		await open(registry, { quotas: { maxChannelsPerSessionPerPack: 2, maxFrameBytes: 64 } });
+		await assertChannelReject(() => registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-1", frame: { kind: "text", data: "123456789" } }), "frame_too_large");
+		await assertChannelReject(() => open(registry, { clientId: "client-2", quotas: { maxChannelsPerSessionPerPack: 2 } }), "channel_quota_exceeded");
+	});
+
+	it("bounds closed-channel tombstones by count", async () => {
+		let seq = 0;
+		const registry = new ChannelRegistry({ dispatcher: noopDispatcher(), idGenerator: () => `chan-${++seq}`, maxTombstones: 1 });
+		await open(registry, { clientId: "client-1" });
+		await registry.close({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-1", reason: "first" });
+		await open(registry, { clientId: "client-2" });
+		await registry.close({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-2", clientId: "client-2", reason: "second" });
+		const closed = registry.list({ sessionId: "sess-1", packId: "pack-a", includeClosed: true });
+		assert.deepEqual(closed.map((info) => info.id), ["chan-2"]);
+	});
+
 	it("closes channels with tombstones and scoped closed listings", async () => {
 		let closedReason: string | undefined;
 		const dispatcher = new ChannelDispatcher();
