@@ -9,9 +9,10 @@ The active directory is resolved once when the gateway starts. Settings changes 
 At startup Bobbit resolves the agent directory with this exact precedence:
 
 1. `BOBBIT_AGENT_DIR`
-2. `PI_CODING_AGENT_DIR`
-3. persisted Settings value (`agentDir` in `.bobbit/state/preferences.json`)
-4. default: `<projectRoot>/.bobbit/agent/`
+2. persisted Settings value (`agentDir` in `.bobbit/state/preferences.json`)
+3. default: `<projectRoot>/.bobbit/agent/`
+
+`PI_CODING_AGENT_DIR` is not accepted as a user-facing Bobbit startup override. Bobbit may set it internally when spawning the underlying `pi-coding-agent`, but only to the already-resolved Bobbit agent directory so child processes cannot fall back to raw pi state.
 
 Inputs are normalized before use:
 
@@ -39,16 +40,16 @@ New scaffolds and upgraded existing scaffolds ensure `.bobbit/.gitignore` contai
 The Settings → Maintenance **Agent Directory** card shows:
 
 - **Active directory** — the startup-pinned directory used by this process.
-- **Startup source** — `BOBBIT_AGENT_DIR`, `PI_CODING_AGENT_DIR`, `persisted`, or `default`.
+- **Startup source** — `BOBBIT_AGENT_DIR`, `persisted`, or `default`.
 - **Default** — `<projectRoot>/.bobbit/agent/`.
-- **Persisted / pending** — the saved directory that will be considered on future starts when no higher-precedence env var overrides it.
+- **Persisted / pending** — the saved directory that will be considered on future starts when no `BOBBIT_AGENT_DIR` override is active.
 - **Effective after restart** — the directory Bobbit would use after restart with the current environment.
 - **Restart guidance** — whether restart is required and which directory is active now vs next start.
-- **Environment override** — a warning when `BOBBIT_AGENT_DIR` or `PI_CODING_AGENT_DIR` is active.
+- **Environment override** — a warning when `BOBBIT_AGENT_DIR` is active.
 
-Saving a path writes only the next-start preference. It does not migrate data or switch live sessions. Clearing the setting removes the persisted path and returns future starts to env/default precedence.
+Saving a path writes only the next-start preference. It does not copy data or switch live sessions. Clearing the setting removes the persisted path and returns future starts to env/default precedence.
 
-When an environment override is active, the UI can still save a persisted path, but the override remains effective after restart until the env var is removed. `BOBBIT_AGENT_DIR` also wins over `PI_CODING_AGENT_DIR` if both are set.
+When `BOBBIT_AGENT_DIR` is active, the UI can still save a persisted path, but the override remains effective after restart until the env var is removed.
 
 ## Path validation
 
@@ -67,11 +68,11 @@ Validation rules:
 
 Structured validation errors include stable codes such as `EMPTY_PATH`, `INSIDE_WORKTREE`, `CREATE_FAILED`, `NOT_DIRECTORY`, `ACCESS_DENIED`, and `PROBE_FAILED`.
 
-## Copy-only migration
+## Copy data
 
-Migration is explicit and copy-only. Bobbit never silently migrates data at startup, never deletes the source, and never renames the source directory.
+Copying data is explicit, user-initiated, and copy-only. Bobbit never silently migrates data at startup, never deletes the source, and never renames the source directory.
 
-The migration card appears when the pending directory differs from the active directory. It copies from an active or historical agent directory to the pending next-start directory.
+The Settings **Copy data** card appears when the pending directory differs from the active directory. It copies from an active or historical configured agent directory to the pending next-start directory. It does not auto-discover `~/.pi/agent` and does not treat raw pi state as an implicit source.
 
 Allowlist:
 
@@ -91,22 +92,24 @@ Symlink safety:
 - Existing destination symlinks are not overwritten.
 - Recursive copies verify destination paths stay inside the selected pending directory.
 
-The migration response reports copied, skipped, overwritten, missing, warning, and error entries, followed by the same restart guidance shown after save.
+The copy response reports copied, skipped, overwritten, missing, warning, and error entries, followed by the same restart guidance shown after save.
 
 ## Transcript compatibility
 
-Persisted sessions store `agentSessionFile` as an absolute path. Bobbit keeps those paths readable across migrations and future configuration changes.
+Persisted sessions store `agentSessionFile` as an absolute path. Bobbit keeps those paths readable across copy operations and future configuration changes.
 
 Compatibility rules:
 
 - New sessions write transcripts under the active startup directory's `sessions/` root.
-- Existing absolute `agentSessionFile` values stay authoritative for host-side reads; migration does not rewrite them.
-- `agentDirHistory` records startup, saved, and migrated directories, seeded with legacy `~/.bobbit/agent` and `~/.pi/agent` roots.
-- Recovery scans active sessions first, then historical sessions roots, then legacy roots.
-- Transcript guards accept paths inside trusted active/historical/legacy `sessions/` roots.
+- Existing absolute `agentSessionFile` values stay authoritative for host-side reads; Copy data does not rewrite them.
+- `agentDirHistory` records configured startup, saved, and copied directories; it is not seeded from `~/.pi/agent`.
+- Recovery scans active sessions first, then historical sessions roots, then read-only legacy transcript roots.
+- Transcript guards accept paths inside trusted active, historical, or legacy `sessions/` roots.
 - Exact persisted outside-root transcript paths are read-compatible only after they are registered from a persisted session and verified as regular, non-symlink `.jsonl` transcript files. They are not sanitizer write targets and are not deleted by purge.
 
 For sandboxed sessions, the agent can see only the active mounted sessions root. If a persisted historical host transcript has been copied to the active root, Bobbit remaps `switch_session` to the active mounted copy while preserving the historical absolute path for host reads. If no active copy exists, the historical path remains unchanged and may not be visible inside the sandbox.
+
+Legacy transcript roots, including `~/.pi/agent/sessions`, are read compatibility fallbacks only. Startup does not rename, move, copy from, or write marker directories into `~/.pi/agent`.
 
 ## Sandbox safeguards
 
@@ -132,8 +135,8 @@ Remote-less sandbox clone sources are also sanitized. Instead of bind-mounting t
 
 Primary implementation modules:
 
-- `src/server/agent-dir-config.ts` — resolution, validation, state, migration, restart guidance.
-- `src/server/bobbit-dir.ts` — public directory helpers and legacy exports.
+- `src/server/agent-dir-config.ts` — resolution, validation, state, copy-data reporting, restart guidance.
+- `src/server/bobbit-dir.ts` — public directory helpers.
 - `src/server/server.ts` — `/api/agent-dir*` endpoints.
 - `src/app/settings-page.ts` — Maintenance settings UI.
 - `src/server/agent/agent-session-path.ts` and `transcript-sanitizer.ts` — transcript compatibility and safety.

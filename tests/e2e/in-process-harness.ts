@@ -180,7 +180,6 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
 		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
 		process.env.BOBBIT_AGENT_DIR = agentDir;
-		process.env.PI_CODING_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";

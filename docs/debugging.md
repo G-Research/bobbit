@@ -948,9 +948,9 @@ Symptom: Settings → Maintenance shows a saved pending directory, but sessions,
 Checklist:
 
 1. Check `GET /api/agent-dir`. `activePath` is the startup-pinned directory for this process; `nextStart.dir` is only effective after restart.
-2. If `activeSource` is `BOBBIT_AGENT_DIR` or `PI_CODING_AGENT_DIR`, the env override wins over the persisted setting. Remove the env var and restart to use the saved path.
+2. If `activeSource` is `BOBBIT_AGENT_DIR`, the env override wins over the persisted setting. Remove the env var and restart to use the saved path. `PI_CODING_AGENT_DIR` is not a Bobbit startup override.
 3. If validation returns `INSIDE_WORKTREE`, choose a path outside the git worktree or use the exact default `<projectRoot>/.bobbit/agent/`. Relative paths are resolved against `<projectRoot>` before this check.
-4. Migration copies only the allowlist and skips existing files unless overwrite is selected. A skipped `auth.json` or `models.json` usually means the destination already had one.
+4. Settings **Copy data** copies only the allowlist from a configured active/historical source to the pending destination and skips existing files unless overwrite is selected. It does not auto-source `~/.pi/agent`; a skipped `auth.json` or `models.json` usually means the destination already had one.
 5. Sandboxed sessions after an agent-dir change require container recreation because Docker bind mounts are immutable. `ProjectSandbox` detects stale active sessions/model mounts and recreates the project container; look for `[project-sandbox] ... stale agent-dir mounts` if a sandbox still sees old transcripts.
 
 See [Configurable agent directory](configurable-agent-directory.md).

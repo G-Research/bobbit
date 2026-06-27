@@ -425,11 +425,11 @@ export class RpcBridge {
 				env: {
 					...process.env,
 					BOBBIT_DIR: bobbitDir(),
+					...tlsEnv,
+					...this.options.env,
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
 					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
 					PI_CODING_AGENT_DIR: globalAgentDir(),
-					...tlsEnv,
-					...this.options.env,
 				},
 			});
 		}

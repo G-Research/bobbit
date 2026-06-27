@@ -5,9 +5,10 @@ This design has shipped. The durable behavior is documented in [Configurable age
 ## Final decisions
 
 - Default agent directory: `<projectRoot>/.bobbit/agent/`.
-- Startup precedence: `BOBBIT_AGENT_DIR` > `PI_CODING_AGENT_DIR` > persisted Settings value > default.
+- Startup precedence: `BOBBIT_AGENT_DIR` > persisted Settings value > default.
+- `PI_CODING_AGENT_DIR` is not a Bobbit startup configuration input. Bobbit sets it only internally for spawned `pi-coding-agent` processes, pointing at the resolved Bobbit agent directory.
 - The active directory is resolved once at gateway startup. Settings writes are next-start only; there is no live switching or multi-root write mode.
-- Migration is user-initiated and copy-only. It preserves the source directory and copies only the allowlist: `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`.
+- Copy data is user-initiated and copy-only. It preserves the source directory and copies only the allowlist: `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`. Sources are active or historical configured Bobbit agent directories, not an automatic `~/.pi/agent` source.
 - Transcript compatibility is read-oriented: existing absolute `agentSessionFile` paths remain authoritative, historical roots are remembered, and exact outside-root transcripts are readable only after persisted-session registration and transcript-shape validation.
 - Sandbox access remains narrow: active sessions and read-only models are mounted, sandbox auth is generated/scoped, and host `auth.json` is never mounted.
 - Project scaffolding ensures `.bobbit/.gitignore` ignores `agent/` as well as `state/`.
@@ -16,9 +17,9 @@ This design has shipped. The durable behavior is documented in [Configurable age
 
 The agent directory feeds process environment, binary staging, Docker bind mounts, transcript path translation, model cache reads, and auth/cache files. Live switching would create split-brain state: running agents and long-lived containers would keep old paths while the server starts writing new metadata elsewhere. Pinning the directory at startup keeps one active runtime root and makes Settings changes explicit: save, optionally copy data, restart.
 
-## Why copy-only migration
+## Why Copy data is explicit
 
-Credentials and transcripts are user data. Bobbit should not silently move or delete them, especially when users may still run older installations against `~/.bobbit/agent/`. Copy-only migration lets the user preserve the source as a rollback path while preparing the next-start directory.
+Credentials and transcripts are user data. Bobbit should not silently move, copy, or delete them, especially when users may also run raw pi on the same machine. Copy-only data transfer lets the user preserve the source as a rollback path while preparing the next-start directory, and avoiding automatic `~/.pi/agent` discovery lets Bobbit coexist with pi without mutating pi-owned state.
 
 ## Why the project-local default is allowed inside the worktree
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-export type AgentDirSource = "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR" | "persisted" | "default";
+export type AgentDirSource = "BOBBIT_AGENT_DIR" | "persisted" | "default";
 
 export interface AgentDirResolution {
 	dir: string;
@@ -46,7 +46,7 @@ export interface AgentDirApiState {
 	restartRequired: boolean;
 	envOverride?: {
 		active: true;
-		source: "BOBBIT_AGENT_DIR" | "PI_CODING_AGENT_DIR";
+		source: "BOBBIT_AGENT_DIR";
 		value: string;
 		savedPathIgnored: boolean;
 	};
@@ -109,10 +109,6 @@ export function resolveAgentDir(input: ResolveAgentDirInput): AgentDirResolution
 	const bobbitEnv = nonEmptyString(env.BOBBIT_AGENT_DIR);
 	if (bobbitEnv) {
 		return { dir: normalizeAgentDirInput(bobbitEnv, projectRoot), source: "BOBBIT_AGENT_DIR", raw: bobbitEnv, projectRoot, defaultDir };
-	}
-	const piEnv = nonEmptyString(env.PI_CODING_AGENT_DIR);
-	if (piEnv) {
-		return { dir: normalizeAgentDirInput(piEnv, projectRoot), source: "PI_CODING_AGENT_DIR", raw: piEnv, projectRoot, defaultDir };
 	}
 	const persisted = nonEmptyString(input.persisted);
 	if (persisted) {
@@ -177,7 +173,7 @@ export function getAgentDirState(): AgentDirRuntimeState {
 export function getAgentDirApiState(): AgentDirApiState {
 	const state = getAgentDirState();
 	const persistedPath = state.persisted;
-	const envSource = state.startup.source === "BOBBIT_AGENT_DIR" || state.startup.source === "PI_CODING_AGENT_DIR" ? state.startup.source : undefined;
+	const envSource = state.startup.source === "BOBBIT_AGENT_DIR" ? state.startup.source : undefined;
 	return {
 		activePath: state.startup.dir,
 		activeSource: state.startup.source,
@@ -229,7 +225,8 @@ export function readPersistedAgentDirHistory(stateDir: string): string[] {
 
 export function recordAgentDirHistory(dir: string, stateDir = runtimeStateDir, projectRoot = runtimeState?.startup.projectRoot): string[] {
 	const resolvedProjectRoot = normalizeAbsolutePath(projectRoot ?? process.cwd());
-	const history = mergeAgentDirHistory(resolvedProjectRoot, stateDir, [dir]);
+	const legacyAllowDirs = runtimeState ? [runtimeState.startup.dir, runtimeState.persisted, runtimeState.nextStart.dir] : [];
+	const history = mergeAgentDirHistory(resolvedProjectRoot, stateDir, [dir], legacyAllowDirs);
 	inMemoryAgentDirHistory = history;
 	if (stateDir) writeAgentDirHistoryIfReady(stateDir, history);
 	if (runtimeState) runtimeState = { ...runtimeState, history };
@@ -418,7 +415,7 @@ export function isPendingAgentDir(dir: string, state = runtimeState): boolean {
 
 export function buildAgentDirRestartGuidance(): string {
 	const state = getAgentDirState();
-	if (state.startup.source === "BOBBIT_AGENT_DIR" || state.startup.source === "PI_CODING_AGENT_DIR") {
+	if (state.startup.source === "BOBBIT_AGENT_DIR") {
 		const pending = state.persisted ? ` Saved pending directory: ${state.persisted}.` : " No persisted pending directory is set.";
 		return `${state.startup.source} is active, so this process continues using ${state.startup.dir}.${pending} Remove the environment override and restart to use the persisted setting.`;
 	}
@@ -461,10 +458,16 @@ function writeAgentDirHistoryIfReady(stateDir: string, history: string[]): void 
 	}
 }
 
-function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined, dirs: Array<string | undefined>): string[] {
+function mergeAgentDirHistory(
+	projectRoot: string,
+	stateDir: string | undefined,
+	dirs: Array<string | undefined>,
+	legacyAllowDirs: Array<string | undefined> = dirs,
+): string[] {
+	const legacyRawPiAgentDir = normalizeAbsolutePath(path.join(os.homedir(), ".pi", "agent"));
+	const allowLegacyRawPiAgentDir = legacyAllowDirs.some((dir) => dir && samePath(normalizeAgentDirInput(dir, projectRoot), legacyRawPiAgentDir));
 	const seeded = [
 		path.join(os.homedir(), ".bobbit", "agent"),
-		path.join(os.homedir(), ".pi", "agent"),
 		defaultAgentDir(projectRoot),
 		...inMemoryAgentDirHistory,
 		...(stateDir ? readPersistedAgentDirHistory(stateDir) : []),
@@ -474,6 +477,7 @@ function mergeAgentDirHistory(projectRoot: string, stateDir: string | undefined,
 	for (const dir of seeded) {
 		if (!dir) continue;
 		const normalized = normalizeAgentDirInput(dir, projectRoot);
+		if (!allowLegacyRawPiAgentDir && samePath(normalized, legacyRawPiAgentDir)) continue;
 		if (!history.some((entry) => samePath(entry, normalized))) history.push(normalized);
 	}
 	return history;
