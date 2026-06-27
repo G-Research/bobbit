@@ -7,26 +7,23 @@
  */
 
 import { test, expect } from "./in-process-harness.js";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
 /**
- * Resolve the models.json path the same way aigw-manager does:
- * BOBBIT_AGENT_DIR / PI_CODING_AGENT_DIR env → ~/.bobbit/agent (fallback ~/.pi/agent)
+ * Resolve the models.json path the same way Bobbit startup does:
+ * BOBBIT_AGENT_DIR env → ~/.bobbit/agent.
  */
 function getModelsJsonPath(): string {
-	const envDir = process.env.BOBBIT_AGENT_DIR || process.env.PI_CODING_AGENT_DIR;
+	const envDir = process.env.BOBBIT_AGENT_DIR;
 	let agentDir: string;
 	if (envDir) {
 		if (envDir === "~") agentDir = homedir();
 		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
 		else agentDir = envDir;
 	} else {
-		// Prefer ~/.bobbit/agent, fall back to ~/.pi/agent for legacy installs
-		const bobbitDir = join(homedir(), ".bobbit", "agent");
-		const piDir = join(homedir(), ".pi", "agent");
-		agentDir = existsSync(bobbitDir) ? bobbitDir : existsSync(piDir) ? piDir : bobbitDir;
+		agentDir = join(homedir(), ".bobbit", "agent");
 	}
 	return join(agentDir, "models.json");
 }

@@ -65,7 +65,6 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	process.env.BOBBIT_DIR = bobbitDir;
 	process.env.BOBBIT_AGENT_DIR = agentDir;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
