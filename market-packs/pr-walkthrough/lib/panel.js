@@ -539,27 +539,27 @@ Decision: ${p}`);for(let u of X(s,l))c.push(`- Card comment: ${u}`);for(let[,u]o
 					/* Historical compact shell parity overrides. */
 					.prw-root .prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: 100%; min-height: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 0; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-					.prw-root .header { height: 58px; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; column-gap: 18px; row-gap: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--background); }
-					.prw-root .title-group { min-width: 0; grid-row: 1 / 3; display: flex; align-items: center; gap: 10px; }
+					.prw-root .header { height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 32vw) max-content; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "title progress submit" "title progress submit"; align-items: stretch; column-gap: 18px; row-gap: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--background); }
+					.prw-root .title-group { grid-area: title; min-width: 0; display: flex; align-items: center; gap: 10px; overflow: hidden; }
 					.prw-root .pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
-					.prw-root .title-stack { min-width: 0; }
+					.prw-root .title-stack { min-width: 0; overflow: hidden; }
 					.prw-root .header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.2; letter-spacing: -.01em; }
-					.prw-root .header-meta { display: flex; gap: 8px; margin-top: 3px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+					.prw-root .header-meta { min-width: 0; max-width: 100%; display: flex; gap: 8px; margin-top: 3px; overflow: hidden; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+					.prw-root .header-meta span { flex: 0 0 auto; }
+					.prw-root .header-meta span:last-child { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 					.prw-root .add { color: var(--positive); } .del { color: var(--negative); }
 					.prw-root .github-link { display: none; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
 					.prw-root .github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.prw-root .progress-wrap { grid-row: 1 / 3; align-self: stretch; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }
+					.prw-root .progress-wrap { grid-area: progress; align-self: stretch; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }
 					.prw-root .progress-wrap > span { grid-row: 2; align-self: start; white-space: nowrap; }
 					.prw-root .progress-track { grid-row: 1; align-self: end; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
 					.prw-root .progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
 					.prw-root .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
-					.prw-root .submit { grid-row: 1 / 3; align-self: center; justify-self: end; width: max-content; min-width: 0; height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: var(--radius, 0.375rem); background: var(--primary); color: var(--primary-foreground); padding: 0 12px; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+					.prw-root .submit { grid-area: submit; align-self: center; justify-self: end; width: max-content; min-width: 0; height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: var(--radius, 0.375rem); background: var(--primary); color: var(--primary-foreground); padding: 0 12px; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
 					.prw-root .submit:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 90%, var(--background)); }
 					.prw-root .submit:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring, var(--primary)) 50%, transparent), 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); }
 					.prw-root .submit svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 					.prw-root .prw-review-header.has-github, .prw-root .prw-review-header.no-github { grid-template-columns: minmax(0, 1fr) minmax(180px, 32vw) max-content; padding-right: 12px; }
-					.prw-root .prw-review-header .submit { grid-column: 3; }
-					.prw-root .prw-review-header .progress-wrap { grid-column: 2; }
 					.prw-root .secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
 					.prw-root .body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
 					.prw-root .rail { grid-row: 1 / 3; min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }

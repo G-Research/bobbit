@@ -505,6 +505,24 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		const submitBox = await submit.boundingBox();
 		const headerBox = await header.boundingBox();
 		const progressBox = await page.locator('[data-testid="pr-walkthrough-progress"]').boundingBox();
+		const headerLayout = await header.evaluate((element: HTMLElement) => {
+			const title = element.querySelector<HTMLElement>('[data-testid="pr-walkthrough-pr-title"]');
+			const stats = element.querySelector<HTMLElement>('[data-testid="pr-walkthrough-pr-stats"]');
+			const progress = element.querySelector<HTMLElement>('[data-testid="pr-walkthrough-progress"]');
+			if (!title || !stats || !progress) return undefined;
+			const titleRect = title.getBoundingClientRect();
+			const statsRect = stats.getBoundingClientRect();
+			const progressRect = progress.getBoundingClientRect();
+			const titleStyle = getComputedStyle(title);
+			const statsStyle = getComputedStyle(stats);
+			return { titleRight: titleRect.right, statsRight: statsRect.right, progressLeft: progressRect.left, titleFont: titleStyle.fontSize, statsFont: statsStyle.fontSize, statsOverflow: statsStyle.overflow };
+		});
+		expect(headerLayout).toBeTruthy();
+		expect(headerLayout!.titleRight, "PR title must stay in the left header column instead of colliding with progress").toBeLessThanOrEqual(headerLayout!.progressLeft + 1);
+		expect(headerLayout!.statsRight, "PR stats must clip within the left header column instead of running under progress").toBeLessThanOrEqual(headerLayout!.progressLeft + 1);
+		expect(headerLayout!.statsOverflow, "PR stats should be clipped in compact headers").toBe("hidden");
+		expect(Number.parseFloat(headerLayout!.titleFont), "PR title should keep compact preview text sizing").toBeLessThanOrEqual(16);
+		expect(Number.parseFloat(headerLayout!.statsFont), "PR stats should keep compact preview text sizing").toBeLessThanOrEqual(12);
 		expect(submitBox?.width, "half-panel header must not stretch Submit review to fill a grid column").toBeLessThanOrEqual(145);
 		expect((submitBox?.x || 0) + (submitBox?.width || 0), "Submit review must not collide with the right edge").toBeLessThanOrEqual((headerBox?.x || 0) + (headerBox?.width || 0) - 4);
 		expect(submitBox?.x || 0, "Submit review should be right-aligned after the review progress meter").toBeGreaterThan((progressBox?.x || 0) + (progressBox?.width || 0));
