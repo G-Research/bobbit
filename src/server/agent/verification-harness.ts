@@ -1680,6 +1680,24 @@ export class VerificationHarness {
 				};
 			}
 
+			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 120_000, step.name);
+			if (postReminderRecovery.type === "result") {
+				return {
+					name: step.name, type: step.type,
+					passed: postReminderRecovery.verdict,
+					output: postReminderRecovery.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+			if (postReminderRecovery.type === "errored") {
+				return {
+					name: step.name, type: step.type,
+					passed: false,
+					output: postReminderRecovery.output,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+
 			return {
 				name: step.name, type: step.type,
 				passed: false,
@@ -3326,6 +3344,15 @@ export class VerificationHarness {
 
 			if (result2.type === "result") {
 				return { passed: result2.verdict, output: result2.summary, sessionId };
+			}
+
+			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
+			if (postReminderRecovery.type === "result") {
+				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+				return { passed: postReminderRecovery.verdict, output: postReminderRecovery.summary, sessionId };
+			}
+			if (postReminderRecovery.type === "errored") {
+				return { passed: false, output: postReminderRecovery.output, sessionId };
 			}
 
 			// Hard failure

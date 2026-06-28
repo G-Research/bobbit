@@ -22,6 +22,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -256,6 +258,35 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		assert.ok(
 			calls.indexOf("terminateSession") > calls.indexOf("race:start"),
 			`Termination should happen only after the post-reminder idle window. calls=${JSON.stringify(calls)}`,
+		);
+	});
+
+	it("live llm-review checks errored-turn recovery after post-reminder idle before declaring the reminder ignored", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const livePathStart = source.indexOf("private async runLlmReviewViaSession");
+		assert.ok(livePathStart >= 0, "runLlmReviewViaSession should exist");
+
+		const hardFailure = source.indexOf("output: \"Agent did not call verification_result after reminder.\"", livePathStart);
+		assert.ok(hardFailure >= 0, "live post-reminder ignored-reminder failure should exist");
+
+		const resultRace = source.lastIndexOf("const result2 = await Promise.race", hardFailure);
+		assert.ok(resultRace > livePathStart, "should find live post-reminder result2 race");
+		const postReminderIdlePath = source.slice(resultRace, hardFailure);
+
+		assert.match(
+			postReminderIdlePath,
+			/const postReminderRecovery = await this\.waitForReviewerErroredTurnRecovery\(sessionId, resultPromise, timeoutMs, step\.name\);/,
+			"Post-reminder idle must call errored-turn recovery before ignored-reminder failure.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "result"[\s\S]*postReminderRecovery\.summary/,
+			"Post-reminder recovery must return a verification_result that arrives during auto-retry.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "errored"[\s\S]*postReminderRecovery\.output/,
+			"Post-reminder recovery exhaustion must surface the retryable runtime error instead of ignored-reminder text.",
 		);
 	});
 });
