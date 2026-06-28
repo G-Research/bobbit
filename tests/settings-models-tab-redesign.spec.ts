@@ -30,6 +30,7 @@ const BUNDLE = path.resolve("tests/fixtures/settings-models-tab-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/settings-models-tab-entry.ts");
 const SETTINGS_SRC = path.resolve("src/app/settings-page.ts");
 const DIALOG_SRC = path.resolve("src/ui/dialogs/AigwModelsDialog.ts");
+const PROVIDER_KEY_SRC = path.resolve("src/ui/components/ProviderKeyInput.ts");
 
 test.beforeAll(async () => {
 	// Full-suite browser fixture runs can be CPU/IO constrained while multiple
@@ -40,6 +41,7 @@ test.beforeAll(async () => {
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(SETTINGS_SRC).mtimeMs,
 		fs.statSync(DIALOG_SRC).mtimeMs,
+		fs.statSync(PROVIDER_KEY_SRC).mtimeMs,
 	);
 	const bundleExists = fs.existsSync(BUNDLE);
 	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
@@ -269,6 +271,12 @@ test.describe("Settings Models tab redesign", () => {
 		await expect(googleKey.locator("provider-key-input")).toHaveCount(1);
 		// The component renders its (capitalized) provider name in the label.
 		await expect(googleKey).toContainText(/google/i);
+		// API-key fields are not website login passwords; do not let browser password
+		// managers prefill unrelated Google account credentials into this empty field.
+		const googleInput = googleKey.locator('input[type="password"]');
+		await expect(googleInput).toHaveAttribute("name", "bobbit-provider-api-key-google");
+		await expect(googleInput).toHaveAttribute("autocomplete", "new-password");
+		await expect(googleInput).toHaveValue("");
 
 		// OpenRouter key input wrapper + its provider-key-input element render too.
 		const openrouterKey = page.locator('[data-testid="provider-key-input-openrouter"]');
