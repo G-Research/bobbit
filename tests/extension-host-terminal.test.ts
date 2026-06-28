@@ -12,6 +12,8 @@ import { terminal as terminalChannelHandler } from "../market-packs/terminal/src
 import type { PackEntry } from "../src/server/agent/pack-types.ts";
 
 const repoRoot = process.cwd();
+const REPLAY_MAX_BYTES = 128 * 1024;
+const REPLAY_CHUNK_BYTES = 16 * 1024;
 
 describe("built-in terminal pack", () => {
 	it("declares a first-party sessionPty terminal channel, panel, and launchers", () => {
@@ -139,6 +141,45 @@ describe("terminal channel handler", () => {
 		const replay = sent.filter(({ target }) => target === "new-client").map(({ frame }) => frame);
 		assert.ok(replay.some((frame) => isTextFrameWithMarker(frame, "RECENT_MARKER")), "recent output should be retained in bounded replay");
 		assert.ok(!replay.some((frame) => isTextFrameWithMarker(frame, "OLD_MARKER")), "old output past the replay budget should be trimmed");
+	});
+
+	it("trims replay that starts inside a CSI escape sequence", async () => {
+		const terminal = await openReplayTestTerminal();
+		const csiTail = "31mVISIBLE_AFTER_CSI";
+		terminal.emit(
+			"A".repeat(REPLAY_CHUNK_BYTES - byteLength("\x1b[")) +
+			"\x1b[" +
+			csiTail +
+			"B".repeat(REPLAY_MAX_BYTES - byteLength(csiTail)),
+		);
+		await flushTerminalOutput();
+		terminal.sent.length = 0;
+
+		await terminal.attach("new-client");
+
+		const replayText = replayTextFor(terminal.sent, "new-client");
+		assert.ok(replayText.startsWith("VISIBLE_AFTER_CSI"), `CSI residue should be trimmed before replay, got ${JSON.stringify(replayText.slice(0, 32))}`);
+		assert.ok(!replayText.startsWith("31m"), "reattach replay should not begin with an orphaned CSI tail");
+	});
+
+	it("trims replay that starts inside an OSC control string", async () => {
+		const terminal = await openReplayTestTerminal();
+		const oscPrefix = "\x1b]0;part";
+		const oscTail = "ial-title\x07VISIBLE_AFTER_OSC";
+		terminal.emit(
+			"A".repeat(REPLAY_CHUNK_BYTES - byteLength(oscPrefix)) +
+			oscPrefix +
+			oscTail +
+			"B".repeat(REPLAY_MAX_BYTES - byteLength(oscTail)),
+		);
+		await flushTerminalOutput();
+		terminal.sent.length = 0;
+
+		await terminal.attach("new-client");
+
+		const replayText = replayTextFor(terminal.sent, "new-client");
+		assert.ok(replayText.startsWith("VISIBLE_AFTER_OSC"), `OSC residue should be trimmed before replay, got ${JSON.stringify(replayText.slice(0, 32))}`);
+		assert.ok(!replayText.startsWith("ial-title"), "reattach replay should not begin with an orphaned OSC tail");
 	});
 
 	it("coalesces replay frames below channel attach quotas", async () => {
@@ -375,6 +416,61 @@ describe("ChannelPtyService", () => {
 		}
 	});
 });
+
+async function openReplayTestTerminal() {
+	let dataCb: ((data: string) => void) | undefined;
+	const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+	const ctx = {
+		host: {
+			pty: {
+				async openTerminal() {
+					return {
+						pid: 76,
+						write() {},
+						resize() {},
+						kill() {},
+						onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+						onExit: () => () => {},
+					};
+				},
+			},
+		},
+		send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+		sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+		close: async () => {},
+	};
+	const session = await terminalChannelHandler(ctx);
+	sent.length = 0;
+	return {
+		sent,
+		emit(data: string) { dataCb?.(data); },
+		attach(clientId: string) {
+			return (session.onAttach as unknown as ((id: string) => Promise<void>) | undefined)?.(clientId);
+		},
+	};
+}
+
+async function flushTerminalOutput() {
+	for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function replayTextFor(sent: Array<{ target: "broadcast" | string; frame: unknown }>, clientId: string): string {
+	return sent
+		.filter(({ target }) => target === clientId)
+		.map(({ frame }) => frame)
+		.filter((frame): frame is { kind: "text"; data: string } => Boolean(
+			frame &&
+			typeof frame === "object" &&
+			(frame as { kind?: unknown }).kind === "text" &&
+			typeof (frame as { data?: unknown }).data === "string",
+		))
+		.map((frame) => frame.data)
+		.join("");
+}
+
+function byteLength(data: string): number {
+	return Buffer.byteLength(data, "utf8");
+}
 
 function isTextFrameWithMarker(frame: unknown, marker: string) {
 	return Boolean(
