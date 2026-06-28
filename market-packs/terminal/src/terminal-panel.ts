@@ -56,10 +56,6 @@ export default function createTerminalPanel() {
 			const state = sessions.get(sid) ?? createSessionState(sid);
 			sessions.set(sid, state);
 			state.host = host;
-			if (typeof params?.startupError === "string" && params.startupError && params.startupError !== state.startupError) {
-				state.startupError = params.startupError;
-				setStatus(state, params.startupError, "error");
-			}
 			queueMicrotask(() => {
 				ensureTerminalMounted(state);
 				const launchId = typeof params?.__channelLaunchId === "string" ? params.__channelLaunchId : undefined;
@@ -69,14 +65,21 @@ export default function createTerminalPanel() {
 				const autoStart = shouldAutoStart(state, autoStartRequested, launchId);
 				const restoredAutoStart = autoStartRequested && !autoStart;
 				const restoredReadyChannel = !!readyId && !autoStart;
+				const restoredChannel = restoredAutoStart || restoredReadyChannel;
+				const startupError = typeof params?.startupError === "string" && params.startupError ? params.startupError : undefined;
 				if (readyId && state.channelReadyId !== readyId) {
 					state.channelReadyId = readyId;
 					state.attachAttempted = false;
+				}
+				if (restoredChannel) {
 					state.startupError = undefined;
+				} else if (startupError && startupError !== state.startupError) {
+					state.startupError = startupError;
+					setStatus(state, startupError, "error");
 				}
 				if (!state.startupError && (!state.attachAttempted || autoStart || launcherOpening)) {
 					state.attachAttempted = true;
-					void attachOrOfferStart(state, autoStart, restoredAutoStart || restoredReadyChannel, launcherOpening);
+					void attachOrOfferStart(state, autoStart, restoredChannel, launcherOpening);
 				}
 			});
 			return state.root;
@@ -182,11 +185,13 @@ function shouldAutoStart(state: SessionState, requested: boolean, launchId?: str
 
 async function attachOrOfferStart(state: SessionState, autoStart: boolean, restoredAutoStart = false, launcherOpening = false): Promise<void> {
 	if (state.channel || state.connecting) return;
+	const disconnectedText = "Terminal disconnected or closed. Press Restart to create a new terminal.";
 	const host = state.host;
 	if (!host?.capabilities?.channels || !host.channels) {
 		if (restoredAutoStart) {
 			state.attachAttempted = false;
-			setStatus(state, "Terminal disconnected or closed. Press Restart to create a new terminal.", "disconnected");
+			state.startupError = undefined;
+			setStatus(state, disconnectedText, "disconnected");
 		} else {
 			setStatus(state, "Terminal channels are unavailable in this host.", "error");
 		}
@@ -209,13 +214,15 @@ async function attachOrOfferStart(state: SessionState, autoStart: boolean, resto
 			setStatus(state, "Opening terminal from launcher…", "connecting");
 			return;
 		}
+		state.startupError = undefined;
 		setStatus(
 			state,
-			restoredAutoStart ? "Terminal disconnected or closed. Press Restart to create a new terminal." : "No live terminal. Press Start to create one.",
+			restoredAutoStart ? disconnectedText : "No live terminal. Press Start to create one.",
 			restoredAutoStart ? "disconnected" : "idle",
 		);
 	} catch (err) {
-		setStatus(state, messageOf(err, "Could not attach terminal."), "disconnected");
+		state.startupError = undefined;
+		setStatus(state, restoredAutoStart ? disconnectedText : messageOf(err, "Could not attach terminal."), "disconnected");
 	} finally {
 		state.connecting = false;
 		updateButtons(state);
@@ -252,6 +259,7 @@ async function startTerminal(state: SessionState, fromButton: boolean): Promise<
 
 async function attachChannel(state: SessionState, channel: HostChannel, status: string): Promise<void> {
 	cleanupChannelListeners(state);
+	state.startupError = undefined;
 	state.channel = channel;
 	state.disposers.push(channel.onFrame((frame) => handleFrame(state, frame)));
 	state.disposers.push(channel.onClose((event) => {
