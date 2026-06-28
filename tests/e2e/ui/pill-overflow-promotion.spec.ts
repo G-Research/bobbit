@@ -14,6 +14,34 @@ import type { Page } from "@playwright/test";
 import { navigateToHash, openApp } from "./ui-helpers.js";
 
 const padName = (i: number): string => `qa-pill-xxxxxx-${i.toString().padStart(2, "0")}`;
+const bgProcessesRoute = (sessionId: string): string => `**/api/sessions/${sessionId}/bg-processes`;
+
+type MockBgProcess = {
+	id: string;
+	name: string;
+	command: string;
+	pid: number;
+	status: "running";
+	exitCode: null;
+	terminalReason: null;
+	startTime: number;
+	endTime: null;
+};
+
+function createMockProcesses(count: number): MockBgProcess[] {
+	const startTime = Date.now();
+	return Array.from({ length: count }, (_, i) => ({
+		id: `mock-bg-${i + 1}`,
+		name: padName(i + 1),
+		command: "mock long-running command",
+		pid: 10_000 + i,
+		status: "running" as const,
+		exitCode: null,
+		terminalReason: null,
+		startTime: startTime + i,
+		endTime: null,
+	}));
+}
 
 async function settleTwoRafs(page: Page): Promise<void> {
 	await page.evaluate(
@@ -47,34 +75,36 @@ async function forcePillOverflowMeasure(page: Page): Promise<boolean> {
 	});
 }
 
-async function seedPillsInUI(page: Page, count: number): Promise<string[]> {
-	const startTime = Date.now();
-	const processes = Array.from({ length: count }, (_, i) => ({
-		id: `mock-bg-${i + 1}`,
-		name: padName(i + 1),
-		command: "mock long-running command",
-		pid: 10_000 + i,
-		status: "running" as const,
-		exitCode: null,
-		terminalReason: null,
-		startTime: startTime + i,
-		endTime: null,
-	}));
-	await page.evaluate(async (mockProcesses) => {
-		await customElements.whenDefined("bg-process-pill");
+async function installMockBgProcessesApi(page: Page, sessionId: string, processes: MockBgProcess[]): Promise<void> {
+	await page.route(bgProcessesRoute(sessionId), async (route) => {
+		if (route.request().method() !== "GET") {
+			await route.fallback();
+			return;
+		}
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ processes }),
+		});
+	});
+}
+
+async function waitForMockPillsHydrated(page: Page, sessionId: string, expectedCount: number): Promise<void> {
+	await page.waitForFunction(({ id, count }) => {
 		const ai = document.querySelector("agent-interface") as
-			| (HTMLElement & { bgProcesses?: unknown[]; requestUpdate?: () => void; updateComplete?: Promise<unknown>; _measurePillOverflow?: () => void })
+			| (HTMLElement & { session?: { sessionId?: string }; bgProcesses?: Array<{ id?: string }> })
 			| null;
-		if (!ai) throw new Error("agent-interface not mounted");
-		ai.bgProcesses = mockProcesses;
-		ai.requestUpdate?.();
-		await ai.updateComplete;
-		await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-		ai._measurePillOverflow?.();
-		await ai.updateComplete;
-	}, processes);
+		return ai?.session?.sessionId === id
+			&& Array.isArray(ai.bgProcesses)
+			&& ai.bgProcesses.length === count
+			&& ai.bgProcesses.every((p) => typeof p.id === "string" && p.id.startsWith("mock-bg-"));
+	}, { id: sessionId, count: expectedCount }, { timeout: 15_000 });
+	await customElementsReady(page);
 	await settleTwoRafs(page);
-	return processes.map((p) => p.id);
+}
+
+async function customElementsReady(page: Page): Promise<void> {
+	await page.evaluate(() => customElements.whenDefined("bg-process-pill"));
 }
 
 async function dismissPillsFromUI(page: Page, idsToRemove: string[]): Promise<void> {
@@ -101,13 +131,23 @@ test.describe("pill strip overflow — real app smoke", () => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
+		const processes = createMockProcesses(15);
+		await installMockBgProcessesApi(page, sessionId, processes);
+		const bgProcessesLoaded = page.waitForResponse((response) => {
+			return response.url().includes(`/api/sessions/${sessionId}/bg-processes`)
+				&& response.request().method() === "GET"
+				&& response.ok();
+		}, { timeout: 15_000 });
+
 		await openApp(page);
 		await navigateToHash(page, `#/session/${sessionId}`);
 		await waitForActiveSession(page, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await bgProcessesLoaded;
+		await waitForMockPillsHydrated(page, sessionId, processes.length);
 		await page.setViewportSize({ width: 540, height: 800 });
 
-		const ids = await seedPillsInUI(page, 15);
+		const ids = processes.map((p) => p.id);
 		await expect.poll(() => forcePillOverflowMeasure(page), {
 			timeout: 10_000,
 			message: "mocked background pills should collapse behind the More button",
