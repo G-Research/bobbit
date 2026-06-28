@@ -667,16 +667,24 @@ server-verified context and returns optional lifecycle hooks:
 ```js
 // lib/repl-channel.mjs
 export async function repl(ctx) {
+  const replay = [];
+  const remember = (frame) => {
+    replay.push(frame);
+    while (replay.length > 50) replay.shift(); // keep replay bounded per live channel
+    return frame;
+  };
+
   await ctx.send({ kind: "json", data: { op: "ready" } });
 
   return {
     async onClientFrame(frame) {
       if (frame.kind === "text") {
-        await ctx.send({ kind: "text", data: `echo: ${frame.data}` });
+        await ctx.send(remember({ kind: "text", data: `echo: ${frame.data}` }));
       }
     },
     async onAttach(clientId) {
-      await ctx.send({ kind: "json", data: { op: "attached", clientId } });
+      for (const frame of replay) await ctx.sendTo(clientId, frame);
+      await ctx.sendTo(clientId, { kind: "json", data: { op: "attached", clientId } });
     },
     async onDetach(clientId) {
       ctx.audit({ type: "channel.detach", reason: `client ${clientId} detached` });
@@ -691,8 +699,11 @@ export const channels = { repl };
 ```
 
 The server supplies `ctx.sessionId`, `ctx.packId`, `ctx.contributionId`, `ctx.channelId`,
-`ctx.name`, `ctx.protocol`, `ctx.init`, `ctx.send(frame)`, `ctx.close(reason?)`, and
-`ctx.audit(event)`. Treat `ctx.init` and every client frame as untrusted protocol input.
+`ctx.name`, `ctx.protocol`, `ctx.init`, `ctx.send(frame)`, `ctx.sendTo(clientId, frame)`,
+`ctx.close(reason?)`, and `ctx.audit(event)`. `ctx.send(frame)` broadcasts to attached clients.
+`ctx.sendTo(clientId, frame)` sends only to one attached client on this channel; use it for
+attach-only replay or status frames so existing clients do not receive duplicate output. Treat
+`ctx.init` and every client frame as untrusted protocol input.
 
 #### Open, attach, list, detach, close
 
