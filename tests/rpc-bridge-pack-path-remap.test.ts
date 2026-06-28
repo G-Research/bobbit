@@ -23,6 +23,7 @@ import { TOOLS_DIR } from "../src/server/agent/tool-manager.ts";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-rpc-pack-remap-"));
 const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
 const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+const previousBobbitDir = process.env.BOBBIT_DIR;
 const previousProjectRoot = getProjectRoot();
 const serverRoot = path.join(root, "server-root");
 const projectRoot = path.join(root, "project-root");
@@ -40,6 +41,7 @@ before(() => {
 	fs.mkdirSync(path.join(projectMarketPacksRoot, "project-pack", "pi-extensions", "demo"), { recursive: true });
 	process.env.BOBBIT_BUILTIN_PACKS_DIR = builtinPacksDir;
 	process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
+	process.env.BOBBIT_DIR = path.join(serverRoot, ".bobbit");
 	setProjectRoot(serverRoot);
 });
 
@@ -48,6 +50,8 @@ after(() => {
 	else process.env.BOBBIT_BUILTIN_PACKS_DIR = previousBuiltinPacksDir;
 	if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 	else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+	if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+	else process.env.BOBBIT_DIR = previousBobbitDir;
 	setProjectRoot(previousProjectRoot);
 	fs.rmSync(root, { recursive: true, force: true });
 });
@@ -78,6 +82,13 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 	it("translates built-in first-party pack paths in the bind-mount table", () => {
 		const hostPath = path.join(builtinPacksDir, "pr-walkthrough", "tools", "pr-walkthrough", "extension.ts");
 		const containerPath = `${BUILTIN_PACKS_CONTAINER_DIR}/pr-walkthrough/tools/pr-walkthrough/extension.ts`;
+		assert.equal(hostPathToContainer(hostPath), containerPath);
+		assert.equal(containerPathToHost(containerPath), hostPath);
+	});
+
+	it("translates generated tool-result error bridge extension paths in the bind-mount table", () => {
+		const hostPath = path.join(serverRoot, ".bobbit", "state", "tool-result-error-bridge", "abc123", "bridge.ts");
+		const containerPath = "/bobbit-state/tool-result-error-bridge/abc123/bridge.ts";
 		assert.equal(hostPathToContainer(hostPath), containerPath);
 		assert.equal(containerPathToHost(containerPath), hostPath);
 	});

@@ -31,6 +31,7 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 };
 
 import { isProposalType, type GoalWorkflowValidationError, type ProposalType } from "./proposal-registry.js";
+import { workflowValidationErrorFromProposalResult } from "../ui/tools/renderers/proposal-rev-marker.js";
 
 export type ProposalSource = "tool" | "legacy" | "edit" | "seed" | "rehydrate" | "restore";
 const SERVER_PROPOSAL_SOURCES = new Set<ProposalSource>(["edit", "seed", "rehydrate", "restore"]);
@@ -221,76 +222,13 @@ function toolEventId(event: any): string | undefined {
 	return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
-function normalizeAvailableWorkflows(value: unknown): Array<{ id: string; name?: string }> | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const workflows = value
-		.map((w) => {
-			if (typeof w === "string" && w.trim()) return { id: w.trim() };
-			if (!w || typeof w !== "object") return null;
-			const id = typeof (w as any).id === "string" ? (w as any).id.trim() : "";
-			if (!id) return null;
-			const name = typeof (w as any).name === "string" && (w as any).name.trim() ? (w as any).name.trim() : undefined;
-			return name ? { id, name } : { id };
-		})
-		.filter((w): w is { id: string; name?: string } => !!w);
-	return workflows.length > 0 ? workflows : undefined;
-}
-
 function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
 	if (!a || !b) return false;
 	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
 }
 
 function parseGoalWorkflowValidationError(result: any, input?: Record<string, unknown>): GoalWorkflowValidationError | null {
-	if (!result?.isError) return null;
-	const texts: string[] = [];
-	const payloads: any[] = [];
-	const inspect = (value: unknown): void => {
-		if (typeof value === "string") {
-			const text = value.trim();
-			if (text) texts.push(text);
-			try {
-				const parsed = JSON.parse(text);
-				if (parsed && typeof parsed === "object") payloads.push(parsed);
-			} catch { /* not json */ }
-			return;
-		}
-		if (Array.isArray(value)) {
-			for (const item of value) inspect(item);
-			return;
-		}
-		if (!value || typeof value !== "object") return;
-		const block = value as Record<string, unknown>;
-		if (typeof block.code === "string" || typeof block.message === "string") payloads.push(block);
-		if (typeof block.text === "string") inspect(block.text);
-		inspect(block.content);
-		inspect(block.output);
-		inspect(block.result);
-	};
-	inspect(result.content);
-	inspect(result.output);
-	inspect(result.result);
-	const plain = texts.join("\n").trim();
-	const structured = payloads.find((p) => p && typeof p === "object" && (p.code === "MISSING_WORKFLOW" || p.code === "UNKNOWN_WORKFLOW"));
-	const fallbackCode = /workflow is required/i.test(plain)
-		? "MISSING_WORKFLOW"
-		: /unknown workflow/i.test(plain)
-			? "UNKNOWN_WORKFLOW"
-			: undefined;
-	const code = structured?.code === "MISSING_WORKFLOW" || structured?.code === "UNKNOWN_WORKFLOW"
-		? structured.code
-		: fallbackCode;
-	if (code !== "MISSING_WORKFLOW" && code !== "UNKNOWN_WORKFLOW") return null;
-	const availableWorkflows = normalizeAvailableWorkflows(structured?.availableWorkflows);
-	const ids = availableWorkflows?.map(w => w.id).filter(Boolean) ?? [];
-	let message = typeof structured?.message === "string" && structured.message.trim()
-		? structured.message.trim()
-		: plain || (code === "MISSING_WORKFLOW" ? "Workflow is required for this project." : "Unknown workflow for this project.");
-	if (ids.length > 0 && !ids.some(id => message.includes(id))) {
-		message = `${message} Available workflows: ${ids.join(", ")}.`;
-	}
-	const workflowId = typeof input?.workflow === "string" ? input.workflow : undefined;
-	return { code, message, workflowId, availableWorkflows };
+	return workflowValidationErrorFromProposalResult(result, input) ?? null;
 }
 
 /**
@@ -2166,7 +2104,6 @@ export class RemoteAgent {
 	 */
 	private _checkProposalToolResult(message: any): void {
 		if (message?.role !== "toolResult" && message?.role !== "tool_result" && message?.type !== "tool_result") return;
-		if (!message?.isError) return;
 		const toolCallId = typeof message.toolCallId === "string"
 			? message.toolCallId
 			: typeof message.tool_use_id === "string"
@@ -2178,17 +2115,19 @@ export class RemoteAgent {
 		const proposalType = remembered?.type ?? (isProposalType(typeFromName) ? typeFromName : undefined);
 		if (proposalType !== "goal") return;
 		const input = remembered?.input ?? (toolCallId ? parseToolPayload(this._toolCallInputsById.get(toolCallId)) ?? undefined : undefined);
+		if (!input) return;
 		const validation = parseGoalWorkflowValidationError(message, input);
 		if (!validation) return;
 		const current = state.activeProposals.goal;
-		if (!current || current.sessionId !== this._sessionId) {
-			if (input && this.onProposal) this.onProposal("goal", input, false, undefined, "tool");
-		} else if ((current.rev ?? 0) > 0 && input && !sameProposalFields(current.fields, input)) {
+		if (current?.sessionId === this._sessionId && (current.rev ?? 0) > 0) {
 			// Historical replay may encounter an older failed no-rev tool result after a
 			// later successful retry has already rehydrated a rev-backed draft. Keep the
 			// failed metadata tied to its own tool card/open event instead of poisoning
 			// the current successful proposal slot.
 			return;
+		}
+		if (!current || current.sessionId !== this._sessionId) {
+			if (input && this.onProposal) this.onProposal("goal", input, false, undefined, "tool");
 		}
 		const slot = state.activeProposals.goal;
 		if (!slot || slot.sessionId !== this._sessionId) return;

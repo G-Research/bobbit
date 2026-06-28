@@ -11,6 +11,7 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
+import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -612,8 +613,10 @@ export class RpcBridge {
 		return this.sendCommand({ type: "compact" }, timeoutMs);
 	}
 
-	getMessages() {
-		return this.sendCommand({ type: "get_messages" });
+	async getMessages() {
+		const response = await this.sendCommand({ type: "get_messages" });
+		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+		return response;
 	}
 
 	async stop(): Promise<void> {
@@ -802,9 +805,10 @@ export class RpcBridge {
 				p.resolve(parsed);
 			} else {
 				this.recordPiExtensionLoadFailureFromEvent(parsed);
+				const normalized = normalizeToolResultErrorEvent(parsed);
 				// Agent event — forward to listeners
 				for (const listener of this.eventListeners) {
-					listener(parsed);
+					listener(normalized);
 				}
 			}
 		}
@@ -955,9 +959,10 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
-		// Generated google-code-assist provider extension (provider.ts) — bind-mounted
-		// by docker-args.ts so sandboxed pi-coding-agent can load it via --extension.
+		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so
+		// sandboxed agents can load remapped --extension paths.
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
+		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 

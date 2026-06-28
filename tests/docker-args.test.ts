@@ -92,20 +92,23 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
-	it("mounts the google-code-assist state subdir READ-ONLY so a compromised sandbox cannot tamper with the generated provider extension", () => {
-		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-gca-ro-"));
+	it("mounts generated extension state subdirs READ-ONLY so a compromised sandbox cannot tamper with reused source", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-generated-ext-ro-"));
 		try {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
 			});
 			const mounts = args.filter((a, i) => args[i - 1] === "-v");
-			const gca = mounts.find((m) => m.includes(":/bobbit-state/google-code-assist"));
-			assert.ok(gca, `expected a google-code-assist mount, got: ${JSON.stringify(mounts)}`);
-			assert.ok(
-				gca!.endsWith(":/bobbit-state/google-code-assist:ro"),
-				`google-code-assist mount must be read-only (:ro), got: ${gca}`,
-			);
+			for (const sub of ["google-code-assist", "tool-result-error-bridge"]) {
+				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
+				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
+				assert.ok(
+					mount!.endsWith(`:/bobbit-state/${sub}:ro`),
+					`${sub} mount must be read-only (:ro), got: ${mount}`,
+				);
+				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
+			}
 			// The writable state subdirs must NOT have picked up :ro.
 			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));

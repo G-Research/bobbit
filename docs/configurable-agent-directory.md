@@ -119,7 +119,8 @@ Sandbox containers receive:
 
 - the active `<agentDir>/sessions/` mounted at `/home/node/.bobbit/agent/sessions`;
 - active `<agentDir>/models.json` mounted read-only when it exists;
-- a generated scoped auth file from `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` mounted read-only as `/home/node/.bobbit/agent/auth.json`.
+- a generated scoped auth file from `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` mounted read-only as `/home/node/.bobbit/agent/auth.json`;
+- only the generated-extension state subdirectories needed for remapped `--extension` paths, including `.bobbit/state/google-code-assist/` and `.bobbit/state/tool-result-error-bridge/`, mounted read-only at `/bobbit-state/<subdir>`.
 
 Sandbox containers do **not** receive:
 
@@ -127,7 +128,9 @@ Sandbox containers do **not** receive:
 - host `<agentDir>/auth.json`;
 - `.bobbit/state` as a whole.
 
-The sandbox auth file contains only sanitized credentials allowed by the project's sandbox token policy. Project sandboxes are recreated when their existing Docker bind mounts still point at a previous active agent directory, because Docker bind mounts cannot be changed in place.
+The sandbox auth file contains only sanitized credentials allowed by the project's sandbox token policy. Generated-extension mounts contain source code only, not host tokens, and are read-only so sandboxed agents can load but not mutate content-addressed code reused by later sessions.
+
+Project sandboxes are recreated when their existing Docker bind mounts still point at a previous active agent directory or are missing current required state mounts such as `google-code-assist` or `tool-result-error-bridge`. Docker bind mounts cannot be changed in place, so recreating the container is the safe way to apply the least-privilege mount contract while preserving the named workspace volumes.
 
 Remote-less sandbox clone sources are also sanitized. Instead of bind-mounting the live project root, Bobbit builds a temporary, remote-less clone source from safe tracked `HEAD` content, excluding `.bobbit/` subtrees and `auth.json` files, then mounts that sanitized repository read-only. Local path origins are rejected rather than passed through to git inside the container.
 
