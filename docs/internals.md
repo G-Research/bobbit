@@ -990,7 +990,7 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ## Editable proposals
 
-Every `propose_*` payload (`goal`, `project`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth for draft content; the in-memory `state.activeProposals[type]` slot is a parsed content projection rebuilt on every change. Side-panel tab presence is separate and comes from the server-backed workspace. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+Successful `propose_*` payloads (`goal`, `project`, `role`, `tool`, `staff`) are mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth for draft content; the in-memory `state.activeProposals[type]` slot is a parsed content projection rebuilt on every change. Failed goal workflow-validation seeds are the exception: they write no draft and remain inspectable from the transcript tool call/result. Side-panel tab presence is separate and comes from the server-backed workspace. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
 
 ### Why
 
@@ -1054,6 +1054,7 @@ interface ProposalSlot {
   streaming: boolean;                // mirrors proposalStreamingByTag for legacy panels
   mode?: "provisional" | "registered"; // project only
   rev: number;                       // monotonic; UI re-render hint
+  workflowValidationError?: GoalWorkflowValidationError; // goal only
 }
 ```
 
@@ -1099,6 +1100,12 @@ agent calls propose_<type>(args)
 ```
 
 `seed` opens the workspace tab on the server before broadcasting the content update, so all clients converge on the same server-backed tab state. `restore` has the same explicit open/focus side effect after copying a historical snapshot back to the live draft. `edit_proposal` follows the content-write/broadcast flow via `POST /api/sessions/:id/proposal/:type/edit` with `source: "edit"`, but it is content-only: it must not open or focus `proposal:<type>`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
+
+### Failed goal workflow seeds
+
+Goal seeds validate against the linked project's workflows before writing a draft. When workflows exist and `propose_goal` omits `workflow`, uses an unknown workflow id, or names an invalid optional step, the seed endpoint returns a structured `400` and does not write a proposal file, snapshot, workspace tab, or `__proposal_rev_v1__` success marker. The tool result is still persisted and broadcast as `isError: true`, with the original tool input preserved in the transcript so the title and spec remain inspectable.
+
+The failed-card UX is intentionally transcript-derived. `ProposalRenderer` reads title/spec from the tool call input and workflow details from the errored result text/JSON, then opens a goal proposal panel with `workflowValidationError`, an empty or invalid workflow selection, and a disabled Create Goal button. Replay/reload follows the same path from persisted messages. A later successful `propose_goal` carries its own server rev and replaces the live draft normally; no-rev failed metadata is not attached to a different rev-backed proposal.
 
 ### Dual-fire: legacy streaming path coexists
 
@@ -1147,7 +1154,7 @@ Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also wr
 - **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult`. Latest/current cards select the live proposal tab; older cards call `GET /api/sessions/:id/proposal/:type/snapshot?rev=<n>` and populate a read-only `proposal:<type>:rev:<n>` tab. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
 - **Restore semantics.** `restoreSnapshot` remains the explicit mutating rollback API: it reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The normal UI history-browsing path does not call it.
 - **Non-fatal snapshot failures.** Snapshot-write failures (disk full, permission denied) leave the live draft committed and broadcast `rev: 0`. Clients treat `rev: 0` as "snapshot system unavailable" - the panel still renders, but the rev badge and "Open proposal" snapshot path are disabled. Mid-restore crash between live rename and snapshot write is benign: the next write recomputes `latestRev` from the dir and picks the same number, overwriting consistently.
-- **Edit failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot - the rev counter only advances on successful disk writes. The `EditProposalRenderer` shows the error code on failed cards but no "Open proposal" button.
+- **Failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot. Failed `propose_goal` workflow-validation seeds happen before the first write, so they also have no snapshot and no `__proposal_rev_v1__` marker. The rev counter only advances on successful disk writes.
 - **Streaming partials don't bump rev.** The dual-fire `_checkToolProposals` streaming path emits in-memory `proposal_update` events from in-flight tool calls; only the gateway-side `seed` POST writes the file. Rev advances exactly once per completed tool call.
 
 Full design (file format, error codes, restore-handler edge cases, test plan): [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
@@ -1319,6 +1326,12 @@ Earlier versions used a fragile multi-layered approach: stub extensions raced ag
 8. `never` tools are never registered with the agent, so no `tool_call` event fires for them - the guard is not involved.
 
 **Key files:** `tool-guard-extension.ts` (generates the guard), `tool-activation.ts` (`writeToolGuardExtension`, `computeToolPolicies`), `tool-group-policy-store.ts`, role YAML `toolPolicies`, tool YAML `grantPolicy`.
+
+### Returned tool-result errors
+
+Many Bobbit tools return MCP-style payloads: `{ content, isError: true }` or `{ content, is_error: true }`. Returning instead of throwing preserves a useful result body for validation failures, but pi treats any normally-returned handler as successful. Bobbit prepends a generated `tool-result-error-bridge` pi extension during session setup so registered tool handlers are wrapped before execution. If a handler returns a flagged payload, the bridge throws a `BobbitToolResultError` whose message is derived from the payload content; pi then persists and broadcasts the paired `toolResult` as errored while keeping the human-readable body.
+
+Gateway-side normalization is a second layer. Live RPC events and `getMessages()` snapshots pass through `tool-result-error-normalizer.ts`, which recognizes both camelCase and snake_case flags on tool results or JSON result bodies and patches `isError: true` before the UI sees them. This keeps current sessions, restored sessions, and older transcripts on the same error contract.
 
 ### Grant duration
 
@@ -1871,7 +1884,7 @@ Skills follow the [Agent Skills spec](https://agentskills.io/specification)'s *p
 **Two invariants this path enforces (each pinned by a regression test after a confirmed bug):**
 
 - **Tool `execute()` params come from the SECOND argument.** pi's `ToolDefinition.execute` contract is `execute(toolCallId, params, signal, onUpdate, ctx)` — the tool-call id string is first, the validated params second. *Every* `defaults/tools/*` extension must use `async execute(_toolCallId, params, …)`. The skills extension once read `input.name` off the first argument, so the model-supplied `name`/`args` were silently `undefined`, `JSON.stringify` dropped the key, and the gateway rejected the call with 400 `name is required`. Pinned by `tests/activate-skill-extension.test.ts` (invokes the real registered tool with the `(toolCallId, params)` convention and asserts the request body carries `name`/`args`). The pre-existing `tests/e2e/activate-skill.spec.ts` missed it because it calls the REST endpoint directly, bypassing `execute()`.
-- **The renderer must not gate error display on `result.isError`.** pi's agent-loop hardcodes `isError: false` for any tool whose `execute()` *returns* (rather than throws) — so an extension that returns `{ isError: true }` never propagates that flag to the UI. `ActivateSkillRenderer` therefore surfaces the result's text content (`activate_skill failed: …`) as a visible error state whenever there is no `skillExpansion`, regardless of the flag; otherwise the failure rendered as a benign "Activating…" header and the error text was discarded. Pinned by `tests/activate-skill-renderer.spec.ts`. See [docs/debugging.md — `activate_skill` returns "name is required"](debugging.md#activate_skill-returns-name-is-required--failures-invisible-in-ui).
+- **The renderer still treats missing expansion as failure.** The tool-result error bridge now preserves returned `{ isError: true }` payloads for current sessions, but older transcripts and upstream edge cases can still lack the flag. `ActivateSkillRenderer` therefore surfaces `activate_skill failed: …` text whenever there is no `skillExpansion`, rather than relying only on `result.isError`. Pinned by `tests/activate-skill-renderer.spec.ts`. See [docs/debugging.md — `activate_skill` returns "name is required"](debugging.md#activate_skill-returns-name-is-required--failures-invisible-in-ui).
 
 **Tool-group policy.** `activate_skill` is in the `Skills` tool group. Roles can opt out by setting `Skills: never` in their `toolPolicies`, which both removes the "Available Skills" section from the system prompt *and* hard-blocks any `activate_skill` call - see [Tool access policies](#tool-access-policies).
 
@@ -2185,6 +2198,12 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 - **Gateway reachable**: `--add-host=host.docker.internal:host-gateway` ensures the container can reach the gateway for API calls (tool extensions, delegate sessions, etc.).
 - **Cleanup**: `cleanupSandboxNetwork()` removes the network on shutdown (non-fatal if containers are still connected).
 - `web_search`/`web_fetch` use direct `curl` from inside the container - no gateway proxy needed.
+
+### Generated extension mounts
+
+Sandboxed agents load several gateway-generated pi extensions through `--extension`. The host paths are remapped into `/bobbit-state/<subdir>/...`, so Docker containers receive only the required state subdirectories, not the full `.bobbit/state` tree. `google-code-assist` and `tool-result-error-bridge` are mounted read-only because agents only load their generated source; allowing writes would let a compromised sandbox tamper with content-addressed extensions later reused by other sessions. The gateway also revalidates cached generated files before reuse.
+
+Long-lived project sandboxes are recreated when their existing Docker mount set is stale: missing a required `/bobbit-state/<subdir>` mount, pointing at a different active state directory, or using the wrong read/write mode. Docker bind mounts cannot be changed in place, so recreation is the safe way to apply the current mount contract while keeping named workspace volumes intact.
 
 ### Scoped tokens
 
@@ -3102,6 +3121,8 @@ Only truly global state lives in the server's central state directory.
 | `gateway-restart` | `harness.ts` | Dev restart sentinel |
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
+| `google-code-assist/` | `google-code-assist-provider-extension.ts` | Content-addressed generated provider extensions mounted read-only into Docker sandboxes when needed. |
+| `tool-result-error-bridge/` | `tool-result-error-bridge-extension.ts` | Content-addressed generated bridge extension that preserves returned MCP-style tool error flags. Mounted read-only into Docker sandboxes. |
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
