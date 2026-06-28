@@ -1,6 +1,4 @@
-# Sidebar font-size control
-
-The sidebar font-size setting is a browser-local appearance preference for the app shell sidebar. It changes the sidebar's text rhythm without changing chat, headers, dialogs, or other product surfaces.
+# Sidebar font-size numeric control UX check
 
 ## Recommendation
 
@@ -39,21 +37,3 @@ Use explicit copy tied to the new default:
 ## Consistency check
 
 Match existing settings primitives: `text-sm font-medium` label, `text-xs text-muted-foreground` help text, rounded bordered background input, tabular numeric value, and link-style muted reset action. Keep this control in the same Appearance group as the existing sidebar font-size setting; do not introduce a new section or slider-like visual pattern.
-
-## Sidebar affordance scaling
-
-The setting writes the persisted scale to `--sidebar-font-scale`; `.sidebar-root` consumes it as its base `font-size`. Sidebar affordance icons then inherit that size through sidebar-scoped `em` and CSS-variable utilities instead of fixed pixel dimensions.
-
-Covered affordances include:
-
-- top action icons: Roles, Tools, Skills, Workflows, Market, and New Goal;
-- add-goal, add-staff, and add-session compound icons, including the plus overlays;
-- expanded, collapsed, mobile, project, staff, session, goal, team-lead, ungrouped, and archived disclosure chevrons;
-- role-picker / “New session with role” chevrons;
-- sidebar action rows where PR badges and adjacent action buttons share the same gap source.
-
-These utilities are scoped under `.sidebar-root` so changing the sidebar font size cannot resize lucide icons or action spacing elsewhere in the app. The scope also keeps sidebar-specific density rules local: visual icon size follows the font scale, while click targets and non-sidebar surfaces keep their existing behavior.
-
-## Regression coverage
-
-`tests/e2e/ui/sidebar-font-scale.spec.ts` owns the full-stack regression coverage. The `sidebar icons, chevrons, overflow, and action gaps follow sidebar font size @repro` path checks desktop affordances, collapsed-sidebar chevrons, min/max horizontal overflow, vertical scrolling, and PR-to-action gap equality. The mobile `@repro` path checks project/sidebar affordances at a phone viewport, including project and sessions chevrons, add buttons, role-picker chevrons, max-size overflow, and vertical scrolling.
