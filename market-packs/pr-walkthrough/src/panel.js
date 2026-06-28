@@ -622,6 +622,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		${section.eyebrow ? html`<div class="phase-label">${section.eyebrow}</div>` : nothing}
 		<h2 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h2>
 		${section.body ? html`<p class="summary">${section.body}</p>` : nothing}
+		${arrayOf(section.items).length ? html`<ul class="beat-list" data-testid="pr-walkthrough-beat-list">${arrayOf(section.items).map((item) => html`<li>${item}</li>`)}</ul>` : nothing}
 		${renderOrientationVerdict(section)}
 		${renderOrientationStats(entry, card, section)}
 		${arrayOf(section.concerns).length ? html`<div class="concerns" data-testid="pr-walkthrough-beat-concerns">${arrayOf(section.concerns).map((concern) => html`<div class="concern"><strong>${asText(concern.severity || concern.kind, "concern").replace(/_/g, "-")}</strong><span>${concern.text || concern.summary || concern}</span></div>`)}</div>` : nothing}
@@ -1345,8 +1346,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			return html`
 				<style>
 					@keyframes prw-spin { to { transform: rotate(360deg); } }
-					.prw-root { color: var(--foreground); background: var(--background); padding: 12px; min-height: 100%; box-sizing: border-box; }
-					.prw-root .prw-shell { border: 1px solid var(--border); border-radius: 18px; background: var(--card); overflow: hidden; box-shadow: 0 20px 60px color-mix(in oklch, var(--foreground) 8%, transparent); }
+					.prw-root { color: var(--foreground); background: var(--background); padding: 0; min-height: 100%; height: 100%; box-sizing: border-box; }
+					.prw-root .prw-shell { border: 0; border-radius: 0; background: var(--card); overflow: hidden; box-shadow: none; }
 					.prw-root .prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
 					.prw-root .prw-review-kicker, .prw-root .prw-header-main, .prw-root .prw-header-meta, .prw-root .prw-progress-row, .prw-root .prw-title-wrap, .prw-root .prw-workspace, .prw-root .prw-card-topline, .prw-root .prw-diff-header, .prw-root .prw-card-comments-head, .prw-root .prw-review-controls, .prw-root .prw-decision-buttons { display: flex; align-items: center; gap: 10px; }
 					.prw-root .prw-review-kicker { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
@@ -1458,7 +1459,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					}
 					@keyframes prw-pulse { 0%, 100% { opacity: .38; } 50% { opacity: .9; } }
 					.prw-root * { box-sizing: border-box; }
-					.prw-root .prw-shell { min-height: calc(100vh - 24px); background: color-mix(in oklch, var(--card) 92%, var(--background)); box-shadow: 0 22px 70px color-mix(in oklch, var(--foreground) 10%, transparent); }
+					.prw-root .prw-shell { min-height: 100%; background: color-mix(in oklch, var(--card) 92%, var(--background)); box-shadow: none; }
 					.prw-root .prw-review-header { padding: 16px 18px 14px; background: linear-gradient(135deg, color-mix(in oklch, var(--card) 88%, var(--background)), color-mix(in oklch, var(--chart-1) 10%, transparent)); }
 					.prw-root .prw-review-header h1 { overflow-wrap: anywhere; }
 					.prw-root .prw-pr-pill { color: var(--chart-1); border-color: color-mix(in oklch, var(--chart-1) 28%, var(--border)); }
@@ -1594,7 +1595,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 					/* Historical compact shell parity overrides. */
 					.prw-root .prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: calc(100vh - 16px); min-height: 600px; display: grid; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: 100%; min-height: 0; display: grid; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 0; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 					.prw-root .header { height: 52px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 240px) auto; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
 					.prw-root .title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
 					.prw-root .pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
@@ -1672,12 +1673,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
 					.prw-root .decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
 					.prw-root .guide { padding: 16px; }
-					.prw-root .guide-counter { border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
+					.prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+					.prw-root .guide-counter { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
 					.prw-root .guide-stage { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--background) 76%, var(--card)); }
 					.prw-root .beat { display: grid; gap: 10px; }
-					.prw-root .beat h2 { font-size: 20px; }
+					.prw-root .beat h2 { font-size: clamp(19px, 3.8vw, 24px); }
+					.prw-root .beat-list { margin: 0; padding-left: 20px; color: var(--muted-foreground); line-height: 1.45; }
+					.prw-root .beat-list li + li { margin-top: 6px; }
 					.prw-root .verdict, .prw-root .concern, .prw-root .filerow { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 9px; }
 					.prw-root .verdict { border-color: color-mix(in oklch, var(--warning) 38%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
+					.prw-root .verdict p { margin: 6px 0 0; }
 					.prw-root .verdict span, .prw-root .filerow small { display: block; color: var(--muted-foreground); }
 					.prw-root .guide-stats { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted-foreground); }
 					.prw-root .concerns, .prw-root .filemap { display: grid; gap: 8px; }

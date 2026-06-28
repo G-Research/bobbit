@@ -119,7 +119,7 @@ describe("PR walkthrough YAML schema", () => {
 		assert.ok(payload.warnings.some(warning => warning.code === "existing"));
 	});
 
-	it("renders the orientation card as six guided beats with the reframed merge heading", () => {
+	it("renders the orientation card as the six focused reviewer orientation beats", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
@@ -128,40 +128,42 @@ describe("PR walkthrough YAML schema", () => {
 		const sections = payload.cards[0]?.sections;
 		assert.ok(sections);
 		assert.deepEqual(sections.map(section => section.id), [
-			"at-a-glance",
-			"why-it-exists",
-			"what-it-changes",
-			"should-merge",
-			"what-to-watch",
-			"where-to-look",
+			"what-changed-and-why",
+			"how-it-works",
+			"change-map",
+			"risks-and-edge-cases",
+			"validation",
+			"merge-recommendation",
 		]);
 		assert.deepEqual(sections.map(section => section.navLabel), [
-			"At a glance",
-			"Why it exists",
-			"What it changes",
-			"Should we merge",
-			"What to watch",
-			"Where to look",
+			"What/why",
+			"How it works",
+			"Change map",
+			"Risks",
+			"Validation",
+			"Merge",
 		]);
 
-		const atAGlance = sections.find(section => section.id === "at-a-glance");
-		assert.equal(atAGlance?.showStats, true);
-		assert.equal(atAGlance?.body, undefined, "at-a-glance summary belongs in verdict.summary only, not duplicated in body");
-		assert.equal(atAGlance?.verdict?.recommendation, "comment");
-		assert.equal(atAGlance?.verdict?.confidence, "medium");
+		const purpose = sections.find(section => section.id === "what-changed-and-why");
+		assert.equal(purpose?.showStats, true);
+		assert.match(purpose?.body ?? "", /Reviewers need session-hosted context/);
+		assert.match(purpose?.body ?? "", /Fix the walkthrough launch flow/);
 
-		const merge = sections.find(section => section.id === "should-merge");
-		assert.equal(merge?.heading, "Should it be merged?");
-		assert.match(merge?.body ?? "", /^Maybe — comment, medium confidence\./);
+		const implementation = sections.find(section => section.id === "how-it-works");
+		assert.match(implementation?.body ?? "", /Move synthesis into the agent/);
+
+		const risks = sections.find(section => section.id === "risks-and-edge-cases");
+		assert.ok(risks?.concerns?.some(concern => concern.severity === "non_blocking" && /reload persistence/i.test(concern.text)));
+		assert.ok(risks?.concerns?.some(concern => concern.severity === "question"));
+
+		const validationBeat = sections.find(section => section.id === "validation");
+		assert.ok(validationBeat?.items?.some(item => /Confirm no tests were run/.test(item)));
+
+		const merge = sections.find(section => section.id === "merge-recommendation");
+		assert.equal(merge?.heading, "Merge recommendation");
+		assert.equal(merge?.verdict?.recommendation, "comment");
+		assert.equal(merge?.verdict?.confidence, "medium");
 		assert.match(merge?.body ?? "", /It makes review safer\./);
-
-		const watch = sections.find(section => section.id === "what-to-watch");
-		assert.ok(watch?.concerns?.some(concern => concern.severity === "non_blocking" && /reload persistence/i.test(concern.text)));
-		assert.ok(watch?.concerns?.some(concern => concern.severity === "question"));
-
-		const whereToLook = sections.find(section => section.id === "where-to-look");
-		assert.equal(whereToLook?.showOriginalDescription, true);
-		assert.match(whereToLook?.body ?? "", /Start with API chunk/);
 	});
 
 	it("derives a nav_label fallback from the title and carries an explicit nav_label through", () => {

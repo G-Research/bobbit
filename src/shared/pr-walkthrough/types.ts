@@ -85,6 +85,7 @@ export interface PrWalkthroughCardSection {
 	eyebrow?: string;
 	heading: string;
 	body?: string;
+	items?: string[];
 	verdict?: PrWalkthroughOrientationVerdict;
 	concerns?: PrWalkthroughOrientationConcern[];
 	fileRoles?: PrWalkthroughOrientationFileRole[];

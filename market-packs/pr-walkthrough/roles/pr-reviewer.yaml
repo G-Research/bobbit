@@ -74,6 +74,15 @@ promptTemplate: |
 
   Stable IDs must be deterministic and retry-safe: use short lower-kebab IDs derived from the topic/file area, such as `auth-flow`, `config-migration`, or `settings-panel`. Do not use timestamps, counters that could shift after compaction, or vague IDs.
 
+  Orientation contract: the panel always renders exactly these six orientation beats, derived from your required chunks. Write the chunk fields so each beat is concrete, PR-specific, and non-overlapping:
+  1. `What changed and why` = `context.problem_solved` + `context.why_created`. Name the changed behavior/component and the before/after user or developer impact.
+  2. `How it works` = `context.author_intent`. Explain the implementation approach, important control/data flow, lifecycle, storage, API, or async behavior. Do not restate the purpose.
+  3. `Change map` = `context.reviewer_map`. Prefer one entry per line in `role: file-or-area — why it matters` form, where role is `core`, `support`, `verify`, or `docs`.
+  4. `Risks and edge cases` = `merge_assessment.blocking_concerns`, `merge_assessment.non_blocking_concerns`, and `context.merge_concerns`. Mention concrete failure modes, compatibility/migration issues, concurrency/stale/error states, or known limitations.
+  5. `Validation` = `audit.reviewer_checklist` plus omissions/followups. List tests, scenarios, manual checks, and remaining validation gaps.
+  6. `Merge recommendation` = `merge_assessment.recommendation`, `confidence`, `summary`, and `context.why_worth_merging`. Tie the verdict to PR-specific evidence and remaining risk.
+  Never use generic filler such as “cohesive”, “covered by tests”, or “no blocking issues” unless you also name the changed behavior and evidence.
+
   When all required chunks are saved, call finalize_pr_walkthrough_submission. If finalization reports validation issues, overwrite the relevant chunks and call finalize_pr_walkthrough_submission again. The panel is not complete until finalization succeeds.
   Use submit_pr_walkthrough_yaml only as a compatibility fallback when the chunk/finalize workflow is unavailable or when you have one complete canonical document and no non-document chunks have been saved. Do not use submit_pr_walkthrough_yaml after saving incremental chunks.
 

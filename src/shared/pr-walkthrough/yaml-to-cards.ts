@@ -658,6 +658,8 @@ function buildOrientationCard(document: PrWalkthroughYamlDocument): PrWalkthroug
 function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkthroughCardSection[] {
 	const context = document.walkthrough.context;
 	const assessment = document.walkthrough.merge_assessment;
+	const audit = document.walkthrough.audit;
+	const omissions = document.walkthrough.omissions_and_followups;
 
 	const concerns: PrWalkthroughOrientationConcern[] = [
 		...assessment.blocking_concerns.map((text): PrWalkthroughOrientationConcern => ({ severity: "blocking", text })),
@@ -666,61 +668,59 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 	if (context.merge_concerns.trim().length > 0) concerns.push({ severity: "question", text: context.merge_concerns });
 
 	const fileRoles = parseReviewerMapRoles(context.reviewer_map);
+	const validationItems = compactArray([
+		...audit.reviewer_checklist,
+		...omissions.map(item => `${item.expected_artifact} — checked: ${item.evidence_checked}${item.concern ? `; concern: ${item.concern}` : ""}`),
+	]);
 
 	return [
 		{
-			id: "at-a-glance",
-			navLabel: "At a glance",
-			heading: "At a glance",
-			verdict: { recommendation: assessment.recommendation, confidence: assessment.confidence, summary: assessment.summary },
+			id: "what-changed-and-why",
+			navLabel: "What/why",
+			eyebrow: "Purpose",
+			heading: "What changed and why",
+			body: compactJoin([context.problem_solved, context.why_created]),
 			showStats: true,
 		},
 		{
-			id: "why-it-exists",
-			navLabel: "Why it exists",
-			eyebrow: "The problem",
-			heading: "Why it exists",
-			body: context.why_created,
+			id: "how-it-works",
+			navLabel: "How it works",
+			eyebrow: "Implementation",
+			heading: "How it works",
+			body: context.author_intent,
 		},
 		{
-			id: "what-it-changes",
-			navLabel: "What it changes",
-			eyebrow: "The change",
-			heading: "What it changes",
-			body: context.problem_solved,
-		},
-		{
-			id: "should-merge",
-			navLabel: "Should we merge",
-			eyebrow: "The decision",
-			heading: "Should it be merged?",
-			body: compactJoin([mergeAnswerLine(assessment.recommendation, assessment.confidence), context.why_worth_merging]),
-		},
-		{
-			id: "what-to-watch",
-			navLabel: "What to watch",
-			heading: "What to scrutinise",
-			concerns,
-		},
-		{
-			id: "where-to-look",
-			navLabel: "Where to look",
-			heading: "Where to look",
+			id: "change-map",
+			navLabel: "Change map",
+			eyebrow: "Review map",
+			heading: "Change map",
 			// When the reviewer map parses into a structured file→role list, render only that
 			// list — keeping the raw prose body too would duplicate every entry on screen.
 			...(fileRoles.length > 0 ? { fileRoles } : { body: context.reviewer_map }),
-			showOriginalDescription: true,
+		},
+		{
+			id: "risks-and-edge-cases",
+			navLabel: "Risks",
+			eyebrow: "Risk",
+			heading: "Risks and edge cases",
+			concerns,
+		},
+		{
+			id: "validation",
+			navLabel: "Validation",
+			eyebrow: "Evidence",
+			heading: "Validation",
+			items: validationItems,
+		},
+		{
+			id: "merge-recommendation",
+			navLabel: "Merge",
+			eyebrow: "Decision",
+			heading: "Merge recommendation",
+			body: context.why_worth_merging,
+			verdict: { recommendation: assessment.recommendation, confidence: assessment.confidence, summary: assessment.summary },
 		},
 	];
-}
-
-function mergeAnswerLine(recommendation: PrWalkthroughYamlWalkthrough["merge_assessment"]["recommendation"], confidence: string): string {
-	switch (recommendation) {
-		case "approve": return `Yes — approve, ${confidence} confidence.`;
-		case "request_changes": return `Not yet — request changes, ${confidence} confidence.`;
-		case "comment": return `Maybe — comment, ${confidence} confidence.`;
-		default: return "Recommendation unclear.";
-	}
 }
 
 function parseReviewerMapRoles(reviewerMap: string): PrWalkthroughOrientationFileRole[] {

@@ -74,24 +74,54 @@ const READY_BUNDLE = {
       rationale: "This card supplies the orientation beats used by the reference stepper.",
       sections: [
         {
-          id: "purpose",
-          navLabel: "Context",
-          eyebrow: "Context",
-          heading: "What changed",
-          verdict: { recommendation: "comment", confidence: "medium", summary: "The panel moved to a first-party pack." },
+          id: "what-changed-and-why",
+          navLabel: "What/why",
+          eyebrow: "Purpose",
+          heading: "What changed and why",
+          body: "The panel moved to a first-party pack so reviewers keep the same walkthrough shell while pack assets own the UI.",
           showStats: true,
-          concerns: [{ severity: "non_blocking", text: "Keep reviewer workflow controls visible while preserving diff parity." }],
-          fileRoles: [{ role: "core", file: "market-packs/pr-walkthrough/src/panel.js", note: "Restored shell implementation." }],
         },
         {
-          id: "risk",
-          navLabel: "Risk",
+          id: "how-it-works",
+          navLabel: "How it works",
+          eyebrow: "Implementation",
+          heading: "How it works",
+          body: "The pack renders persisted walkthrough cards through the Host API and keeps navigation state local to the review session.",
+        },
+        {
+          id: "change-map",
+          navLabel: "Change map",
+          eyebrow: "Review map",
+          heading: "Change map",
+          fileRoles: [
+            { role: "core", file: "market-packs/pr-walkthrough/src/panel.js", note: "Restored shell implementation." },
+            { role: "verify", file: "tests/pr-walkthrough-panel-parity.spec.ts", note: "Browser fixture coverage." },
+          ],
+        },
+        {
+          id: "risks-and-edge-cases",
+          navLabel: "Risks",
           eyebrow: "Risk",
-          heading: "What to inspect",
-          body: "Diff review controls and comment affordances regressed.",
-          showStats: true,
-          concerns: [{ severity: "blocking", text: "The submit flow must not unlock until every review card is complete." }],
-          fileRoles: [{ role: "verify", file: "tests/pr-walkthrough-panel-parity.spec.ts", note: "Browser fixture coverage." }],
+          heading: "Risks and edge cases",
+          concerns: [
+            { severity: "non_blocking", text: "Keep reviewer workflow controls visible while preserving diff parity." },
+            { severity: "blocking", text: "The submit flow must not unlock until every review card is complete." },
+          ],
+        },
+        {
+          id: "validation",
+          navLabel: "Validation",
+          eyebrow: "Evidence",
+          heading: "Validation",
+          items: ["Browser fixture covers guided orientation, rail navigation, review controls, and export preview."],
+        },
+        {
+          id: "merge-recommendation",
+          navLabel: "Merge",
+          eyebrow: "Decision",
+          heading: "Merge recommendation",
+          body: "Merge once the shell parity checks pass on compact and desktop layouts.",
+          verdict: { recommendation: "comment", confidence: "medium", summary: "The panel moved to a first-party pack with targeted parity coverage." },
         },
       ],
       checklist: ["Confirm the guided orientation remains visible", "Confirm the reviewer can leave feedback"],
@@ -320,9 +350,11 @@ async function expectRenderedReadyPanel(page: any) {
 
 async function startReviewFromGuide(page: any) {
 	await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]'), "pr-walkthrough shell parity: guided orientation card is required before review cards").toBeVisible();
-	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*2/);
-	await page.locator('[data-testid="pr-walkthrough-guide-next"]').click();
-	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/2\s*\/\s*2/);
+	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*6/);
+	for (let index = 0; index < 5; index += 1) {
+		await page.locator('[data-testid="pr-walkthrough-guide-next"]').click();
+	}
+	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/6\s*\/\s*6/);
 	await expect(page.locator('[data-testid="pr-walkthrough-guide-next"]')).toContainText(/Start review/i);
 	await page.locator('[data-testid="pr-walkthrough-guide-next"]').click();
 	await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Diff review controls and comments");
@@ -430,14 +462,18 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(shell).toHaveClass(/\bshell\b/);
 		await expect(page.locator(".shell > .body > .content"), "pr-walkthrough shell parity: dense .shell/.body/.content layout classes must be present").toBeVisible();
 
-		const typography = await shell.evaluate((element: HTMLElement) => {
+		const shellChrome = await shell.evaluate((element: HTMLElement) => {
 			const style = getComputedStyle(element);
-			return { fontSize: style.fontSize, lineHeight: style.lineHeight };
+			const rootStyle = getComputedStyle(element.closest(".prw-root") as HTMLElement);
+			return { fontSize: style.fontSize, lineHeight: style.lineHeight, borderTopWidth: style.borderTopWidth, borderRadius: style.borderTopLeftRadius, rootPadding: rootStyle.paddingTop };
 		});
-		expect(typography.fontSize, "pr-walkthrough shell parity: root font must be 13px/1.45 system-ui").toBe("13px");
-		const lineHeight = Number.parseFloat(typography.lineHeight);
+		expect(shellChrome.fontSize, "pr-walkthrough shell parity: root font must be 13px/1.45 system-ui").toBe("13px");
+		const lineHeight = Number.parseFloat(shellChrome.lineHeight);
 		expect(lineHeight, "pr-walkthrough shell parity: root line-height must be approximately 1.45").toBeGreaterThanOrEqual(18);
 		expect(lineHeight, "pr-walkthrough shell parity: root line-height must be approximately 1.45").toBeLessThanOrEqual(19.5);
+		expect(shellChrome.rootPadding, "PR walkthrough should sit flush in the host panel without an outer padding frame").toBe("0px");
+		expect(shellChrome.borderTopWidth, "PR walkthrough should not add a redundant outer card border inside the host panel").toBe("0px");
+		expect(shellChrome.borderRadius, "PR walkthrough should not round an extra outer card inside the host panel").toBe("0px");
 
 		const header = page.locator('[data-testid="pr-walkthrough-header"]');
 		await expect(header, "pr-walkthrough shell parity: compact header data-testid=pr-walkthrough-header is required").toBeVisible();
@@ -504,7 +540,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(page.locator('[data-testid="pr-walkthrough-phase-button"]')).not.toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-card-step"]')).not.toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-rail"]')).toBeVisible();
-		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(2);
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(6);
 
 		const rail = page.locator('[data-testid="pr-walkthrough-labelled-rail"]');
 		const beforeWidth = (await rail.boundingBox())?.width || 0;
@@ -521,7 +557,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
 		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "pr-walkthrough shell parity: collapsed rail must replace labelled rail after toggle").toBeVisible();
 		expect(await visibleRailTestIds(page), "pr-walkthrough shell parity: only the collapsed rail should be visible after toggle").toEqual(["pr-walkthrough-collapsed-rail"]);
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(2);
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(6);
 		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
 	});
 
@@ -573,24 +609,28 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expectRenderedReadyPanel(page);
 
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]'), "pr-walkthrough shell parity: first card with sections must render the dedicated guide card").toBeVisible();
-		await expect(page.locator('[data-testid="pr-walkthrough-card-summary"]'), "orientation summary should not duplicate the first at-a-glance beat above every guide page").toHaveCount(0);
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*2/);
-		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("What changed");
-		await expect(page.locator('[data-testid="pr-walkthrough-beat-verdict"]')).toContainText(/COMMENT/);
-		await expect(page.locator('[data-testid="pr-walkthrough-orientation-beat"] > p.summary'), "at-a-glance copy should not be duplicated outside the recommendation when it matches the verdict summary").toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-card-summary"]'), "orientation summary should not duplicate the first focused orientation beat above every guide page").toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*6/);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("What changed and why");
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-beat"] > p.summary')).toContainText(/first-party pack/);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-stats"]')).toContainText(/3 files/);
-		await expect(page.locator('[data-testid="pr-walkthrough-beat-concerns"]')).toContainText(/non-blocking/i);
-		await expect(page.locator('[data-testid="pr-walkthrough-beat-filemap"]')).toContainText("market-packs/pr-walkthrough/src/panel.js");
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"]')).toBeDisabled();
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]').first()).toHaveAttribute("data-state", "current");
 
-		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(1).click();
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/2\s*\/\s*2/);
-		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("What to inspect");
+		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(2).click();
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/3\s*\/\s*6/);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("Change map");
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-filemap"]')).toContainText("market-packs/pr-walkthrough/src/panel.js");
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"]')).toBeEnabled();
+		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(4).click();
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/5\s*\/\s*6/);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-list"]')).toContainText(/Browser fixture covers/);
+		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(5).click();
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-next"]')).toContainText(/Start review/i);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-verdict"]')).toContainText(/COMMENT/);
 		await page.locator('[data-testid="pr-walkthrough-guide-back"]').click();
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*2/);
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/5\s*\/\s*6/);
+		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').first().click();
 
 		await startReviewFromGuide(page);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]')).toHaveCount(0);
