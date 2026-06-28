@@ -250,12 +250,13 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 	// sidebar uses, NOT a bare `selectedSessionId` assignment that skips the hash
 	// route + hydration) and mounting the tab under it — without regressing the
 	// default (no `sessionId`) active-session behaviour.
-	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 3)", async ({ page }) => {
+	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion >= 3)", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// Additive addressing fields bumped the data/addressing contract to v3.
+		// PanelTarget.sessionId requires contract v3+; host.channels later bumped the
+		// additive data/addressing contract again without changing this behaviour.
 		const cv = await page.evaluate(() => (window as any).__contractVersion());
-		expect(cv).toBe(3);
+		expect(cv).toBeGreaterThanOrEqual(3);
 
 		// Register demo.panel for a project, install the switcher stub (the production
 		// hook is `connectToSession`), and start from an "owner" session view.

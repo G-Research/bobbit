@@ -9,6 +9,8 @@
 //                                  manifest.contents.entrypoints[])
 //   - `providers/<id>.yaml`     → ProviderContribution[] (filtered by
 //                                  manifest.contents.providers[])
+//   - `channels/<name>.yaml`    → ChannelContribution[] (filtered by
+//                                  manifest.contents.channels[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -37,6 +39,8 @@ import type { McpServerConfig } from "../mcp/mcp-types.js";
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
 const PROVIDER_HOOKS = new Set([
@@ -120,7 +124,7 @@ export interface EntrypointContribution {
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string; // required for launcher kinds
 	routeId?: string; // required for kind:"route"; host-global
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	/** The contents.entrypoints[] basename that lists this file — the SINGLE
 	 *  activation toggle key. Maps one toggle onto BOTH the launcher id AND the
@@ -135,6 +139,44 @@ export interface RouteContribution {
 	module: string; // path relative to pack.yaml, contained in packRoot
 	names: string[]; // allowlist
 	sourceFile: string; // = <packRoot>/pack.yaml
+	packRoot: string;
+}
+
+export type ChannelCapability = "sessionPty";
+
+export interface ChannelQuotas {
+	maxChannelsPerSessionPerPack?: number;
+	maxGatewayChannels?: number;
+	maxFrameBytes?: number;
+	maxInboundBytes?: number;
+	maxInboundFrames?: number;
+	maxOutboundBytes?: number;
+	maxOutboundFrames?: number;
+	maxClientOutboundBytes?: number;
+	maxClientOutboundFrames?: number;
+	maxClientSendRatePerSecond?: number;
+	idleTimeoutMs?: number;
+	openTimeoutMs?: number;
+	closeGraceMs?: number;
+}
+
+/** A pack-owned long-lived channel handler (channels/<listName>.yaml). */
+export interface ChannelContribution {
+	/** Pack-local channel name resolved by host.channels.open(name). */
+	name: string;
+	/** Documentation/diagnostics protocol string; never controls dispatch. */
+	protocol?: string;
+	/** Handler module path relative to sourceFile, contained in packRoot. */
+	module: string;
+	/** Export member name in the module; defaults to `name`. */
+	handler: string;
+	/** Known privileged capability declarations; authorization is applied by the registry/dispatcher. */
+	capabilities?: ChannelCapability[];
+	requiresUserGesture?: boolean;
+	quotas?: ChannelQuotas;
+	/** The contents.channels[] basename that listed this file. */
+	listName: string;
+	sourceFile: string;
 	packRoot: string;
 }
 
@@ -214,6 +256,8 @@ export interface PackContributions {
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
+	/** Channel handler files listed by contents.channels[]. */
+	channels: ChannelContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -247,6 +291,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
+		channels: loadChannels(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -364,6 +409,151 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
 	const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
 	return Math.min(max, Math.max(min, n));
+}
+
+const CHANNEL_CAPABILITIES = new Set<ChannelCapability>(["sessionPty"]);
+const CHANNEL_QUOTA_KEYS = new Set<keyof ChannelQuotas>([
+	"maxChannelsPerSessionPerPack",
+	"maxGatewayChannels",
+	"maxFrameBytes",
+	"maxInboundBytes",
+	"maxInboundFrames",
+	"maxOutboundBytes",
+	"maxOutboundFrames",
+	"maxClientOutboundBytes",
+	"maxClientOutboundFrames",
+	"maxClientSendRatePerSecond",
+	"idleTimeoutMs",
+	"openTimeoutMs",
+	"closeGraceMs",
+]);
+const CHANNEL_QUOTA_ALIASES: Record<string, keyof ChannelQuotas> = {
+	maxInboundBufferedBytesPerChannel: "maxInboundBytes",
+	maxInboundBufferedFramesPerChannel: "maxInboundFrames",
+	maxOutboundBufferedBytesPerChannel: "maxOutboundBytes",
+	maxOutboundBufferedFramesPerChannel: "maxOutboundFrames",
+	maxBufferedBytesPerAttachedClient: "maxClientOutboundBytes",
+	maxAttachedClientBufferedFrames: "maxClientOutboundFrames",
+	sendRateFramesPerSecond: "maxClientSendRatePerSecond",
+	maxInboundFramesPerSecond: "maxClientSendRatePerSecond",
+};
+
+function parseChannelCapabilities(raw: unknown, sourceFile: string, channelName: string): ChannelCapability[] | undefined {
+	if (raw === undefined) return undefined;
+	if (!Array.isArray(raw)) {
+		console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) has invalid capabilities; dropping capabilities`);
+		return undefined;
+	}
+	const out: ChannelCapability[] = [];
+	for (const cap of raw) {
+		if (typeof cap === "string" && CHANNEL_CAPABILITIES.has(cap as ChannelCapability)) {
+			if (!out.includes(cap as ChannelCapability)) out.push(cap as ChannelCapability);
+		} else {
+			console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) declares unknown capability ${JSON.stringify(cap)}; ignoring`);
+		}
+	}
+	return out.length > 0 ? out : undefined;
+}
+
+function parseChannelQuotas(raw: unknown, sourceFile: string, channelName: string): ChannelQuotas | undefined {
+	if (raw === undefined) return undefined;
+	if (!isPlainObject(raw)) {
+		console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) has invalid quotas; dropping quotas`);
+		return undefined;
+	}
+	const quotas: ChannelQuotas = {};
+	for (const [key, value] of Object.entries(raw)) {
+		const quotaKey = CHANNEL_QUOTA_KEYS.has(key as keyof ChannelQuotas) ? key as keyof ChannelQuotas : CHANNEL_QUOTA_ALIASES[key];
+		if (!quotaKey) continue; // unknown fields are inert metadata
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+			console.warn(`[pack-contributions] channel '${channelName}' (${sourceFile}) quota ${JSON.stringify(key)} must be a non-negative integer; ignoring`);
+			continue;
+		}
+		quotas[quotaKey] = value;
+	}
+	return Object.keys(quotas).length > 0 ? quotas : undefined;
+}
+
+function resolveContributionFile(dir: string, listName: string): string {
+	const yaml = path.join(dir, `${listName}.yaml`);
+	if (fs.existsSync(yaml)) return yaml;
+	const yml = path.join(dir, `${listName}.yml`);
+	return fs.existsSync(yml) ? yml : yaml;
+}
+
+/** Load `channels/<name>.yaml` ONLY for names listed in contents.channels[].
+ *  Duplicate channel name within the pack = hard conflict. */
+export function loadChannels(packRoot: string, manifest: PackManifest): ChannelContribution[] {
+	const listNames = manifest.contents.channels ?? [];
+	const dir = path.join(packRoot, "channels");
+	const out: ChannelContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenName = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] channel listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares channel listName "${listName}" more than once; channel listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] channel '${listName}' resolves outside channels/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed channel '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] channel '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const name = data.name;
+		if (typeof name !== "string" || !CHANNEL_NAME_RE.test(name)) {
+			console.warn(`[pack-contributions] channel '${listName}' (${sourceFile}) has invalid name; dropping`);
+			continue;
+		}
+		const mod = data.module;
+		if (typeof mod !== "string" || !isSafeRelativePath(mod)) {
+			console.warn(`[pack-contributions] channel '${name}' (${sourceFile}) has unsafe/missing module; dropping`);
+			continue;
+		}
+		const resolvedModule = path.resolve(path.dirname(sourceFile), mod);
+		if (!isPackPathWithinRoot(packRoot, resolvedModule)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" channel "${name}" module resolves outside the pack root`,
+			);
+		}
+		if (seenName.has(name)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares channel name "${name}" more than once; channel names must be unique within a pack`,
+			);
+		}
+		seenName.add(name);
+		const handler = data.handler === undefined ? name : data.handler;
+		if (typeof handler !== "string" || !CHANNEL_HANDLER_RE.test(handler)) {
+			console.warn(`[pack-contributions] channel '${name}' (${sourceFile}) has invalid handler; dropping`);
+			continue;
+		}
+		const channel: ChannelContribution = { name, module: mod, handler, listName, sourceFile, packRoot };
+		if (typeof data.protocol === "string" && data.protocol.trim().length > 0) channel.protocol = data.protocol.trim();
+		const capabilities = parseChannelCapabilities(data.capabilities, sourceFile, name);
+		if (capabilities) channel.capabilities = capabilities;
+		if (typeof data.requiresUserGesture === "boolean") channel.requiresUserGesture = data.requiresUserGesture;
+		const quotas = parseChannelQuotas({ ...data, ...(isPlainObject(data.quotas) ? data.quotas : {}) }, sourceFile, name);
+		if (quotas) channel.quotas = quotas;
+		out.push(channel);
+	}
+	return out;
 }
 
 // §0.2: providers are pack-scoped, keyed (packId, contributionId).

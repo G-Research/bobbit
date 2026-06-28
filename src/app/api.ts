@@ -2549,7 +2549,7 @@ export interface PackEntrypointWire {
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
 	routeId?: string;
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	listName: string;
 }
@@ -2560,6 +2560,8 @@ export interface PackContributionsWire {
 	packName: string;
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
+	/** Pack-local channel names only; module/handler paths stay server-side. */
+	channelNames?: string[];
 	routeNames: string[];
 }
 

@@ -1,0 +1,10 @@
+id: terminal.session-menu
+kind: session-menu
+label: Open Terminal
+target:
+  action: channel-panel
+  channel: terminal
+  singletonKey: session-terminal
+  panelId: terminal.panel
+  params:
+    autoStart: true

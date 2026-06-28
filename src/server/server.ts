@@ -30,7 +30,7 @@ export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
-import { SessionManager, type SessionInfo } from "./agent/session-manager.js";
+import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -158,6 +158,125 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
+	const code = (err as { code?: unknown } | null)?.code;
+	const message = err instanceof Error ? err.message : String(err);
+	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
+}
+
+function extensionChannelAuditSink(event: Record<string, unknown>): void {
+	const type = typeof event.type === "string" ? event.type : "unknown";
+	if ((type === "channel.frame.in" || type === "channel.frame.out") && process.env.BOBBIT_DEBUG !== "1") return;
+	const session = typeof event.sessionId === "string" ? event.sessionId : "-";
+	const packId = typeof event.packId === "string" ? event.packId : "-";
+	const channelName = typeof event.channelName === "string" ? event.channelName : "-";
+	const channelId = typeof event.channelId === "string" ? event.channelId : "-";
+	const reason = typeof event.reason === "string" ? event.reason : undefined;
+	const error = typeof event.error === "string" ? event.error : undefined;
+	const quota = typeof event.quota === "string" ? event.quota : undefined;
+	const frameKind = typeof event.frameKind === "string" ? event.frameKind : undefined;
+	const frameBytes = typeof event.frameBytes === "number" ? event.frameBytes : undefined;
+	const extras = [reason && `reason=${reason}`, error && `error=${error}`, quota && `quota=${quota}`, frameKind && `frameKind=${frameKind}`, frameBytes !== undefined && `frameBytes=${frameBytes}`].filter(Boolean).join(" ");
+	console.log(`[ext-channel-audit] type=${type} session=${session} packId=${packId} channel=${channelName} channelId=${channelId}${extras ? ` ${extras}` : ""}`);
+}
+
+async function instantiateExtensionChannelServices(deps: {
+	packContributionRegistry: PackContributionRegistry;
+	sessionManager: SessionManager;
+	projectContextManager: ProjectContextManager;
+	toolManager: ToolManager;
+}): Promise<ExtensionChannelServices | undefined> {
+	try {
+		const [registryModule, grantsModule, channelModuleHostModule, channelPtyModule] = await Promise.all([
+			import("./extension-host/" + "channel-registry.js"),
+			import("./extension-host/" + "channel-open-permits.js"),
+			import("./extension-host/" + "channel-module-host.js"),
+			import("./extension-host/" + "channel-pty-helper.js"),
+		]);
+		const OpenPermitsCtor = (grantsModule as any).ChannelOpenPermitService
+			?? (grantsModule as any).ChannelOpenPermits
+			?? (grantsModule as any).ChannelOpenPermitStore
+			?? (grantsModule as any).OpenGrantStore;
+		const RegistryCtor = (registryModule as any).ChannelRegistry;
+		if (typeof OpenPermitsCtor !== "function" || typeof RegistryCtor !== "function") {
+			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-permit service");
+		}
+		const ChannelModuleHostCtor = (channelModuleHostModule as any).WorkerChannelModuleHost
+			?? (channelModuleHostModule as any).ChannelModuleHost
+			?? (channelModuleHostModule as any).LocalChannelModuleHost;
+		const openPermits = new OpenPermitsCtor({ audit: extensionChannelAuditSink });
+		const ChannelPtyServiceCtor = (channelPtyModule as any).ChannelPtyService;
+		const channelPtyService = typeof ChannelPtyServiceCtor === "function"
+			? new ChannelPtyServiceCtor({ sessionManager: deps.sessionManager, audit: extensionChannelAuditSink })
+			: undefined;
+		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor({
+			buildHost: channelPtyService
+				? (contribution: any, ctx: any) => channelPtyService.buildHost(contribution, ctx.sessionId)
+				: undefined,
+		}) : undefined;
+		const registry = new RegistryCtor({
+			openPermits,
+			openPermitService: openPermits,
+			grants: openPermits,
+			packContributionRegistry: deps.packContributionRegistry,
+			contributionRegistry: deps.packContributionRegistry,
+			contributions: deps.packContributionRegistry,
+			moduleHost: channelModuleHost,
+			audit: extensionChannelAuditSink,
+			auditLog: { write: extensionChannelAuditSink },
+			sessionManager: deps.sessionManager,
+			projectContextManager: deps.projectContextManager,
+			toolManager: deps.toolManager,
+			getPackStore,
+		});
+		return { registry, openPermits };
+	} catch (err) {
+		if (isMissingOptionalExtensionChannelModule(err)) return undefined;
+		throw err;
+	}
+}
+
+function resolveChannelContributionForGrant(
+	registry: PackContributionRegistry,
+	projectId: string | undefined,
+	packId: string,
+	name: string,
+): unknown {
+	const direct = (registry as any).getChannel;
+	if (typeof direct === "function") return direct.call(registry, projectId, packId, name);
+	const pack = registry.getPack(projectId, packId) as unknown as { channels?: unknown } | undefined;
+	const channels = Array.isArray(pack?.channels) ? pack.channels : [];
+	return channels.find((channel: any) => channel && channel.name === name);
+}
+
+async function mintExtensionChannelOpenGrant(openPermits: unknown, binding: {
+	sessionId: string;
+	packId: string;
+	contributionId: string;
+	channelName: string;
+	singletonKey?: string;
+}): Promise<string> {
+	const issuer = openPermits as any;
+	const mint = issuer?.mint ?? issuer?.mintGrant ?? issuer?.createGrant ?? issuer?.issue;
+	if (typeof mint !== "function") throw new Error("channel open-permit service is unavailable");
+	const result = await mint.call(issuer, binding);
+	if (typeof result === "string") return result;
+	if (result && typeof result.grant === "string") return result.grant;
+	if (result && typeof result.openGrant === "string") return result.openGrant;
+	if (result && typeof result.token === "string") return result.token;
+	throw new Error("channel open-permit service returned no grant");
+}
+
+async function disposeExtensionChannelServices(services: ExtensionChannelServices | undefined, reason: string): Promise<void> {
+	const dispose = services?.registry?.dispose;
+	if (!dispose) return;
+	try {
+		await dispose.call(services.registry, reason);
+	} catch (err) {
+		console.warn(`[extension-channels] dispose failed:`, err);
+	}
 }
 
 function collectVisibleSessionWorktreeReferences(projectContextManager: ProjectContextManager): WorktreeReferenceRecord[] {
@@ -1478,6 +1597,8 @@ export function createGateway(config: GatewayConfig) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
+	let extensionChannelServices: ExtensionChannelServices | undefined;
+	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
@@ -1814,6 +1935,22 @@ export function createGateway(config: GatewayConfig) {
 		},
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
+	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
+		if (extensionChannelServices) return extensionChannelServices;
+		if (!extensionChannelServicesInit) {
+			extensionChannelServicesInit = instantiateExtensionChannelServices({
+				packContributionRegistry,
+				sessionManager,
+				projectContextManager,
+				toolManager,
+			}).then((services) => {
+				extensionChannelServices = services;
+				sessionManager.setExtensionChannelServices(services);
+				return services;
+			});
+		}
+		return extensionChannelServicesInit;
+	};
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -2091,7 +2228,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2499,7 +2636,8 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore);
+			const channels = extensionChannelServices;
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
@@ -2512,6 +2650,7 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -2519,6 +2658,7 @@ export function createGateway(config: GatewayConfig) {
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
+			await initExtensionChannelsOnce();
 
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
@@ -2946,6 +3086,7 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			inboxNudger.stop();
 			wss.close();
+			await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
 			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
@@ -3146,6 +3287,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	extensionChannelServices?: ExtensionChannelServices,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -3173,7 +3315,15 @@ async function handleApiRoute(
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); };
+	const closeUnavailableExtensionChannels = (): void => {
+		const registry = extensionChannelServices?.registry as any;
+		const closeUnavailable = registry?.closeUnavailablePacks;
+		if (typeof closeUnavailable !== "function") return;
+		void Promise.resolve(closeUnavailable.call(registry)).catch((err) => {
+			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
+		});
+	};
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -6812,6 +6962,83 @@ async function handleApiRoute(
 		const token = mintSurfaceToken({ sessionId: guard.sessionId, packId: ident.packId, contributionId: ident.contributionId, tool });
 		console.log(`[ext-surface-token] tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=ok`);
 		json({ token });
+		return;
+	}
+
+	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
+	// `ext_channel_open`. This is a typed, scoped server path: identity is derived
+	// from the surface token and channel name is resolved inside that pack only.
+	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
+		if (!extensionChannelServices?.openPermits) {
+			json({ error: "extension channels are not available" }, 503);
+			return;
+		}
+		const body = (await readBody(req)) ?? {};
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const channelHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const channelSessionProjectId = channelHeaderSid
+			? (sessionManager.getSession(channelHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(channelHeaderSid)?.projectId)
+			: undefined;
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const channelToolManager = resolveActionToolManager(
+			toolManager,
+			channelSessionProjectId ? projectContextManager.getOrCreate(channelSessionProjectId)?.toolManager : undefined,
+		);
+		const surf = resolveSurfaceIdentity({ token: (body as { surfaceToken?: unknown }).surfaceToken, headerSessionId: channelHeaderSid, resolver: channelToolManager, contributions: packContributionRegistry, projectId: channelSessionProjectId });
+		if (!surf.ok) {
+			json({ error: surf.error }, surf.status);
+			return;
+		}
+		const guard = surf.tool !== undefined
+			? authorizeScopedRequest({ tool: surf.tool, headerSessionId, bodySessionId: (body as { sessionId?: unknown }).sessionId, resolveSession })
+			: packBoundScopedGuard(channelHeaderSid, (body as { sessionId?: unknown }).sessionId, resolveSession);
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		const name = typeof (body as { name?: unknown }).name === "string" ? (body as { name: string }).name : "";
+		if (!name) {
+			json({ error: "channel name is required" }, 400);
+			return;
+		}
+		const init = (body as { init?: unknown }).init;
+		const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
+			? (init as { singletonKey: string }).singletonKey
+			: typeof (body as { singletonKey?: unknown }).singletonKey === "string" ? (body as { singletonKey: string }).singletonKey : undefined;
+		if (!resolveChannelContributionForGrant(packContributionRegistry, channelSessionProjectId, surf.packId, name)) {
+			json({ error: `pack "${surf.packId}" declares no channel "${name}"` }, 404);
+			return;
+		}
+		const permitsAny = extensionChannelServices.openPermits as any;
+		const activationBinding = { sessionId: guard.sessionId, packId: surf.packId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
+		if (surf.contributionId.startsWith("entrypoint:")) {
+			permitsAny.markTrustedLauncherActivation?.(activationBinding);
+		} else if (permitsAny.hasTrustedLauncherActivation?.(activationBinding) !== true) {
+			json({ error: "channel open requires a trusted launcher activation" }, 403);
+			return;
+		}
+		try {
+			const openGrant = await mintExtensionChannelOpenGrant(extensionChannelServices.openPermits, {
+				sessionId: guard.sessionId,
+				packId: surf.packId,
+				contributionId: surf.contributionId,
+				channelName: name,
+				...(singletonKey !== undefined ? { singletonKey } : {}),
+			});
+			console.log(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=ok`);
+			json({ openGrant });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=error: ${message}`);
+			json({ error: message }, 400);
+		}
 		return;
 	}
 

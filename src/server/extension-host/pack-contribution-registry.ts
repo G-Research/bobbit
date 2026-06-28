@@ -1,7 +1,7 @@
 // src/server/extension-host/pack-contribution-registry.ts
 //
 // Project-scoped registry of the PACK-SCOPED contributions (panels / entrypoints
-// / providers / routes), the pack-scoped analogue of the tool cascade
+// / providers / channels / routes), the pack-scoped analogue of the tool cascade
 // (pack-schema-v1-rationalisation §5.2).
 //
 // It enumerates installed market packs (the SAME enumeration the tool cascade
@@ -21,6 +21,7 @@ import {
 	type PanelContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
+	type ChannelContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -36,6 +37,8 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
+	/** Resolve a channel handler within a pack. */
+	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean;
 }
@@ -112,6 +115,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
 	}
 
+	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
+		return this.getPack(projectId, packId)?.channels.find((c) => c.name === name);
+	}
+
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean {
 		const routes = this.getPack(projectId, packId)?.routes;
 		return !!routes && routes.names.includes(routeName);
@@ -182,6 +189,8 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
+			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
+			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };
 			loaded.push(contrib);
 		}
 
@@ -223,6 +232,27 @@ export class PackContributionRegistry implements PackContributionResolver {
 /** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
  *  flat config — every required key present and, for a string, non-empty after
  *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
+function authorizeChannelCapabilities(entry: PackEntry, channels: ChannelContribution[]): ChannelContribution[] {
+	const firstParty = entry.kind === "builtin" || entry.id.startsWith("builtin-pack:") || entry.meta?.sourceUrl === "builtin:";
+	let changed = false;
+	const out = channels.map((channel) => {
+		const caps = channel.capabilities;
+		if (!caps?.includes("sessionPty") || firstParty) return channel;
+		changed = true;
+		console.warn(
+			`[pack-contributions] channel '${channel.name}' in pack "${packIdFromRoot(entry.path)}" declares unauthorized sessionPty; capability ignored`,
+		);
+		const nextCaps = caps.filter((cap) => cap !== "sessionPty");
+		if (nextCaps.length === 0) {
+			const rest: ChannelContribution = { ...channel };
+			delete rest.capabilities;
+			return rest;
+		}
+		return { ...channel, capabilities: nextCaps };
+	});
+	return changed ? out : channels;
+}
+
 function providerActivationSatisfied(provider: ProviderContribution): boolean {
 	const required = provider.activation?.requiresConfig;
 	if (!required || required.length === 0) return true;

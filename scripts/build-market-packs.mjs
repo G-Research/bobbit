@@ -126,6 +126,13 @@ const PACKS = [
 			{ in: "routes.ts", out: "lib/routes.mjs", platform: "node" },
 		],
 	},
+	{
+		pack: "terminal",
+		entries: [
+			{ in: "terminal-panel.ts", out: "lib/terminal-panel.js" },
+			{ in: "terminal-channel.ts", out: "lib/terminal-channel.mjs", platform: "node" },
+		],
+	},
 ];
 
 async function main() {

@@ -37,6 +37,7 @@ import { consumeGesture } from "./gesture-context.js";
 import { postSessionMessageOverWs } from "./session-write-bridge.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
+import { createHostChannelsApi, type HostChannelsApi } from "./channel-bridge.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -234,10 +235,11 @@ export function getHostApi(
 		session: true,
 		ui: true,
 		store: true,
+		channels: true,
 	};
-	return {
+	const api = {
 		version: HOST_API_VERSION,
-		contractVersion: HOST_CONTRACT_VERSION,
+		contractVersion: Math.max(HOST_CONTRACT_VERSION, 4),
 		capabilities: {
 			...flags,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -396,5 +398,11 @@ export function getHostApi(
 			deletePrefix: async (prefix: string) => (await storeOp("deletePrefix", { prefix })) as number,
 			stats: async (prefix?: string) => (await storeOp("stats", { prefix })) as StoreStats,
 		} as HostApi["store"],
-	};
+		channels: createHostChannelsApi({
+			sessionId,
+			getSurfaceToken,
+			consumeOpenGesture: consumeGesture,
+		}) as HostChannelsApi,
+	} as HostApi & { channels: HostChannelsApi };
+	return api as HostApi;
 }

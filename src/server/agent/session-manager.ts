@@ -953,6 +953,16 @@ export interface PendingToolPermissionSnapshot {
 	ts: number;
 }
 
+export interface ExtensionChannelLifecycle {
+	closeSession?(sessionId: string, reason?: string): void | Promise<void>;
+	dispose?(reason?: string): void | Promise<void>;
+}
+
+export interface ExtensionChannelServices {
+	registry?: ExtensionChannelLifecycle;
+	openPermits?: unknown;
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -976,6 +986,8 @@ export interface SessionManagerOptions {
 	configCascade?: import("./config-cascade.js").ConfigCascade;
 	/** PR status store — single source of truth for goal PR URLs. */
 	prStatusStore?: PrStatusStore;
+	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
+	extensionChannels?: ExtensionChannelServices;
 }
 
 type RestoreCoordinator = {
@@ -1048,6 +1060,7 @@ export class SessionManager {
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
+	private _extensionChannels?: ExtensionChannelServices;
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
 	 * persisted `agentSessionFile` (and are newer than the most recent
@@ -1399,6 +1412,7 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
+		this._extensionChannels = options?.extensionChannels;
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -1424,6 +1438,24 @@ export class SessionManager {
 			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
 		);
 		(this._statusHeartbeatTimer as any).unref?.();
+	}
+
+	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
+		this._extensionChannels = services;
+	}
+
+	get extensionChannels(): ExtensionChannelServices | undefined {
+		return this._extensionChannels;
+	}
+
+	private async closeExtensionChannelsForSession(sessionId: string, reason: string): Promise<void> {
+		const registry = this._extensionChannels?.registry;
+		if (!registry?.closeSession) return;
+		try {
+			await registry.closeSession(sessionId, reason);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to close extension channels for ${sessionId}:`, err);
+		}
 	}
 
 	/** Resolve goal tools extension path via toolManager cascade (with fallback). */
@@ -3761,6 +3793,7 @@ export class SessionManager {
 			});
 			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
 			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
+			void this.closeExtensionChannelsForSession(session.id, "session-process-exit");
 			broadcastStatus(session, "terminated");
 		}
 
@@ -7248,6 +7281,8 @@ export class SessionManager {
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
 
+		await this.closeExtensionChannelsForSession(id, "session-terminated");
+
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
@@ -9066,6 +9101,8 @@ export class SessionManager {
 		for (const id of ids) {
 			const session = this.sessions.get(id);
 			if (!session) continue;
+
+			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
 			// Snapshot the current streaming state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
