@@ -35,7 +35,7 @@ test.describe("terminal pack panel", () => {
 
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(0);
 
 		const marker1 = `bobbit_terminal_e2e_${Date.now()}`;
@@ -50,7 +50,7 @@ test.describe("terminal pack panel", () => {
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 		await expect(page.locator(terminalPanel()), "terminal panel should be restored after reload").toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
 		await expect.poll(() => channelSendCount(page, "ext_channel_attach"), { timeout: 20_000 }).toBeGreaterThan(0);
 
 		const marker2 = `${marker1}_reattach`;
@@ -62,7 +62,7 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toHaveCount(0, { timeout: 10_000 });
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
 		await expect.poll(() => killFrameCount(page), { timeout: 5_000 }).toBe(killBeforeHide);
 		const marker3 = `${marker1}_hidden_live`;
 		await typeCommand(page, `echo ${marker3}`);
@@ -76,7 +76,7 @@ test.describe("terminal pack panel", () => {
 		await expect(startButton).toBeEnabled({ timeout: 20_000 });
 		await startButton.click();
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(openBeforeRestart);
-		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
 
 		const killBefore = await killFrameCount(page);
 		await page.locator(terminalPanel()).getByRole("button", { name: "Terminate terminal process" }).click();
@@ -98,7 +98,7 @@ test.describe("terminal pack panel", () => {
 
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
 		const marker = `bobbit_terminal_restart_${Date.now()}`;
 		await typeCommand(page, `echo ${marker}`);
 		await expect(page.locator(terminalHost())).toContainText(marker, { timeout: 20_000 });
@@ -156,10 +156,35 @@ async function openTerminalFromSessionMenu(page: import("@playwright/test").Page
 	await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
 }
 
+async function waitForTerminalReadyForInput(page: import("@playwright/test").Page): Promise<void> {
+	await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", "attached", { timeout: 20_000 });
+	await expect(page.locator(`${terminalHost()} .xterm-helper-textarea`), "xterm input textarea must be mounted before typing").toHaveCount(1, { timeout: 10_000 });
+	await focusTerminal(page);
+}
+
+async function focusTerminal(page: import("@playwright/test").Page): Promise<void> {
+	const xterm = page.locator(`${terminalHost()} .xterm`).first();
+	await expect(xterm, "xterm must be visible and focusable before typing").toBeVisible({ timeout: 10_000 });
+	await xterm.click({ position: { x: 24, y: 24 } });
+	await page.evaluate(() => {
+		(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus();
+	});
+	await expect.poll(
+		() => page.evaluate(() => {
+			const active = document.activeElement as HTMLElement | null;
+			return active?.classList.contains("xterm-helper-textarea") === true
+				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null;
+		}),
+		{ timeout: 5_000 },
+	).toBe(true);
+}
+
 async function typeCommand(page: import("@playwright/test").Page, command: string): Promise<void> {
-	await page.locator(terminalHost()).click();
-	await page.keyboard.type(command);
+	await waitForTerminalReadyForInput(page);
+	const textFramesBefore = await textFrameCount(page);
+	await page.keyboard.insertText(command);
 	await page.keyboard.press("Enter");
+	await expect.poll(() => textFrameCount(page), { timeout: 5_000 }).toBeGreaterThan(textFramesBefore);
 }
 
 async function resizeFrameCount(page: import("@playwright/test").Page): Promise<number> {
@@ -168,6 +193,10 @@ async function resizeFrameCount(page: import("@playwright/test").Page): Promise<
 
 async function killFrameCount(page: import("@playwright/test").Page): Promise<number> {
 	return page.evaluate(() => ((window as any).__terminalE2E?.sent ?? []).filter((msg: any) => msg?.type === "ext_channel_send" && msg?.frame?.kind === "json" && msg.frame.data?.op === "kill").length);
+}
+
+async function textFrameCount(page: import("@playwright/test").Page): Promise<number> {
+	return page.evaluate(() => ((window as any).__terminalE2E?.sent ?? []).filter((msg: any) => msg?.type === "ext_channel_send" && msg?.frame?.kind === "text").length);
 }
 
 async function channelSendCount(page: import("@playwright/test").Page, type: string): Promise<number> {
