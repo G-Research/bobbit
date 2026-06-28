@@ -672,7 +672,6 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 			id: "at-a-glance",
 			navLabel: "At a glance",
 			heading: "At a glance",
-			body: assessment.summary,
 			verdict: { recommendation: assessment.recommendation, confidence: assessment.confidence, summary: assessment.summary },
 			showStats: true,
 		},

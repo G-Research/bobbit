@@ -78,8 +78,7 @@ const READY_BUNDLE = {
           navLabel: "Context",
           eyebrow: "Context",
           heading: "What changed",
-          body: "The panel moved to a first-party pack.",
-          verdict: { recommendation: "comment", confidence: "medium" },
+          verdict: { recommendation: "comment", confidence: "medium", summary: "The panel moved to a first-party pack." },
           showStats: true,
           concerns: [{ severity: "non_blocking", text: "Keep reviewer workflow controls visible while preserving diff parity." }],
           fileRoles: [{ role: "core", file: "market-packs/pr-walkthrough/src/panel.js", note: "Restored shell implementation." }],
@@ -376,6 +375,18 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await expect(page.locator('[data-testid="prw-draft"]')).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator('[data-testid="prw-draft"]')).toContainText("Draft Saved");
+		await expect(page.locator('[data-testid="prw-draft"] .state-header .pr-pill'), "draft header should not waste space on a PR chip").toHaveCount(0);
+		const progressLayout = await page.locator('[data-testid="prw-draft"] .progress-wrap').evaluate((element: HTMLElement) => {
+			const label = element.querySelector<HTMLElement>("span");
+			const bar = element.querySelector<HTMLElement>(".progress-track");
+			if (!label || !bar) return undefined;
+			const labelRect = label.getBoundingClientRect();
+			const barRect = bar.getBoundingClientRect();
+			return { labelTop: labelRect.top, barBottom: barRect.bottom, labelHeight: labelRect.height };
+		});
+		expect(progressLayout).toBeTruthy();
+		expect(progressLayout!.labelTop, "draft status text should sit below the progress bar").toBeGreaterThanOrEqual(progressLayout!.barBottom - 0.5);
+		expect(progressLayout!.labelHeight, "draft status text should remain one line").toBeLessThan(18);
 		await expect(page.locator('[data-testid="prw-draft-chunks"]')).toContainText("metadata");
 		await expect(page.locator('[data-testid="prw-draft-chunks"]')).toContainText("chunk:auth-flow");
 	});
@@ -460,6 +471,28 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(progressLayout!.labelHeight, "reviewed text should remain one line").toBeLessThan(18);
 	});
 
+	test("pr-walkthrough shell parity: mobile header keeps submit in the top right", async ({ page }) => {
+		await page.setViewportSize({ width: 420, height: 760 });
+		await renderReady(page);
+		await expectRenderedReadyPanel(page);
+		const layout = await page.evaluate(() => {
+			const header = document.querySelector<HTMLElement>('[data-testid="pr-walkthrough-header"]');
+			const title = document.querySelector<HTMLElement>('[data-testid="pr-walkthrough-pr-title"]');
+			const submit = document.querySelector<HTMLElement>('[data-testid="pr-walkthrough-submit-review"]');
+			const progress = document.querySelector<HTMLElement>('[data-testid="pr-walkthrough-progress"]');
+			if (!header || !title || !submit || !progress) return undefined;
+			const headerRect = header.getBoundingClientRect();
+			const titleRect = title.getBoundingClientRect();
+			const submitRect = submit.getBoundingClientRect();
+			const progressRect = progress.getBoundingClientRect();
+			return { submitTop: submitRect.top, submitRight: submitRect.right, titleTop: titleRect.top, progressTop: progressRect.top, headerRight: headerRect.right };
+		});
+		expect(layout).toBeTruthy();
+		expect(layout!.submitTop, "Submit review should stay on the title row in compact/mobile view").toBeLessThan(layout!.progressTop);
+		expect(Math.abs(layout!.submitTop - layout!.titleTop), "Submit review should align with the title row").toBeLessThan(18);
+		expect(layout!.submitRight, "Submit review should not collide with the right edge in compact/mobile view").toBeLessThanOrEqual(layout!.headerRight - 4);
+	});
+
 	test("pr-walkthrough shell parity: single rail toggles, resizes, and keeps orientation steps", async ({ page }) => {
 		await renderReady(page);
 		await expectRenderedReadyPanel(page);
@@ -540,9 +573,11 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expectRenderedReadyPanel(page);
 
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]'), "pr-walkthrough shell parity: first card with sections must render the dedicated guide card").toBeVisible();
+		await expect(page.locator('[data-testid="pr-walkthrough-card-summary"]'), "orientation summary should not duplicate the first at-a-glance beat above every guide page").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*2/);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("What changed");
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-verdict"]')).toContainText(/COMMENT/);
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-beat"] > p.summary'), "at-a-glance copy should not be duplicated outside the recommendation when it matches the verdict summary").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-stats"]')).toContainText(/3 files/);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-concerns"]')).toContainText(/non-blocking/i);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-filemap"]')).toContainText("market-packs/pr-walkthrough/src/panel.js");

@@ -635,7 +635,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return html`<article class="card guide" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
 			<span data-testid="prw-card" hidden></span>
 			<div class="guide-top"><div><div class="phase-label">Guided orientation</div><h1 data-testid="pr-walkthrough-card-title">${card.title || "Review orientation"}</h1></div><div class="guide-counter" data-testid="pr-walkthrough-guide-counter">${beat + 1} / ${sections.length}</div></div>
-			${card.summary ? html`<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>` : nothing}
 			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, sections[beat] || {})}</div>
 			${renderOriginalDescription(entry)}
 			<div class="guide-nav"><button class="secondary" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${beat === 0} @click=${() => setBeat(beat - 1)}>Back</button><button class="primary" data-testid="pr-walkthrough-guide-next" type="button" @click=${() => isLast ? completeOrientation(entry, host, paramKey, card) : setBeat(beat + 1)}>${isLast ? "Start review" : "Next"}</button></div>
@@ -1333,7 +1332,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const renderStateShell = (kind, testId, title, body, detail = nothing) => html`<section class=${`shell state-shell ${kind}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)}>
 				<header class="header state-header">
 					<div class="title-group">
-						<span class="pr-pill">${kind === "pending" ? spinner : "PR"}</span>
+						${kind === "pending" ? html`<span class="pr-pill">${spinner}</span>` : nothing}
 						<div class="title-stack"><h1>${title}</h1><div class="header-meta"><span>Reviewer child session</span><span>${displayJob}</span></div></div>
 					</div>
 					<div class="progress-wrap"><span>${progressLabel(kind)}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "pending" ? "35" : kind === "draft" ? "60" : "0"}><div class=${`progress-fill ${kind === "pending" ? "prw-progress-indeterminate" : ""}`} style=${kind === "pending" ? "width:42%" : kind === "draft" ? "width:60%" : "width:0%"}></div></div></div>
@@ -1710,8 +1709,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .state-shell .header h1 { overflow: visible; text-overflow: clip; white-space: normal; font-size: 16px; line-height: 1.2; }
 					.prw-root .state-shell .header-meta { min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px; white-space: normal; }
 					.prw-root .state-shell .header-meta span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-					.prw-root .state-shell .progress-wrap { width: min(260px, 100%); justify-self: end; grid-template-columns: max-content minmax(96px, 1fr); }
-					.prw-root .state-shell .progress-wrap > span { white-space: nowrap; }
+					.prw-root .state-shell .progress-wrap { width: min(260px, 100%); justify-self: end; grid-template-columns: minmax(120px, 1fr); gap: 4px; }
+					.prw-root .state-shell .progress-wrap > span { order: 2; white-space: nowrap; }
 					.prw-root .state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
 					.prw-root .state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
 					.prw-root .state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
@@ -1732,7 +1731,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .shell.narrow { --walkthrough-content-x: 4px; }
 					.prw-root .shell.narrow .content { padding: 6px var(--walkthrough-content-x) 0; }
 					.prw-root .shell.narrow .guide { padding: 12px; }
-					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 12px 8px 10px; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 1 / -1; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
+					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) max-content; height: auto; min-height: 58px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1; } .prw-root .submit { grid-column: 2; grid-row: 1; align-self: center; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 1 / -1; grid-row: 2; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
 					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } }
 
 				</style>

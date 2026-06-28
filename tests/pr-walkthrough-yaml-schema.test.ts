@@ -146,6 +146,7 @@ describe("PR walkthrough YAML schema", () => {
 
 		const atAGlance = sections.find(section => section.id === "at-a-glance");
 		assert.equal(atAGlance?.showStats, true);
+		assert.equal(atAGlance?.body, undefined, "at-a-glance summary belongs in verdict.summary only, not duplicated in body");
 		assert.equal(atAGlance?.verdict?.recommendation, "comment");
 		assert.equal(atAGlance?.verdict?.confidence, "medium");
 
