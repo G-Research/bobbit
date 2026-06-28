@@ -6,6 +6,7 @@ import * as prWalkthroughExtension from "../market-packs/pr-walkthrough/tools/pr
 
 const extension = extensionModule as any;
 const compactApi = prWalkthroughExtension as any;
+const HARD_COMPACT_FILE_BUDGET_BYTES = 64 * 1024;
 
 type RegisteredTool = { name: string; execute: (...args: any[]) => Promise<any>; parameters?: any };
 
@@ -109,6 +110,38 @@ function modifiedFile() {
 					{ id: "block-modified:h1:l1", kind: "del", side: "old", old_line: 31, text: "value -= 1;" },
 					{ id: "block-modified:h1:l2", kind: "add", side: "new", new_line: 32, text: "value += 1;" },
 					{ id: "block-modified:h1:l3", kind: "context", side: "context", old_line: 32, new_line: 33, text: "return value;" },
+				],
+			},
+		],
+	};
+}
+
+function largeSingleLineBundleFile() {
+	return {
+		path: "market-packs/terminal/lib/terminal-panel.js",
+		old_path: undefined,
+		status: "modified",
+		additions: 1,
+		deletions: 0,
+		is_binary: false,
+		is_generated: false,
+		is_truncated: false,
+		hunks: [
+			{
+				id: "block-terminal-panel:h0",
+				header: "@@ -1,0 +1,1 @@",
+				old_start: 1,
+				old_lines: 0,
+				new_start: 1,
+				new_lines: 1,
+				lines: [
+					{
+						id: "block-terminal-panel:h0:l0",
+						kind: "add",
+						side: "new",
+						new_line: 1,
+						text: `(()=>{${"a".repeat(700_000)}})();`,
+					},
 				],
 			},
 		],
@@ -397,6 +430,28 @@ describe("PR walkthrough compact bundle tool integration", () => {
 				const serialized = JSON.stringify(result);
 				assert.doesNotMatch(serialized, /"old_line"|"new_line"|"side"|"lines"/);
 				assert.doesNotMatch(serialized, /"changeset"|"limits"|baseSha|headSha|maxFiles|maxLinesPerFile/);
+			} finally {
+				restoreEnv();
+			}
+		});
+	});
+
+	it("bounds compact file reads for a 700k single-line hunk with truncation/window markers", async () => {
+		const { tools, restoreEnv } = installEnvAndRegisterTools();
+		const bundleTool = tools.get("read_pr_walkthrough_bundle");
+		assert.ok(bundleTool, "expected read_pr_walkthrough_bundle to be registered");
+		const file = largeSingleLineBundleFile();
+		await withMockedFetch(async () => new Response(JSON.stringify(fileRead(file as any, { totalHunks: 1, hunkLimit: 1, truncated: false })), { status: 200 }), async () => {
+			try {
+				const result = await bundleTool.execute("call-large-compact", { mode: "file", path: file.path, hunkLimit: 1, format: "compact" });
+				const output = String(result.content[0].text);
+				const outputBytes = Buffer.byteLength(output, "utf8");
+				const hasTruncationOrWindowMarker = /truncated=true|window(?:ed|ing)|omitted|bytes? omitted|request .*slice/i.test(output);
+
+				assert.ok(
+					outputBytes <= HARD_COMPACT_FILE_BUDGET_BYTES && hasTruncationOrWindowMarker,
+					`compact output must stay below hard budget and include truncation/window markers (bytes=${outputBytes}, budget=${HARD_COMPACT_FILE_BUDGET_BYTES}, hasMarker=${hasTruncationOrWindowMarker})`,
+				);
 			} finally {
 				restoreEnv();
 			}
