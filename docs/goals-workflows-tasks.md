@@ -568,7 +568,7 @@ interface GateSignalStep {
 }
 ```
 
-**LLM review artifacts:** When an `llm-review` step completes, the verification harness stores the reviewer's full analysis as a `text/markdown` artifact. The `output` field retains the short summary, while the artifact preserves the complete review text that was previously lost.
+**LLM review artifacts:** When an `llm-review` step completes, the verification harness stores the reviewer's full analysis as a `text/markdown` artifact. The `output` field retains the short summary, while the artifact preserves the complete review text that was previously lost. For reviewer retry, reminder, restart-resume, and exhausted-recovery diagnostics, see [llm-review Recovery](llm-review-recovery.md).
 
 **Size limit:** Artifact content is capped at 10 MB. Content exceeding this limit is truncated.
 
