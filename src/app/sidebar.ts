@@ -972,24 +972,24 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 	const staffNavId = `staff-header:${projectId || ""}`;
 	const staffNavActive = getActiveNavId() === staffNavId;
 	return html`
-		<div class="border-t border-border/30 my-1 mx-2"></div>
+		<div class="border-t border-border/30 ${mobile ? "my-0.5" : "my-1"} mx-2"></div>
 		<div class="flex flex-col gap-0.5">
-			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
+			<div class="relative flex items-center ${mobile ? "gap-1 pl-0 pr-2 py-0.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
 				data-nav-id=${staffNavId}
 				data-nav-active=${staffNavActive ? "true" : "false"}
 				style="${mobile ? "" : "padding-left:var(--sidebar-header-chevron-w);"}"
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
-				<span class="sidebar-chevron-slot ${mobile ? "sidebar-chevron-slot--inline" : "sidebar-chevron-slot--header sidebar-chevron-slot--absolute"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${staffExpanded ? "▾" : "▸"}</span></span>
-				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
+				<span class="sidebar-chevron-slot ${mobile ? "sidebar-chevron-slot--header" : "sidebar-chevron-slot--header sidebar-chevron-slot--absolute"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${staffExpanded ? "▾" : "▸"}</span></span>
+				<span class="shrink-0 text-muted-foreground" style="${mobile ? "margin-left:-3px;margin-right:2px;" : "margin-left:-3px;"}">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: ${mobile ? "1.1667em" : "0.75em"};">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
-						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
+						class="${mobile ? "p-1 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
 						@click=${() => { import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
 						title="Manage staff agents"
 					>${icon(List, mobile ? "sm" : "xs")}</button>
 					<button
-						class="${mobile ? "p-1.5 rounded active:bg-secondary/50" : "p-0.5 rounded-md hover:bg-secondary"} text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
+						class="${mobile ? "p-1 rounded active:bg-secondary/50" : "p-0.5 rounded-md hover:bg-secondary"} text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 						style="line-height:0;"
 						@click=${(e: Event) => startNewStaffFlow(e, projectId)}
 						title="New staff agent"
@@ -1021,8 +1021,8 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const isCompacting = session?.isCompacting || false;
 				const isAborting = session?.isAborting || false;
 				const accessory = session?.accessory;
-				const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
-				const btnPad = mobile ? "p-1.5" : "p-0.5";
+				const rowPy = SESSION_ROW_PY;
+				const btnPad = mobile ? "p-1" : "p-0.5";
 				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
 					title="Edit">${icon(Pencil, "xs")}</button>`;
@@ -1121,8 +1121,9 @@ export function renderArchivedSearchControls(): TemplateResult | string {
 	const loading = state.archivedSearchGoalsLoading || state.archivedSearchSessionsLoading;
 	const hasMore = state.archivedSearchGoalsHasMore || state.archivedSearchSessionsHasMore;
 	if (!loading && !hasMore) return "";
+	const dividerMy = isDesktop() ? "my-1" : "my-0.5";
 	return html`
-		<div class="border-t border-border/30 my-1 mx-2"></div>
+		<div class="border-t border-border/30 ${dividerMy} mx-2"></div>
 		<div class="flex flex-col gap-0.5 px-2">
 			${loading ? html`<div class="text-muted-foreground py-1" style="font-size: 0.75em;">Searching archived…</div>` : ""}
 			${state.archivedSearchGoalsHasMore ? html`

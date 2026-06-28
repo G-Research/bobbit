@@ -376,7 +376,7 @@ function renderMobileLanding() {
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
 			${renderProjectReorderLiveRegion()}
-			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
+			<div class="w-full max-w-xl mx-auto px-2 py-2 pb-16 flex flex-col gap-0.5">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
@@ -524,7 +524,7 @@ function renderMobileLanding() {
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											return html`
-												${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+												${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 												<div data-project-reorder-id=${project.id} data-project-id=${project.id}>
 													<div
 														data-testid="project-header"
@@ -562,14 +562,14 @@ function renderMobileLanding() {
 													`)}
 													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
-															<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
-															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
+															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
+															<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;margin-right:2px;">${icon(MessagesSquare, "sm")}</span>
 															<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
 																<button
-																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
+																	class="p-1 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
 																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
@@ -582,7 +582,7 @@ function renderMobileLanding() {
 																						</span>
 																</button>
 																<button
-																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	class="p-1 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 																	title="New session with role"
 																><span class="sidebar-scale-icon">${icon(ChevronDown, "sm")}</span></button>
@@ -607,7 +607,7 @@ function renderMobileLanding() {
 										})}
 										${renderArchivedSearchControls()}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
-											<div class="border-t border-border/30 my-1 mx-2"></div>
+											<div class="border-t border-border/30 my-0.5 mx-2"></div>
 											<div class="flex flex-col gap-0.5 px-2">
 												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
 												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}

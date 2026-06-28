@@ -395,7 +395,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
  * Layout: [bobbit] [title] [rename] [terminate]
  *
  * Desktop: buttons hidden until hover (via group-hover), tooltip on mouseenter.
- * Mobile:  buttons always visible, no tooltip, slightly taller touch targets.
+ * Mobile:  buttons always visible, no tooltip, compact vertical rhythm.
  */
 export const SESSION_ROW_PY = "py-0.5";
 
@@ -855,11 +855,12 @@ export function renderProjectArchivedSection(
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const isMobile = variant === "mobile";
 	const headerSize = isMobile ? "sm" : "xs";
-	const headerPy = isMobile ? "py-1.5" : "py-0.5";
+	const headerPy = "py-0.5";
+	const dividerMy = isMobile ? "my-0.5" : "my-1";
 	const labelClass = "flex-1 text-muted-foreground uppercase tracking-wider font-medium opacity-60";
 	const labelStyle = isMobile ? "font-size: 1.1667em;" : "font-size: 0.75em;";
 	return html`
-		<div class="border-t border-border/30 my-1 mx-2"></div>
+		<div class="border-t border-border/30 ${dividerMy} mx-2"></div>
 		<div class="flex flex-col gap-0.5">
 			<button
 				data-nav-id=${archHeaderNavId}
@@ -873,9 +874,9 @@ export function renderProjectArchivedSection(
 				<span class="${labelClass}" style="${labelStyle}">Archived</span>
 			</button>
 			${expanded ? html`
-				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${archivedGoals.length > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile) : ""}
-				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${standaloneArchivedSessions.map(s => html`
 						${renderArchivedSessionRow(s)}
@@ -904,8 +905,8 @@ export function renderSessionRow(session: GatewaySession) {
 		? isFirstClassParentExpanded(session.id)
 		: isArchivedParentExpanded(session.id));
 
-	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
-	const btnPad = mobile ? "p-1.5" : "p-0.5";
+	const rowPy = SESSION_ROW_PY;
+	const btnPad = mobile ? "p-1" : "p-0.5";
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
@@ -1003,7 +1004,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const delegates = archivedChildrenForParent(session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
-	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
+	const rowPy = SESSION_ROW_PY;
 	const archivedNavId = `session:${session.id}`;
 	return html`
 		<div
@@ -1058,8 +1059,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
-	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
-	const btnPad = mobile ? "p-1.5" : "p-0.5";
+	const rowPy = SESSION_ROW_PY;
+	const btnPad = mobile ? "p-1" : "p-0.5";
 
 	const goalId = session.goalId || session.teamGoalId;
 
@@ -1263,7 +1264,7 @@ function renderGoalBadge(goal: Goal) {
  * Expanded: child session rows + empty state + team controls
  *
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
- * Mobile:  dashboard button always visible. No double-click (no hover hint).
+ * Mobile:  dashboard button always visible with compact row padding. No double-click.
  */
 export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string }) {
 	const mobile = !isDesktop();
@@ -1345,7 +1346,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		if (sid) connectToSession(sid, false); else renderApp();
 	};
 
-	const btnPad = mobile ? "p-1.5" : "p-0.5";
+	const btnPad = mobile ? "p-1" : "p-0.5";
 	const pr = state.prStatusCache.get(goal.id);
 	const showArchive = !goal.archived;
 	const isWorkMerged = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
@@ -1476,7 +1477,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const goalNavActive = getActiveNavId() === goalNavId;
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
-			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
+			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
 				data-sidebar-actions-row-root
 				data-nav-id=${goalNavId}
 				data-nav-active=${goalNavActive ? "true" : "false"}
@@ -1484,7 +1485,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none" title="${isExpanded ? "Collapse goal" : "Expand goal"}"><span class="sidebar-chevron-glyph">${isExpanded ? "▾" : "▸"}</span></span>
-				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
+				<span class="shrink-0 text-muted-foreground" style="${mobile ? "margin-left:0;margin-right:1px;" : "margin-left:-3px;"}">${icon(GoalIcon, mobile ? "sm" : "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${opts?.displayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${opts.displayTitleSuffix})</span>` : ""}</span>
 				${(opts?.descendantCount ?? 0) > 0 ? html`

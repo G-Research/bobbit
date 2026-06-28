@@ -172,6 +172,12 @@ bell-toggle button {
 	font-size: var(--sidebar-chevron-glyph-size-sm);
 }
 
+@media (max-width: 767px) {
+	.sidebar-root {
+		--sidebar-chevron-glyph-size: 1.45em;
+	}
+}
+
 .sidebar-root .sidebar-action-cluster {
 	gap: var(--sidebar-action-gap);
 }

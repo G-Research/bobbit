@@ -20,13 +20,13 @@ test.describe("SB-33: Mobile sidebar behavior", () => {
 		expect(r.autoCloseOnSelect).toBe(false);
 	});
 
-	test("mobile: buttons always visible, py-1 padding (larger touch targets)", async ({ page }) => {
+	test("mobile: buttons always visible, compact py-0.5 padding", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const r = await page.evaluate(() =>
 			(window as any).__mobileSidebar.getMobileSidebarBehavior(false)
 		);
 		expect(r.buttonsAlwaysVisible).toBe(true);
-		expect(r.rowPadding).toBe("py-1");
+		expect(r.rowPadding).toBe("py-0.5");
 	});
 
 	test("mobile: auto-close on session select", async ({ page }) => {
