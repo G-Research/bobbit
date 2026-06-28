@@ -21,6 +21,7 @@ The terminal is a **session-persistent side-panel channel** owned by a built-in 
 - Optional `entrypoints/terminal.yaml` contributes composer slash `/terminal`.
 - The panel uses `host.channels` to open/attach the pack-owned `terminal` protocol. There is no `host.terminal` API and no raw WebSocket/fetch surface.
 - The backend PTY lifetime is tied to the session channel, not to the DOM panel instance.
+- The channel handler owns a bounded in-memory replay buffer for recent PTY output so a live reattach can restore useful context without making generic channel delivery queues durable.
 
 User mental model: **closing the panel is like hiding a terminal tab; Kill is what stops the shell.** This distinction must be explicit in labels and status copy.
 
@@ -90,12 +91,15 @@ Design notes:
 - Do not infer failure from lack of output. State comes from channel close/status frames.
 - Gateway restart survival is not required for v1; the UX must make the old PTY clearly gone and offer `Restart`.
 - `Close panel` causes a detach/hide only. Reopening attaches to the same channel if it still exists.
+- `Kill`, `Restart` from a terminal state, session termination, gateway shutdown, idle cleanup, or typing `exit` are the actions that terminate or replace the PTY/channel.
 - Browser reload/remount should restore the side-panel tab from workspace state, call `host.channels.attach(id)` or find the session terminal via `list`, and show attached/reconnecting/disconnected accordingly.
+- When the gateway and PTY are still live, reattach should replay recent bounded output before the status frame so the user sees prior context immediately. The transport should queue attach-time replay until the browser attach result is established, then deliver it only to the newly attached client.
 
 ## Resize and channel protocol UX
 
 - xterm should fit to the panel using a resize observer on the terminal viewport, not window size alone.
-- Debounce resize frames enough to avoid flooding during panel drags, but the final size must be sent promptly.
+- Fit should wait until the root and terminal viewport are connected, visible, and have non-zero dimensions. Mount, attach, restore, and resize should all schedule retries because side-panel dimensions can settle over several animation frames.
+- Debounce resize frames enough to avoid flooding during panel drags, but the final size must be sent promptly after a successful fit.
 - Protocol frames:
   - Client input: `{ kind:"text", data:"…" }` to PTY stdin.
   - Server output: `{ kind:"text", data:"…" }` from PTY stdout/stderr stream.
@@ -106,7 +110,8 @@ Design notes:
 ## Scrollback, keyboard, copy/paste
 
 - Default bounded scrollback should be large enough for real work but finite. Recommend starting at 10,000 lines in xterm client state, distinct from server channel delivery buffers.
-- V1 channel reattach is live-only by default: it does not replay historical terminal frames after full browser reload. If the side-panel DOM/tab survives, existing xterm scrollback remains visible; after reload, the panel may reattach to the live PTY with an empty/new viewport plus a status note such as `Reattached; previous scrollback is not replayed.`
+- Generic v1 channels do not replay historical frames by default, but `terminal.v1` makes replay part of its handler protocol. The live terminal handler keeps recent PTY text in memory, bounded by bytes and coalesced into bounded text frames on attach. It is scoped to one live `{session, pack, channel}` instance and is never shared across sessions, packs, channels, or clients.
+- Replay is not persistent storage. It disappears when the channel exits, is killed, the session/gateway shuts down, or the gateway process restarts. If the side-panel DOM/tab survives without a browser reload, xterm's own bounded scrollback remains visible independently of server replay.
 - Keyboard focus:
   - Opening/focusing the terminal panel places focus in xterm once attached.
   - `Tab`, arrows, Ctrl/Meta combinations, and shell shortcuts go to xterm while it is focused.

@@ -166,7 +166,7 @@ This lets a terminal launcher create or focus a session-persistent terminal with
 1. Resolve surface token.
 2. Look up `channelId`.
 3. Require exact same `sessionId` and `packId` as the channel record.
-4. If the channel is open, attach this WS connection and replay no historical frames by default.
+4. If the channel is open, attach this WS connection. Generic channels replay no historical frames by default; a handler may send explicit attach-only frames from `onAttach`, as the built-in terminal does for bounded PTY output replay.
 5. If the channel is closed or missing, return a clear `CHANNEL_CLOSED`/`CHANNEL_NOT_FOUND` result.
 
 Cross-pack and cross-session attach attempts should be indistinguishable from not found where possible to avoid enumeration.
@@ -179,9 +179,11 @@ Cross-pack and cross-session attach attempts should be indistinguishable from no
 
 A browser panel unmount or WebSocket close detaches the connection only. It does not close the server channel. While detached, the channel remains alive until explicit close, process cleanup, handler exit, quota enforcement, or idle timeout.
 
-V1 does not replay historical frames by default. Server outbound queues are delivery buffers for currently attached or briefly disconnected clients, not durable scrollback. Terminal scrollback is owned by the xterm client while the panel/tab survives; a full browser reload may reattach to the live PTY without restoring old output unless a future protocol adds explicit replay.
+V1 does not replay historical frames by default. Server outbound queues are delivery buffers for currently attached or briefly disconnected clients, not durable scrollback. Protocols that need reattach history must implement their own bounded replay and decide what is safe to expose to a newly attached client.
 
-On browser reload, the panel reconstructs its Host API, mints a fresh surface token, calls `host.channels.list({ name: "terminal" })` or `attach(channelId)`, and receives the still-live process channel when the gateway has not restarted. The UI should clearly distinguish live reattach with no replay from closed/disconnected restart cases.
+The built-in terminal protocol does this in the handler: while a PTY channel is live, recent text output is retained in an in-memory buffer scoped to that one `{session, pack, channel}` instance. On attach, the handler sends replay frames only to the attaching client, coalesced into bounded text frames, then sends status. Existing clients do not receive duplicate replay, and replay does not cross sessions, packs, channels, or clients. The WebSocket handler holds attach-time frames until it has sent the successful attach result, then flushes them, so the browser has a `HostChannel` before replay delivery begins.
+
+On browser reload, the panel reconstructs its Host API, mints a fresh surface token, calls `host.channels.list({ name: "terminal" })` or `attach(channelId)`, and receives the still-live process channel when the gateway has not restarted. If the gateway restarted, there is no persisted live channel or replay buffer; the UI should render a disconnected state with `Restart`.
 
 ### Close
 
@@ -448,7 +450,7 @@ Server to client:
 { kind: "json", data: { op: "exit", code?: number, signal?: string, reason?: string } }
 ```
 
-Kill is `HostChannel.close("kill")`. Restart after exit/kill is a new `open("terminal", { singletonKey: "default" })` from a trusted launcher or terminal panel button click.
+The built-in panel sends a kill JSON frame to request PTY termination. Restart after exit/kill is a new `open("terminal", { singletonKey: "default" })` from a trusted launcher or terminal panel button click.
 
 ### PTY helper
 
@@ -519,7 +521,9 @@ Build/package areas:
 UI behavior:
 
 - xterm.js panel uses theme tokens, fit-to-panel resize, bounded scrollback, accessible label, status banner, Kill, Restart, and Close panel controls.
+- Fit waits for connected, visible, non-zero panel dimensions and retries during mount, attach, restore, and resize. This avoids stale measurements and first-paint xterm corruption when a side panel is still settling.
 - Panel remount/reload attaches to an existing channel by id or lists `name:"terminal"` and attaches the session singleton.
+- Reattaching to a live terminal replays recent bounded PTY output from the handler before the status frame, targeted only to the attaching client and flushed after the browser attach result.
 - Panel tab close detaches only. Kill closes the channel and PTY. Exit from shell marks channel closed.
 
 ## 14. Exact implementation sequencing

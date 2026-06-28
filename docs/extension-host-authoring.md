@@ -758,6 +758,9 @@ Lifecycle semantics:
   not found; render a clear disconnected state and offer a user-triggered new `open()`.
 - V1 does not replay historical frames by default. Server queues are delivery buffers, not durable
   scrollback. Persist important state in `host.store` or make replay part of your own protocol.
+- If your protocol implements replay, keep it scoped to the live channel instance, bounded, and
+  explicit. Use targeted delivery for attach-only replay frames so existing clients do not receive a
+  duplicate history burst.
 
 #### Security and open grants
 
@@ -860,8 +863,17 @@ The built-in xterm panel behavior:
 - Identity: one session-persistent singleton channel (`singletonKey: session-terminal`) for the
   built-in terminal pack.
 - Reopen/remount/reload: the panel uses `list({ name: "terminal" })` and `attach(id)` to reconnect
-  while the gateway process is alive. Old output is not guaranteed after full reload.
-- Resize: xterm fits to the panel and sends debounced JSON resize frames.
+  while the gateway process is alive. Reattaching to a live terminal replays recent bounded PTY text
+  from the handler's in-memory buffer, then receives a status frame.
+- Replay scope: the buffer belongs to one live `{session, pack, channel}` instance. It is byte-bounded,
+  coalesced into bounded text frames on attach, delivered only to the attaching client, and never
+  shared across sessions, packs, channels, or clients. The WebSocket handler queues attach-time replay
+  until the browser receives the successful attach result, then flushes it, so early frames are not
+  dropped before the client has a `HostChannel` object. Replay is not persisted across channel exit,
+  kill, session/gateway shutdown, or gateway restart.
+- Resize: xterm fits to the panel and sends debounced JSON resize frames. Fitting waits for visible,
+  connected, non-zero panel dimensions and retries during mount, attach, restore, and resize so stale
+  measurements do not corrupt the initial render.
 - `Kill`: sends a kill JSON frame and terminates the PTY/channel.
 - `Restart`/`Start`: creates a fresh terminal from a user action after exit, kill, error, or
   disconnected restart state.
