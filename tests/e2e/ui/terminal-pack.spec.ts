@@ -1,5 +1,5 @@
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteSession } from "../e2e-setup.js";
+import { apiFetch, deleteSession, waitForHealth } from "../e2e-setup.js";
 import { createSessionViaUI, openApp } from "./ui-helpers.js";
 
 // Browser E2E for the first-party terminal pack. The WebSocket send spy is a
@@ -19,7 +19,7 @@ test.describe("terminal pack panel", () => {
 		sessionId = undefined;
 	});
 
-	test("opens from session menu, runs commands, resizes, reload-reattaches, kills, restarts, exits, and cleans up @smoke", async ({ page }) => {
+	test("opens from session menu, runs commands, resizes, hides live without killing, reload-reattaches, kills, restarts, exits, and cleans up @smoke", async ({ page }) => {
 		test.setTimeout(90_000);
 		await page.setViewportSize({ width: 1400, height: 900 });
 		await installChannelFrameSpy(page);
@@ -57,6 +57,17 @@ test.describe("terminal pack panel", () => {
 		await typeCommand(page, `echo ${marker2}`);
 		await expect(page.locator(terminalHost())).toContainText(marker2, { timeout: 20_000 });
 
+		const killBeforeHide = await killFrameCount(page);
+		await page.locator(terminalPanel()).getByRole("button", { name: "Hide terminal panel without killing the process" }).click();
+		await expect(page.locator(terminalPanel())).toHaveCount(0, { timeout: 10_000 });
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		await expect.poll(() => killFrameCount(page), { timeout: 5_000 }).toBe(killBeforeHide);
+		const marker3 = `${marker1}_hidden_live`;
+		await typeCommand(page, `echo ${marker3}`);
+		await expect(page.locator(terminalHost())).toContainText(marker3, { timeout: 20_000 });
+
 		await typeCommand(page, "exit");
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /exited|disconnected|idle/, { timeout: 20_000 });
 
@@ -74,6 +85,34 @@ test.describe("terminal pack panel", () => {
 
 		await page.locator(terminalPanel()).getByRole("button", { name: "Hide terminal panel without killing the process" }).click();
 		await expect(page.locator(terminalPanel())).toHaveCount(0, { timeout: 10_000 });
+	});
+
+	test("renders a clear disconnected state after gateway restart while terminal is live", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1400, height: 900 });
+		await installChannelFrameSpy(page);
+
+		await openApp(page);
+		sessionId = await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /attached|connecting/, { timeout: 20_000 });
+		const marker = `bobbit_terminal_restart_${Date.now()}`;
+		await typeCommand(page, `echo ${marker}`);
+		await expect(page.locator(terminalHost())).toContainText(marker, { timeout: 20_000 });
+
+		await gateway.crash();
+		await page.waitForFunction(() => (window as any).bobbitState?.connectionStatus !== "connected", undefined, { timeout: 5_000 }).catch(() => {});
+		await gateway.restart();
+		await waitForHealth(20_000);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel()), "terminal panel should restore after gateway restart").toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /disconnected/, { timeout: 30_000 });
+		await expect(page.locator(terminalPanel())).toContainText(/disconnected|closed|Restart/i, { timeout: 10_000 });
+		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 5_000 }).toBe(0);
 	});
 });
 

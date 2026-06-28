@@ -40,6 +40,8 @@ type SessionState = {
 	terminalState: "idle" | "connecting" | "attached" | "detached" | "exited" | "killed" | "disconnected" | "error";
 	connecting?: boolean;
 	autoStartAttempted?: boolean;
+	autoStartLaunchId?: string;
+	channelReadyId?: string;
 	attachAttempted?: boolean;
 	startupError?: string;
 	host?: HostApi;
@@ -60,11 +62,21 @@ export default function createTerminalPanel() {
 			}
 			queueMicrotask(() => {
 				ensureTerminalMounted(state);
-				const autoStart = params?.autoStart === true && !state.autoStartAttempted;
-				if (autoStart) state.autoStartAttempted = true;
-				if (!state.startupError && !state.attachAttempted) {
+				const launchId = typeof params?.__channelLaunchId === "string" ? params.__channelLaunchId : undefined;
+				const readyId = typeof params?.__channelReadyId === "string" ? params.__channelReadyId : undefined;
+				const launcherOpening = params?.launcherOpening === true;
+				const autoStartRequested = params?.autoStart === true;
+				const autoStart = shouldAutoStart(state, autoStartRequested, launchId);
+				const restoredAutoStart = autoStartRequested && !autoStart;
+				const restoredReadyChannel = !!readyId && !autoStart;
+				if (readyId && state.channelReadyId !== readyId) {
+					state.channelReadyId = readyId;
+					state.attachAttempted = false;
+					state.startupError = undefined;
+				}
+				if (!state.startupError && (!state.attachAttempted || autoStart || launcherOpening)) {
 					state.attachAttempted = true;
-					void attachOrOfferStart(state, autoStart);
+					void attachOrOfferStart(state, autoStart, restoredAutoStart || restoredReadyChannel, launcherOpening);
 				}
 			});
 			return state.root;
@@ -149,7 +161,26 @@ function ensureTerminalMounted(state: SessionState): void {
 	scheduleFitAndResize(state);
 }
 
-async function attachOrOfferStart(state: SessionState, autoStart: boolean): Promise<void> {
+function shouldAutoStart(state: SessionState, requested: boolean, launchId?: string): boolean {
+	if (!requested) return false;
+	if (launchId) {
+		if (state.autoStartLaunchId === launchId) return false;
+		state.autoStartLaunchId = launchId;
+		const key = `bb-terminal-autostart:${state.sid}:${launchId}`;
+		try {
+			if (sessionStorage.getItem(key)) return false;
+			sessionStorage.setItem(key, "1");
+		} catch {
+			// If storage is unavailable, fall back to the page-lived launch guard.
+		}
+		return true;
+	}
+	if (state.autoStartAttempted) return false;
+	state.autoStartAttempted = true;
+	return true;
+}
+
+async function attachOrOfferStart(state: SessionState, autoStart: boolean, restoredAutoStart = false, launcherOpening = false): Promise<void> {
 	if (state.channel || state.connecting) return;
 	const host = state.host;
 	if (!host?.capabilities?.channels || !host.channels) {
@@ -169,7 +200,15 @@ async function attachOrOfferStart(state: SessionState, autoStart: boolean): Prom
 			await startTerminal(state, false);
 			return;
 		}
-		setStatus(state, "No live terminal. Press Start to create one.", "idle");
+		if (launcherOpening) {
+			setStatus(state, "Opening terminal from launcher…", "connecting");
+			return;
+		}
+		setStatus(
+			state,
+			restoredAutoStart ? "Terminal disconnected or closed. Press Restart to create a new terminal." : "No live terminal. Press Start to create one.",
+			restoredAutoStart ? "disconnected" : "idle",
+		);
 	} catch (err) {
 		setStatus(state, messageOf(err, "Could not attach terminal."), "disconnected");
 	} finally {
@@ -296,7 +335,7 @@ function setStatus(state: SessionState, text: string, terminalState: SessionStat
 function updateButtons(state: SessionState): void {
 	const open = state.channel?.state === "open";
 	state.startButton.textContent = state.terminalState === "exited" || state.terminalState === "killed" || state.terminalState === "disconnected" || state.terminalState === "error" ? "Restart" : "Start";
-	state.startButton.disabled = state.connecting === true || open;
+	state.startButton.disabled = state.connecting === true || state.terminalState === "connecting" || open;
 	state.killButton.disabled = !open;
 }
 

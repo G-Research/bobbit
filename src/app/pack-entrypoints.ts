@@ -332,17 +332,33 @@ async function runChannelPanelLauncher(
 	options?: LauncherDispatchOptions,
 ): Promise<void> {
 	const host = getLauncherHost(l.packId, l.id, options?.sessionId);
+	const launchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+	const launchParams = {
+		...(target.params ?? {}),
+		autoStart: false,
+		launcherOpening: true,
+		__channelLaunchId: launchId,
+	};
+	if (!host?.ui?.openPanel) {
+		onResult?.({ ok: false, error: "Terminal panel is unavailable." });
+		return;
+	}
+	if (!host.capabilities?.channels || !host.channels) {
+		const message = "Terminal channels are unavailable.";
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, startupError: message }, sessionId: options?.sessionId });
+		onResult?.({ ok: false, error: message });
+		return;
+	}
+	// Open/focus immediately, then create the channel from this trusted launcher
+	// surface so the server-minted activation/open permit remains entrypoint-bound.
+	host.ui.openPanel({ panelId: target.panelId, params: launchParams, sessionId: options?.sessionId });
 	try {
-		if (!host?.capabilities?.channels || !host.channels || !host.ui?.openPanel) {
-			onResult?.({ ok: false, error: "Terminal channels are unavailable." });
-			return;
-		}
 		await host.channels.open(target.channel, { singletonKey: target.singletonKey, data: options?.body ?? {} });
-		host.ui.openPanel({ panelId: target.panelId, params: target.params ?? {}, sessionId: options?.sessionId });
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, __channelReadyId: launchId }, sessionId: options?.sessionId });
 		onResult?.({ ok: true });
 	} catch (e) {
 		const message = e instanceof Error ? e.message : String(e);
-		host?.ui?.openPanel?.({ panelId: target.panelId, params: { ...(target.params ?? {}), startupError: message }, sessionId: options?.sessionId });
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, startupError: message }, sessionId: options?.sessionId });
 		onResult?.({ ok: false, error: message });
 	}
 }
