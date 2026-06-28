@@ -341,12 +341,33 @@ async function visibleRailTestIds(page: any): Promise<string[]> {
 
 test.describe("PR walkthrough pack panel UI parity", () => {
 	test("renders a pending reviewer-child state without falling back to an owner-session loader", async ({ page }) => {
+		await page.setViewportSize({ width: 1100, height: 760 });
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwPending());
 
 		await expect(page.locator('[data-testid="prw-panel-root"]')).toBeVisible();
 		await expect(page.locator('[data-testid="prw-pending"]')).toContainText("PR Walkthrough: In Progress");
 		await expect(page.locator("body")).not.toContainText(/Run walkthrough|Load walkthrough/i);
+
+		const layout = await page.evaluate(() => {
+			const header = document.querySelector<HTMLElement>('[data-testid="prw-pending"] .state-header');
+			const title = header?.querySelector<HTMLElement>("h1");
+			const progress = header?.querySelector<HTMLElement>(".progress-wrap");
+			const progressLabel = progress?.querySelector<HTMLElement>("span");
+			const card = document.querySelector<HTMLElement>('[data-testid="prw-pending"] .state-card');
+			if (!header || !title || !progress || !progressLabel || !card) return undefined;
+			const headerRect = header.getBoundingClientRect();
+			const titleRect = title.getBoundingClientRect();
+			const progressRect = progress.getBoundingClientRect();
+			const labelRect = progressLabel.getBoundingClientRect();
+			const cardRect = card.getBoundingClientRect();
+			const overlaps = !(titleRect.right <= progressRect.left || progressRect.right <= titleRect.left || titleRect.bottom <= progressRect.top || progressRect.bottom <= titleRect.top);
+			return { overlaps, labelHeight: labelRect.height, contentGap: cardRect.top - headerRect.bottom };
+		});
+		expect(layout).toBeTruthy();
+		expect(layout!.overlaps).toBe(false);
+		expect(layout!.labelHeight).toBeLessThan(24);
+		expect(layout!.contentGap).toBeGreaterThanOrEqual(0);
 	});
 
 	test("renders saved draft chunks as a bounded resumable state", async ({ page }) => {
@@ -419,7 +440,10 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-stats"]')).toContainText(/-14/);
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-link"]')).toHaveAttribute("href", /github\.com\/SuuBro\/bobbit\/pull\/42/);
 		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/0\s*\/\s*2\s+reviewed/);
-		await expect(page.locator('[data-testid="pr-walkthrough-submit-review"]')).toBeDisabled();
+		const submit = page.locator('[data-testid="pr-walkthrough-submit-review"]');
+		await expect(submit).toBeDisabled();
+		const submitBox = await submit.boundingBox();
+		expect(submitBox?.width, "half-panel header must not stretch Submit review to fill a grid column").toBeLessThanOrEqual(160);
 	});
 
 	test("pr-walkthrough shell parity: single rail toggles, resizes, and keeps orientation steps", async ({ page }) => {
