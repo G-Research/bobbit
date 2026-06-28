@@ -15,9 +15,8 @@
  * once, a file:// fixture loads it, and we drive the helpers via window globals.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle";
 
 const FIXTURE = path.resolve("tests/fixtures/client-host-api.html");
 const BUNDLE = path.resolve("tests/fixtures/client-host-api-bundle.js");
@@ -26,26 +25,11 @@ const HOST_SRC = path.resolve("src/app/host-api.ts");
 const SHARED_SRC = path.resolve("src/shared/extension-host/host-api.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(HOST_SRC).mtimeMs,
-		fs.statSync(SHARED_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [ENTRY, HOST_SRC, SHARED_SRC],
+	});
 });
 
 const PAGE = `file://${FIXTURE}`;
