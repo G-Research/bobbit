@@ -507,9 +507,10 @@ workspace. It uses the same shared controls as every side panel: fullscreen,
 collapse/restore, split view, and popout. There is no walkthrough-specific resize
 code path, and no preview-specific localStorage collapse key; size mode persists
 as `sidePanelWorkspace.sizeMode` on the reviewer session and syncs across reloads
-and browser contexts. The shared keyboard shortcuts expand one level
-(`collapsed → split → fullscreen`), collapse one level (`fullscreen → split → collapsed`),
-and toggle fullscreen/collapsed.
+and browser contexts. Shared visible controls and shortcuts expand one level
+(`collapsed → split → fullscreen`) or collapse one level (`fullscreen → split → collapsed`).
+The explicit `Ctrl+#` fullscreen toggle is the only shared control that jumps
+between fullscreen and collapsed.
 
 The panel **never auto-enters fullscreen**. Fullscreen is strictly user-initiated,
 via a toolbar button or one of those shortcuts. This matches the preview panel and
@@ -552,9 +553,8 @@ and the user-terminate control are pinned in the API spec
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
 Preview panel sizing through the shared side-panel controls is independently pinned by
-`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (preview is one workspace
-panel kind using the same sizing logic as pack, proposal, review, and inbox
-panels). See
+`tests/ui-fixtures/preview-panel.spec.ts` (preview is one workspace panel kind
+using the same sizing logic as pack, proposal, review, and inbox panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
 

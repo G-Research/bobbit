@@ -154,11 +154,20 @@ The side-panel shell renders every tab kind with the same workspace chrome:
 
 Panel-specific actions remain inside the panel or per-tab action slot. Preview keeps refresh/direct preview behavior; pack panels keep scoped Host API behavior; proposal/review/inbox panels keep their business actions.
 
-Keyboard shortcuts target the active side panel, regardless of kind:
+Size mode is a three-level ladder: `collapsed` (closed), `split` (beside chat), and `fullscreen` (side panel owns the window). The visible window controls move only one level at a time:
+
+- expand/restore from `collapsed` opens `split`;
+- expand from `split` opens `fullscreen`;
+- collapse from `fullscreen` restores `split`;
+- collapse from `split` closes to `collapsed`.
+
+A toolbar control must not jump directly between `fullscreen` and `collapsed`; that jump is reserved for the explicit `Ctrl+#` fullscreen toggle. Labels reflect the target: `Expand` moves upward, `Collapse` moves downward, and `Restore split view` returns from fullscreen to split instead of closing the panel.
+
+Keyboard shortcuts target the active side panel, regardless of kind, and use the same level model:
 
 - expand: `collapsed -> split -> fullscreen`;
 - collapse: `fullscreen -> split -> collapsed`;
-- fullscreen toggle: non-fullscreen -> `fullscreen`, fullscreen -> `collapsed`.
+- fullscreen toggle (`Ctrl+#`): non-fullscreen -> `fullscreen`, fullscreen -> `collapsed`.
 
 ## Popout and deep links
 
@@ -217,6 +226,6 @@ Useful checks:
 - stale localStorage should not change the workspace after `migratedFromLocalStorageAt` is set;
 - preview restart restore should show the active preview tab in the workspace after gateway restart, and a user-closed preview tab should stay absent even while `GET /api/preview/mount` still succeeds.
 
-Regression coverage: `tests/e2e/ui/preview-durable-restart.spec.ts`.
+Regression coverage: `tests/e2e/ui/preview-durable-restart.spec.ts` for restart restore and `tests/ui-fixtures/preview-panel.spec.ts` for one-step visible sizing controls.
 
 Related docs: [architecture.md](architecture.md#side-panel-workspace), [preview-architecture.md](preview-architecture.md#restart-restore), [extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel), [rest-api.md](rest-api.md#side-panel-workspace), and [websocket-protocol.md](websocket-protocol.md#server--client).
