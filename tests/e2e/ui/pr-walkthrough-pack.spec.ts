@@ -713,9 +713,9 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 	}
 
-	async function assertLabelledRailRowsDoNotOverlap(page: import("@playwright/test").Page, label: string): Promise<void> {
+	async function assertCompactRailCountersUsable(page: import("@playwright/test").Page, label: string): Promise<void> {
 		const violations = await page.evaluate(() => {
-			const rail = document.querySelector('[data-testid="pr-walkthrough-labelled-rail"]');
+			const rail = document.querySelector('[data-testid="pr-walkthrough-collapsed-rail"]');
 			const isVisible = (element: Element | null): element is HTMLElement => {
 				if (!(element instanceof HTMLElement)) return false;
 				const style = getComputedStyle(element);
@@ -723,35 +723,47 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 				return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 			};
 			const problems: string[] = [];
-			if (!rail || !isVisible(rail)) return ["labelled rail is not visible"];
-			for (const row of Array.from(rail.querySelectorAll('[data-testid="pr-walkthrough-phase-button"]'))) {
-				if (!isVisible(row)) continue;
-				const name = row.querySelector(".phase-name");
-				const count = row.querySelector(".phase-count");
-				if (!isVisible(name) || !isVisible(count)) continue;
-				const rowBox = row.getBoundingClientRect();
-				const nameBox = name.getBoundingClientRect();
-				const countBox = count.getBoundingClientRect();
-				const title = (name.textContent || "phase").trim();
-				if (nameBox.right > countBox.left - 2) problems.push(`${title}: phase name overlaps count (${nameBox.right.toFixed(1)} > ${countBox.left.toFixed(1)} - 2)`);
-				if (nameBox.left < rowBox.left - 0.5) problems.push(`${title}: phase name starts outside row`);
-				if (countBox.right > rowBox.right + 0.5) problems.push(`${title}: phase count ends outside row`);
+			if (!rail || !isVisible(rail)) return ["compact rail is not visible"];
+			const railBox = rail.getBoundingClientRect();
+			const entries = Array.from(rail.querySelectorAll('[data-testid="pr-walkthrough-orientation-step"], [data-testid="pr-walkthrough-card-step"]'))
+				.filter(isVisible)
+				.map((row) => {
+					const dot = row.querySelector<HTMLElement>(".step-dot, .card-dot");
+					const rowBox = row.getBoundingClientRect();
+					const dotBox = dot?.getBoundingClientRect();
+					const labelText = row.getAttribute("aria-label") || row.getAttribute("data-card-id") || row.getAttribute("data-prw-nav") || "step";
+					return { row, dot, rowBox, dotBox, labelText };
+				});
+			if (!entries.length) problems.push("compact rail has no visible step counters");
+			for (const entry of entries) {
+				const { rowBox, dotBox, labelText } = entry;
+				if (!dotBox || dotBox.width <= 0 || dotBox.height <= 0) {
+					problems.push(`${labelText}: counter dot is not visible`);
+					continue;
+				}
+				if (rowBox.width < 26 || rowBox.height < 26) problems.push(`${labelText}: step hit target is too small (${rowBox.width.toFixed(1)}×${rowBox.height.toFixed(1)})`);
+				if (dotBox.width < 16 || dotBox.height < 16) problems.push(`${labelText}: counter dot is too small (${dotBox.width.toFixed(1)}×${dotBox.height.toFixed(1)})`);
+				if (dotBox.left < rowBox.left - 0.5 || dotBox.right > rowBox.right + 0.5 || dotBox.top < rowBox.top - 0.5 || dotBox.bottom > rowBox.bottom + 0.5) {
+					problems.push(`${labelText}: counter dot is not contained by its button`);
+				}
+				const center = dotBox.left + dotBox.width / 2;
+				const railCenter = railBox.left + railBox.width / 2;
+				if (Math.abs(center - railCenter) > 1.5) problems.push(`${labelText}: counter dot is not centered in the compact rail`);
 			}
-			for (const row of Array.from(rail.querySelectorAll(".card-button"))) {
-				if (!isVisible(row)) continue;
-				const dot = row.querySelector(".card-dot");
-				const label = row.querySelector(".card-label");
-				if (!isVisible(dot) || !isVisible(label)) continue;
-				const rowBox = row.getBoundingClientRect();
-				const dotBox = dot.getBoundingClientRect();
-				const labelBox = label.getBoundingClientRect();
-				const title = (label.textContent || "card").trim();
-				if (dotBox.right > labelBox.left + 0.5) problems.push(`${title}: card dot overlaps label (${dotBox.right.toFixed(1)} > ${labelBox.left.toFixed(1)})`);
-				if (labelBox.right > rowBox.right + 0.5) problems.push(`${title}: card label ends outside row`);
+			const sorted = entries
+				.filter((entry) => entry.dotBox)
+				.map((entry) => ({ labelText: entry.labelText, box: entry.dotBox! }))
+				.sort((a, b) => a.box.top - b.box.top);
+			for (let index = 1; index < sorted.length; index += 1) {
+				const previous = sorted[index - 1];
+				const current = sorted[index];
+				if (previous.box.bottom > current.box.top + 0.5) {
+					problems.push(`${previous.labelText} overlaps ${current.labelText} (${previous.box.bottom.toFixed(1)} > ${current.box.top.toFixed(1)} + 0.5)`);
+				}
 			}
 			return problems;
 		});
-		expect.soft(violations, `${label}: phase/card rail rows must not overlap fixed dots or counts`).toEqual([]);
+		expect.soft(violations, `${label}: compact rail counters must remain centered, non-overlapping, and usable`).toEqual([]);
 	}
 
 	// ── T-4: the walkthrough pane lives WITH the reviewer-child session. On mount the
@@ -807,10 +819,10 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect(persistedAt2, "reload must rehydrate the SAME persisted store record via recover").toBe(persistedAt1);
 	});
 
-	// ── T-5: regression coverage for the PR walkthrough rail polish. Orientation
-	//    beats are the only orientation navigation surface; phase counters use the
-	//    same compact gate-counter vocabulary; title rows reserve fixed dot/count
-	//    real estate at both default and constrained widths. ──
+	// ── T-5: regression coverage for the simplified PR walkthrough rail. Orientation
+	//    beats are represented once in the compact rail; the old labelled rail/toggle
+	//    UI stays absent; compact counters remain centered, non-overlapping, and usable
+	//    at both default and constrained widths. ──
 	test("T-5 — sidebar de-duplicates orientation and keeps rail counters compact/non-overlapping", async ({ page, gateway }) => {
 		await page.setViewportSize({ width: 1600, height: 900 });
 		const sid = await seedReadyWalkthrough(page, gateway, "prw-t5-sidebar-regression");
@@ -820,66 +832,42 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		});
 		await openRecoveredReadyWalkthrough(page, "prw-t5-sidebar-regression");
 
-		const labelledRail = page.getByTestId("pr-walkthrough-labelled-rail");
-		if (!(await labelledRail.isVisible())) {
-			await page.getByTestId("pr-walkthrough-collapsed-rail").getByTestId("pr-walkthrough-rail-toggle").click();
-		}
-		await expect(labelledRail, "labelled rail must render in expanded mode").toBeVisible();
-		await expect(labelledRail.getByTestId("pr-walkthrough-orientation-rail"), "orientation beats must render in the labelled rail").toBeVisible();
+		await expect(page.getByTestId("pr-walkthrough-labelled-rail"), "simplified rail must not render the obsolete labelled rail").toHaveCount(0);
+		await expect(page.getByTestId("pr-walkthrough-rail-toggle"), "simplified rail must not expose expand/collapse controls").toHaveCount(0);
+		await expect(page.getByTestId("pr-walkthrough-rail-resize"), "simplified rail must not expose resize controls").toHaveCount(0);
 
-		const labelledDuplicateOrientationCards = labelledRail.locator('.card-button[data-prw-nav="orientation-summary"]:visible');
-		expect.soft(
-			await labelledDuplicateOrientationCards.count(),
-			"labelled rail must not duplicate orientation card buttons outside the orientation beat rail",
-		).toBe(0);
-		expect.soft(
-			await labelledRail.getByTestId("pr-walkthrough-phase-button").filter({ has: page.locator(".phase-name").filter({ hasText: /^Orientation$/ }) }).count(),
-			"labelled rail must not render a duplicate Orientation phase row when orientation beats are present",
-		).toBe(0);
-
-		const phaseCounts = labelledRail.locator('[data-testid="pr-walkthrough-phase-button"]:visible .phase-count');
-		expect(await phaseCounts.count(), "the labelled rail must expose phase progress counts").toBeGreaterThan(0);
-		const countTexts = (await phaseCounts.allTextContents()).map((text) => text.trim());
-		for (const text of countTexts) {
-			expect.soft(text, `phase progress count must use gate-counter format (n/total), got ${text}`).toMatch(/^\(\d+\/\d+\)$/);
-		}
-		const firstCountStyle = await phaseCounts.first().evaluate((node) => {
-			const style = getComputedStyle(node as HTMLElement);
-			return {
-				whiteSpace: style.whiteSpace,
-				fontWeight: Number.parseInt(style.fontWeight, 10),
-				fontSize: Number.parseFloat(style.fontSize),
-				letterSpacing: style.letterSpacing,
-			};
-		});
-		expect.soft(firstCountStyle.whiteSpace, "phase progress count must not wrap").toBe("nowrap");
-		expect.soft(firstCountStyle.fontWeight, "phase progress count must be semibold/bold like gate counters").toBeGreaterThanOrEqual(600);
-		expect.soft(firstCountStyle.fontSize, "phase progress count must stay compact like gate counters").toBeLessThanOrEqual(12);
-		expect.soft(firstCountStyle.letterSpacing, "phase progress count should use tight gate-counter letter spacing").not.toBe("normal");
-
-		await assertLabelledRailRowsDoNotOverlap(page, "default rail width");
-
-		const resizeHandle = page.getByTestId("pr-walkthrough-rail-resize");
-		await expect(resizeHandle, "expanded desktop rail must expose the resize handle").toBeVisible();
-		const resizeBox = await resizeHandle.boundingBox();
-		expect(resizeBox, "resize handle must have a measurable box").toBeTruthy();
-		await page.mouse.move(resizeBox!.x + resizeBox!.width / 2, resizeBox!.y + resizeBox!.height / 2);
-		await page.mouse.down();
-		await page.mouse.move(resizeBox!.x - 110, resizeBox!.y + resizeBox!.height / 2, { steps: 8 });
-		await page.mouse.up();
-		await assertLabelledRailRowsDoNotOverlap(page, "constrained rail width");
-
-		await page.getByTestId("pr-walkthrough-rail-toggle").click();
 		const collapsedRail = page.getByTestId("pr-walkthrough-collapsed-rail");
-		await expect(collapsedRail, "collapsed rail must render after toggling").toBeVisible();
-		await expect(collapsedRail.getByTestId("pr-walkthrough-orientation-rail"), "orientation beats must remain represented in collapsed mode").toBeVisible();
+		await expect(collapsedRail, "simplified compact rail must render").toBeVisible();
+		await expect(collapsedRail.getByTestId("pr-walkthrough-orientation-rail"), "orientation beats must render in the compact rail").toBeVisible();
+		await expect(collapsedRail.getByTestId("pr-walkthrough-orientation-step"), "orientation beats should be represented once as compact steps").toHaveCount(6);
+		await expect(collapsedRail.getByTestId("pr-walkthrough-card-step"), "review cards should render as compact counter steps").not.toHaveCount(0);
+
+		expect.soft(
+			await page.locator('[data-testid="pr-walkthrough-orientation-rail"]:visible').count(),
+			"orientation beat rail must be represented once",
+		).toBe(1);
 		expect.soft(
 			await collapsedRail.locator('.card-button[data-prw-nav="orientation-summary"]:visible').count(),
-			"collapsed rail must not duplicate orientation card buttons outside the orientation beat controls",
+			"compact rail must not duplicate orientation card buttons outside the orientation beat controls",
 		).toBe(0);
 		expect.soft(
 			await collapsedRail.locator('[data-testid="pr-walkthrough-phase-button"][aria-label="Orientation"]:visible').count(),
-			"collapsed rail must not render a duplicate Orientation phase pip when orientation beats are present",
+			"compact rail must not render a duplicate Orientation phase pip when orientation beats are present",
+		).toBe(0);
+
+		await assertCompactRailCountersUsable(page, "default rail width");
+
+		await page.setViewportSize({ width: 900, height: 760 });
+		await expect(collapsedRail, "simplified compact rail must remain visible at constrained width").toBeVisible();
+		await expect(collapsedRail.getByTestId("pr-walkthrough-orientation-rail"), "orientation beats must remain represented at constrained width").toBeVisible();
+		await assertCompactRailCountersUsable(page, "constrained rail width");
+		expect.soft(
+			await page.locator('[data-testid="pr-walkthrough-orientation-rail"]:visible').count(),
+			"constrained width must not duplicate orientation rails",
+		).toBe(1);
+		expect.soft(
+			await collapsedRail.locator('.card-button[data-prw-nav="orientation-summary"]:visible').count(),
+			"constrained compact rail must not duplicate orientation card buttons",
 		).toBe(0);
 	});
 });
