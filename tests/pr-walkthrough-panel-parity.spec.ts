@@ -350,11 +350,9 @@ async function expectRenderedReadyPanel(page: any) {
 
 async function startReviewFromGuide(page: any) {
 	await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]'), "pr-walkthrough shell parity: guided orientation card is required before review cards").toBeVisible();
-	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*6/);
 	for (let index = 0; index < 5; index += 1) {
 		await page.locator('[data-testid="pr-walkthrough-guide-next"]').click();
 	}
-	await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/6\s*\/\s*6/);
 	await expect(page.locator('[data-testid="pr-walkthrough-guide-next"]')).toContainText(/Start review/i);
 	await page.locator('[data-testid="pr-walkthrough-guide-next"]').click();
 	await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Diff review controls and comments");
@@ -553,36 +551,32 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(layout!.submitRight, "Submit review should not collide with the right edge in compact/mobile view").toBeLessThanOrEqual(layout!.headerRight - 4);
 	});
 
-	test("pr-walkthrough shell parity: single rail toggles, resizes, and keeps orientation steps", async ({ page }) => {
+	test("pr-walkthrough shell parity: simplified rail keeps one compact step list", async ({ page }) => {
 		await renderReady(page);
 		await expectRenderedReadyPanel(page);
 
-		await expect(page.locator('[data-testid="pr-walkthrough-labelled-rail"]'), "pr-walkthrough shell parity: labelled rail must be the single desktop sidebar").toBeVisible();
-		expect(await visibleRailTestIds(page), "pr-walkthrough shell parity: only the labelled rail should be visible before toggle").toEqual(["pr-walkthrough-labelled-rail"]);
-		await expect(page.locator('[data-testid="pr-walkthrough-rail-toggle"]'), "pr-walkthrough-rail-toggle must collapse/expand the single rail").toBeVisible();
-		await expect(page.locator('[data-testid="pr-walkthrough-rail-resize"]'), "pr-walkthrough shell parity: desktop labelled rail must expose pr-walkthrough-rail-resize").toBeVisible();
-		await expect(page.locator('[data-testid="pr-walkthrough-phase-button"]')).not.toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-labelled-rail"]'), "expanded labelled rail should not render").toHaveCount(0);
+		expect(await visibleRailTestIds(page), "only the simplified compact rail should be visible").toEqual(["pr-walkthrough-collapsed-rail"]);
+		await expect(page.locator('[data-testid="pr-walkthrough-rail-toggle"]'), "simplified rail should not expose expand/collapse controls").toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-rail-resize"]'), "simplified rail should not expose resize controls").toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-phase-button"]'), "phase/category headers should not render in the simplified rail").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-card-step"]')).not.toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-rail"]')).toBeVisible();
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(6);
-
-		const rail = page.locator('[data-testid="pr-walkthrough-labelled-rail"]');
-		const beforeWidth = (await rail.boundingBox())?.width || 0;
-		const handleBox = await page.locator('[data-testid="pr-walkthrough-rail-resize"]').boundingBox();
-		expect(handleBox, "pr-walkthrough shell parity: resize handle must have a measurable hit target").toBeTruthy();
-		await page.mouse.move((handleBox?.x || 0) + (handleBox?.width || 1) / 2, (handleBox?.y || 0) + (handleBox?.height || 1) / 2);
-		await page.mouse.down();
-		await page.mouse.move((handleBox?.x || 0) + 85, (handleBox?.y || 0) + (handleBox?.height || 1) / 2);
-		await page.mouse.up();
-		const afterWidth = (await rail.boundingBox())?.width || 0;
-		expect(afterWidth, "pr-walkthrough shell parity: dragging pr-walkthrough-rail-resize must resize the rail").toBeGreaterThan(beforeWidth + 20);
-		expect(afterWidth, "pr-walkthrough shell parity: rail resize must clamp near the historical 360px maximum").toBeLessThanOrEqual(365);
-
-		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "pr-walkthrough shell parity: collapsed rail must replace labelled rail after toggle").toBeVisible();
-		expect(await visibleRailTestIds(page), "pr-walkthrough shell parity: only the collapsed rail should be visible after toggle").toEqual(["pr-walkthrough-collapsed-rail"]);
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-orientation-step"]')).toHaveCount(6);
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-card-step"]').first()).toContainText("7");
+		const railMetrics = await page.locator('[data-testid="pr-walkthrough-collapsed-rail"]').evaluate((element: HTMLElement) => {
+			const orientationDot = element.querySelector<HTMLElement>('[data-testid="pr-walkthrough-orientation-step"] .step-dot');
+			const reviewDot = element.querySelector<HTMLElement>('[data-testid="pr-walkthrough-card-step"] .card-dot');
+			const o = orientationDot?.getBoundingClientRect();
+			const r = reviewDot?.getBoundingClientRect();
+			const rail = element.getBoundingClientRect();
+			return { railWidth: rail.width, orientationWidth: o?.width, orientationHeight: o?.height, reviewWidth: r?.width, reviewHeight: r?.height, orientationCenter: o ? o.left + o.width / 2 - rail.left : undefined, reviewCenter: r ? r.left + r.width / 2 - rail.left : undefined, railCenter: rail.width / 2 };
+		});
+		expect(railMetrics.railWidth, "simplified rail should use the same compact width in full and half panel modes").toBeLessThanOrEqual(60);
+		expect(railMetrics.orientationWidth, "orientation and review circles should have the same width").toBe(railMetrics.reviewWidth);
+		expect(railMetrics.orientationHeight, "orientation and review circles should have the same height").toBe(railMetrics.reviewHeight);
+		expect(Math.abs((railMetrics.orientationCenter || 0) - railMetrics.railCenter), "orientation circles should be centered in the rail").toBeLessThanOrEqual(1);
+		expect(Math.abs((railMetrics.reviewCenter || 0) - railMetrics.railCenter), "review circles should be centered in the rail").toBeLessThanOrEqual(1);
 	});
 
 	test("pr-walkthrough shell parity: container-narrow panels auto-collapse the rail in a wide viewport", async ({ page }) => {
@@ -595,17 +589,17 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		});
 		await expectRenderedReadyPanel(page);
 
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "pr-walkthrough shell parity: ResizeObserver must collapse a narrow embedded panel even when the viewport is wide").toBeVisible();
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "simplified rail should use the compact form in narrow panels").toBeVisible();
 		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-collapsed-rail"]);
-		await expect(page.locator('[data-testid="pr-walkthrough-rail-toggle"]'), "half-panel collapsed rail must not show a broken expand button").toHaveCount(0);
+		await expect(page.locator('[data-testid="pr-walkthrough-rail-toggle"]'), "simplified rail must not show a broken expand button").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
 
 		await page.evaluate(() => {
 			const root = document.getElementById("root");
 			if (root) root.style.width = "1120px";
 		});
-		await expect(page.locator('[data-testid="pr-walkthrough-labelled-rail"]'), "pr-walkthrough shell parity: labelled rail should recover when the observed panel width grows").toBeVisible();
-		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-labelled-rail"]);
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "simplified rail should remain compact when the observed panel width grows").toBeVisible();
+		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-collapsed-rail"]);
 	});
 
 	test("pr-walkthrough shell parity: compact CSS selectors do not leak outside the panel root", async ({ page }) => {
@@ -634,36 +628,70 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]'), "pr-walkthrough shell parity: first card with sections must render the dedicated guide card").toBeVisible();
 		await expect(page.locator('[data-testid="pr-walkthrough-card-summary"]'), "orientation summary should not duplicate the first focused orientation beat above every guide page").toHaveCount(0);
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/1\s*\/\s*6/);
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]'), "orientation pages should not show a duplicate n/N chip in the top right").toHaveCount(0);
 		await expect(page.locator(".guide-top .phase-label")).toContainText("ORIENTATION > PURPOSE");
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("What changed and why");
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"] [data-testid="pr-walkthrough-beat-heading"]'), "orientation pages should not duplicate the heading inside the page body").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-beat"] > p.summary')).toContainText(/first-party pack/);
+		const beatSummaryStyle = await page.locator('[data-testid="pr-walkthrough-orientation-beat"] > p.summary').evaluate((element: HTMLElement) => {
+			const s = getComputedStyle(element);
+			const root = getComputedStyle(document.documentElement);
+			return { color: s.color, muted: root.getPropertyValue("--muted-foreground").trim(), fontSize: s.fontSize };
+		});
+		expect(beatSummaryStyle.color, "orientation body copy should use primary readable text, not muted text").not.toBe(beatSummaryStyle.muted);
+		expect(Number.parseFloat(beatSummaryStyle.fontSize), "orientation body copy should be sized as focus content").toBeGreaterThanOrEqual(16);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-stats"]')).toContainText(/3 files/);
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"]')).toBeDisabled();
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-nav"]')).toBeVisible();
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"] svg')).toHaveCount(1);
+		await expect(page.locator('[data-testid="pr-walkthrough-guide-next"] svg')).toHaveCount(1);
+		const guideNavStyle = await page.locator('[data-testid="pr-walkthrough-guide-nav"]').evaluate((element: HTMLElement) => {
+			const s = getComputedStyle(element);
+			const content = element.closest<HTMLElement>(".content");
+			const back = element.querySelector<HTMLElement>('button[data-testid="pr-walkthrough-guide-back"]');
+			const next = element.querySelector<HTMLElement>('button[data-testid="pr-walkthrough-guide-next"]');
+			const buttonStyle = next ? getComputedStyle(next) : undefined;
+			const rect = element.getBoundingClientRect();
+			const contentRect = content?.getBoundingClientRect();
+			const backRect = back?.getBoundingClientRect();
+			const nextRect = next?.getBoundingClientRect();
+			return { position: s.position, bottom: s.bottom, buttonHeight: buttonStyle?.height, buttonRadius: buttonStyle?.borderTopLeftRadius, navLeft: rect.left, navRight: rect.right, navBottom: rect.bottom, contentLeft: contentRect?.left, contentRight: contentRect?.right, contentBottom: contentRect?.bottom, backLeft: backRect?.left, backRight: backRect?.right, nextLeft: nextRect?.left, nextRight: nextRect?.right };
+		});
+		expect(guideNavStyle.position, "orientation nav should pin to the bottom of the review pane").toBe("fixed");
+		expect(guideNavStyle.bottom).toBe("0px");
+		expect(Number.parseFloat(guideNavStyle.buttonHeight || "0"), "orientation buttons should match Submit review height").toBeGreaterThanOrEqual(34);
+		expect(Number.parseFloat(guideNavStyle.buttonRadius || "999"), "orientation buttons should use the squarer default button shape").toBeLessThan(12);
+		expect(guideNavStyle.navLeft, "orientation nav should span the full content width").toBeLessThanOrEqual((guideNavStyle.contentLeft || 0) + 1);
+		expect(guideNavStyle.navRight, "orientation nav should span the full content width").toBeGreaterThanOrEqual((guideNavStyle.contentRight || 0) - 1);
+		expect(guideNavStyle.navBottom, "orientation nav should sit at the bottom of the review pane").toBeGreaterThanOrEqual((guideNavStyle.contentBottom || 0) - 1);
+		expect(guideNavStyle.backLeft, "Back should sit on the right side of the nav row").toBeGreaterThan((guideNavStyle.navRight || 0) - 260);
+		expect(guideNavStyle.backRight, "Back should sit to the left of Next").toBeLessThanOrEqual(guideNavStyle.nextLeft || 0);
+		expect(guideNavStyle.nextRight, "Next should be the rightmost orientation action").toBeLessThanOrEqual(guideNavStyle.navRight || 0);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]').first()).toHaveAttribute("data-state", "current");
 
 		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(2).click();
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/3\s*\/\s*6/);
 		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/2\s*\/\s*7\s+reviewed/);
 		await expect(page.locator(".guide-top .phase-label")).toContainText("ORIENTATION > REVIEW MAP");
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-heading"]')).toContainText("Change map");
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-filemap"]')).toContainText("market-packs/pr-walkthrough/src/panel.js");
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"]')).toBeEnabled();
 		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(4).click();
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/5\s*\/\s*6/);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-list"]')).toContainText(/Browser fixture covers/);
 		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(5).click();
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-next"]')).toContainText(/Start review/i);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-verdict"]')).toContainText(/COMMENT/);
 		await page.locator('[data-testid="pr-walkthrough-guide-back"]').click();
-		await expect(page.locator('[data-testid="pr-walkthrough-guide-counter"]')).toContainText(/5\s*\/\s*6/);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-list"]')).toContainText(/Browser fixture covers/);
 		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').first().click();
 
 		await startReviewFromGuide(page);
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-card"][data-card-id="diff-review"]')).toBeVisible();
 		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]').first()).toHaveAttribute("data-state", "visited");
+		await page.locator('[data-testid="pr-walkthrough-orientation-step"]').first().click();
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-guide"]')).toBeVisible();
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]').first(), "returning to orientation should make the current beat responsive instead of leaving every tick checked").toHaveAttribute("data-state", "current");
+		await expect(page.locator('[data-testid="pr-walkthrough-orientation-step"]').nth(1)).toHaveAttribute("data-state", "upcoming");
 	});
 
 	test("pr-walkthrough shell parity: Like completes the card, persists state, updates progress, and auto-advances", async ({ page }) => {
@@ -686,8 +714,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(likedStep, "pr-walkthrough shell parity: labelled rail must show completed liked state").toHaveClass(/complete/);
 		await expect(likedStep).toHaveClass(/liked/);
 
-		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]'), "pr-walkthrough shell parity: collapsed rail must preserve liked/completed state").toHaveClass(/liked/);
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]'), "simplified rail must preserve liked/completed state").toHaveClass(/liked/);
 	});
 
 	test("pr-walkthrough shell parity: Dislike requires a saved comment, then persists and auto-advances", async ({ page }) => {
@@ -715,8 +742,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(dislikedStep, "pr-walkthrough shell parity: labelled rail must show completed disliked state").toHaveClass(/complete/);
 		await expect(dislikedStep).toHaveClass(/disliked/);
 
-		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
-		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]'), "pr-walkthrough shell parity: collapsed rail must preserve disliked/completed state").toHaveClass(/disliked/);
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]'), "simplified rail must preserve disliked/completed state").toHaveClass(/disliked/);
 	});
 
 	test("pr-walkthrough shell parity: reviewer state persists through recover/bundle reloads", async ({ page }) => {
@@ -729,7 +755,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		});
 		await page.locator('[data-testid="pr-walkthrough-like"]').click();
 		await expect.poll(async () => page.evaluate(() => (window as any).__prwCompleteEvents || 0)).toBeGreaterThan(0);
-		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]')).toBeVisible();
 		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/7\s*\/\s*7\s+reviewed/);
 		await expect.poll(async () => (await page.evaluate(() => (window as any).__prwHostStoreEntries())).length).toBeGreaterThan(0);
 

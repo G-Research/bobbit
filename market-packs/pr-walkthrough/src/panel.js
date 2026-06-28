@@ -549,9 +549,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (!sections.length) return nothing;
 		const beat = Math.max(0, Math.min(sections.length - 1, (entry.orientationBeatIndex || 0)));
 		const completed = completedCardIds(entry).has(card.id);
+		const active = activeCard(entry);
+		const activeOrientation = active && active.id === card.id;
 		return html`<div class="orientation-rail" data-testid=${exposeTestIds ? "pr-walkthrough-orientation-rail" : nothing}>
 			${sections.map((section, index) => {
-				const state = completed || index < beat ? "visited" : index === beat ? "current" : "upcoming";
+				const state = (!activeOrientation && completed) || index < beat ? "visited" : index === beat ? "current" : "upcoming";
 				return html`<button class=${`orientation-step ${state}`} data-testid=${exposeTestIds ? "pr-walkthrough-orientation-step" : nothing} data-state=${state} type="button" title=${section.heading || section.navLabel || `Beat ${index + 1}`} aria-label=${section.heading || section.navLabel || `Beat ${index + 1}`} @click=${() => patchEntry(host, paramKey, { activeCardId: card.id, orientationBeatIndex: index })}>
 					<span class="step-dot">${state === "visited" ? "✓" : index + 1}</span>${compact ? nothing : html`<span class="step-label">${section.navLabel || section.eyebrow || `Beat ${index + 1}`}</span>`}
 				</button>`;
@@ -560,7 +562,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		</div>`;
 	};
 
-	const renderRailCardButton = (entry, host, paramKey, card, compact = false, exposeTestIds = true) => {
+	const renderRailCardButton = (entry, host, paramKey, card, compact = false, exposeTestIds = true, stepNumber = "") => {
 		const active = activeCard(entry);
 		const status = (entry.reviewStatus || {})[card.id] || "pending";
 		const complete = status === "liked" || status === "disliked" || status === "complete";
@@ -571,49 +573,22 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			type="button" title=${label} aria-label=${label}
 			@click=${() => setActiveCard(entry, host, paramKey, card.id)}
 		>
-			<span class="card-dot prw-nav-dot" aria-hidden="true">${complete ? status === "disliked" ? "!" : "✓" : ""}</span>
+			<span class="card-dot prw-nav-dot" aria-hidden="true">${complete ? status === "disliked" ? "!" : "✓" : stepNumber}</span>
 			${compact ? html`${exposeTestIds ? html`<span class="legacy-nav-card-marker" data-testid="prw-nav-card" data-prw-nav=${card.id} data-card-id=${card.id} aria-hidden="true"></span>` : nothing}` : html`<span class="card-label"><span data-testid=${exposeTestIds ? "prw-nav-card" : nothing} data-prw-nav=${card.id} data-card-id=${card.id}>${deriveNavLabel(card)}</span></span>`}
 		</button>`;
 	};
 
 	const renderNavRail = (entry, host, paramKey) => {
 		const cards = cardsOf(entry);
-		const active = activeCard(entry);
-		const railWidth = clampRailWidth(entry.railWidth || 248);
-		const collapsed = isRailCollapsed(entry);
-		const narrow = isNarrowLayout(entry);
 		const orientationCard = cards.find((card) => cardPhase(card) === "orientation" && arrayOf(card.sections).length);
-		const railPhases = orientationCard ? PHASES.filter((phase) => phase.id !== "orientation") : PHASES;
+		const reviewCards = cards.filter((card) => card !== orientationCard && cardPhase(card) !== "orientation");
+		const orientationCount = orientationCard ? arrayOf(orientationCard.sections).length : 0;
 		return html`
-			<aside class=${`rail ${collapsed ? "collapsed" : ""} ${narrow ? "narrow" : ""}`} style=${`--walkthrough-rail-width:${railWidth}px`} data-observed-narrow=${String(narrow)}>
-				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label=${collapsed ? "Labelled PR walkthrough phase rail" : "PR walkthrough phase rail"}>
-					<div class="rail-top"><strong>Walkthrough</strong><button class="rail-toggle" data-testid=${collapsed ? nothing : "pr-walkthrough-rail-toggle"} type="button" title="Collapse rail" aria-label="Collapse rail" @click=${() => setRailCollapsed(entry, host, paramKey, true)}>‹</button></div>
-					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, false, !collapsed) : nothing}
-					${railPhases.map((phase, phaseIndex) => {
-						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
-						if (phaseCards.length === 0) return nothing;
-						const phaseActive = active && cardPhase(active) === phase.id;
-						const done = phaseCards.filter((card) => completedCardIds(entry).has(card.id)).length;
-						const phaseDone = done >= phaseCards.length;
-						return html`<section class=${`phase prw-phase ${phaseActive ? "active is-active" : ""}`}>
-							<button class="phase-button" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => phaseCards[0] && setActiveCard(entry, host, paramKey, phaseCards[0].id)}>
-								<span class="phase-pip prw-phase-index">${phase.short || phaseIndex + 1}</span><span class="phase-name">${phase.label}</span><span class=${`phase-count ${phaseDone ? "complete" : phaseActive ? "active" : "pending"}`} title=${`${done} of ${phaseCards.length} cards reviewed`}>(${done}/${phaseCards.length})</span>
-							</button>
-							<div class="phase-cards">${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, false, !collapsed))}</div>
-						</section>`;
-					})}
-					${narrow ? nothing : html`<button class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" type="button" title="Drag to resize rail" aria-label="Resize rail" @dblclick=${() => resetRailWidth(entry, host, paramKey)} @pointerdown=${(event) => onRailResizePointerDown(event, entry, host, paramKey)}></button>`}
-				</nav>
-				<nav class="rail-panel compact prw-phase-rail-collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="Collapsed PR walkthrough phase rail">
-					${collapsed ? html`<span class="legacy-navrail-marker" data-testid="prw-navrail" aria-hidden="true"></span>` : nothing}
-					${narrow ? nothing : html`<button class="rail-toggle" data-testid=${collapsed ? "pr-walkthrough-rail-toggle" : nothing} type="button" title="Expand rail" aria-label="Expand rail" @click=${() => setRailCollapsed(entry, host, paramKey, false)}>›</button>`}
-					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, true, collapsed) : nothing}
-					${railPhases.map((phase, phaseIndex) => {
-						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
-						if (phaseCards.length === 0) return nothing;
-						const phaseActive = active && cardPhase(active) === phase.id;
-						return html`<div class="rail-pip-group prw-rail-pip-group"><button class=${`phase-pip prw-rail-pip ${phaseActive ? "active is-active" : ""}`} data-testid="pr-walkthrough-phase-button" type="button" title=${phase.label} aria-label=${phase.label} @click=${() => phaseCards[0] && setActiveCard(entry, host, paramKey, phaseCards[0].id)}>${phase.short || phaseIndex + 1}</button>${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, true, collapsed))}</div>`;
-					})}
+			<aside class="rail collapsed simple" style="--walkthrough-rail-width:48px" data-observed-narrow="true">
+				<nav class="rail-panel compact prw-phase-rail-collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="PR walkthrough steps">
+					<span class="legacy-navrail-marker" data-testid="prw-navrail" aria-hidden="true"></span>
+					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, true, true) : nothing}
+					<div class="simple-card-steps">${reviewCards.map((card, index) => renderRailCardButton(entry, host, paramKey, card, true, true, orientationCount + index + 1))}</div>
 				</nav>
 			</aside>
 		`;
@@ -649,10 +624,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const section = sections[beat] || {};
 		return html`<article class="card guide" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
 			<span data-testid="prw-card" hidden></span>
-			<div class="guide-top"><div><div class="phase-label">${orientationKicker(section)}</div><h1 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h1></div><div class="guide-counter" data-testid="pr-walkthrough-guide-counter">${beat + 1} / ${sections.length}</div></div>
+			<div class="guide-top"><div><div class="phase-label">${orientationKicker(section)}</div><h1 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h1></div></div>
 			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, section)}</div>
 			${renderOriginalDescription(entry)}
-			<div class="guide-nav"><button class="secondary" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${beat === 0} @click=${() => setBeat(beat - 1)}>Back</button><button class="primary" data-testid="pr-walkthrough-guide-next" type="button" @click=${() => isLast ? completeOrientation(entry, host, paramKey, card) : setBeat(beat + 1)}>${isLast ? "Start review" : "Next"}</button></div>
+			<div class="guide-nav" data-testid="pr-walkthrough-guide-nav"><button class="guide-button guide-back" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${beat === 0} @click=${() => setBeat(beat - 1)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path></svg><span>Back</span></button><button class="guide-button guide-next" data-testid="pr-walkthrough-guide-next" type="button" @click=${() => isLast ? completeOrientation(entry, host, paramKey, card) : setBeat(beat + 1)}><span>${isLast ? "Start review" : "Next"}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></button></div>
 		</article>`;
 	};
 
@@ -1148,9 +1123,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				${renderHeaderBlock(entry, host, paramKey)}
 				<div class="parity-affordance-sentinels" hidden aria-hidden="true"><button>Side-by-side diff</button><button>Inline</button><button>Add line comment</button><button>Add card comment</button><button>Prev</button><button>Like</button><button>Dislike</button></div>
 				<div class="prw-debug-meta" aria-hidden="true"><span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span><span data-testid="prw-toolcall">${yaml ? yaml.slice(0, 80) : "(none)"}</span></div>
-				<div class=${`body ${collapsed ? "rail-collapsed" : ""} ${narrow ? "narrow" : ""}`}>
+				<div class=${`body rail-collapsed ${narrow ? "narrow" : ""}`}>
 					${renderNavRail(entry, host, paramKey)}
-					<main class="content prw-card-pane">${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="state-card prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}</main>
+					<main class=${`content prw-card-pane ${active && cardPhase(active) === "orientation" && arrayOf(active.sections).length ? "orientation-content" : ""}`}>${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="state-card prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}</main>
 				</div>
 				${renderExportDialog(entry, host, paramKey)}
 			</section>
@@ -1662,14 +1637,30 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .orientation-rail { display: grid; gap: 2px; margin: 2px 0 8px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
 					.prw-root .orientation-step { display: flex; align-items: center; gap: 6px; min-width: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 4px 5px; text-align: left; }
 					.prw-root .orientation-step.current { color: var(--foreground); background: color-mix(in oklch, var(--chart-1) 10%, transparent); }
+					.prw-root .orientation-step:focus, .prw-root .orientation-step:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+					.prw-root .orientation-step.current .step-dot, .prw-root .orientation-step:focus .step-dot, .prw-root .orientation-step:focus-visible .step-dot { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
 					.prw-root .orientation-step.visited .step-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-root .rail.simple .orientation-step.current .step-dot, .prw-root .rail.simple .orientation-step:focus .step-dot, .prw-root .rail.simple .orientation-step:focus-visible .step-dot { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
+					.rail.simple .orientation-step:focus, .rail.simple .orientation-step:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+					.rail.simple .orientation-step[data-state="current"] .step-dot, .rail.simple .orientation-step:focus .step-dot, .rail.simple .orientation-step:focus-visible .step-dot { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
 					.prw-root .compact .rail-toggle { margin: 0 auto 8px; display: block; }
 					.prw-root .compact .orientation-step, .prw-root .compact .card-button, .prw-root .compact .phase-pip { justify-content: center; width: 32px; margin: 0 auto; padding: 4px; }
 					.prw-root .compact .orientation-rail { justify-items: center; }
+					.prw-root .simple-card-steps { display: grid; gap: 2px; justify-items: center; }
+					.prw-root .rail.simple .step-dot, .prw-root .rail.simple .card-button .card-dot { width: 20px; height: 20px; flex: 0 0 20px; font-size: 10px; line-height: 1; }
+					.prw-root .rail.simple .card-button { position: relative; }
+					.prw-root .rail.simple .orientation-step.visited .step-dot, .prw-root .rail.simple .card-button.complete .card-dot { width: 18px; height: 18px; flex-basis: 18px; font-size: 12px; font-weight: 1000; line-height: 1; text-shadow: 0 0 .01px currentColor; }
+					.prw-root .rail.simple .card-button.active .card-dot { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
+					.prw-root .rail.simple .legacy-nav-card-marker { position: absolute; inset: auto; width: 1px; height: 1px; pointer-events: none; }
 					.prw-root .legacy-navrail-marker, .prw-root .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
 					.prw-root .walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
 					.prw-root .walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
-					.prw-root .content { min-width: 0; overflow: auto; padding: 8px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-root .content { min-width: 0; overflow: auto; padding: 8px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); scrollbar-width: thin; scrollbar-color: color-mix(in oklch, var(--muted-foreground) 42%, transparent) transparent; }
+					.prw-root .content.orientation-content { margin-bottom: 57px; }
+					.prw-root .content::-webkit-scrollbar { width: 10px; height: 10px; }
+					.prw-root .content::-webkit-scrollbar-track { background: transparent; }
+					.prw-root .content::-webkit-scrollbar-thumb { background: color-mix(in oklch, var(--muted-foreground) 42%, transparent); border: 2px solid transparent; border-radius: 999px; background-clip: padding-box; }
+					.prw-root .content::-webkit-scrollbar-thumb:hover { background: color-mix(in oklch, var(--muted-foreground) 56%, transparent); border: 2px solid transparent; background-clip: padding-box; }
 					.prw-root .card { max-width: none; margin: 0 0 12px; display: grid; gap: 8px; }
 					.prw-root .inner, .prw-root .guide { border: 0; border-radius: 0; background: transparent; padding: 0; box-shadow: none; }
 					.prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
@@ -1677,6 +1668,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
 					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
 					.prw-root .summary { margin: 8px 0 0; color: var(--muted-foreground); }
+					.prw-root .beat > .summary { margin-top: 0; color: var(--foreground); font-size: clamp(16px, 1.45vw, 20px); line-height: 1.5; max-width: 72ch; }
 					.prw-root .rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
 					.prw-root .checklist { margin: 10px 0 0; color: var(--muted-foreground); }
 					.prw-root .nav-label { color: var(--muted-foreground); font-size: 11px; }
@@ -1691,9 +1683,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .dislike { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); }
 					.prw-root .decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
 					.prw-root .decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
-					.prw-root .guide { padding: 4px 2px 0; }
+					.prw-root .guide { --guide-inline-pad: 2px; min-height: 100%; grid-template-rows: auto auto auto minmax(0, 1fr) auto; padding: 4px var(--guide-inline-pad) 0; }
 					.prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-					.prw-root .guide-counter { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
 					.prw-root .guide-stage { margin-top: 10px; border-top: 1px solid var(--border); padding: 12px 0 0; background: transparent; }
 					.prw-root .beat { display: grid; gap: 10px; }
 					.prw-root .beat h2 { font-size: clamp(19px, 3.8vw, 24px); }
@@ -1707,7 +1698,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .concerns, .prw-root .filemap { display: grid; gap: 8px; }
 					.prw-root .concern strong, .prw-root .filerow strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted-foreground); }
 					.prw-root .filerow span { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-					.prw-root .guide-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+					.prw-root .guide-nav { position: fixed; left: var(--walkthrough-rail-width, 248px); right: 0; bottom: 0; z-index: 4; box-sizing: border-box; display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 10px var(--walkthrough-content-x); border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
+					.prw-root .body.rail-collapsed .guide-nav { left: 48px; }
+					.prw-root .guide-button { height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: var(--radius, 0.375rem); padding: 0 12px; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+					.prw-root .guide-button svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .guide-back { border: 1px solid var(--border); background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); }
+					.prw-root .guide-next { background: var(--primary); color: var(--primary-foreground); }
+					.prw-root .guide-button:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 90%, var(--background)); color: var(--primary-foreground); }
+					.prw-root .guide-button:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring, var(--primary)) 50%, transparent), 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); }
+					.prw-root .guide-button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
 					.prw-root .export-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--background) 58%, transparent); backdrop-filter: blur(6px); }
 					.prw-root .export-dialog { width: min(760px, 100%); max-height: 88%; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--foreground); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); padding: 14px; }
 					.prw-root .export-dialog header, .prw-root .export-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -1754,8 +1753,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .body.narrow .walkthrough-rail-resize-handle, .prw-root .rail.narrow .walkthrough-rail-resize-handle { display: none; }
 					.prw-root .shell.narrow { --walkthrough-content-x: 4px; }
 					.prw-root .shell.narrow .content { padding: 6px var(--walkthrough-content-x) 0; }
-					.prw-root .shell.narrow .guide { padding: 12px; }
-					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) minmax(120px, 34vw) max-content; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); height: 58px; min-height: 58px; column-gap: 12px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1 / 3; min-width: 0; } .prw-root .submit { grid-column: 3; grid-row: 1 / 3; align-self: center; justify-self: end; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 2; grid-row: 1 / 3; align-self: stretch; min-width: 0; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: 58px minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
+					.prw-root .shell.narrow .guide { --guide-inline-pad: 12px; padding: 12px var(--guide-inline-pad) 0; }
+					@media (max-width: 900px) { .prw-root .guide-nav { left: 40px; } .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) minmax(120px, 34vw) max-content; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); height: 58px; min-height: 58px; column-gap: 12px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1 / 3; min-width: 0; } .prw-root .submit { grid-column: 3; grid-row: 1 / 3; align-self: center; justify-self: end; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 2; grid-row: 1 / 3; align-self: stretch; min-width: 0; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: 58px minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
 					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } }
 
 				</style>
