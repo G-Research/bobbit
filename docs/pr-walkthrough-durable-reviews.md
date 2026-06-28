@@ -40,9 +40,54 @@ read_pr_walkthrough_bundle mode=manifest format=compact limit=50
 read_pr_walkthrough_bundle mode=file path=src/example.ts format=compact hunkOffset=0 hunkLimit=20
 ```
 
-Compact output is lossless for the diff content the legacy bundle returned: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators are preserved. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
+For non-windowed content, compact output preserves the diff information reviewers need: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
 
 The compact manifest remains the authoritative envelope read: target metadata, SHAs, stats, warnings, limits, export metadata, and file summaries appear there. Compact follow-up reads (`summary`, `files`, and `file`) include only a short bundle reference plus the requested file or hunk data, so repeated target/changeset/limits blocks do not re-enter the model context.
+
+### Compact file read bounds
+
+`mode=file format=compact` is bounded in two layers so a reviewer cannot accidentally paste a generated bundle into its context window:
+
+1. **Server-side bundle read windowing.** The bundle store first applies the requested `hunkOffset`/`hunkLimit`, then windows the selected hunk bodies by bytes and lines before returning JSON to the tool. Long hunk headers and diff lines are clipped with inline markers; very large hunks stop after the read window is exhausted.
+2. **Compact formatter hard cap.** The extension formatter renders that windowed JSON to unified-diff-like text and enforces a final **64KiB** hard cap before returning model-facing text. It also caps individual compact diff lines and hunk line counts as defense in depth.
+
+Windowing is explicit in the response:
+
+- `truncated=true` means either the hunk page was partial or the read window changed the returned file body.
+- `hunk_truncated=true` is only hunk pagination (`hunkOffset`/`hunkLimit`), so callers can distinguish pagination from byte/line clipping.
+- `read_window` reports whether windowing applied, the configured budgets, returned/omitted line and byte counts, reasons such as `line-bytes`, `line-window`, or `content-bytes`, and guidance for a narrower follow-up read.
+- Windowed files, hunks, and long lines carry `is_truncated` / `truncated` markers plus inline text such as `bundle-store read window` or `bytes omitted`.
+- Manifest and file-list summaries surface the same state: `is_truncated` becomes true when either source truncation or read-window truncation applies, while `source_is_truncated` preserves whether the original parsed diff was already truncated.
+
+If a file needs more inspection, request a more specific slice instead of rereading a broad range:
+
+```text
+read_pr_walkthrough_bundle mode=file path=market-packs/terminal/lib/terminal-panel.js format=compact hunkOffset=0 hunkLimit=1
+```
+
+Use `format="legacy"` only for exact line ids or `old_line` / `new_line` fields; it is not the normal review path.
+
+### Generated and minified artifacts
+
+PR Walkthrough marks generated or low-signal files before they reach reviewer prompts. The generated-path classifier includes:
+
+- built marketplace pack output such as `market-packs/<pack>/lib/**`, including `market-packs/terminal/lib/terminal-panel.js`;
+- minified filenames containing `.min.` across extensions;
+- lockfiles such as npm, pnpm, Yarn, Bun, Cargo, Composer, Gem, Poetry, and similar ecosystem locks;
+- common build/output/generated directories such as `dist`, `build`, `coverage`, `.next`, `generated`, `__generated__`, and snapshots;
+- source names that conventionally indicate generated code, such as protobuf, grpc, designer, generated, or source-map files.
+
+Generated files get `is_generated=true` in manifest/file summaries and a warning that they may be low-signal for review. Path classification is separate from read-window truncation: a normal source file can be `is_truncated=true` because it is too large to return safely, and a generated file can also be windowed if it contains long minified lines.
+
+### Reviewer guidance for low-signal files
+
+Reviewer agents should spend context on source changes that can affect behavior:
+
+- Start with `read_pr_walkthrough_bundle mode=manifest format=compact` and use manifest `generated` / `truncated` flags to plan coverage.
+- Avoid generated, minified, lockfile, build, and bundle artifacts unless they are necessary to prove a user-facing change.
+- Prefer listing those files in the audit `generated_or_binary_files` section over reading their contents.
+- If inspection is necessary, use a path-specific compact read with a very small hunk window, usually `hunkLimit=1`, and stop once there is enough evidence.
+- Do not repeatedly reread large generated/truncated output. Treat `read_window` guidance and inline truncation markers as instructions to narrow the slice, not as a reason to request a broader one.
 
 ### Chunk saves and status
 
