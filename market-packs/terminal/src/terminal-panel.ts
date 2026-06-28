@@ -62,11 +62,15 @@ export default function createTerminalPanel() {
 				const readyId = typeof params?.__channelReadyId === "string" ? params.__channelReadyId : undefined;
 				const launcherOpening = params?.launcherOpening === true;
 				const autoStartRequested = params?.autoStart === true;
-				const autoStart = shouldAutoStart(state, autoStartRequested, launchId);
+				const startupError = typeof params?.startupError === "string" && params.startupError ? params.startupError : undefined;
+				// A ready/error marker means the trusted launcher already attempted the
+				// open. On reload/gateway restart, never replay that creation attempt from
+				// restored panel params; v1 should show disconnected and wait for Restart.
+				const autoStart = readyId || startupError || (!!launchId && !launcherOpening) ? false : shouldAutoStart(state, autoStartRequested, launchId);
 				const restoredAutoStart = autoStartRequested && !autoStart;
 				const restoredReadyChannel = !!readyId && !autoStart;
-				const restoredChannel = restoredAutoStart || restoredReadyChannel;
-				const startupError = typeof params?.startupError === "string" && params.startupError ? params.startupError : undefined;
+				const restoredStartupFailure = !!startupError && !launcherOpening && (/trusted launcher activation/i.test(startupError) || !!launchId);
+				const restoredChannel = restoredAutoStart || restoredReadyChannel || restoredStartupFailure;
 				if (readyId && state.channelReadyId !== readyId) {
 					state.channelReadyId = readyId;
 					state.attachAttempted = false;
@@ -178,9 +182,11 @@ function shouldAutoStart(state: SessionState, requested: boolean, launchId?: str
 		}
 		return true;
 	}
-	if (state.autoStartAttempted) return false;
-	state.autoStartAttempted = true;
-	return true;
+	// Trusted launchers always provide a one-shot launch id. A restored workspace
+	// may still carry the declarative `autoStart` panel param, but after a reload or
+	// gateway restart v1 must not silently create a fresh PTY without a new user
+	// gesture. Treat id-less autoStart as restored intent and offer Restart instead.
+	return false;
 }
 
 async function attachOrOfferStart(state: SessionState, autoStart: boolean, restoredAutoStart = false, launcherOpening = false): Promise<void> {
