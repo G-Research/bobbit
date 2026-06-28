@@ -184,7 +184,12 @@ async function attachOrOfferStart(state: SessionState, autoStart: boolean, resto
 	if (state.channel || state.connecting) return;
 	const host = state.host;
 	if (!host?.capabilities?.channels || !host.channels) {
-		setStatus(state, "Terminal channels are unavailable in this host.", "error");
+		if (restoredAutoStart) {
+			state.attachAttempted = false;
+			setStatus(state, "Terminal disconnected or closed. Press Restart to create a new terminal.", "disconnected");
+		} else {
+			setStatus(state, "Terminal channels are unavailable in this host.", "error");
+		}
 		return;
 	}
 	state.connecting = true;
