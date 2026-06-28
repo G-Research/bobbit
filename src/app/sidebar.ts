@@ -981,7 +981,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
 				<span class="sidebar-chevron-slot ${mobile ? "sidebar-chevron-slot--inline" : "sidebar-chevron-slot--header sidebar-chevron-slot--absolute"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${staffExpanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
-				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: ${mobile ? "1.1667em" : "0.75em"};">Staff</span>
+				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: ${mobile ? "1.1667em" : "0.75em"};">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
 						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
@@ -1035,7 +1035,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="block min-w-0 max-w-full truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);
@@ -1215,7 +1215,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 	const reordering = isProjectReordering();
 	const reorderActive = _projectReorderState?.activeId === project.id && _projectReorderState.dragging;
 	return html`
-		<div class="group project-header flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md ${reordering ? "cursor-default" : "cursor-pointer"} ${reorderActive ? "project-reorder-active" : ""} ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+		<div class="group project-header relative flex items-center gap-1 pr-1 py-0.5 rounded-md ${reordering ? "cursor-default" : "cursor-pointer"} ${reorderActive ? "project-reorder-active" : ""} ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
 			data-testid="project-header"
 			data-project-id=${project.id}
 			data-project-reorder-id=${project.id}
@@ -1223,6 +1223,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			data-project-reorder-active=${reorderActive ? "true" : "false"}
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
+			style="padding-left:var(--sidebar-header-chevron-w);"
 			@click=${(e: Event) => {
 				if (consumeProjectHeaderReorderClick() || isProjectReordering()) {
 					e.preventDefault();
@@ -1232,10 +1233,10 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				toggleProjectExpanded(project.id);
 				renderApp();
 			}}>
-			<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+			<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 			<span class="project-reorder-slot">${renderProjectReorderHandle(project)}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
-			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
+			<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
 			<button
 				type="button"
@@ -1416,7 +1417,7 @@ function renderProjectContent(
 				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none"><span class="sidebar-chevron-glyph">${ungroupedExp ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
-				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Sessions</span>
+				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Sessions</span>
 				${!isProvisional ? html`
 				<div class="flex items-center relative">
 					<button
@@ -1486,53 +1487,53 @@ export function renderSidebar() {
 			${renderProjectReorderLiveRegion()}
 			<div class="sidebar-resize-handle" @pointerdown=${onSidebarResizePointerDown} @dblclick=${onSidebarResizeDoubleClick} title="Drag to resize (double-click to reset)"></div>
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
-				<div class="flex items-center">
+				<div class="sidebar-top-action-row">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}
 						title="Manage roles"
 					>
 						<span class="sidebar-scale-icon">${icon(Users, "xs")}</span>
-						<span>Roles</span>
+						<span class="sidebar-top-action-label">Roles</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}
 						title="Manage tools"
 					>
 						<span class="sidebar-scale-icon">${icon(Wrench, "xs")}</span>
-						<span>Tools</span>
+						<span class="sidebar-top-action-label">Tools</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}
 						title="View skills"
 					>
 						<span class="sidebar-scale-icon">${icon(Zap, "xs")}</span>
-						<span>Skills</span>
+						<span class="sidebar-top-action-label">Skills</span>
 					</button>
 				</div>
-				<div class="flex items-center">
+				<div class="sidebar-top-action-row">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}
 						title="Manage workflows"
 					>
 						<span class="sidebar-scale-icon">${icon(Workflow, "xs")}</span>
-						<span>Workflows</span>
+						<span class="sidebar-top-action-label">Workflows</span>
 					</button>
 					<button
 						data-testid="market-nav-button"
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}
 						title="Marketplace"
 					>
 						<span class="sidebar-scale-icon">${icon(Store, "xs")}</span>
-						<span>Market</span>
+						<span class="sidebar-top-action-label">Market</span>
 					</button>
 					<button
 						data-new-goal-trigger
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="sidebar-top-action-btn flex items-center justify-center px-1 py-1 ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						?disabled=${state.projects.length === 0}
 						@click=${(e: Event) => {
 							if (state.projects.length === 0) { showProjectDialog(); return; }
@@ -1541,7 +1542,7 @@ export function renderSidebar() {
 						title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}
 					>
 						<span class="sidebar-scale-icon" data-testid="sidebar-new-goal-icon">${icon(GoalIcon, "xs")}</span>
-						<span>New Goal</span>
+						<span class="sidebar-top-action-label">New Goal</span>
 					</button>
 				</div>
 			</div>
@@ -1709,14 +1710,14 @@ export function renderSidebar() {
 					</button>
 				`}
 			</div>
-			<div class="flex items-center border-t border-border/50">
+			<div class="sidebar-bottom-actions flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
-					class="flex items-center gap-1.5 px-3 py-2 transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
+					class="flex items-center px-3 py-2 transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 					title=${`Settings${shortcutHint("show-settings")}`}
 				>
 					${icon(Settings, "sm")}
-					<span>Settings</span>
+					<span class="sidebar-bottom-action-text">Settings</span>
 				</button>`; })()}
 				${renderFiltersButton("desktop")}
 				<span class="flex-1"></span>
