@@ -3,6 +3,8 @@ import { FitAddon } from "@xterm/addon-fit";
 
 const SINGLETON_KEY = "session-terminal";
 const MAX_SCROLLBACK = 5000;
+const FIT_RETRY_DELAYS_MS = [0, 32, 80, 160, 320] as const;
+const RESIZE_SEND_DEBOUNCE_MS = 120;
 
 type HostChannelFrame = { kind: "text"; data: string } | { kind: "json"; data: unknown };
 type HostChannel = {
@@ -34,6 +36,11 @@ type SessionState = {
 	term?: Terminal;
 	fit?: FitAddon;
 	resizeObserver?: ResizeObserver;
+	fitGeneration?: number;
+	fitRetryTimer?: number;
+	fitFrame?: number;
+	resizeSendTimer?: number;
+	lastResizeSent?: string;
 	channel?: HostChannel;
 	disposers: Array<() => void>;
 	status: string;
@@ -58,6 +65,7 @@ export default function createTerminalPanel() {
 			state.host = host;
 			queueMicrotask(() => {
 				ensureTerminalMounted(state);
+				scheduleFitAndResize(state);
 				const launchId = typeof params?.__channelLaunchId === "string" ? params.__channelLaunchId : undefined;
 				const readyId = typeof params?.__channelReadyId === "string" ? params.__channelReadyId : undefined;
 				const launcherOpening = params?.launcherOpening === true;
@@ -248,10 +256,12 @@ async function startTerminal(state: SessionState, fromButton: boolean): Promise<
 		ensureTerminalMounted(state);
 		state.term?.clear();
 		setStatus(state, fromButton ? "Starting terminal…" : "Opening terminal from launcher…", "connecting");
-		fitNow(state);
+		const initialSize = fitNow(state) ?? currentTerminalSize(state) ?? { cols: 80, rows: 24 };
+		state.lastResizeSent = sizeKey(initialSize);
+		if (!canFitTerminal(state)) scheduleFitAndResize(state);
 		const channel = await host.channels.open("terminal", {
 			singletonKey: SINGLETON_KEY,
-			data: { cols: state.term?.cols || 80, rows: state.term?.rows || 24 },
+			data: initialSize,
 		});
 		await attachChannel(state, channel, "Terminal attached.");
 	} catch (err) {
@@ -325,18 +335,92 @@ async function killTerminal(state: SessionState): Promise<void> {
 }
 
 function scheduleFitAndResize(state: SessionState): void {
-	requestAnimationFrame(() => {
-		const before = `${state.term?.cols}x${state.term?.rows}`;
-		fitNow(state);
-		const after = `${state.term?.cols}x${state.term?.rows}`;
-		if (state.channel?.state === "open" && before !== after && state.term?.cols && state.term.rows) {
-			void state.channel.send({ kind: "json", data: { op: "resize", cols: state.term.cols, rows: state.term.rows } }).catch((err) => setError(state, err));
-		}
+	const generation = (state.fitGeneration ?? 0) + 1;
+	state.fitGeneration = generation;
+	if (state.fitRetryTimer !== undefined) {
+		window.clearTimeout(state.fitRetryTimer);
+		state.fitRetryTimer = undefined;
+	}
+	if (state.fitFrame !== undefined) {
+		cancelAnimationFrame(state.fitFrame);
+		state.fitFrame = undefined;
+	}
+	queueFitAttempt(state, generation, 0);
+}
+
+function queueFitAttempt(state: SessionState, generation: number, attempt: number): void {
+	const delay = FIT_RETRY_DELAYS_MS[Math.min(attempt, FIT_RETRY_DELAYS_MS.length - 1)];
+	state.fitRetryTimer = window.setTimeout(() => {
+		state.fitRetryTimer = undefined;
+		runFitAttempt(state, generation, attempt);
+	}, delay);
+}
+
+function runFitAttempt(state: SessionState, generation: number, attempt: number): void {
+	if (state.fitGeneration !== generation) return;
+	state.fitFrame = requestAnimationFrame(() => {
+		state.fitFrame = requestAnimationFrame(() => {
+			state.fitFrame = undefined;
+			if (state.fitGeneration !== generation) return;
+			const size = fitNow(state);
+			if (size) queueResizeSend(state);
+			if (attempt + 1 < FIT_RETRY_DELAYS_MS.length) {
+				queueFitAttempt(state, generation, attempt + 1);
+			}
+		});
 	});
 }
 
-function fitNow(state: SessionState): void {
-	try { state.fit?.fit(); } catch { /* hidden or not yet measurable */ }
+function queueResizeSend(state: SessionState): void {
+	if (state.resizeSendTimer !== undefined) {
+		window.clearTimeout(state.resizeSendTimer);
+		state.resizeSendTimer = undefined;
+	}
+	state.resizeSendTimer = window.setTimeout(() => {
+		state.resizeSendTimer = undefined;
+		const size = canFitTerminal(state) ? currentTerminalSize(state) : undefined;
+		if (!size || state.channel?.state !== "open") return;
+		const key = sizeKey(size);
+		if (key === state.lastResizeSent) return;
+		state.lastResizeSent = key;
+		void state.channel.send({ kind: "json", data: { op: "resize", cols: size.cols, rows: size.rows } }).catch((err) => setError(state, err));
+	}, RESIZE_SEND_DEBOUNCE_MS);
+}
+
+function fitNow(state: SessionState): { cols: number; rows: number } | undefined {
+	if (!canFitTerminal(state)) return undefined;
+	try {
+		state.fit?.fit();
+	} catch {
+		return undefined;
+	}
+	return currentTerminalSize(state);
+}
+
+function canFitTerminal(state: SessionState): boolean {
+	if (!state.term || !state.fit || !state.root.isConnected || !state.terminalHost.isConnected) return false;
+	const rootStyle = getComputedStyle(state.root);
+	const hostStyle = getComputedStyle(state.terminalHost);
+	if (rootStyle.display === "none" || hostStyle.display === "none") return false;
+	if (rootStyle.visibility === "hidden" || hostStyle.visibility === "hidden") return false;
+	if (state.root.getClientRects().length === 0 || state.terminalHost.getClientRects().length === 0) return false;
+	const rootRect = state.root.getBoundingClientRect();
+	const hostRect = state.terminalHost.getBoundingClientRect();
+	return isUsableRect(rootRect) && isUsableRect(hostRect);
+}
+
+function isUsableRect(rect: DOMRect): boolean {
+	return Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width >= 2 && rect.height >= 2;
+}
+
+function currentTerminalSize(state: SessionState): { cols: number; rows: number } | undefined {
+	const cols = state.term?.cols ?? 0;
+	const rows = state.term?.rows ?? 0;
+	return cols > 0 && rows > 0 ? { cols, rows } : undefined;
+}
+
+function sizeKey(size: { cols: number; rows: number }): string {
+	return `${size.cols}x${size.rows}`;
 }
 
 function setError(state: SessionState, err: unknown): void {
@@ -404,15 +488,12 @@ function installStyles(): void {
 .bb-terminal-actions button:hover:not(:disabled){border-color:var(--primary);color:var(--primary);}
 .bb-terminal-actions button:disabled{opacity:.45;cursor:not-allowed;}
 .bb-terminal-host{flex:1;min-height:0;padding:.5rem;background:var(--background);overflow:hidden;}
-.bb-terminal-host .xterm{height:100%;padding:0;position:relative;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
+.bb-terminal-host .xterm{height:100%;padding:0;position:relative;overflow:hidden;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
 .bb-terminal-host .xterm.focus,.bb-terminal-host .xterm:focus{outline:1px solid color-mix(in oklch,var(--primary) 55%,transparent);}
-.bb-terminal-host .xterm-viewport{background:transparent!important;overflow-y:auto;cursor:default;position:absolute;inset:0;}
-.bb-terminal-host .xterm-screen{position:relative;}
-.bb-terminal-host .xterm-rows{position:absolute;left:0;top:0;white-space:nowrap;}
-.bb-terminal-host .xterm-rows span{display:inline-block;}
-.bb-terminal-host .xterm-cursor-layer,.bb-terminal-host .xterm-text-layer,.bb-terminal-host .xterm-selection-layer,.bb-terminal-host .xterm-link-layer{position:absolute;left:0;top:0;}
-.bb-terminal-host .xterm-helper-textarea{position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-10;white-space:nowrap;overflow:hidden;resize:none;}
-.bb-terminal-host .xterm-accessibility,.bb-terminal-host .xterm-message{position:absolute;left:0;top:0;}
+.bb-terminal-host .xterm-viewport{background:transparent!important;overflow-y:auto;cursor:default;}
+.bb-terminal-host .xterm-screen canvas{position:absolute;left:0;top:0;}
+.bb-terminal-host .xterm-scroll-area{visibility:hidden;}
+.bb-terminal-host .xterm-helper-textarea{padding:0;border:0;margin:0;opacity:0;}
 `;
 	document.head.append(style);
 }
