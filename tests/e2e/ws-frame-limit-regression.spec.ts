@@ -31,4 +31,52 @@ test.describe("WebSocket frame size routing", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("rejects oversized extension-channel frames with a structured result and keeps the socket usable", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				const requestId = "oversized-ext-channel-send";
+				const oversizedFrameText = "x".repeat(EXTENSION_CHANNEL_ENVELOPE_CAP_BYTES + 1);
+				const cursor = conn.messageCount();
+				conn.send({
+					type: "ext_channel_send",
+					requestId,
+					channelId: "channel-not-attached",
+					frame: { kind: "text", data: oversizedFrameText },
+				});
+
+				const result = await conn.waitForFrom(
+					cursor,
+					(m) =>
+						(m.type === "ext_channel_result" && m.requestId === requestId) ||
+						m.type === "error",
+					10_000,
+				);
+
+				const structuredFrameTooLargeError =
+					(result.type === "error" &&
+						result.code === "FRAME_TOO_LARGE" &&
+						/WebSocket frame exceeds maximum envelope size|too large|size/i.test(result.message ?? "")) ||
+					(result.type === "ext_channel_result" &&
+						result.requestId === requestId &&
+						result.ok === false &&
+						/FRAME_TOO_LARGE|maximum envelope|too large|size/i.test(`${result.error ?? ""} ${result.message ?? ""}`));
+
+				expect(
+					structuredFrameTooLargeError,
+					`Oversized extension-channel frames must reject with a structured size error instead of closing/crashing; received ${JSON.stringify(result)}`,
+				).toBe(true);
+
+				const pingCursor = conn.messageCount();
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(pingCursor, (m) => m.type === "pong", 5_000);
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });
