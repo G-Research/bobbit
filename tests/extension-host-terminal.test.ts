@@ -97,6 +97,39 @@ describe("terminal channel handler", () => {
 		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "exit", code: 0, signal: undefined, reason: "killed" } });
 		assert.equal(closed, "killed");
 	});
+
+	it("awaits and reports rejected PTY proxy operations", async () => {
+		const frames: unknown[] = [];
+		const audits: unknown[] = [];
+		let closed: string | undefined;
+		const session = await terminalChannelHandler({
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 78,
+							write: async () => { throw new Error("write failed"); },
+							resize: async () => { throw new Error("resize failed"); },
+							kill: async () => { throw new Error("kill failed"); },
+							onData: () => () => {},
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame) => { frames.push(frame); },
+			close: async (reason?: string) => { closed = reason; },
+			audit: (event) => { audits.push(event); },
+		});
+		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "status", state: "attached", pid: 78 } });
+		await session.onClientFrame?.({ kind: "json", data: { op: "resize", cols: 100, rows: 30 } });
+		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "error", operation: "resize", message: "resize failed" } });
+		assert.equal(closed, undefined, "resize failures are reported without closing the terminal");
+		await session.onClientFrame?.({ kind: "text", data: "pwd\n" });
+		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "error", operation: "write", message: "write failed" } });
+		assert.equal(closed, "write failed");
+		assert.ok(JSON.stringify(audits).includes("terminal_write_failed"));
+	});
 });
 
 describe("ChannelPtyService", () => {

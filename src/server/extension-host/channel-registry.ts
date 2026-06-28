@@ -294,6 +294,12 @@ export class ChannelRegistry {
 			}
 			record.handler = handler;
 			record.state = "open";
+			try {
+				await this.completePendingAttaches(record);
+			} catch (err) {
+				await this.closeInternal(record, err instanceof Error ? err.message : "attach failed", "registry");
+				throw err;
+			}
 			record.lastActiveAt = this.now();
 			this.emit({ type: "channel.open", at: record.lastActiveAt, ...auditRecord(record) });
 			return this.openResult(record, clientId, false);
@@ -579,16 +585,7 @@ export class ChannelRegistry {
 		} else {
 			const attachment: ClientAttachment = { clientId, sink, autoDrain: sink?.autoDrain !== false, queuedFrames: [], queuedBytes: 0, inFlightFrames: 0, inFlightBytes: 0, attaching: true };
 			record.clients.set(clientId, attachment);
-			try {
-				await record.handler?.onAttach?.(clientId);
-				attachment.attaching = false;
-				await this.flushAutoDrainQueue(record, attachment);
-			} catch (err) {
-				this.removeClientAccounting(record, attachment);
-				record.clients.delete(clientId);
-				this.emit({ type: "channel.attach.reject", at: this.now(), ...auditRecord(record), clientId, error: err instanceof Error ? err.message : String(err) });
-				throw err;
-			}
+			if (record.handler) await this.completeAttach(record, attachment);
 		}
 		record.lastActiveAt = this.now();
 		this.emit({ type: "channel.attach", at: record.lastActiveAt, ...auditRecord(record), clientId });
@@ -617,11 +614,15 @@ export class ChannelRegistry {
 		if (record.state === "closed") return;
 		record.state = "closing";
 		record.closeReason = reason;
+		const disposable = record.handler as (ChannelHandlerSession & { dispose?: (reason?: string) => Promise<void> | void }) | undefined;
 		if (source !== "handler") {
 			await this.withTimeout(Promise.resolve(record.handler?.close?.(reason)), record.quotas.closeGraceMs, "channel handler close timed out").catch((err) => {
 				this.emit({ type: "channel.close", at: this.now(), ...auditRecord(record), error: err instanceof Error ? err.message : String(err) });
 			});
 		}
+		await Promise.resolve(disposable?.dispose?.(reason)).catch((err: unknown) => {
+			this.emit({ type: "channel.cleanup", at: this.now(), ...auditRecord(record), error: err instanceof Error ? err.message : String(err), reason: "handler_dispose_failed" });
+		});
 		record.state = "closed";
 		record.lastActiveAt = this.now();
 		this.unindex(record);
@@ -727,6 +728,25 @@ export class ChannelRegistry {
 		this.channels.delete(record.id);
 		this.tupleIndex.delete(tupleKey(record.sessionId, record.packId, record.id, record.name));
 		if (record.singletonKey) this.singletonIndex.delete(singletonIndexKey(record.sessionId, record.packId, record.name, record.singletonKey));
+	}
+
+	private async completePendingAttaches(record: ChannelRecord): Promise<void> {
+		for (const client of Array.from(record.clients.values())) {
+			if (client.attaching) await this.completeAttach(record, client);
+		}
+	}
+
+	private async completeAttach(record: ChannelRecord, attachment: ClientAttachment): Promise<void> {
+		try {
+			await record.handler?.onAttach?.(attachment.clientId);
+			attachment.attaching = false;
+			await this.flushAutoDrainQueue(record, attachment);
+		} catch (err) {
+			this.removeClientAccounting(record, attachment);
+			record.clients.delete(attachment.clientId);
+			this.emit({ type: "channel.attach.reject", at: this.now(), ...auditRecord(record), clientId: attachment.clientId, error: err instanceof Error ? err.message : String(err) });
+			throw err;
+		}
 	}
 
 	private async flushAutoDrainQueue(record: ChannelRecord, client: ClientAttachment): Promise<void> {

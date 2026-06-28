@@ -14,9 +14,9 @@ type ChannelContext = {
 
 type PtyHandle = {
 	pid: number;
-	write(data: string): void;
-	resize(cols: number, rows: number): void;
-	kill(reason?: string): void;
+	write(data: string): void | Promise<void>;
+	resize(cols: number, rows: number): void | Promise<void>;
+	kill(reason?: string): void | Promise<void>;
 	onData(cb: (data: string) => void): () => void;
 	onExit(cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void): () => void;
 };
@@ -31,6 +31,15 @@ export async function terminal(ctx: ChannelContext) {
 	const disposers: Array<() => void> = [];
 	const sendJson = async (data: Record<string, unknown>) => {
 		await ctx.send({ kind: "json", data });
+	};
+	const failPtyOperation = async (operation: string, error: unknown, closeChannel: boolean) => {
+		const message = error instanceof Error ? error.message : String(error);
+		ctx.audit?.({ type: "channel.cleanup", reason: `terminal_${operation}_failed`, error: message });
+		await sendJson({ op: "error", operation, message }).catch(() => undefined);
+		if (closeChannel && !closed) {
+			closed = true;
+			await ctx.close(message).catch(() => undefined);
+		}
 	};
 	try {
 		if (!ctx.host?.pty) {
@@ -59,7 +68,11 @@ export async function terminal(ctx: ChannelContext) {
 		async onClientFrame(frame: HostChannelFrame) {
 			if (closed || !pty) return;
 			if (frame.kind === "text") {
-				pty.write(frame.data);
+				try {
+					await pty.write(frame.data);
+				} catch (error) {
+					await failPtyOperation("write", error, true);
+				}
 				return;
 			}
 			const data = objectOf(frame.data);
@@ -68,12 +81,22 @@ export async function terminal(ctx: ChannelContext) {
 				const resize = data as ResizeFrame;
 				const cols = numberOf(resize.cols);
 				const rows = numberOf(resize.rows);
-				if (cols && rows) pty.resize(cols, rows);
+				if (cols && rows) {
+					try {
+						await pty.resize(cols, rows);
+					} catch (error) {
+						await failPtyOperation("resize", error, false);
+					}
+				}
 				return;
 			}
 			if (data.op === "kill") {
 				const kill = data as KillFrame;
-				pty.kill(typeof kill.reason === "string" ? kill.reason : "killed");
+				try {
+					await pty.kill(typeof kill.reason === "string" ? kill.reason : "killed");
+				} catch (error) {
+					await failPtyOperation("kill", error, true);
+				}
 			}
 		},
 		async onAttach() {
@@ -89,7 +112,13 @@ export async function terminal(ctx: ChannelContext) {
 				try { dispose(); } catch { /* ignore */ }
 			}
 			if (pty) {
-				try { pty.kill(reason || "closed"); } catch { /* ignore */ }
+				try {
+					await pty.kill(reason || "closed");
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.audit?.({ type: "channel.cleanup", reason: "terminal_close_kill_failed", error: message });
+					await sendJson({ op: "error", operation: "close", message }).catch(() => undefined);
+				}
 			}
 		},
 	};
