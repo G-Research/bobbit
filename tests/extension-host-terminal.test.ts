@@ -58,6 +58,134 @@ describe("built-in terminal pack", () => {
 });
 
 describe("terminal channel handler", () => {
+	it("replays buffered terminal output to a newly attached client", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		const marker = "REATTACH_REPLAY_HISTORY_MARKER";
+		const ctx = {
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 76,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => {},
+		};
+		const session = await terminalChannelHandler(ctx);
+		sent.length = 0;
+
+		dataCb?.(`before detach ${marker}\r\n`);
+		assert.ok(sent.some(({ frame }) => isTextFrameWithMarker(frame, marker)), "test setup should receive initial PTY output");
+		sent.length = 0;
+
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("new-client");
+
+		const visibleToNewClient = sent
+			.filter(({ target }) => target === "broadcast" || target === "new-client")
+			.map(({ frame }) => frame);
+		const replayIndex = visibleToNewClient.findIndex((frame) => isTextFrameWithMarker(frame, marker));
+		assert.notEqual(
+			replayIndex,
+			-1,
+			`reattach should replay prior terminal output text history for new-client; expected a text frame containing ${marker}, got ${JSON.stringify(visibleToNewClient)}`,
+		);
+		const statusIndex = visibleToNewClient.findIndex((frame) => isStatusFrame(frame));
+		assert.notEqual(statusIndex, -1, "reattach should include attached status with replay");
+		assert.ok(replayIndex <= statusIndex, "reattach should replay text history before status");
+	});
+
+	it("bounds replay to recent terminal output", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		const ctx = {
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 76,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => {},
+		};
+		const session = await terminalChannelHandler(ctx);
+		sent.length = 0;
+
+		dataCb?.(`OLD_MARKER ${"x".repeat(70_000)}`);
+		dataCb?.(`${"y".repeat(70_000)} RECENT_MARKER`);
+		for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+		sent.length = 0;
+
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("new-client");
+
+		const replay = sent.filter(({ target }) => target === "new-client").map(({ frame }) => frame);
+		assert.ok(replay.some((frame) => isTextFrameWithMarker(frame, "RECENT_MARKER")), "recent output should be retained in bounded replay");
+		assert.ok(!replay.some((frame) => isTextFrameWithMarker(frame, "OLD_MARKER")), "old output past the replay budget should be trimmed");
+	});
+
+	it("coalesces replay frames below channel attach quotas", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		const ctx = {
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 76,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => {},
+		};
+		const session = await terminalChannelHandler(ctx);
+		sent.length = 0;
+
+		for (let i = 0; i < 300; i++) dataCb?.(`chunk-${i.toString().padStart(3, "0")}\r\n`);
+		await new Promise((resolve) => setImmediate(resolve));
+		sent.length = 0;
+
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("new-client");
+
+		const replay = sent.filter(({ target }) => target === "new-client").map(({ frame }) => frame);
+		const replayTextFrames = replay.filter((frame) => frame && typeof frame === "object" && (frame as { kind?: unknown }).kind === "text");
+		assert.ok(replayTextFrames.length > 0, "reattach should include replay text frames");
+		assert.ok(
+			replayTextFrames.length < 64,
+			`replay should be comfortably below maxClientOutboundFrames=256, got ${replayTextFrames.length} text frames`,
+		);
+		assert.ok(replay.some((frame) => isTextFrameWithMarker(frame, "chunk-299")), "recent small chunks should be retained in replay");
+		const statusIndex = replay.findIndex((frame) => isStatusFrame(frame));
+		assert.notEqual(statusIndex, -1, "reattach should include attached status after replay");
+		const lastTextIndex = replay.map((frame, index) => ({ frame, index })).filter(({ frame }) => frame && typeof frame === "object" && (frame as { kind?: unknown }).kind === "text").at(-1)?.index ?? -1;
+		assert.ok(lastTextIndex < statusIndex, "status should remain after replay text frames");
+	});
+
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
@@ -247,6 +375,29 @@ describe("ChannelPtyService", () => {
 		}
 	});
 });
+
+function isTextFrameWithMarker(frame: unknown, marker: string) {
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "text" &&
+		typeof (frame as { data?: unknown }).data === "string" &&
+		(frame as { data: string }).data.includes(marker),
+	);
+}
+
+function isStatusFrame(frame: unknown) {
+	const data = frame && typeof frame === "object" ? (frame as { data?: unknown }).data : undefined;
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "json" &&
+		data &&
+		typeof data === "object" &&
+		(data as { op?: unknown }).op === "status" &&
+		(data as { state?: unknown }).state === "attached",
+	);
+}
 
 function sessionManager(overrides: { cwd?: string; worktreePath?: string; readOnly?: boolean; sandboxed?: boolean }) {
 	const cwd = overrides.cwd ?? overrides.worktreePath ?? process.cwd();
