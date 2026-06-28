@@ -572,6 +572,54 @@ function installStyles(): void {
 	const style = document.createElement("style");
 	style.id = "bb-terminal-styles";
 	style.textContent = `
+/* xterm.js required layout rules. Keep these before Bobbit theme overrides. */
+.bb-terminal-host .xterm{cursor:text;position:relative;overflow:hidden;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
+.bb-terminal-host .xterm.focus,.bb-terminal-host .xterm:focus{outline:none;}
+.bb-terminal-host .xterm .xterm-helpers{position:absolute;top:0;z-index:5;}
+.bb-terminal-host .xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none;}
+.bb-terminal-host .xterm .composition-view{background:var(--background);color:var(--foreground);display:none;position:absolute;white-space:nowrap;z-index:1;}
+.bb-terminal-host .xterm .composition-view.active{display:block;}
+.bb-terminal-host .xterm .xterm-viewport{background-color:var(--background);overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0;}
+.bb-terminal-host .xterm .xterm-screen{position:relative;}
+.bb-terminal-host .xterm .xterm-screen canvas{position:absolute;left:0;top:0;}
+.bb-terminal-host .xterm-char-measure-element{display:inline-block;visibility:hidden;position:absolute;top:0;left:-9999em;line-height:normal;}
+.bb-terminal-host .xterm.enable-mouse-events{cursor:default;}
+.bb-terminal-host .xterm.xterm-cursor-pointer,.bb-terminal-host .xterm .xterm-cursor-pointer{cursor:pointer;}
+.bb-terminal-host .xterm.column-select.focus{cursor:crosshair;}
+.bb-terminal-host .xterm .xterm-accessibility:not(.debug),.bb-terminal-host .xterm .xterm-message{position:absolute;left:0;top:0;bottom:0;right:0;z-index:10;color:transparent;pointer-events:none;}
+.bb-terminal-host .xterm .xterm-accessibility-tree:not(.debug) *::selection{color:transparent;}
+.bb-terminal-host .xterm .xterm-accessibility-tree{font-family:monospace;user-select:text;white-space:pre;}
+.bb-terminal-host .xterm .xterm-accessibility-tree>div{transform-origin:left;width:fit-content;}
+.bb-terminal-host .xterm .live-region{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
+.bb-terminal-host .xterm-dim{opacity:1!important;}
+.bb-terminal-host .xterm-underline-1{text-decoration:underline;}
+.bb-terminal-host .xterm-underline-2{text-decoration:double underline;}
+.bb-terminal-host .xterm-underline-3{text-decoration:wavy underline;}
+.bb-terminal-host .xterm-underline-4{text-decoration:dotted underline;}
+.bb-terminal-host .xterm-underline-5{text-decoration:dashed underline;}
+.bb-terminal-host .xterm-overline{text-decoration:overline;}
+.bb-terminal-host .xterm-overline.xterm-underline-1{text-decoration:overline underline;}
+.bb-terminal-host .xterm-overline.xterm-underline-2{text-decoration:overline double underline;}
+.bb-terminal-host .xterm-overline.xterm-underline-3{text-decoration:overline wavy underline;}
+.bb-terminal-host .xterm-overline.xterm-underline-4{text-decoration:overline dotted underline;}
+.bb-terminal-host .xterm-overline.xterm-underline-5{text-decoration:overline dashed underline;}
+.bb-terminal-host .xterm-strikethrough{text-decoration:line-through;}
+.bb-terminal-host .xterm-screen .xterm-decoration-container .xterm-decoration{z-index:6;position:absolute;}
+.bb-terminal-host .xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer{z-index:7;}
+.bb-terminal-host .xterm-decoration-overview-ruler{z-index:8;position:absolute;top:0;right:0;pointer-events:none;}
+.bb-terminal-host .xterm-decoration-top{z-index:2;position:relative;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.scrollbar{cursor:default;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.scrollbar>.scra{cursor:pointer;font-size:11px!important;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.visible{opacity:1;background:transparent;transition:opacity 100ms linear;z-index:11;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.invisible{opacity:0;pointer-events:none;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.invisible.fade{transition:opacity 800ms linear;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.shadow{position:absolute;display:none;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.shadow.top{display:block;top:0;left:3px;height:3px;width:100%;box-shadow:var(--border) 0 6px 6px -6px inset;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.shadow.left{display:block;top:3px;left:0;height:100%;width:3px;box-shadow:var(--border) 6px 0 6px -6px inset;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.shadow.top-left-corner{display:block;top:0;left:0;height:3px;width:3px;}
+.bb-terminal-host .xterm .xterm-scrollable-element>.shadow.top.left{box-shadow:var(--border) 6px 0 6px -6px inset;}
+.bb-terminal-host .xterm-scroll-area{visibility:hidden;}
+/* Bobbit panel/theme overrides. */
 .bb-terminal-panel{display:flex;flex-direction:column;min-height:0;height:100%;background:var(--background);color:var(--foreground);}
 .bb-terminal-toolbar{display:flex;align-items:center;gap:.75rem;padding:.5rem .75rem;border-bottom:1px solid var(--border);background:var(--card);}
 .bb-terminal-title{font-weight:600;font-size:.875rem;white-space:nowrap;}
@@ -581,12 +629,9 @@ function installStyles(): void {
 .bb-terminal-actions button:hover:not(:disabled){border-color:var(--primary);color:var(--primary);}
 .bb-terminal-actions button:disabled{opacity:.45;cursor:not-allowed;}
 .bb-terminal-host{flex:1;min-height:0;padding:.5rem;background:var(--background);overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;}
-.bb-terminal-host .xterm{width:100%;height:100%;padding:0;position:relative;overflow:hidden;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
+.bb-terminal-host .xterm{width:100%;height:100%;padding:0;}
 .bb-terminal-host .xterm.focus,.bb-terminal-host .xterm:focus{outline:1px solid color-mix(in oklch,var(--primary) 55%,transparent);}
-.bb-terminal-host .xterm-viewport{background:transparent!important;overflow-y:auto;cursor:default;}
-.bb-terminal-host .xterm-screen canvas{position:absolute;left:0;top:0;}
-.bb-terminal-host .xterm-scroll-area{visibility:hidden;}
-.bb-terminal-host .xterm-helper-textarea{padding:0;border:0;margin:0;opacity:0;}
+.bb-terminal-host .xterm .xterm-viewport{background:transparent!important;}
 `;
 	document.head.append(style);
 }
