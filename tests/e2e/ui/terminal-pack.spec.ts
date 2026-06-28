@@ -36,15 +36,19 @@ test.describe("terminal pack panel", () => {
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
+		await assertTerminalLayoutStable(page, "initial terminal open");
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(0);
 
 		const marker1 = `bobbit_terminal_e2e_${Date.now()}`;
 		await typeCommand(page, `echo ${marker1}`);
 		await expect(page.locator(terminalHost())).toContainText(marker1, { timeout: 20_000 });
+		await assertTerminalLayoutStable(page, "after first marker output");
 
 		const resizeBefore = await resizeFrameCount(page);
 		await page.setViewportSize({ width: 1200, height: 700 });
+		await assertTerminalLayoutStable(page, "after shrinking viewport");
 		await page.setViewportSize({ width: 1500, height: 950 });
+		await assertTerminalLayoutStable(page, "after expanding viewport");
 		await expect.poll(() => resizeFrameCount(page), { timeout: 15_000 }).toBeGreaterThan(resizeBefore);
 
 		await page.reload();
@@ -52,6 +56,7 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel()), "terminal panel should be restored after reload").toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
 		await expect.poll(() => channelSendCount(page, "ext_channel_attach"), { timeout: 20_000 }).toBeGreaterThan(0);
+		await assertTerminalHistoryAndLayout(page, [marker1], "browser reload reattach should replay prior marker before follow-up input");
 
 		const marker2 = `${marker1}_reattach`;
 		await typeCommand(page, `echo ${marker2}`);
@@ -64,9 +69,11 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
 		await expect.poll(() => killFrameCount(page), { timeout: 5_000 }).toBe(killBeforeHide);
+		await assertTerminalHistoryAndLayout(page, [marker1, marker2], "reopened live terminal should show existing markers before new input");
 		const marker3 = `${marker1}_hidden_live`;
 		await typeCommand(page, `echo ${marker3}`);
 		await expect(page.locator(terminalHost())).toContainText(marker3, { timeout: 20_000 });
+		await assertTerminalLayoutStable(page, "after hidden-panel reattach marker output");
 
 		await typeCommand(page, "exit");
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /exited|disconnected|idle/, { timeout: 20_000 });
@@ -185,6 +192,93 @@ async function typeCommand(page: import("@playwright/test").Page, command: strin
 	await page.keyboard.insertText(command);
 	await page.keyboard.press("Enter");
 	await expect.poll(() => textFrameCount(page), { timeout: 5_000 }).toBeGreaterThan(textFramesBefore);
+}
+
+async function assertTerminalHistoryAndLayout(page: import("@playwright/test").Page, markers: string[], reason: string): Promise<void> {
+	await assertTerminalLayoutStable(page, reason);
+	for (const marker of markers) {
+		await expect(page.locator(terminalHost()), `${reason}: marker ${marker} must be visible before typing`).toContainText(marker, { timeout: 10_000 });
+	}
+	await assertNoRepeatedTopRowGlyphArtifact(page, reason);
+}
+
+async function assertTerminalLayoutStable(page: import("@playwright/test").Page, reason: string): Promise<void> {
+	await expect.poll(async () => {
+		const before = await terminalLayoutSnapshot(page);
+		const after = await terminalLayoutSnapshotAfterAnimationFrames(page);
+		return before.visible
+			&& before.hostWidth > 200
+			&& before.hostHeight > 120
+			&& before.xtermWidth > 200
+			&& before.xtermHeight > 100
+			&& before.screenWidth > 0
+			&& before.screenHeight > 0
+			&& before.renderedRows > 0
+			&& Math.abs(before.xtermWidth - after.xtermWidth) <= 2
+			&& Math.abs(before.xtermHeight - after.xtermHeight) <= 2
+			&& Math.abs(before.screenWidth - after.screenWidth) <= 2
+			&& Math.abs(before.screenHeight - after.screenHeight) <= 2;
+	}, { message: `${reason}: terminal should have positive, stable xterm dimensions`, timeout: 10_000 }).toBe(true);
+	await assertNoRepeatedTopRowGlyphArtifact(page, reason);
+}
+
+async function assertNoRepeatedTopRowGlyphArtifact(page: import("@playwright/test").Page, reason: string): Promise<void> {
+	const artifact = await page.evaluate(() => {
+		const rows = Array.from(document.querySelectorAll('[data-testid="terminal-xterm"] .xterm-rows > div'))
+			.slice(0, 3)
+			.map((row) => row.textContent ?? "");
+		for (const row of rows) {
+			const text = row.trim();
+			if (text.length < 24) continue;
+			const counts = new Map<string, number>();
+			for (const ch of text.replace(/\s/g, "")) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+			const max = Math.max(0, ...counts.values());
+			if (max >= 24 && max / Math.max(1, text.replace(/\s/g, "").length) >= 0.8) return text;
+			const repeatedRun = text.match(/([^\s])\1{23,}/)?.[0];
+			if (repeatedRun) return repeatedRun;
+		}
+		return "";
+	});
+	expect(artifact, `${reason}: xterm top rows should not contain a repeated glyph layout artifact`).toBe("");
+}
+
+type TerminalLayoutSnapshot = {
+	visible: boolean;
+	hostWidth: number;
+	hostHeight: number;
+	xtermWidth: number;
+	xtermHeight: number;
+	screenWidth: number;
+	screenHeight: number;
+	renderedRows: number;
+};
+
+async function terminalLayoutSnapshot(page: import("@playwright/test").Page, animationFrames = 0): Promise<TerminalLayoutSnapshot> {
+	return page.evaluate(async (frames) => {
+		for (let i = 0; i < frames; i += 1) {
+			await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		}
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const xterm = host?.querySelector(".xterm") as HTMLElement | null;
+		const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
+		const hostRect = host?.getBoundingClientRect();
+		const xtermRect = xterm?.getBoundingClientRect();
+		const screenRect = screen?.getBoundingClientRect();
+		return {
+			visible: !!host && !!xterm && !!screen && hostRect!.width > 0 && hostRect!.height > 0,
+			hostWidth: hostRect?.width ?? 0,
+			hostHeight: hostRect?.height ?? 0,
+			xtermWidth: xtermRect?.width ?? 0,
+			xtermHeight: xtermRect?.height ?? 0,
+			screenWidth: screenRect?.width ?? 0,
+			screenHeight: screenRect?.height ?? 0,
+			renderedRows: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+		};
+	}, animationFrames);
+}
+
+async function terminalLayoutSnapshotAfterAnimationFrames(page: import("@playwright/test").Page): Promise<TerminalLayoutSnapshot> {
+	return terminalLayoutSnapshot(page, 2);
 }
 
 async function resizeFrameCount(page: import("@playwright/test").Page): Promise<number> {
