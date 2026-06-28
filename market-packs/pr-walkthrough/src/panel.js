@@ -443,7 +443,21 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	const progressFor = (entry) => {
 		const reviewCards = reviewCardsOf(entry);
 		const completed = completedCardIds(entry);
-		return { completed: reviewCards.filter((card) => completed.has(card.id)).length, total: reviewCards.length };
+		let done = 0;
+		let total = 0;
+		for (const card of reviewCards) {
+			const sections = cardPhase(card) === "orientation" ? arrayOf(card.sections) : [];
+			if (sections.length) {
+				total += sections.length;
+				done += completed.has(card.id)
+					? sections.length
+					: Math.max(0, Math.min(sections.length, Number(entry.orientationBeatIndex) || 0));
+			} else {
+				total += 1;
+				if (completed.has(card.id)) done += 1;
+			}
+		}
+		return { completed: done, total };
 	};
 	const supportingCommentIdsFor = (entry, card) => [
 		...savedCardCommentsForCard(entry, card).map((_, index) => `${card.id}::card::${index}`),
@@ -525,7 +539,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					<span>${progress.completed} / ${progress.total} reviewed</span>
 					<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax=${progress.total || 1} aria-valuenow=${progress.completed}><div class="progress-fill" style=${`width:${pct}%`}></div></div>
 				</div>
-				<button class="submit" data-testid="pr-walkthrough-submit-review" type="button" ?disabled=${!submitReady} @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: true })}>Submit review</button>
+				<button class="submit" data-testid="pr-walkthrough-submit-review" type="button" ?disabled=${!submitReady} @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: true })}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></svg><span>Submit review</span></button>
 			</header>
 		`;
 	};
@@ -618,9 +632,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const stats = statsFor(entry.bundle || {}, cardsOf(entry));
 		return html`<div class="guide-stats" data-testid="pr-walkthrough-beat-stats"><span>${stats.files} ${stats.files === 1 ? "file" : "files"}</span><span class="add">+${stats.additions}</span><span class="del">-${stats.deletions}</span><span>${arrayOf(card.diffBlocks).length} diff blocks</span></div>`;
 	};
+	const orientationKicker = (section) => `ORIENTATION${section && section.eyebrow ? ` > ${asText(section.eyebrow).toUpperCase()}` : ""}`;
 	const renderOrientationBeat = (entry, card, section) => html`<div class="beat" data-testid="pr-walkthrough-orientation-beat">
-		${section.eyebrow ? html`<div class="phase-label">${section.eyebrow}</div>` : nothing}
-		<h2 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h2>
 		${section.body ? html`<p class="summary">${section.body}</p>` : nothing}
 		${arrayOf(section.items).length ? html`<ul class="beat-list" data-testid="pr-walkthrough-beat-list">${arrayOf(section.items).map((item) => html`<li>${item}</li>`)}</ul>` : nothing}
 		${renderOrientationVerdict(section)}
@@ -633,10 +646,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const beat = Math.max(0, Math.min(sections.length - 1, entry.orientationBeatIndex || 0));
 		const setBeat = (next) => patchEntry(host, paramKey, { orientationBeatIndex: Math.max(0, Math.min(sections.length - 1, next)) });
 		const isLast = beat >= sections.length - 1;
+		const section = sections[beat] || {};
 		return html`<article class="card guide" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
 			<span data-testid="prw-card" hidden></span>
-			<div class="guide-top"><div><div class="phase-label">Guided orientation</div><h1 data-testid="pr-walkthrough-card-title">${card.title || "Review orientation"}</h1></div><div class="guide-counter" data-testid="pr-walkthrough-guide-counter">${beat + 1} / ${sections.length}</div></div>
-			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, sections[beat] || {})}</div>
+			<div class="guide-top"><div><div class="phase-label">${orientationKicker(section)}</div><h1 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h1></div><div class="guide-counter" data-testid="pr-walkthrough-guide-counter">${beat + 1} / ${sections.length}</div></div>
+			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, section)}</div>
 			${renderOriginalDescription(entry)}
 			<div class="guide-nav"><button class="secondary" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${beat === 0} @click=${() => setBeat(beat - 1)}>Back</button><button class="primary" data-testid="pr-walkthrough-guide-next" type="button" @click=${() => isLast ? completeOrientation(entry, host, paramKey, card) : setBeat(beat + 1)}>${isLast ? "Start review" : "Next"}</button></div>
 		</article>`;
@@ -1595,24 +1609,28 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 					/* Historical compact shell parity overrides. */
 					.prw-root .prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: 100%; min-height: 0; display: grid; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 0; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-					.prw-root .header { height: 52px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 240px) auto; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
-					.prw-root .title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
+					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: 100%; min-height: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 0; border-radius: 0; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.prw-root .header { height: 58px; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; column-gap: 18px; row-gap: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--background); }
+					.prw-root .title-group { min-width: 0; grid-row: 1 / 3; display: flex; align-items: center; gap: 10px; }
 					.prw-root .pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
 					.prw-root .title-stack { min-width: 0; }
 					.prw-root .header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.2; letter-spacing: -.01em; }
 					.prw-root .header-meta { display: flex; gap: 8px; margin-top: 3px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 					.prw-root .add { color: var(--positive); } .del { color: var(--negative); }
-					.prw-root .github-link { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
+					.prw-root .github-link { display: none; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
 					.prw-root .github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.prw-root .progress-wrap { display: grid; grid-template-columns: minmax(96px, 1fr); align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }
-					.prw-root .progress-wrap > span { order: 2; white-space: nowrap; }
-					.prw-root .progress-track { order: 1; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
+					.prw-root .progress-wrap { grid-row: 1 / 3; align-self: stretch; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }
+					.prw-root .progress-wrap > span { grid-row: 2; align-self: start; white-space: nowrap; }
+					.prw-root .progress-track { grid-row: 1; align-self: end; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
 					.prw-root .progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
-					.prw-root .submit, .prw-root .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
-					.prw-root .submit { justify-self: end; width: max-content; min-width: 132px; margin-inline-end: 4px; }
-					.prw-root .prw-review-header.has-github { grid-template-columns: minmax(0, 1fr) auto minmax(120px, 180px) max-content; padding-right: 14px; }
-					.prw-root .prw-review-header.no-github { grid-template-columns: minmax(0, 1fr) minmax(120px, 180px) max-content; padding-right: 14px; }
+					.prw-root .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
+					.prw-root .submit { grid-row: 1 / 3; align-self: center; justify-self: end; width: max-content; min-width: 0; height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: var(--radius, 0.375rem); background: var(--primary); color: var(--primary-foreground); padding: 0 12px; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+					.prw-root .submit:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 90%, var(--background)); }
+					.prw-root .submit:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring, var(--primary)) 50%, transparent), 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent); }
+					.prw-root .submit svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .prw-review-header.has-github, .prw-root .prw-review-header.no-github { grid-template-columns: minmax(0, 1fr) minmax(180px, 32vw) max-content; padding-right: 12px; }
+					.prw-root .prw-review-header .submit { grid-column: 3; }
+					.prw-root .prw-review-header .progress-wrap { grid-column: 2; }
 					.prw-root .secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
 					.prw-root .body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
 					.prw-root .rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
@@ -1651,9 +1669,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .legacy-navrail-marker, .prw-root .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
 					.prw-root .walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
 					.prw-root .walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
-					.prw-root .content { min-width: 0; overflow: auto; padding: 10px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
-					.prw-root .card { max-width: 1120px; margin: 0 auto 14px; display: grid; gap: 8px; }
-					.prw-root .inner, .prw-root .guide, .prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .content { min-width: 0; overflow: auto; padding: 8px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-root .card { max-width: none; margin: 0 0 12px; display: grid; gap: 8px; }
+					.prw-root .inner, .prw-root .guide { border: 0; border-radius: 0; background: transparent; padding: 0; box-shadow: none; }
+					.prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
 					.prw-root .card-head, .prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
 					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
@@ -1672,10 +1691,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .dislike { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); }
 					.prw-root .decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
 					.prw-root .decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
-					.prw-root .guide { padding: 16px; }
+					.prw-root .guide { padding: 4px 2px 0; }
 					.prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 					.prw-root .guide-counter { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
-					.prw-root .guide-stage { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--background) 76%, var(--card)); }
+					.prw-root .guide-stage { margin-top: 10px; border-top: 1px solid var(--border); padding: 12px 0 0; background: transparent; }
 					.prw-root .beat { display: grid; gap: 10px; }
 					.prw-root .beat h2 { font-size: clamp(19px, 3.8vw, 24px); }
 					.prw-root .beat-list { margin: 0; padding-left: 20px; color: var(--muted-foreground); line-height: 1.45; }
@@ -1736,7 +1755,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .shell.narrow { --walkthrough-content-x: 4px; }
 					.prw-root .shell.narrow .content { padding: 6px var(--walkthrough-content-x) 0; }
 					.prw-root .shell.narrow .guide { padding: 12px; }
-					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) max-content; height: auto; min-height: 58px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1; } .prw-root .submit { grid-column: 2; grid-row: 1; align-self: center; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 1 / -1; grid-row: 2; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
+					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) minmax(120px, 34vw) max-content; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); height: 58px; min-height: 58px; column-gap: 12px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1 / 3; min-width: 0; } .prw-root .submit { grid-column: 3; grid-row: 1 / 3; align-self: center; justify-self: end; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 2; grid-row: 1 / 3; align-self: stretch; min-width: 0; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: 58px minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
 					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } }
 
 				</style>
