@@ -94,6 +94,70 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toHaveCount(0, { timeout: 10_000 });
 	});
 
+	test("keeps the latest prompt visible after large output, resize, and reattach", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1180, height: 560 });
+		await installChannelFrameSpy(page);
+
+		await openApp(page);
+		sessionId = await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
+		await assertTerminalLayoutStable(page, "scroll regression initial terminal open");
+
+		const run = `bobbit_scroll_${Date.now()}`;
+		const burstDone = `${run}_BURST_DONE`;
+		const followUp = `${run}_FOLLOWUP_VISIBLE`;
+		const burstCommand = [
+			...Array.from({ length: 90 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abc123xyz`),
+			`echo ${burstDone}`,
+		].join(" && ");
+		await typeCommand(page, burstCommand);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, burstDone),
+			{ message: "large-output regression setup: PTY should emit the burst completion marker", timeout: 20_000 },
+		).toBe(true);
+
+		await page.setViewportSize({ width: 980, height: 430 });
+		await assertTerminalLayoutStable(page, "scroll regression after shrinking viewport");
+		await page.setViewportSize({ width: 1280, height: 620 });
+		await assertTerminalLayoutStable(page, "scroll regression after expanding viewport");
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel()), "terminal panel should restore for scroll regression reattach").toBeVisible({ timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
+		await expect.poll(() => channelSendCount(page, "ext_channel_attach"), { timeout: 20_000 }).toBeGreaterThan(0);
+		await assertNoRepeatedTopRowGlyphArtifact(page, "scroll regression after reload reattach");
+
+		await typeCommand(page, `echo ${followUp}`);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, followUp),
+			{ message: "scroll regression follow-up command should reach the PTY", timeout: 20_000 },
+		).toBe(true);
+		await assertLatestTerminalInputVisibleAtBottom(page, followUp, "scroll regression after large output, resize, and reattach");
+		await assertNoRepeatedTopRowGlyphArtifact(page, "scroll regression after follow-up input");
+
+		const cursorHome = `${run}_CURSOR_HOME_VISIBLE`;
+		const cursorHomeCommand = process.platform === "win32" ? `prompt $E[H${cursorHome}$G` : `printf '\\033[H${cursorHome}'`;
+		const beforeCursorHomeLayout = await terminalLayoutSnapshotAfterAnimationFrames(page);
+		await typeCommand(page, cursorHomeCommand);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, cursorHome),
+			{ message: "cursor-positioning regression setup: PTY should emit the cursor-home marker", timeout: 20_000 },
+		).toBe(true);
+		await assertTerminalLayoutStable(page, "scroll regression after cursor-positioning output");
+		const afterCursorHomeLayout = await terminalLayoutSnapshotAfterAnimationFrames(page);
+		expect(
+			afterCursorHomeLayout.renderedRows,
+			"cursor-positioning output must not shrink xterm rows; rows are owned by FitAddon/host size",
+		).toBeGreaterThanOrEqual(Math.max(10, beforeCursorHomeLayout.renderedRows - 1));
+		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
+	});
+
 	test("renders a clear disconnected state after gateway restart while terminal is live", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1400, height: 900 });
@@ -132,9 +196,24 @@ async function listContributions(): Promise<Array<{ packId: string; panels: Arra
 async function installChannelFrameSpy(page: import("@playwright/test").Page): Promise<void> {
 	await page.addInitScript(() => {
 		const win = window as any;
-		win.__terminalE2E = { sent: [] as any[] };
+		win.__terminalE2E = { sent: [] as any[], received: [] as any[] };
 		const OriginalWebSocket = window.WebSocket;
 		window.WebSocket = class BobbitTerminalSpyWebSocket extends OriginalWebSocket {
+			constructor(url: string | URL, protocols?: string | string[]) {
+				super(url, protocols as any);
+				this.addEventListener("message", (event: MessageEvent) => {
+					if (typeof event.data !== "string") return;
+					try {
+						const msg = JSON.parse(event.data);
+						if (msg?.type && String(msg.type).startsWith("ext_channel")) {
+							win.__terminalE2E.received.push(msg);
+						}
+					} catch {
+						// Non-JSON websocket payload; ignore.
+					}
+				});
+			}
+
 			send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
 				if (typeof data === "string") {
 					try {
@@ -173,6 +252,7 @@ async function focusTerminal(page: import("@playwright/test").Page): Promise<voi
 	const xterm = page.locator(`${terminalHost()} .xterm`).first();
 	await expect(xterm, "xterm must be visible and focusable before typing").toBeVisible({ timeout: 10_000 });
 	await xterm.click({ position: { x: 24, y: 24 } });
+	await page.locator(`${terminalHost()} .xterm-helper-textarea`).focus();
 	await page.evaluate(() => {
 		(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus();
 	});
@@ -182,7 +262,7 @@ async function focusTerminal(page: import("@playwright/test").Page): Promise<voi
 			return active?.classList.contains("xterm-helper-textarea") === true
 				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null;
 		}),
-		{ timeout: 5_000 },
+		{ timeout: 10_000 },
 	).toBe(true);
 }
 
@@ -242,6 +322,51 @@ async function assertNoRepeatedTopRowGlyphArtifact(page: import("@playwright/tes
 	expect(artifact, `${reason}: xterm top rows should not contain a repeated glyph layout artifact`).toBe("");
 }
 
+async function assertLatestTerminalInputVisibleAtBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
+	const snapshot = await terminalViewportContent(page);
+	const bottomRows = nearBottomRows(snapshot.rows);
+	const bottomText = bottomRows.join("\n");
+	const bottomSoftWrappedText = bottomRows.join("");
+	const expectedTail = expected.slice(-32);
+	expect(
+		snapshot.atBottom,
+		`${reason}: terminal scroll regression - xterm viewport should be pinned to the bottom for the active prompt/input. scrollTop=${snapshot.scrollTop}, maxScrollTop=${snapshot.maxScrollTop}`,
+	).toBe(true);
+	expect(
+		bottomSoftWrappedText.includes(expected) || bottomSoftWrappedText.includes(expectedTail),
+		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" or its unique tail "${expectedTail}" in the near-bottom xterm rows, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+	).toBe(true);
+}
+
+async function assertTerminalTextVisibleNearBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
+	const snapshot = await terminalViewportContent(page);
+	const bottomRows = nearBottomRows(snapshot.rows);
+	const bottomText = bottomRows.join("\n");
+	expect(
+		bottomRows.join(""),
+		`${reason}: expected "${expected}" in the near-bottom xterm rows after viewport-only prompt pinning, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+	).toContain(expected);
+}
+
+function nearBottomRows(rows: string[]): string[] {
+	const withoutTrailingBlankRows = [...rows];
+	while (withoutTrailingBlankRows.length > 0 && withoutTrailingBlankRows[withoutTrailingBlankRows.length - 1]?.trim() === "") {
+		withoutTrailingBlankRows.pop();
+	}
+	return withoutTrailingBlankRows.slice(-8);
+}
+
+async function terminalViewportContent(page: import("@playwright/test").Page): Promise<{ rows: string[]; atBottom: boolean; scrollTop: number; maxScrollTop: number }> {
+	return page.evaluate(() => {
+		const viewport = document.querySelector('[data-testid="terminal-xterm"] .xterm-viewport') as HTMLElement | null;
+		const rows = Array.from(document.querySelectorAll('[data-testid="terminal-xterm"] .xterm-rows > div'))
+			.map((row) => (row.textContent ?? "").trimEnd());
+		const scrollTop = viewport?.scrollTop ?? 0;
+		const maxScrollTop = viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight) : 0;
+		return { rows, atBottom: Math.abs(maxScrollTop - scrollTop) <= 2, scrollTop, maxScrollTop };
+	});
+}
+
 type TerminalLayoutSnapshot = {
 	visible: boolean;
 	hostWidth: number;
@@ -291,6 +416,11 @@ async function killFrameCount(page: import("@playwright/test").Page): Promise<nu
 
 async function textFrameCount(page: import("@playwright/test").Page): Promise<number> {
 	return page.evaluate(() => ((window as any).__terminalE2E?.sent ?? []).filter((msg: any) => msg?.type === "ext_channel_send" && msg?.frame?.kind === "text").length);
+}
+
+async function receivedTerminalTextIncludes(page: import("@playwright/test").Page, text: string): Promise<boolean> {
+	return page.evaluate((needle) => ((window as any).__terminalE2E?.received ?? [])
+		.some((msg: any) => msg?.type === "ext_channel_frame" && msg?.frame?.kind === "text" && String(msg.frame.data ?? "").includes(needle)), text);
 }
 
 async function channelSendCount(page: import("@playwright/test").Page, type: string): Promise<number> {
