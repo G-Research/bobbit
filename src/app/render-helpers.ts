@@ -534,7 +534,7 @@ function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: S
 				@click=${action.run}
 				title=${action.title || action.label}
 				aria-label=${action.label}
-			>${action.icon}</button>
+			><span class="sidebar-scale-icon">${action.icon}</span></button>
 		`;
 	})}`;
 }
@@ -584,7 +584,7 @@ function renderSidebarActionsTrigger(input: {
 				if (event.key === "ArrowDown" || event.key === "ArrowUp") openFromTrigger(event);
 				else event.stopPropagation();
 			}}
-		>${icon(Menu, "xs")}</button>
+		><span class="sidebar-scale-icon">${icon(Menu, "xs")}</span></button>
 	`;
 }
 
@@ -865,10 +865,10 @@ export function renderProjectArchivedSection(
 				data-nav-id=${archHeaderNavId}
 				data-nav-active=${archHeaderActive ? "true" : "false"}
 				class="relative flex items-center gap-1 pr-1 ${headerPy} w-full text-left ${archHeaderActive ? "bg-secondary text-foreground sidebar-session-active" : (isMobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} rounded-md transition-colors"
-				style="padding-left:${HEADER_CHEVRON_W}px;"
+				style="padding-left:var(--sidebar-header-chevron-w);"
 				@click=${() => { setArchivedSectionExpanded(project.id, !expanded); renderApp(); }}
 			>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none opacity-60"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, headerSize)}</span>
 				<span class="${labelClass}" style="${labelStyle}">Archived</span>
 			</button>
@@ -933,16 +933,15 @@ export function renderSessionRow(session: GatewaySession) {
 			data-nav-active=${navActive ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${CHEVRON_W}px;"
+			style="padding-left:var(--sidebar-chevron-w);"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${hasChildren ? html`<span
-				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
-				style="width:${CHEVRON_W}px;font-size: 1em;"
+				class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
 				@click=${(e: Event) => { e.stopPropagation(); if (hasFirstClassChild) toggleFirstClassParentExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
-			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
+			><span class="sidebar-chevron-glyph">${childrenExpanded ? "▾" : "▸"}</span></span>` : ""}
 			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
@@ -955,7 +954,7 @@ export function renderSessionRow(session: GatewaySession) {
 				? buttons
 				: html`
 					<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
 		</div>
@@ -1013,15 +1012,14 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			data-nav-active=${active ? "true" : "false"}
 			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${CHEVRON_W}px; filter:grayscale(1); opacity:0.75;"
+			style="padding-left:var(--sidebar-chevron-w); filter:grayscale(1); opacity:0.75;"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 		>
 			${hasChildren ? html`<span
-				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
-				style="width:${CHEVRON_W}px;font-size: 1em;"
+				class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
-			>${expanded ? "▾" : "▸"}</span>` : ""}
+			><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
@@ -1070,11 +1068,10 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
 
 	const chevron = html`<span
-		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
-		style="width:${CHEVRON_W}px;font-size: 1.1667em;"
+		class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
 		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); renderApp(); }}
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
-	>${expanded ? "▾" : "▸"}</span>`;
+	><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>`;
 
 	void childCount; // available if needed later
 
@@ -1087,7 +1084,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${CHEVRON_W}px;"
+			style="padding-left:var(--sidebar-chevron-w);"
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
@@ -1102,7 +1099,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 				? buttons
 				: html`
 					<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
 		</div>
@@ -1483,10 +1480,10 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				data-sidebar-actions-row-root
 				data-nav-id=${goalNavId}
 				data-nav-active=${goalNavActive ? "true" : "false"}
-				style="padding-left:${HEADER_CHEVRON_W}px;"
+				style="padding-left:var(--sidebar-header-chevron-w);"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none" title="${isExpanded ? "Collapse goal" : "Expand goal"}"><span class="sidebar-chevron-glyph">${isExpanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${opts?.displayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${opts.displayTitleSuffix})</span>` : ""}</span>
@@ -1502,7 +1499,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				${renderGoalBadge(goal)}
 				${mobile
 					? goalButtons
-					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					: html`<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${goalButtons}
 					</div>`}
 			</div>
@@ -1517,7 +1514,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 							   still alive — it would be misleading to offer Start Team. */
 							: (isTeamGoal && hasActiveTeam ? nothing : emptyState))
 						: (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow))}
-					${isCreatingHere ? html`<div style="padding-left:${CHEVRON_W}px;${mobile ? "" : "font-size: 0.8333em;"}" class="py-1 text-muted-foreground flex items-center gap-1">
+					${isCreatingHere ? html`<div style="padding-left:var(--sidebar-chevron-w);${mobile ? "" : "font-size: 0.8333em;"}" class="py-1 text-muted-foreground flex items-center gap-1">
 						<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
 						Creating…
 					</div>` : ""}

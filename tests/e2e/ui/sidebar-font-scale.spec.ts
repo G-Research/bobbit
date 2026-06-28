@@ -3,6 +3,7 @@
  */
 import { type Locator } from "@playwright/test";
 import { test, expect, type Page } from "../gateway-harness.js";
+import { apiFetch, createGoal, defaultProject, deleteGoal, deleteSession } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const SCALE_KEY = "bobbit:sidebar-font-scale";
@@ -17,6 +18,34 @@ const FONT_SIZE_INPUT_SELECTOR = [
 ].join(", ");
 
 type SidebarMeasure = { rootSize: number; emChildSize: number | null; cssVar: string };
+type VisualMetric = {
+	width: number;
+	height: number;
+	left: number;
+	right: number;
+	top: number;
+	bottom: number;
+	display: string;
+	visibility: string;
+	opacity: number;
+};
+type SidebarVisualSnapshot = {
+	rootFont: number;
+	topNewGoal: VisualMetric | null;
+	addGoalBase: VisualMetric | null;
+	addGoalPlus: VisualMetric | null;
+	addSessionBase: VisualMetric | null;
+	addSessionPlus: VisualMetric | null;
+	addStaffBase: VisualMetric | null;
+	addStaffPlus: VisualMetric | null;
+	projectChevron: VisualMetric | null;
+	rolePickerChevron: VisualMetric | null;
+	collapsedChevron?: VisualMetric | null;
+};
+
+const createdGoalIds = new Set<string>();
+const createdSessionIds = new Set<string>();
+const createdStaffIds = new Set<string>();
 
 function scaleForPx(px: number): number {
 	return px / BASE_PX;
@@ -60,6 +89,253 @@ async function setFontSizePx(page: Page, value: string): Promise<void> {
 	await input.blur();
 }
 
+async function setSidebarFontSizeDirect(page: Page, px: number): Promise<void> {
+	const scale = scaleForPx(px);
+	await page.evaluate(([key, value]) => {
+		localStorage.setItem(key as string, String(value));
+		document.documentElement.style.setProperty("--sidebar-font-scale", String(value));
+	}, [SCALE_KEY, scale]);
+	await waitForScale(page, scale);
+}
+
+async function createSidebarVisualFixture(): Promise<{ goalTitle: string }> {
+	const project = await defaultProject();
+	const token = `IconScale${Date.now()}`;
+	const goal = await createGoal({
+		title: `${token} Goal`,
+		cwd: project.rootPath,
+		projectId: project.id,
+		worktree: false,
+		autoStartTeam: false,
+	});
+	createdGoalIds.add(goal.id);
+
+	const sessionResp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ title: `${token} Session`, cwd: project.rootPath, projectId: project.id, worktree: false }),
+	});
+	expect(sessionResp.status, `create sidebar fixture session: ${await sessionResp.clone().text()}`).toBe(201);
+	const session = await sessionResp.json();
+	createdSessionIds.add(session.id);
+
+	const staffResp = await apiFetch("/api/staff", {
+		method: "POST",
+		body: JSON.stringify({
+			name: `${token} Staff`,
+			description: "Sidebar icon scaling fixture",
+			systemPrompt: "You are a sidebar icon scaling fixture.",
+			cwd: project.rootPath,
+			projectId: project.id,
+		}),
+	});
+	expect(staffResp.status, `create sidebar fixture staff: ${await staffResp.clone().text()}`).toBe(201);
+	const staff = await staffResp.json();
+	createdStaffIds.add(staff.id);
+	if (staff.currentSessionId) createdSessionIds.add(staff.currentSessionId);
+	return { goalTitle: goal.title as string };
+}
+
+async function resetSidebarVisualState(page: Page, goalTitle: string): Promise<void> {
+	await page.evaluate((title) => {
+		localStorage.removeItem("bobbit-sidebar-collapsed");
+		localStorage.removeItem("bobbit-expanded-projects");
+		localStorage.removeItem("bobbit-collapsed-ungrouped");
+		localStorage.removeItem("bobbit-collapsed-staff");
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const goal = state?.goals?.find((g: { title?: string }) => g.title === title);
+		if (goal?.id) localStorage.setItem("bobbit-expanded-goals", JSON.stringify([goal.id]));
+	}, goalTitle);
+	await page.reload();
+	await expect(page.locator("[data-testid='sidebar-expanded']")).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator("button[title^='New goal in']").first()).toBeVisible({ timeout: 10_000 });
+	await expect(page.locator("button[title^='New session in']").first()).toBeVisible({ timeout: 10_000 });
+	await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 10_000 });
+	await expect(page.getByText(goalTitle, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
+}
+
+async function measureSidebarVisualAffordances(page: Page, goalTitle?: string): Promise<SidebarVisualSnapshot> {
+	return page.evaluate((title) => {
+		const metric = (el: Element | null): VisualMetric | null => {
+			if (!el) return null;
+			const rect = el.getBoundingClientRect();
+			const style = getComputedStyle(el as HTMLElement);
+			return {
+				width: rect.width,
+				height: rect.height,
+				left: rect.left,
+				right: rect.right,
+				top: rect.top,
+				bottom: rect.bottom,
+				display: style.display,
+				visibility: style.visibility,
+				opacity: Number.parseFloat(style.opacity || "1"),
+			};
+		};
+		const first = <T extends Element = Element>(selector: string, root: ParentNode = document): T | null => root.querySelector(selector) as T | null;
+		const compoundParts = (buttonSelector: string) => {
+			const button = first<HTMLButtonElement>(buttonSelector);
+			if (!button) return { base: null, plus: null };
+			const base = first('[data-testid$="-icon"], .sidebar-compound-icon, span', button);
+			const plus = first('[data-testid$="-plus"]', button)
+				?? Array.from(button.querySelectorAll("svg")).at(-1)
+				?? null;
+			return { base: metric(base), plus: metric(plus) };
+		};
+		const addGoal = compoundParts('button[title^="New goal in"]');
+		const addSession = compoundParts('button[title^="New session in"]');
+		const addStaff = compoundParts('button[title^="New staff agent"]');
+		const collapsedButton = title
+			? Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="sidebar-collapsed"] button'))
+				.find((button) => button.getAttribute("title") === title)
+			: null;
+		const root = first<HTMLElement>('[data-testid="sidebar-expanded"], [data-testid="sidebar-collapsed"]');
+		return {
+			rootFont: root ? Number.parseFloat(getComputedStyle(root).fontSize) : 0,
+			topNewGoal: metric(first('button[data-new-goal-trigger] [data-testid="sidebar-new-goal-icon"], button[data-new-goal-trigger] .sidebar-scale-icon, button[data-new-goal-trigger] svg')),
+			addGoalBase: addGoal.base,
+			addGoalPlus: addGoal.plus,
+			addSessionBase: addSession.base,
+			addSessionPlus: addSession.plus,
+			addStaffBase: addStaff.base,
+			addStaffPlus: addStaff.plus,
+			projectChevron: metric(first('[data-testid="project-header"] .sidebar-chevron-slot, [data-testid="project-header"] > span:first-child')),
+			rolePickerChevron: metric(first('button[title="New session with role"] .sidebar-scale-icon, button[title="New session with role"] svg')),
+			collapsedChevron: metric(first('span', collapsedButton ?? document)),
+		};
+	}, goalTitle);
+}
+
+async function assertSidebarHorizontalFit(page: Page, label: string): Promise<void> {
+	const failures = await page.evaluate(() => {
+		const out: string[] = [];
+		const root = document.querySelector<HTMLElement>('[data-testid="sidebar-expanded"], [data-testid="sidebar-collapsed"], .sidebar-root');
+		if (!root) return ["missing sidebar root"];
+		const rootRect = root.getBoundingClientRect();
+		if (root.scrollWidth > root.clientWidth + 2) {
+			const offenders = Array.from(root.querySelectorAll<HTMLElement>("*"))
+				.map((el) => ({ el, rect: el.getBoundingClientRect() }))
+				.filter(({ rect }) => rect.width > 0 && rect.right > rootRect.right + 1)
+				.slice(0, 5)
+				.map(({ el, rect }) => `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 4).join(".")} title=${el.getAttribute("title") ?? ""} text=${(el.textContent ?? "").trim().slice(0, 30)} right=${rect.right.toFixed(1)}`);
+			out.push(`sidebar root scrollWidth ${root.scrollWidth} exceeds clientWidth ${root.clientWidth}; offenders: ${offenders.join(" | ")}`);
+		}
+		for (const [i, row] of Array.from(root.querySelectorAll<HTMLElement>(".sidebar-top-action-row")).entries()) {
+			const rowRect = row.getBoundingClientRect();
+			if (row.scrollWidth > row.clientWidth + 2) out.push(`top action row ${i} scrollWidth ${row.scrollWidth} exceeds clientWidth ${row.clientWidth}`);
+			if (rowRect.left < rootRect.left - 1 || rowRect.right > rootRect.right + 1) out.push(`top action row ${i} escapes sidebar bounds`);
+			for (const [j, button] of Array.from(row.querySelectorAll<HTMLElement>("button")).entries()) {
+				const buttonRect = button.getBoundingClientRect();
+				if (buttonRect.width < 24) out.push(`top action row ${i} button ${j} click target too narrow: ${buttonRect.width.toFixed(2)}px`);
+				if (buttonRect.left < rootRect.left - 1 || buttonRect.right > rootRect.right + 1) out.push(`top action row ${i} button ${j} escapes sidebar bounds`);
+			}
+		}
+		return out;
+	});
+	expect(failures, `${label} sidebar large-font horizontal fit`).toEqual([]);
+}
+
+async function assertProjectHeaderChevronAlignment(page: Page): Promise<void> {
+	const alignment = await page.evaluate(() => {
+		const header = document.querySelector<HTMLElement>('[data-testid="project-header"]');
+		const slot = header?.querySelector<HTMLElement>(".sidebar-chevron-slot");
+		if (!header || !slot) return null;
+		const headerRect = header.getBoundingClientRect();
+		const slotRect = slot.getBoundingClientRect();
+		const style = getComputedStyle(header);
+		return {
+			centerDelta: Math.abs((slotRect.top + slotRect.height / 2) - (headerRect.top + headerRect.height / 2)),
+			leftDelta: Math.abs(slotRect.left - headerRect.left),
+			paddingLeft: Number.parseFloat(style.paddingLeft || "0"),
+			slotWidth: slotRect.width,
+			absolute: getComputedStyle(slot).position === "absolute",
+		};
+	});
+	expect(alignment, "project header chevron must be measurable").not.toBeNull();
+	expect(alignment!.absolute, "desktop project chevron uses absolute-left slot").toBe(true);
+	expect(alignment!.centerDelta, "desktop project chevron stays vertically centered").toBeLessThanOrEqual(2);
+	expect(alignment!.leftDelta, "desktop project chevron slot starts at header left edge").toBeLessThanOrEqual(1);
+	expect(alignment!.paddingLeft, "desktop project header reserves matching chevron slot padding").toBeCloseTo(alignment!.slotWidth, 0);
+}
+
+async function assertSidebarActionGaps(page: Page): Promise<void> {
+	const result = await page.evaluate(() => {
+		const root = document.querySelector<HTMLElement>('[data-testid="sidebar-expanded"]');
+		if (!root) return { ok: false, reason: "missing expanded sidebar" };
+		const clusters = Array.from(root.querySelectorAll<HTMLElement>(".sidebar-actions.sidebar-action-cluster"));
+		for (const cluster of clusters) {
+			const children = Array.from(cluster.children).filter((child): child is HTMLElement => child instanceof HTMLElement && child.getBoundingClientRect().width > 0);
+			if (children.length < 3) continue;
+			const rects = children.slice(0, 3).map((child) => child.getBoundingClientRect());
+			return {
+				ok: true,
+				gap01: rects[1].left - rects[0].right,
+				gap12: rects[2].left - rects[1].right,
+				computedGap: Number.parseFloat(getComputedStyle(cluster).columnGap || getComputedStyle(cluster).gap || "0"),
+			};
+		}
+		const fixture = document.createElement("div");
+		fixture.className = "sidebar-actions sidebar-action-cluster";
+		fixture.style.cssText = "position:absolute;left:-9999px;top:0;display:flex;";
+		for (let i = 0; i < 3; i += 1) {
+			const button = document.createElement("button");
+			button.style.cssText = "width:10px;height:10px;padding:0;border:0;";
+			fixture.appendChild(button);
+		}
+		root.appendChild(fixture);
+		const rects = Array.from(fixture.children).map((child) => child.getBoundingClientRect());
+		const computedGap = Number.parseFloat(getComputedStyle(fixture).columnGap || getComputedStyle(fixture).gap || "0");
+		fixture.remove();
+		return { ok: true, gap01: rects[1].left - rects[0].right, gap12: rects[2].left - rects[1].right, computedGap, fixture: true };
+	});
+	expect(result.ok, `sidebar action gap cluster must be measurable: ${"reason" in result ? result.reason : ""}`).toBe(true);
+	if ("gap01" in result) {
+		expect(result.gap01, "PR/action-to-action gap should share one cluster gap").toBeCloseTo(result.gap12, 0);
+		expect(result.gap01, "measured action gap should match computed cluster gap").toBeCloseTo(result.computedGap, 0);
+	}
+}
+
+function assertSidebarAffordancesScale(small: SidebarVisualSnapshot, large: SidebarVisualSnapshot): void {
+	const expectedRatio = large.rootFont / small.rootFont;
+	const minRatio = expectedRatio * 0.85;
+	const failures: string[] = [];
+	const checkMetric = (label: string, a: VisualMetric | null | undefined, b: VisualMetric | null | undefined) => {
+		if (!a || !b) {
+			failures.push(`${label} missing at one or more sidebar font sizes`);
+			return;
+		}
+		const ratio = b.width / Math.max(a.width, 0.01);
+		if (ratio < minRatio) failures.push(`${label} width did not scale with sidebar font size: ${a.width.toFixed(2)}px -> ${b.width.toFixed(2)}px (ratio ${ratio.toFixed(2)}, expected >= ${minRatio.toFixed(2)})`);
+	};
+	const checkPlus = (label: string, base: VisualMetric | null, plus: VisualMetric | null) => {
+		if (!base || !plus) {
+			failures.push(`${label} plus overlay missing`);
+			return;
+		}
+		if (plus.display === "none" || plus.visibility === "hidden" || plus.opacity <= 0 || plus.width <= 0 || plus.height <= 0) {
+			failures.push(`${label} plus overlay is not visibly rendered`);
+		}
+		const overlaps = plus.left < base.right && plus.right > base.left && plus.top < base.bottom && plus.bottom > base.top;
+		if (!overlaps) failures.push(`${label} plus overlay does not overlap its compound icon box`);
+	};
+
+	expect(large.rootFont / small.rootFont, "sidebar root font size must change before icon scaling assertions").toBeCloseTo(24 / 14, 1);
+	checkMetric("top New Goal icon", small.topNewGoal, large.topNewGoal);
+	checkMetric("project New Goal compound icon box", small.addGoalBase, large.addGoalBase);
+	checkMetric("project New Goal plus overlay", small.addGoalPlus, large.addGoalPlus);
+	checkMetric("New Session compound icon box", small.addSessionBase, large.addSessionBase);
+	checkMetric("New Session plus overlay", small.addSessionPlus, large.addSessionPlus);
+	checkMetric("New Staff compound icon box", small.addStaffBase, large.addStaffBase);
+	checkMetric("New Staff plus overlay", small.addStaffPlus, large.addStaffPlus);
+	checkMetric("expanded project disclosure chevron slot", small.projectChevron, large.projectChevron);
+	checkMetric("role-picker chevron", small.rolePickerChevron, large.rolePickerChevron);
+	if (small.collapsedChevron || large.collapsedChevron) checkMetric("collapsed goal disclosure chevron slot", small.collapsedChevron, large.collapsedChevron);
+	checkPlus("project New Goal", large.addGoalBase, large.addGoalPlus);
+	checkPlus("New Session", large.addSessionBase, large.addSessionPlus);
+	checkPlus("New Staff", large.addStaffBase, large.addStaffPlus);
+
+	expect(failures, `sidebar icon scaling regression: ${failures.join("; ")}`).toEqual([]);
+}
+
 async function measureSidebar(page: Page): Promise<SidebarMeasure> {
 	const result = await page.evaluate(() => {
 		const root = document.querySelector("[data-testid='sidebar-expanded']") as HTMLElement | null;
@@ -99,6 +375,51 @@ async function activityDotSize(page: Page): Promise<number> {
 }
 
 test.describe("Sidebar font scale (full-stack UI)", () => {
+	test.afterEach(async () => {
+		for (const id of createdStaffIds) await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
+		createdStaffIds.clear();
+		for (const id of createdSessionIds) await deleteSession(id).catch(() => {});
+		createdSessionIds.clear();
+		for (const id of createdGoalIds) await deleteGoal(id).catch(() => {});
+		createdGoalIds.clear();
+	});
+
+	test("real sidebar visual affordance icons scale with the sidebar font size @repro", async ({ page }) => {
+		const { goalTitle } = await createSidebarVisualFixture();
+		await openApp(page);
+		await resetSidebarVisualState(page, goalTitle);
+
+		await setSidebarFontSizeDirect(page, 14);
+		const expandedSmall = await measureSidebarVisualAffordances(page);
+		await setSidebarFontSizeDirect(page, 24);
+		const expandedLarge = await measureSidebarVisualAffordances(page);
+		await assertProjectHeaderChevronAlignment(page);
+		await assertSidebarActionGaps(page);
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "expanded desktop");
+
+		await page.locator("button[title^='Collapse sidebar']").first().click();
+		await expect(page.locator("[data-testid='sidebar-collapsed']")).toBeVisible({ timeout: 5_000 });
+		await setSidebarFontSizeDirect(page, 14);
+		const collapsedSmall = await measureSidebarVisualAffordances(page, goalTitle);
+		await setSidebarFontSizeDirect(page, 24);
+		const collapsedLarge = await measureSidebarVisualAffordances(page, goalTitle);
+
+		assertSidebarAffordancesScale(
+			{ ...expandedSmall, collapsedChevron: collapsedSmall.collapsedChevron },
+			{ ...expandedLarge, collapsedChevron: collapsedLarge.collapsedChevron },
+		);
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "collapsed desktop");
+
+		await page.setViewportSize({ width: 375, height: 667 });
+		await page.evaluate(() => localStorage.removeItem("bobbit-sidebar-collapsed"));
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: /^\s*Roles\s*$/ }).first()).toBeVisible({ timeout: 15_000 });
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "mobile");
+	});
+
 	test("desktop numeric control scales sidebar, persists, clamps, resets, and leaves main pane unchanged @smoke", async ({ page }) => {
 		await resetScale(page);
 		await navigateToHash(page, "#/settings/system/general");

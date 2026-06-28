@@ -387,25 +387,25 @@ function renderMobileLanding() {
 						const isSkillsActive = isRouteActive("skills");
 						const isMarketActive = isRouteActive("market");
 						return html`
-					<div class="flex items-center gap-1">
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+					<div class="sidebar-top-action-row">
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage roles"
 							@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}>
-							${icon(Users, "xs")} Roles
+							<span class="sidebar-scale-icon">${icon(Users, "xs")}</span><span class="sidebar-top-action-label">Roles</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage tools"
 							@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}>
-							${icon(Wrench, "xs")} Tools
+							<span class="sidebar-scale-icon">${icon(Wrench, "xs")}</span><span class="sidebar-top-action-label">Tools</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="View skills"
 							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
-							${icon(Zap, "xs")} Skills
+							<span class="sidebar-scale-icon">${icon(Zap, "xs")}</span><span class="sidebar-top-action-label">Skills</span>
 						</button>
 					</div>
-					<div class="flex items-center gap-1">
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+					<div class="sidebar-top-action-row">
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage workflows"
 							@click=${() => {
 								const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
@@ -413,24 +413,24 @@ function renderMobileLanding() {
 								import("./workflow-page.js").then((m) => m.loadWorkflowPageData());
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
-							${icon(WorkflowIcon, "xs")} Workflows
+							<span class="sidebar-scale-icon">${icon(WorkflowIcon, "xs")}</span><span class="sidebar-top-action-label">Workflows</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							data-testid="market-nav-button-mobile"
 							title="Marketplace"
 							@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}>
-							${icon(Store, "xs")} Market
+							<span class="sidebar-scale-icon">${icon(Store, "xs")}</span><span class="sidebar-top-action-label">Market</span>
 						</button>
 						<button
 							data-new-goal-trigger
-							class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+							class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							?disabled=${state.projects.length === 0}
 							@click=${(e: Event) => {
 								if (state.projects.length === 0) { showProjectDialog(); return; }
 								startNewGoalFlow(e.currentTarget as HTMLElement);
 							}}
 							title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}>
-							${icon(GoalIcon, "xs")} New Goal
+							<span class="sidebar-scale-icon" data-testid="sidebar-new-goal-icon">${icon(GoalIcon, "xs")}</span><span class="sidebar-top-action-label">New Goal</span>
 						</button>
 					</div>
 					`;
@@ -531,10 +531,10 @@ function renderMobileLanding() {
 														data-project-id=${project.id}
 														class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 														@click=${() => { if (isProjectReordering()) return; toggleProjectExpanded(project.id); renderApp(); }}>
-														<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${effectiveExpanded ? "▾" : "▸"}</span>
+														<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${effectiveExpanded ? "▾" : "▸"}</span></span>
 														${renderProjectReorderHandle(project)}
 														<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
-													<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
+													<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
@@ -546,9 +546,9 @@ function renderMobileLanding() {
 															@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 															title="New goal in ${project.name}"
 														>
-															<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
-																${icon(GoalIcon, "sm")}
-																<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+															<span class="sidebar-compound-icon sidebar-compound-icon--lg" data-testid="sidebar-add-goal-icon">
+																${icon(GoalIcon, "sm", "sidebar-compound-base")}
+																<svg data-testid="sidebar-add-goal-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
 																	<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
 																</svg>
 															</span>
@@ -564,9 +564,9 @@ function renderMobileLanding() {
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
-															<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${_mobileUngroupedExp ? "▾" : "▸"}</span>
+															<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
 															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
-															<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
+															<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
@@ -574,18 +574,18 @@ function renderMobileLanding() {
 																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
 																>
-																	<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
-																		${icon(MessagesSquare, "sm")}
-																		<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
-																			<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
-																		</svg>
-																	</span>
+																	<span class="sidebar-compound-icon sidebar-compound-icon--lg" data-testid="sidebar-add-session-icon">
+																							${icon(MessagesSquare, "sm", "sidebar-compound-base")}
+																							<svg data-testid="sidebar-add-session-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
+																								<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+																							</svg>
+																						</span>
 																</button>
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 																	title="New session with role"
-																>${icon(ChevronDown, "sm")}</button>
+																><span class="sidebar-scale-icon">${icon(ChevronDown, "sm")}</span></button>
 																${renderRolePickerDropdown()}
 															</div>
 														</div>
