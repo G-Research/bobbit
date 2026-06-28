@@ -205,6 +205,95 @@ async function measureSidebarVisualAffordances(page: Page, goalTitle?: string): 
 	}, goalTitle);
 }
 
+async function assertSidebarHorizontalFit(page: Page, label: string): Promise<void> {
+	const failures = await page.evaluate(() => {
+		const out: string[] = [];
+		const root = document.querySelector<HTMLElement>('[data-testid="sidebar-expanded"], [data-testid="sidebar-collapsed"], .sidebar-root');
+		if (!root) return ["missing sidebar root"];
+		const rootRect = root.getBoundingClientRect();
+		if (root.scrollWidth > root.clientWidth + 2) {
+			const offenders = Array.from(root.querySelectorAll<HTMLElement>("*"))
+				.map((el) => ({ el, rect: el.getBoundingClientRect() }))
+				.filter(({ rect }) => rect.width > 0 && rect.right > rootRect.right + 1)
+				.slice(0, 5)
+				.map(({ el, rect }) => `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 4).join(".")} title=${el.getAttribute("title") ?? ""} text=${(el.textContent ?? "").trim().slice(0, 30)} right=${rect.right.toFixed(1)}`);
+			out.push(`sidebar root scrollWidth ${root.scrollWidth} exceeds clientWidth ${root.clientWidth}; offenders: ${offenders.join(" | ")}`);
+		}
+		for (const [i, row] of Array.from(root.querySelectorAll<HTMLElement>(".sidebar-top-action-row")).entries()) {
+			const rowRect = row.getBoundingClientRect();
+			if (row.scrollWidth > row.clientWidth + 2) out.push(`top action row ${i} scrollWidth ${row.scrollWidth} exceeds clientWidth ${row.clientWidth}`);
+			if (rowRect.left < rootRect.left - 1 || rowRect.right > rootRect.right + 1) out.push(`top action row ${i} escapes sidebar bounds`);
+			for (const [j, button] of Array.from(row.querySelectorAll<HTMLElement>("button")).entries()) {
+				const buttonRect = button.getBoundingClientRect();
+				if (buttonRect.width < 24) out.push(`top action row ${i} button ${j} click target too narrow: ${buttonRect.width.toFixed(2)}px`);
+				if (buttonRect.left < rootRect.left - 1 || buttonRect.right > rootRect.right + 1) out.push(`top action row ${i} button ${j} escapes sidebar bounds`);
+			}
+		}
+		return out;
+	});
+	expect(failures, `${label} sidebar large-font horizontal fit`).toEqual([]);
+}
+
+async function assertProjectHeaderChevronAlignment(page: Page): Promise<void> {
+	const alignment = await page.evaluate(() => {
+		const header = document.querySelector<HTMLElement>('[data-testid="project-header"]');
+		const slot = header?.querySelector<HTMLElement>(".sidebar-chevron-slot");
+		if (!header || !slot) return null;
+		const headerRect = header.getBoundingClientRect();
+		const slotRect = slot.getBoundingClientRect();
+		const style = getComputedStyle(header);
+		return {
+			centerDelta: Math.abs((slotRect.top + slotRect.height / 2) - (headerRect.top + headerRect.height / 2)),
+			leftDelta: Math.abs(slotRect.left - headerRect.left),
+			paddingLeft: Number.parseFloat(style.paddingLeft || "0"),
+			slotWidth: slotRect.width,
+			absolute: getComputedStyle(slot).position === "absolute",
+		};
+	});
+	expect(alignment, "project header chevron must be measurable").not.toBeNull();
+	expect(alignment!.absolute, "desktop project chevron uses absolute-left slot").toBe(true);
+	expect(alignment!.centerDelta, "desktop project chevron stays vertically centered").toBeLessThanOrEqual(2);
+	expect(alignment!.leftDelta, "desktop project chevron slot starts at header left edge").toBeLessThanOrEqual(1);
+	expect(alignment!.paddingLeft, "desktop project header reserves matching chevron slot padding").toBeCloseTo(alignment!.slotWidth, 0);
+}
+
+async function assertSidebarActionGaps(page: Page): Promise<void> {
+	const result = await page.evaluate(() => {
+		const root = document.querySelector<HTMLElement>('[data-testid="sidebar-expanded"]');
+		if (!root) return { ok: false, reason: "missing expanded sidebar" };
+		const clusters = Array.from(root.querySelectorAll<HTMLElement>(".sidebar-actions.sidebar-action-cluster"));
+		for (const cluster of clusters) {
+			const children = Array.from(cluster.children).filter((child): child is HTMLElement => child instanceof HTMLElement && child.getBoundingClientRect().width > 0);
+			if (children.length < 3) continue;
+			const rects = children.slice(0, 3).map((child) => child.getBoundingClientRect());
+			return {
+				ok: true,
+				gap01: rects[1].left - rects[0].right,
+				gap12: rects[2].left - rects[1].right,
+				computedGap: Number.parseFloat(getComputedStyle(cluster).columnGap || getComputedStyle(cluster).gap || "0"),
+			};
+		}
+		const fixture = document.createElement("div");
+		fixture.className = "sidebar-actions sidebar-action-cluster";
+		fixture.style.cssText = "position:absolute;left:-9999px;top:0;display:flex;";
+		for (let i = 0; i < 3; i += 1) {
+			const button = document.createElement("button");
+			button.style.cssText = "width:10px;height:10px;padding:0;border:0;";
+			fixture.appendChild(button);
+		}
+		root.appendChild(fixture);
+		const rects = Array.from(fixture.children).map((child) => child.getBoundingClientRect());
+		const computedGap = Number.parseFloat(getComputedStyle(fixture).columnGap || getComputedStyle(fixture).gap || "0");
+		fixture.remove();
+		return { ok: true, gap01: rects[1].left - rects[0].right, gap12: rects[2].left - rects[1].right, computedGap, fixture: true };
+	});
+	expect(result.ok, `sidebar action gap cluster must be measurable: ${"reason" in result ? result.reason : ""}`).toBe(true);
+	if ("gap01" in result) {
+		expect(result.gap01, "PR/action-to-action gap should share one cluster gap").toBeCloseTo(result.gap12, 0);
+		expect(result.gap01, "measured action gap should match computed cluster gap").toBeCloseTo(result.computedGap, 0);
+	}
+}
+
 function assertSidebarAffordancesScale(small: SidebarVisualSnapshot, large: SidebarVisualSnapshot): void {
 	const expectedRatio = large.rootFont / small.rootFont;
 	const minRatio = expectedRatio * 0.85;
@@ -304,6 +393,10 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 		const expandedSmall = await measureSidebarVisualAffordances(page);
 		await setSidebarFontSizeDirect(page, 24);
 		const expandedLarge = await measureSidebarVisualAffordances(page);
+		await assertProjectHeaderChevronAlignment(page);
+		await assertSidebarActionGaps(page);
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "expanded desktop");
 
 		await page.locator("button[title^='Collapse sidebar']").first().click();
 		await expect(page.locator("[data-testid='sidebar-collapsed']")).toBeVisible({ timeout: 5_000 });
@@ -316,6 +409,15 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 			{ ...expandedSmall, collapsedChevron: collapsedSmall.collapsedChevron },
 			{ ...expandedLarge, collapsedChevron: collapsedLarge.collapsedChevron },
 		);
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "collapsed desktop");
+
+		await page.setViewportSize({ width: 375, height: 667 });
+		await page.evaluate(() => localStorage.removeItem("bobbit-sidebar-collapsed"));
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: /^\s*Roles\s*$/ }).first()).toBeVisible({ timeout: 15_000 });
+		await setSidebarFontSizeDirect(page, 32);
+		await assertSidebarHorizontalFit(page, "mobile");
 	});
 
 	test("desktop numeric control scales sidebar, persists, clamps, resets, and leaves main pane unchanged @smoke", async ({ page }) => {

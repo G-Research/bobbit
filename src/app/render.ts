@@ -387,25 +387,25 @@ function renderMobileLanding() {
 						const isSkillsActive = isRouteActive("skills");
 						const isMarketActive = isRouteActive("market");
 						return html`
-					<div class="flex items-center gap-1">
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+					<div class="sidebar-top-action-row">
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage roles"
 							@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}>
-							<span class="sidebar-scale-icon">${icon(Users, "xs")}</span> Roles
+							<span class="sidebar-scale-icon">${icon(Users, "xs")}</span><span class="sidebar-top-action-label">Roles</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage tools"
 							@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}>
-							<span class="sidebar-scale-icon">${icon(Wrench, "xs")}</span> Tools
+							<span class="sidebar-scale-icon">${icon(Wrench, "xs")}</span><span class="sidebar-top-action-label">Tools</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="View skills"
 							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
-							<span class="sidebar-scale-icon">${icon(Zap, "xs")}</span> Skills
+							<span class="sidebar-scale-icon">${icon(Zap, "xs")}</span><span class="sidebar-top-action-label">Skills</span>
 						</button>
 					</div>
-					<div class="flex items-center gap-1">
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+					<div class="sidebar-top-action-row">
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							title="Manage workflows"
 							@click=${() => {
 								const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
@@ -413,24 +413,24 @@ function renderMobileLanding() {
 								import("./workflow-page.js").then((m) => m.loadWorkflowPageData());
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
-							<span class="sidebar-scale-icon">${icon(WorkflowIcon, "xs")}</span> Workflows
+							<span class="sidebar-scale-icon">${icon(WorkflowIcon, "xs")}</span><span class="sidebar-top-action-label">Workflows</span>
 						</button>
-						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+						<button class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							data-testid="market-nav-button-mobile"
 							title="Marketplace"
 							@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}>
-							<span class="sidebar-scale-icon">${icon(Store, "xs")}</span> Market
+							<span class="sidebar-scale-icon">${icon(Store, "xs")}</span><span class="sidebar-top-action-label">Market</span>
 						</button>
 						<button
 							data-new-goal-trigger
-							class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+							class="sidebar-top-action-btn px-1.5 py-1 rounded transition-colors flex items-center justify-center ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
 							?disabled=${state.projects.length === 0}
 							@click=${(e: Event) => {
 								if (state.projects.length === 0) { showProjectDialog(); return; }
 								startNewGoalFlow(e.currentTarget as HTMLElement);
 							}}
 							title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}>
-							<span class="sidebar-scale-icon" data-testid="sidebar-new-goal-icon">${icon(GoalIcon, "xs")}</span> New Goal
+							<span class="sidebar-scale-icon" data-testid="sidebar-new-goal-icon">${icon(GoalIcon, "xs")}</span><span class="sidebar-top-action-label">New Goal</span>
 						</button>
 					</div>
 					`;
@@ -534,7 +534,7 @@ function renderMobileLanding() {
 														<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${effectiveExpanded ? "▾" : "▸"}</span></span>
 														${renderProjectReorderHandle(project)}
 														<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
-													<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
+													<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
@@ -566,7 +566,7 @@ function renderMobileLanding() {
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
 															<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
 															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
-															<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
+															<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"

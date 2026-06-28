@@ -35,6 +35,32 @@ bell-toggle button {
 	--sidebar-chevron-glyph-size: 1.2em;
 	--sidebar-chevron-glyph-size-sm: 1.1em;
 	--sidebar-action-gap: 0.125em;
+	--sidebar-top-action-gap: 0.2em;
+}
+
+.sidebar-root .sidebar-top-action-row {
+	display: flex;
+	align-items: stretch;
+	gap: var(--sidebar-top-action-gap);
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-top-action-btn {
+	flex: 1 1 0;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	gap: min(0.25em, 0.375rem);
+	padding-left: min(0.375em, 0.5rem);
+	padding-right: min(0.375em, 0.5rem);
+}
+
+.sidebar-root .sidebar-top-action-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .sidebar-root .sidebar-scale-icon,
@@ -150,9 +176,52 @@ bell-toggle button {
 	gap: var(--sidebar-action-gap);
 }
 
+.sidebar-root[data-testid="sidebar-collapsed"] {
+	width: max(3.5rem, 3.75em);
+}
+
 .sidebar-root .sidebar-collapsed-label {
 	min-width: 0;
 	overflow: hidden;
+	white-space: nowrap;
+}
+
+.sidebar-root [data-session-id] .truncate,
+.sidebar-root [data-nav-id^="session:"] .truncate {
+	display: block;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-bottom-actions {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-bottom-actions > button {
+	min-width: 0;
+	overflow: hidden;
+	gap: min(0.25em, 0.375rem);
+	padding-left: min(0.5em, 0.75rem);
+	padding-right: min(0.5em, 0.75rem);
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"],
+.sidebar-root .sidebar-bottom-action-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"] {
+	flex: 1 1 0;
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"] > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
@@ -283,10 +352,10 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * overlap — unlike the previous `::after` inflation attempt (reverted in
  * dd428416) where adjacent buttons ate into each other.
  *
- * Excluded: `.flex-1` tab buttons in the top tab strip (Roles / Tools /
- * Skills / Workflows / New Goal) — they already fill their row.
+ * Excluded: top tab strip buttons (Roles / Tools / Skills / Workflows /
+ * New Goal) — they already fill their row.
  */
-.sidebar-root button:not(.flex-1) {
+.sidebar-root button:not(.flex-1):not(.sidebar-top-action-btn) {
 	border: 0.5px solid transparent;
 }
 
