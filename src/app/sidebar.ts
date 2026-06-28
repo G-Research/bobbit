@@ -35,7 +35,7 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -977,9 +977,9 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
 				data-nav-id=${staffNavId}
 				data-nav-active=${staffNavActive ? "true" : "false"}
-				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
+				style="${mobile ? "" : "padding-left:var(--sidebar-header-chevron-w);"}"
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
-				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}font-size: 1.1667em;">${staffExpanded ? "▾" : "▸"}</span>
+				<span class="sidebar-chevron-slot ${mobile ? "sidebar-chevron-slot--inline" : "sidebar-chevron-slot--header sidebar-chevron-slot--absolute"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${staffExpanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: ${mobile ? "1.1667em" : "0.75em"};">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
@@ -994,9 +994,9 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 						@click=${(e: Event) => startNewStaffFlow(e, projectId)}
 						title="New staff agent"
 					>
-						<span class="relative inline-flex items-center justify-center" style="width:${mobile ? "16px" : "12px"};height:${mobile ? "16px" : "12px"};">
-							${icon(Bot, mobile ? "sm" : "xs")}
-							<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:${mobile ? "9px" : "7px"};height:${mobile ? "9px" : "7px"};filter:drop-shadow(0 0 1.5px var(--background));">
+						<span class="sidebar-compound-icon ${mobile ? "sidebar-compound-icon--lg" : ""}" data-testid="sidebar-add-staff-icon">
+							${icon(Bot, mobile ? "sm" : "xs", "sidebar-compound-base")}
+							<svg data-testid="sidebar-add-staff-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
 								<path d="M5 1V9M1 5H9" stroke="${staffAccentColor}" stroke-width="2.5" stroke-linecap="round"/>
 							</svg>
 						</span>
@@ -1032,7 +1032,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 					data-nav-id=${staffSessionNavId}
 					data-nav-active=${active ? "true" : "false"}
-					style="padding-left:${CHEVRON_W}px;"
+					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
@@ -1045,14 +1045,14 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 						})() : ""}</div>
 					${mobile
 						? editBtn
-						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 							<span class="group-hover:hidden flex items-center">${session ? (() => {
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
 								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
 							})() : ""}</span>
-							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+							<div class="sidebar-actions sidebar-action-cluster hidden group-hover:flex items-center">
 								${editBtn}
 							</div>
 						</div>`}
@@ -1232,7 +1232,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				toggleProjectExpanded(project.id);
 				renderApp();
 			}}>
-			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
+			<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 			<span class="project-reorder-slot">${renderProjectReorderHandle(project)}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
@@ -1251,9 +1251,9 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 				title="New goal in ${project.name}"
 			>
-				<span class="relative inline-flex" style="width:12px;height:12px;">
-					${icon(GoalIcon, "xs")}
-					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
+				<span class="sidebar-compound-icon" data-testid="sidebar-add-goal-icon">
+					${icon(GoalIcon, "xs", "sidebar-compound-base")}
+					<svg data-testid="sidebar-add-goal-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
 						<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
 					</svg>
 				</span>
@@ -1412,9 +1412,9 @@ function renderProjectContent(
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${ungActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
 				data-nav-id=${ungNavId}
 				data-nav-active=${ungActive ? "true" : "false"}
-				style="padding-left:${HEADER_CHEVRON_W}px;"
+				style="padding-left:var(--sidebar-header-chevron-w);"
 				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;">${ungroupedExp ? "▾" : "▸"}</span>
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none"><span class="sidebar-chevron-glyph">${ungroupedExp ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Sessions</span>
 				${!isProvisional ? html`
@@ -1426,9 +1426,9 @@ function renderProjectContent(
 						title="New session in ${project.name}"
 						?disabled=${state.creatingSession}
 					>
-						<span class="relative inline-flex items-center justify-center" style="width:12px;height:12px;">
-							${icon(MessagesSquare, "xs")}
-							<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
+						<span class="sidebar-compound-icon" data-testid="sidebar-add-session-icon">
+							${icon(MessagesSquare, "xs", "sidebar-compound-base")}
+							<svg data-testid="sidebar-add-session-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
 								<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
 							</svg>
 						</span>
@@ -1437,7 +1437,7 @@ function renderProjectContent(
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 						title="New session with role"
-					>${icon(ChevronDown, "xs")}</button>
+					><span class="sidebar-scale-icon">${icon(ChevronDown, "xs")}</span></button>
 					${renderRolePickerDropdown()}
 				</div>
 				` : ""}
@@ -1492,7 +1492,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}
 						title="Manage roles"
 					>
-						${icon(Users, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon">${icon(Users, "xs")}</span>
 						<span>Roles</span>
 					</button>
 					<button
@@ -1500,7 +1500,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}
 						title="Manage tools"
 					>
-						${icon(Wrench, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon">${icon(Wrench, "xs")}</span>
 						<span>Tools</span>
 					</button>
 					<button
@@ -1508,7 +1508,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}
 						title="View skills"
 					>
-						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon">${icon(Zap, "xs")}</span>
 						<span>Skills</span>
 					</button>
 				</div>
@@ -1518,7 +1518,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}
 						title="Manage workflows"
 					>
-						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon">${icon(Workflow, "xs")}</span>
 						<span>Workflows</span>
 					</button>
 					<button
@@ -1527,7 +1527,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}
 						title="Marketplace"
 					>
-						${icon(Store, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon">${icon(Store, "xs")}</span>
 						<span>Market</span>
 					</button>
 					<button
@@ -1540,7 +1540,7 @@ export function renderSidebar() {
 						}}
 						title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}
 					>
-						${icon(GoalIcon, "xs", "!w-3.5 !h-3.5")}
+						<span class="sidebar-scale-icon" data-testid="sidebar-new-goal-icon">${icon(GoalIcon, "xs")}</span>
 						<span>New Goal</span>
 					</button>
 				</div>
@@ -1700,7 +1700,7 @@ export function renderSidebar() {
 				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
-						class="flex items-center gap-1 px-1 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full" style="font-size: 0.8333em; padding-left:${HEADER_CHEVRON_W}px;"
+						class="flex items-center gap-1 px-1 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full" style="font-size: 0.8333em; padding-left:var(--sidebar-header-chevron-w);"
 						@click=${() => showProjectDialog()}
 						title="Register another project"
 					>
@@ -1800,12 +1800,12 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 
 		return html`
 			<button
-				class="flex items-center gap-0.5 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
+				class="flex items-center sidebar-action-cluster ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
 			>
-				<span class="text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;font-size: 0.75em;"
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none" style="cursor:pointer;"
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
-				>${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span>
+				><span class="sidebar-chevron-glyph">${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span></span>
 				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead))}</span>
 				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
@@ -1829,35 +1829,35 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 							return html`
 								${i > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 								<button
-									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 									title=${goal.title}
 									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 								>
-									<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
-									<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
+									<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+									<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
 								</button>
 								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 							`;
 						})}
 						${bucket.goals.length > 0 && bucket.sessions.length > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 						${bucket.goals.length > 0 && bucket.sessions.length > 0 ? html`<button
-							class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+							class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 							title="Ungrouped sessions in ${project.name}"
 							@click=${() => { setUngroupedExpanded(project.id, !_collapsedUngroupedExp); renderApp(); }}
 						>
-							<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
-							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
+							<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_collapsedUngroupedExp ? "▾" : "▸"}</span></span>
+							<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
 						</button>
 						${_collapsedUngroupedExp ? bucket.sessions.map(renderCollapsedSession) : ""}` : bucket.sessions.map(renderCollapsedSession)}
 						${bucket.staff.length > 0 ? html`
 							<div class="w-7 border-t border-border/50 my-1.5"></div>
 							<button
-								class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+								class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 								title="Staff in ${project.name}"
 								@click=${() => { setStaffSectionExpanded(project.id, !_collapsedStaffExp); renderApp(); }}
 							>
-								<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedStaffExp ? "▾" : "▸"}</span>
-								<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">STAFF</span>
+								<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_collapsedStaffExp ? "▾" : "▸"}</span></span>
+								<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">STAFF</span>
 							</button>
 							${_collapsedStaffExp ? bucket.staff.map(renderCollapsedSession) : ""}
 						` : ""}
@@ -1871,12 +1871,12 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 						return html`
 							<div class="opacity-60">
 								<button
-									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 									title=${goal.title}
 									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 								>
-									<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
-									<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
+									<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+									<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
 								</button>
 								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 							</div>
