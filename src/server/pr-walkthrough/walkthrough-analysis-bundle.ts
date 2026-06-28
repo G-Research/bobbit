@@ -12,6 +12,16 @@ export const PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION = 1;
 export const PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND = "pr_walkthrough_analysis_bundle";
 const STORE_DIR = "pr-walkthrough-analysis-bundles";
 
+export const PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW = {
+	maxContentBytes: 48 * 1024,
+	maxHeaderBytes: 512,
+	maxLineBytes: 8 * 1024,
+	maxLines: 600,
+	maxLinesPerHunk: 200,
+} as const;
+const READ_WINDOW_MARKER_RESERVE_BYTES = 1024;
+const READ_WINDOW_GUIDANCE = "Bundle store windowed this file read before returning it. Request narrower slices with mode=file hunkOffset=<n> hunkLimit=1 when more hunk context is needed.";
+
 export type PrWalkthroughAnalysisBundleTarget = {
 	provider: "github" | string;
 	owner?: string;
@@ -90,6 +100,25 @@ export type PrWalkthroughAnalysisBundleMetadata = {
 	files: number;
 };
 
+type BundleFileReadWindowMetadata = {
+	applied: boolean;
+	maxContentBytes: number;
+	maxHeaderBytes: number;
+	maxLineBytes: number;
+	maxLines: number;
+	maxLinesPerHunk: number;
+	selectedHunks: number;
+	returnedHunks: number;
+	returnedLines: number;
+	markerLines: number;
+	omittedLines: number;
+	truncatedLines: number;
+	omittedBytes: number;
+	returnedBytes: number;
+	reasons: string[];
+	guidance: string;
+};
+
 export type ReadPrWalkthroughBundleRequest = {
 	sessionId: string;
 	jobId: string;
@@ -140,7 +169,18 @@ export class WalkthroughAnalysisBundleStore {
 			const hunkOffset = clampInteger(request.hunkOffset ?? request.offset, 0, Number.MAX_SAFE_INTEGER, 0);
 			const hunkLimit = clampInteger(request.hunkLimit ?? request.limit, 1, 200, 50);
 			const hunks = file.hunks.slice(hunkOffset, hunkOffset + hunkLimit);
-			return { bundle: bundleHeader(bundle), file: { ...file, hunks }, hunkOffset, hunkLimit, totalHunks: file.hunks.length, truncated: hunkOffset > 0 || hunkOffset + hunkLimit < file.hunks.length };
+			const windowed = windowFileRead(file, hunks, hunkOffset);
+			const hunkWindowTruncated = hunkOffset > 0 || hunkOffset + hunkLimit < file.hunks.length;
+			return {
+				bundle: bundleHeader(bundle),
+				file: windowed.file,
+				hunkOffset,
+				hunkLimit,
+				totalHunks: file.hunks.length,
+				truncated: hunkWindowTruncated || windowed.window.applied,
+				hunk_truncated: hunkWindowTruncated,
+				read_window: windowed.window,
+			};
 		}
 		throw bundleReadError(400, "Unsupported PR walkthrough bundle read mode", { code: "INVALID_BUNDLE_READ_REQUEST", retryable: false });
 	}
@@ -408,6 +448,8 @@ function bundleHeader(bundle: PrWalkthroughAnalysisBundle): Record<string, unkno
 }
 
 function fileManifest(file: PrWalkthroughAnalysisBundleFile): Record<string, unknown> {
+	const readWindow = summarizeFileReadWindow(file);
+	const readWindowed = Boolean(readWindow.applied);
 	return {
 		path: file.path,
 		old_path: file.old_path,
@@ -416,9 +458,240 @@ function fileManifest(file: PrWalkthroughAnalysisBundleFile): Record<string, unk
 		deletions: file.deletions,
 		is_binary: file.is_binary,
 		is_generated: file.is_generated,
-		is_truncated: file.is_truncated,
+		is_truncated: file.is_truncated || readWindowed,
+		source_is_truncated: file.is_truncated,
+		read_window: readWindow,
 		hunks: file.hunks.length,
 	};
+}
+
+function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: PrWalkthroughAnalysisBundleHunk[], hunkOffset: number): { file: PrWalkthroughAnalysisBundleFile; window: BundleFileReadWindowMetadata } {
+	const window = newFileReadWindowMetadata(selectedHunks.length);
+	const reasons = new Set<string>();
+	let remainingBytes = PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxContentBytes;
+	let remainingLines = PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLines;
+
+	const hunks = selectedHunks.map((hunk, selectedIndex) => {
+		const absoluteHunkIndex = hunkOffset + selectedIndex;
+		const hunkWindow = {
+			applied: false,
+			omittedLines: 0,
+			truncatedLines: 0,
+			omittedBytes: 0,
+		};
+		const lines: PrWalkthroughAnalysisBundleLine[] = [];
+		const header = windowTextToBudget(
+			typeof hunk.header === "string" ? hunk.header : "",
+			Math.min(PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxHeaderBytes, Math.max(0, remainingBytes - READ_WINDOW_MARKER_RESERVE_BYTES)),
+			` … [hunk header truncated by bundle-store read window; request hunkOffset=${absoluteHunkIndex} hunkLimit=1 if needed]`,
+		);
+		remainingBytes = consumeWindowBytes(remainingBytes, header.text);
+		window.returnedBytes += utf8Bytes(header.text);
+		if (header.truncated) {
+			hunkWindow.applied = true;
+			hunkWindow.omittedBytes += header.omittedBytes;
+			reasons.add("header-bytes");
+		}
+
+		let hunkReturnedSourceLines = 0;
+		for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex++) {
+			const line = hunk.lines[lineIndex];
+			if (hunkReturnedSourceLines >= PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLinesPerHunk || remainingLines <= 0 || remainingBytes <= READ_WINDOW_MARKER_RESERVE_BYTES) {
+				const omitted = summarizeOmittedLines(hunk.lines, lineIndex);
+				hunkWindow.applied = true;
+				hunkWindow.omittedLines += omitted.lines;
+				hunkWindow.omittedBytes += omitted.bytes;
+				if (remainingBytes <= READ_WINDOW_MARKER_RESERVE_BYTES) reasons.add("content-bytes");
+				else reasons.add("line-window");
+				break;
+			}
+
+			const availableForLine = Math.min(
+				PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLineBytes,
+				Math.max(0, remainingBytes - READ_WINDOW_MARKER_RESERVE_BYTES),
+			);
+			const originalText = typeof line.text === "string" ? line.text : "";
+			const text = windowTextToBudget(
+				originalText,
+				availableForLine,
+				` … [line truncated by bundle-store read window; request hunkOffset=${absoluteHunkIndex} hunkLimit=1 if needed]`,
+			);
+			const returnedLine = { ...line, text: text.text } as PrWalkthroughAnalysisBundleLine & Record<string, unknown>;
+			if (text.truncated) {
+				returnedLine.is_truncated = true;
+				returnedLine.truncated = true;
+				returnedLine.read_window = {
+					applied: true,
+					originalBytes: text.originalBytes,
+					returnedBytes: utf8Bytes(text.text),
+					omittedBytes: text.omittedBytes,
+				};
+				hunkWindow.applied = true;
+				hunkWindow.truncatedLines++;
+				hunkWindow.omittedBytes += text.omittedBytes;
+				reasons.add("line-bytes");
+			}
+			lines.push(returnedLine as PrWalkthroughAnalysisBundleLine);
+			remainingBytes = consumeWindowBytes(remainingBytes, text.text);
+			window.returnedBytes += utf8Bytes(text.text);
+			window.returnedLines++;
+			remainingLines--;
+			hunkReturnedSourceLines++;
+		}
+
+		if (hunkWindow.applied) {
+			appendWindowMarkerLine(lines, hunkWindowMarker(absoluteHunkIndex, hunkWindow), window, remainingBytes, (text) => {
+				remainingBytes = consumeWindowBytes(remainingBytes, text);
+			});
+		}
+
+		window.omittedLines += hunkWindow.omittedLines;
+		window.truncatedLines += hunkWindow.truncatedLines;
+		window.omittedBytes += hunkWindow.omittedBytes;
+		const windowedHunk = { ...hunk, header: header.text, lines } as PrWalkthroughAnalysisBundleHunk & Record<string, unknown>;
+		if (hunkWindow.applied) {
+			windowedHunk.is_truncated = true;
+			windowedHunk.truncated = true;
+			windowedHunk.read_window = { ...hunkWindow, guidance: READ_WINDOW_GUIDANCE };
+		}
+		return windowedHunk as PrWalkthroughAnalysisBundleHunk;
+	});
+
+	window.applied = reasons.size > 0 || window.omittedLines > 0 || window.truncatedLines > 0 || window.omittedBytes > 0;
+	window.reasons = [...reasons];
+	if (window.applied && hunks.length > 0) prependWindowNotice(hunks[0], window);
+	const windowedFile = { ...file, is_truncated: file.is_truncated || window.applied, hunks } as PrWalkthroughAnalysisBundleFile & Record<string, unknown>;
+	windowedFile.truncated = windowedFile.is_truncated;
+	windowedFile.read_window = window;
+	return { file: windowedFile as PrWalkthroughAnalysisBundleFile, window };
+}
+
+function newFileReadWindowMetadata(selectedHunks: number): BundleFileReadWindowMetadata {
+	return {
+		applied: false,
+		maxContentBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxContentBytes,
+		maxHeaderBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxHeaderBytes,
+		maxLineBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLineBytes,
+		maxLines: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLines,
+		maxLinesPerHunk: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLinesPerHunk,
+		selectedHunks,
+		returnedHunks: selectedHunks,
+		returnedLines: 0,
+		markerLines: 0,
+		omittedLines: 0,
+		truncatedLines: 0,
+		omittedBytes: 0,
+		returnedBytes: 0,
+		reasons: [],
+		guidance: READ_WINDOW_GUIDANCE,
+	};
+}
+
+function summarizeFileReadWindow(file: PrWalkthroughAnalysisBundleFile): Record<string, unknown> {
+	let totalLines = 0;
+	let totalBytes = 0;
+	let longestLineBytes = 0;
+	let longLines = 0;
+	const reasons = new Set<string>();
+	for (const hunk of file.hunks) {
+		const headerBytes = utf8Bytes(typeof hunk.header === "string" ? hunk.header : "");
+		if (headerBytes > PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxHeaderBytes) reasons.add("header-bytes");
+		totalBytes += headerBytes;
+		if (hunk.lines.length > PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLinesPerHunk) reasons.add("line-window");
+		for (const line of hunk.lines) {
+			const lineBytes = utf8Bytes(typeof line.text === "string" ? line.text : "");
+			totalLines++;
+			totalBytes += lineBytes;
+			longestLineBytes = Math.max(longestLineBytes, lineBytes);
+			if (lineBytes > PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLineBytes) {
+				longLines++;
+				reasons.add("line-bytes");
+			}
+		}
+	}
+	if (totalLines > PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLines) reasons.add("line-window");
+	if (totalBytes > PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxContentBytes) reasons.add("content-bytes");
+	const applied = reasons.size > 0;
+	return {
+		applied,
+		maxContentBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxContentBytes,
+		maxHeaderBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxHeaderBytes,
+		maxLineBytes: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLineBytes,
+		maxLines: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLines,
+		maxLinesPerHunk: PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLinesPerHunk,
+		totalLines,
+		totalBytes,
+		longestLineBytes,
+		longLines,
+		reasons: [...reasons],
+		guidance: applied ? READ_WINDOW_GUIDANCE : undefined,
+	};
+}
+
+function windowTextToBudget(text: string, maxBytes: number, marker: string): { text: string; truncated: boolean; originalBytes: number; omittedBytes: number } {
+	const originalBytes = utf8Bytes(text);
+	if (originalBytes <= maxBytes) return { text, truncated: false, originalBytes, omittedBytes: 0 };
+	if (maxBytes <= 0) return { text: "", truncated: true, originalBytes, omittedBytes: originalBytes };
+	const fallbackMarker = " … [truncated by bundle-store read window]";
+	let suffix = marker;
+	let prefixBytes = Math.max(0, maxBytes - utf8Bytes(suffix));
+	let prefix = utf8Prefix(text, prefixBytes);
+	let omittedBytes = originalBytes - utf8Bytes(prefix);
+	suffix = marker.replace("request ", `${omittedBytes} bytes omitted; request `);
+	prefixBytes = Math.max(0, maxBytes - utf8Bytes(suffix));
+	if (prefixBytes === 0 && utf8Bytes(suffix) > maxBytes) suffix = utf8Prefix(fallbackMarker, maxBytes);
+	else prefix = utf8Prefix(text, prefixBytes);
+	omittedBytes = originalBytes - utf8Bytes(prefix);
+	const clipped = utf8Prefix(`${prefix}${suffix}`, maxBytes);
+	return { text: clipped, truncated: true, originalBytes, omittedBytes };
+}
+
+function appendWindowMarkerLine(lines: PrWalkthroughAnalysisBundleLine[], marker: string, window: BundleFileReadWindowMetadata, remainingBytes: number, consume: (text: string) => void): void {
+	if (remainingBytes <= 0) return;
+	const text = utf8Prefix(marker, Math.min(READ_WINDOW_MARKER_RESERVE_BYTES, remainingBytes));
+	if (!text) return;
+	lines.push({ kind: "context", side: "context", text });
+	window.markerLines++;
+	window.returnedBytes += utf8Bytes(text);
+	consume(text);
+}
+
+function prependWindowNotice(hunk: PrWalkthroughAnalysisBundleHunk, window: BundleFileReadWindowMetadata): void {
+	const text = `[bundle-store read window applied: omitted ${window.omittedLines} lines and ${window.omittedBytes} bytes; request narrower slices with hunkOffset=<n> hunkLimit=1 if needed]`;
+	hunk.lines.unshift({ kind: "context", side: "context", text });
+	window.markerLines++;
+	window.returnedBytes += utf8Bytes(text);
+}
+
+function hunkWindowMarker(hunkIndex: number, window: { omittedLines: number; truncatedLines: number; omittedBytes: number }): string {
+	return `[bundle-store read window: hunkOffset=${hunkIndex} windowed; omitted ${window.omittedLines} lines, truncated ${window.truncatedLines} long lines, ${window.omittedBytes} bytes omitted; request hunkOffset=${hunkIndex} hunkLimit=1 for a narrower slice]`;
+}
+
+function summarizeOmittedLines(lines: PrWalkthroughAnalysisBundleLine[], startIndex: number): { lines: number; bytes: number } {
+	let bytes = 0;
+	for (let i = startIndex; i < lines.length; i++) bytes += utf8Bytes(typeof lines[i].text === "string" ? lines[i].text : "");
+	return { lines: Math.max(0, lines.length - startIndex), bytes };
+}
+
+function consumeWindowBytes(remaining: number, text: string): number {
+	return Math.max(0, remaining - utf8Bytes(text) - 1);
+}
+
+function utf8Bytes(text: string): number {
+	return Buffer.byteLength(text, "utf8");
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (utf8Bytes(text) <= maxBytes) return text;
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (utf8Bytes(text.slice(0, mid)) <= maxBytes) low = mid;
+		else high = mid - 1;
+	}
+	return text.slice(0, low);
 }
 
 function selectFile(bundle: PrWalkthroughAnalysisBundle, filePath: string | undefined, index: number | undefined): PrWalkthroughAnalysisBundleFile | undefined {
