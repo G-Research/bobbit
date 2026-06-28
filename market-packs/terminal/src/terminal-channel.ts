@@ -115,7 +115,7 @@ export async function terminal(ctx: ChannelContext) {
 		},
 		async onAttach(clientId: string) {
 			if (!closed && pty) {
-				for (const data of replay.chunks()) await sendToClient(ctx, clientId, { kind: "text", data });
+				for (const data of replay.chunks(REPLAY_CHUNK_BYTES)) await sendToClient(ctx, clientId, { kind: "text", data });
 				await sendJsonTo(clientId, { op: "status", state: "attached", pid: pty.pid });
 			}
 		},
@@ -166,8 +166,25 @@ class TextReplayBuffer {
 		}
 	}
 
-	chunks(): readonly string[] {
-		return [...this.parts];
+	chunks(maxChunkBytes: number): readonly string[] {
+		// Coalesce on attach so byte-bounded scrollback cannot exceed client frame quotas.
+		const out: string[] = [];
+		let current = "";
+		let currentBytes = 0;
+		for (const part of this.parts) {
+			for (const chunk of splitUtf8(part, maxChunkBytes)) {
+				const chunkBytes = byteLength(chunk);
+				if (current && currentBytes + chunkBytes > maxChunkBytes) {
+					out.push(current);
+					current = "";
+					currentBytes = 0;
+				}
+				current += chunk;
+				currentBytes += chunkBytes;
+			}
+		}
+		if (current) out.push(current);
+		return out;
 	}
 }
 

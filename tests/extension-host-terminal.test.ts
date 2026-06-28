@@ -141,6 +141,51 @@ describe("terminal channel handler", () => {
 		assert.ok(!replay.some((frame) => isTextFrameWithMarker(frame, "OLD_MARKER")), "old output past the replay budget should be trimmed");
 	});
 
+	it("coalesces replay frames below channel attach quotas", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		const ctx = {
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 76,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => {},
+		};
+		const session = await terminalChannelHandler(ctx);
+		sent.length = 0;
+
+		for (let i = 0; i < 300; i++) dataCb?.(`chunk-${i.toString().padStart(3, "0")}\r\n`);
+		await new Promise((resolve) => setImmediate(resolve));
+		sent.length = 0;
+
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("new-client");
+
+		const replay = sent.filter(({ target }) => target === "new-client").map(({ frame }) => frame);
+		const replayTextFrames = replay.filter((frame) => frame && typeof frame === "object" && (frame as { kind?: unknown }).kind === "text");
+		assert.ok(replayTextFrames.length > 0, "reattach should include replay text frames");
+		assert.ok(
+			replayTextFrames.length < 64,
+			`replay should be comfortably below maxClientOutboundFrames=256, got ${replayTextFrames.length} text frames`,
+		);
+		assert.ok(replay.some((frame) => isTextFrameWithMarker(frame, "chunk-299")), "recent small chunks should be retained in replay");
+		const statusIndex = replay.findIndex((frame) => isStatusFrame(frame));
+		assert.notEqual(statusIndex, -1, "reattach should include attached status after replay");
+		const lastTextIndex = replay.map((frame, index) => ({ frame, index })).filter(({ frame }) => frame && typeof frame === "object" && (frame as { kind?: unknown }).kind === "text").at(-1)?.index ?? -1;
+		assert.ok(lastTextIndex < statusIndex, "status should remain after replay text frames");
+	});
+
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
