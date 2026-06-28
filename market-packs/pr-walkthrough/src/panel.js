@@ -1355,9 +1355,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					],
 				},
 			});
-			const renderPendingShell = () => {
+			const renderProgressOverlayShell = ({ testId, phase, title, body, label, value, width, indeterminate = false, detail = nothing }) => {
 				const previewEntry = pendingPreviewEntry();
-				return html`<section class=${`shell prw-bundle pending-shell ${isNarrowLayout(previewEntry) ? "narrow" : ""}`} data-testid="prw-pending" data-prw-key=${safeDomId(paramKey)} data-observed-narrow=${String(isNarrowLayout(previewEntry))} style="--walkthrough-rail-width:48px">
+				return html`<section class=${`shell prw-bundle pending-shell ${isNarrowLayout(previewEntry) ? "narrow" : ""}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)} data-observed-narrow=${String(isNarrowLayout(previewEntry))} style="--walkthrough-rail-width:48px">
 					<div class="pending-preview-blur" aria-hidden="true">
 						${renderHeaderBlock(previewEntry, host, paramKey)}
 						<div class="body rail-collapsed narrow">
@@ -1368,16 +1368,18 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					</div>
 					<div class="pending-overlay" data-testid="prw-pending-overlay" role="status" aria-live="polite">
 						<article class="pending-modal state-card">
-							<div class="phase-label">Pending</div>
-							<h2>PR Walkthrough: In Progress</h2>
-							<p>Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.</p>
-							<div class="pending-progress-row"><span class="pr-pill">${spinner}</span><div class="progress-wrap"><span>Generating review cards</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35"><div class="progress-fill prw-progress-indeterminate" style="width:42%"></div></div></div></div>
+							<div class="phase-label">${phase}</div>
+							<h2>${title}</h2>
+							<p>${body}</p>
+							<div class="pending-progress-row"><span class="pr-pill">${spinner}</span><div class="progress-wrap"><span>${label}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${String(value)}><div class=${`progress-fill ${indeterminate ? "prw-progress-indeterminate" : ""}`} style=${`width:${width}%`}></div></div></div></div>
+							${detail}
 							<div class="state-skeleton"><span></span><span></span><span></span></div>
 						</article>
 					</div>
 				</section>`;
 			};
-			const renderDraftShell = () => renderStateShell("draft", "prw-draft", "PR Walkthrough: Draft Saved", "The reviewer has saved analysis chunks, but the walkthrough has not been finalized yet. This pane will keep checking for the finalized review.", renderChunkSummary(entry.chunkSummary));
+			const renderPendingShell = () => renderProgressOverlayShell({ testId: "prw-pending", phase: "Pending", title: "PR Walkthrough: In Progress", body: "Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.", label: "Generating review cards", value: 35, width: 42, indeterminate: true });
+			const renderDraftShell = () => renderProgressOverlayShell({ testId: "prw-draft", phase: "Draft saved", title: "PR Walkthrough: Draft Saved", body: "The reviewer has saved analysis chunks, but the walkthrough has not been finalized yet. This pane will keep checking for the finalized review.", label: "Saved draft", value: 60, width: 60, detail: renderChunkSummary(entry.chunkSummary) });
 
 			return html`
 				<style>
@@ -1716,7 +1718,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
 					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
 					.prw-root .summary { margin: 8px 0 0; color: var(--muted-foreground); }
-					.prw-root .beat > .summary { margin-top: 0; color: var(--foreground); font-size: clamp(16px, 1.45vw, 20px); line-height: 1.5; max-width: 72ch; }
+					.prw-root .beat > .summary { margin-top: 0; color: var(--foreground); font-size: 16px; line-height: 1.5; max-width: 72ch; }
 					.prw-root .rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
 					.prw-root .checklist { margin: 10px 0 0; color: var(--muted-foreground); }
 					.prw-root .nav-label { color: var(--muted-foreground); font-size: 11px; }
@@ -1735,7 +1737,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 					.prw-root .guide-stage { margin-top: 10px; border-top: 1px solid var(--border); padding: 12px 0 0; background: transparent; }
 					.prw-root .beat { display: grid; gap: 10px; }
-					.prw-root .beat h2 { font-size: clamp(19px, 3.8vw, 24px); }
+					.prw-root .beat h2 { font-size: 20px; }
 					.prw-root .beat-list { margin: 0; padding-left: 20px; color: var(--muted-foreground); line-height: 1.45; }
 					.prw-root .beat-list li + li { margin-top: 6px; }
 					.prw-root .verdict, .prw-root .concern, .prw-root .filerow { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 9px; }

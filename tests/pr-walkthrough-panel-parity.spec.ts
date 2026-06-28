@@ -304,8 +304,8 @@ window.__prwMissingReadyParityAffordances = () => {
   if (!hasText(/\d+\s*\/\s*\d+\s+reviewed/i) && !document.querySelector('[role="progressbar"], [data-testid="prw-review-progress"]')) missing.push("review progress indicator");
   if (!document.querySelector('a[href*="github.com"][href*="/pull/42"]')) missing.push("GitHub PR link affordance");
   if (!buttonText(/side-by-side|split diff/i) || !buttonText(/inline/i)) missing.push("side-by-side/inline diff mode controls");
-  if (!document.querySelector('[data-testid="prw-phase-rail"], [aria-label="PR walkthrough phase rail"]')) missing.push("full phase rail structure");
-  if (!document.querySelector('[data-testid="prw-phase-rail-collapsed"], [aria-label="Collapsed PR walkthrough phase rail"]')) missing.push("collapsed/narrow phase rail structure");
+  if (document.querySelector('[data-testid="pr-walkthrough-labelled-rail"], [aria-label="PR walkthrough phase rail"]')) missing.push("obsolete expanded phase rail structure");
+  if (!document.querySelector('[data-testid="pr-walkthrough-collapsed-rail"], [aria-label="PR walkthrough steps"]')) missing.push("simplified compact step rail structure");
   if (!buttonText(/add line comment|comment on line|line comment/i)) missing.push("line-level comment affordance");
   if (!buttonText(/add card comment|comment on card|card comment/i)) missing.push("card-level comment affordance");
   if (!buttonText(/^\s*prev(ious)?\s*$/i) || !buttonText(/^\s*like\s*$/i) || !buttonText(/^\s*dislike\s*$/i)) missing.push("Prev/Like/Dislike review controls");
@@ -412,8 +412,10 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await expect(page.locator('[data-testid="prw-draft"]')).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator('[data-testid="prw-draft"]')).toContainText("Draft Saved");
-		await expect(page.locator('[data-testid="prw-draft"] .state-header .pr-pill'), "draft header should not waste space on a PR chip").toHaveCount(0);
-		const progressLayout = await page.locator('[data-testid="prw-draft"] .progress-wrap').evaluate((element: HTMLElement) => {
+		await expect(page.locator('[data-testid="prw-draft"] [data-testid="pr-walkthrough-header"]'), "draft should keep the ready-to-review panel behind the overlay instead of reverting to the old draft screen").toBeVisible();
+		await expect(page.locator('[data-testid="prw-draft"] [data-testid="pr-walkthrough-collapsed-rail"]')).toBeVisible();
+		await expect(page.locator('[data-testid="prw-draft"] [data-testid="prw-pending-overlay"]'), "draft progress should stay in the same modal overlay as pending").toBeVisible();
+		const progressLayout = await page.locator('[data-testid="prw-draft"] .pending-modal .progress-wrap').evaluate((element: HTMLElement) => {
 			const label = element.querySelector<HTMLElement>("span");
 			const bar = element.querySelector<HTMLElement>(".progress-track");
 			if (!label || !bar) return undefined;
@@ -897,7 +899,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwReady());
 		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
-		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+		await page.locator('.prw-phase-rail-collapsed button[data-prw-nav="diff-review"]').click();
 
 		await expect(page.locator('#diff-mode-split.active, .mode-toggle [aria-label="Split diff"][aria-checked="true"]')).toBeVisible();
 		const firstBlock = page.locator('.diff-block[data-file-path="market-packs/pr-walkthrough/src/panel.js"], [data-testid="pr-walkthrough-diff-block"][data-file-path="market-packs/pr-walkthrough/src/panel.js"]').first();
@@ -924,7 +926,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwReady());
 		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
-		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+		await page.locator('.prw-phase-rail-collapsed button[data-prw-nav="diff-review"]').click();
 
 		const suggestion = page.locator('.suggestions .suggestion[data-line-id="L36"], [data-testid="pr-walkthrough-suggested-comment"][data-line-id="L36"]');
 		await expect(suggestion).toContainText("Consider keeping one horizontal scrollbar per diff widget.");
@@ -938,7 +940,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwReady());
 		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
-		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+		await page.locator('.prw-phase-rail-collapsed button[data-prw-nav="diff-review"]').click();
 
 		const firstBlock = page.locator('.diff-block[data-file-path="market-packs/pr-walkthrough/src/panel.js"], [data-testid="pr-walkthrough-diff-block"][data-file-path="market-packs/pr-walkthrough/src/panel.js"]').first();
 		await expect(firstBlock.locator('.tok-keyword')).not.toHaveCount(0);
@@ -962,7 +964,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwReady());
 		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
-		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+		await page.locator('.prw-phase-rail-collapsed button[data-prw-nav="diff-review"]').click();
 		await page.locator('#diff-mode-inline, .mode-toggle [aria-label="Inline diff"]').click();
 
 		const firstBlock = page.locator('.diff-block[data-file-path="market-packs/pr-walkthrough/src/panel.js"], [data-testid="pr-walkthrough-diff-block"][data-file-path="market-packs/pr-walkthrough/src/panel.js"]').first();
