@@ -83,4 +83,15 @@ describe("ChannelOpenPermitStore", () => {
 		const token = store.mint(binding({ singletonKey: "" }));
 		assert.equal(store.consume(token, binding({ singletonKey: undefined })).token, "t");
 	});
+
+	it("tracks server-side trusted launcher activations separately from raw surface-token possession", () => {
+		let now = 0;
+		const store = new ChannelOpenPermitStore({ ttlMs: 10, trustedActivationTtlMs: 10, now: () => now, randomToken: () => "t" });
+		assert.equal(store.hasTrustedLauncherActivation(binding()), false);
+		store.markTrustedLauncherActivation(binding());
+		assert.equal(store.hasTrustedLauncherActivation(binding()), true);
+		assert.equal(store.hasTrustedLauncherActivation(binding({ channelName: "other" })), false);
+		now = 11;
+		assert.equal(store.hasTrustedLauncherActivation(binding()), false);
+	});
 });

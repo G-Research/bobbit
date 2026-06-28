@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import process from "node:process";
-import { ChannelError, type ChannelContributionRef } from "./channel-types.js";
+import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef } from "./channel-types.js";
 
 export interface ChannelPtyOpenOptions {
 	cols?: number;
@@ -54,6 +54,7 @@ type SessionResolver = {
 export interface ChannelPtyServiceOptions {
 	sessionManager?: SessionResolver;
 	ptyModule?: PtyModule;
+	audit?: (event: ChannelAuditEvent) => void;
 }
 
 type PtyProcess = {
@@ -73,10 +74,12 @@ type PtyModule = {
 export class ChannelPtyService {
 	private readonly sessionManager?: SessionResolver;
 	private readonly injectedPtyModule?: PtyModule;
+	private readonly audit?: (event: ChannelAuditEvent) => void;
 
 	constructor(opts: ChannelPtyServiceOptions = {}) {
 		this.sessionManager = opts.sessionManager;
 		this.injectedPtyModule = opts.ptyModule;
+		this.audit = opts.audit;
 	}
 
 	buildHost(contribution: ChannelContributionRef, sessionId: string): ChannelHandlerHostSurface {
@@ -116,10 +119,12 @@ export class ChannelPtyService {
 				cwd,
 				env: terminalEnv(),
 			});
+			this.audit?.({ type: "pty.spawn", at: Date.now(), sessionId, reason: "spawned" });
 		} catch (err) {
+			this.audit?.({ type: "pty.spawn", at: Date.now(), sessionId, error: err instanceof Error ? err.message : String(err) });
 			throw new ChannelError(500, "pty_spawn_failed", `Terminal failed to start: ${err instanceof Error ? err.message : String(err)}`);
 		}
-		return wrapPty(proc);
+		return wrapPty(proc, (event) => this.audit?.({ type: "pty.exit", at: Date.now(), sessionId, reason: event.reason, error: event.signal !== undefined ? String(event.signal) : undefined }));
 	}
 
 	private resolveSession(sessionId: string): SessionLike | undefined {
@@ -142,7 +147,7 @@ export class ChannelPtyService {
 	}
 }
 
-function wrapPty(proc: PtyProcess): ChannelPtyHandle {
+function wrapPty(proc: PtyProcess, auditExit?: (event: ChannelPtyExitEvent) => void): ChannelPtyHandle {
 	const dataListeners = new Set<(data: string) => void>();
 	const exitListeners = new Set<(event: ChannelPtyExitEvent) => void>();
 	let exited = false;
@@ -153,6 +158,7 @@ function wrapPty(proc: PtyProcess): ChannelPtyHandle {
 		exited = true;
 		if (killFallbackTimer) clearTimeout(killFallbackTimer);
 		const event = { code, signal, reason: killReason };
+		auditExit?.(event);
 		for (const cb of [...exitListeners]) cb(event);
 	};
 	if (proc.onData) {

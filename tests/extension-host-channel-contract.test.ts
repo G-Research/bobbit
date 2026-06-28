@@ -51,6 +51,13 @@ describe("host.channels — public Host API contract", () => {
 		assert.doesNotMatch(src, /trustedLauncher|userGesture|requiresUserGesture:\s*boolean/, "raw WS frames must not trust client launcher/gesture booleans");
 	});
 
+	it("server production wiring installs channel audit and worker module-host sinks", () => {
+		const src = fs.readFileSync(path.join(process.cwd(), "src", "server", "server.ts"), "utf-8");
+		assert.match(src, /extensionChannelAuditSink/, "server must wire a production channel audit sink");
+		assert.match(src, /WorkerChannelModuleHost/, "server must prefer the worker-backed channel module host");
+		assert.match(src, /new OpenPermitsCtor\(\{ audit: extensionChannelAuditSink \}\)/, "open permits must emit audit events in production wiring");
+	});
+
 	it("WebSocket channel operations settle requestIds and buffer synchronous open events", () => {
 		const src = fs.readFileSync(path.join(process.cwd(), "src", "server", "ws", "handler.ts"), "utf-8");
 		assert.match(src, /sendExtChannelFailure\(requestId, err\)/, "thrown channel operation failures must return ext_channel_result for the original requestId");

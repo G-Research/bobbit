@@ -219,6 +219,10 @@ describe("channel frame validation", () => {
 		assertFrameRejected(mod, { kind: "text", data: 123 }, /text|string|data/i);
 		assertFrameRejected(mod, { kind: "json" }, /data|frame/i);
 		assertFrameRejected(mod, { kind: "text", data: "x".repeat(65) }, /size|bytes|quota/i, { maxFrameBytes: 64 });
+		let deep: any = { leaf: true };
+		for (let i = 0; i < 140; i++) deep = { next: deep };
+		assertFrameRejected(mod, { kind: "json", data: deep }, /depth|frame/i, { maxFrameBytes: 1024 * 1024 });
+		assertFrameRejected(mod, { kind: "json", data: { payload: "x".repeat(1024) } }, /exceeds|bytes|size/i, { maxFrameBytes: 64 });
 	});
 });
 

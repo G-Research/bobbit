@@ -8,13 +8,13 @@
 import { randomUUID } from "node:crypto";
 import { ChannelDispatcher, type ChannelHandlerSession } from "./channel-dispatcher.js";
 import { ChannelOpenPermitStore } from "./channel-open-permits.js";
-import { isChannelModuleHost, LocalChannelModuleHost, type ChannelModuleHost } from "./channel-module-host.js";
+import { isChannelModuleHost, WorkerChannelModuleHost, type ChannelModuleHost } from "./channel-module-host.js";
 import {
 	ChannelError,
 	frameByteLength,
 	mergeChannelQuotas,
 	normalizeSingletonKey,
-	validateChannelFrame,
+	validateChannelFrameWithSize,
 	type ChannelAuditEvent,
 	type ChannelContributionRef,
 	type ChannelInfo,
@@ -208,7 +208,7 @@ export class ChannelRegistry {
 		this.tombstoneTtlMs = opts.tombstoneTtlMs ?? Math.max(this.quotas.idleTimeoutMs, 5 * 60_000);
 		this.maxTombstones = opts.maxTombstones ?? 512;
 		this.permits = opts.permits ?? opts.openPermits ?? new ChannelOpenPermitStore({ now: this.now, audit: this.audit });
-		const moduleHost = isChannelModuleHost(opts.moduleHost) ? opts.moduleHost : new LocalChannelModuleHost();
+		const moduleHost = isChannelModuleHost(opts.moduleHost) ? opts.moduleHost : new WorkerChannelModuleHost();
 		this.dispatcher = opts.dispatcher ?? new ChannelDispatcher({ moduleHost });
 		this.idGenerator = opts.idGenerator ?? (() => randomUUID());
 		if (opts.idleSweepIntervalMs !== false) {
@@ -366,8 +366,7 @@ export class ChannelRegistry {
 		const clientId = req.clientId ?? (record.clients.size === 1 ? record.clients.keys().next().value : undefined);
 		if (!clientId || !record.clients.has(clientId)) throw new ChannelError(403, "not_attached", "client is not attached to this channel");
 		if (record.state !== "open") throw new ChannelError(409, "channel_not_open", "channel is not open");
-		const frame = this.validateFrameFor(record, req.frame);
-		const bytes = frameByteLength(frame);
+		const { frame, bytes } = this.validateFrameFor(record, req.frame);
 		this.assertClientSendRate(record, clientId);
 		this.assertInboundCapacity(record, bytes);
 		record.inboundBytes += bytes;
@@ -385,8 +384,7 @@ export class ChannelRegistry {
 	async sendFromHandler(channelId: string, frame: unknown): Promise<void> {
 		const record = this.channels.get(channelId);
 		if (!record || (record.state !== "open" && record.state !== "opening")) throw new ChannelError(404, "channel_not_found", "channel is not open");
-		const typed = this.validateFrameFor(record, frame);
-		const bytes = frameByteLength(typed);
+		const { frame: typed, bytes } = this.validateFrameFor(record, frame);
 		const recipients = Array.from(record.clients.values());
 		this.assertOutboundCapacity(record, bytes * recipients.length, recipients.length);
 		for (const client of recipients) this.assertClientOutboundCapacity(record, client, bytes);
@@ -698,9 +696,9 @@ export class ChannelRegistry {
 		throw new ChannelError(429, "channel_backpressure", message);
 	}
 
-	private validateFrameFor(record: ChannelRecord, frame: unknown): HostChannelFrame {
+	private validateFrameFor(record: ChannelRecord, input: unknown): { frame: HostChannelFrame; bytes: number } {
 		try {
-			return validateChannelFrame(frame, record.quotas.maxFrameBytes);
+			return validateChannelFrameWithSize(input, record.quotas.maxFrameBytes);
 		} catch (err) {
 			if (err instanceof ChannelError) {
 				this.emit({ type: "channel.frame.reject", at: this.now(), ...auditRecord(record), error: err.code });
