@@ -9,6 +9,7 @@ import type { ArtifactsPanel } from "./tools/artifacts/index.js";
 import { registerToolRenderer } from "./tools/renderer-registry.js";
 import type { Attachment } from "./utils/attachment-utils.js";
 import { i18n } from "./utils/i18n.js";
+import { bobbitLoadingAnimation } from "./components/BobbitLoadingAnimation.js";
 
 const BREAKPOINT = 800; // px - switch between overlay and side-by-side
 
@@ -170,12 +171,7 @@ export class ChatPanel extends LitElement {
 
 	render() {
 		if (!this.agent || !this.agentInterface) {
-			return html`<div class="flex items-center justify-center h-full">
-				<div class="text-muted-foreground flex items-center gap-2">
-					<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
-					Connecting…
-				</div>
-			</div>`;
+			return html`<div class="h-full" aria-label="Connecting">${bobbitLoadingAnimation()}</div>`;
 		}
 
 		const isMobile = this.windowWidth < BREAKPOINT;
