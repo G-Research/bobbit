@@ -2521,13 +2521,17 @@ export function doRenderApp(): void {
 
 	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
 		const fullscreenTitle = tab.kind === "preview"
-			? `Fullscreen preview${shortcutHint("toggle-sidebar")}`
-			: `Fullscreen side panel${shortcutHint("toggle-sidebar")}`;
-		const restoreTitle = `Restore side panel${shortcutHint("toggle-sidebar")}`;
+			? `Expand preview to fullscreen${shortcutHint("toggle-sidebar")}`
+			: `Expand side panel to fullscreen${shortcutHint("toggle-sidebar")}`;
+		const restoreTitle = `Restore split view${shortcutHint("toggle-preview")}`;
+		const collapseTarget: SidePanelSizeMode = mode === "fullscreen" ? "split" : "collapsed";
+		const collapseTitle = mode === "fullscreen"
+			? `Collapse to split view${shortcutHint("toggle-preview")}`
+			: `Collapse side panel${shortcutHint("toggle-preview")}`;
 		return html`
 		${mode === "fullscreen" ? html`
 			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${restoreTitle} data-testid="side-panel-restore">
-				${icon(PanelRightOpen, "sm")}
+				${icon(PanelRightClose, "sm")}
 			</button>
 		` : html`
 			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${fullscreenTitle} data-testid="side-panel-fullscreen">
@@ -2543,7 +2547,7 @@ export function doRenderApp(): void {
 			title="Open side panel in new tab"
 			data-testid="side-panel-popout"
 		>${icon(ExternalLink, "sm")}</a>` : ""}
-		<button @click=${() => setSidePanelModeAndRender("collapsed")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Collapse side panel${shortcutHint("toggle-preview")}`} data-testid="side-panel-collapse">
+		<button @click=${() => setSidePanelModeAndRender(collapseTarget)} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${collapseTitle} data-testid="side-panel-collapse">
 			${icon(PanelRightClose, "sm")}
 		</button>
 	`;
