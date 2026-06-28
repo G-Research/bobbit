@@ -128,7 +128,10 @@ describe("ChannelPtyService", () => {
 				spawnOpts = opts;
 				return {
 					pid: 123,
-					write: (data: string) => { writes.push(data); },
+					write: (data: string) => {
+						writes.push(data);
+						if (data.includes("exit")) onExit?.({ exitCode: 0 });
+					},
 					resize: (cols: number, rows: number) => { resizes.push([cols, rows]); },
 					kill: () => { onExit?.({ exitCode: 0 }); },
 					onData: (cb: (data: string) => void) => { onData = cb; return { dispose() {} }; },
@@ -156,6 +159,57 @@ describe("ChannelPtyService", () => {
 			pty.kill("test");
 			assert.equal(exitCode, 0);
 		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("passes only terminal-safe environment variables to the PTY", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-pty-env-"));
+		const envPatch: Record<string, string> = {
+			OPENAI_API_KEY: "openai-secret",
+			GITHUB_TOKEN: "github-secret",
+			AWS_SECRET_ACCESS_KEY: "aws-secret",
+			BOBBIT_TOKEN: "bobbit-secret",
+			BOBBIT_GATEWAY_URL: "https://gateway.example.invalid",
+			NPM_TOKEN: "npm-secret",
+			LANG: "C.UTF-8",
+			COLORTERM: "truecolor",
+		};
+		const original = new Map<string, string | undefined>();
+		for (const key of Object.keys(envPatch)) {
+			original.set(key, process.env[key]);
+			process.env[key] = envPatch[key];
+		}
+		let spawnEnv: Record<string, string> | undefined;
+		const ptyModule = {
+			spawn(_file: string, _args: string[] | string, opts: Record<string, unknown>) {
+				spawnEnv = opts.env as Record<string, string>;
+				return {
+					pid: 321,
+					write() {},
+					resize() {},
+					kill() {},
+					onData: () => ({ dispose() {} }),
+					onExit: () => ({ dispose() {} }),
+				};
+			},
+		};
+		try {
+			const service = new ChannelPtyService({ sessionManager: sessionManager({ worktreePath: cwd }), ptyModule });
+			await service.openTerminal("s1");
+			assert.ok(spawnEnv);
+			assert.equal(spawnEnv!.TERM, "xterm-256color");
+			assert.equal(spawnEnv!.COLORTERM, "truecolor");
+			assert.equal(spawnEnv!.LANG, "C.UTF-8");
+			assert.ok(spawnEnv!.PATH || spawnEnv!.Path, "PATH/Path should be preserved");
+			for (const key of ["OPENAI_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "BOBBIT_TOKEN", "BOBBIT_GATEWAY_URL", "NPM_TOKEN"]) {
+				assert.equal(spawnEnv![key], undefined, `${key} should be stripped from PTY env`);
+			}
+		} finally {
+			for (const [key, value] of original) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	});

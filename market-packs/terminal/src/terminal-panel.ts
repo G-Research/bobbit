@@ -40,6 +40,7 @@ type SessionState = {
 	terminalState: "idle" | "connecting" | "attached" | "detached" | "exited" | "killed" | "disconnected" | "error";
 	connecting?: boolean;
 	autoStartAttempted?: boolean;
+	attachAttempted?: boolean;
 	startupError?: string;
 	host?: HostApi;
 };
@@ -59,7 +60,12 @@ export default function createTerminalPanel() {
 			}
 			queueMicrotask(() => {
 				ensureTerminalMounted(state);
-				if (!state.startupError) void attachOrOfferStart(state, params?.autoStart === true);
+				const autoStart = params?.autoStart === true && !state.autoStartAttempted;
+				if (autoStart) state.autoStartAttempted = true;
+				if (!state.startupError && !state.attachAttempted) {
+					state.attachAttempted = true;
+					void attachOrOfferStart(state, autoStart);
+				}
 			});
 			return state.root;
 		},
@@ -159,8 +165,7 @@ async function attachOrOfferStart(state: SessionState, autoStart: boolean): Prom
 			await attachChannel(state, await host.channels.attach(live.id), "Reattached to terminal.");
 			return;
 		}
-		if (autoStart && !state.autoStartAttempted) {
-			state.autoStartAttempted = true;
+		if (autoStart) {
 			await startTerminal(state, false);
 			return;
 		}
@@ -286,7 +291,6 @@ function setStatus(state: SessionState, text: string, terminalState: SessionStat
 	state.statusEl.textContent = text;
 	state.root.setAttribute("data-terminal-state", terminalState);
 	updateButtons(state);
-	state.host?.requestRender?.();
 }
 
 function updateButtons(state: SessionState): void {
