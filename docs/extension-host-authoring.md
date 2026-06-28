@@ -2,18 +2,18 @@
 
 This guide walks through making a **marketplace pack** that contributes Extension Host
 surfaces — a chat-block **renderer**, an interactive **server action handler**, side
-**panels**, pack-owned **routes**, non-chat **entrypoints**, implicit pack-scoped **stores**,
-and **session** access. By the end you will understand every contribution point, *where each
-one is declared on disk*, and the one mediated **Host API** they all flow through — with no
-privileged escape hatch.
+**panels**, long-lived **channels**, pack-owned **routes**, non-chat **entrypoints**, implicit
+pack-scoped **stores**, and **session** access. By the end you will understand every
+contribution point, *where each one is declared on disk*, and the one mediated **Host API**
+they all flow through — with no privileged escape hatch.
 
 The schema is laid out so that **each contribution lives where its runtime scope already is**:
 
 - **Tool-scoped** contributions (`renderer`, `actions`) stay on the tool YAML — they are the
   only ones that depend on a tool call / `toolUseId`.
-- **Pack-scoped** contributions move off arbitrary tool YAMLs: panels and entrypoints are
-  one-file-each under `panels/` and `entrypoints/`, and routes are a single module + allowlist
-  declared on `pack.yaml`.
+- **Pack-scoped** contributions move off arbitrary tool YAMLs: panels, channels, and
+  entrypoints are one-file-each under `panels/`, `channels/`, and `entrypoints/`; routes are a
+  single module + allowlist declared on `pack.yaml`.
 - **Shared implementation** lives in `lib/`, reachable from any declaring file via `../`.
 - **Stores are implicit** — the namespace is already the server-derived `packId`, so there is
   nothing to declare.
@@ -27,10 +27,11 @@ This guide is the practical how-to.
 
 - [docs/marketplace.md](marketplace.md) — packs, sources, scopes/precedence, install/uninstall, activation controls, and the full threat model. This guide assumes you can already author and install a pack.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
+- [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
-**Status:** renderers, actions, panels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `host.capabilities` reports all flags `true` on a current host.
+**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
 
-The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
+The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), `market-packs/terminal/` (the first-party xterm terminal over `host.channels`), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
 ## Big picture: what you are contributing, and where it lives
 
@@ -39,6 +40,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Renderer** | tool YAML `renderer:` | Browser, main UI thread | `host.invokeAction`, `host.requestRender` |
 | **Server actions** | tool YAML `actions:` | Gateway (confined worker) | the handler `ctx.host` |
 | **Side panel** | `panels/<panel>.yaml` (auto-discovered) | Browser, main UI thread | opened via `host.ui.openPanel` |
+| **Channel** | `channels/<name>.yaml` (listed in `contents.channels`) | Browser `HostChannel` + Gateway handler | `host.channels.{open,attach,list}` |
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
@@ -50,9 +52,10 @@ and the server-side `host.agents.*` (launch + orchestrate child agents), availab
 that hold a `host`.
 
 **Why this layout.** Several of these contributions are already **pack-scoped** at runtime:
-a `panelId` is opened through the Host API by any surface in the pack, routes resolve through
-a pack-level registry keyed by the server-derived `packId`, stores are namespaced by `packId`,
-and entrypoints are launchers for the whole pack. Bolting them onto an arbitrary carrier tool
+a `panelId` is opened through the Host API by any surface in the pack, channels resolve through
+pack-level declarations keyed by the server-derived `packId`, routes resolve through a pack-level
+registry, stores are namespaced by `packId`, and entrypoints are launchers for the whole pack.
+Bolting them onto an arbitrary carrier tool
 was unintuitive and blocked clean UI-only packs. The V1 schema makes the on-disk layout match
 the actual runtime scope, which is also what lets a pack ship **no tools at all** (covered by
 fixture/litmus packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`).
@@ -90,6 +93,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
     ToolRenderer.js               # optional, co-located tool renderer
 
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
+  channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
@@ -108,7 +112,8 @@ surfaces only, or any mix — a pack with **no `tools/` dir at all** is fully su
 ### `pack.yaml`
 
 `pack.yaml` is a table of contents of the **user-facing / configurable** things, plus the
-pack-level `routes` reference. Panels are **not** listed (they are support surfaces,
+pack-level `routes` reference. Channels are listed because they create server-side handlers and
+need activation/diagnostic visibility. Panels are **not** listed (they are support surfaces,
 auto-discovered from `panels/*.yaml`).
 
 ```yaml
@@ -119,6 +124,7 @@ contents:
   roles:       []
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
+  channels:    []                       # channels/<name>.yaml basenames; schema 2
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -130,6 +136,9 @@ Rules:
 - **`contents.entrypoints: string[]`** — each entry is the **basename** (no extension) of an
   `entrypoints/<name>.yaml` file. This list is the activation catalogue the Market UI toggles
   and the registry keys by. An entrypoint file not listed here is not loaded. Default-enabled.
+- **`contents.channels: string[]`** — schema-2 channel contribution basenames under
+  `channels/<name>.yaml`. A channel file not listed here is not loaded, and duplicate
+  channel names within a pack are rejected.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -151,6 +160,7 @@ resolved absolute path must stay **inside the pack root**:
 |---|---|---|
 | `tools/<group>/<tool>.yaml` | `renderer`, `actions.module` | the tool YAML's dir |
 | `panels/<panel>.yaml` | `entry` | the panel YAML's dir (`panels/`) |
+| `channels/<name>.yaml` | `module` | the channel YAML's dir (`channels/`) |
 | `pack.yaml` | `routes.module` | the pack root |
 
 A path *may* use `..` segments (e.g. a tool YAML pointing at `../../lib/SharedRenderer.js`, a
@@ -184,8 +194,8 @@ actions:
 - **`actions.names:`** — optional allowlist. When present the endpoint rejects any `:action`
   not in the list **before loading the module**.
 
-A tool YAML carries no other contribution keys. `panels`/`routes`/`entrypoints`/`stores` on a
-tool YAML are not part of the schema and are ignored — they belong in `panels/`,
+A tool YAML carries no other contribution keys. `panels`/`channels`/`routes`/`entrypoints`/`stores` on a
+tool YAML are not part of the schema and are ignored — they belong in `panels/`, `channels/`,
 `entrypoints/`, `pack.yaml.routes`, or are implicit. (There is no migration warning: the
 parser reads only `renderer` + `actions` and treats any old pack-scoped key as it would any
 unrecognized key.)
@@ -430,10 +440,11 @@ Check capabilities via `host.capabilities`, never member presence:
 ```js
 if (host.capabilities.invokeAction) { /* always true on a v1 host */ }
 if (host.capabilities.has("callRoute")) { /* true on a current host */ }
+if (host.capabilities.channels) { /* safe to use host.channels */ }
 ```
 
 A current host reports all client flags `true` — `{ invokeAction, requestRender, callRoute,
-session, ui, store }`. The **server-side** capabilities are `{ session, store, agents }` (a
+session, ui, store, channels }`. The **server-side** capabilities are `{ session, store, agents }` (a
 current host reports all three `true`). `host.version` (`HOST_API_VERSION`, `1`) and `host.contractVersion`
 (`HOST_CONTRACT_VERSION`) identify the contract revision. All capabilities are purely additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
@@ -442,17 +453,17 @@ current host reports all three `true`). `host.version` (`HOST_API_VERSION`, `1`)
 
 1. Register the source, then **Install** the pack into a scope (see [docs/marketplace.md](marketplace.md)).
 2. `/api/tools` now lists your tool with `rendererKind: "pack"` (and `hasActions: true`).
-   `/api/ext/contributions` lists your pack's panels/entrypoints/routes.
+   `/api/ext/contributions` lists your pack's panels/entrypoints/routes and channel names.
 3. Open a session whose transcript contains a call of your tool → it renders with your pack
    renderer (placeholder → real renderer).
 4. Click the action button → the handler runs → your renderer paints the result.
-5. **Reload** → the renderer + panels + entrypoints still load (registration is re-driven from
-   metadata).
+5. **Reload** → the renderer + panels + channels + entrypoints still load (registration is re-driven from
+   metadata); live channel reattach works only while the gateway process is still alive.
 6. **Update** the pack → caches invalidate synchronously; the next call uses the new code.
-7. **Uninstall** → the renderer, panels, entrypoints, and actions disappear live; any
-   displaced built-in is restored.
+7. **Uninstall** → the renderer, panels, channels, entrypoints, and actions disappear live; any
+   displaced built-in is restored. Live channels from the removed pack are closed by cleanup.
 
-## Pack-scoped surfaces: panels, routes, entrypoints, stores, session
+## Pack-scoped surfaces: panels, channels, routes, entrypoints, stores, session
 
 Everything below is reached through the **same** Host API your renderer holds (`ctx.host`, or
 the `host` argument a panel/entrypoint is handed) and authorized through the **same**
@@ -460,7 +471,7 @@ per-session guard — there is still no raw escape hatch.
 
 ### How pack identity is bound (you never supply it)
 
-The scoped capabilities (`host.store.*`, `host.callRoute`, `host.session.*`) all act **as a
+The scoped capabilities (`host.store.*`, `host.callRoute`, `host.channels.*`, `host.session.*`) all act **as a
 specific pack** — store keys are namespaced by `packId`, `callRoute` reaches only your pack's
 own routes, session reads are own-session. That identity must not be forgeable, so it is
 **server-derived, never caller-supplied**:
@@ -482,12 +493,13 @@ session's scope + caller's own session** — `allowedTools` no longer narrows wh
 session may reach. This is exactly what enables **orphan / UI-only packs**: a launcher can open
 a panel and obtain a pack-scoped Host API without inventing a dummy tool. It grants no
 capability a tool-bound surface did not already have (store is `packId`-namespaced, `callRoute`
-reaches only your own routes, session reads are own-session, session writes keep the
-user-gesture + one-time permit gate).
+reaches only your own routes, channels resolve only to your declared handlers, session reads are
+own-session, session writes and process-creating channel opens keep the user-gesture + one-time
+permit gate).
 
 **Practical consequence for you:** you just call `host.store.get(...)` /
-`host.callRoute(...)` / `host.session.readToolCall(...)`. You never pass a pack id, a `tool`
-name, or a token. (A same-realm malicious pack could still forge its own token — the
+`host.callRoute(...)` / `host.channels.open(...)` / `host.session.readToolCall(...)`. You never
+pass a pack id, a `tool` name, a token, a URL, or a WebSocket. (A same-realm malicious pack could still forge its own token — the
 documented Model-A residual; see [marketplace.md](marketplace.md). The token closes the
 *accidental* cross-pack path.)
 
@@ -530,6 +542,335 @@ Authorization and server-derived `packId` binding remain parent-side.
   `review-final`). Per-value, key-count, and emergency per-pack byte limits still apply.
 - **Non-pack callers are rejected.** A deep-link carries only ids; the payload lives in the
   store, so a panel reopened from a URL rehydrates by `store.get(id)` and survives reload.
+
+### Channels — long-lived framed communication (`host.channels`)
+
+Channels are the Extension Host answer for UI that needs a long-lived, bidirectional stream:
+REPLs, log tails, debug consoles, SSH-like sessions, and terminal-like tools. They are generic
+and protocol-agnostic. The Host API owns only the channel lifecycle and the v1 frame envelope;
+your pack owns the channel name, protocol, handler, and payload semantics.
+
+There is deliberately no raw transport surface. A pack never receives a WebSocket, URL, bearer
+token, `Authorization` header, gateway path, or caller-selectable `packId`. Browser code holds a
+`HostChannel`; gateway code mediates every open, attach, send, close, and cleanup.
+
+#### Public client API
+
+```ts
+type HostChannelFrame =
+  | { kind: "text"; data: string }
+  | { kind: "json"; data: unknown };
+
+interface HostChannelOpenInit {
+  data?: unknown;
+  singletonKey?: string;
+}
+
+interface ChannelInfo {
+  id: string;
+  name: string;
+  packId: string;
+  sessionId: string;
+  state: "opening" | "open" | "closing" | "closed";
+  createdAt: number;
+  lastActiveAt: number;
+  attached: boolean;
+  closeReason?: string;
+}
+
+interface HostChannel {
+  readonly id: string;
+  readonly name: string;
+  readonly state: "open" | "closing" | "closed";
+  send(frame: HostChannelFrame): Promise<void>;
+  close(reason?: string): Promise<void>;
+  onFrame(cb: (frame: HostChannelFrame) => void): () => void;
+  onClose(cb: (ev: { reason?: string; error?: string }) => void): () => void;
+}
+
+interface HostChannelsApi {
+  open(name: string, init?: HostChannelOpenInit): Promise<HostChannel>;
+  attach(id: string): Promise<HostChannel>;
+  list(opts?: { name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]>;
+}
+```
+
+Feature-detect before use:
+
+```js
+if (!host.capabilities.channels || !host.channels) {
+  renderUnavailable("This host does not support channels.");
+  return;
+}
+```
+
+Frame rules:
+
+- V1 accepts only `{ kind: "text", data: string }` and `{ kind: "json", data: unknown }`.
+- JSON data must be JSON-serializable and within the configured frame-size limit.
+- Binary/bytes frames are intentionally not part of v1. Encode small domain data as JSON; do not
+  smuggle arbitrary binary streams through strings unless your protocol explicitly owns that cost.
+
+#### Pack declaration
+
+Declare channel handlers with a dedicated contribution type. Do not overload routes with
+streaming semantics.
+
+```yaml
+# pack.yaml
+name: repl-pack
+schema: 2
+contents:
+  channels: [repl]
+  entrypoints: [open-repl]
+```
+
+```yaml
+# channels/repl.yaml
+name: repl                       # pack-local name used by host.channels.open("repl")
+protocol: example.repl.v1        # diagnostics/documentation string; not dispatch authority
+module: ../lib/repl-channel.mjs  # relative to this YAML; contained in the pack root
+handler: repl                    # export member; defaults to name
+requiresUserGesture: true
+quotas:
+  maxChannelsPerSessionPerPack: 1
+  maxFrameBytes: 65536
+  maxInboundBytes: 262144
+  maxInboundFrames: 128
+  maxOutboundBytes: 524288
+  maxOutboundFrames: 128
+  maxClientOutboundBytes: 262144
+  maxClientOutboundFrames: 64
+  maxClientSendRatePerSecond: 60
+  idleTimeoutMs: 300000
+  openTimeoutMs: 10000
+  closeGraceMs: 2000
+```
+
+Rules:
+
+- `contents.channels` lists `channels/<name>.yaml` basenames. Unlisted files are not loaded.
+- `name` is pack-local and must be unique within the pack. Cross-pack names do not collide.
+- `module` resolves relative to the channel YAML and must stay inside the pack root.
+- `protocol` is for humans, diagnostics, and convention matching; the server still resolves by the
+  calling pack's declared `name`.
+- Unknown fields are inert metadata. Unknown capabilities are ignored.
+- Canonical quota keys are the ones shown above. Compatibility aliases such as
+  `maxInboundBufferedBytesPerChannel`, `maxOutboundBufferedFramesPerChannel`,
+  `maxBufferedBytesPerAttachedClient`, and `sendRateFramesPerSecond` map to the canonical keys.
+
+#### Handler contract
+
+A channel module exports either a named handler or a `channels` map. The handler receives a
+server-verified context and returns optional lifecycle hooks:
+
+```js
+// lib/repl-channel.mjs
+export async function repl(ctx) {
+  await ctx.send({ kind: "json", data: { op: "ready" } });
+
+  return {
+    async onClientFrame(frame) {
+      if (frame.kind === "text") {
+        await ctx.send({ kind: "text", data: `echo: ${frame.data}` });
+      }
+    },
+    async onAttach(clientId) {
+      await ctx.send({ kind: "json", data: { op: "attached", clientId } });
+    },
+    async onDetach(clientId) {
+      ctx.audit({ type: "channel.detach", reason: `client ${clientId} detached` });
+    },
+    async close(reason) {
+      // Stop child resources, subscriptions, timers, or sockets owned by this handler.
+    },
+  };
+}
+
+export const channels = { repl };
+```
+
+The server supplies `ctx.sessionId`, `ctx.packId`, `ctx.contributionId`, `ctx.channelId`,
+`ctx.name`, `ctx.protocol`, `ctx.init`, `ctx.send(frame)`, `ctx.close(reason?)`, and
+`ctx.audit(event)`. Treat `ctx.init` and every client frame as untrusted protocol input.
+
+#### Open, attach, list, detach, close
+
+Common browser flow for a panel-backed channel:
+
+```js
+let channel;
+let cleanup = () => {};
+
+async function mount(host) {
+  const live = (await host.channels.list({ name: "repl" }))
+    .filter((c) => c.state === "open" || c.state === "opening")
+    .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+
+  if (live) {
+    await attach(await host.channels.attach(live.id));
+  } else {
+    renderStartButton(); // calls startFromTrustedLauncherOrGesture(), not mount-time open
+  }
+}
+
+async function startFromTrustedLauncherOrGesture(host) {
+  await attach(await host.channels.open("repl", {
+    singletonKey: "default",
+    data: { mode: "safe" },
+  }));
+}
+
+async function attach(next) {
+  cleanup();
+  channel = next;
+  const offFrame = channel.onFrame((frame) => renderFrame(frame));
+  const offClose = channel.onClose((ev) => renderClosed(ev.reason || ev.error || "closed"));
+  cleanup = () => { offFrame(); offClose(); };
+}
+
+async function sendLine(line) {
+  await channel.send({ kind: "text", data: `${line}\n` });
+}
+
+async function stop() {
+  await channel.close("user closed repl");
+}
+```
+
+Lifecycle semantics:
+
+- `open(name, init)` creates a handler only for a channel declared by the calling pack and only
+  with a valid open grant from a user gesture or trusted launcher. If `init.singletonKey` names an
+  existing open channel for the same `{ session, pack, name }`, the registry reuses it and attaches
+  the caller instead of creating a duplicate.
+- `attach(id)` attaches the caller to an existing channel from the same session and pack. It does
+  not require an open grant because it does not create a new process or handler.
+- `list(opts)` returns only this pack's channels in this session. Use `name` to find singleton
+  channels and `includeClosed` only for diagnostics or explicit closed-state UX.
+- Panel unmount, tab hide, browser reload, or WebSocket reconnect detach the client. They do not
+  kill the handler. Reopen/remount by calling `list()` and `attach()`.
+- `close(reason?)` is the explicit owner action that terminates the server resource. All attached
+  clients receive `onClose`.
+- Session termination, pack disable/uninstall/precedence changes, idle timeout, handler failure,
+  and gateway shutdown close affected channels from the server side.
+- Gateway restart does not persist v1 live channels. After restart, `attach()` returns closed or
+  not found; render a clear disconnected state and offer a user-triggered new `open()`.
+- V1 does not replay historical frames by default. Server queues are delivery buffers, not durable
+  scrollback. Persist important state in `host.store` or make replay part of your own protocol.
+
+#### Security and open grants
+
+Channel authority follows the existing surface-token model:
+
+- The trusted app constructs the Host API and mints a surface token bound to the current session,
+  owning pack, and contribution. Pack code never sees that token.
+- The server derives `{ sessionId, packId, contributionId }` from that token and resolves the
+  channel `name` only inside that pack's `contents.channels` declarations.
+- `send` and `close` are accepted only from a browser connection that has already opened or
+  attached the exact `{ sessionId, packId, channelId }` tuple.
+- Cross-pack and cross-session `open`, `attach`, `list`, `send`, and `close` attempts are rejected
+  before handler code runs.
+
+Every process-creating `open()` also needs a server-verifiable one-shot `openGrant`. The app-side
+channel bridge mints the grant over Bobbit-owned infrastructure and consumes it immediately on
+`ext_channel_open`. Missing, forged, expired, replayed, or mismatched grants are rejected before
+handler or PTY creation.
+
+Interactive channel creation is normally initiated by a trusted Bobbit launcher, such as an
+entrypoint with `target.action: channel-panel`, which consumes the user's click, opens/focuses the
+panel, mints the grant, and creates or reuses the channel. Panel code may `list()` and `attach()`
+on remount/reload; if it calls `open()` without a current trusted activation, the server rejects
+it. There is no `trustedLauncher` boolean, no client-trusted gesture flag, and no bare
+surface-token open path.
+
+#### Errors, quotas, and backpressure
+
+Authors should treat all channel methods as fallible:
+
+- `open()` can reject for missing declaration, missing user/trusted launcher activation, invalid
+  or consumed open grant, quota exhaustion, handler load failure, open timeout, sandbox/read-only
+  policy, or missing privileged helper.
+- `attach()` can reject when the channel belongs to another pack/session, is closed, or disappeared
+  after gateway restart.
+- `send()` can reject for invalid frame shape, non-serializable JSON, frame size, closed channel,
+  not-attached client, inbound buffer limits, or send-rate/backpressure limits.
+- `onClose()` is the durable lifecycle signal for handler exit, server cleanup, quota failure,
+  session termination, pack removal, and gateway shutdown.
+
+Keep outbound data bounded. Log streams should sample, coalesce, or drop old lines before hitting
+quota. Debug consoles should surface `channel_backpressure` as a visible paused/error state rather
+than retrying in a tight loop. If you need durable replay, store checkpoints or summaries via
+`host.store` and make replay an explicit JSON request.
+
+#### Protocol guidance
+
+Use the small frame envelope to define a clear pack protocol:
+
+- **REPLs:** text frames for stdin/stdout, JSON frames for prompts, evaluation status, and reset.
+  Use a singleton key per session unless multiple independent REPLs are intentional.
+- **Log streams:** server text frames for log lines, JSON control frames for filters/cursors. Keep
+  reconnect replay bounded and explicit; do not rely on server delivery queues as scrollback.
+- **Debug consoles:** JSON frames for breakpoints, state snapshots, and command results; text
+  frames only for human-readable console output.
+- **SSH-like/custom terminal protocols:** model resize, auth state, reconnect, and exit as JSON
+  operations. Do not expose remote socket URLs or credentials to pack UI code.
+- **Terminal-like tools:** follow the blessed `terminal.v1` convention below unless you need a
+  deliberately different protocol.
+
+#### Blessed terminal protocol convention
+
+Bobbit's first-party terminal pack declares `channels/terminal.yaml` with `protocol: terminal.v1`
+and uses the generic channel API; there is no `host.terminal` core API.
+
+Protocol frames:
+
+- Client input to PTY stdin: `{ kind: "text", data: "..." }`.
+- Server PTY output: `{ kind: "text", data: "..." }`.
+- Resize: `{ kind: "json", data: { op: "resize", cols, rows } }`.
+- Status: `{ kind: "json", data: { op: "status", state: "attached", pid } }`.
+- Exit: `{ kind: "json", data: { op: "exit", code, signal, reason } }`.
+- Kill request used by the built-in panel: `{ kind: "json", data: { op: "kill", reason: "killed" } }`.
+- Errors: `{ kind: "json", data: { op: "error", message, operation? } }`.
+
+The PTY helper is a narrow privileged handler capability, not a general process API:
+
+```yaml
+# channels/terminal.yaml
+name: terminal
+protocol: terminal.v1
+module: ../lib/terminal-channel.mjs
+handler: terminal
+capabilities: [sessionPty]
+requiresUserGesture: true
+quotas:
+  maxChannelsPerSessionPerPack: 1
+```
+
+Only authorized first-party/reviewed channel declarations receive `ctx.host.pty`. Generic
+handlers receive no `pty` surface. The helper resolves the session worktree/cwd, shell, terminal
+environment allowlist, read-only policy, and cleanup. Read-only sessions reject terminal opens.
+Sandboxed sessions must run inside an equivalent sandbox; if that is unavailable, the helper fails
+closed instead of silently spawning a host shell.
+
+The built-in xterm panel behavior:
+
+- Entrypoints: session menu `Open Terminal` and composer slash `/terminal` both open/focus the
+  terminal side panel without writing terminal output into chat.
+- Identity: one session-persistent singleton channel (`singletonKey: session-terminal`) for the
+  built-in terminal pack.
+- Reopen/remount/reload: the panel uses `list({ name: "terminal" })` and `attach(id)` to reconnect
+  while the gateway process is alive. Old output is not guaranteed after full reload.
+- Resize: xterm fits to the panel and sends debounced JSON resize frames.
+- `Kill`: sends a kill JSON frame and terminates the PTY/channel.
+- `Restart`/`Start`: creates a fresh terminal from a user action after exit, kill, error, or
+  disconnected restart state.
+- `Close panel`: hides/detaches the UI only; the PTY keeps running until kill, exit, idle cleanup,
+  session termination, or gateway shutdown.
+- Typing `exit` exits the shell naturally; the handler sends the exit JSON frame, closes the
+  channel, and the panel preserves the terminal viewport with a closed status.
+- Styling and accessibility use Bobbit theme tokens, bounded xterm scrollback, explicit button
+  labels, and an `aria-live` status region.
 
 ### Panels — persistent side panels (`host.ui.openPanel`)
 
@@ -1295,7 +1636,12 @@ for how built-in packs are shipped, resolved in place, and disabled.)
 
 Why do this? It makes the pack contract **load-bearing for production code**, not just for tests —
 if the Host API can't express a real shipped feature, the gap shows up in the app, not in a litmus.
-Two pieces of the migration are worth understanding when authoring your own ambitious pack:
+The built-in `terminal` pack does the same for `host.channels`: xterm UI, session launchers,
+reattach, kill/restart, and PTY execution all run through the generic channel contract, proving no
+terminal-specific `host.terminal` escape hatch is needed.
+
+Two pieces of the PR Walkthrough migration are worth understanding when authoring your own
+ambitious pack:
 
 - **Launch re-expression — mint a real isolated reviewer child via `host.agents`.** The deleted
   built-in git-widget button launched a *new dedicated child walkthrough agent* (a fresh session
@@ -1347,11 +1693,15 @@ The Host API is the single security boundary. As an author, your obligations are
 - [ ] **Keep `args` identity-free** — `sessionId`/`toolUseId` come from the verified context.
 - [ ] **Don't bare-import `lit`** in a renderer or panel — use the factory toolkit.
 - [ ] **Use theme tokens**, preserve any iframe `sandbox` attributes, never mutate the transcript from a renderer.
-- [ ] **Go through the Host API** for every pack→server call — `host.invokeAction`, `host.callRoute`, `host.store.*`, `host.session.*`. There is no raw fetch by design.
+- [ ] **Go through the Host API** for every pack→server call — `host.invokeAction`, `host.callRoute`, `host.channels.*`, `host.store.*`, `host.session.*`. There is no raw fetch, raw WebSocket, URL, bearer token, or gateway path by design.
 - [ ] **Never build a URL or hash string** — `host.ui.openPanel` / `host.ui.navigate` take structured `{ panelId | route, params }` targets.
-- [ ] **No post / navigate / action on mount** — panels and entrypoints act only from a real user gesture; `host.session.postMessage` is gesture-gated and throws on mount.
-- [ ] **Never supply a pack id, `tool`, or token to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
-- [ ] **Keep paths inside the pack root** — `renderer`, `actions.module`, panel `entry`, and `routes.module` resolve relative to their declaring file; `../lib/...` is fine, escaping the pack root is rejected.
+- [ ] **No post / navigate / action / channel open on mount** — panels and entrypoints act only from a real user gesture; `host.session.postMessage` and process-creating `host.channels.open` calls are grant-gated.
+- [ ] **Never supply a pack id, `tool`, token, or transport to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
+- [ ] **Declare channels in `contents.channels` + `channels/<name>.yaml`** — do not use routes as streaming transports.
+- [ ] **Open process-creating channels only from a user gesture or trusted launcher** — `openGrant` is minted/consumed by Bobbit-owned code; there is no client-trusted flag.
+- [ ] **Handle channel backpressure and close events** — every `open`/`attach`/`send`/`close` promise can reject, and `onClose` is the lifecycle source of truth.
+- [ ] **Do not request `sessionPty` unless you are an authorized first-party/reviewed terminal-like pack** — generic handlers do not receive `ctx.host.pty`, and sandbox/read-only policy is enforced by the helper.
+- [ ] **Keep paths inside the pack root** — `renderer`, `actions.module`, panel `entry`, channel `module`, and `routes.module` resolve relative to their declaring file; `../lib/...` is fine, escaping the pack root is rejected.
 - [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are available directly (no declaration). The worker is resource/crash isolation only; design handlers to be fast.
 - [ ] **Standalone pi extensions are host/runtime code** — source-level trust is required before executable discovery, and enabled extensions load into matching agent sessions by default via `--extension`.
 - [ ] **Feature-detect via `host.capabilities`**, never member presence.
@@ -1367,9 +1717,10 @@ the contract adapter, and the worker isolation model — is documented in
 
 - **Authoritative V1 schema:** `docs/design/pack-schema-v1-rationalisation.md`
 - Renderer+action example pack: `tests/fixtures/market-sources/retry-demo-src/retry-demo/`
-- Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (first-party reviewer tools + panel/routes/entrypoints), `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/` (no-tools / UI-only)
-- Browser E2Es: `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, `pr-walkthrough-pack.spec.ts`
+- Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (first-party reviewer tools + panel/routes/entrypoints), `market-packs/terminal/` (first-party xterm terminal over channels), `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/` (no-tools / UI-only)
+- Browser E2Es: `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, `pr-walkthrough-pack.spec.ts`, `terminal-pack.spec.ts`
 - Frozen Host API types: `src/shared/extension-host/host-api.ts`
+- Extension channel substrate: `src/app/channel-bridge.ts`, `src/server/extension-host/channel-registry.ts`, `channel-open-permits.ts`, `channel-module-host.ts`, `channel-pty-helper.ts`
 - Action / route dispatch + handler ctx: `src/server/extension-host/action-dispatcher.ts`, `route-dispatcher.ts`
 - Server-side Host API (`ctx.host`): `src/server/extension-host/server-host-api.ts`
 - Pack identity + scoped authz: `src/server/extension-host/pack-identity.ts`, `action-guard.ts`, `surface-binding.ts`, `path-guard.ts`
@@ -1378,5 +1729,5 @@ the contract adapter, and the worker isolation model — is documented in
 - Internal→contract adapter: `src/server/extension-host/contract-adapter.ts`
 - Pack store + worker isolation: `pack-store.ts`, `module-host-worker.ts`, `module-host-bootstrap.ts`, `confinement-loader.ts`
 - Activation persistence: `src/server/agent/project-config-store.ts` (`pack_activation`)
-- Client registries: `src/app/pack-renderers.ts`, `pack-panels.ts`, `pack-entrypoints.ts`, `host-api.ts`
+- Client registries: `src/app/pack-renderers.ts`, `pack-panels.ts`, `pack-entrypoints.ts`, `host-api.ts`, `channel-bridge.ts`
 - Renderer render-context type: `src/ui/tools/types.ts`
