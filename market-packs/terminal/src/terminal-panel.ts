@@ -5,6 +5,7 @@ const SINGLETON_KEY = "session-terminal";
 const MAX_SCROLLBACK = 5000;
 const FIT_RETRY_DELAYS_MS = [0, 32, 80, 160, 320] as const;
 const RESIZE_SEND_DEBOUNCE_MS = 120;
+const SCROLL_BOTTOM_EPSILON = 1;
 
 type HostChannelFrame = { kind: "text"; data: string } | { kind: "json"; data: unknown };
 type HostChannel = {
@@ -40,7 +41,11 @@ type SessionState = {
 	fitRetryTimer?: number;
 	fitFrame?: number;
 	resizeSendTimer?: number;
+	scrollFrame?: number;
 	lastResizeSent?: string;
+	terminalDisposerCount?: number;
+	followOutput: boolean;
+	replayHydrating?: boolean;
 	channel?: HostChannel;
 	disposers: Array<() => void>;
 	status: string;
@@ -140,6 +145,7 @@ function createSessionState(sid: string): SessionState {
 		disposers: [],
 		status: "Ready",
 		terminalState: "idle",
+		followOutput: true,
 	};
 	startButton.addEventListener("click", () => { void startTerminal(state, true); });
 	killButton.addEventListener("click", () => { void killTerminal(state); });
@@ -169,8 +175,13 @@ function ensureTerminalMounted(state: SessionState): void {
 	term.open(state.terminalHost);
 	state.term = term;
 	state.fit = fit;
-	const inputDisposable = term.onData((data) => { void state.channel?.send({ kind: "text", data }).catch((err) => setError(state, err)); });
-	state.disposers.push(() => inputDisposable.dispose());
+	const inputDisposable = term.onData((data) => {
+		reconcileActivePrompt(state);
+		void state.channel?.send({ kind: "text", data }).catch((err) => setError(state, err));
+	});
+	const scrollDisposable = term.onScroll(() => updateFollowOutputFromViewport(state));
+	state.disposers.push(() => inputDisposable.dispose(), () => scrollDisposable.dispose());
+	state.terminalDisposerCount = state.disposers.length;
 	state.resizeObserver = new ResizeObserver(() => scheduleFitAndResize(state));
 	state.resizeObserver.observe(state.terminalHost);
 	scheduleFitAndResize(state);
@@ -275,7 +286,9 @@ async function startTerminal(state: SessionState, fromButton: boolean): Promise<
 
 async function attachChannel(state: SessionState, channel: HostChannel, status: string): Promise<void> {
 	cleanupChannelListeners(state);
+	resetTerminalForAttach(state);
 	state.startupError = undefined;
+	state.replayHydrating = true;
 	state.channel = channel;
 	state.disposers.push(channel.onFrame((frame) => handleFrame(state, frame)));
 	state.disposers.push(channel.onClose((event) => {
@@ -291,23 +304,37 @@ async function attachChannel(state: SessionState, channel: HostChannel, status: 
 }
 
 function cleanupChannelListeners(state: SessionState): void {
-	if (state.disposers.length <= 1) return;
-	const keep = state.disposers.slice(0, 1);
-	for (const dispose of state.disposers.slice(1)) {
+	const terminalDisposerCount = state.terminalDisposerCount ?? 1;
+	if (state.disposers.length <= terminalDisposerCount) return;
+	const keep = state.disposers.slice(0, terminalDisposerCount);
+	for (const dispose of state.disposers.slice(terminalDisposerCount)) {
 		try { dispose(); } catch { /* ignore */ }
 	}
 	state.disposers = keep;
 }
 
+function resetTerminalForAttach(state: SessionState): void {
+	ensureTerminalMounted(state);
+	state.followOutput = true;
+	state.term?.reset();
+	state.term?.clear();
+	keepPromptVisible(state);
+}
+
 function handleFrame(state: SessionState, frame: HostChannelFrame): void {
 	if (frame.kind === "text") {
-		state.term?.write(frame.data);
+		state.term?.write(frame.data, () => {
+			if (state.replayHydrating) keepPromptVisible(state);
+			else reconcileActivePrompt(state);
+		});
 		return;
 	}
 	const data = objectOf(frame.data);
 	if (!data) return;
 	if (data.op === "status") {
+		state.replayHydrating = false;
 		setStatus(state, typeof data.state === "string" ? `Terminal ${data.state}.` : "Terminal attached.", "attached");
+		reconcileActivePrompt(state);
 		return;
 	}
 	if (data.op === "error") {
@@ -363,7 +390,10 @@ function runFitAttempt(state: SessionState, generation: number, attempt: number)
 			state.fitFrame = undefined;
 			if (state.fitGeneration !== generation) return;
 			const size = fitNow(state);
-			if (size) queueResizeSend(state);
+			if (size) {
+				queueResizeSend(state);
+				reconcileActivePrompt(state);
+			}
 			if (attempt + 1 < FIT_RETRY_DELAYS_MS.length) {
 				queueFitAttempt(state, generation, attempt + 1);
 			}
@@ -394,7 +424,70 @@ function fitNow(state: SessionState): { cols: number; rows: number } | undefined
 	} catch {
 		return undefined;
 	}
+	reconcileActivePrompt(state);
 	return currentTerminalSize(state);
+}
+
+function reconcileActivePrompt(state: SessionState): void {
+	keepPromptVisible(state);
+	pinPromptToPanelBottom(state);
+}
+
+function keepPromptVisible(state: SessionState): void {
+	if (!state.term || state.followOutput === false) return;
+	scrollToBottomNow(state);
+	if (state.scrollFrame !== undefined) return;
+	state.scrollFrame = requestAnimationFrame(() => {
+		state.scrollFrame = requestAnimationFrame(() => {
+			state.scrollFrame = undefined;
+			if (state.followOutput !== false) {
+				scrollToBottomNow(state);
+				pinPromptToPanelBottom(state);
+			}
+		});
+	});
+}
+
+function scrollToBottomNow(state: SessionState): void {
+	try {
+		state.term?.scrollToBottom();
+	} catch {
+		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
+	}
+	state.followOutput = true;
+}
+
+function pinPromptToPanelBottom(state: SessionState): void {
+	const term = state.term;
+	const buffer = term?.buffer?.active;
+	if (!term || !buffer || state.followOutput === false || buffer.baseY <= 0) return;
+	const slack = Math.floor(term.rows - 1 - buffer.cursorY);
+	if (slack <= 3 || slack >= term.rows) return;
+	const viewportY = promptPinnedViewportY(term, buffer);
+	if (Math.abs(buffer.viewportY - viewportY) <= SCROLL_BOTTOM_EPSILON) return;
+	try {
+		term.scrollToLine(viewportY);
+	} catch {
+		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
+	}
+	state.followOutput = true;
+}
+
+function promptPinnedViewportY(term: Terminal, buffer: Terminal["buffer"]["active"]): number {
+	const cursorLine = buffer.baseY + buffer.cursorY;
+	return Math.max(0, Math.min(buffer.baseY, cursorLine - term.rows + 1));
+}
+
+function updateFollowOutputFromViewport(state: SessionState): void {
+	const term = state.term;
+	const buffer = term?.buffer?.active;
+	if (!term || !buffer) {
+		state.followOutput = true;
+		return;
+	}
+	const atBottom = buffer.viewportY >= buffer.baseY - SCROLL_BOTTOM_EPSILON;
+	const promptPinned = Math.abs(buffer.viewportY - promptPinnedViewportY(term, buffer)) <= SCROLL_BOTTOM_EPSILON;
+	state.followOutput = atBottom || promptPinned;
 }
 
 function canFitTerminal(state: SessionState): boolean {
@@ -487,8 +580,8 @@ function installStyles(): void {
 .bb-terminal-actions button{font:inherit;font-size:.75rem;border:1px solid var(--border);border-radius:.4rem;background:var(--background);color:var(--foreground);padding:.25rem .5rem;cursor:pointer;}
 .bb-terminal-actions button:hover:not(:disabled){border-color:var(--primary);color:var(--primary);}
 .bb-terminal-actions button:disabled{opacity:.45;cursor:not-allowed;}
-.bb-terminal-host{flex:1;min-height:0;padding:.5rem;background:var(--background);overflow:hidden;}
-.bb-terminal-host .xterm{height:100%;padding:0;position:relative;overflow:hidden;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
+.bb-terminal-host{flex:1;min-height:0;padding:.5rem;background:var(--background);overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;}
+.bb-terminal-host .xterm{width:100%;height:100%;padding:0;position:relative;overflow:hidden;user-select:none;-ms-user-select:none;-webkit-user-select:none;}
 .bb-terminal-host .xterm.focus,.bb-terminal-host .xterm:focus{outline:1px solid color-mix(in oklch,var(--primary) 55%,transparent);}
 .bb-terminal-host .xterm-viewport{background:transparent!important;overflow-y:auto;cursor:default;}
 .bb-terminal-host .xterm-screen canvas{position:absolute;left:0;top:0;}

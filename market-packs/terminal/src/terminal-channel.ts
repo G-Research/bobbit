@@ -146,14 +146,21 @@ export const channels = { terminal };
 class TextReplayBuffer {
 	private parts: string[] = [];
 	private bytes = 0;
+	private boundaryState: AnsiReplayState = "ground";
+	private streamState: AnsiReplayState = "ground";
 
 	constructor(private readonly maxBytes: number) {}
 
 	append(data: string): void {
+		const dataStartState = this.streamState;
+		this.streamState = advanceAnsiReplayState(this.streamState, data);
+
 		let chunk = data;
 		let chunkBytes = byteLength(chunk);
 		if (chunkBytes > this.maxBytes) {
 			chunk = takeUtf8Tail(chunk, this.maxBytes);
+			const droppedPrefix = data.slice(0, data.length - chunk.length);
+			this.boundaryState = advanceAnsiReplayState(dataStartState, droppedPrefix);
 			chunkBytes = byteLength(chunk);
 			this.parts = [];
 			this.bytes = 0;
@@ -162,6 +169,7 @@ class TextReplayBuffer {
 		this.bytes += chunkBytes;
 		while (this.bytes > this.maxBytes && this.parts.length > 0) {
 			const removed = this.parts.shift()!;
+			this.boundaryState = advanceAnsiReplayState(this.boundaryState, removed);
 			this.bytes -= byteLength(removed);
 		}
 	}
@@ -184,7 +192,78 @@ class TextReplayBuffer {
 			}
 		}
 		if (current) out.push(current);
-		return out;
+		return sanitizeReplayBoundary(out, this.boundaryState);
+	}
+}
+
+type AnsiReplayState = "ground" | "escape" | "csi" | "osc" | "oscEscape" | "string" | "stringEscape";
+
+function sanitizeReplayBoundary(chunks: readonly string[], boundaryState: AnsiReplayState): readonly string[] {
+	if (boundaryState === "ground") return chunks;
+	const out: string[] = [];
+	let state = boundaryState;
+	for (const chunk of chunks) {
+		if (state === "ground") {
+			out.push(chunk);
+			continue;
+		}
+		const trimmed = trimLeadingAnsiResidue(chunk, state);
+		state = trimmed.state;
+		if (trimmed.data) out.push(trimmed.data);
+	}
+	return out;
+}
+
+function trimLeadingAnsiResidue(data: string, state: AnsiReplayState): { data: string; state: AnsiReplayState } {
+	let index = 0;
+	let nextState = state;
+	for (const char of data) {
+		if (nextState === "ground") break;
+		index += char.length;
+		nextState = advanceAnsiReplayStateChar(nextState, char);
+	}
+	return { data: data.slice(index), state: nextState };
+}
+
+function advanceAnsiReplayState(state: AnsiReplayState, data: string): AnsiReplayState {
+	let next = state;
+	for (const char of data) next = advanceAnsiReplayStateChar(next, char);
+	return next;
+}
+
+function advanceAnsiReplayStateChar(state: AnsiReplayState, char: string): AnsiReplayState {
+	const code = char.codePointAt(0) ?? 0;
+	switch (state) {
+		case "ground":
+			if (char === "\x1b") return "escape";
+			if (code === 0x9b) return "csi";
+			if (code === 0x9d) return "osc";
+			if (code === 0x90 || code === 0x9e || code === 0x9f) return "string";
+			return "ground";
+		case "escape":
+			if (char === "\x1b") return "escape";
+			if (char === "[") return "csi";
+			if (char === "]") return "osc";
+			if (char === "P" || char === "^" || char === "_") return "string";
+			if (code === 0x9b) return "csi";
+			if (code === 0x9d) return "osc";
+			if (code === 0x90 || code === 0x9e || code === 0x9f) return "string";
+			return "ground";
+		case "csi":
+			if (char === "\x1b") return "escape";
+			return code >= 0x40 && code <= 0x7e ? "ground" : "csi";
+		case "osc":
+			if (char === "\x07" || code === 0x9c) return "ground";
+			return char === "\x1b" ? "oscEscape" : "osc";
+		case "oscEscape":
+			if (char === "\\") return "ground";
+			return char === "\x1b" ? "oscEscape" : "osc";
+		case "string":
+			if (code === 0x9c) return "ground";
+			return char === "\x1b" ? "stringEscape" : "string";
+		case "stringEscape":
+			if (char === "\\") return "ground";
+			return char === "\x1b" ? "stringEscape" : "string";
 	}
 }
 
