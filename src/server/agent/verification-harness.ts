@@ -58,6 +58,7 @@ import {
 	describeProviderBackoff,
 	isPreImplementationGate,
 	isProviderBackoffError,
+	isRetryableGenericAgentError,
 	shouldRetryVerificationStep,
 	shouldSuppressRestartInterrupt,
 	isRestartInterruptError,
@@ -928,6 +929,48 @@ function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
 		: nextBackoffDelay(attempt, { baseMs: 2000 });
 }
 
+const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
+const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+
+function isRetryableLlmReviewRecovery(output: string): boolean {
+	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
+}
+
+function classifyLlmReviewRecoveryError(output: string): string {
+	if (isProviderBackoffError(output)) return "provider-backoff";
+	if (isTransientReviewError(output)) return "transient";
+	if (isRetryableGenericAgentError(output)) return "generic-runtime";
+	if (output.includes("Agent did not call verification_result")) return "missing-verification-result";
+	return "deterministic";
+}
+
+function reviewerIgnoredReminder(output: string): boolean {
+	return output.includes("Agent did not call verification_result after reminder")
+		|| output.includes("Agent did not call verification_result after server restart and reminder");
+}
+
+function appendLlmReviewRecoveryDiagnostics(
+	output: string,
+	args: { attempts: number; maxBoundedAttempts: number },
+): string {
+	if (!output || output.includes("## Recovery diagnostics")) return output;
+	const retryable = isRetryableLlmReviewRecovery(output);
+	const ignoredReminder = reviewerIgnoredReminder(output);
+	const exhaustedBoundedRecovery = retryable
+		&& !isProviderBackoffError(output)
+		&& args.attempts >= args.maxBoundedAttempts;
+	if (!exhaustedBoundedRecovery && !ignoredReminder) return output;
+	const attemptedRetries = Math.max(0, args.attempts - 1);
+	return [
+		output,
+		"",
+		"## Recovery diagnostics",
+		`- Attempted retries: ${attemptedRetries}`,
+		`- Final error class: ${classifyLlmReviewRecoveryError(output)}`,
+		`- Reviewer ignored reminder: ${ignoredReminder ? "yes" : "no"}`,
+	].join("\n");
+}
+
 export class VerificationHarness {
 	private static _warnedCmdExeDetached = false;
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
@@ -1420,7 +1463,7 @@ export class VerificationHarness {
 			// re-run from scratch rather than giving up
 			const isTransient = step.type === "agent-qa"
 					? isTransientQaError(resumeResult?.output || "")
-					: isTransientReviewError(resumeResult?.output || "");
+					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransient) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
@@ -1569,6 +1612,25 @@ export class VerificationHarness {
 				};
 			}
 
+			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 180_000, step.name);
+			if (recoveryResult.type === "result") {
+				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
+				return {
+					name: step.name, type: step.type,
+					passed: recoveryResult.verdict,
+					output: recoveryResult.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+			if (recoveryResult.type === "errored") {
+				return {
+					name: step.name, type: step.type,
+					passed: false,
+					output: recoveryResult.output,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+
 			// Agent went idle without calling verification_result — inspect whether
 			// the previous turn hit a JSON / tool-argument validation glitch, and
 			// send a targeted nudge if so. Falls back to the generic reminder.
@@ -1664,6 +1726,7 @@ export class VerificationHarness {
 		// transient errors, unbounded retry for provider rate-limit / overload.
 		const maxBoundedAttempts = 3;
 		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
+		let finalAttempt = 0;
 
 		// Resolve project vars and substitute the prompt template
 		const projectConfigStore = this.resolveProjectConfigStore(goalId);
@@ -1674,6 +1737,7 @@ export class VerificationHarness {
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
 		for (let attempt = 1; ; attempt++) {
+			finalAttempt = attempt;
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
@@ -1706,7 +1770,7 @@ export class VerificationHarness {
 		return {
 			name: stepName, type: "llm-review",
 			passed: result.passed,
-			output: result.output,
+			output: result.passed ? result.output : appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }),
 			duration_ms: Date.now() - startedAt,
 		};
 	}
@@ -2751,7 +2815,9 @@ export class VerificationHarness {
 								// retry rationale — kept symmetric so both review paths
 								// survive a long provider rate-limit / overload window.
 								const maxBoundedAttempts = 3;
+								let finalAttempt = 0;
 								for (let attempt = 1; ; attempt++) {
+									finalAttempt = attempt;
 									if (active.cancelled) break;
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
@@ -2771,6 +2837,9 @@ export class VerificationHarness {
 									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
 									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
 									await this._sleepCancellable(delayMs, () => !!active.cancelled);
+								}
+								if (!result.passed && !active.cancelled) {
+									result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
 								}
 							}
 						}
@@ -2968,6 +3037,69 @@ export class VerificationHarness {
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
 	// import it directly without going through a class instance.
 
+	private async waitForReviewerErroredTurnRecovery(
+		sessionId: string,
+		resultPromise: Promise<VerificationResult>,
+		timeoutMs: number,
+		stepName: string,
+	): Promise<
+		| ({ type: "result" } & VerificationResult)
+		| { type: "idle" }
+		| { type: "errored"; output: string }
+	> {
+		for (;;) {
+			const session = this.sessionManager?.getSession(sessionId);
+			const errMsg = session?.lastTurnErrored ? (session.lastTurnErrorMessage || "") : "";
+			if (!errMsg) return { type: "idle" };
+
+			const backoffSuffix = describeProviderBackoff(session);
+			if (!isRetryableLlmReviewRecovery(errMsg)) {
+				return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+			}
+
+			if (!session?.pendingAutoRetryTimer) {
+				return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+			}
+
+			const graceMs = Math.min(
+				Math.max(timeoutMs, 1_000),
+				isProviderBackoffError(errMsg) ? REVIEWER_PROVIDER_BACKOFF_GRACE_MS : REVIEWER_ERRORED_TURN_GRACE_MS,
+			);
+			console.log(`[verification] Reviewer ${sessionId} for "${stepName}" ended with retryable runtime error; waiting up to ${Math.round(graceMs / 1000)}s for session auto-retry to start...`);
+
+			const started = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForStreaming(sessionId, graceMs)
+					.then(() => ({ type: "streaming" as const }))
+					.catch(() => ({ type: "no-stream" as const })),
+			]);
+			if (started.type === "result") return started;
+			if (started.type === "no-stream") {
+				const latest = this.sessionManager?.getSession(sessionId);
+				if (latest && !latest.lastTurnErrored) return { type: "idle" };
+				const latestErr = latest?.lastTurnErrored ? (latest.lastTurnErrorMessage || errMsg) : errMsg;
+				if (latest?.pendingAutoRetryTimer && isRetryableLlmReviewRecovery(latestErr)) continue;
+				return { type: "errored", output: `LLM review failed: ${latestErr}${describeProviderBackoff(latest)}` };
+			}
+
+			try {
+				const finished = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+				if (finished.type === "result") return finished;
+			} catch (err: any) {
+				const latest = this.sessionManager?.getSession(sessionId);
+				return {
+					type: "errored",
+					output: `LLM review timed out after ${(timeoutMs / 1000)}s.${describeProviderBackoff(latest)}`,
+				};
+			}
+			// The auto-retry turn ended idle. Loop once more: if it errored, wait for
+			// the next scheduled auto-retry; if it ended cleanly without the tool,
+			// the caller will send the normal reminder.
+		}
+	}
 
 	/**
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
@@ -3159,6 +3291,15 @@ export class VerificationHarness {
 				// Got structured result — still wait for agent to go idle (cleanup)
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
 				return { passed: result.verdict, output: result.summary, sessionId };
+			}
+
+			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
+			if (recoveryResult.type === "result") {
+				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+				return { passed: recoveryResult.verdict, output: recoveryResult.summary, sessionId };
+			}
+			if (recoveryResult.type === "errored") {
+				return { passed: false, output: recoveryResult.output, sessionId };
 			}
 
 			// Agent went idle without calling the tool — if the last turn hit a
