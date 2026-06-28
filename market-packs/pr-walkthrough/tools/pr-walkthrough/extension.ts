@@ -709,6 +709,67 @@ function compactJson(value: unknown): string {
 	return JSON.stringify(value ?? null);
 }
 
+const COMPACT_FILE_HARD_BUDGET_BYTES = 64 * 1024;
+const COMPACT_FILE_RESERVED_FOOTER_BYTES = 4 * 1024;
+const COMPACT_FILE_BODY_BUDGET_BYTES = COMPACT_FILE_HARD_BUDGET_BYTES - COMPACT_FILE_RESERVED_FOOTER_BYTES;
+const COMPACT_FILE_MAX_HUNK_LINES = 200;
+const COMPACT_FILE_MAX_DIFF_LINE_BYTES = 4 * 1024;
+const COMPACT_FILE_NARROW_READ_INSTRUCTIONS = "Request a narrower read with mode=file format=compact hunkOffset=<n> hunkLimit=1; use format=legacy only when exact line ids/old_line/new_line are required.";
+
+function utf8ByteLength(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (utf8ByteLength(value) <= maxBytes) return value;
+	let low = 0;
+	let high = Math.min(value.length, maxBytes);
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (utf8ByteLength(value.slice(0, mid)) <= maxBytes) low = mid;
+		else high = mid - 1;
+	}
+	return value.slice(0, low);
+}
+
+function lineJoinBytes(lines: string[], nextLine?: string): number {
+	const base = lines.reduce((total, line, index) => total + utf8ByteLength(line) + (index > 0 ? 1 : 0), 0);
+	if (nextLine === undefined) return base;
+	return base + (lines.length > 0 ? 1 : 0) + utf8ByteLength(nextLine);
+}
+
+function appendLineWithinBudget(lines: string[], line: string, budgetBytes: number): boolean {
+	if (lineJoinBytes(lines, line) <= budgetBytes) {
+		lines.push(line);
+		return true;
+	}
+	return false;
+}
+
+function compactDiffLine(marker: "+" | "-" | " ", text: string): { line: string; truncated: boolean; omittedBytes: number } {
+	const fullLine = `${marker}${text}`;
+	if (utf8ByteLength(fullLine) <= COMPACT_FILE_MAX_DIFF_LINE_BYTES) return { line: fullLine, truncated: false, omittedBytes: 0 };
+
+	let suffix = " … [line truncated; request narrower hunkOffset/hunkLimit]";
+	let prefixBudget = COMPACT_FILE_MAX_DIFF_LINE_BYTES - utf8ByteLength(marker) - utf8ByteLength(suffix);
+	let prefix = utf8Prefix(text, prefixBudget);
+	let omittedBytes = Math.max(0, utf8ByteLength(text) - utf8ByteLength(prefix));
+	suffix = ` … [line truncated: ${omittedBytes} bytes omitted; request narrower hunkOffset/hunkLimit]`;
+	prefixBudget = COMPACT_FILE_MAX_DIFF_LINE_BYTES - utf8ByteLength(marker) - utf8ByteLength(suffix);
+	prefix = utf8Prefix(text, prefixBudget);
+	omittedBytes = Math.max(0, utf8ByteLength(text) - utf8ByteLength(prefix));
+	return { line: `${marker}${prefix}${suffix}`, truncated: true, omittedBytes };
+}
+
+function finalizeCompactFileOutput(lines: string[]): string {
+	const text = lines.join("\n").replace(/\n+$/, "");
+	if (utf8ByteLength(text) <= COMPACT_FILE_HARD_BUDGET_BYTES) return text;
+	const suffix = "\n... [compact output hard cap reached; output truncated to 64KiB. Request narrower mode=file format=compact hunkOffset/hunkLimit or format=legacy.]";
+	const prefixBudget = Math.max(0, COMPACT_FILE_HARD_BUDGET_BYTES - utf8ByteLength(suffix));
+	return `${utf8Prefix(text, prefixBudget).replace(/\n+$/, "")}${suffix}`;
+}
+
 function bundleRef(data: Record<string, unknown>): string {
 	const bundle = isRecord(data.bundle) ? data.bundle : {};
 	const jobId = stringValue(bundle.job_id) ?? stringValue(data.job_id) ?? "unknown";
@@ -791,6 +852,8 @@ function formatCompactFile(data: Record<string, unknown>): string {
 	const file = isRecord(data.file) ? data.file : {};
 	const hunks = Array.isArray(file.hunks) ? file.hunks : [];
 	const formatterWarnings: string[] = [];
+	const windowWarnings: string[] = [];
+	let outputBudgetReached = false;
 	const hunkOffset = numberValue(data.hunkOffset) ?? 0;
 	const totalHunks = numberValue(data.totalHunks) ?? hunks.length;
 	const hunkEnd = hunks.length ? hunkOffset + hunks.length - 1 : hunkOffset;
@@ -806,38 +869,67 @@ function formatCompactFile(data: Record<string, unknown>): string {
 		`flags: truncated=${Boolean(file.is_truncated ?? file.truncated)} binary=${Boolean(file.is_binary)} generated=${Boolean(file.is_generated)}`,
 		`hunks: ${hunkOffset}-${hunkEnd} of ${totalHunks} (hunkOffset=${hunkOffset} hunkLimit=${data.hunkLimit ?? hunks.length} truncated=${Boolean(data.truncated)})`,
 		"anchoring: Use format=legacy for exact line ids/old_line/new_line metadata.",
+		`compact_budget: hard_cap=${COMPACT_FILE_HARD_BUDGET_BYTES} bytes max_line_bytes=${COMPACT_FILE_MAX_DIFF_LINE_BYTES} max_hunk_lines=${COMPACT_FILE_MAX_HUNK_LINES}`,
 		"",
 	);
 
-	hunks.forEach((hunk, hunkIndex) => {
+	const appendBodyLine = (line: string): boolean => {
+		if (appendLineWithinBudget(lines, line, COMPACT_FILE_BODY_BUDGET_BYTES)) return true;
+		if (!outputBudgetReached) {
+			outputBudgetReached = true;
+			const marker = `... [compact output windowed: body budget reached; remaining hunk content omitted. ${COMPACT_FILE_NARROW_READ_INSTRUCTIONS}]`;
+			appendLineWithinBudget(lines, marker, COMPACT_FILE_BODY_BUDGET_BYTES);
+			windowWarnings.push("compact output body budget reached before all selected hunk lines could be rendered");
+		}
+		return false;
+	};
+
+	outer: for (const [hunkIndex, hunk] of hunks.entries()) {
 		const warningHunk = hunkOffset + hunkIndex + 1;
 		if (!isRecord(hunk)) {
 			formatterWarnings.push(`hunk ${warningHunk} was not an object; omitted because no legacy lines were present`);
-			return;
+			continue;
 		}
-		if (typeof hunk.header === "string") lines.push(hunk.header);
-		else formatterWarnings.push(`hunk ${warningHunk} had missing header`);
+		if (typeof hunk.header === "string") {
+			if (!appendBodyLine(hunk.header)) break;
+		} else formatterWarnings.push(`hunk ${warningHunk} had missing header`);
 		const hunkLines = Array.isArray(hunk.lines) ? hunk.lines : [];
-		hunkLines.forEach((line, lineIndex) => {
+		const visibleHunkLines = hunkLines.slice(0, COMPACT_FILE_MAX_HUNK_LINES);
+		for (const [lineIndex, line] of visibleHunkLines.entries()) {
 			const warningLine = lineIndex + 1;
 			if (!isRecord(line)) {
-				lines.push(" ");
+				if (!appendBodyLine(" ")) break outer;
 				formatterWarnings.push(`hunk ${warningHunk} line ${warningLine} was not an object; preserved as blank context marker`);
-				return;
+				continue;
 			}
 			const marker = compactLineMarker(line.kind);
 			const text = typeof line.text === "string" ? line.text : "";
 			if (!marker) formatterWarnings.push(`hunk ${warningHunk} line ${warningLine} had unknown kind; preserved as context marker`);
-			lines.push(`${marker ?? " "}${text}`);
-		});
-		if (hunkIndex < hunks.length - 1) lines.push("");
-	});
+			const compactLine = compactDiffLine(marker ?? " ", text);
+			if (compactLine.truncated) {
+				windowWarnings.push(`hunk ${warningHunk} line ${warningLine} exceeded ${COMPACT_FILE_MAX_DIFF_LINE_BYTES} bytes; ${compactLine.omittedBytes} bytes omitted`);
+			}
+			if (!appendBodyLine(compactLine.line)) break outer;
+		}
+		if (hunkLines.length > visibleHunkLines.length) {
+			const omitted = hunkLines.length - visibleHunkLines.length;
+			windowWarnings.push(`hunk ${warningHunk} exceeded ${COMPACT_FILE_MAX_HUNK_LINES} compact lines; ${omitted} lines omitted`);
+			if (!appendBodyLine(`... [hunk line windowed: ${omitted} lines omitted. ${COMPACT_FILE_NARROW_READ_INSTRUCTIONS}]`)) break;
+		}
+		if (hunkIndex < hunks.length - 1 && !appendBodyLine("")) break;
+	}
 
+	if (windowWarnings.length > 0 || outputBudgetReached) {
+		lines.push("", "output_windowing:");
+		lines.push(`- compact file text is hard-capped at ${COMPACT_FILE_HARD_BUDGET_BYTES} bytes before it is returned to the model`);
+		for (const warning of windowWarnings) lines.push(`- ${warning}`);
+		lines.push(`- ${COMPACT_FILE_NARROW_READ_INSTRUCTIONS}`);
+	}
 	if (formatterWarnings.length > 0) {
 		lines.push("", "formatter_warnings:");
 		for (const warning of formatterWarnings) lines.push(`- ${warning}`);
 	}
-	return lines.join("\n").replace(/\n+$/, "");
+	return finalizeCompactFileOutput(lines);
 }
 
 export function formatCompactPrWalkthroughBundleRead(data: unknown, args: { mode?: unknown; path?: unknown; index?: unknown } = {}): string {
