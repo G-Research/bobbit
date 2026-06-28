@@ -826,6 +826,8 @@ export function openGatewayDialog(): void {
 									<label class="text-xs text-muted-foreground mb-1 block">Gateway URL</label>
 									${Input({
 										type: "text",
+										name: "bobbit-gateway-url",
+										autocomplete: "off",
 										placeholder: "http://localhost:3001",
 										value: urlValue,
 										onInput: (e: Event) => {
@@ -837,6 +839,8 @@ export function openGatewayDialog(): void {
 									<label class="text-xs text-muted-foreground mb-1 block">Auth Token</label>
 									${Input({
 										type: "password",
+										name: "bobbit-gateway-auth-token",
+										autocomplete: "new-password",
 										placeholder: "Paste token from gateway terminal",
 										value: tokenValue,
 										onInput: (e: Event) => {

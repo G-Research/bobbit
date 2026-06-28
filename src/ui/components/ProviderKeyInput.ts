@@ -117,6 +117,12 @@ export class ProviderKeyInput extends LitElement {
 				<div class="flex items-center gap-2">
 					${Input({
 						type: "password",
+						// These are API keys, not website login passwords. Use a
+						// provider-specific field name plus new-password autocomplete so
+						// browser password managers do not prefill unrelated credentials
+						// (notably "Google" account passwords) into an empty key field.
+						name: `bobbit-provider-api-key-${this.provider || "unknown"}`,
+						autocomplete: "new-password",
 						placeholder: this.hasKey ? "••••••••••••" : i18n("Enter API key"),
 						value: this.keyInput,
 						onInput: (e: Event) => {

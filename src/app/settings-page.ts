@@ -2042,6 +2042,11 @@ export function renderModelsTab() {
 							type="text"
 							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
 								focus:outline-none focus:ring-2 focus:ring-ring"
+							data-testid="aigw-url-input"
+							name="bobbit-aigw-url"
+							autocomplete="off"
+							autocapitalize="off"
+							spellcheck="false"
 							placeholder="http://gateway-host/v1"
 							.value=${aigwUrl}
 							?disabled=${busy}
