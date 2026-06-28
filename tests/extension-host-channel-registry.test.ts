@@ -68,10 +68,10 @@ describe("ChannelRegistry — permit-gated open and scoping", () => {
 		assert.equal(result.channelId, "chan-1");
 		assert.equal(result.info.state, "open");
 		assert.equal(result.info.attached, true);
-		assert.equal(attached, 0, "initial opener is attached before the handler exists");
+		assert.equal(attached, 1, "initial opener receives handler onAttach after handler assignment");
 
 		await registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-2" });
-		assert.equal(attached, 1);
+		assert.equal(attached, 2);
 		assert.equal(registry.list({ sessionId: "sess-1", packId: "pack-a", clientId: "client-2" })[0].attached, true);
 		await assertChannelReject(() => registry.attach({ sessionId: "sess-2", packId: "pack-a", channelId: "chan-1", clientId: "evil" }), "channel_not_found");
 		await assertChannelReject(() => registry.sendFromClient({ sessionId: "sess-1", packId: "pack-b", channelId: "chan-1", clientId: "client-2", frame: { kind: "text", data: "x" } }), "channel_not_found");
@@ -149,6 +149,60 @@ export const channels = {
 				clientId: "client-2",
 				openPermit: permit(registry),
 			}), "channel_handler_not_found");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("disposes worker-backed handler resources when the handler self-closes", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-self-close-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => {
+    const pty = await ctx.host.pty.openTerminal();
+    return {
+      onClientFrame: async () => { await ctx.close("self closed"); },
+      close: async () => { await pty.kill("logical close"); }
+    };
+  }
+};
+`, "utf-8");
+			const killReasons: string[] = [];
+			const moduleHost = new WorkerChannelModuleHost({
+				buildHost: () => ({
+					pty: {
+						async openTerminal() {
+							return {
+								pid: 43,
+								write: () => {},
+								resize: () => {},
+								kill: (reason?: string) => { killReasons.push(reason ?? ""); },
+								onData: () => () => {},
+								onExit: () => () => {},
+							};
+						},
+					},
+				}),
+			});
+			const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-self-close" });
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+				capabilities: ["sessionPty"],
+			};
+			await registry.open({ sessionId: "sess-1", packId: "pack-a", contribution: declared, clientId: "client-1", openPermit: permit(registry) });
+			await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-self-close", clientId: "client-1", frame: { kind: "text", data: "exit\n" } });
+			for (let i = 0; i < 20 && registry.activeCount() !== 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			assert.equal(registry.activeCount(), 0);
+			assert.deepEqual(killReasons, ["self closed"], "self-close disposes PTY resources without invoking logical close");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -342,7 +396,7 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 	it("rolls back failed attaches and their queued outbound accounting", async () => {
 		let ctx!: ChannelHandlerContext;
 		const dispatcher = new ChannelDispatcher();
-		let failNextAttach = true;
+		let failNextAttach = false;
 		dispatcher.registerName("terminal", (opened) => {
 			ctx = opened;
 			return {
@@ -362,6 +416,7 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 			clientId: "client-1",
 			openPermit: permit(registry),
 		});
+		failNextAttach = true;
 		await registry.detach("sess-1", "pack-a", "chan-1", "client-1");
 		const failedAttachFrames: unknown[] = [];
 		await assert.rejects(() => registry.attach({
@@ -411,7 +466,7 @@ describe("ChannelRegistry — lifecycle cleanup", () => {
 			client: { onFrame: (frame) => { frames.push(frame); }, onClose: (ev) => { closes.push(ev); } },
 			openPermit: permit(registry),
 		}), "channel_closed");
-		assert.deepEqual(frames, [{ kind: "text", data: "hello" }]);
+		assert.deepEqual(frames, []);
 		assert.deepEqual(closes, [{ reason: "closed during open" }]);
 		assert.equal(handlerClosed, 1, "late returned handler must be closed instead of leaked");
 		assert.equal(registry.activeCount(), 0);

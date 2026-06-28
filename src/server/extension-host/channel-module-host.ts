@@ -34,6 +34,10 @@ export interface ChannelModuleHostOptions {
 	stackSizeMb?: number;
 }
 
+interface WorkerChannelHandlerSession extends ChannelHandlerSession {
+	dispose?(reason?: string): Promise<void> | void;
+}
+
 const WORKER_SAFE_EXEC_FLAGS = new Set(["--require", "-r", "--import", "--loader", "--experimental-loader", "--conditions", "-C"]);
 
 function workerSafeExecArgv(argv: readonly string[]): string[] {
@@ -89,13 +93,14 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 		let closed = false;
 		const pendingControls = new Map<number, { resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
-		const cleanup = (reason?: string): void => {
+		const cleanup = (reason?: string, rejectPending = true): void => {
 			if (closed) return;
 			closed = true;
 			this.live.delete(worker);
 			for (const pending of pendingControls.values()) {
 				clearTimeout(pending.timer);
-				pending.reject(new Error(reason ?? "channel handler worker closed"));
+				if (rejectPending) pending.reject(new Error(reason ?? "channel handler worker closed"));
+				else pending.resolve();
 			}
 			pendingControls.clear();
 			for (const pty of ptys.values()) {
@@ -164,7 +169,7 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 						reject(new ChannelError(typeof msg.status === "number" ? msg.status : 500, msg.code || "channel_handler_failed", msg.error || "channel handler failed"));
 						return;
 					}
-					resolve({
+					const session: WorkerChannelHandlerSession = {
 						onClientFrame: (frame) => invokeControl("channel-client-frame", { frame }),
 						onAttach: (clientId) => invokeControl("channel-attach", { clientId }),
 						onDetach: (clientId) => invokeControl("channel-detach", { clientId }),
@@ -172,7 +177,9 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 							try { await invokeControl("channel-close", { reason }); }
 							finally { cleanup(reason ?? "channel closed"); }
 						},
-					});
+						dispose: async (reason) => { cleanup(reason ?? "channel disposed", false); },
+					};
+					resolve(session);
 					return;
 				}
 				if (msg.kind === "child-spawn") {
