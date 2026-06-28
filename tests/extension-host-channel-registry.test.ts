@@ -149,6 +149,47 @@ export const channels = {
 				clientId: "client-2",
 				openPermit: permit(registry),
 			}), "channel_handler_not_found");
+			await registry.dispose("test done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("wires worker module targeted sends to only the attaching client", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-send-to-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => ({
+    onAttach: async (clientId) => { await ctx.sendTo(clientId, { kind: "text", data: ` + "`attach:${clientId}`" + ` }); }
+  })
+};
+`, "utf-8");
+			const registry = new ChannelRegistry({ idGenerator: () => "chan-send-to" });
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+			};
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: { autoDrain: false },
+				openPermit: permit(registry),
+			});
+			assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-send-to", "client-1"), [{ kind: "text", data: "attach:client-1" }]);
+			await registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-send-to", clientId: "client-2", client: { autoDrain: false } });
+			assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-send-to", "client-1"), []);
+			assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-send-to", "client-2"), [{ kind: "text", data: "attach:client-2" }]);
+			await registry.dispose("test done");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -314,6 +355,34 @@ describe("ChannelRegistry — frames, quotas, backpressure, and no replay", () =
 		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-1"), [{ kind: "text", data: "first" }]);
 		await registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-2", client: { autoDrain: false } });
 		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-2"), []);
+	});
+
+	it("supports scoped handler sends to one attached client", async () => {
+		let ctx!: ChannelHandlerContext;
+		const dispatcher = new ChannelDispatcher();
+		dispatcher.registerName("terminal", (opened) => {
+			ctx = opened;
+			return {
+				onAttach: async (clientId) => {
+					await ctx.sendTo(clientId, { kind: "text", data: `attach:${clientId}` });
+				},
+			};
+		});
+		const registry = new ChannelRegistry({ dispatcher, idGenerator: () => "chan-1" });
+		await registry.open({
+			sessionId: "sess-1",
+			packId: "pack-a",
+			contribution: contribution(),
+			clientId: "client-1",
+			client: { autoDrain: false },
+			openPermit: permit(registry),
+		});
+		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-1"), [{ kind: "text", data: "attach:client-1" }]);
+
+		await registry.attach({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-1", clientId: "client-2", client: { autoDrain: false } });
+		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-1"), [], "targeted attach output must not duplicate to existing clients");
+		assert.deepEqual(registry.drainClient("sess-1", "pack-a", "chan-1", "client-2"), [{ kind: "text", data: "attach:client-2" }]);
+		await assertChannelReject(() => ctx.sendTo("missing-client", { kind: "text", data: "nope" }), "not_attached");
 	});
 
 	it("bounds outbound in-flight frames for auto-drain clients", async () => {

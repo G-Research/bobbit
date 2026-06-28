@@ -331,13 +331,6 @@ export function handleWebSocketConnection(
 	const clientId = randomUUID();
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
-	const channelClientFor = (channelId: string): ExtensionChannelClient => ({
-		onFrame: (frame) => sendAsync(ws, { type: "ext_channel_frame", channelId, frame }),
-		onClose: (ev) => {
-			attachedExtChannels.delete(channelId);
-			send(ws, { type: "ext_channel_close", channelId, reason: ev.reason, error: ev.error });
-		},
-	});
 	const sendExtChannelFailure = (requestId: string, err: unknown, fallback = "channel operation failed"): void => {
 		const record = err as { code?: unknown; status?: unknown; message?: unknown };
 		const message = typeof record?.message === "string" && record.message.length > 0 ? record.message : fallback;
@@ -1292,9 +1285,43 @@ export function handleWebSocketConnection(
 							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel id" : surf.error });
 							break;
 						}
-						const channel = await channelRegistry.attach({ sessionId, packId: surf.packId, channelId, clientId, client: channelClientFor(channelId) });
+						let attachedChannelId = "";
+						const pendingChannelEvents: Array<{ type: "frame"; frame: HostChannelFrame } | { type: "close"; ev: { reason?: string; error?: string } }> = [];
+						const flushPendingChannelEvents = () => {
+							for (const event of pendingChannelEvents.splice(0)) {
+								if (event.type === "frame") send(ws, { type: "ext_channel_frame", channelId: attachedChannelId, frame: event.frame });
+								else {
+									attachedExtChannels.delete(attachedChannelId);
+									send(ws, { type: "ext_channel_close", channelId: attachedChannelId, reason: event.ev.reason, error: event.ev.error });
+								}
+							}
+						};
+						const channel = await channelRegistry.attach({
+							sessionId,
+							packId: surf.packId,
+							channelId,
+							clientId,
+							client: {
+								onFrame: (frame) => {
+									if (!attachedChannelId) {
+										pendingChannelEvents.push({ type: "frame", frame });
+										return;
+									}
+									return sendAsync(ws, { type: "ext_channel_frame", channelId: attachedChannelId, frame });
+								},
+								onClose: (ev) => {
+									if (!attachedChannelId) pendingChannelEvents.push({ type: "close", ev });
+									else {
+										attachedExtChannels.delete(attachedChannelId);
+										send(ws, { type: "ext_channel_close", channelId: attachedChannelId, reason: ev.reason, error: ev.error });
+									}
+								},
+							},
+						});
+						attachedChannelId = channel.id;
 						attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
 						send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+						flushPendingChannelEvents();
 					} catch (err) {
 						sendExtChannelFailure(requestId, err);
 					}

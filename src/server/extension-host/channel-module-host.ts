@@ -201,6 +201,7 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 					return;
 				}
 				if (msg.kind === "channel-send") { void req.ctx.send(msg.frame as HostChannelFrame).catch(() => undefined); return; }
+				if (msg.kind === "channel-send-to") { void req.ctx.sendTo(String(msg.clientId ?? ""), msg.frame as HostChannelFrame).catch(() => undefined); return; }
 				if (msg.kind === "channel-close") { void req.ctx.close(typeof msg.reason === "string" ? msg.reason : undefined).catch(() => undefined); return; }
 				if (msg.kind === "channel-audit") { req.ctx.audit(isRecord(msg.event) ? msg.event as any : { type: "channel.cleanup", reason: "invalid_worker_audit" }); return; }
 				if (msg.kind === "host-call") {

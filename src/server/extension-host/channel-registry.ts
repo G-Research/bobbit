@@ -280,6 +280,7 @@ export class ChannelRegistry {
 						init: initData,
 						host: {},
 						send: async (frame) => { await this.sendFromHandler(record.id, frame); },
+						sendTo: async (clientId, frame) => { await this.sendFromHandlerTo(record.id, clientId, frame); },
 						close: async (reason) => { await this.closeInternal(record, reason, "handler"); },
 						audit: (event) => { this.emit({ ...event, at: this.now(), ...auditRecord(record) }); },
 					},
@@ -388,43 +389,17 @@ export class ChannelRegistry {
 	}
 
 	async sendFromHandler(channelId: string, frame: unknown): Promise<void> {
-		const record = this.channels.get(channelId);
-		if (!record || (record.state !== "open" && record.state !== "opening")) throw new ChannelError(404, "channel_not_found", "channel is not open");
+		const record = this.requireOpenChannelForHandlerSend(channelId);
 		const { frame: typed, bytes } = this.validateFrameFor(record, frame);
-		const recipients = Array.from(record.clients.values());
-		this.assertOutboundCapacity(record, bytes * recipients.length, recipients.length);
-		for (const client of recipients) this.assertClientOutboundCapacity(record, client, bytes);
-		for (const client of recipients) {
-			if (!client.attaching && client.autoDrain && client.sink?.onFrame) {
-				client.inFlightFrames++;
-				client.inFlightBytes += bytes;
-			} else {
-				client.queuedFrames.push(typed);
-				client.queuedBytes += bytes;
-			}
-			record.outboundBytes += bytes;
-			record.outboundFrames++;
-		}
-		const at = this.now();
-		record.lastActiveAt = at;
-		this.emit({ type: "channel.frame.out", at, ...auditRecord(record), frameKind: typed.kind, frameBytes: bytes });
-		await Promise.all(recipients.map(async (client) => {
-			if (client.attaching || !client.autoDrain || !client.sink?.onFrame) return;
-			try {
-				await client.sink.onFrame(typed);
-			} catch (err) {
-				await this.detachInternal(record, client.clientId, err).catch((detachErr: unknown) => {
-					this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: detachErr instanceof Error ? detachErr.message : String(detachErr) });
-				});
-			} finally {
-				if (client.inFlightFrames > 0 && client.inFlightBytes >= bytes) {
-					client.inFlightFrames--;
-					client.inFlightBytes -= bytes;
-					record.outboundBytes -= bytes;
-					record.outboundFrames--;
-				}
-			}
-		}));
+		await this.deliverFromHandler(record, Array.from(record.clients.values()), typed, bytes);
+	}
+
+	async sendFromHandlerTo(channelId: string, clientId: string, frame: unknown): Promise<void> {
+		const record = this.requireOpenChannelForHandlerSend(channelId);
+		const client = record.clients.get(clientId);
+		if (!client) throw new ChannelError(403, "not_attached", "client is not attached to this channel");
+		const { frame: typed, bytes } = this.validateFrameFor(record, frame);
+		await this.deliverFromHandler(record, [client], typed, bytes, clientId);
 	}
 
 	drainClient(sessionId: string, packId: string, channelId: string, clientId: string, maxFrames = Number.POSITIVE_INFINITY): HostChannelFrame[] {
@@ -706,6 +681,48 @@ export class ChannelRegistry {
 			}
 			throw err;
 		}
+	}
+
+	private requireOpenChannelForHandlerSend(channelId: string): ChannelRecord {
+		const record = this.channels.get(channelId);
+		if (!record || (record.state !== "open" && record.state !== "opening")) throw new ChannelError(404, "channel_not_found", "channel is not open");
+		return record;
+	}
+
+	private async deliverFromHandler(record: ChannelRecord, recipients: ClientAttachment[], frame: HostChannelFrame, bytes: number, targetClientId?: string): Promise<void> {
+		this.assertOutboundCapacity(record, bytes * recipients.length, recipients.length);
+		for (const client of recipients) this.assertClientOutboundCapacity(record, client, bytes);
+		for (const client of recipients) {
+			if (!client.attaching && client.autoDrain && client.sink?.onFrame) {
+				client.inFlightFrames++;
+				client.inFlightBytes += bytes;
+			} else {
+				client.queuedFrames.push(frame);
+				client.queuedBytes += bytes;
+			}
+			record.outboundBytes += bytes;
+			record.outboundFrames++;
+		}
+		const at = this.now();
+		record.lastActiveAt = at;
+		this.emit({ type: "channel.frame.out", at, ...auditRecord(record), clientId: targetClientId, frameKind: frame.kind, frameBytes: bytes });
+		await Promise.all(recipients.map(async (client) => {
+			if (client.attaching || !client.autoDrain || !client.sink?.onFrame) return;
+			try {
+				await client.sink.onFrame(frame);
+			} catch (err) {
+				await this.detachInternal(record, client.clientId, err).catch((detachErr: unknown) => {
+					this.emit({ type: "channel.detach", at: this.now(), ...auditRecord(record), clientId: client.clientId, error: detachErr instanceof Error ? detachErr.message : String(detachErr) });
+				});
+			} finally {
+				if (client.inFlightFrames > 0 && client.inFlightBytes >= bytes) {
+					client.inFlightFrames--;
+					client.inFlightBytes -= bytes;
+					record.outboundBytes -= bytes;
+					record.outboundFrames--;
+				}
+			}
+		}));
 	}
 
 	private requireChannel(sessionId: string, packId: string, channelId: string, op: string): ChannelRecord {
