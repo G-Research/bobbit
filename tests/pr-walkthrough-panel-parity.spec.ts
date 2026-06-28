@@ -270,7 +270,7 @@ window.__prwMissingReadyParityAffordances = () => {
   const hasText = (pattern) => pattern.test(document.body.textContent || "");
   const buttonText = (pattern) => Array.from(document.querySelectorAll("button")).some((button) => pattern.test([button.textContent, button.getAttribute("aria-label"), button.getAttribute("title")].filter(Boolean).join(" ")));
   const missing = [];
-  if (!hasText(/PR\s*#?42|#42|pull\/42/i)) missing.push("prominent PR number/title header");
+  if (!hasText(/Restore PR walkthrough panel parity|#42|pull\/42/i)) missing.push("prominent PR number/title header");
   if (!hasText(/3\s+files?/i) || !hasText(/\+128/) || !hasText(/-14/)) missing.push("file/addition/deletion stats");
   if (!hasText(/\d+\s*\/\s*\d+\s+reviewed/i) && !document.querySelector('[role="progressbar"], [data-testid="prw-review-progress"]')) missing.push("review progress indicator");
   if (!document.querySelector('a[href*="github.com"][href*="/pull/42"]')) missing.push("GitHub PR link affordance");
@@ -435,6 +435,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(box?.height, "pr-walkthrough shell parity: header must remain a compact ~58px toolbar").toBeGreaterThanOrEqual(50);
 		expect(box?.height, "pr-walkthrough shell parity: header must remain a compact ~58px toolbar").toBeLessThanOrEqual(70);
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-title"]')).toContainText("Restore PR walkthrough panel parity");
+		await expect(header.locator(".pr-pill"), "ready header should not waste half-panel space on a PR chip").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-stats"]')).toContainText(/3 files/);
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-stats"]')).toContainText(/\+128/);
 		await expect(page.locator('[data-testid="pr-walkthrough-pr-stats"]')).toContainText(/-14/);
@@ -443,7 +444,20 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		const submit = page.locator('[data-testid="pr-walkthrough-submit-review"]');
 		await expect(submit).toBeDisabled();
 		const submitBox = await submit.boundingBox();
+		const headerBox = await header.boundingBox();
 		expect(submitBox?.width, "half-panel header must not stretch Submit review to fill a grid column").toBeLessThanOrEqual(160);
+		expect((submitBox?.x || 0) + (submitBox?.width || 0), "Submit review must not collide with the right edge").toBeLessThanOrEqual((headerBox?.x || 0) + (headerBox?.width || 0) - 4);
+		const progressLayout = await page.locator('[data-testid="pr-walkthrough-progress"]').evaluate((element: HTMLElement) => {
+			const label = element.querySelector<HTMLElement>("span");
+			const bar = element.querySelector<HTMLElement>(".progress-track");
+			if (!label || !bar) return undefined;
+			const labelRect = label.getBoundingClientRect();
+			const barRect = bar.getBoundingClientRect();
+			return { labelTop: labelRect.top, barBottom: barRect.bottom, labelHeight: labelRect.height };
+		});
+		expect(progressLayout).toBeTruthy();
+		expect(progressLayout!.labelTop, "reviewed text should sit below the progress bar").toBeGreaterThanOrEqual(progressLayout!.barBottom - 0.5);
+		expect(progressLayout!.labelHeight, "reviewed text should remain one line").toBeLessThan(18);
 	});
 
 	test("pr-walkthrough shell parity: single rail toggles, resizes, and keeps orientation steps", async ({ page }) => {
@@ -490,6 +504,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "pr-walkthrough shell parity: ResizeObserver must collapse a narrow embedded panel even when the viewport is wide").toBeVisible();
 		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-collapsed-rail"]);
+		await expect(page.locator('[data-testid="pr-walkthrough-rail-toggle"]'), "half-panel collapsed rail must not show a broken expand button").toHaveCount(0);
 		await expect(page.locator('[data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
 
 		await page.evaluate(() => {
