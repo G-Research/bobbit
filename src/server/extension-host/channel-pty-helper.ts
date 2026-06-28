@@ -3,6 +3,7 @@
 // Narrow first-party PTY helper for channel handlers that explicitly declare
 // `capabilities: [sessionPty]`. Generic channel modules receive no PTY surface.
 
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import process from "node:process";
@@ -146,9 +147,11 @@ function wrapPty(proc: PtyProcess): ChannelPtyHandle {
 	const exitListeners = new Set<(event: ChannelPtyExitEvent) => void>();
 	let exited = false;
 	let killReason: string | undefined;
+	let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	const emitExit = (code: number | null, signal?: string | number) => {
 		if (exited) return;
 		exited = true;
+		if (killFallbackTimer) clearTimeout(killFallbackTimer);
 		const event = { code, signal, reason: killReason };
 		for (const cb of [...exitListeners]) cb(event);
 	};
@@ -173,11 +176,42 @@ function wrapPty(proc: PtyProcess): ChannelPtyHandle {
 		kill: (reason) => {
 			if (exited) return;
 			killReason = reason || "killed";
+			if (process.platform === "win32") {
+				// node-pty's Windows process-tree kill can fail in headless hosts when
+				// its ConPTY console-list helper cannot attach. The terminal helper always
+				// starts an interactive shell, so ask the shell to exit first and leave the
+				// native kill as a delayed fallback. This keeps Kill deterministic without
+				// exposing process internals to the pack.
+				try { proc.write("\x03"); } catch { /* process may already be gone */ }
+				try { proc.write("exit\r\n"); } catch { /* process may already be gone */ }
+				killFallbackTimer = setTimeout(() => {
+					if (!exited) taskkillWindowsProcessTree(proc.pid);
+				}, 1_000);
+				killFallbackTimer.unref?.();
+				return;
+			}
 			try { proc.kill(); } catch { /* process may already be gone */ }
 		},
 		onData: (cb) => { dataListeners.add(cb); return () => { dataListeners.delete(cb); }; },
 		onExit: (cb) => { exitListeners.add(cb); return () => { exitListeners.delete(cb); }; },
 	};
+}
+
+function taskkillWindowsProcessTree(pid: number): void {
+	if (!Number.isFinite(pid) || pid <= 0) return;
+	execFile("taskkill.exe", ["/PID", String(Math.floor(pid)), "/T", "/F"], {
+		windowsHide: true,
+		env: windowsProcessControlEnv(),
+	}, () => undefined);
+}
+
+function windowsProcessControlEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const key of ["SystemRoot", "windir", "PATH", "Path", "PATHEXT", "TEMP", "TMP"]) {
+		const value = process.env[key];
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
 }
 
 function defaultShell(): { shell: string; args: string[] } {
@@ -187,11 +221,51 @@ function defaultShell(): { shell: string; args: string[] } {
 	return { shell: process.env.SHELL || (os.platform() === "darwin" ? "/bin/zsh" : "/bin/bash"), args: [] };
 }
 
+const COMMON_ENV_ALLOWLIST = new Set([
+	"PATH",
+	"Path",
+	"TERM",
+	"COLORTERM",
+	"LANG",
+	"LANGUAGE",
+	"LC_ALL",
+	"LC_CTYPE",
+	"LC_COLLATE",
+	"LC_MESSAGES",
+	"LC_MONETARY",
+	"LC_NUMERIC",
+	"LC_TIME",
+	"NO_COLOR",
+	"FORCE_COLOR",
+]);
+
+const POSIX_ENV_ALLOWLIST = new Set([
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
+	"TMPDIR",
+]);
+
+const WINDOWS_ENV_ALLOWLIST = new Set([
+	"SystemRoot",
+	"windir",
+	"TEMP",
+	"TMP",
+	"USERPROFILE",
+	"USERNAME",
+	"HOMEDRIVE",
+	"HOMEPATH",
+	"ComSpec",
+	"PATHEXT",
+]);
+
 function terminalEnv(): Record<string, string> {
 	const out: Record<string, string> = {};
+	const platformAllowlist = process.platform === "win32" ? WINDOWS_ENV_ALLOWLIST : POSIX_ENV_ALLOWLIST;
 	for (const [key, value] of Object.entries(process.env)) {
 		if (value === undefined) continue;
-		if (/TOKEN|SECRET|PASSWORD|KEY/i.test(key) && key.startsWith("BOBBIT_")) continue;
+		if (!COMMON_ENV_ALLOWLIST.has(key) && !platformAllowlist.has(key)) continue;
 		out[key] = value;
 	}
 	out.TERM = "xterm-256color";
