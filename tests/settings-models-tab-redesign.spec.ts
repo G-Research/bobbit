@@ -140,6 +140,11 @@ test.describe("Settings Models tab redesign", () => {
 		const defaultsBox = page.locator('[data-testid="defaults-section"]');
 		await expect(aigwBox).toBeVisible();
 		await expect(defaultsBox).toBeVisible();
+		const gatewayUrlInput = aigwBox.locator('[data-testid="aigw-url-input"]');
+		await expect(gatewayUrlInput).toHaveAttribute("name", "bobbit-aigw-url");
+		await expect(gatewayUrlInput).toHaveAttribute("autocomplete", "off");
+		await expect(gatewayUrlInput).toHaveAttribute("autocapitalize", "off");
+		await expect(gatewayUrlInput).toHaveAttribute("spellcheck", "false");
 
 		// Assert DOM order: aigw appears before defaults in document order.
 		const order = await page.evaluate(() => {
