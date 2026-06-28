@@ -140,6 +140,22 @@ test.describe("terminal pack panel", () => {
 		).toBe(true);
 		await assertLatestTerminalInputVisibleAtBottom(page, followUp, "scroll regression after large output, resize, and reattach");
 		await assertNoRepeatedTopRowGlyphArtifact(page, "scroll regression after follow-up input");
+
+		const cursorHome = `${run}_CURSOR_HOME_VISIBLE`;
+		const cursorHomeCommand = process.platform === "win32" ? `prompt $E[H${cursorHome}$G` : `printf '\\033[H${cursorHome}'`;
+		const beforeCursorHomeLayout = await terminalLayoutSnapshotAfterAnimationFrames(page);
+		await typeCommand(page, cursorHomeCommand);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, cursorHome),
+			{ message: "cursor-positioning regression setup: PTY should emit the cursor-home marker", timeout: 20_000 },
+		).toBe(true);
+		await assertTerminalLayoutStable(page, "scroll regression after cursor-positioning output");
+		const afterCursorHomeLayout = await terminalLayoutSnapshotAfterAnimationFrames(page);
+		expect(
+			afterCursorHomeLayout.renderedRows,
+			"cursor-positioning output must not shrink xterm rows; rows are owned by FitAddon/host size",
+		).toBeGreaterThanOrEqual(Math.max(10, beforeCursorHomeLayout.renderedRows - 1));
+		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
 	test("renders a clear disconnected state after gateway restart while terminal is live", async ({ page, gateway }) => {
@@ -318,6 +334,16 @@ async function assertLatestTerminalInputVisibleAtBottom(page: import("@playwrigh
 	expect(
 		bottomSoftWrappedText,
 		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" in the bottom xterm rows, allowing xterm soft wrapping. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+	).toContain(expected);
+}
+
+async function assertTerminalTextVisibleNearBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
+	const snapshot = await terminalViewportContent(page);
+	const bottomRows = snapshot.rows.slice(-4);
+	const bottomText = bottomRows.join("\n");
+	expect(
+		bottomRows.join(""),
+		`${reason}: expected "${expected}" in the bottom xterm rows after viewport-only prompt pinning. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
 	).toContain(expected);
 }
 

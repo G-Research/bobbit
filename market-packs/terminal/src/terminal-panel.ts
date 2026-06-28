@@ -463,21 +463,31 @@ function pinPromptToPanelBottom(state: SessionState): void {
 	if (!term || !buffer || state.followOutput === false || buffer.baseY <= 0) return;
 	const slack = Math.floor(term.rows - 1 - buffer.cursorY);
 	if (slack <= 3 || slack >= term.rows) return;
-	const rows = Math.max(2, Math.min(term.rows, buffer.cursorY + 1));
-	if (rows !== term.rows) {
-		term.resize(term.cols, rows);
-		queueResizeSend(state);
-		scrollToBottomNow(state);
+	const viewportY = promptPinnedViewportY(term, buffer);
+	if (Math.abs(buffer.viewportY - viewportY) <= SCROLL_BOTTOM_EPSILON) return;
+	try {
+		term.scrollToLine(viewportY);
+	} catch {
+		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
 	}
+	state.followOutput = true;
+}
+
+function promptPinnedViewportY(term: Terminal, buffer: Terminal["buffer"]["active"]): number {
+	const cursorLine = buffer.baseY + buffer.cursorY;
+	return Math.max(0, Math.min(buffer.baseY, cursorLine - term.rows + 1));
 }
 
 function updateFollowOutputFromViewport(state: SessionState): void {
-	const buffer = state.term?.buffer?.active;
-	if (!buffer) {
+	const term = state.term;
+	const buffer = term?.buffer?.active;
+	if (!term || !buffer) {
 		state.followOutput = true;
 		return;
 	}
-	state.followOutput = buffer.viewportY >= buffer.baseY - SCROLL_BOTTOM_EPSILON;
+	const atBottom = buffer.viewportY >= buffer.baseY - SCROLL_BOTTOM_EPSILON;
+	const promptPinned = Math.abs(buffer.viewportY - promptPinnedViewportY(term, buffer)) <= SCROLL_BOTTOM_EPSILON;
+	state.followOutput = atBottom || promptPinned;
 }
 
 function canFitTerminal(state: SessionState): boolean {
