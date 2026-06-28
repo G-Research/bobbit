@@ -127,6 +127,17 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		assert.doesNotMatch(prompt, /When complete, call submit_pr_walkthrough_yaml/);
 	});
 
+	it("the pr-reviewer prompt avoids generated or truncated artifacts by default", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		const prompt = reviewer.promptTemplate ?? "";
+		assert.match(prompt, /manifest `generated` and `truncated` flags/);
+		assert.match(prompt, /Avoid generated, minified, lockfile, build, and bundle artifacts/);
+		assert.match(prompt, /generated_or_binary_files/);
+		assert.match(prompt, /small bounded compact slices/);
+		assert.match(prompt, /hunkLimit=1/);
+		assert.match(prompt, /Do not repeatedly reread large low-signal bundle output/);
+	});
+
 	for (const tool of PR_WALKTHROUGH_TOOLS) {
 		it(`pr-reviewer role resolves ${tool} to allow`, () => {
 			const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
