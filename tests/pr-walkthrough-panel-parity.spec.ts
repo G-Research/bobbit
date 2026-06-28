@@ -641,29 +641,32 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(beatSummaryStyle.color, "orientation body copy should use primary readable text, not muted text").not.toBe(beatSummaryStyle.muted);
 		expect(Number.parseFloat(beatSummaryStyle.fontSize), "orientation body copy should be sized as focus content").toBeGreaterThanOrEqual(16);
 		await expect(page.locator('[data-testid="pr-walkthrough-beat-stats"]')).toContainText(/3 files/);
+		await expect(page.locator('[data-testid="pr-walkthrough-beat-stats"]'), "orientation stats should summarize review diff blocks, not the orientation card itself").not.toContainText(/0 diff blocks/);
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"]')).toBeDisabled();
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-nav"]')).toBeVisible();
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-back"] svg')).toHaveCount(1);
 		await expect(page.locator('[data-testid="pr-walkthrough-guide-next"] svg')).toHaveCount(1);
 		const guideNavStyle = await page.locator('[data-testid="pr-walkthrough-guide-nav"]').evaluate((element: HTMLElement) => {
 			const s = getComputedStyle(element);
-			const content = element.closest<HTMLElement>(".content");
+			const body = element.closest<HTMLElement>(".body");
+			const content = body?.querySelector<HTMLElement>(".content");
 			const back = element.querySelector<HTMLElement>('button[data-testid="pr-walkthrough-guide-back"]');
 			const next = element.querySelector<HTMLElement>('button[data-testid="pr-walkthrough-guide-next"]');
 			const buttonStyle = next ? getComputedStyle(next) : undefined;
 			const rect = element.getBoundingClientRect();
+			const bodyRect = body?.getBoundingClientRect();
 			const contentRect = content?.getBoundingClientRect();
 			const backRect = back?.getBoundingClientRect();
 			const nextRect = next?.getBoundingClientRect();
-			return { position: s.position, bottom: s.bottom, buttonHeight: buttonStyle?.height, buttonRadius: buttonStyle?.borderTopLeftRadius, navLeft: rect.left, navRight: rect.right, navBottom: rect.bottom, contentLeft: contentRect?.left, contentRight: contentRect?.right, contentBottom: contentRect?.bottom, backLeft: backRect?.left, backRight: backRect?.right, nextLeft: nextRect?.left, nextRight: nextRect?.right };
+			return { position: s.position, bottom: s.bottom, buttonHeight: buttonStyle?.height, buttonRadius: buttonStyle?.borderTopLeftRadius, navLeft: rect.left, navRight: rect.right, navTop: rect.top, navBottom: rect.bottom, bodyBottom: bodyRect?.bottom, contentLeft: contentRect?.left, contentRight: contentRect?.right, contentBottom: contentRect?.bottom, backLeft: backRect?.left, backRight: backRect?.right, nextLeft: nextRect?.left, nextRight: nextRect?.right };
 		});
-		expect(guideNavStyle.position, "orientation nav should pin to the bottom of the review pane").toBe("fixed");
-		expect(guideNavStyle.bottom).toBe("0px");
+		expect(guideNavStyle.position, "orientation nav should live in the bottom row of the review pane").toBe("static");
 		expect(Number.parseFloat(guideNavStyle.buttonHeight || "0"), "orientation buttons should match Submit review height").toBeGreaterThanOrEqual(34);
 		expect(Number.parseFloat(guideNavStyle.buttonRadius || "999"), "orientation buttons should use the squarer default button shape").toBeLessThan(12);
 		expect(guideNavStyle.navLeft, "orientation nav should span the full content width").toBeLessThanOrEqual((guideNavStyle.contentLeft || 0) + 1);
 		expect(guideNavStyle.navRight, "orientation nav should span the full content width").toBeGreaterThanOrEqual((guideNavStyle.contentRight || 0) - 1);
-		expect(guideNavStyle.navBottom, "orientation nav should sit at the bottom of the review pane").toBeGreaterThanOrEqual((guideNavStyle.contentBottom || 0) - 1);
+		expect(Math.abs((guideNavStyle.navBottom || 0) - (guideNavStyle.bodyBottom || 0)), "orientation nav should sit at the bottom of the review pane").toBeLessThanOrEqual(1);
+		expect(guideNavStyle.contentBottom, "orientation scrollbar should end above the bottom nav row").toBeLessThanOrEqual((guideNavStyle.navTop || 0) + 1);
 		expect(guideNavStyle.backLeft, "Back should sit on the right side of the nav row").toBeGreaterThan((guideNavStyle.navRight || 0) - 260);
 		expect(guideNavStyle.backRight, "Back should sit to the left of Next").toBeLessThanOrEqual(guideNavStyle.nextLeft || 0);
 		expect(guideNavStyle.nextRight, "Next should be the rightmost orientation action").toBeLessThanOrEqual(guideNavStyle.navRight || 0);
@@ -700,6 +703,19 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await startReviewFromGuide(page);
 
 		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/6\s*\/\s*7\s+reviewed/);
+		await expect(page.locator('[data-testid="prw-review-controls"]'), "review controls should reuse the bottom orientation action bar").toHaveClass(/guide-nav/);
+		const reviewBar = await page.locator('[data-testid="prw-review-controls"]').evaluate((element: HTMLElement) => {
+			const rect = element.getBoundingClientRect();
+			const style = getComputedStyle(element);
+			const body = element.closest<HTMLElement>(".body")?.getBoundingClientRect();
+			const content = element.closest<HTMLElement>(".body")?.querySelector<HTMLElement>(".content")?.getBoundingClientRect();
+			return { position: style.position, bottom: style.bottom, left: rect.left, right: rect.right, top: rect.top, rectBottom: rect.bottom, bodyBottom: body?.bottom, contentLeft: content?.left, contentRight: content?.right, contentBottom: content?.bottom };
+		});
+		expect(reviewBar.position).toBe("static");
+		expect(Math.abs(reviewBar.left - (reviewBar.contentLeft || 0)), "bottom bar should span the full main section width").toBeLessThanOrEqual(1);
+		expect(Math.abs(reviewBar.right - (reviewBar.contentRight || 0)), "bottom bar should span the full main section width").toBeLessThanOrEqual(1);
+		expect(Math.abs(reviewBar.rectBottom - (reviewBar.bodyBottom || 0)), "bottom bar should anchor to the panel body, not the viewport").toBeLessThanOrEqual(1);
+		expect((reviewBar.contentBottom || 0), "content scrollbar should end above the bottom action bar").toBeLessThanOrEqual(reviewBar.top + 1);
 		await expect(page.locator('[data-testid="pr-walkthrough-dislike"]')).toBeDisabled();
 		await page.locator('[data-testid="pr-walkthrough-like"]').click();
 		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Final review controls");
