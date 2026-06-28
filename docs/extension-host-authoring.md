@@ -873,18 +873,26 @@ The built-in xterm panel behavior:
   terminal side panel without writing terminal output into chat.
 - Identity: one session-persistent singleton channel (`singletonKey: session-terminal`) for the
   built-in terminal pack.
+- Output following: new PTY output and local typing keep the active prompt/input visible after large
+  bursts by scrolling the xterm viewport to the current prompt. If the user intentionally scrolls back,
+  the panel stops following output until the viewport returns to the bottom or the prompt-pinned view.
 - Reopen/remount/reload: the panel uses `list({ name: "terminal" })` and `attach(id)` to reconnect
-  while the gateway process is alive. Reattaching to a live terminal replays recent bounded PTY text
-  from the handler's in-memory buffer, then receives a status frame.
+  while the gateway process is alive. Each attach resets the panel's xterm buffer before bounded replay
+  is written, so reattach reconstructs the visible terminal state from handler replay instead of
+  appending stale contents from a prior mount.
 - Replay scope: the buffer belongs to one live `{session, pack, channel}` instance. It is byte-bounded,
   coalesced into bounded text frames on attach, delivered only to the attaching client, and never
   shared across sessions, packs, channels, or clients. The WebSocket handler queues attach-time replay
   until the browser receives the successful attach result, then flushes it, so early frames are not
   dropped before the client has a `HostChannel` object. Replay is not persisted across channel exit,
   kill, session/gateway shutdown, or gateway restart.
-- Resize: xterm fits to the panel and sends debounced JSON resize frames. Fitting waits for visible,
-  connected, non-zero panel dimensions and retries during mount, attach, restore, and resize so stale
-  measurements do not corrupt the initial render.
+- Replay boundaries: when byte-bounded replay starts in the middle of an ANSI/control sequence, the
+  handler trims the orphaned sequence tail before sending replay. This prevents partial CSI/OSC/string
+  fragments from being interpreted as visible garbage or corrupting the restored xterm buffer.
+- Resize and fit: xterm fits to the panel and sends debounced JSON resize frames. Fitting waits for
+  visible, connected, non-zero panel dimensions and retries during mount, attach, restore, and resize
+  so stale measurements do not corrupt the initial render. PTY row/column changes come only from panel
+  fit/host size; prompt pinning scrolls the viewport and must not shrink rows to force visibility.
 - `Kill`: sends a kill JSON frame and terminates the PTY/channel.
 - `Restart`/`Start`: creates a fresh terminal from a user action after exit, kill, error, or
   disconnected restart state.
@@ -894,6 +902,9 @@ The built-in xterm panel behavior:
   channel, and the panel preserves the terminal viewport with a closed status.
 - Styling and accessibility use Bobbit theme tokens, bounded xterm scrollback, explicit button
   labels, and an `aria-live` status region.
+- Regression coverage: `tests/e2e/ui/terminal-pack.spec.ts` covers prompt visibility, resize,
+  reattach, and repeated-glyph artifacts in the browser; `tests/extension-host-terminal.test.ts`
+  covers bounded replay, replay boundary sanitization, frame bridging, and PTY policy.
 
 ### Panels — persistent side panels (`host.ui.openPanel`)
 
