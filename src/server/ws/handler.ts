@@ -274,10 +274,32 @@ type ExtensionChannelRegistry = {
 };
 
 const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
+const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
+const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
+
+type ExtensionChannelClientMessageType = Extract<ClientMessage, { type: `ext_channel_${string}` }>['type'];
+
+const EXTENSION_CHANNEL_CLIENT_MESSAGE_TYPES: ReadonlySet<ExtensionChannelClientMessageType> = new Set([
+	"ext_channel_open_grant",
+	"ext_channel_open",
+	"ext_channel_attach",
+	"ext_channel_list",
+	"ext_channel_send",
+	"ext_channel_close",
+	"ext_channel_detach",
+]);
 
 function rawWsMessageBytes(data: unknown): number {
 	if (Array.isArray(data)) return data.reduce((sum, part) => sum + rawWsMessageBytes(part), 0);
-	return Buffer.byteLength(data as any);
+	if (typeof data === "string") return Buffer.byteLength(data);
+	if (Buffer.isBuffer(data)) return data.byteLength;
+	if (data instanceof ArrayBuffer) return data.byteLength;
+	if (ArrayBuffer.isView(data)) return data.byteLength;
+	return Buffer.byteLength(String(data));
+}
+
+function isExtensionChannelClientMessageType(type: unknown): type is ExtensionChannelClientMessageType {
+	return typeof type === "string" && EXTENSION_CHANNEL_CLIENT_MESSAGE_TYPES.has(type as ExtensionChannelClientMessageType);
 }
 
 function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
@@ -323,6 +345,25 @@ export function handleWebSocketConnection(
 		const status = typeof record?.status === "number" ? record.status : undefined;
 		send(ws, { type: "ext_channel_result", requestId, ok: false, error, message, status });
 	};
+	const sendExtChannelEnvelopeTooLarge = (msg: Extract<ClientMessage, { type: `ext_channel_${string}` }>): void => {
+		const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+		if (!requestId) {
+			send(ws, { type: "error", message: EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE, code: "FRAME_TOO_LARGE" });
+			return;
+		}
+		if (msg.type === "ext_channel_open_grant") {
+			send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "FRAME_TOO_LARGE" });
+			return;
+		}
+		send(ws, {
+			type: "ext_channel_result",
+			requestId,
+			ok: false,
+			error: "FRAME_TOO_LARGE",
+			message: EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE,
+			status: 413,
+		});
+	};
 
 	// 5-second window to authenticate before disconnection
 	const authTimeout = setTimeout(() => {
@@ -332,8 +373,9 @@ export function handleWebSocketConnection(
 	}, 5000);
 
 	ws.on("message", async (data) => {
-		if (rawWsMessageBytes(data) > MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES) {
-			send(ws, { type: "error", message: "WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
+		const frameBytes = rawWsMessageBytes(data);
+		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
+			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
 			return;
 		}
 		let msg: ClientMessage;
@@ -523,6 +565,11 @@ export function handleWebSocketConnection(
 			if (pendingPerm) {
 				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
+			return;
+		}
+
+		if (isExtensionChannelClientMessageType(msg.type) && frameBytes > MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES) {
+			sendExtChannelEnvelopeTooLarge(msg as Extract<ClientMessage, { type: `ext_channel_${string}` }>);
 			return;
 		}
 
