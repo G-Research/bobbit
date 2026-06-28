@@ -1335,14 +1335,48 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const renderStateShell = (kind, testId, title, body, detail = nothing) => html`<section class=${`shell state-shell ${kind}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)}>
 				<header class="header state-header">
 					<div class="title-group">
-						${kind === "pending" ? html`<span class="pr-pill">${spinner}</span>` : nothing}
 						<div class="title-stack"><h1>${title}</h1><div class="header-meta"><span>Reviewer child session</span><span>${displayJob}</span></div></div>
 					</div>
-					<div class="progress-wrap"><span>${progressLabel(kind)}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "pending" ? "35" : kind === "draft" ? "60" : "0"}><div class=${`progress-fill ${kind === "pending" ? "prw-progress-indeterminate" : ""}`} style=${kind === "pending" ? "width:42%" : kind === "draft" ? "width:60%" : "width:0%"}></div></div></div>
+					<div class="progress-wrap"><span>${progressLabel(kind)}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "draft" ? "60" : "0"}><div class="progress-fill" style=${kind === "draft" ? "width:60%" : "width:0%"}></div></div></div>
 				</header>
-				<main class="content state-content"><article class="state-card"><div class="phase-label">${stateLabel(kind)}</div><h2>${title}</h2><p>${body}</p>${detail}${kind === "pending" ? html`<div class="state-skeleton"><span></span><span></span><span></span></div>` : nothing}</article></main>
+				<main class="content state-content"><article class="state-card"><div class="phase-label">${stateLabel(kind)}</div><h2>${title}</h2><p>${body}</p>${detail}</article></main>
 			</section>`;
-			const renderPendingShell = () => renderStateShell("pending", "prw-pending", "PR Walkthrough: In Progress", "Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.");
+			const pendingPreviewEntry = () => ({
+				...entry,
+				status: "rendered",
+				activeCardId: "pending-orientation",
+				reviewStatus: {},
+				bundle: {
+					changeset: { prTitle: "PR Walkthrough", baseSha: "pending", headSha: "pending" },
+					cards: [
+						{ id: "pending-orientation", phaseId: "orientation", navLabel: "Purpose", title: "Review orientation", sections: ["Purpose", "Review map", "Risk", "Files", "Validation", "Start"].map((label) => ({ navLabel: label, heading: label })) },
+						{ id: "pending-review", phaseId: "significant", navLabel: "Diff review", title: "Diff review", summary: "Review cards will appear here once generation finishes." },
+						{ id: "pending-audit", phaseId: "audit", navLabel: "Audit", title: "Final review" },
+					],
+				},
+			});
+			const renderPendingShell = () => {
+				const previewEntry = pendingPreviewEntry();
+				return html`<section class=${`shell prw-bundle pending-shell ${isNarrowLayout(previewEntry) ? "narrow" : ""}`} data-testid="prw-pending" data-prw-key=${safeDomId(paramKey)} data-observed-narrow=${String(isNarrowLayout(previewEntry))} style="--walkthrough-rail-width:48px">
+					<div class="pending-preview-blur" aria-hidden="true">
+						${renderHeaderBlock(previewEntry, host, paramKey)}
+						<div class="body rail-collapsed narrow">
+							${renderNavRail(previewEntry, host, paramKey)}
+							<main class="content prw-card-pane"><article class="card prw-card pending-preview-card"><div class="inner prw-card-story"><header class="card-head"><div><div class="phase-label">Significant</div><h2>Review cards</h2></div><span class="nav-label">Diff review</span></header><p class="summary prw-summary">Diff-backed review cards will appear here once the reviewer submits the walkthrough.</p><div class="state-skeleton"><span></span><span></span><span></span></div></div></article></main>
+							${renderOrientationControls(previewEntry, host, paramKey, previewEntry.bundle.cards[0])}
+						</div>
+					</div>
+					<div class="pending-overlay" data-testid="prw-pending-overlay" role="status" aria-live="polite">
+						<article class="pending-modal state-card">
+							<div class="phase-label">Pending</div>
+							<h2>PR Walkthrough: In Progress</h2>
+							<p>Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.</p>
+							<div class="pending-progress-row"><span class="pr-pill">${spinner}</span><div class="progress-wrap"><span>Generating review cards</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35"><div class="progress-fill prw-progress-indeterminate" style="width:42%"></div></div></div></div>
+							<div class="state-skeleton"><span></span><span></span><span></span></div>
+						</article>
+					</div>
+				</section>`;
+			};
 			const renderDraftShell = () => renderStateShell("draft", "prw-draft", "PR Walkthrough: Draft Saved", "The reviewer has saved analysis chunks, but the walkthrough has not been finalized yet. This pane will keep checking for the finalized review.", renderChunkSummary(entry.chunkSummary));
 
 			return html`
@@ -1742,6 +1776,17 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .export-error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
 					.prw-root .export-result { border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
 					.prw-root .export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
+					.prw-root .pending-shell { grid-template-rows: minmax(0, 1fr); }
+					.prw-root .pending-preview-blur { grid-area: 1 / 1; min-height: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); filter: blur(6px); transform: scale(1.012); transform-origin: center; pointer-events: none; user-select: none; }
+					.prw-root .pending-preview-blur .body { min-height: 0; }
+					.prw-root .pending-preview-blur .submit, .prw-root .pending-preview-blur .guide-button { opacity: .52; }
+					.prw-root .pending-overlay { grid-area: 1 / 1; z-index: 8; display: grid; place-items: center; padding: clamp(14px, 3vw, 36px); background: color-mix(in oklch, var(--background) 42%, transparent); backdrop-filter: blur(10px); }
+					.prw-root .pending-modal { width: min(360px, calc(100% - 20px)); padding: 18px; border-radius: 18px; background: color-mix(in oklch, var(--card) 94%, var(--background)); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); }
+					.prw-root .pending-modal h2 { margin: 8px 0 0; font-size: clamp(20px, 4vw, 28px); line-height: 1.15; letter-spacing: -.02em; }
+					.prw-root .pending-modal p { margin: 12px 0 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.55; }
+					.prw-root .pending-progress-row { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 16px; }
+					.prw-root .pending-progress-row .pr-pill { width: 34px; height: 34px; padding: 0; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 74%, var(--card)); }
+					.prw-root .pending-progress-row .progress-wrap { display: grid; gap: 4px; color: var(--muted-foreground); font-size: 12px; }
 					.prw-root .state-shell { grid-template-rows: auto minmax(0, 1fr); }
 					.prw-root .state-shell .state-header { height: auto; min-height: 68px; grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); gap: 12px; padding: 10px 14px; align-items: center; }
 					.prw-root .state-shell .title-group { min-width: 0; }
@@ -1772,7 +1817,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .shell.narrow .content { padding: 6px var(--walkthrough-content-x) 0; }
 					.prw-root .shell.narrow .guide { --guide-inline-pad: 12px; padding: 12px var(--guide-inline-pad) 0; }
 					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 40px minmax(0, 1fr); } .prw-root .rail { border-right: 0; } .prw-root .rail-panel { padding-inline: 4px; } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .compact .rail-toggle, .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) minmax(120px, 34vw) max-content; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); height: 58px; min-height: 58px; column-gap: 12px; padding: 8px 12px 8px 10px; } .prw-root .title-group { grid-column: 1; grid-row: 1 / 3; min-width: 0; } .prw-root .submit { grid-column: 3; grid-row: 1 / 3; align-self: center; justify-self: end; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 2; grid-row: 1 / 3; align-self: stretch; min-width: 0; } .prw-root .shell { --walkthrough-content-x: 4px; height: 100vh; min-height: 560px; grid-template-rows: 58px minmax(0, 1fr); } .prw-root .content { padding: 6px var(--walkthrough-content-x) 0; } }
-					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } }
+					.prw-root .pending-shell { grid-template-rows: minmax(0, 1fr); }
+					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } .prw-root .pending-overlay { padding: 14px; } .prw-root .pending-modal { width: min(340px, 100%); } }
 
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>

@@ -369,34 +369,41 @@ async function visibleRailTestIds(page: any): Promise<string[]> {
 }
 
 test.describe("PR walkthrough pack panel UI parity", () => {
-	test("renders a pending reviewer-child state without falling back to an owner-session loader", async ({ page }) => {
-		await page.setViewportSize({ width: 1100, height: 760 });
+	test("renders a pending reviewer-child state as the ready panel with a blurred modal overlay", async ({ page }) => {
+		await page.setViewportSize({ width: 640, height: 760 });
 		await loadFixture(page);
 		await page.evaluate(() => (window as any).__renderPrwPending());
 
 		await expect(page.locator('[data-testid="prw-panel-root"]')).toBeVisible();
 		await expect(page.locator('[data-testid="prw-pending"]')).toContainText("PR Walkthrough: In Progress");
 		await expect(page.locator("body")).not.toContainText(/Run walkthrough|Load walkthrough/i);
+		await expect(page.locator('[data-testid="prw-pending"] [data-testid="pr-walkthrough-header"]'), "pending state should keep the ready-to-review header behind the overlay").toBeVisible();
+		await expect(page.locator('[data-testid="prw-pending"] [data-testid="pr-walkthrough-collapsed-rail"]'), "pending state should keep the ready-to-review compact rail behind the overlay").toBeVisible();
+		await expect(page.locator('[data-testid="prw-pending-overlay"]'), "pending progress should be a modal overlay").toBeVisible();
 
 		const layout = await page.evaluate(() => {
-			const header = document.querySelector<HTMLElement>('[data-testid="prw-pending"] .state-header');
-			const title = header?.querySelector<HTMLElement>("h1");
-			const progress = header?.querySelector<HTMLElement>(".progress-wrap");
-			const progressLabel = progress?.querySelector<HTMLElement>("span");
-			const card = document.querySelector<HTMLElement>('[data-testid="prw-pending"] .state-card');
-			if (!header || !title || !progress || !progressLabel || !card) return undefined;
+			const shell = document.querySelector<HTMLElement>('[data-testid="prw-pending"]');
+			const preview = shell?.querySelector<HTMLElement>(".pending-preview-blur");
+			const overlay = shell?.querySelector<HTMLElement>('[data-testid="prw-pending-overlay"]');
+			const modal = shell?.querySelector<HTMLElement>(".pending-modal");
+			const header = shell?.querySelector<HTMLElement>('[data-testid="pr-walkthrough-header"]');
+			const rail = shell?.querySelector<HTMLElement>('[data-testid="pr-walkthrough-collapsed-rail"]');
+			if (!shell || !preview || !overlay || !modal || !header || !rail) return undefined;
+			const shellRect = shell.getBoundingClientRect();
+			const overlayRect = overlay.getBoundingClientRect();
+			const modalRect = modal.getBoundingClientRect();
+			const previewStyle = getComputedStyle(preview);
+			const overlayStyle = getComputedStyle(overlay);
 			const headerRect = header.getBoundingClientRect();
-			const titleRect = title.getBoundingClientRect();
-			const progressRect = progress.getBoundingClientRect();
-			const labelRect = progressLabel.getBoundingClientRect();
-			const cardRect = card.getBoundingClientRect();
-			const overlaps = !(titleRect.right <= progressRect.left || progressRect.right <= titleRect.left || titleRect.bottom <= progressRect.top || progressRect.bottom <= titleRect.top);
-			return { overlaps, labelHeight: labelRect.height, contentGap: cardRect.top - headerRect.bottom };
+			const railRect = rail.getBoundingClientRect();
+			return { previewFilter: previewStyle.filter, overlayBackdrop: overlayStyle.backdropFilter || (overlayStyle as any).webkitBackdropFilter || "", shellWidth: shellRect.width, overlayWidth: overlayRect.width, modalWidth: modalRect.width, headerTop: headerRect.top, railTop: railRect.top };
 		});
 		expect(layout).toBeTruthy();
-		expect(layout!.overlaps).toBe(false);
-		expect(layout!.labelHeight).toBeLessThan(24);
-		expect(layout!.contentGap).toBeGreaterThanOrEqual(0);
+		expect(layout!.previewFilter, "background around the pending modal should be gaussian blurred").toContain("blur");
+		expect(layout!.overlayBackdrop, "overlay should also blur the backdrop around the modal").toContain("blur");
+		expect(Math.abs(layout!.overlayWidth - layout!.shellWidth), "overlay should cover the full panel, not a narrow side card").toBeLessThanOrEqual(1);
+		expect(layout!.modalWidth, "pending modal should remain compact in half-panel layout").toBeLessThanOrEqual(380);
+		expect(layout!.headerTop, "ready header should remain at the top behind the overlay").toBeLessThan(layout!.railTop);
 	});
 
 	test("renders saved draft chunks as a bounded resumable state", async ({ page }) => {
