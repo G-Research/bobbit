@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ChannelDispatcher, type ChannelHandlerContext } from "../src/server/extension-host/channel-dispatcher.ts";
+import { WorkerChannelModuleHost } from "../src/server/extension-host/channel-module-host.ts";
 import { ChannelRegistry } from "../src/server/extension-host/channel-registry.ts";
 import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenPermitBinding } from "../src/server/extension-host/channel-types.ts";
 
@@ -95,6 +96,13 @@ describe("ChannelRegistry — permit-gated open and scoping", () => {
 		assert.equal(registry.activeCount(), 1);
 	});
 
+	it("production wiring uses the worker-backed module host instead of in-process pack imports", () => {
+		const registrySrc = fs.readFileSync(path.join(process.cwd(), "src/server/extension-host/channel-registry.ts"), "utf8");
+		const moduleHostSrc = fs.readFileSync(path.join(process.cwd(), "src/server/extension-host/channel-module-host.ts"), "utf8");
+		assert.match(registrySrc, /new WorkerChannelModuleHost\(/, "registry default must use worker-backed module host");
+		assert.doesNotMatch(moduleHostSrc, /await import\(resolved\.url\)/, "channel module host must not directly import pack modules in the gateway process");
+	});
+
 	it("runs pack-declared channel modules and fails closed when a handler cannot be loaded", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-host-"));
 		try {
@@ -141,6 +149,68 @@ export const channels = {
 				clientId: "client-2",
 				openPermit: permit(registry),
 			}), "channel_handler_not_found");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("runs a terminal-style module through the worker/proxy PTY seam", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-pty-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => {
+    const pty = await ctx.host.pty.openTerminal({ cols: 80, rows: 24 });
+    pty.onData((data) => { void ctx.send({ kind: "text", data }); });
+    pty.onExit((event) => { void ctx.send({ kind: "json", data: { op: "exit", code: event.code, reason: event.reason } }); });
+    await ctx.send({ kind: "json", data: { op: "status", pid: pty.pid } });
+    return {
+      onClientFrame: async (frame) => { if (frame.kind === "text") pty.write(frame.data); },
+      close: async () => { pty.kill("closed"); }
+    };
+  }
+};
+`, "utf-8");
+			let dataCb: ((data: string) => void) | undefined;
+			let exitCb: ((event: { code: number | null; reason?: string }) => void) | undefined;
+			const writes: string[] = [];
+			const frames: unknown[] = [];
+			const moduleHost = new WorkerChannelModuleHost({
+				buildHost: () => ({
+					pty: {
+						async openTerminal() {
+							return {
+								pid: 42,
+								write: (data: string) => { writes.push(data); dataCb?.(`echo:${data}`); },
+								resize: () => {},
+								kill: (_reason?: string) => {},
+								onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+								onExit: (cb: (event: { code: number | null; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+							};
+						},
+					},
+				}),
+			});
+			const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-pty" });
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+				capabilities: ["sessionPty"],
+			};
+			await registry.open({ sessionId: "sess-1", packId: "pack-a", contribution: declared, clientId: "client-1", client: { onFrame: (frame) => { frames.push(frame); } }, openPermit: permit(registry) });
+			assert.deepEqual(frames.shift(), { kind: "json", data: { op: "status", pid: 42 } });
+			await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-pty", clientId: "client-1", frame: { kind: "text", data: "pwd\n" } });
+			assert.deepEqual(writes, ["pwd\n"]);
+			for (let i = 0; i < 20 && frames.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			assert.deepEqual(frames.shift(), { kind: "text", data: "echo:pwd\n" });
+			await registry.close({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-pty", clientId: "client-1", reason: "done" });
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

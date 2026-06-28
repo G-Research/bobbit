@@ -17,8 +17,11 @@ interface StoredPermit {
 	expiresAt: number;
 }
 
+type TrustedActivationBinding = Pick<ChannelOpenPermitBinding, "sessionId" | "packId" | "channelName" | "singletonKey">;
+
 export interface ChannelOpenPermitStoreOptions {
 	ttlMs?: number;
+	trustedActivationTtlMs?: number;
 	now?: () => number;
 	randomToken?: () => string;
 	audit?: (event: ChannelAuditEvent) => void;
@@ -32,20 +35,43 @@ export interface ChannelOpenPermitConsumeResult {
 }
 
 const DEFAULT_TTL_MS = 30_000;
+const DEFAULT_TRUSTED_ACTIVATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class ChannelOpenPermitStore {
 	private readonly permits = new Map<string, StoredPermit>();
 	private readonly consumedPermits = new Map<string, number>();
+	private readonly trustedActivations = new Map<string, number>();
 	private readonly ttlMs: number;
+	private readonly trustedActivationTtlMs: number;
 	private readonly now: () => number;
 	private readonly randomToken: () => string;
 	private readonly audit?: (event: ChannelAuditEvent) => void;
 
 	constructor(opts: ChannelOpenPermitStoreOptions = {}) {
 		this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+		this.trustedActivationTtlMs = opts.trustedActivationTtlMs ?? DEFAULT_TRUSTED_ACTIVATION_TTL_MS;
 		this.now = opts.now ?? Date.now;
 		this.randomToken = opts.randomToken ?? (() => randomBytes(24).toString("base64url"));
 		this.audit = opts.audit;
+	}
+
+	markTrustedLauncherActivation(binding: TrustedActivationBinding): void {
+		const normalized = normalizeTrustedActivation(binding);
+		const at = this.now();
+		this.cleanupExpiredAt(at);
+		this.trustedActivations.set(trustedActivationKey(normalized), at + this.trustedActivationTtlMs);
+	}
+
+	hasTrustedLauncherActivation(binding: TrustedActivationBinding): boolean {
+		const normalized = normalizeTrustedActivation(binding);
+		const at = this.now();
+		this.cleanupExpiredAt(at);
+		const expiresAt = this.trustedActivations.get(trustedActivationKey(normalized));
+		return expiresAt !== undefined && expiresAt > at;
+	}
+
+	clearTrustedLauncherActivation(binding: TrustedActivationBinding): void {
+		this.trustedActivations.delete(trustedActivationKey(normalizeTrustedActivation(binding)));
 	}
 
 	mint(binding: ChannelOpenPermitBinding): string {
@@ -101,6 +127,7 @@ export class ChannelOpenPermitStore {
 	clear(): void {
 		this.permits.clear();
 		this.consumedPermits.clear();
+		this.trustedActivations.clear();
 	}
 
 	private cleanupExpiredAt(at: number): number {
@@ -114,6 +141,12 @@ export class ChannelOpenPermitStore {
 		for (const [token, expiresAt] of this.consumedPermits) {
 			if (expiresAt <= at) {
 				this.consumedPermits.delete(token);
+				removed++;
+			}
+		}
+		for (const [key, expiresAt] of this.trustedActivations) {
+			if (expiresAt <= at) {
+				this.trustedActivations.delete(key);
 				removed++;
 			}
 		}
@@ -157,6 +190,19 @@ function bindingsEqual(a: StoredPermit["binding"], b: StoredPermit["binding"]): 
 		&& a.contributionId === b.contributionId
 		&& a.channelName === b.channelName
 		&& a.singletonKey === b.singletonKey;
+}
+
+function normalizeTrustedActivation(binding: TrustedActivationBinding): Required<Pick<ChannelOpenPermitBinding, "sessionId" | "packId" | "channelName">> & Pick<ChannelOpenPermitBinding, "singletonKey"> {
+	return {
+		sessionId: requireNonEmpty(binding.sessionId, "sessionId"),
+		packId: requireNonEmpty(binding.packId, "packId"),
+		channelName: requireNonEmpty(binding.channelName, "channelName"),
+		singletonKey: normalizeSingletonKey(binding.singletonKey),
+	};
+}
+
+function trustedActivationKey(binding: ReturnType<typeof normalizeTrustedActivation>): string {
+	return `${binding.sessionId}\u0000${binding.packId}\u0000${binding.channelName}\u0000${binding.singletonKey ?? ""}`;
 }
 
 function auditBinding(binding: StoredPermit["binding"]): Pick<ChannelAuditEvent, "sessionId" | "packId" | "contributionId" | "channelName" | "singletonKey"> {

@@ -98,7 +98,9 @@ export type ChannelAuditEventType =
 	| "channel.frame.out"
 	| "channel.frame.reject"
 	| "channel.close"
-	| "channel.cleanup";
+	| "channel.cleanup"
+	| "pty.spawn"
+	| "pty.exit";
 
 export interface ChannelAuditEvent {
 	type: ChannelAuditEventType;
@@ -136,13 +138,20 @@ export function normalizeSingletonKey(value: unknown): string | undefined {
 
 export function frameByteLength(frame: HostChannelFrame): number {
 	if (frame.kind === "text") return Buffer.byteLength(frame.data, "utf8");
-	return Buffer.byteLength(JSON.stringify(frame.data) ?? "null", "utf8");
+	return measureJsonByteLength(frame.data, Number.POSITIVE_INFINITY).bytes;
 }
 
 export function validateChannelFrame(
 	frame: unknown,
 	options: number | { maxFrameBytes?: number } = DEFAULT_CHANNEL_QUOTAS.maxFrameBytes,
 ): HostChannelFrame {
+	return validateChannelFrameWithSize(frame, options).frame;
+}
+
+export function validateChannelFrameWithSize(
+	frame: unknown,
+	options: number | { maxFrameBytes?: number } = DEFAULT_CHANNEL_QUOTAS.maxFrameBytes,
+): { frame: HostChannelFrame; bytes: number } {
 	const maxFrameBytes = typeof options === "number" ? options : options.maxFrameBytes ?? DEFAULT_CHANNEL_QUOTAS.maxFrameBytes;
 	if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
 		throw new ChannelError(400, "invalid_frame", "channel frame must be an object");
@@ -153,32 +162,43 @@ export function validateChannelFrame(
 			throw new ChannelError(400, "invalid_frame", "text channel frame data must be a string");
 		}
 		const typed: HostChannelFrame = { kind: "text", data: candidate.data };
-		assertFrameSize(typed, maxFrameBytes);
-		return typed;
+		const bytes = Buffer.byteLength(typed.data, "utf8");
+		if (bytes > maxFrameBytes) throw new ChannelError(413, "frame_too_large", `channel frame exceeds ${maxFrameBytes} bytes`);
+		return { frame: typed, bytes };
 	}
 	if (candidate.kind === "json") {
 		if (!Object.prototype.hasOwnProperty.call(candidate, "data") || candidate.data === undefined) {
 			throw new ChannelError(400, "invalid_frame", "json channel frame data is required");
 		}
-		const typed: HostChannelFrame = { kind: "json", data: candidate.data };
-		assertJsonSerializable(typed.data);
-		assertFrameSize(typed, maxFrameBytes);
-		return typed;
+		const measured = measureJsonByteLength(candidate.data, maxFrameBytes);
+		return { frame: { kind: "json", data: candidate.data }, bytes: measured.bytes };
 	}
 	throw new ChannelError(400, "invalid_frame", "channel frame kind must be text or json");
 }
 
-function assertFrameSize(frame: HostChannelFrame, maxFrameBytes: number): void {
-	const bytes = frameByteLength(frame);
-	if (bytes > maxFrameBytes) {
-		throw new ChannelError(413, "frame_too_large", `channel frame exceeds ${maxFrameBytes} bytes`);
-	}
-}
-
-function assertJsonSerializable(value: unknown): void {
-	try {
-		JSON.stringify(value);
-	} catch {
-		throw new ChannelError(400, "invalid_frame", "json channel frame data must be JSON serializable");
-	}
+export function measureJsonByteLength(value: unknown, maxBytes = DEFAULT_CHANNEL_QUOTAS.maxFrameBytes, maxDepth = 128): { bytes: number } {
+	const seen = new WeakSet<object>();
+	const visit = (node: unknown, depth: number): void => {
+		if (depth > maxDepth) throw new ChannelError(400, "invalid_frame", "json channel frame data exceeds maximum depth");
+		if (!node || typeof node !== "object") return;
+		if (seen.has(node)) throw new ChannelError(400, "invalid_frame", "json channel frame data must be JSON serializable");
+		seen.add(node);
+		if (Array.isArray(node)) {
+			for (const item of node) visit(item, depth + 1);
+			return;
+		}
+		for (const value of Object.values(node as Record<string, unknown>)) {
+			if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
+				throw new ChannelError(400, "invalid_frame", "json channel frame data must be JSON serializable");
+			}
+			visit(value, depth + 1);
+		}
+	};
+	visit(value, 0);
+	let json: string;
+	try { json = JSON.stringify(value) ?? "null"; }
+	catch { throw new ChannelError(400, "invalid_frame", "json channel frame data must be JSON serializable"); }
+	const bytes = Buffer.byteLength(json, "utf8");
+	if (bytes > maxBytes) throw new ChannelError(413, "frame_too_large", `channel frame exceeds ${maxBytes} bytes`);
+	return { bytes };
 }

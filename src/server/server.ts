@@ -166,6 +166,22 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
 }
 
+function extensionChannelAuditSink(event: Record<string, unknown>): void {
+	const type = typeof event.type === "string" ? event.type : "unknown";
+	if ((type === "channel.frame.in" || type === "channel.frame.out") && process.env.BOBBIT_DEBUG !== "1") return;
+	const session = typeof event.sessionId === "string" ? event.sessionId : "-";
+	const packId = typeof event.packId === "string" ? event.packId : "-";
+	const channelName = typeof event.channelName === "string" ? event.channelName : "-";
+	const channelId = typeof event.channelId === "string" ? event.channelId : "-";
+	const reason = typeof event.reason === "string" ? event.reason : undefined;
+	const error = typeof event.error === "string" ? event.error : undefined;
+	const quota = typeof event.quota === "string" ? event.quota : undefined;
+	const frameKind = typeof event.frameKind === "string" ? event.frameKind : undefined;
+	const frameBytes = typeof event.frameBytes === "number" ? event.frameBytes : undefined;
+	const extras = [reason && `reason=${reason}`, error && `error=${error}`, quota && `quota=${quota}`, frameKind && `frameKind=${frameKind}`, frameBytes !== undefined && `frameBytes=${frameBytes}`].filter(Boolean).join(" ");
+	console.log(`[ext-channel-audit] type=${type} session=${session} packId=${packId} channel=${channelName} channelId=${channelId}${extras ? ` ${extras}` : ""}`);
+}
+
 async function instantiateExtensionChannelServices(deps: {
 	packContributionRegistry: PackContributionRegistry;
 	sessionManager: SessionManager;
@@ -187,12 +203,13 @@ async function instantiateExtensionChannelServices(deps: {
 		if (typeof OpenPermitsCtor !== "function" || typeof RegistryCtor !== "function") {
 			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-permit service");
 		}
-		const ChannelModuleHostCtor = (channelModuleHostModule as any).LocalChannelModuleHost
-			?? (channelModuleHostModule as any).ChannelModuleHost;
-		const openPermits = new OpenPermitsCtor();
+		const ChannelModuleHostCtor = (channelModuleHostModule as any).WorkerChannelModuleHost
+			?? (channelModuleHostModule as any).ChannelModuleHost
+			?? (channelModuleHostModule as any).LocalChannelModuleHost;
+		const openPermits = new OpenPermitsCtor({ audit: extensionChannelAuditSink });
 		const ChannelPtyServiceCtor = (channelPtyModule as any).ChannelPtyService;
 		const channelPtyService = typeof ChannelPtyServiceCtor === "function"
-			? new ChannelPtyServiceCtor({ sessionManager: deps.sessionManager })
+			? new ChannelPtyServiceCtor({ sessionManager: deps.sessionManager, audit: extensionChannelAuditSink })
 			: undefined;
 		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor({
 			buildHost: channelPtyService
@@ -207,6 +224,8 @@ async function instantiateExtensionChannelServices(deps: {
 			contributionRegistry: deps.packContributionRegistry,
 			contributions: deps.packContributionRegistry,
 			moduleHost: channelModuleHost,
+			audit: extensionChannelAuditSink,
+			auditLog: { write: extensionChannelAuditSink },
 			sessionManager: deps.sessionManager,
 			projectContextManager: deps.projectContextManager,
 			toolManager: deps.toolManager,
@@ -6995,6 +7014,14 @@ async function handleApiRoute(
 			: typeof (body as { singletonKey?: unknown }).singletonKey === "string" ? (body as { singletonKey: string }).singletonKey : undefined;
 		if (!resolveChannelContributionForGrant(packContributionRegistry, channelSessionProjectId, surf.packId, name)) {
 			json({ error: `pack "${surf.packId}" declares no channel "${name}"` }, 404);
+			return;
+		}
+		const permitsAny = extensionChannelServices.openPermits as any;
+		const activationBinding = { sessionId: guard.sessionId, packId: surf.packId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
+		if (surf.contributionId.startsWith("entrypoint:")) {
+			permitsAny.markTrustedLauncherActivation?.(activationBinding);
+		} else if (permitsAny.hasTrustedLauncherActivation?.(activationBinding) !== true) {
+			json({ error: "channel open requires a trusted launcher activation" }, 403);
 			return;
 		}
 		try {
