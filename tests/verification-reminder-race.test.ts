@@ -208,4 +208,54 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		// Cleanup the queued startTurn timer.
 		await new Promise((r) => setTimeout(r, 60));
 	});
+
+	it("reminder failure/termination waits for the reminder turn to actually start", async () => {
+		const session = new FakeSession("rv-6");
+		const calls: string[] = [];
+		const resultPromise = new Promise<any>(() => {});
+		let terminated = false;
+
+		async function reminderThenFailOrTerminate() {
+			calls.push("prompt:reminder");
+			await session.rpcClient.prompt();
+			calls.push("waitForStreaming");
+			await waitForStreaming(session, 1_000).catch(() => {});
+			calls.push("race:start");
+			const outcome = await Promise.race([
+				resultPromise.then((r: any) => ({ type: "result" as const, ...r })),
+				waitForIdle(session, 2_000).then(() => ({ type: "idle" as const })),
+			]);
+			if (outcome.type === "idle") {
+				calls.push("fail:idle-after-reminder");
+				terminated = true;
+				calls.push("terminateSession");
+			}
+		}
+
+		const run = reminderThenFailOrTerminate();
+		setTimeout(() => {
+			calls.push("agent_start");
+			session.startTurn();
+		}, 25);
+
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(
+			calls,
+			["prompt:reminder", "waitForStreaming", "agent_start", "race:start"],
+			`Reminder path must wait for agent_start before starting the idle race. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(
+			terminated,
+			false,
+			`Reviewer must not be failed/terminated while the reminder turn is still streaming. calls=${JSON.stringify(calls)}`,
+		);
+
+		session.endTurn();
+		await run;
+		assert.equal(terminated, true);
+		assert.ok(
+			calls.indexOf("terminateSession") > calls.indexOf("race:start"),
+			`Termination should happen only after the post-reminder idle window. calls=${JSON.stringify(calls)}`,
+		);
+	});
 });
