@@ -11,6 +11,23 @@ const tid = (id: string) => `[data-testid="${id}"]`;
 const terminalPanel = () => `${tid("terminal-panel")}`;
 const terminalHost = () => `${tid("terminal-xterm")}`;
 
+// Synthetic fixture based on the Windows cmd.exe/ConPTY startup shape observed
+// in the terminal regression: private-mode enables, clear/home, OSC title,
+// banner, prompt, and cursor visibility toggles. Escaped bytes keep the replay
+// deterministic on every E2E platform.
+const WINDOWS_CMD_CONPTY_STARTUP_STREAM = [
+	"\x1b[?9001h",
+	"\x1b[?1004h",
+	"\x1b[?25l",
+	"\x1b[2J",
+	"\x1b[H",
+	"\x1b]0;C:\\Windows\\System32\\cmd.exe\x07",
+	"Microsoft Windows [Version 10.0.22631.4317]\r\n",
+	"(c) Microsoft Corporation. All rights reserved.\r\n\r\n",
+	"\x1b[?25h",
+	"C:\\Users\\bobbit>",
+].join("");
+
 test.describe("terminal pack panel", () => {
 	let sessionId: string | undefined;
 
@@ -158,6 +175,93 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
+	test("reproduces Windows cmd ConPTY startup xterm layout artifact @terminal-repro", async ({ page }, testInfo) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1220, height: 620 });
+		await installChannelFrameSpy(page);
+
+		await openApp(page);
+		sessionId = await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await waitForTerminalMountedForFrameInjection(page);
+
+		const run = `bobbit_windows_conpty_${Date.now()}`;
+		const burstDone = `${run}_BURST_DONE`;
+		const followUp = `${run}_FOLLOWUP_PROMPT_VISIBLE`;
+		const cursorHome = `${run}_CURSOR_HOME_VISIBLE`;
+		const burst = Array.from({ length: 70 }, (_, i) => `${run}_LINE_${String(i).padStart(3, "0")}_abcdefghijklmnopqrstuvwxyz`)
+			.join("\r\n") + `\r\n${burstDone}\r\n`;
+		const followUpPrompt = `C:\\Users\\bobbit>echo ${followUp}\r\n${followUp}\r\nC:\\Users\\bobbit>`;
+
+		const snapshots: TerminalDebugSnapshot[] = [];
+		const contentProblems: string[] = [];
+		const collectPhase = async (phase: string, expectedNearBottom?: string) => {
+			const snapshot = await collectTerminalDebugSnapshot(page, phase);
+			snapshots.push(snapshot);
+			contentProblems.push(...terminalContentProblems(snapshot, expectedNearBottom));
+			await attachTerminalDebugArtifacts(testInfo, page, phase, snapshot);
+			return snapshot;
+		};
+
+		await injectTerminalTextFrame(page, WINDOWS_CMD_CONPTY_STARTUP_STREAM);
+		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
+		await expect(page.locator(terminalHost())).toContainText("Microsoft Windows", { timeout: 10_000 });
+		await collectPhase("initial-startup");
+
+		await injectTerminalTextFrame(page, burst);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, burstDone),
+			{ message: "Windows ConPTY reproducer should feed the large-output completion marker", timeout: 10_000 },
+		).toBe(true);
+		await injectTerminalTextFrame(page, followUpPrompt);
+		await expect(page.locator(terminalHost())).toContainText(followUp, { timeout: 10_000 });
+		await collectPhase("large-burst-follow-up", followUp);
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(terminalPanel()), "terminal panel should restore for Windows ConPTY replay reproduction").toBeVisible({ timeout: 20_000 });
+		await waitForTerminalMountedForFrameInjection(page);
+		await expect.poll(() => channelSendCount(page, "ext_channel_attach"), { timeout: 20_000 }).toBeGreaterThan(0);
+		await injectTerminalTextFrame(page, WINDOWS_CMD_CONPTY_STARTUP_STREAM + burst + followUpPrompt);
+		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
+		await expect(page.locator(terminalHost())).toContainText(followUp, { timeout: 10_000 });
+		await collectPhase("reload-reattach-replay", followUp);
+
+		await page.setViewportSize({ width: 940, height: 430 });
+		await waitForTerminalAnimationFrames(page);
+		await injectTerminalTextFrame(page, followUpPrompt);
+		await expect(page.locator(terminalHost())).toContainText(followUp, { timeout: 10_000 });
+		await collectPhase("resize-smaller", followUp);
+		await page.setViewportSize({ width: 1320, height: 720 });
+		await waitForTerminalAnimationFrames(page);
+		await injectTerminalTextFrame(page, followUpPrompt);
+		await expect(page.locator(terminalHost())).toContainText(followUp, { timeout: 10_000 });
+		await collectPhase("resize-larger", followUp);
+
+		const beforeCursorRows = snapshots.at(-1)?.renderedRowCount ?? 0;
+		await injectTerminalTextFrame(page, `\x1b[H${cursorHome}\r\nC:\\Users\\bobbit>`);
+		await expect(page.locator(terminalHost())).toContainText(cursorHome, { timeout: 10_000 });
+		const cursorSnapshot = await collectPhase("cursor-control-home", cursorHome);
+		if (cursorSnapshot.renderedRowCount < Math.max(10, beforeCursorRows - 1)) {
+			contentProblems.push(`cursor-control-home: xterm rendered rows shrank from ${beforeCursorRows} to ${cursorSnapshot.renderedRowCount}`);
+		}
+
+		const cssProblems = snapshots.flatMap(requiredXtermCssProblems);
+		const allProblems = [...cssProblems, ...contentProblems];
+		try {
+			expect(
+				allProblems,
+				`TERMINAL_XTERM_REQUIRED_CSS_MISSING: required xterm stylesheet/layout rules are absent or incomplete. Debug snapshots:\n${JSON.stringify(snapshots, null, 2)}`,
+			).toEqual([]);
+		} catch (err) {
+			await attachTerminalDebugArtifacts(testInfo, page, "failure", snapshots.at(-1));
+			throw err;
+		}
+	});
+
 	test("renders a clear disconnected state after gateway restart while terminal is live", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1400, height: 900 });
@@ -196,11 +300,23 @@ async function listContributions(): Promise<Array<{ packId: string; panels: Arra
 async function installChannelFrameSpy(page: import("@playwright/test").Page): Promise<void> {
 	await page.addInitScript(() => {
 		const win = window as any;
-		win.__terminalE2E = { sent: [] as any[], received: [] as any[] };
+		win.__terminalE2E = { sent: [] as any[], received: [] as any[], sockets: [] as WebSocket[] };
+		win.__terminalE2E.injectServerMessage = (msg: any) => {
+			const data = JSON.stringify(msg);
+			win.__terminalE2E.received.push(msg);
+			const sockets = [...win.__terminalE2E.sockets].filter((socket: WebSocket) => socket.readyState === WebSocket.OPEN);
+			for (const socket of sockets) {
+				const event = new MessageEvent("message", { data });
+				const handler = (socket as any).onmessage;
+				if (typeof handler === "function") handler.call(socket, event);
+				else socket.dispatchEvent(event);
+			}
+		};
 		const OriginalWebSocket = window.WebSocket;
 		window.WebSocket = class BobbitTerminalSpyWebSocket extends OriginalWebSocket {
 			constructor(url: string | URL, protocols?: string | string[]) {
 				super(url, protocols as any);
+				win.__terminalE2E.sockets.push(this);
 				this.addEventListener("message", (event: MessageEvent) => {
 					if (typeof event.data !== "string") return;
 					try {
@@ -231,6 +347,218 @@ async function installChannelFrameSpy(page: import("@playwright/test").Page): Pr
 	});
 }
 
+type TerminalDebugSnapshot = {
+	phase: string;
+	buffer: { baseY: number | null; viewportY: number | null; cursorY: number | null; cols: number | null; rows: number | null };
+	renderedRowCount: number;
+	selectors: Record<string, { exists: boolean; rect: Record<string, number> | null; css: Record<string, string> | null }>;
+	rows: { top: string[]; banner: string[]; bottom: string[]; all: string[] };
+	scroll: { scrollTop: number; scrollHeight: number; clientHeight: number; maxScrollTop: number; atBottom: boolean };
+	recentFrames: Array<{ kind: string; escaped: string; hex: string }>;
+};
+
+async function injectTerminalTextFrame(page: import("@playwright/test").Page, data: string): Promise<void> {
+	await injectTerminalFrame(page, { kind: "text", data });
+}
+
+async function injectTerminalJsonFrame(page: import("@playwright/test").Page, data: unknown): Promise<void> {
+	await injectTerminalFrame(page, { kind: "json", data });
+}
+
+async function injectTerminalFrame(page: import("@playwright/test").Page, frame: { kind: "text"; data: string } | { kind: "json"; data: unknown }): Promise<void> {
+	const channelId = await latestTerminalChannelId(page);
+	expect(channelId, "terminal reproducer needs an attached terminal channel before injecting deterministic ConPTY frames").toBeTruthy();
+	await page.evaluate(({ channelId: id, frame: injectedFrame }) => {
+		(window as any).__terminalE2E?.injectServerMessage?.({ type: "ext_channel_frame", channelId: id, frame: injectedFrame });
+	}, { channelId, frame });
+	await waitForTerminalAnimationFrames(page);
+}
+
+async function waitForTerminalAnimationFrames(page: import("@playwright/test").Page): Promise<void> {
+	await page.evaluate(async () => {
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+	});
+}
+
+async function latestTerminalChannelId(page: import("@playwright/test").Page): Promise<string> {
+	return page.evaluate(() => {
+		const received = ((window as any).__terminalE2E?.received ?? []) as any[];
+		for (const msg of [...received].reverse()) {
+			const channel = msg?.type === "ext_channel_result" && msg?.ok ? msg.channel : undefined;
+			if (channel?.name === "terminal" && typeof channel.id === "string") return channel.id;
+		}
+		return "";
+	});
+}
+
+async function collectTerminalDebugSnapshot(page: import("@playwright/test").Page, phase: string): Promise<TerminalDebugSnapshot> {
+	return page.evaluate((snapshotPhase) => {
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const selectors = {
+			host: '[data-testid="terminal-xterm"]',
+			xterm: '[data-testid="terminal-xterm"] .xterm',
+			viewport: '[data-testid="terminal-xterm"] .xterm-viewport',
+			screen: '[data-testid="terminal-xterm"] .xterm-screen',
+			helpers: '[data-testid="terminal-xterm"] .xterm-helpers',
+			helperTextarea: '[data-testid="terminal-xterm"] .xterm-helper-textarea',
+			accessibility: '[data-testid="terminal-xterm"] .xterm-accessibility',
+			liveRegion: '[data-testid="terminal-xterm"] .live-region',
+			charMeasure: '[data-testid="terminal-xterm"] .xterm-char-measure-element',
+		};
+		const rectAndCss = (selector: string) => {
+			const el = document.querySelector(selector) as HTMLElement | null;
+			if (!el) return { exists: false, rect: null, css: null };
+			const rect = el.getBoundingClientRect();
+			const css = getComputedStyle(el);
+			return {
+				exists: true,
+				rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left },
+				css: {
+					display: css.display,
+					visibility: css.visibility,
+					opacity: css.opacity,
+					position: css.position,
+					top: css.top,
+					right: css.right,
+					bottom: css.bottom,
+					left: css.left,
+					overflow: css.overflow,
+					overflowY: css.overflowY,
+					pointerEvents: css.pointerEvents,
+					width: css.width,
+					height: css.height,
+					zIndex: css.zIndex,
+				},
+			};
+		};
+		const allRows = Array.from(document.querySelectorAll('[data-testid="terminal-xterm"] .xterm-rows > div'))
+			.map((row) => (row.textContent ?? "").trimEnd());
+		const bannerIndex = allRows.findIndex((row) => /Microsoft Windows/i.test(row));
+		const viewport = host?.querySelector(".xterm-viewport") as HTMLElement | null;
+		const scrollTop = viewport?.scrollTop ?? 0;
+		const scrollHeight = viewport?.scrollHeight ?? 0;
+		const clientHeight = viewport?.clientHeight ?? 0;
+		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+		const escaped = (value: string) => value
+			.replace(/\\/g, "\\\\")
+			.replace(/\x1b/g, "\\x1b")
+			.replace(/\r/g, "\\r")
+			.replace(/\n/g, "\\n")
+			.replace(/\x07/g, "\\x07");
+		const hex = (value: string) => Array.from(value).map((ch) => ch.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
+		const recentFrames = (((window as any).__terminalE2E?.received ?? []) as any[])
+			.filter((msg) => msg?.type === "ext_channel_frame")
+			.slice(-8)
+			.map((msg) => {
+				const data = typeof msg?.frame?.data === "string" ? msg.frame.data : JSON.stringify(msg?.frame?.data ?? null);
+				return { kind: String(msg?.frame?.kind ?? "unknown"), escaped: escaped(data).slice(0, 500), hex: hex(data).slice(0, 500) };
+			});
+		return {
+			phase: snapshotPhase,
+			buffer: {
+				baseY: null,
+				viewportY: null,
+				cursorY: null,
+				cols: null,
+				rows: allRows.length || null,
+			},
+			renderedRowCount: allRows.length,
+			selectors: Object.fromEntries(Object.entries(selectors).map(([name, selector]) => [name, rectAndCss(selector)])),
+			rows: {
+				top: allRows.slice(0, 5),
+				banner: bannerIndex >= 0 ? allRows.slice(Math.max(0, bannerIndex - 2), bannerIndex + 5) : [],
+				bottom: allRows.slice(-8),
+				all: allRows,
+			},
+			scroll: { scrollTop, scrollHeight, clientHeight, maxScrollTop, atBottom: Math.abs(maxScrollTop - scrollTop) <= 2 },
+			recentFrames,
+		};
+	}, phase);
+}
+
+async function attachTerminalDebugArtifacts(testInfo: import("@playwright/test").TestInfo, page: import("@playwright/test").Page, phase: string, snapshot?: TerminalDebugSnapshot): Promise<void> {
+	const safePhase = phase.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+	if (snapshot) {
+		await testInfo.attach(`terminal-debug-${safePhase}.json`, {
+			body: JSON.stringify(snapshot, null, 2),
+			contentType: "application/json",
+		});
+	}
+	const host = page.locator(terminalHost()).first();
+	if (await host.count()) {
+		const path = testInfo.outputPath(`terminal-${safePhase}.png`);
+		await host.screenshot({ path }).catch(() => undefined);
+		await testInfo.attach(`terminal-${safePhase}.png`, { path, contentType: "image/png" }).catch(() => undefined);
+	}
+}
+
+function terminalContentProblems(snapshot: TerminalDebugSnapshot, expectedNearBottom?: string): string[] {
+	const problems: string[] = [];
+	for (const row of snapshot.rows.top.slice(0, 3)) {
+		const text = row.trim();
+		if (text.length < 24) continue;
+		const dense = text.replace(/\s/g, "");
+		const counts = new Map<string, number>();
+		for (const ch of dense) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+		const max = Math.max(0, ...counts.values());
+		const repeatedRun = text.match(/([^\s])\1{23,}/)?.[0];
+		if ((max >= 24 && max / Math.max(1, dense.length) >= 0.8) || repeatedRun) {
+			problems.push(`${snapshot.phase}: repeated glyph artifact in top xterm rows: ${JSON.stringify(text)}`);
+		}
+	}
+	if (expectedNearBottom) {
+		const bottomText = snapshot.rows.bottom.join("");
+		if (!snapshot.scroll.atBottom) {
+			problems.push(`${snapshot.phase}: expected viewport at bottom after follow-up prompt; scrollTop=${snapshot.scroll.scrollTop} max=${snapshot.scroll.maxScrollTop}`);
+		}
+		if (!bottomText.includes(expectedNearBottom) && !bottomText.includes(expectedNearBottom.slice(-32))) {
+			problems.push(`${snapshot.phase}: expected ${expectedNearBottom} near bottom rows; bottom=${JSON.stringify(snapshot.rows.bottom)}`);
+		}
+	}
+	return problems;
+}
+
+function requiredXtermCssProblems(snapshot: TerminalDebugSnapshot): string[] {
+	const problems: string[] = [];
+	const selector = (name: string) => snapshot.selectors[name];
+	const css = (name: string) => selector(name)?.css;
+	const rect = (name: string) => selector(name)?.rect;
+	const expectCss = (name: string, condition: boolean, detail: string) => {
+		if (!condition) problems.push(`${snapshot.phase}: ${name} ${detail}`);
+	};
+	const viewportCss = css("viewport");
+	expectCss(".xterm-viewport", !!viewportCss, "must exist");
+	if (viewportCss) {
+		expectCss(".xterm-viewport", viewportCss.position === "absolute", `must be position:absolute from xterm.css; actual=${viewportCss.position}`);
+		expectCss(".xterm-viewport", viewportCss.top === "0px" && viewportCss.left === "0px", `must be inset to the xterm host; actual top=${viewportCss.top} left=${viewportCss.left}`);
+	}
+	const screenCss = css("screen");
+	expectCss(".xterm-screen", !!screenCss, "must exist");
+	if (screenCss) {
+		expectCss(".xterm-screen", screenCss.position === "relative", `must be position:relative from xterm.css; actual=${screenCss.position}`);
+	}
+	const helpersCss = css("helpers");
+	expectCss(".xterm-helpers", !!helpersCss, "must exist so xterm helper DOM can be hidden outside normal layout");
+	if (helpersCss) {
+		expectCss(".xterm-helpers", helpersCss.position === "absolute", `must be position:absolute from xterm.css; actual=${helpersCss.position}`);
+	}
+	const textareaCss = css("helperTextarea");
+	expectCss(".xterm-helper-textarea", !!textareaCss, "must exist");
+	if (textareaCss) {
+		expectCss(".xterm-helper-textarea", textareaCss.position === "absolute", `must be position:absolute/off-screen from xterm.css; actual=${textareaCss.position}`);
+		expectCss(".xterm-helper-textarea", textareaCss.opacity === "0", `must be transparent; actual opacity=${textareaCss.opacity}`);
+	}
+	for (const name of ["accessibility", "liveRegion", "charMeasure"] as const) {
+		const node = selector(name);
+		if (!node?.exists) continue;
+		const nodeCss = node.css;
+		const nodeRect = rect(name);
+		expectCss(name, nodeCss?.position === "absolute" || nodeCss?.display === "none" || nodeCss?.visibility === "hidden", `must not participate in visible normal layout; css=${JSON.stringify(nodeCss)} rect=${JSON.stringify(nodeRect)}`);
+	}
+	return problems;
+}
+
 async function openTerminalFromSessionMenu(page: import("@playwright/test").Page): Promise<void> {
 	const trigger = page.locator(tid("session-actions-trigger")).first();
 	await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
@@ -243,9 +571,13 @@ async function openTerminalFromSessionMenu(page: import("@playwright/test").Page
 }
 
 async function waitForTerminalReadyForInput(page: import("@playwright/test").Page): Promise<void> {
+	await waitForTerminalMountedForFrameInjection(page);
+	await focusTerminal(page);
+}
+
+async function waitForTerminalMountedForFrameInjection(page: import("@playwright/test").Page): Promise<void> {
 	await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", "attached", { timeout: 20_000 });
 	await expect(page.locator(`${terminalHost()} .xterm-helper-textarea`), "xterm input textarea must be mounted before typing").toHaveCount(1, { timeout: 10_000 });
-	await focusTerminal(page);
 }
 
 async function focusTerminal(page: import("@playwright/test").Page): Promise<void> {
