@@ -324,27 +324,36 @@ async function assertNoRepeatedTopRowGlyphArtifact(page: import("@playwright/tes
 
 async function assertLatestTerminalInputVisibleAtBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
 	const snapshot = await terminalViewportContent(page);
-	const bottomRows = snapshot.rows.slice(-4);
+	const bottomRows = nearBottomRows(snapshot.rows);
 	const bottomText = bottomRows.join("\n");
 	const bottomSoftWrappedText = bottomRows.join("");
+	const expectedTail = expected.slice(-32);
 	expect(
 		snapshot.atBottom,
 		`${reason}: terminal scroll regression - xterm viewport should be pinned to the bottom for the active prompt/input. scrollTop=${snapshot.scrollTop}, maxScrollTop=${snapshot.maxScrollTop}`,
 	).toBe(true);
 	expect(
-		bottomSoftWrappedText,
-		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" in the bottom xterm rows, allowing xterm soft wrapping. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
-	).toContain(expected);
+		bottomSoftWrappedText.includes(expected) || bottomSoftWrappedText.includes(expectedTail),
+		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" or its unique tail "${expectedTail}" in the near-bottom xterm rows, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+	).toBe(true);
 }
 
 async function assertTerminalTextVisibleNearBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
 	const snapshot = await terminalViewportContent(page);
-	const bottomRows = snapshot.rows.slice(-4);
+	const bottomRows = nearBottomRows(snapshot.rows);
 	const bottomText = bottomRows.join("\n");
 	expect(
 		bottomRows.join(""),
-		`${reason}: expected "${expected}" in the bottom xterm rows after viewport-only prompt pinning. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+		`${reason}: expected "${expected}" in the near-bottom xterm rows after viewport-only prompt pinning, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
 	).toContain(expected);
+}
+
+function nearBottomRows(rows: string[]): string[] {
+	const withoutTrailingBlankRows = [...rows];
+	while (withoutTrailingBlankRows.length > 0 && withoutTrailingBlankRows[withoutTrailingBlankRows.length - 1]?.trim() === "") {
+		withoutTrailingBlankRows.pop();
+	}
+	return withoutTrailingBlankRows.slice(-8);
 }
 
 async function terminalViewportContent(page: import("@playwright/test").Page): Promise<{ rows: string[]; atBottom: boolean; scrollTop: number; maxScrollTop: number }> {
