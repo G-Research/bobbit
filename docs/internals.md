@@ -210,7 +210,7 @@ Both are needed because, after a restart, the resumed session is in `status === 
 
 The pattern is now applied at all four reminder sites in `verification-harness.ts`: `_tryResumeFromSession` (the original repro), `runLlmReviewViaSession`, the QA-tester reminder, and the legacy direct-`RpcBridge` reminder. The legacy site has no `SessionManager` injected and so reproduces the shape inline with an `agent_start` listener and the same 10s timeout. A `.catch(() => {})` on every `waitForStreaming` call ensures that an unresponsive agent still falls through to the existing `waitForIdle` race rather than blocking forever - the helper raises the floor without lowering the ceiling.
 
-The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern.
+The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern. The full reviewer recovery policy is documented in [llm-review Recovery](llm-review-recovery.md).
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 

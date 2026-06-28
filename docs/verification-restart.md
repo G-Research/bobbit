@@ -170,6 +170,8 @@ explicitly out of scope (see below).
   constants), which the reviewer resume here AND the two generic
   session-restore recovery paths (mid-turn re-prompt, boot-resume nudge) all
   call — see [cold-restart-reprompt.md](cold-restart-reprompt.md). See
+  [llm-review Recovery](llm-review-recovery.md) for transient socket/runtime
+  recovery, reminder handling, and retry diagnostics; see
   [internals.md — Reviewer `kind` & restart resume](internals.md#reviewer-kind--restart-resume)
   for the team-store rebinding and
   [internals.md — Cold-reviewer resume: readiness wait + restart-interrupt routing](internals.md#cold-reviewer-resume-readiness-wait--restart-interrupt-routing)

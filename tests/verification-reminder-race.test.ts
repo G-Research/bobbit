@@ -22,6 +22,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -207,5 +209,84 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 		// Cleanup the queued startTurn timer.
 		await new Promise((r) => setTimeout(r, 60));
+	});
+
+	it("reminder failure/termination waits for the reminder turn to actually start", async () => {
+		const session = new FakeSession("rv-6");
+		const calls: string[] = [];
+		const resultPromise = new Promise<any>(() => {});
+		let terminated = false;
+
+		async function reminderThenFailOrTerminate() {
+			calls.push("prompt:reminder");
+			await session.rpcClient.prompt();
+			calls.push("waitForStreaming");
+			await waitForStreaming(session, 1_000).catch(() => {});
+			calls.push("race:start");
+			const outcome = await Promise.race([
+				resultPromise.then((r: any) => ({ type: "result" as const, ...r })),
+				waitForIdle(session, 2_000).then(() => ({ type: "idle" as const })),
+			]);
+			if (outcome.type === "idle") {
+				calls.push("fail:idle-after-reminder");
+				terminated = true;
+				calls.push("terminateSession");
+			}
+		}
+
+		const run = reminderThenFailOrTerminate();
+		setTimeout(() => {
+			calls.push("agent_start");
+			session.startTurn();
+		}, 25);
+
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(
+			calls,
+			["prompt:reminder", "waitForStreaming", "agent_start", "race:start"],
+			`Reminder path must wait for agent_start before starting the idle race. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(
+			terminated,
+			false,
+			`Reviewer must not be failed/terminated while the reminder turn is still streaming. calls=${JSON.stringify(calls)}`,
+		);
+
+		session.endTurn();
+		await run;
+		assert.equal(terminated, true);
+		assert.ok(
+			calls.indexOf("terminateSession") > calls.indexOf("race:start"),
+			`Termination should happen only after the post-reminder idle window. calls=${JSON.stringify(calls)}`,
+		);
+	});
+
+	it("live llm-review checks errored-turn recovery after post-reminder idle before declaring the reminder ignored", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const livePathStart = source.indexOf("private async runLlmReviewViaSession");
+		assert.ok(livePathStart >= 0, "runLlmReviewViaSession should exist");
+
+		const hardFailure = source.indexOf("output: \"Agent did not call verification_result after reminder.\"", livePathStart);
+		assert.ok(hardFailure >= 0, "live post-reminder ignored-reminder failure should exist");
+
+		const resultRace = source.lastIndexOf("const result2 = await Promise.race", hardFailure);
+		assert.ok(resultRace > livePathStart, "should find live post-reminder result2 race");
+		const postReminderIdlePath = source.slice(resultRace, hardFailure);
+
+		assert.match(
+			postReminderIdlePath,
+			/const postReminderRecovery = await this\.waitForReviewerErroredTurnRecovery\(sessionId, resultPromise, timeoutMs, step\.name\);/,
+			"Post-reminder idle must call errored-turn recovery before ignored-reminder failure.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "result"[\s\S]*postReminderRecovery\.summary/,
+			"Post-reminder recovery must return a verification_result that arrives during auto-retry.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "errored"[\s\S]*postReminderRecovery\.output/,
+			"Post-reminder recovery exhaustion must surface the retryable runtime error instead of ignored-reminder text.",
+		);
 	});
 });

@@ -107,3 +107,12 @@ Covers `maybeAutoRetryTransient`, `nextBackoffDelay`, and the two-policy model d
 - **`tests/backoff-delay.test.ts`** (unit) — pins `nextBackoffDelay` in isolation: doubling sequence, cap enforcement at `maxMs` before and after jitter, jitter bounds (±20%), finite output for very large attempt counts.
 - **`tests/auto-retry-policy.test.ts`** (unit) — pins the end-to-end policy decision tree using the same exported building blocks (`isTransientReviewError`, `isProviderBackoffError`, `nextBackoffDelay`) the manager calls: overload/rate-limit retries indefinitely past the 3-attempt bounded cap; HTTP 429/529 phrasings classified as provider-backoff; non-provider transient errors stop after attempt 3; non-transient errors produce no retry.
 - **`tests/queue-dispatch.spec.ts`** (unit, session-manager simulation) — pins `pendingAutoRetryTimer` teardown on explicit retry; explicit retry resets `transientRetryAttempts` while auto retry preserves it; provider-overload errors bypass the 3-attempt non-provider cap.
+
+## `llm-review` transient recovery
+
+Covers the reviewer-session recovery behavior described in [llm-review Recovery](llm-review-recovery.md): socket/WebSocket/runtime classifiers, generic runtime retry, provider backoff, reminder race protection, restart resume, and rerun fallback.
+
+- **`tests/verification-logic.test.ts`** (unit) — pins socket/WebSocket/process transient classification, generic unexpected runtime retry decisions, deterministic terminal exclusions, and provider backoff classification.
+- **`tests/transient-review-error.test.ts`** (unit) — keeps legacy transient review classifier exports covered through `verification-harness.ts`.
+- **`tests/verification-reminder-race.test.ts`** (unit/source guard) — pins `waitForStreaming()` between reminder dispatch and the idle race, plus post-reminder transient recovery before ignored-reminder failure.
+- **`tests/verification-resume-restart-prompt.test.ts`** and **`tests/verification-resume-restart-recovery.test.ts`** (unit) — pin cold reviewer resume, prompt timeout handling, and transient resume failure rerun behavior.

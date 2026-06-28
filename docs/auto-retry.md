@@ -4,7 +4,7 @@
 
 Bobbit auto-retries agent turns when the last turn ended with a retryable infrastructure or agent-runtime error. The retry uses the same `retryLastPrompt(sessionId, { auto: true })` path as the chat **Retry** button so continuation safety stays centralized: if a failed turn already ran tools, Retry resumes rather than blindly replaying side effects.
 
-Auto-retry is intentionally conservative. It keeps transient provider and runtime failures moving, but stops when the error looks deterministic and needs a human fix.
+Auto-retry is intentionally conservative. It keeps transient provider and runtime failures moving, but stops when the error looks deterministic and needs a human fix. `llm-review` gate verification layers additional reviewer-session recovery on top of this policy; see [llm-review Recovery](llm-review-recovery.md).
 
 ## Retry policies
 

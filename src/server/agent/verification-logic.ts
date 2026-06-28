@@ -28,8 +28,11 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	"process exited",
 	"Session lost during server restart",
 	"ECONNRESET",
+	"ENOTCONN",
 	"EPIPE",
 	"spawn UNKNOWN",
+	"WebSocket error",
+	"socket error",
 	"socket hang up",
 	"connect ECONNREFUSED",
 	// Tool-call schema validation failure from the provider SDK — distinct
@@ -195,6 +198,23 @@ export const TRANSIENT_ERROR_REGEXES: RegExp[] = [
 ];
 
 /**
+ * Regex patterns for transient agent/runtime infrastructure failures. Kept
+ * separate from TRANSIENT_ERROR_REGEXES so detectJsonValidationError() remains
+ * scoped to tool-argument JSON/schema glitches and does not send JSON-retry
+ * prompts for socket/process failures.
+ */
+export const TRANSIENT_INFRA_ERROR_REGEXES: RegExp[] = [
+	/\bwebsocket\s+error\b/i,
+	/\bsocket\s+error\b/i,
+	/\bsocket\s+hang\s+up\b/i,
+	/\b(?:ECONNRESET|ECONNREFUSED|ENOTCONN|EPIPE)\b/i,
+	/\bconnection\s+(?:reset|refused|closed|lost|terminated)\b/i,
+	/\bconnect\s+ECONNREFUSED\b/i,
+	/\b(?:agent\s+)?process[-\s]+not[-\s]+running\b/i,
+	/\b(?:agent\s+)?process[-\s]+(?:exited|exit(?:ed)?|died|terminated)\b/i,
+];
+
+/**
  * Return the matched JSON/validation error substring (roughly one line of
  * context around the match) if `output` looks like an LLM tool-argument
  * glitch, otherwise null. Used to craft a targeted retry prompt.
@@ -233,6 +253,7 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 function matchesAnyTransient(output: string): boolean {
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
+	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
 	// Provider overload / rate-limit conditions (HTTP 429/529 phrasings) are
 	// transient too — keep `isTransientReviewError()` as the single source of
 	// truth so any consumer that gates on "transient" also covers these.
@@ -315,7 +336,8 @@ export function shouldRetryVerificationStep(args: {
 	isTransient: (output: string) => boolean;
 }): RetryDecision {
 	if (args.passed) return "break";
-	if (!args.isTransient(args.output)) return "break";
+	const retryable = args.isTransient(args.output) || isRetryableGenericAgentError(args.output);
+	if (!retryable) return "break";
 	const isBackoff = isProviderBackoffError(args.output);
 	if (isBackoff) return "retry"; // unbounded for rate-limit / overload
 	return args.attempt >= args.maxBoundedAttempts ? "break" : "retry";
