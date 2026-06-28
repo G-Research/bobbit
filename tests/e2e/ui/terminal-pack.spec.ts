@@ -308,14 +308,16 @@ async function assertNoRepeatedTopRowGlyphArtifact(page: import("@playwright/tes
 
 async function assertLatestTerminalInputVisibleAtBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
 	const snapshot = await terminalViewportContent(page);
-	const bottomText = snapshot.rows.slice(-4).join("\n");
+	const bottomRows = snapshot.rows.slice(-4);
+	const bottomText = bottomRows.join("\n");
+	const bottomSoftWrappedText = bottomRows.join("");
 	expect(
 		snapshot.atBottom,
 		`${reason}: terminal scroll regression - xterm viewport should be pinned to the bottom for the active prompt/input. scrollTop=${snapshot.scrollTop}, maxScrollTop=${snapshot.maxScrollTop}`,
 	).toBe(true);
 	expect(
-		bottomText,
-		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" in the bottom xterm rows. Visible rows:\n${snapshot.rows.join("\n")}`,
+		bottomSoftWrappedText,
+		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" in the bottom xterm rows, allowing xterm soft wrapping. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
 	).toContain(expected);
 }
 
