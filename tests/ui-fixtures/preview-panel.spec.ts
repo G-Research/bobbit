@@ -67,6 +67,31 @@ async function previewState(page: Page): Promise<any> {
 	return page.evaluate(() => (window as any).__getDynamicPanelWorkspaceState());
 }
 
+type VisibleSidePanelSizeMode = "collapsed" | "split" | "fullscreen" | "unknown";
+
+async function visibleSidePanelSizeMode(page: Page): Promise<VisibleSidePanelSizeMode> {
+	return page.evaluate(() => {
+		const visible = (selector: string): boolean => {
+			const element = document.querySelector(selector) as HTMLElement | null;
+			if (!element) return false;
+			const style = window.getComputedStyle(element);
+			const rect = element.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+		};
+		if (visible(".side-panel-fullscreen-prompt")) return "fullscreen";
+		if (visible('[data-testid="side-panel-fullscreen"]')) return "split";
+		if (visible('[data-testid="side-panel-restore"]') && !visible('[data-testid="side-panel-collapse"]')) return "collapsed";
+		return "unknown";
+	}) as Promise<VisibleSidePanelSizeMode>;
+}
+
+async function expectVisibleSidePanelSizeMode(page: Page, expected: VisibleSidePanelSizeMode, message: string): Promise<void> {
+	await expect.poll(async () => visibleSidePanelSizeMode(page), {
+		timeout: 5_000,
+		message: `${message}: expected visible side-panel sizeMode ${expected}; fullscreen collapse must go to split, not collapsed`,
+	}).toBe(expected);
+}
+
 test.describe("Preview panel fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
@@ -111,6 +136,25 @@ test.describe("Preview panel fixture", () => {
 			timeout: 5_000,
 			message: "fullscreen Refresh should update the iframe cache-buster",
 		}).not.toEqual(refreshedSrc);
+	});
+
+	test("visible side-panel controls move one size level at a time", async ({ page }) => {
+		await setLivePreview(page, "levels.html", hashOf("d"), "level controls");
+
+		await expectVisibleSidePanelSizeMode(page, "split", "live preview should start in split mode");
+
+		await page.getByTestId("side-panel-collapse").click();
+		await expectVisibleSidePanelSizeMode(page, "collapsed", "split collapse should move one level to collapsed");
+		await expect(page.getByTestId("side-panel-restore")).toBeVisible({ timeout: 5_000 });
+
+		await page.getByTestId("side-panel-restore").click();
+		await expectVisibleSidePanelSizeMode(page, "split", "collapsed restore should move one level to split");
+
+		await page.getByTestId("side-panel-fullscreen").click();
+		await expectVisibleSidePanelSizeMode(page, "fullscreen", "split fullscreen expand should move one level to fullscreen");
+
+		await page.getByTestId("side-panel-collapse").click();
+		await expectVisibleSidePanelSizeMode(page, "split", "fullscreen collapse should move one level to split, not collapsed");
 	});
 
 	test("dismissed live preview stays closed until new preview content reopens it", async ({ page }) => {
