@@ -8,6 +8,7 @@ type ChannelContext = {
 	};
 	init?: unknown;
 	send(frame: HostChannelFrame): Promise<void>;
+	sendTo?(clientId: string, frame: HostChannelFrame): Promise<void>;
 	close(reason?: string): Promise<void>;
 	audit?(event: { type: string; reason?: string; error?: string }): void;
 };
@@ -25,12 +26,25 @@ type TerminalInit = { cols?: number; rows?: number };
 type ResizeFrame = { op: "resize"; cols: number; rows: number };
 type KillFrame = { op: "kill"; reason?: string };
 
+const REPLAY_MAX_BYTES = 128 * 1024;
+const REPLAY_CHUNK_BYTES = 16 * 1024;
+
 export async function terminal(ctx: ChannelContext) {
 	let pty: PtyHandle | undefined;
 	let closed = false;
 	const disposers: Array<() => void> = [];
+	const replay = new TextReplayBuffer(REPLAY_MAX_BYTES);
 	const sendJson = async (data: Record<string, unknown>) => {
 		await ctx.send({ kind: "json", data });
+	};
+	const sendJsonTo = async (clientId: string, data: Record<string, unknown>) => {
+		await sendToClient(ctx, clientId, { kind: "json", data });
+	};
+	const sendText = async (data: string) => {
+		for (const chunk of splitUtf8(data, REPLAY_CHUNK_BYTES)) {
+			replay.append(chunk);
+			await ctx.send({ kind: "text", data: chunk });
+		}
 	};
 	const failPtyOperation = async (operation: string, error: unknown, closeChannel: boolean) => {
 		const message = error instanceof Error ? error.message : String(error);
@@ -47,7 +61,7 @@ export async function terminal(ctx: ChannelContext) {
 		}
 		const init = objectOf(ctx.init) as TerminalInit | undefined;
 		pty = await ctx.host.pty.openTerminal({ cols: numberOf(init?.cols), rows: numberOf(init?.rows) });
-		disposers.push(pty.onData((data) => { void ctx.send({ kind: "text", data }).catch(() => undefined); }));
+		disposers.push(pty.onData((data) => { void sendText(data).catch(() => undefined); }));
 		disposers.push(pty.onExit((event) => {
 			if (closed) return;
 			closed = true;
@@ -99,8 +113,11 @@ export async function terminal(ctx: ChannelContext) {
 				}
 			}
 		},
-		async onAttach() {
-			if (!closed && pty) await sendJson({ op: "status", state: "attached", pid: pty.pid });
+		async onAttach(clientId: string) {
+			if (!closed && pty) {
+				for (const data of replay.chunks()) await sendToClient(ctx, clientId, { kind: "text", data });
+				await sendJsonTo(clientId, { op: "status", state: "attached", pid: pty.pid });
+			}
 		},
 		async onDetach() {
 			if (!closed) ctx.audit?.({ type: "channel.detach", reason: "terminal panel detached" });
@@ -125,6 +142,74 @@ export async function terminal(ctx: ChannelContext) {
 }
 
 export const channels = { terminal };
+
+class TextReplayBuffer {
+	private parts: string[] = [];
+	private bytes = 0;
+
+	constructor(private readonly maxBytes: number) {}
+
+	append(data: string): void {
+		let chunk = data;
+		let chunkBytes = byteLength(chunk);
+		if (chunkBytes > this.maxBytes) {
+			chunk = takeUtf8Tail(chunk, this.maxBytes);
+			chunkBytes = byteLength(chunk);
+			this.parts = [];
+			this.bytes = 0;
+		}
+		this.parts.push(chunk);
+		this.bytes += chunkBytes;
+		while (this.bytes > this.maxBytes && this.parts.length > 0) {
+			const removed = this.parts.shift()!;
+			this.bytes -= byteLength(removed);
+		}
+	}
+
+	chunks(): readonly string[] {
+		return [...this.parts];
+	}
+}
+
+async function sendToClient(ctx: ChannelContext, clientId: string, frame: HostChannelFrame): Promise<void> {
+	if (ctx.sendTo) await ctx.sendTo(clientId, frame);
+	else await ctx.send(frame);
+}
+
+function splitUtf8(data: string, maxBytes: number): string[] {
+	if (byteLength(data) <= maxBytes) return [data];
+	const chunks: string[] = [];
+	let current = "";
+	let currentBytes = 0;
+	for (const char of data) {
+		const charBytes = byteLength(char);
+		if (current && currentBytes + charBytes > maxBytes) {
+			chunks.push(current);
+			current = "";
+			currentBytes = 0;
+		}
+		current += char;
+		currentBytes += charBytes;
+	}
+	if (current) chunks.push(current);
+	return chunks;
+}
+
+function takeUtf8Tail(data: string, maxBytes: number): string {
+	let out = "";
+	let bytes = 0;
+	for (const char of Array.from(data).reverse()) {
+		const charBytes = byteLength(char);
+		if (bytes + charBytes > maxBytes) break;
+		out = char + out;
+		bytes += charBytes;
+	}
+	return out;
+}
+
+function byteLength(data: string): number {
+	return Buffer.byteLength(data, "utf8");
+}
 
 function objectOf(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;

@@ -104,6 +104,43 @@ describe("terminal channel handler", () => {
 		assert.ok(replayIndex <= statusIndex, "reattach should replay text history before status");
 	});
 
+	it("bounds replay to recent terminal output", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		const ctx = {
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 76,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: () => () => {},
+						};
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => {},
+		};
+		const session = await terminalChannelHandler(ctx);
+		sent.length = 0;
+
+		dataCb?.(`OLD_MARKER ${"x".repeat(70_000)}`);
+		dataCb?.(`${"y".repeat(70_000)} RECENT_MARKER`);
+		for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+		sent.length = 0;
+
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("new-client");
+
+		const replay = sent.filter(({ target }) => target === "new-client").map(({ frame }) => frame);
+		assert.ok(replay.some((frame) => isTextFrameWithMarker(frame, "RECENT_MARKER")), "recent output should be retained in bounded replay");
+		assert.ok(!replay.some((frame) => isTextFrameWithMarker(frame, "OLD_MARKER")), "old output past the replay budget should be trimmed");
+	});
+
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;

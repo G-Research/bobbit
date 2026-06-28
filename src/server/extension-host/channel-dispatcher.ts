@@ -17,6 +17,7 @@ export interface ChannelHandlerContext {
 	readonly init?: unknown;
 	readonly host: ChannelHandlerHostSurface;
 	send(frame: HostChannelFrame): Promise<void>;
+	sendTo(clientId: string, frame: HostChannelFrame): Promise<void>;
 	close(reason?: string): Promise<void>;
 	audit(event: Omit<ChannelAuditEvent, "at" | "sessionId" | "packId" | "contributionId" | "channelName" | "channelId">): void;
 }

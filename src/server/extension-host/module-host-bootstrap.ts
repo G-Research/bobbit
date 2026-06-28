@@ -565,6 +565,7 @@ async function handleChannelOpen(msg: ChannelOpenMessage): Promise<void> {
 			workingDir: msg.ctx.workingDir,
 			host: buildChannelHostProxy(msg.ctx),
 			send: (frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send", frame }); return Promise.resolve(); },
+			sendTo: (clientId: string, frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send-to", clientId, frame }); return Promise.resolve(); },
 			close: (reason?: string) => { port!.postMessage({ kind: "channel-close", reason }); return Promise.resolve(); },
 			audit: (event: unknown) => { port!.postMessage({ kind: "channel-audit", event }); },
 		};
