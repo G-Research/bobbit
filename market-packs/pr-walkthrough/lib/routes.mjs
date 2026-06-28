@@ -183,12 +183,13 @@ export const routes = {
 		// title/metadata from the production YAML) over the bare local changeset.
 		const stored = await ctx.host.store.get(cardsKey(live.changesetId));
 		const hasStored = stored && Array.isArray(stored.cards) && stored.cards.length > 0;
+		const liveChangeset = decorateChangesetWithTarget(live.changeset, finalAccess.binding && finalAccess.binding.target);
 		return {
 			found: true,
 			live: true,
 			jobId,
 			changesetId: live.changesetId,
-			changeset: hasStored && stored.changeset ? stored.changeset : live.changeset,
+			changeset: hasStored && stored.changeset ? stored.changeset : liveChangeset,
 			cards: hasStored ? stored.cards : live.cards,
 			warnings: live.warnings,
 			cardsSource: hasStored ? "stored-synthesis" : "fallback",
@@ -727,6 +728,7 @@ function trustedPrFields(binding) {
 	if (target.repo) out.repo = target.repo;
 	if (target.number !== undefined) out.number = target.number;
 	if (target.prUrl) out.url = target.prUrl;
+	if (target.prTitle || target.title) out.title = target.prTitle || target.title;
 	if (binding.baseSha) out.base_sha = binding.baseSha;
 	if (binding.headSha) out.head_sha = binding.headSha;
 	return out;
@@ -831,6 +833,22 @@ function changesetIdFromDocument(document, baseSha, headSha) {
 
 function isFinalPayload(value) {
 	return value && typeof value === "object" && typeof value.yaml === "string" && Array.isArray(value.cards);
+}
+
+function decorateChangesetWithTarget(changeset, target) {
+	if (!target || typeof target !== "object" || target.provider !== "github") return changeset;
+	const prTitle = strOf(target.prTitle) || strOf(target.title);
+	const prUrl = strOf(target.prUrl) || strOf(target.url);
+	return {
+		...changeset,
+		provider: "github",
+		owner: strOf(target.owner) || changeset.owner,
+		repo: strOf(target.repo) || changeset.repo,
+		prNumber: target.number ?? target.prNumber ?? changeset.prNumber,
+		number: target.number ?? target.prNumber ?? changeset.number,
+		...(prUrl ? { prUrl, externalUrl: prUrl, url: prUrl } : {}),
+		...(prTitle ? { prTitle, title: prTitle } : {}),
+	};
 }
 
 function finalBundleResult(payload, jobId) {
@@ -1281,7 +1299,7 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 
 	let pr;
 	try {
-		const out = await io.gh(cwd, ["pr", "view", "--json", "number,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
+		const out = await io.gh(cwd, ["pr", "view", "--json", "number,title,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
 		pr = JSON.parse(String(out).trim());
 	} catch {
 		return noPr; // gh non-zero / no PR for branch / gh unavailable
@@ -1330,6 +1348,7 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 			owner,
 			repo,
 			prNumber: pr.number,
+			prTitle: strOf(pr.title),
 			prUrl: strOf(pr.url),
 			baseSha,
 			headSha,
@@ -1361,15 +1380,16 @@ async function canonicalizeTarget(input, cwd) {
 		}
 	}
 
+	const prTitle = strOf(input.prTitle) || strOf(input.title);
 	if (owner && repo && number !== undefined) {
 		const url = prUrl || `https://${host}/${owner}/${repo}/pull/${number}`;
 		const canonicalKey = host === "github.com"
 			? `github:${owner}/${repo}#${number}`
 			: `github:${host}/${owner}/${repo}#${number}`;
-		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, host, canonicalKey };
+		return { provider: "github", prUrl: url, prTitle, owner, repo, number, baseSha, headSha, host, canonicalKey };
 	}
 	if (number !== undefined) {
-		return { provider: "github", prUrl, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
+		return { provider: "github", prUrl, prTitle, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
 	}
 	if (baseSha && headSha) {
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };

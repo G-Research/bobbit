@@ -509,7 +509,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const url = prUrlFor(cs);
 		const submitReady = progress.total > 0 && progress.completed >= progress.total;
 		return html`
-			<header class="header prw-review-header" data-testid="pr-walkthrough-header">
+			<header class=${`header prw-review-header ${url ? "has-github" : "no-github"}`} data-testid="pr-walkthrough-header">
 				<div class="title-group">
 					<span class="pr-pill">${prLabel}</span>
 					<div class="title-stack">
@@ -1611,6 +1611,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
 					.prw-root .progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
 					.prw-root .submit, .prw-root .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
+					.prw-root .submit { justify-self: end; width: max-content; min-width: 132px; }
+					.prw-root .prw-review-header.has-github { grid-template-columns: minmax(220px, 1fr) auto minmax(150px, 240px) max-content; }
+					.prw-root .prw-review-header.no-github { grid-template-columns: minmax(220px, 1fr) minmax(150px, 240px) max-content; }
 					.prw-root .secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
 					.prw-root .body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
 					.prw-root .rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
@@ -1701,6 +1704,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .export-error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
 					.prw-root .export-result { border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
 					.prw-root .export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
+					.prw-root .state-shell { grid-template-rows: auto minmax(0, 1fr); }
+					.prw-root .state-shell .state-header { height: auto; min-height: 68px; grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); gap: 12px; padding: 10px 14px; align-items: center; }
+					.prw-root .state-shell .title-group { min-width: 0; }
+					.prw-root .state-shell .title-stack { min-width: 0; }
+					.prw-root .state-shell .header h1 { overflow: visible; text-overflow: clip; white-space: normal; font-size: 16px; line-height: 1.2; }
+					.prw-root .state-shell .header-meta { min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px; white-space: normal; }
+					.prw-root .state-shell .header-meta span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+					.prw-root .state-shell .progress-wrap { width: min(260px, 100%); justify-self: end; grid-template-columns: max-content minmax(96px, 1fr); }
+					.prw-root .state-shell .progress-wrap > span { white-space: nowrap; }
 					.prw-root .state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
 					.prw-root .state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
 					.prw-root .state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
@@ -1717,6 +1729,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .body.narrow .rail-panel.compact { display: block !important; }
 					.prw-root .body.narrow .walkthrough-rail-resize-handle, .prw-root .rail.narrow .walkthrough-rail-resize-handle { display: none; }
 					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 48px minmax(0, 1fr); } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 10px; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 1 / -1; } .prw-root .shell { height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } }
+					@media (max-width: 620px) { .prw-root .state-shell .state-header { grid-template-columns: minmax(0, 1fr); } .prw-root .state-shell .progress-wrap { justify-self: stretch; width: 100%; } }
 
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>

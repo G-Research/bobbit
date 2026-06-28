@@ -67,6 +67,40 @@ async function previewState(page: Page): Promise<any> {
 	return page.evaluate(() => (window as any).__getDynamicPanelWorkspaceState());
 }
 
+type VisibleSidePanelSizeMode = "collapsed" | "split" | "fullscreen" | "unknown";
+
+async function visibleSidePanelSizeMode(page: Page): Promise<VisibleSidePanelSizeMode> {
+	return page.evaluate(() => {
+		const visible = (selector: string): boolean => {
+			const element = document.querySelector(selector) as HTMLElement | null;
+			if (!element) return false;
+			const style = window.getComputedStyle(element);
+			const rect = element.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+		};
+		if (visible(".side-panel-fullscreen-prompt")) return "fullscreen";
+		if (visible('[data-testid="side-panel-fullscreen"]')) return "split";
+		if (visible('[data-testid="side-panel-restore"]') && !visible('[data-testid="side-panel-collapse"]')) return "collapsed";
+		return "unknown";
+	}) as Promise<VisibleSidePanelSizeMode>;
+}
+
+async function expectVisibleSidePanelSizeMode(page: Page, expected: VisibleSidePanelSizeMode, message: string): Promise<void> {
+	await expect.poll(async () => visibleSidePanelSizeMode(page), {
+		timeout: 5_000,
+		message: `${message}: expected visible side-panel sizeMode ${expected}; fullscreen collapse must go to split, not collapsed`,
+	}).toBe(expected);
+}
+
+async function sidePanelControlTitles(page: Page): Promise<string[]> {
+	return page.evaluate(() => {
+		const controls = document.querySelector('[data-panel-workspace="content"] > div:first-child > div:last-child');
+		return [...(controls?.querySelectorAll('a,button') || [])]
+			.map((el) => (el.getAttribute("title") || "").replace(/\s+\([^)]*\)$/, ""))
+			.filter(Boolean);
+	});
+}
+
 test.describe("Preview panel fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
@@ -91,6 +125,13 @@ test.describe("Preview panel fixture", () => {
 		expect(await openLink.getAttribute("href")).not.toMatch(/[?#]mtime=/);
 		await expect(page.getByTestId("side-panel-popout"), "preview tab should not render the generic side-panel popout").toHaveCount(0);
 
+		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+			"Refresh preview",
+			"Open preview in new tab",
+			"Expand preview to fullscreen",
+			"Collapse side panel",
+		]);
+
 		const refresh = page.locator('button[title="Refresh preview"]').first();
 		await expect(refresh).toBeVisible();
 		await refresh.click();
@@ -102,15 +143,58 @@ test.describe("Preview panel fixture", () => {
 
 		await page.getByTestId("side-panel-fullscreen").first().click();
 		await expect.poll(async () => (await previewState(page)).activePanelTabId, { timeout: 5_000 }).toContain("preview");
-		await expect(page.getByTestId("side-panel-restore").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByTestId("side-panel-collapse")).toHaveCount(1);
+		await expect(page.getByTestId("side-panel-restore"), "fullscreen chrome should not show a duplicate restore/collapse button").toHaveCount(0);
 		await expect(openLink, "Open-in-new-tab remains available in fullscreen chrome").toBeVisible({ timeout: 5_000 });
 		await expect(refresh, "Refresh remains available in fullscreen chrome").toBeVisible({ timeout: 5_000 });
+		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+			"Refresh preview",
+			"Open preview in new tab",
+			"Collapse to split view",
+		]);
 
 		await refresh.click();
 		await expect.poll(async () => iframe.getAttribute("src"), {
 			timeout: 5_000,
 			message: "fullscreen Refresh should update the iframe cache-buster",
 		}).not.toEqual(refreshedSrc);
+	});
+
+	test("uses the same action order for preview and non-preview panel tabs", async ({ page }) => {
+		await setLivePreview(page, "order.html", hashOf("e"), "preview order");
+		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+			"Refresh preview",
+			"Open preview in new tab",
+			"Expand preview to fullscreen",
+			"Collapse side panel",
+		]);
+
+		await page.evaluate(() => (window as any).__openDynamicReviewDoc({ title: "Review panel", markdown: "# Review panel" }));
+		await expect(page.getByTestId("side-panel-popout")).toBeVisible({ timeout: 5_000 });
+		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+			"Open side panel in new tab",
+			"Expand side panel to fullscreen",
+			"Collapse side panel",
+		]);
+	});
+
+	test("visible side-panel controls move one size level at a time", async ({ page }) => {
+		await setLivePreview(page, "levels.html", hashOf("d"), "level controls");
+
+		await expectVisibleSidePanelSizeMode(page, "split", "live preview should start in split mode");
+
+		await page.getByTestId("side-panel-collapse").click();
+		await expectVisibleSidePanelSizeMode(page, "collapsed", "split collapse should move one level to collapsed");
+		await expect(page.getByTestId("side-panel-restore")).toBeVisible({ timeout: 5_000 });
+
+		await page.getByTestId("side-panel-restore").click();
+		await expectVisibleSidePanelSizeMode(page, "split", "collapsed restore should move one level to split");
+
+		await page.getByTestId("side-panel-fullscreen").click();
+		await expectVisibleSidePanelSizeMode(page, "fullscreen", "split fullscreen expand should move one level to fullscreen");
+
+		await page.getByTestId("side-panel-collapse").click();
+		await expectVisibleSidePanelSizeMode(page, "split", "fullscreen collapse should move one level to split, not collapsed");
 	});
 
 	test("dismissed live preview stays closed until new preview content reopens it", async ({ page }) => {
