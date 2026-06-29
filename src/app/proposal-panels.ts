@@ -173,7 +173,9 @@ function normalizeWorkflowSelections(): void {
 	const first = _cachedWorkflows[0].id;
 	const preserveInvalid = shouldPreserveFailedWorkflowSelection();
 	if (!ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;
-	if (!ids.has(_proposalWorkflowId) && !preserveInvalid) _proposalWorkflowId = first;
+	if (!ids.has(_proposalWorkflowId) && !preserveInvalid) {
+		_proposalWorkflowId = _proposalInlineWorkflow?.id || first;
+	}
 }
 
 // Test affordance (mirrors main.ts's `__bobbitState` / `__bobbitRenderApp`):
@@ -243,6 +245,37 @@ function isKnownWorkflowId(id: string): boolean {
 
 function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null): boolean {
 	return _cachedWorkflows.length > 0 && !inlineWorkflow && !isKnownWorkflowId(id);
+}
+
+type WorkflowSelectOption = {
+	id: string;
+	label: string;
+	kind: "project" | "bespoke";
+};
+
+function projectWorkflowOptionLabel(workflow: Workflow): string {
+	return `${workflow.name} (${workflow.gates.length} gates)`;
+}
+
+function bespokeWorkflowOptionLabel(workflow: Workflow): string {
+	return `Bespoke (${workflow.gates.length} Gates)`;
+}
+
+function goalWorkflowSelectOptions(selectedId: string, inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
+	const options: WorkflowSelectOption[] = [];
+	if (inlineWorkflow?.id && inlineWorkflow.id === selectedId) {
+		options.push({ id: inlineWorkflow.id, label: bespokeWorkflowOptionLabel(inlineWorkflow), kind: "bespoke" });
+	}
+	for (const workflow of _cachedWorkflows) {
+		options.push({ id: workflow.id, label: projectWorkflowOptionLabel(workflow), kind: "project" });
+	}
+	return options;
+}
+
+function isSelectedWorkflowOption(option: WorkflowSelectOption, selectedId: string, options: WorkflowSelectOption[]): boolean {
+	if (option.id !== selectedId) return false;
+	const selectedBespoke = options.some((candidate) => candidate.kind === "bespoke" && candidate.id === selectedId);
+	return option.kind === "bespoke" || !selectedBespoke;
 }
 
 function workflowErrorMessageWithAvailable(error: GoalWorkflowValidationError | undefined): string {
@@ -964,12 +997,14 @@ function renderGoalForm(config: GoalFormConfig) {
 	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
 	const wfState = config.workflowState ?? "ready";
-	const noWorkflows = wfState === "empty";
-	const workflowsLoading = wfState === "loading";
+	const workflowOptions = goalWorkflowSelectOptions(config.workflowId, config.inlineWorkflow);
+	const noWorkflows = wfState === "empty" && workflowOptions.length === 0;
+	const workflowsLoading = wfState === "loading" && workflowOptions.length === 0;
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
 		: worktreePreviewPath(config.cwd, config.title);
-	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
+	const selectedLibraryWorkflow = _cachedWorkflows.find(w => w.id === config.workflowId) ?? null;
+	const wf = config.inlineWorkflow ?? selectedLibraryWorkflow;
 	const workflowInvalid = isWorkflowSelectionInvalid(config.workflowId, config.inlineWorkflow);
 	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
 	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
@@ -1047,7 +1082,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
 					</div>
-				` : _cachedWorkflows.length > 0 ? html`
+				` : workflowOptions.length > 0 ? html`
 					<div class="flex items-center gap-2 md:shrink-0">
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
@@ -1061,8 +1096,8 @@ function renderGoalForm(config: GoalFormConfig) {
 									${config.workflowId ? `Unknown workflow: ${config.workflowId}` : "Select workflow"}
 								</option>
 							` : ""}
-							${_cachedWorkflows.map((w) => html`
-								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							${workflowOptions.map((option) => html`
+								<option value=${option.id} ?selected=${isSelectedWorkflowOption(option, config.workflowId, workflowOptions)}>${option.label}</option>
 							`)}
 						</select>
 					</div>
@@ -1346,6 +1381,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const selectedId = config.workflowId;
 	const workflows = _cachedWorkflows;
 	const inline = config.inlineWorkflow ?? null;
+	const workflowOptions = goalWorkflowSelectOptions(selectedId, inline);
 	const customizing = !!config.customizingWorkflow && !!inline;
 	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? null;
 	const displayWf = inline ?? selectedLibrary;
@@ -1358,7 +1394,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 			id="goal-proposal-panel-workflow"
 			aria-labelledby="goal-proposal-tab-workflow"
 			data-testid="goal-proposal-panel-workflow">
-			${workflows.length === 0
+			${workflowOptions.length === 0
 				? html`<p class="text-xs text-muted-foreground px-5 pt-3">No workflows available for this project.</p>`
 				: html`
 					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
@@ -1374,8 +1410,8 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 									${selectedId ? `Unknown workflow: ${selectedId}` : "Select workflow"}
 								</option>
 							` : ""}
-							${workflows.map((w) => html`
-								<option value=${w.id} ?selected=${selectedId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							${workflowOptions.map((option) => html`
+								<option value=${option.id} ?selected=${isSelectedWorkflowOption(option, selectedId, workflowOptions)}>${option.label}</option>
 							`)}
 						</select>
 						${customizing
