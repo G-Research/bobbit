@@ -219,19 +219,8 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { lookupPackRoute } from "./pack-entrypoints.js";
+import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import "./config-scope.css";
-
-function bobbitLoadingAnimation() {
-	return html`
-		<div class="flex items-center justify-center w-full h-full" style="background: var(--background);">
-			<div
-				class="rounded-full animate-spin"
-				style="width: 2rem; height: 2rem; border: 2px solid color-mix(in oklch, var(--muted-foreground) 22%, transparent); border-top-color: var(--primary);"
-				aria-label="Loading"
-			></div>
-		</div>
-	`;
-}
 
 // ---------------------------------------------------------------------------
 // Lazy route page loader — see docs/design/ui-bundle-size-reduction.md (Task A)

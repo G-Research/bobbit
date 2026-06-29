@@ -655,19 +655,36 @@ async function assertNoRepeatedTopRowGlyphArtifact(page: import("@playwright/tes
 }
 
 async function assertLatestTerminalInputVisibleAtBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
-	const snapshot = await terminalViewportContent(page);
-	const bottomRows = nearBottomRows(snapshot.rows);
-	const bottomText = bottomRows.join("\n");
-	const bottomSoftWrappedText = bottomRows.join("");
 	const expectedTail = expected.slice(-32);
-	expect(
-		snapshot.atBottom,
-		`${reason}: terminal scroll regression - xterm viewport should be pinned to the bottom for the active prompt/input. scrollTop=${snapshot.scrollTop}, maxScrollTop=${snapshot.maxScrollTop}`,
-	).toBe(true);
-	expect(
-		bottomSoftWrappedText.includes(expected) || bottomSoftWrappedText.includes(expectedTail),
-		`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" or its unique tail "${expectedTail}" in the near-bottom xterm rows, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
-	).toBe(true);
+	let lastSnapshot: Awaited<ReturnType<typeof terminalViewportContent>> | undefined;
+	try {
+		await expect.poll(async () => {
+			lastSnapshot = await terminalViewportContent(page);
+			return latestTerminalInputVisibleAtBottom(lastSnapshot, expected, expectedTail);
+		}, {
+			message: `${reason}: latest prompt/input should settle in the near-bottom xterm rows after PTY echo and prompt pinning`,
+			timeout: 10_000,
+		}).toBe(true);
+		return;
+	} catch {
+		const snapshot = lastSnapshot ?? await terminalViewportContent(page);
+		const bottomRows = nearBottomRows(snapshot.rows);
+		const bottomText = bottomRows.join("\n");
+		const bottomSoftWrappedText = bottomRows.join("");
+		expect(
+			snapshot.atBottom,
+			`${reason}: terminal scroll regression - xterm viewport should be pinned to the bottom for the active prompt/input. scrollTop=${snapshot.scrollTop}, maxScrollTop=${snapshot.maxScrollTop}`,
+		).toBe(true);
+		expect(
+			bottomSoftWrappedText.includes(expected) || bottomSoftWrappedText.includes(expectedTail),
+			`${reason}: terminal scroll regression - expected latest prompt/input "${expected}" or its unique tail "${expectedTail}" in the near-bottom xterm rows, allowing xterm soft wrapping and trailing blank rows. Bottom rows:\n${bottomText}\n\nVisible rows:\n${snapshot.rows.join("\n")}`,
+		).toBe(true);
+	}
+}
+
+function latestTerminalInputVisibleAtBottom(snapshot: Awaited<ReturnType<typeof terminalViewportContent>>, expected: string, expectedTail: string): boolean {
+	const bottomSoftWrappedText = nearBottomRows(snapshot.rows).join("");
+	return snapshot.atBottom && (bottomSoftWrappedText.includes(expected) || bottomSoftWrappedText.includes(expectedTail));
 }
 
 async function assertTerminalTextVisibleNearBottom(page: import("@playwright/test").Page, expected: string, reason: string): Promise<void> {
