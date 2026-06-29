@@ -921,7 +921,7 @@ export class McpManager {
       const owners = this._routeOwnersForRuntimeGroup(runtimeServerKey, group);
       tools.forEach((tool, toolIndex) => {
         owners.forEach((contribution, ownerIndex) => {
-          const route = this._routeForContributionTool(runtimeServerKey, contribution, tool);
+          const route = this._routeForContributionTool(runtimeServerKey, contribution, tool, owners.length);
           if (!route) return;
           candidates.push({
             route,
@@ -1022,9 +1022,11 @@ export class McpManager {
     return [flatManualContribution(runtimeServerKey, config)];
   }
 
-  private _routeForContributionTool(runtimeServerKey: string, contribution: ResolvedMcpContribution, tool: McpToolDef): McpToolRoute | undefined {
+  private _routeForContributionTool(runtimeServerKey: string, contribution: ResolvedMcpContribution, tool: McpToolDef, ownerCount = 1): McpToolRoute | undefined {
     const publicServerName = contribution.serverName;
-    const name = this._makeBobbitToolName(publicServerName, tool.name);
+    const publicMcpToolName = this._publicMcpToolNameForContribution(contribution, tool.name, ownerCount);
+    if (!publicMcpToolName) return undefined;
+    const name = this._makeBobbitToolName(publicServerName, publicMcpToolName);
     const parsed = parseMcpToolName(name);
     if (contribution.subNamespace && (!parsed?.sub || parsed.sub !== contribution.subNamespace)) return undefined;
     if (!this._operationSelected(contribution, tool.name, parsed?.op)) return undefined;
@@ -1037,6 +1039,36 @@ export class McpManager {
       contribution,
       group: `MCP: ${publicServerName}`,
     };
+  }
+
+  private _publicMcpToolNameForContribution(contribution: ResolvedMcpContribution, rawToolName: string, ownerCount: number): string | undefined {
+    const subNamespace = contribution.subNamespace;
+    if (!subNamespace) return rawToolName;
+
+    const prefix = `${subNamespace}__`;
+    if (rawToolName.startsWith(prefix) && rawToolName.length > prefix.length) {
+      return rawToolName;
+    }
+
+    // Gateway sub-namespace contributions may expose raw, unprefixed operation
+    // names. Publish them under Bobbit's package namespace while preserving the
+    // raw MCP call name. Already-prefixed operations for other namespaces remain
+    // filtered out as before.
+    if (!rawToolName.includes("__")) {
+      if (
+        ownerCount <= 1
+        || contribution.selectedOperations?.includes(rawToolName)
+        || this._rawToolNameLooksOwnedBySubNamespace(subNamespace, rawToolName)
+      ) {
+        return `${subNamespace}__${rawToolName}`;
+      }
+    }
+
+    return undefined;
+  }
+
+  private _rawToolNameLooksOwnedBySubNamespace(subNamespace: string, rawToolName: string): boolean {
+    return rawToolName.startsWith(`${subNamespace}_`) || rawToolName.startsWith(`${subNamespace}-`);
   }
 
   private _operationSelected(contribution: ResolvedMcpContribution, rawToolName: string, parsedOp?: string): boolean {

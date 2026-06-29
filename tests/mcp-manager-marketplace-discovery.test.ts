@@ -207,6 +207,63 @@ describe("McpManager marketplace discovery primitives", () => {
     );
   });
 
+  it("routes unprefixed gateway sub-namespace operations with namespaced public names", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const config = { url: "https://gateway.example.test/mcp" };
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("confluence", "gr", config, "confluence", {
+        runtimeServerKey: "gw-gr",
+        contributionId: "source:confluence",
+        disabledOperations: ["confluence_remove_page"],
+      }),
+      contrib("jira", "gr", config, "jira", {
+        runtimeServerKey: "gw-gr",
+        contributionId: "source:jira",
+        selectedOperations: ["jira_search"],
+      }),
+    ];
+    const stub = new StubMcpClient("gw-gr", {
+      tools: [
+        op("confluence_add_comment"),
+        op("confluence_remove_page"),
+        op("confluence__already_prefixed"),
+        op("jira_search"),
+        op("page_read"),
+      ],
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([["gw-gr", stub]]), { marketplaceResolver: resolver }) as any;
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => ({ name: t.name, mcpToolName: t.mcpToolName })).sort((a: any, b: any) => a.name.localeCompare(b.name)), [
+      { name: "mcp__gr__confluence__already_prefixed", mcpToolName: "confluence__already_prefixed" },
+      { name: "mcp__gr__confluence__confluence_add_comment", mcpToolName: "confluence_add_comment" },
+      { name: "mcp__gr__jira__jira_search", mcpToolName: "jira_search" },
+    ]);
+    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, op: parseMcpToolName(t.name)?.op, subNamespace: t.subNamespace })), [
+      { name: "mcp__gr__confluence__confluence_add_comment", op: "confluence_add_comment", subNamespace: "confluence" },
+      { name: "mcp__gr__confluence__already_prefixed", op: "already_prefixed", subNamespace: "confluence" },
+      { name: "mcp__gr__jira__jira_search", op: "jira_search", subNamespace: "jira" },
+    ]);
+
+    await mgr.callTool("mcp__gr__confluence__confluence_add_comment", { text: "hello" });
+    await mgr.callTool("mcp__gr__confluence__already_prefixed", { ok: true });
+    await mgr.callTool("mcp__gr__jira__jira_search", { q: "BUG-1" });
+    assert.deepEqual(stub.calls, [
+      { toolName: "confluence_add_comment", args: { text: "hello" } },
+      { toolName: "confluence__already_prefixed", args: { ok: true } },
+      { toolName: "jira_search", args: { q: "BUG-1" } },
+    ]);
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr__confluence__confluence_remove_page", {}),
+      /not available or is disabled/,
+    );
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr__confluence__page_read", {}),
+      /not available or is disabled/,
+    );
+  });
+
   it("groups same-config subNamespace contributions and filters tool infos", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "stub" };
