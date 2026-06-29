@@ -16,7 +16,7 @@
  */
 import type { Locator } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, deleteGoal } from "../e2e-setup.js";
 import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
 
 const INLINE_WORKFLOW_ID = "bespoke-inline-e2e";
@@ -168,6 +168,111 @@ test.describe("Goal proposal — Workflow tab", () => {
 			},
 			"BESPOKE_INLINE_WORKFLOW_LABEL_UPDATE: Bespoke label must reflect edited inline gate count",
 		).toEqual({ goal: updatedLabel, workflow: updatedLabel });
+	});
+
+	test("inline workflow proposals remain creatable when the workflow cache is empty", async ({ page }) => {
+		test.setTimeout(90_000);
+		let workflowListRequests = 0;
+		await page.route(/\/api\/workflows(?:\?.*)?$/, async (route, req) => {
+			if (req.method() === "GET") {
+				workflowListRequests += 1;
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ workflows: [] }),
+				});
+				return;
+			}
+			await route.continue();
+		});
+
+		await ensureSubgoals(true);
+		await openApp(page);
+		const sessionId = await createSessionViaUI(page);
+		await seedInlineWorkflowGoalProposal(sessionId);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("Inline Workflow Label Goal", { timeout: 10_000 });
+		await expect.poll(
+			() => page.evaluate(() => {
+				const fields = (window as any).bobbitState?.activeProposals?.goal?.fields;
+				return {
+					workflow: fields?.workflow ?? null,
+					inlineId: fields?.inlineWorkflow?.id ?? null,
+					gateCount: fields?.inlineWorkflow?.gates?.length ?? 0,
+				};
+			}),
+			{ timeout: 10_000, message: "inline workflow proposal should hydrate while workflow cache is empty" },
+		).toEqual({ workflow: INLINE_WORKFLOW_ID, inlineId: INLINE_WORKFLOW_ID, gateCount: INLINE_WORKFLOW_GATE_COUNT });
+		await expect.poll(() => workflowListRequests, { timeout: 10_000 }).toBeGreaterThan(0);
+
+		const goalSelect = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+		await expect(goalSelect).toBeVisible({ timeout: 10_000 });
+		const goalLabel = await selectedOptionText(goalSelect);
+		const goalValue = await goalSelect.inputValue();
+		expect(
+			goalLabel,
+			"BESPOKE_INLINE_WORKFLOW_EMPTY_CACHE_LABEL: Goal tab must render the inline workflow option even with an empty project workflow cache",
+		).toBe(INLINE_WORKFLOW_LABEL);
+		await expect(page.locator("[data-testid='goal-form-no-workflows-banner']")).toHaveCount(0);
+
+		await page.locator("[data-testid='goal-proposal-tab-workflow']").click();
+		const workflowSelect = page.locator("[data-testid='goal-proposal-workflow-select']");
+		await expect(workflowSelect).toBeVisible({ timeout: 10_000 });
+		expect(
+			{
+				goal: goalLabel,
+				workflow: await selectedOptionText(workflowSelect),
+				goalValue,
+				workflowValue: await workflowSelect.inputValue(),
+			},
+			"BESPOKE_INLINE_WORKFLOW_EMPTY_CACHE_LABEL: Goal and Workflow tabs must agree when project workflows are empty",
+		).toEqual({
+			goal: INLINE_WORKFLOW_LABEL,
+			workflow: INLINE_WORKFLOW_LABEL,
+			goalValue: INLINE_WORKFLOW_ID,
+			workflowValue: INLINE_WORKFLOW_ID,
+		});
+
+		await page.locator("[data-testid='goal-proposal-tab-goal']").click();
+		const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+		await expect(createBtn).toBeVisible({ timeout: 5_000 });
+		await expect(createBtn, "inline workflow proposals should not be disabled by the empty-workflows guard").toBeEnabled();
+
+		const createPromise = page.waitForResponse(
+			(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST",
+			{ timeout: 15_000 },
+		).catch((err: Error) => err);
+		await createBtn.click();
+		await expect(
+			page.getByText("This project has no workflows yet").first(),
+			"BESPOKE_INLINE_WORKFLOW_EMPTY_CACHE_SUBMIT: Create Goal must not be blocked by the empty-workflows guard when an inline workflow is present",
+		).not.toBeVisible({ timeout: 1_000 });
+		const createResp = await createPromise;
+		if (createResp instanceof Error) throw createResp;
+		const body = createResp.request().postDataJSON?.() ?? JSON.parse(createResp.request().postData() || "{}");
+		expect(
+			body,
+			"BESPOKE_INLINE_WORKFLOW_EMPTY_CACHE_SUBMIT: Create Goal must submit the inline workflow body instead of a workflowId",
+		).toMatchObject({
+			workflow: {
+				id: INLINE_WORKFLOW_ID,
+				gates: expect.arrayContaining([
+					expect.objectContaining({ id: "issue-analysis" }),
+					expect.objectContaining({ id: "implementation" }),
+					expect.objectContaining({ id: "ready-to-merge" }),
+				]),
+			},
+		});
+		expect(body.workflow.gates).toHaveLength(INLINE_WORKFLOW_GATE_COUNT);
+		expect(body.workflowId).toBeUndefined();
+		expect(createResp.status()).toBe(201);
+		const created = await createResp.json();
+		expect(created?.id).toBeTruthy();
+		await deleteGoal(created.id);
 	});
 
 	test("customise/revert toggle drives the editor, and the select syncs with the Goal tab @smoke", async ({ page }) => {
