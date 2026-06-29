@@ -9,14 +9,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 
-type RegistryMode = "official" | "legacy-schema";
-
-async function startRegistry(mode: RegistryMode = "official"): Promise<{ url: string; close: () => Promise<void> }> {
+async function startGateway(): Promise<{ url: string; close: () => Promise<void> }> {
 	const server = http.createServer((req, res) => {
-		if (req.url === "/registry.json") {
-			const port = (server.address() as any).port;
+		if (req.url === "/signin/aigateway" || req.url === "/readonly/mcp") {
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(JSON.stringify(mode === "legacy-schema" ? legacySchemaRegistryBody() : officialRegistryBody(port)));
+			res.end(JSON.stringify(gatewayCatalogueBody()));
 			return;
 		}
 		res.writeHead(404, { "content-type": "text/plain" });
@@ -25,48 +22,17 @@ async function startRegistry(mode: RegistryMode = "official"): Promise<{ url: st
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = (server.address() as any).port;
 	return {
-		url: `http://127.0.0.1:${port}/registry.json`,
+		url: `http://127.0.0.1:${port}/readonly/mcp`,
 		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
 	};
 }
 
-function officialRegistryBody(port: number): Record<string, unknown> {
+function gatewayCatalogueBody(): Record<string, unknown> {
 	return {
-		servers: [
-			{
-				server: {
-					name: "io.bobbit/docs",
-					title: "Docs MCP",
-					description: "Remote docs MCP",
-					version: "1.0.0",
-					websiteUrl: "https://docs.example.com",
-					remotes: [{ type: "streamable-http", url: `http://127.0.0.1:${port}/mcp` }],
-				},
-			},
-			{
-				server: {
-					name: "io.bobbit/stdio-docs",
-					description: "Stdio docs MCP",
-					version: "1.0.0",
-					packages: [{ registryType: "npm", identifier: "@bobbit/docs-mcp", version: "1.0.0", transport: { type: "stdio" } }],
-				},
-			},
-		],
-	};
-}
-
-function legacySchemaRegistryBody(): Record<string, unknown> {
-	return {
-		schemaVersion: 1,
-		servers: [
-			{
-				id: "docs-remote",
-				name: "docs_runtime",
-				label: "Docs MCP",
-				description: "Remote docs MCP",
-				version: "1.0.0",
-				transport: { type: "http", url: "https://mcp.example.com/mcp" },
-			},
+		providers: [
+			{ id: "confluence", label: "Confluence", description: "Confluence docs tools", operations: [{ name: "confluence_search" }] },
+			{ id: "jira", label: "Jira", description: "Jira issue tools", operations: [{ name: "jira_search" }] },
+			{ id: "jira-readonly", label: "Jira readonly", description: "Read-only Jira tools", operations: [{ name: "jira_search" }] },
 		],
 	};
 }
@@ -87,11 +53,12 @@ async function cleanup(sourceId?: string, projectId?: string, packNames: string[
 	if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
 }
 
-async function browseRemoteRegistryPack(sourceId: string): Promise<any> {
+async function browseRemoteGatewayPack(sourceId: string): Promise<any> {
 	const browse = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}/packs`);
 	expect(browse.status).toBe(200);
 	const packs = (await browse.json()).packs;
-	const pack = packs.find((p: any) => p.mcp?.some((m: any) => m.transport === "http" && String(m.url).includes("/mcp")));
+	expect(packs.map((p: any) => p.gatewayProviderId).sort()).toEqual(["confluence", "jira", "jira-readonly"]);
+	const pack = packs.find((p: any) => p.gatewayProviderId === "jira");
 	expect(pack).toBeTruthy();
 	return pack;
 }
@@ -136,26 +103,27 @@ function writeAuthoredNonMcpPack(repo: string): void {
 }
 
 test.describe("Marketplace MCP API integration", () => {
-	test("registry browse, install, activation reload, and uninstall update MCP runtime", async ({ gateway }) => {
+	test("gateway browse, install, activation reload, and uninstall update MCP runtime", async ({ gateway }) => {
 		await gateway.sessionManager.initMcp(gateway.bobbitDir);
-		const registry = await startRegistry();
+		const gatewaySource = await startGateway();
 		let sourceId: string | undefined;
 		let packName: string | undefined;
 		try {
 			const add = await apiFetch("/api/marketplace/sources", {
 				method: "POST",
-				body: JSON.stringify({ url: registry.url, type: "mcp-registry" }),
+				body: JSON.stringify({ url: gatewaySource.url, type: "mcp-gateway" }),
 			});
 			expect(add.status).toBe(201);
 			sourceId = (await add.json()).source.id;
 
-			const pack = await browseRemoteRegistryPack(sourceId!);
+			const pack = await browseRemoteGatewayPack(sourceId!);
 			packName = pack.name;
-			expect(pack.name).toMatch(/^mcp-io-bobbit-docs-1-0-0-/);
+			expect(pack.name).toBe("mcp-jira");
 			expect(pack).toMatchObject({
 				virtual: true,
-				sourceType: "mcp-registry",
-				mcp: [{ ref: pack.registryId, serverName: pack.serverName, transport: "http", url: expect.stringContaining("/mcp") }],
+				sourceType: "mcp-gateway",
+				gatewayProviderId: "jira",
+				mcp: [{ ref: "jira", serverName: "gr", subNamespace: "jira", transport: "http", url: expect.stringContaining("/readonly/mcp") }],
 			});
 
 			const install = await apiFetch("/api/marketplace/install", {
@@ -164,26 +132,30 @@ test.describe("Marketplace MCP API integration", () => {
 			});
 			expect(install.status).toBe(201);
 			const installBody = await install.json();
-			expect(installBody.installed.manifest.contents.mcp).toEqual([pack.registryId]);
+			expect(installBody.installed.manifest.contents.mcp).toEqual(["jira"]);
 			expect(installBody.mcpReload?.status).toBeTruthy();
 
 			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(pack.name)}`);
 			expect(activation.status).toBe(200);
 			const activationBody = await activation.json();
-			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: pack.registryId, serverName: pack.serverName, label: "Docs MCP", transport: "http" });
+			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: "jira", serverName: "gr", subNamespace: "jira", label: "Jira", transport: "http" });
 
 			let mcp = await apiFetch("/api/mcp-servers");
 			expect(mcp.status).toBe(200);
-			expect((await mcp.json()).some((s: any) => s.name === pack.serverName)).toBe(true);
+			let servers = await mcp.json();
+			let gr = servers.find((s: any) => s.name === "gr");
+			expect(gr?.activeSubNamespaces).toContain("jira");
 
 			const disable = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
-				body: JSON.stringify({ scope: "server", packName: pack.name, disabled: { mcp: [pack.registryId] } }),
+				body: JSON.stringify({ scope: "server", packName: pack.name, disabled: { mcp: ["jira"] } }),
 			});
 			expect(disable.status).toBe(200);
-			expect((await disable.json()).disabled.mcp).toEqual([pack.registryId]);
+			expect((await disable.json()).disabled.mcp).toEqual(["jira"]);
 			mcp = await apiFetch("/api/mcp-servers");
-			expect((await mcp.json()).some((s: any) => s.name === pack.serverName)).toBe(false);
+			servers = await mcp.json();
+			gr = servers.find((s: any) => s.name === "gr");
+			expect(gr?.activeSubNamespaces ?? []).not.toContain("jira");
 
 			const enable = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
@@ -191,7 +163,9 @@ test.describe("Marketplace MCP API integration", () => {
 			});
 			expect(enable.status).toBe(200);
 			mcp = await apiFetch("/api/mcp-servers");
-			expect((await mcp.json()).some((s: any) => s.name === pack.serverName)).toBe(true);
+			servers = await mcp.json();
+			gr = servers.find((s: any) => s.name === "gr");
+			expect(gr?.activeSubNamespaces).toContain("jira");
 
 			const del = await apiFetch("/api/marketplace/installed", {
 				method: "DELETE",
@@ -199,25 +173,20 @@ test.describe("Marketplace MCP API integration", () => {
 			});
 			expect(del.status).toBe(204);
 			mcp = await apiFetch("/api/mcp-servers");
-			expect((await mcp.json()).some((s: any) => s.name === pack.serverName)).toBe(false);
+			expect((await mcp.json()).some((s: any) => s.name === "gr" && s.activeSubNamespaces?.includes("jira"))).toBe(false);
 		} finally {
 			await cleanup(sourceId, undefined, packName ? [packName] : []);
-			await registry.close();
+			await gatewaySource.close();
 		}
 	});
 
-	test("old schema-1 registry source is rejected", async () => {
-		const registry = await startRegistry("legacy-schema");
-		try {
-			const add = await apiFetch("/api/marketplace/sources", {
-				method: "POST",
-				body: JSON.stringify({ url: registry.url, type: "mcp-registry" }),
-			});
-			expect(add.status).toBe(422);
-			expect((await add.json()).error).toMatch(/unsupported MCP registry format|official MCP Registry|servers\[\]\.server/i);
-		} finally {
-			await registry.close();
-		}
+	test("new mcp-registry source creation is rejected with migration message", async () => {
+		const add = await apiFetch("/api/marketplace/sources", {
+			method: "POST",
+			body: JSON.stringify({ url: "https://registry.modelcontextprotocol.io/v0/servers", type: "mcp-registry" }),
+		});
+		expect(add.status).toBe(400);
+		expect((await add.json()).error).toMatch(/mcp-registry sources are no longer supported; use type mcp-gateway/i);
 	});
 
 	test("authored pack update from MCP to non-MCP disconnects stale runtime and tools", async ({ gateway }) => {
@@ -268,21 +237,21 @@ test.describe("Marketplace MCP API integration", () => {
 		}
 	});
 
-	test("project-scope registry install appears only in project MCP runtime", async ({ gateway }) => {
+	test("project-scope gateway install appears only in project MCP runtime", async ({ gateway }) => {
 		await gateway.sessionManager.initMcp(gateway.bobbitDir);
 		const projectId = await defaultProjectId();
 		expect(projectId).toBeTruthy();
-		const registry = await startRegistry();
+		const gatewaySource = await startGateway();
 		let sourceId: string | undefined;
 		let packName: string | undefined;
 		try {
 			const add = await apiFetch("/api/marketplace/sources", {
 				method: "POST",
-				body: JSON.stringify({ url: registry.url, type: "mcp-registry" }),
+				body: JSON.stringify({ url: gatewaySource.url, type: "mcp-gateway" }),
 			});
 			expect(add.status).toBe(201);
 			sourceId = (await add.json()).source.id;
-			const pack = await browseRemoteRegistryPack(sourceId!);
+			const pack = await browseRemoteGatewayPack(sourceId!);
 			packName = pack.name;
 
 			const install = await apiFetch("/api/marketplace/install", {
@@ -294,18 +263,18 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const scoped = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
 			expect(scoped.status).toBe(200);
-			expect((await scoped.json()).some((s: any) => s.name === pack.serverName)).toBe(true);
+			expect((await scoped.json()).find((s: any) => s.name === "gr")?.activeSubNamespaces).toContain("jira");
 
 			const global = await apiFetch("/api/mcp-servers");
 			expect(global.status).toBe(200);
-			expect((await global.json()).some((s: any) => s.name === pack.serverName)).toBe(false);
+			expect((await global.json()).some((s: any) => s.name === "gr" && s.activeSubNamespaces?.includes("jira"))).toBe(false);
 
 			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(projectId!)}&packName=${encodeURIComponent(pack.name)}`);
 			expect(activation.status).toBe(200);
-			expect((await activation.json()).catalogue.mcp[0]).toMatchObject({ ref: pack.registryId, serverName: pack.serverName, transport: "http" });
+			expect((await activation.json()).catalogue.mcp[0]).toMatchObject({ ref: "jira", serverName: "gr", subNamespace: "jira", transport: "http" });
 		} finally {
 			await cleanup(sourceId, projectId, packName ? [packName] : []);
-			await registry.close();
+			await gatewaySource.close();
 		}
 	});
 });
