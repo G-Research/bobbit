@@ -19,7 +19,7 @@ The terminal is a **session-persistent side-panel channel** owned by a built-in 
 
 - Pack declares `channels/terminal.yaml`, `panels/terminal.yaml`, and at least one `entrypoints/open-terminal-session-menu.yaml`.
 - Optional `entrypoints/terminal.yaml` contributes composer slash `/terminal`.
-- The panel uses `host.channels` to open/attach the pack-owned `terminal` protocol. There is no `host.terminal` API and no raw WebSocket/fetch surface.
+- The panel uses `host.channels` to open/attach the pack-owned `terminal` protocol. There is no `host.terminal` API, and the Host API contract exposes no raw WebSocket/fetch surface.
 - The backend PTY lifetime is tied to the session channel, not to the DOM panel instance.
 - The channel handler owns a bounded in-memory replay buffer for recent PTY output so a live reattach can restore useful context without making generic channel delivery queues durable.
 

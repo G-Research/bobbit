@@ -31,8 +31,10 @@ freezes the contribution-point manifest, the full Host API, and proves (on paper
 types.
 
 **Durability principle (the whole point of v1).** Every host capability is a **typed,
-named, versioned, capability-scoped method**. There is **no raw transport and no escape
-hatch**: the Host API is a contract Bobbit *serves*, not a window into Bobbit internals.
+named, versioned, capability-scoped method**. The sanctioned Host API exposes no raw
+transport or untyped passthrough: it is a contract Bobbit *serves*, not a window into
+Bobbit internals. This is a contract/durability boundary, not a browser-realm
+anti-spoofing claim against installed/enabled pack code with the session bearer.
 Consequences encoded throughout this doc:
 
 - **No `gateway.fetch`.** A raw authenticated fetch against the live REST surface would
@@ -99,7 +101,8 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 ## 1. Overview & two-host architecture
 
 VS Code-shaped: declarative **contribution points** in the tool/pack manifest, two
-**extension hosts**, one **Host API** that is the single security choke point.
+**extension hosts**, one **Host API** as the typed authorization choke point for sanctioned
+pack capabilities.
 
 ```
                           ┌───────────────────────────── Bobbit gateway (server host) ─────────────┐
@@ -1248,42 +1251,48 @@ has the token + shell. We are not widening that; we are adding *typed* entry poi
 had to resolve a *trusted base URL* (the `resolveTrustedGatewayBaseUrl` machinery,
 Host-header–derived), which is itself a token-leak surface — a forged/poisoned Host header
 could steer the injected admin bearer at an attacker-chosen origin. Removing `gateway.fetch`
-deletes that entire concern: the only endpoint the client Host API calls in Phase 1 is the
-same-origin action endpoint, and the durable Phase-2 replacement (`host.callRoute`) is
-scoped to the pack's OWN `/api/ext/<pack>/*` namespace and authorized like a tool call.
-There is no raw-fetch capability to misdirect, so the trusted-base-URL surface is gone.
+deletes that contract-level concern: the Phase-1 client Host API builds the same-origin
+action request itself, and the durable Phase-2 replacement (`host.callRoute`) is scoped to
+the caller's validated pack identity and authorized through the scoped Host API guard. No
+Host API method accepts a caller-supplied URL or `Authorization` header, so the
+trusted-base-URL surface is gone.
 
 ### 5.1 The single choke point — `invokeAction` + scoped Phase-2 capabilities
 
-The boundary is now exactly the set of NEW typed entry points the extension host
-introduces; there is no raw escape hatch to reason around.
+The sanctioned boundary is the set of typed entry points the extension host introduces,
+combined with gateway bearer/session auth, scoped surface identity, declarations, quotas,
+audit, and sandbox/read-only policy.
 
 - **`invokeAction` is the only Phase-1 pack→server path, and it is authorized like a tool
   call.** The action endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈
   the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call`
   (control i). The LLM can `curl` the endpoint, so this guard — not the agent layer's
   `allowedTools` — is the real gate.
-- **Phase-2 capabilities inherit the same rule by construction.** `host.callRoute` (the
-  pack-scoped route capability), `host.store.*`, and `host.session.*` all route through the
-  one `allowedTools`-gated guard. `callRoute` additionally constrains the target to the
-  calling pack's OWN `/api/ext/<thisPack>/*` namespace — a pack can never address another
-  pack's routes or an arbitrary gateway path. This is the durable replacement for the
-  removed raw fetch: dynamic pack data comes from typed, pack-owned, authorized routes.
+- **Phase-2 capabilities inherit scoped authorization by construction.** `host.callRoute`
+  (the pack-scoped route capability), `host.store.*`, `host.session.*`, and later
+  `host.channels.*` route through validated surface identity plus the header-bound session.
+  Tool-bound surfaces layer `allowedTools`; pack-bound surfaces are gated by
+  installed+active+own-session. `callRoute` additionally constrains the target to the
+  calling pack's own declared routes — dynamic pack data comes from typed, pack-owned,
+  authorized routes rather than a caller-supplied gateway path.
 - **The renderer-module endpoint is not a capability entry point.** `GET
   /api/tools/:tool/renderer` serves trusted pack module bytes (a static-asset-equivalent),
   so it is bearer-only — EXEMPT from the `allowedTools` check (§4a, control i). Path
   traversal on the renderer file is still re-validated.
-- **The injected bearer never leaves same-origin.** With no `gateway.fetch`, there is no
-  caller-supplied URL or `Authorization` header to sanitize on the client: `host-api.ts`
-  builds the single action-endpoint request itself (same-origin, `withSession` adds only
-  `x-bobbit-session-id`; `gatewayFetch` adds the bearer). The previous
+- **The Host API has no caller-supplied transport target.** With no `gateway.fetch`, there
+  is no caller-supplied URL or `Authorization` header to sanitize in the Host API contract:
+  `host-api.ts` builds same-origin endpoint requests itself (`withSession` adds only
+  `x-bobbit-session-id`; `gatewayFetch` adds the bearer where needed). The previous
   `stripAuthorizationHeaders` / trusted-base-URL defenses are unnecessary because the
-  capability that required them no longer exists.
+  capability that required them no longer exists. This does not make same-origin code a
+  separate security principal; bearer/session auth and sandbox/token custody remain the
+  gateway boundary.
 - **The single choke point, stated accurately:** every capability entry point created by
-  the extension host (the action endpoint today; `callRoute`/`stores`/`session` in Phase 2)
-  routes through one `allowedTools`-gated guard; the renderer-module endpoint serves
-  trusted bytes and is bearer-only. There is exactly one un-typed surface in the whole
-  design — none — which is the property that makes v1 durable.
+  the extension host routes through the appropriate server guard: `invokeAction` uses the
+  full tool/action/`toolUseId` guard; scoped capabilities use validated surface identity,
+  header-bound session, declarations/namespaces, quotas, and audit. The renderer-module
+  endpoint serves trusted bytes and is bearer-only. There are no untyped capability entry
+  points in the Host API contract, which is the property that makes v1 durable.
 
 ---
 
@@ -1388,8 +1397,8 @@ when a host gates the capability off), and
 read `host.version` / `host.contractVersion` only to identify the contract revision.
 Deprecation policy: a member may be
 marked `@deprecated` (kept working) for at least one MAJOR `HOST_API_VERSION` before
-removal, and removal is the ONLY thing that bumps the major. The load-bearing rule: **no
-member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
+removal, and removal is the ONLY thing that bumps the major. The load-bearing contract rule:
+**no member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
 un-typed passthrough makes the abstraction a fiction, which is exactly why `gateway.fetch`
 was removed rather than retained "just in case."
 

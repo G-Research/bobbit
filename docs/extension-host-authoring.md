@@ -63,8 +63,9 @@ fixture/litmus packs such as `tests/fixtures/market-sources/no-tools-pack-src/no
 The two halves talk through **one Host API**. The renderer→action flow: a renderer calls
 `host.invokeAction(tool, action, args)`; the gateway authorizes the call (like a tool call),
 runs the matching handler, and returns its JSON; the renderer paints the result into its
-**own local state**. Every other capability routes through that same mediated, authorized
-boundary — there is no raw escape hatch.
+**own local state**. Every other sanctioned capability routes through that same typed,
+authorized Host API contract; bearer/session auth, installed/enabled pack scope, declarations,
+quotas, audit, and sandbox policy are the durable boundaries.
 
 ```
  Browser (renderer)                         Gateway (action handler)
@@ -430,10 +431,9 @@ const result = await ctx.host.invokeAction("sample_action", "retry", { /* args *
   `:tool`. Because the LLM can `curl` this endpoint with the admin token, *this* guard is the
   real gate.
 
-`invokeAction` is the **only** action pack→server path — there is no lower-level raw-fetch
-seam. The endpoint is built same-origin inside the client Host API
-([`src/app/host-api.ts`](../src/app/host-api.ts)), so there is no caller-supplied URL or
-`Authorization` header anywhere in the flow.
+`invokeAction` is the **only** sanctioned action pack→server path. The client Host API
+([`src/app/host-api.ts`](../src/app/host-api.ts)) builds the same-origin endpoint request, so
+the typed contract has no caller-supplied URL or `Authorization` header.
 
 ### Feature-detection and the durable forward path
 
@@ -468,8 +468,9 @@ current host reports all three `true`). `host.version` (`HOST_API_VERSION`, `1`)
 ## Pack-scoped surfaces: panels, channels, routes, entrypoints, stores, session
 
 Everything below is reached through the **same** Host API your renderer holds (`ctx.host`, or
-the `host` argument a panel/entrypoint is handed) and authorized through the **same**
-per-session guard — there is still no raw escape hatch.
+the `host` argument a panel/entrypoint is handed) and authorized through scoped session/pack
+identity. The sanctioned API remains typed and named; it is not a same-origin anti-spoofing
+boundary against already-trusted pack code with the session bearer.
 
 ### How pack identity is bound (you never supply it)
 
@@ -484,9 +485,10 @@ own routes, session reads are own-session. That identity must not be forgeable, 
   `{ sessionId, contributionKind, contributionId, packId }`. The server resolves the winning
   contribution and returns an opaque, HMAC-signed token bound to
   `{sessionId, packId, contributionId, tool?}`.
-- The token is held in the Host API **closure** — **your pack code never sees it, sets it, or
-  sends it.** It is echoed automatically on every scoped call; the server re-validates it and
-  derives `{packId, tool?}` from it, ignoring anything a caller tries to send.
+- The token is held by the Host API implementation and is not part of the author-facing
+  contract — **your sanctioned pack code never sets or supplies it.** It is echoed
+  automatically on every scoped call; the server re-validates it and derives
+  `{packId, tool?}` from it, ignoring anything a caller tries to send.
 
 **The trust boundary differs for tool-bound vs pack-bound surfaces.** A tool-bound surface
 (renderer/action) is gated by `:tool ∈ allowedTools` (plus `toolUseId` ownership for actions).
@@ -500,10 +502,11 @@ own-session, session writes keep the user-gesture + one-time permit provenance g
 opens keep one-shot replay/protocol permits under scoped channel authority).
 
 **Practical consequence for you:** you just call `host.store.get(...)` /
-`host.callRoute(...)` / `host.channels.open(...)` / `host.session.readToolCall(...)`. You never
-pass a pack id, a `tool` name, a token, a URL, or a WebSocket. (A same-realm malicious pack could still forge its own token — the
-documented Model-A residual; see [marketplace.md](marketplace.md). The token closes the
-*accidental* cross-pack path.)
+`host.callRoute(...)` / `host.channels.open(...)` / `host.session.readToolCall(...)`. The
+sanctioned Host API does not ask you to pass a pack id, `tool` name, token, URL, or WebSocket.
+A same-realm malicious pack with the session bearer is already inside the installed/enabled pack
+trust model; surface tokens close accidental identity confusion and support declaration checks,
+audit, and replay resistance, not full browser-realm isolation. See [marketplace.md](marketplace.md).
 
 ### Stores — implicit, pack-scoped persistence (`host.store.*`)
 
@@ -552,9 +555,10 @@ REPLs, log tails, debug consoles, SSH-like sessions, and terminal-like tools. Th
 and protocol-agnostic. The Host API owns only the channel lifecycle and the v1 frame envelope;
 your pack owns the channel name, protocol, handler, and payload semantics.
 
-There is deliberately no raw transport surface. A pack never receives a WebSocket, URL, bearer
-token, `Authorization` header, gateway path, or caller-selectable `packId`. Browser code holds a
-`HostChannel`; gateway code mediates every open, attach, send, close, and cleanup.
+The sanctioned channel API exposes typed channel verbs, not raw transport handles. A pack author
+does not receive or choose a WebSocket, URL, bearer token, `Authorization` header, gateway path,
+or caller-selectable `packId`; browser code holds a `HostChannel`, and gateway code mediates
+every open, attach, send, close, and cleanup.
 
 #### Public client API
 
@@ -1382,8 +1386,8 @@ await host.session.postMessage({ role: "user", text: "re-run the tests", resumeT
   it reads `navigator.userActivation` synchronously and **throws** on mount. This is a
   user-provenance and UX guard for a capability that visibly speaks into the active transcript, not
   a complete malicious-pack boundary in the shared UI realm. The post rides the app's authenticated
-  session WebSocket (pack code has no handle) and carries a one-time, content-bound, server-minted
-  permit — captured/replayed/forged/tampered frames are rejected.
+  session WebSocket path and carries a one-time, content-bound, server-minted permit —
+  captured/replayed/forged/tampered posts are rejected server-side.
 - **Cross-session posting is impossible** — the target is the WS connection's own session.
 
 ### `host.agents` — launch and orchestrate child agents
@@ -1439,10 +1443,11 @@ waiting for a child. Instead it `spawn`s, then **polls** `status` / `list` / `re
 multiple worker calls if the work outlives one call's timeout budget. (This is the one place
 the pack surface deliberately differs from the agent-tool `team_wait`, which *can* block.)
 
-`host.agents` and `host.channels.open` follow the same trust shape: both act under the bound
-session/pack authority instead of a raw transport or foreign-session handle. `host.agents` mints
-scoped child principals owned by the session; channels open only declared pack channels in the same
-session and consume a one-shot protocol permit. Neither grants cross-session or cross-pack reach.
+`host.agents` and `host.channels.open` follow the same trust shape: both act through typed verbs
+under the bound session/pack authority, with no foreign-session target parameter. `host.agents`
+mints scoped child principals owned by the session; channels open only declared pack channels in
+the same session and consume a one-shot protocol permit. Neither grants cross-session or
+cross-pack reach through the sanctioned API.
 
 #### Scoping — own children only, by source discriminator
 
@@ -1737,7 +1742,9 @@ migration. Full keep-vs-delete detail is in
 
 ## Security checklist
 
-The Host API is the single security boundary. As an author, your obligations are:
+The Host API is the authoring surface and server authorization choke point. The broader boundary
+is the installed/enabled pack trust decision, bearer/session auth, declarations, quotas, audit, and
+sandbox/read-only enforcement. As an author, your obligations are:
 
 - [ ] **Never auto-invoke an action on render** — invoke actions from a visible user action; this is authoring/UX guidance, while server authorization remains `allowedTools`, action allowlist, session binding, and `toolUseId` ownership.
 - [ ] **Validate / whitelist `args`** in every handler; never `eval`/`exec`/`require` it or derive paths from it.
@@ -1745,7 +1752,7 @@ The Host API is the single security boundary. As an author, your obligations are
 - [ ] **Keep `args` identity-free** — `sessionId`/`toolUseId` come from the verified context.
 - [ ] **Don't bare-import `lit`** in a renderer or panel — use the factory toolkit.
 - [ ] **Use theme tokens**, preserve any iframe `sandbox` attributes, never mutate the transcript from a renderer.
-- [ ] **Go through the Host API** for every pack→server call — `host.invokeAction`, `host.callRoute`, `host.channels.*`, `host.store.*`, `host.session.*`. There is no raw fetch, raw WebSocket, URL, bearer token, or gateway path by design.
+- [ ] **Go through the Host API** for every sanctioned pack→server call — `host.invokeAction`, `host.callRoute`, `host.channels.*`, `host.store.*`, `host.session.*`. The author-facing contract does not expose a raw fetch, raw WebSocket, URL, bearer token, or gateway path.
 - [ ] **Never build a URL or hash string** — `host.ui.openPanel` / `host.ui.navigate` take structured `{ panelId | route, params }` targets.
 - [ ] **No post / navigate / action / surprising process start on mount** — `host.session.postMessage` requires a real user gesture; actions/navigations/process-like channel opens should be user-driven UX, even though channel authorization is scoped declaration + one-shot permit rather than launcher activation.
 - [ ] **Never supply a pack id, `tool`, token, or transport to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
