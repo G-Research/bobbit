@@ -762,7 +762,7 @@ export class RemoteAgent {
 
 			this.ws.onopen = () => {
 				bootMark("ws-open");
-				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
+				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
 			};
 
 			this.ws.onmessage = (evt) => {

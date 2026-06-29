@@ -307,8 +307,6 @@ function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
 }
 
-const surfaceTokenAuthorities = new Map<string, { clientId: string; key: string }>();
-
 export function handleWebSocketConnection(
 	ws: WebSocket,
 	sessionId: string,
@@ -462,14 +460,14 @@ export function handleWebSocketConnection(
 			sessionManager.addClient(sessionId, ws);
 
 			// Pack-bound surface-token minting is intentionally NOT available on arbitrary
-			// authenticated same-session WebSockets. The first app-owned session socket gets
-			// a per-connection key captured by RemoteAgent's closure; auxiliary channel
-			// sockets opt out with clientKind:"extension-channel" and raw sockets do not
-			// receive this key while the app socket is connected.
+			// authenticated same-session WebSockets. Only the first-party RemoteAgent app
+			// transport opts in as clientKind:"app" and receives a per-connection key
+			// captured by its closure; raw/authenticated auxiliary sockets receive no key.
+			// Authority is per app connection, not singleton per session, so multiple tabs
+			// can each mint scoped pack surface tokens without stealing lifecycle state.
 			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
-			if (authMsg.clientKind !== "extension-channel" && !surfaceTokenAuthorities.has(sessionId)) {
+			if (authMsg.clientKind === "app") {
 				surfaceTokenAuthorityKey = randomUUID();
-				surfaceTokenAuthorities.set(sessionId, { clientId, key: surfaceTokenAuthorityKey });
 			}
 
 			// The C2 session WRITE (`host.session.postMessage`) is driven over THIS trusted,
@@ -645,8 +643,7 @@ export function handleWebSocketConnection(
 
 		try {
 			const mintTrustedPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
-				const authority = surfaceTokenAuthorities.get(sessionId);
-				if (!authority || authority.clientId !== clientId || tokenMsg.surfaceTokenKey !== authority.key) {
+				if (!surfaceTokenAuthorityKey || tokenMsg.surfaceTokenKey !== surfaceTokenAuthorityKey) {
 					return { ok: false, error: "pack-bound surface-token mint requires trusted app surface authority" };
 				}
 				const packId = typeof tokenMsg.packId === "string" ? tokenMsg.packId : "";
@@ -1553,8 +1550,6 @@ export function handleWebSocketConnection(
 
 	ws.on("close", () => {
 		clearTimeout(authTimeout);
-		const authority = surfaceTokenAuthorities.get(sessionId);
-		if (authority?.clientId === clientId) surfaceTokenAuthorities.delete(sessionId);
 		if (channelRegistry && attachedExtChannels.size > 0) {
 			for (const [channelId, attached] of attachedExtChannels) {
 				void Promise.resolve(channelRegistry.detach({ sessionId: attached.sessionId, packId: attached.packId, channelId, clientId })).catch((err) => {

@@ -89,7 +89,7 @@ export interface ChannelInfo {
 
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
-	| { type: "auth"; token: string; clientKind?: "extension-channel" }
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[] }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }

@@ -86,14 +86,20 @@ function channelInfo(overrides: Partial<ChannelInfo> = {}): ChannelInfo {
 	};
 }
 
-async function authenticatedHarness(opts: { channelRegistry?: any; permits?: ChannelOpenPermitStore; trustedApp?: boolean } = {}): Promise<{ ws: FakeWebSocket; permits: ChannelOpenPermitStore }> {
+async function authenticatedHarness(opts: {
+	channelRegistry?: any;
+	permits?: ChannelOpenPermitStore;
+	authKind?: "app" | "extension-channel" | "raw";
+	sessionManager?: ReturnType<typeof makeSessionManager>;
+} = {}): Promise<{ ws: FakeWebSocket; permits: ChannelOpenPermitStore }> {
 	const ws = new FakeWebSocket();
 	const permits = opts.permits ?? new ChannelOpenPermitStore({ now: () => 1_000, randomToken: () => "grant-1" });
+	const sessionManager = opts.sessionManager ?? makeSessionManager();
 	handleWebSocketConnection(
 		ws as any,
 		"sess-1",
 		{ socket: { remoteAddress: "127.0.0.1" } } as any,
-		makeSessionManager() as any,
+		sessionManager as any,
 		"token",
 		{ isRateLimited: () => false, recordFailure: () => {} } as any,
 		undefined,
@@ -106,7 +112,8 @@ async function authenticatedHarness(opts: { channelRegistry?: any; permits?: Cha
 		opts.channelRegistry,
 		permits,
 	);
-	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored", ...(opts.trustedApp ? {} : { clientKind: "extension-channel" }) }));
+	const authKind = opts.authKind ?? "extension-channel";
+	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored", ...(authKind === "raw" ? {} : { clientKind: authKind }) }));
 	await Promise.resolve();
 	return { ws, permits };
 }
@@ -134,7 +141,7 @@ async function requestOpenGrant(ws: FakeWebSocket, requestId: string, surfaceTok
 
 describe("WebSocket extension channel open grants", () => {
 	it("mints a legitimate pack-bound panel surface token over the trusted app websocket", async () => {
-		const { ws } = await authenticatedHarness({ trustedApp: true });
+		const { ws } = await authenticatedHarness({ authKind: "app" });
 		const key = surfaceTokenAuthorityKey(ws);
 		assert.equal(typeof key, "string");
 		const result = await requestSurfaceToken(ws, "surface", "terminal", "panel", "terminal", key);
@@ -149,9 +156,10 @@ describe("WebSocket extension channel open grants", () => {
 	});
 
 	it("rejects raw same-session websocket attempts to mint a victim pack surface token", async () => {
-		const main = await authenticatedHarness({ trustedApp: true });
+		const sessionManager = makeSessionManager();
+		const main = await authenticatedHarness({ authKind: "app", sessionManager });
 		assert.equal(typeof surfaceTokenAuthorityKey(main.ws), "string");
-		const raw = await authenticatedHarness();
+		const raw = await authenticatedHarness({ authKind: "raw", sessionManager });
 		assert.equal(surfaceTokenAuthorityKey(raw.ws), undefined);
 
 		const forged = await requestSurfaceToken(raw.ws, "surface", "terminal", "panel", "terminal");
@@ -171,6 +179,49 @@ describe("WebSocket extension channel open grants", () => {
 		});
 		main.ws.close();
 		raw.ws.close();
+	});
+
+	it("rejects raw same-session websocket minting even when it connects before the app socket", async () => {
+		const sessionManager = makeSessionManager();
+		const raw = await authenticatedHarness({ authKind: "raw", sessionManager });
+		assert.equal(surfaceTokenAuthorityKey(raw.ws), undefined);
+
+		const forged = await requestSurfaceToken(raw.ws, "surface", "terminal", "panel", "terminal");
+		assert.deepEqual(forged, {
+			type: "ext_surface_token_result",
+			requestId: "surface",
+			ok: false,
+			error: "pack-bound surface-token mint requires trusted app surface authority",
+		});
+
+		const main = await authenticatedHarness({ authKind: "app", sessionManager });
+		const key = surfaceTokenAuthorityKey(main.ws);
+		assert.equal(typeof key, "string");
+		const result = await requestSurfaceToken(main.ws, "surface", "terminal", "panel", "terminal", key);
+		assert.equal(result.ok, true);
+		assert.equal(typeof result.token, "string");
+		raw.ws.close();
+		main.ws.close();
+	});
+
+	it("allows multiple app clients for the same session to mint pack surface tokens", async () => {
+		const sessionManager = makeSessionManager();
+		const first = await authenticatedHarness({ authKind: "app", sessionManager });
+		const second = await authenticatedHarness({ authKind: "app", sessionManager });
+		const firstKey = surfaceTokenAuthorityKey(first.ws);
+		const secondKey = surfaceTokenAuthorityKey(second.ws);
+		assert.equal(typeof firstKey, "string");
+		assert.equal(typeof secondKey, "string");
+		assert.notEqual(firstKey, secondKey);
+
+		const firstToken = await requestSurfaceToken(first.ws, "surface-1", "terminal", "panel", "terminal", firstKey);
+		const secondToken = await requestSurfaceToken(second.ws, "surface-2", "terminal", "panel", "terminal", secondKey);
+		assert.equal(firstToken.ok, true);
+		assert.equal(typeof firstToken.token, "string");
+		assert.equal(secondToken.ok, true);
+		assert.equal(typeof secondToken.token, "string");
+		first.ws.close();
+		second.ws.close();
 	});
 
 	it("mints and uses a declared panel channel permit without prior launcher activation", async () => {
