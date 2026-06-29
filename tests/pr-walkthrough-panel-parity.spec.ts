@@ -933,6 +933,8 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(diffColors.addText.color, 'added code text must keep the normal syntax foreground, not turn green').toBe(diffColors.delText.color);
 		expect(diffColors.addGutter.background, 'GitHub-style added gutter should be highlighted separately from the code cell').not.toBe(diffColors.addText.background);
 		expect(diffColors.delGutter.background, 'GitHub-style deleted gutter should be highlighted separately from the code cell').not.toBe(diffColors.delText.background);
+		await expect(paired.locator('.diff-line.add .diff-word'), 'added lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
+		await expect(paired.locator('.diff-line.del .diff-word'), 'deleted lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
 		await expect(paired.locator('.diff-line.del .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
 		await expect(paired.locator('.diff-line.add .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
 
