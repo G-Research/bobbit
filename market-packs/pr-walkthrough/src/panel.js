@@ -238,6 +238,54 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
 
 	const cardsOf = (entry) => (entry && entry.bundle && Array.isArray(entry.bundle.cards)) ? entry.bundle.cards : [];
+	const renderInlineMarkdown = (text) => {
+		const source = asText(text);
+		const parts = [];
+		let rest = source;
+		const tokenRe = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*)/;
+		while (rest) {
+			const match = tokenRe.exec(rest);
+			if (!match) { parts.push(rest); break; }
+			if (match.index > 0) parts.push(rest.slice(0, match.index));
+			if (match[2] && match[3]) parts.push(html`<a href=${match[3]} target="_blank" rel="noreferrer">${match[2]}</a>`);
+			else if (match[4]) parts.push(html`<code>${match[4]}</code>`);
+			else if (match[5]) parts.push(html`<strong>${match[5]}</strong>`);
+			else if (match[6]) parts.push(html`<em>${match[6]}</em>`);
+			rest = rest.slice(match.index + match[0].length);
+		}
+		return parts;
+	};
+	const renderMarkdownBlocks = (markdown) => {
+		const lines = asText(markdown).replace(/\r\n/g, "\n").split("\n");
+		const blocks = [];
+		for (let i = 0; i < lines.length;) {
+			const line = lines[i];
+			if (!line.trim()) { i += 1; continue; }
+			const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+			if (heading) {
+				const level = heading[1].length;
+				blocks.push(level === 1 ? html`<h4>${renderInlineMarkdown(heading[2])}</h4>` : html`<h5>${renderInlineMarkdown(heading[2])}</h5>`);
+				i += 1;
+				continue;
+			}
+			if (/^\s*[-*]\s+/.test(line)) {
+				const items = [];
+				while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+					items.push(lines[i].replace(/^\s*[-*]\s+/, ""));
+					i += 1;
+				}
+				blocks.push(html`<ul>${items.map((item) => html`<li>${renderInlineMarkdown(item)}</li>`)}</ul>`);
+				continue;
+			}
+			const paragraph = [];
+			while (i < lines.length && lines[i].trim() && !/^(#{1,3})\s+/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i])) {
+				paragraph.push(lines[i].trim());
+				i += 1;
+			}
+			blocks.push(html`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+		}
+		return blocks;
+	};
 
 	const activeCard = (entry) => {
 		const cards = cardsOf(entry);
@@ -594,12 +642,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const renderOriginalDescription = (entry) => {
-		const cs = (entry.bundle && entry.bundle.changeset) || {};
-		const body = cs.description || cs.body || cs.prBody || cs.summary;
-		if (!body) return nothing;
-		return html`<details class="original-description"><summary>Original PR description</summary><div>${body}</div></details>`;
-	};
 
 	const renderOrientationVerdict = (section) => section && section.verdict ? html`<div class="verdict" data-testid="pr-walkthrough-beat-verdict"><strong>${asText(section.verdict.recommendation, "review").toUpperCase()}</strong>${section.verdict.confidence ? html`<span>${section.verdict.confidence} confidence</span>` : nothing}${section.verdict.summary ? html`<p>${section.verdict.summary}</p>` : nothing}</div>` : nothing;
 	const renderOrientationStats = (entry, card, section) => {
@@ -609,12 +651,33 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const diffBlocks = cards.reduce((total, candidate) => total + arrayOf(candidate.diffBlocks).length, 0);
 		return html`<div class="guide-stats" data-testid="pr-walkthrough-beat-stats"><span>${stats.files} ${stats.files === 1 ? "file" : "files"}</span><span class="add">+${stats.additions}</span><span class="del">-${stats.deletions}</span><span>${diffBlocks} ${diffBlocks === 1 ? "diff block" : "diff blocks"}</span></div>`;
 	};
+	const renderOriginalDescription = (entry, section) => {
+		if (!section || !section.showOriginalDescription) return nothing;
+		const cs = (entry.bundle && entry.bundle.changeset) || {};
+		const body = asText(cs.prBody || cs.description || cs.body).trim();
+		if (!body) return nothing;
+		return html`<section class="original-description" data-testid="pr-walkthrough-original-description"><div class="markdown-body">${renderMarkdownBlocks(body)}</div></section>`;
+	};
+	const countCell = (value, prefix = "") => value === undefined || value === null || value === "" ? "—" : `${prefix}${value}`;
+	const renderDiffBreakdown = (section) => {
+		const items = arrayOf(section && section.diffBreakdown);
+		if (!items.length) return nothing;
+		return html`<section class="diff-breakdown" data-testid="pr-walkthrough-diff-breakdown">
+			<div class="phase-label">Diff breakdown</div>
+			<div class="diff-breakdown-table" role="table" aria-label="Diff breakdown by change type">
+				<div class="diff-breakdown-row head" role="row"><span role="columnheader">Type</span><span role="columnheader">Files</span><span role="columnheader">Additions</span><span role="columnheader">Deletions</span></div>
+				${items.map((item) => html`<div class="diff-breakdown-row" role="row"><span role="cell"><strong>${item.label}</strong>${item.note ? html`<small>${item.note}</small>` : nothing}</span><span role="cell">${countCell(item.files)}</span><span class="add" role="cell">${countCell(item.additions, "+")}</span><span class="del" role="cell">${countCell(item.deletions, "-")}</span></div>`)}
+			</div>
+		</section>`;
+	};
 	const orientationKicker = (section) => `ORIENTATION${section && section.eyebrow ? ` > ${asText(section.eyebrow).toUpperCase()}` : ""}`;
 	const renderOrientationBeat = (entry, card, section) => html`<div class="beat" data-testid="pr-walkthrough-orientation-beat">
 		${section.body ? html`<p class="summary">${section.body}</p>` : nothing}
 		${arrayOf(section.items).length ? html`<ul class="beat-list" data-testid="pr-walkthrough-beat-list">${arrayOf(section.items).map((item) => html`<li>${item}</li>`)}</ul>` : nothing}
 		${renderOrientationVerdict(section)}
 		${renderOrientationStats(entry, card, section)}
+		${renderDiffBreakdown(section)}
+		${renderOriginalDescription(entry, section)}
 		${arrayOf(section.concerns).length ? html`<div class="concerns" data-testid="pr-walkthrough-beat-concerns">${arrayOf(section.concerns).map((concern) => html`<div class="concern"><strong>${asText(concern.severity || concern.kind, "concern").replace(/_/g, "-")}</strong><span>${concern.text || concern.summary || concern}</span></div>`)}</div>` : nothing}
 		${arrayOf(section.fileRoles).length ? html`<div class="filemap" data-testid="pr-walkthrough-beat-filemap">${arrayOf(section.fileRoles).map((role) => html`<div class="filerow"><strong>${role.role || "file"}</strong><span>${role.file || role.path || "unknown"}</span>${role.note ? html`<small>${role.note}</small>` : nothing}</div>`)}</div>` : nothing}
 	</div>`;
@@ -626,7 +689,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			<span data-testid="prw-card" hidden></span>
 			<div class="guide-top"><div><div class="phase-label">${orientationKicker(section)}</div><h1 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h1></div></div>
 			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, section)}</div>
-			${renderOriginalDescription(entry)}
 		</article>`;
 	};
 
@@ -1035,7 +1097,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					${card.summary ? html`<p class="summary prw-summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>` : nothing}
 					${card.rationale ? html`<p class="rationale prw-rationale">${card.rationale}</p>` : nothing}
 					${Array.isArray(card.checklist) && card.checklist.length ? html`<ul class="checklist prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>` : nothing}
-					${renderOriginalDescription(entry)}
 				</div>
 				${arrayOf(card.diffBlocks).length || suggestedComments.length ? html`<div class="diff-toolbar prw-diff-toolbar"><div><div class="phase-label">Diff review</div><small>Review each grouped file hunk and leave anchored feedback.</small></div>${renderDiffModeControls(entry, host, paramKey)}</div>` : nothing}
 				<div class="diff-list prw-diff-list">${arrayOf(card.diffBlocks).length ? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block)) : html`<div class="no-diff prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}</div>
@@ -1349,7 +1410,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				bundle: {
 					changeset: { prTitle: "PR Walkthrough", baseSha: "pending", headSha: "pending" },
 					cards: [
-						{ id: "pending-orientation", phaseId: "orientation", navLabel: "Purpose", title: "Review orientation", sections: ["Purpose", "Review map", "Risk", "Files", "Validation", "Start"].map((label) => ({ navLabel: label, heading: label })) },
+						{ id: "pending-orientation", phaseId: "orientation", navLabel: "Purpose", title: "Review orientation", sections: ["Overview", "Original PR", "Review map", "Risk", "Start"].map((label) => ({ navLabel: label, heading: label })) },
 						{ id: "pending-review", phaseId: "significant", navLabel: "Diff review", title: "Diff review", summary: "Review cards will appear here once generation finishes." },
 						{ id: "pending-audit", phaseId: "audit", navLabel: "Audit", title: "Final review" },
 					],
@@ -1722,8 +1783,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
 					.prw-root .checklist { margin: 10px 0 0; color: var(--muted-foreground); }
 					.prw-root .nav-label { color: var(--muted-foreground); font-size: 11px; }
-					.prw-root .original-description { margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--muted-foreground); }
-					.prw-root .original-description summary { color: var(--foreground); cursor: pointer; font-weight: 700; }
 					.prw-root .diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
 					.prw-root .actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
 					.prw-root .decision-note { color: var(--muted-foreground); font-size: 12px; }
@@ -1745,6 +1804,24 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .verdict p { margin: 6px 0 0; }
 					.prw-root .verdict span, .prw-root .filerow small { display: block; color: var(--muted-foreground); }
 					.prw-root .guide-stats { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted-foreground); }
+					.prw-root .original-description { max-width: 86ch; min-height: 200px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in oklch, var(--card) 72%, transparent); box-shadow: inset 0 1px 0 color-mix(in oklch, var(--background) 70%, transparent); overflow: auto; }
+					.prw-root .original-description .markdown-body { display: block; color: var(--foreground); font-size: 14px; line-height: 1.65; }
+					.prw-root .original-description h4, .prw-root .original-description h5, .prw-root .original-description p, .prw-root .original-description ul { margin: 0; }
+					.prw-root .original-description .markdown-body > * + * { margin-top: 10px; }
+					.prw-root .original-description h4 { padding-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 16px; line-height: 1.3; font-weight: 800; letter-spacing: -.015em; }
+					.prw-root .original-description h5 { font-size: 14px; line-height: 1.35; font-weight: 800; letter-spacing: -.01em; }
+					.prw-root .original-description p { color: var(--foreground); }
+					.prw-root .original-description ul { padding-left: 20px; }
+					.prw-root .original-description li + li { margin-top: 4px; }
+					.prw-root .original-description code { padding: 1px 5px; border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); border-radius: 5px; background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+					.prw-root .original-description a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+					.prw-root .diff-breakdown { max-width: 86ch; }
+					.prw-root .diff-breakdown-table { display: grid; gap: 4px; margin-top: 6px; }
+					.prw-root .diff-breakdown-row { display: grid; grid-template-columns: minmax(160px, 1fr) 72px 82px 82px; align-items: start; gap: 8px; padding: 2px 0; color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .diff-breakdown-row.head { color: var(--muted-foreground); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+					.prw-root .diff-breakdown-row strong { display: block; color: var(--foreground); font-weight: 750; }
+					.prw-root .diff-breakdown-row small { display: block; margin-top: 2px; color: var(--muted-foreground); line-height: 1.35; }
+					.prw-root .diff-breakdown-row span:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; font-weight: 650; }
 					.prw-root .concerns, .prw-root .filemap { display: grid; gap: 8px; }
 					.prw-root .concern strong, .prw-root .filerow strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted-foreground); }
 					.prw-root .filerow span { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
