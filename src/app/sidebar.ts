@@ -1034,7 +1034,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
-					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
+					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session), true)}</span>
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="block min-w-0 max-w-full truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
@@ -1784,7 +1784,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				title=${displayTitle}
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
-				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s))}</span>
+				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s), true)}</span>
 				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
 			</button>
 		`;
@@ -1808,7 +1808,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none" style="cursor:pointer;"
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
 				><span class="sidebar-chevron-glyph">${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span></span>
-				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead))}</span>
+				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead), true)}</span>
 				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
 			${tlExpanded ? children.map(s => html`<div style="padding-left:6px;">${renderCollapsedSession(s)}</div>`) : ""}
