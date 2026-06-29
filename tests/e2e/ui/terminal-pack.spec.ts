@@ -175,7 +175,7 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
-	test("touch pan over xterm-screen scrolls the xterm viewport @terminal-repro", async ({ page, browserName }) => {
+	test("touch pan over xterm-screen scrolls the xterm viewport; reproduces ambiguous marker assertion before touch pan hides the terminal tail @terminal-repro", async ({ page, browserName }) => {
 		test.skip(browserName !== "chromium", "CDP touch event dispatch is Chromium-only");
 		test.setTimeout(90_000);
 		await page.setViewportSize({ width: 1220, height: 620 });
