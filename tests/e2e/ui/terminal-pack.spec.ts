@@ -334,6 +334,8 @@ test.describe("terminal pack panel", () => {
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
+		const liveChannelId = await latestTerminalChannelId(page);
+		expect(liveChannelId, "gateway restart setup should have a live terminal channel before the crash").toBeTruthy();
 		const marker = `bobbit_terminal_restart_${Date.now()}`;
 		await typeCommand(page, `echo ${marker}`);
 		await expect(page.locator(terminalHost())).toContainText(marker, { timeout: 20_000 });
@@ -348,6 +350,24 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /disconnected/, { timeout: 30_000 });
 		await expect(page.locator(terminalPanel())).toContainText(/disconnected|closed|Restart/i, { timeout: 10_000 });
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 5_000 }).toBe(0);
+
+		const openBeforeRestart = await channelSendCount(page, "ext_channel_open");
+		const startButton = page.locator(terminalPanel()).getByRole("button", { name: "Start or restart terminal" });
+		await expect(startButton, "restored disconnected terminal should offer an explicit Restart/Start action").toBeEnabled({ timeout: 20_000 });
+		await startButton.click();
+		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(openBeforeRestart);
+		await waitForTerminalReadyForInput(page);
+		await expect.poll(
+			async () => {
+				const restartedChannelId = await latestTerminalChannelId(page);
+				return Boolean(restartedChannelId && restartedChannelId !== liveChannelId);
+			},
+			{ message: "Restart after gateway restart should attach a newly opened terminal channel", timeout: 20_000 },
+		).toBe(true);
+
+		const restartMarker = `${marker}_after_restart`;
+		await typeCommand(page, `echo ${restartMarker}`);
+		await expect(page.locator(terminalHost())).toContainText(restartMarker, { timeout: 20_000 });
 	});
 });
 
@@ -719,22 +739,106 @@ async function waitForTerminalMountedForFrameInjection(page: import("@playwright
 	await expect(page.locator(`${terminalHost()} .xterm-helper-textarea`), "xterm input textarea must be mounted before typing").toHaveCount(1, { timeout: 10_000 });
 }
 
+type TerminalFocusDiagnostics = {
+	panelState: string | null;
+	activeTag: string | null;
+	activeClass: string;
+	activeInTerminal: boolean;
+	textareaExists: boolean;
+	textareaDisabled: boolean;
+	textareaReadOnly: boolean;
+	xtermVisible: boolean;
+	screenVisible: boolean;
+	hostRect: { width: number; height: number } | null;
+	xtermRect: { width: number; height: number } | null;
+	screenRect: { width: number; height: number } | null;
+	renderedRows: number;
+};
+
 async function focusTerminal(page: import("@playwright/test").Page): Promise<void> {
 	const xterm = page.locator(`${terminalHost()} .xterm`).first();
+	const helperTextarea = page.locator(`${terminalHost()} .xterm-helper-textarea`).first();
 	await expect(xterm, "xterm must be visible and focusable before typing").toBeVisible({ timeout: 10_000 });
-	await xterm.click({ position: { x: 24, y: 24 } });
-	await page.locator(`${terminalHost()} .xterm-helper-textarea`).focus();
-	await page.evaluate(() => {
-		(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus();
+
+	let lastDiagnostics: TerminalFocusDiagnostics | undefined;
+	let lastFocusError = "";
+	try {
+		await expect.poll(async () => {
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			if (lastDiagnostics.panelState !== "attached" || !lastDiagnostics.textareaExists || !lastDiagnostics.xtermVisible || !lastDiagnostics.screenVisible) {
+				return false;
+			}
+			try {
+				await xterm.click({ position: { x: 24, y: 24 }, timeout: 2_000 });
+				await helperTextarea.focus({ timeout: 2_000 });
+				await page.evaluate(() => {
+					(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus({ preventScroll: true });
+				});
+				lastFocusError = "";
+			} catch (error) {
+				lastFocusError = error instanceof Error ? error.message : String(error);
+			}
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			return terminalFocusedForInput(lastDiagnostics);
+		}, {
+			message: "terminal xterm should become focused/ready for input",
+			timeout: 20_000,
+			intervals: [100, 250, 500],
+		}).toBe(true);
+	} catch (error) {
+		const detail = JSON.stringify(lastDiagnostics ?? await terminalFocusDiagnostics(page), null, 2);
+		throw new Error(`terminal xterm did not become focused/ready for input within 20s; lastFocusError=${lastFocusError || "none"}; diagnostics=${detail}; assertion=${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function terminalFocusedForInput(diagnostics: TerminalFocusDiagnostics): boolean {
+	return diagnostics.panelState === "attached"
+		&& diagnostics.textareaExists
+		&& !diagnostics.textareaDisabled
+		&& diagnostics.xtermVisible
+		&& diagnostics.screenVisible
+		&& diagnostics.renderedRows > 0
+		&& diagnostics.activeInTerminal;
+}
+
+async function terminalFocusDiagnostics(page: import("@playwright/test").Page): Promise<TerminalFocusDiagnostics> {
+	return page.evaluate(() => {
+		const panel = document.querySelector('[data-testid="terminal-panel"]') as HTMLElement | null;
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const xterm = host?.querySelector(".xterm") as HTMLElement | null;
+		const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
+		const textarea = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+		const active = document.activeElement as HTMLElement | null;
+		const rectSize = (element: HTMLElement | null) => {
+			if (!element) return null;
+			const rect = element.getBoundingClientRect();
+			return { width: rect.width, height: rect.height };
+		};
+		const visible = (element: HTMLElement | null) => {
+			if (!element) return false;
+			const rect = element.getBoundingClientRect();
+			const css = getComputedStyle(element);
+			return rect.width > 0 && rect.height > 0 && css.display !== "none" && css.visibility !== "hidden";
+		};
+		return {
+			panelState: panel?.getAttribute("data-terminal-state") ?? null,
+			activeTag: active?.tagName ?? null,
+			activeClass: active?.className ? String(active.className) : "",
+			activeInTerminal: active?.classList.contains("xterm-helper-textarea") === true
+				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null,
+			textareaExists: !!textarea,
+			textareaDisabled: textarea?.disabled === true,
+			textareaReadOnly: textarea?.readOnly === true,
+			xtermVisible: visible(xterm),
+			screenVisible: visible(screen),
+			hostRect: rectSize(host),
+			xtermRect: rectSize(xterm),
+			screenRect: rectSize(screen),
+			renderedRows: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+		};
 	});
-	await expect.poll(
-		() => page.evaluate(() => {
-			const active = document.activeElement as HTMLElement | null;
-			return active?.classList.contains("xterm-helper-textarea") === true
-				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null;
-		}),
-		{ timeout: 10_000 },
-	).toBe(true);
 }
 
 async function typeCommand(page: import("@playwright/test").Page, command: string): Promise<void> {

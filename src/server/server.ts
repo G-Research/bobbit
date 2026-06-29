@@ -269,6 +269,73 @@ async function mintExtensionChannelOpenGrant(openPermits: unknown, binding: {
 	throw new Error("channel open-permit service returned no grant");
 }
 
+function authorizePackBoundScopedChannelOpenRequest(
+	headerSid: string | undefined,
+	bodySid: unknown,
+	resolveSession: (id: string) => ActionGuardSession | undefined,
+): { ok: true; sessionId: string } | { ok: false; status: number; error: string } {
+	if (!headerSid) return { ok: false, status: 403, error: "missing session" };
+	if (bodySid !== undefined && bodySid !== null && bodySid !== headerSid) {
+		return { ok: false, status: 403, error: "session mismatch" };
+	}
+	if (!resolveSession(headerSid)) return { ok: false, status: 403, error: "unknown session" };
+	return { ok: true, sessionId: headerSid };
+}
+
+export type ScopedExtensionChannelOpenPermitResult =
+	| { ok: true; openGrant: string; sessionId: string; packId: string; contributionId: string; channelName: string; singletonKey?: string }
+	| { ok: false; status: number; error: string };
+
+export async function mintScopedExtensionChannelOpenPermit(input: {
+	openPermits: unknown;
+	packContributionRegistry: PackContributionRegistry;
+	projectId?: string;
+	resolver: any;
+	headerSessionId: string | undefined;
+	rawHeaderSessionId?: string | string[] | undefined;
+	bodySessionId?: unknown;
+	surfaceToken: unknown;
+	name: unknown;
+	init?: unknown;
+	singletonKey?: unknown;
+	resolveSession: (id: string) => ActionGuardSession | undefined;
+}): Promise<ScopedExtensionChannelOpenPermitResult> {
+	const surf = resolveSurfaceIdentity({
+		token: input.surfaceToken,
+		headerSessionId: input.headerSessionId,
+		resolver: input.resolver,
+		contributions: input.packContributionRegistry,
+		projectId: input.projectId,
+	});
+	if (!surf.ok) return { ok: false, status: surf.status, error: surf.error };
+	if (surf.tool !== undefined) {
+		return { ok: false, status: 403, error: "channel open permits require a pack-bound surface token" };
+	}
+	const guard = authorizePackBoundScopedChannelOpenRequest(input.headerSessionId, input.bodySessionId, input.resolveSession);
+	if (!guard.ok) return { ok: false, status: guard.status, error: guard.error };
+	const name = typeof input.name === "string" ? input.name.trim() : "";
+	if (!name) return { ok: false, status: 400, error: "missing channel name" };
+	const init = input.init;
+	const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
+		? (init as { singletonKey: string }).singletonKey
+		: typeof input.singletonKey === "string" ? input.singletonKey : undefined;
+	if (!resolveChannelContributionForGrant(input.packContributionRegistry, input.projectId, surf.packId, name)) {
+		return { ok: false, status: 404, error: "channel is not declared by this pack" };
+	}
+	try {
+		const openGrant = await mintExtensionChannelOpenGrant(input.openPermits, {
+			sessionId: guard.sessionId,
+			packId: surf.packId,
+			contributionId: surf.contributionId,
+			channelName: name,
+			...(singletonKey !== undefined ? { singletonKey } : {}),
+		});
+		return { ok: true, openGrant, sessionId: guard.sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
+	} catch (err) {
+		return { ok: false, status: 400, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
 async function disposeExtensionChannelServices(services: ExtensionChannelServices | undefined, reason: string): Promise<void> {
 	const dispose = services?.registry?.dispose;
 	if (!dispose) return;
@@ -6918,45 +6985,16 @@ async function handleApiRoute(
 		};
 		const contributionKind = (body as { contributionKind?: unknown }).contributionKind;
 
-		// ── Pack-bound surface (panel / entrypoint / route) — pack-schema-v1 §6.5.
-		//    No carrier tool, so NO allowedTools gate; the trust boundary is
-		//    installed + active in the session's scope + caller's own session (§4.5).
+		// ── Pack-bound surfaces (panel / entrypoint / route) are deliberately NOT
+		// minted from this public REST body: a same-session caller could choose another
+		// active pack's id. The trusted app mints these over the session WebSocket it
+		// owns; pack code receives only the resulting HostApi closure.
 		if (typeof contributionKind === "string") {
 			if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") {
 				json({ error: "invalid contributionKind" }, 400);
 				return;
 			}
-			const bodySid = (body as { sessionId?: unknown }).sessionId;
-			if (!mintHeaderSid || typeof bodySid !== "string" || bodySid !== mintHeaderSid) {
-				json({ error: "session mismatch" }, 403);
-				return;
-			}
-			if (!resolveSession(mintHeaderSid)) {
-				json({ error: "unknown session" }, 403);
-				return;
-			}
-			const packId = typeof (body as { packId?: unknown }).packId === "string" ? (body as { packId: string }).packId : "";
-			const contributionRef = typeof (body as { contributionId?: unknown }).contributionId === "string" ? (body as { contributionId: string }).contributionId : "";
-			if (!packId || !contributionRef) {
-				json({ error: "packId and contributionId are required" }, 400);
-				return;
-			}
-			// Validate the pack is installed + active in scope AND the contribution exists.
-			const pack = packContributionRegistry.getPack(mintSessionProjectId, packId);
-			let exists = false;
-			if (pack) {
-				if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(mintSessionProjectId, packId, contributionRef);
-				else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(mintSessionProjectId, packId, contributionRef);
-				else exists = packContributionRegistry.hasRoute(mintSessionProjectId, packId, contributionRef);
-			}
-			if (!pack || !exists) {
-				json({ error: "surface tokens are available only to installed, active pack contributions" }, 403);
-				return;
-			}
-			const contributionId = `${contributionKind}:${contributionRef}`;
-			const token = mintSurfaceToken({ sessionId: mintHeaderSid, packId, contributionId });
-			console.log(`[ext-surface-token] kind=${contributionKind} contribution=${contributionRef} packId=${packId} session=${mintHeaderSid} outcome=ok`);
-			json({ token });
+			json({ error: "pack-bound surface tokens must be minted over the trusted session WebSocket" }, 403);
 			return;
 		}
 
@@ -6988,8 +7026,8 @@ async function handleApiRoute(
 	}
 
 	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
-	// `ext_channel_open`. This is a typed, scoped server path: identity is derived
-	// from the surface token and channel name is resolved inside that pack only.
+	// `ext_channel_open`. This scoped path accepts only pack-bound surface tokens
+	// (panel / entrypoint / route); channel name is resolved inside that pack only.
 	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
 		if (!extensionChannelServices?.openPermits) {
 			json({ error: "extension channels are not available" }, 503);
@@ -7013,54 +7051,27 @@ async function handleApiRoute(
 			toolManager,
 			channelSessionProjectId ? projectContextManager.getOrCreate(channelSessionProjectId)?.toolManager : undefined,
 		);
-		const surf = resolveSurfaceIdentity({ token: (body as { surfaceToken?: unknown }).surfaceToken, headerSessionId: channelHeaderSid, resolver: channelToolManager, contributions: packContributionRegistry, projectId: channelSessionProjectId });
-		if (!surf.ok) {
-			json({ error: surf.error }, surf.status);
+		const result = await mintScopedExtensionChannelOpenPermit({
+			openPermits: extensionChannelServices.openPermits,
+			packContributionRegistry,
+			projectId: channelSessionProjectId,
+			resolver: channelToolManager,
+			headerSessionId: channelHeaderSid,
+			rawHeaderSessionId: headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			surfaceToken: (body as { surfaceToken?: unknown }).surfaceToken,
+			name: (body as { name?: unknown }).name,
+			init: (body as { init?: unknown }).init,
+			singletonKey: (body as { singletonKey?: unknown }).singletonKey,
+			resolveSession,
+		});
+		if (!result.ok) {
+			console.warn(`[ext-channel-grant] outcome=error: ${result.error}`);
+			json({ error: result.error }, result.status);
 			return;
 		}
-		const guard = surf.tool !== undefined
-			? authorizeScopedRequest({ tool: surf.tool, headerSessionId, bodySessionId: (body as { sessionId?: unknown }).sessionId, resolveSession })
-			: packBoundScopedGuard(channelHeaderSid, (body as { sessionId?: unknown }).sessionId, resolveSession);
-		if (!guard.ok) {
-			json({ error: guard.error }, guard.status);
-			return;
-		}
-		const name = typeof (body as { name?: unknown }).name === "string" ? (body as { name: string }).name : "";
-		if (!name) {
-			json({ error: "channel name is required" }, 400);
-			return;
-		}
-		const init = (body as { init?: unknown }).init;
-		const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
-			? (init as { singletonKey: string }).singletonKey
-			: typeof (body as { singletonKey?: unknown }).singletonKey === "string" ? (body as { singletonKey: string }).singletonKey : undefined;
-		if (!resolveChannelContributionForGrant(packContributionRegistry, channelSessionProjectId, surf.packId, name)) {
-			json({ error: `pack "${surf.packId}" declares no channel "${name}"` }, 404);
-			return;
-		}
-		const permitsAny = extensionChannelServices.openPermits as any;
-		const activationBinding = { sessionId: guard.sessionId, packId: surf.packId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
-		if (surf.contributionId.startsWith("entrypoint:")) {
-			permitsAny.markTrustedLauncherActivation?.(activationBinding);
-		} else if (permitsAny.hasTrustedLauncherActivation?.(activationBinding) !== true) {
-			json({ error: "channel open requires a trusted launcher activation" }, 403);
-			return;
-		}
-		try {
-			const openGrant = await mintExtensionChannelOpenGrant(extensionChannelServices.openPermits, {
-				sessionId: guard.sessionId,
-				packId: surf.packId,
-				contributionId: surf.contributionId,
-				channelName: name,
-				...(singletonKey !== undefined ? { singletonKey } : {}),
-			});
-			console.log(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=ok`);
-			json({ openGrant });
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			console.warn(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=error: ${message}`);
-			json({ error: message }, 400);
-		}
+		console.log(`[ext-channel-grant] channel=${result.channelName} packId=${result.packId} session=${result.sessionId} outcome=ok`);
+		json({ openGrant: result.openGrant });
 		return;
 	}
 

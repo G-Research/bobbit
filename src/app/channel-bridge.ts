@@ -48,6 +48,7 @@ export interface HostChannelsApi {
 interface BridgeOptions {
 	sessionId: string | undefined;
 	getSurfaceToken: () => Promise<string>;
+	invalidateSurfaceToken?: () => void;
 	consumeOpenGesture: () => boolean;
 }
 
@@ -58,7 +59,7 @@ type Pending = {
 };
 
 type ServerChannelMessage =
-	| { type: "auth_ok" }
+	| { type: "auth_ok"; surfaceTokenKey?: string }
 	| { type: "auth_failed" }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string }
@@ -232,7 +233,7 @@ class ChannelBridge {
 				try { ws.close(); } catch { /* ignore */ }
 			}, 15_000);
 			ws.onopen = () => {
-				ws.send(JSON.stringify({ type: "auth", token }));
+				ws.send(JSON.stringify({ type: "auth", token, clientKind: "extension-channel" }));
 			};
 			ws.onmessage = (evt) => this.handleMessage(evt.data, resolve, reject, timer);
 			ws.onerror = () => {
@@ -303,6 +304,11 @@ class ChannelBridge {
 
 const bridges = new Map<string, ChannelBridge>();
 
+function isSurfaceTokenError(err: unknown): boolean {
+	const message = err instanceof Error ? err.message : String(err ?? "");
+	return /surface token|surface-token/i.test(message);
+}
+
 export function createHostChannelsApi(opts: BridgeOptions): HostChannelsApi {
 	const getBridge = (): ChannelBridge => {
 		if (!opts.sessionId) throw new Error("host.channels requires a bound session");
@@ -315,9 +321,16 @@ export function createHostChannelsApi(opts: BridgeOptions): HostChannelsApi {
 	};
 	return {
 		open(name, init) {
-			if (!opts.consumeOpenGesture()) return Promise.reject(new Error("host.channels.open requires a user gesture"));
 			if (typeof name !== "string" || !name.trim()) return Promise.reject(new Error("host.channels.open requires a channel name"));
-			return (async () => getBridge().open(await opts.getSurfaceToken(), name, init))();
+			return (async () => {
+				try {
+					return await getBridge().open(await opts.getSurfaceToken(), name, init);
+				} catch (err) {
+					if (!isSurfaceTokenError(err) || !opts.invalidateSurfaceToken) throw err;
+					opts.invalidateSurfaceToken();
+					return getBridge().open(await opts.getSurfaceToken(), name, init);
+				}
+			})();
 		},
 		attach(id) {
 			if (typeof id !== "string" || !id.trim()) return Promise.reject(new Error("host.channels.attach requires a channel id"));

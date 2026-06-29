@@ -9,82 +9,100 @@
 import { test, expect } from "./in-process-harness.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 
-/**
- * Resolve the models.json path the same way Bobbit startup does:
- * BOBBIT_AGENT_DIR env → ~/.bobbit/agent.
- */
-function getModelsJsonPath(): string {
-	const envDir = process.env.BOBBIT_AGENT_DIR;
-	let agentDir: string;
-	if (envDir) {
-		if (envDir === "~") agentDir = homedir();
-		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
-		else agentDir = envDir;
-	} else {
-		agentDir = join(homedir(), ".bobbit", "agent");
+type OverrideState = {
+	ready: boolean;
+	summary: string;
+	hasSonnetBedrockOverride: boolean;
+	hasOpusBedrockOverride: boolean;
+	hasSonnetAnthropicOverride: boolean;
+	hasOpusAnthropicOverride: boolean;
+};
+
+function summarizeKeys(record: Record<string, unknown>): string {
+	const keys = Object.keys(record);
+	return keys.length > 0 ? keys.slice(0, 8).join(", ") : "<none>";
+}
+
+function inspectContextWindowOverrides(modelsPath: string): OverrideState {
+	let data: Record<string, any>;
+	try {
+		data = JSON.parse(readFileSync(modelsPath, "utf-8"));
+	} catch (err: any) {
+		return {
+			ready: false,
+			summary: `models.json is not readable yet at ${modelsPath}: ${err?.code || err?.message || String(err)}`,
+			hasSonnetBedrockOverride: false,
+			hasOpusBedrockOverride: false,
+			hasSonnetAnthropicOverride: false,
+			hasOpusAnthropicOverride: false,
+		};
 	}
-	return join(agentDir, "models.json");
+
+	const providers = data.providers || {};
+	const bedrockOverrides = providers["amazon-bedrock"]?.modelOverrides || {};
+	const anthropicOverrides = providers.anthropic?.modelOverrides || {};
+
+	const hasSonnetBedrockOverride = Object.entries(bedrockOverrides).some(
+		([key, val]: [string, any]) =>
+			key.toLowerCase().includes("claude-sonnet") &&
+			val?.contextWindow === 1_000_000,
+	);
+	const hasOpusBedrockOverride = Object.entries(bedrockOverrides).some(
+		([key, val]: [string, any]) =>
+			key.toLowerCase().includes("claude-opus") &&
+			val?.contextWindow === 1_000_000,
+	);
+	const hasSonnetAnthropicOverride = Object.entries(anthropicOverrides).some(
+		([key, val]: [string, any]) =>
+			key.toLowerCase().includes("claude-sonnet") &&
+			val?.contextWindow === 1_000_000,
+	);
+	const hasOpusAnthropicOverride = Object.entries(anthropicOverrides).some(
+		([key, val]: [string, any]) =>
+			key.toLowerCase().includes("claude-opus") &&
+			val?.contextWindow === 1_000_000,
+	);
+
+	const ready =
+		hasSonnetBedrockOverride &&
+		hasOpusBedrockOverride &&
+		hasSonnetAnthropicOverride &&
+		hasOpusAnthropicOverride;
+
+	return {
+		ready,
+		summary:
+			`amazon-bedrock override keys: ${summarizeKeys(bedrockOverrides)}; ` +
+			`anthropic override keys: ${summarizeKeys(anthropicOverrides)}`,
+		hasSonnetBedrockOverride,
+		hasOpusBedrockOverride,
+		hasSonnetAnthropicOverride,
+		hasOpusAnthropicOverride,
+	};
 }
 
 test.describe("Context window overrides in models.json", () => {
-	test("server writes contextWindow overrides for Claude Sonnet/Opus models @smoke", async () => {
-		// The E2E gateway has already started by this point (Playwright webServer).
-		// Read models.json that the server should have written overrides to.
-		const modelsPath = getModelsJsonPath();
+	test("server writes contextWindow overrides for Claude Sonnet/Opus models @smoke", async ({ gateway }) => {
+		// Use the in-process gateway fixture's isolated agent directory. Reading
+		// process.env here is flaky in broad E2E runs because workers mutate it
+		// during setup/teardown; the fixture identity is the authoritative path.
+		const modelsPath = join(gateway.bobbitDir, "agent", "models.json");
 
-		let data: Record<string, any> = { providers: {} };
-		try {
-			data = JSON.parse(readFileSync(modelsPath, "utf-8"));
-		} catch {
-			// File may not exist — that's the bug
-		}
-
-		const providers = data.providers || {};
-
-		// Check amazon-bedrock provider
-		const bedrock = providers["amazon-bedrock"] || {};
-		const bedrockOverrides = bedrock.modelOverrides || {};
-
-		// Check anthropic provider
-		const anthropic = providers["anthropic"] || {};
-		const anthropicOverrides = anthropic.modelOverrides || {};
-
-		// Find any Claude Sonnet or Opus override with contextWindow: 1000000
-		// in either provider. The fix should write these for all known models.
-		const hasSonnetBedrockOverride = Object.entries(bedrockOverrides).some(
-			([key, val]: [string, any]) =>
-				key.toLowerCase().includes("claude-sonnet") &&
-				val?.contextWindow === 1_000_000,
-		);
-
-		const hasOpusBedrockOverride = Object.entries(bedrockOverrides).some(
-			([key, val]: [string, any]) =>
-				key.toLowerCase().includes("claude-opus") &&
-				val?.contextWindow === 1_000_000,
-		);
-
-		const hasSonnetAnthropicOverride = Object.entries(anthropicOverrides).some(
-			([key, val]: [string, any]) =>
-				key.toLowerCase().includes("claude-sonnet") &&
-				val?.contextWindow === 1_000_000,
-		);
-
-		const hasOpusAnthropicOverride = Object.entries(anthropicOverrides).some(
-			([key, val]: [string, any]) =>
-				key.toLowerCase().includes("claude-opus") &&
-				val?.contextWindow === 1_000_000,
-		);
-
-		// At least one Sonnet and one Opus override must exist in each provider.
-		// This assertion will FAIL on unfixed code because no overrides are written.
-		const allPresent =
-			hasSonnetBedrockOverride &&
-			hasOpusBedrockOverride &&
-			hasSonnetAnthropicOverride &&
-			hasOpusAnthropicOverride;
-
-		expect(allPresent, "Expected contextWindow override for Claude models in amazon-bedrock and anthropic providers of models.json").toBe(true);
+		await expect
+			.poll(() => inspectContextWindowOverrides(modelsPath), {
+				message:
+					"Expected contextWindow overrides for Claude Sonnet/Opus models " +
+					"in amazon-bedrock and anthropic providers of models.json",
+				timeout: 5_000,
+				intervals: [50, 100, 250, 500],
+			})
+			.toMatchObject({
+				ready: true,
+				hasSonnetBedrockOverride: true,
+				hasOpusBedrockOverride: true,
+				hasSonnetAnthropicOverride: true,
+				hasOpusAnthropicOverride: true,
+			});
 	});
 });

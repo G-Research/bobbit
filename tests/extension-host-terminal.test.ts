@@ -16,7 +16,7 @@ const REPLAY_MAX_BYTES = 128 * 1024;
 const REPLAY_CHUNK_BYTES = 16 * 1024;
 
 describe("built-in terminal pack", () => {
-	it("declares a first-party sessionPty terminal channel, panel, and launchers", () => {
+	it("declares a sessionPty terminal channel, panel, and launchers", () => {
 		const root = path.join(repoRoot, "market-packs", "terminal");
 		const manifest = validateManifest(parse(fs.readFileSync(path.join(root, "pack.yaml"), "utf-8")))!;
 		assert.ok(manifest, "terminal pack manifest should validate");
@@ -41,18 +41,17 @@ describe("built-in terminal pack", () => {
 		assert.equal(channel?.quotas?.maxChannelsPerSessionPerPack, 1);
 	});
 
-	it("retains sessionPty only through first-party pack contribution resolution", () => {
+	it("retains declared sessionPty through trusted pack contribution resolution", () => {
 		const root = path.join(repoRoot, "market-packs", "terminal");
 		const manifest = validateManifest(parse(fs.readFileSync(path.join(root, "pack.yaml"), "utf-8")))!;
 		const entry: PackEntry = {
-			id: "builtin-pack:terminal",
-			kind: "builtin",
-			scope: "builtin",
+			id: "market:server:terminal",
+			kind: "market",
+			scope: "server",
 			path: root,
 			readOnly: true,
 			manifest,
 			layout: "defaults-tree",
-			meta: { sourceUrl: "builtin:" },
 		};
 		const reg = new PackContributionRegistry(() => [entry]);
 		assert.deepEqual(reg.getChannel(undefined, "terminal", "terminal")?.capabilities, ["sessionPty"]);
