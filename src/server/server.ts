@@ -8297,6 +8297,8 @@ async function handleApiRoute(
 			}
 			return out;
 		};
+		const packActivationRevision = (disabled: unknown): string =>
+			`act:${createHash("sha256").update(JSON.stringify(disabled ?? {})).digest("hex").slice(0, 16)}`;
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {
 			const scope = parseScope(url.searchParams.get("scope"));
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
@@ -8309,7 +8311,7 @@ async function handleApiRoute(
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const disabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
-			json({ scope, packName, catalogue, disabled });
+			json({ scope, packName, catalogue, disabled, revision: packActivationRevision(disabled) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "PUT") {
@@ -8374,7 +8376,8 @@ async function handleApiRoute(
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
 			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
 			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, body?.projectId) ?? catalogue : catalogue;
-			json({ scope, packName, catalogue: refreshedCatalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName), ...(mcpReload ? { mcpReload } : {}) });
+			const nextDisabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
+			json({ scope, packName, catalogue: refreshedCatalogue, disabled: nextDisabled, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-activation/mcp-operation" && req.method === "PATCH") {
@@ -8389,6 +8392,7 @@ async function handleApiRoute(
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			let matchedPackName = "";
 			let matchedCatalogue: ReturnType<typeof buildActivationCatalogue> = null;
+			let matchedEntry: Record<string, unknown> | undefined;
 			for (const installed of installer.listInstalled([{ scope, projectBase: st.target.projectBase }])) {
 				if (installed.scope !== scope || installed.status === "corrupt") continue;
 				const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, installed.packName, body?.projectId);
@@ -8397,14 +8401,29 @@ async function handleApiRoute(
 				if (lookup.get(contributionId) === contributionId) {
 					matchedPackName = installed.packName;
 					matchedCatalogue = catalogue;
+					matchedEntry = (catalogue.mcp ?? []).find((entry): entry is Record<string, unknown> => {
+						if (typeof entry === "string") return entry === contributionId;
+						return mcpContributionLookup({ mcp: [entry] }).get(contributionId) === contributionId;
+					}) as Record<string, unknown> | undefined;
 					break;
 				}
 			}
 			if (!matchedPackName || !matchedCatalogue) { json({ error: "unknown MCP contribution for scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const current = cfgStore.getPackActivation(scope as PackOrderScope, matchedPackName);
+			const currentRevision = packActivationRevision(current);
+			if (typeof body?.expectedRevision === "string" && body.expectedRevision !== currentRevision) {
+				json({ error: "stale activation revision", code: "STALE_REVISION", scope, packName: matchedPackName, contributionId, operationName, disabled: current, catalogue: matchedCatalogue, revision: currentRevision }, 409);
+				return;
+			}
+			const operationRows = Array.isArray(matchedEntry?.operations) ? matchedEntry.operations.filter((op): op is Record<string, unknown> => !!op && typeof op === "object" && !Array.isArray(op)) : [];
+			const knownOperationNames = new Set(operationRows.map((op) => safeString(op.name)).filter((name): name is string => !!name));
 			const nextOps = { ...(current.mcpOperations ?? {}) };
 			const currentOps = new Set(nextOps[contributionId] ?? []);
+			if (!knownOperationNames.has(operationName) && !(body.disabled === false && currentOps.has(operationName))) {
+				json({ error: `unknown MCP operation for contribution: ${operationName}` }, 400);
+				return;
+			}
 			if (body.disabled) currentOps.add(operationName);
 			else currentOps.delete(operationName);
 			if (currentOps.size > 0) nextOps[contributionId] = [...currentOps].sort();
@@ -8416,7 +8435,8 @@ async function handleApiRoute(
 			invalidateResolverCaches();
 			const mcpReload = await reloadMcpAfterMarketplaceMutation(scope, body?.projectId);
 			const refreshedCatalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, matchedPackName, body?.projectId) ?? matchedCatalogue;
-			json({ scope, packName: matchedPackName, contributionId, operationName, disabled: cfgStore.getPackActivation(scope as PackOrderScope, matchedPackName), catalogue: refreshedCatalogue, ...(mcpReload ? { mcpReload } : {}) });
+			const nextDisabled = cfgStore.getPackActivation(scope as PackOrderScope, matchedPackName);
+			json({ scope, packName: matchedPackName, contributionId, operationName, disabled: nextDisabled, catalogue: refreshedCatalogue, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 
