@@ -295,7 +295,7 @@ const GENERIC_AGENT_NON_RETRYABLE_REGEXES: RegExp[] = [
 	/\b(?:api key|token|credential)s? (?:is |are )?(?:missing|invalid|expired|not configured|required)\b/i,
 	/\b(?:configuration|config) (?:error|invalid|missing|not configured)\b/i,
 	/\b(?:unsupported|unknown|unrecognized) (?:provider|model)\b/i,
-	/\b(?:provider|model)\b.{0,80}\b(?:unsupported|not supported|unknown|unrecognized)\b/i,
+	/\b(?:provider|model)\b.{0,80}\b(?:unsupported|not supported|unrecognized)\b/i,
 	/\b(?:permission denied|access denied|operation not permitted|eacces|eperm)\b/i,
 	/\b(?:user|human) (?:aborted|cancelled|canceled|interrupted)\b/i,
 	/\b(?:aborterror|cancelled by user|canceled by user)\b/i,

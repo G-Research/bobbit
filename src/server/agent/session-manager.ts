@@ -541,6 +541,8 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
+	recoveredPromptDispatchQueueIds?: string[];
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
 	/**
@@ -2955,6 +2957,11 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
 
+			// A fresh prompt supersedes any recovered dispatch-time copy of the
+			// failed prompt. Drop it before dispatching the new intent so a later
+			// agent_end drain cannot replay stale work after the follow-up succeeds.
+			this.consumeRecoveredPromptDispatchRows(session);
+
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
 			session.lastTurnErrored = false;
@@ -3306,12 +3313,20 @@ export class SessionManager {
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
+		const recoveredIds: string[] = [];
 		for (const r of [...rows].reverse()) {
-			session.promptQueue.enqueueAtFront(r.text, {
+			const recovered = session.promptQueue.enqueueAtFront(r.text, {
 				images: r.images,
 				attachments: r.attachments,
 				isSteered: r.isSteered,
 			});
+			recoveredIds.push(recovered.id);
+		}
+		if (recoveredIds.length > 0) {
+			session.recoveredPromptDispatchQueueIds = [
+				...(session.recoveredPromptDispatchQueueIds ?? []),
+				...recoveredIds,
+			];
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
@@ -4024,6 +4039,18 @@ export class SessionManager {
 		return restored ?? this.sessions.get(session.id);
 	}
 
+	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
+		const ids = session.recoveredPromptDispatchQueueIds;
+		if (!ids?.length) return false;
+		let removedAny = false;
+		for (const id of ids) {
+			removedAny = session.promptQueue.remove(id) || removedAny;
+		}
+		session.recoveredPromptDispatchQueueIds = undefined;
+		if (removedAny) this.broadcastQueue(session);
+		return removedAny;
+	}
+
 	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
 		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
 		if (textSet.size === 0) return false;
@@ -4108,13 +4135,18 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			// Provider-auth dispatch failures re-enqueue the failed row for recovery.
-			// Explicit retry is the recovery dispatch, so consume that row first;
-			// otherwise the next successful agent_end drain would send it a second time.
-			this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			// Dispatch failures before agent_start re-enqueue the failed row for
+			// recovery. Explicit/auto retry is the recovery dispatch, so consume
+			// that row first; otherwise the next successful agent_end drain would
+			// send it a second time. Prefer tracked recovery row IDs; fall back to
+			// text matching for sessions created before the ID ledger existed.
+			if (!this.consumeRecoveredPromptDispatchRows(session)) {
+				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			}
 			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
+			this.consumeRecoveredPromptDispatchRows(session);
 			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"
