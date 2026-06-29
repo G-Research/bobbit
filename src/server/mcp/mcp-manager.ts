@@ -657,11 +657,19 @@ export class McpManager {
   }
 
   async reloadDiscoveredServers(opts?: { force?: boolean; timeoutMs?: number }): Promise<McpReloadResult> {
+    const force = opts?.force === true;
     if (!this.reloadPromise) {
-      this.reloadPromise = this._reloadDiscoveredServers(opts?.force === true)
+      this.reloadPromise = this._makeReloadPromise(force);
+    } else {
+      const previous = this.reloadPromise;
+      let chained!: Promise<McpReloadResult>;
+      chained = previous
+        .catch(() => undefined)
+        .then(() => this._reloadDiscoveredServers(force))
         .finally(() => {
-          this.reloadPromise = undefined;
+          if (this.reloadPromise === chained) this.reloadPromise = undefined;
         });
+      this.reloadPromise = chained;
     }
 
     const timeoutMs = opts?.timeoutMs ?? 30_000;
@@ -674,6 +682,15 @@ export class McpManager {
     return Promise.race([this.reloadPromise, pending]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+  }
+
+  private _makeReloadPromise(force: boolean): Promise<McpReloadResult> {
+    let promise!: Promise<McpReloadResult>;
+    promise = this._reloadDiscoveredServers(force)
+      .finally(() => {
+        if (this.reloadPromise === promise) this.reloadPromise = undefined;
+      });
+    return promise;
   }
 
   /** Return the in-flight reload, if any, so callers can refresh dependents after a pending response completes. */
@@ -840,9 +857,7 @@ export class McpManager {
 
     for (const [runtimeServerKey, tools] of this.toolDefs) {
       const group = this.connectionGroups.get(runtimeServerKey);
-      const owners = group?.ownerContributions?.length
-        ? group.ownerContributions
-        : [flatManualContribution(runtimeServerKey, this.configs.get(runtimeServerKey) ?? {})];
+      const owners = this._routeOwnersForRuntimeGroup(runtimeServerKey, group);
       for (const tool of tools) {
         for (const contribution of owners) {
           const route = this._routeForContributionTool(runtimeServerKey, contribution, tool);
@@ -870,6 +885,21 @@ export class McpManager {
     }
 
     this._routeMapDirty = false;
+  }
+
+  private _routeOwnersForRuntimeGroup(runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined): ResolvedMcpContribution[] {
+    if (group?.ownerContributions?.length) return group.ownerContributions;
+    const config = group?.config ?? this.configs.get(runtimeServerKey) ?? {};
+    if (group?.activeSubNamespaces?.size) {
+      return [...group.activeSubNamespaces]
+        .sort()
+        .map((subNamespace) => ({
+          ...flatManualContribution(runtimeServerKey, config),
+          runtimeServerKey,
+          subNamespace,
+        }));
+    }
+    return [flatManualContribution(runtimeServerKey, config)];
   }
 
   private _routeForContributionTool(runtimeServerKey: string, contribution: ResolvedMcpContribution, tool: McpToolDef): McpToolRoute | undefined {
@@ -904,6 +934,24 @@ export class McpManager {
     }
 
     return true;
+  }
+
+  private _manualFallbackRuntimeKey(publicServerName: string): string | undefined {
+    const isManualOnlyGroup = (group: ResolvedMcpConnectionGroup | undefined): boolean => {
+      if (!group?.ownerContributions?.length) return true;
+      return group.ownerContributions.some((c) => c.serverName === publicServerName && c.origin.scope === "manual");
+    };
+
+    const direct = this.connectionGroups.get(publicServerName) ?? this.discoveredConnectionGroups.get(publicServerName);
+    if (this.configs.has(publicServerName) && isManualOnlyGroup(direct)) return publicServerName;
+
+    for (const [runtimeServerKey, group] of this.connectionGroups) {
+      if (group.serverName === publicServerName && isManualOnlyGroup(group)) return runtimeServerKey;
+      if (group.ownerContributions.some((c) => c.serverName === publicServerName && c.origin.scope === "manual")) {
+        return runtimeServerKey;
+      }
+    }
+    return undefined;
   }
 
   /** Helper for callers that refresh external MCP tools without leaving stale rows. */
@@ -1099,16 +1147,17 @@ export class McpManager {
         // that compatibility without bypassing marketplace operation selection:
         // if the raw op is known locally but absent from the route map, it was
         // filtered out by namespace/selection/disablement and must stay denied.
-        if (this.configs.has(parsed.server)) {
-          const knownTools = this.toolDefs.get(parsed.server) ?? [];
+        const manualFallbackRuntimeKey = this._manualFallbackRuntimeKey(parsed.server);
+        if (manualFallbackRuntimeKey) {
+          const knownTools = this.toolDefs.get(manualFallbackRuntimeKey) ?? [];
           if (!knownTools.some((tool) => tool.name === rawMcpToolName)) {
             const fallbackRoute: McpToolRoute = {
               name: bobbitToolName,
-              runtimeServerKey: parsed.server,
+              runtimeServerKey: manualFallbackRuntimeKey,
               publicServerName: parsed.server,
               mcpToolName: rawMcpToolName,
               tool: { name: rawMcpToolName, inputSchema: { type: "object" } },
-              contribution: flatManualContribution(parsed.server, this.configs.get(parsed.server) ?? {}),
+              contribution: flatManualContribution(parsed.server, this.configs.get(manualFallbackRuntimeKey) ?? {}),
               group: `MCP: ${parsed.server}`,
             };
             return this._callRouteTool(fallbackRoute, args);
