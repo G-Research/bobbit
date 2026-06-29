@@ -120,7 +120,7 @@ export default function (pi: ExtensionAPI) {
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
-			workflow: Type.Optional(Type.String({ description: "Registered workflow ID. Required when project workflows exist unless a valid inlineWorkflow is supplied." })),
+			workflow: Type.Optional(Type.String({ description: "Registered workflow ID; optional with valid inlineWorkflow." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 			parentGoalId: Type.Optional(Type.String({ description: "Subgoal parent ID; team leads auto-fill only when child spawn is allowed." })),
 			subgoalsAllowed: Type.Optional(Type.Boolean({ description: "Allow the team-lead to spawn sub-goals. Default off." })),
@@ -141,7 +141,7 @@ export default function (pi: ExtensionAPI) {
 				name: Type.String(),
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
-			}, { description: "Bespoke workflow snapshot frozen on the goal; may reference inlineRoles. When valid, it is authoritative and workflow is optional/non-authoritative." })),
+			}, { description: "Bespoke workflow snapshot; may reference inlineRoles." })),
 			metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary namespaced per-goal metadata; inherited by sub-goals." })),
 		}),
 		async execute(_id, args) {
