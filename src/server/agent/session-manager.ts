@@ -3268,11 +3268,15 @@ export class SessionManager {
 
 		// The agent rejected the prompt before it could emit an assistant
 		// message_end, so synthesize the same error state that message_end would
-		// have established. The recovered queue row remains the single durable
-		// copy of the prompt; retryLastPrompt(auto:true) consumes it before
-		// dispatching so a later agent_end cannot replay it a second time.
+		// have established. The failed prompt never reached agent_start, so no
+		// tools ran in that turn; clear any stale flag from a previous turn so
+		// retryLastPrompt(auto:true) re-sends the recovered prompt instead of a
+		// mid-work continuation. The recovered queue row remains the single
+		// durable copy of the prompt; retryLastPrompt(auto:true) consumes it
+		// before dispatching so a later agent_end cannot replay it a second time.
 		session.lastTurnErrored = true;
 		session.lastTurnErrorMessage = reason;
+		session.turnHadToolCalls = false;
 		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
 		const scheduled = this.maybeAutoRetryTransient(session);
 		if (scheduled) {
@@ -3908,6 +3912,11 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} ${label} auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
+			// Dispatch-time failures can exhaust before an agent_start arrives to
+			// clear the last visible countdown. Emit the standard cancellation
+			// frame even though the timer already fired so the UI does not keep a
+			// stale "retrying" banner while manual Retry is required.
+			this.cancelPendingAutoRetry(session, "new-prompt", { emitWithoutTimer: true });
 			return false;
 		}
 		session.transientRetryAttempts = attempt;
@@ -3974,11 +3983,13 @@ export class SessionManager {
 	private cancelPendingAutoRetry(
 		session: SessionInfo,
 		reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown",
+		opts?: { emitWithoutTimer?: boolean },
 	): void {
-		if (!session.pendingAutoRetryTimer) return;
-		clearTimeout(session.pendingAutoRetryTimer);
+		const hadTimer = !!session.pendingAutoRetryTimer;
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = undefined;
-		if (reason !== "shutdown" && session.clients.size > 0) {
+		if (!hadTimer && !opts?.emitWithoutTimer) return;
+		if (reason !== "shutdown") {
 			const cancelledEvent: AutoRetryCancelledEvent = {
 				type: "auto_retry_cancelled",
 				reason,
