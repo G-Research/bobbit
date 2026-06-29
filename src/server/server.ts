@@ -477,6 +477,7 @@ import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, P
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
+import { gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -528,11 +529,6 @@ function safeString(value: unknown): string | undefined {
 
 function stableGatewayContributionId(fields: Record<string, unknown>): string {
 	return `mcp:${createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 16)}`;
-}
-
-function gatewayMcpRuntimeKey(entry: PackEntry, mcp: { serverName: string; subNamespace?: string }, metaDetails: Record<string, unknown>): string {
-	const fingerprint = safeString(entry.meta?.commit) ?? safeString(metaDetails.gatewayFingerprint) ?? "unknown";
-	return `gateway_${mcp.serverName}_${mcp.subNamespace ?? "default"}_${fingerprint.slice(0, 16)}`;
 }
 
 function activationMcpContributionId(
@@ -14552,15 +14548,30 @@ async function handleApiRoute(
 		const routeSnapshots = mcpManager.getToolRouteSnapshots();
 		const result = statuses.map(s => {
 			const ownedRoutes = routeSnapshots.filter(t => t.runtimeServerKey === s.name);
+			const publicServerNames = new Set<string>([
+				...ownedRoutes.map(t => t.publicServerName),
+				...(s.ownerContributions ?? []).map(c => c.serverName),
+			].filter((name): name is string => typeof name === "string" && name.length > 0));
+			const publicServerName = publicServerNames.size === 1 ? [...publicServerNames][0] : undefined;
+			const serverPolicyKey = publicServerName ? `mcp__${publicServerName}` : `mcp__${s.name}`;
 			return {
 				...s,
+				serverPolicyKey,
+				policyKey: serverPolicyKey,
 				toolCount: ownedRoutes.length,
 				tools: ownedRoutes.map(t => {
 					const parsed = parseMcpToolName(t.name);
+					const subNamespace = t.subNamespace ?? parsed?.sub;
+					const routeServerPolicyKey = `mcp__${t.publicServerName}`;
+					const packagePolicyKey = subNamespace ? `${routeServerPolicyKey}__${subNamespace}` : undefined;
 					return {
 						name: t.name,
 						description: t.description,
-						subNamespace: t.subNamespace ?? parsed?.sub,
+						serverPolicyKey: routeServerPolicyKey,
+						policyKey: t.name,
+						operationPolicyKey: t.name,
+						...(packagePolicyKey ? { packagePolicyKey, subNamespacePolicyKey: packagePolicyKey } : {}),
+						subNamespace,
 						op: parsed?.op ?? t.mcpToolName,
 					};
 				}),

@@ -969,16 +969,24 @@ export class McpManager {
   private _buildRoutePrecedenceRanks(): Map<string, number> {
     const ranks = new Map<string, number>();
     let rank = 0;
-    const addGroup = (runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined) => {
+    const groups: Array<[string, ResolvedMcpConnectionGroup]> = [
+      ...this.discoveredConnectionGroups,
+      ...this.connectionGroups,
+    ];
+    const addGroup = (runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined, manual: boolean) => {
       if (!group?.ownerContributions?.length) return;
       for (const contribution of group.ownerContributions) {
+        if ((contribution.origin?.scope === "manual") !== manual) continue;
         const key = this._contributionPrecedenceKey(runtimeServerKey, contribution);
         if (!ranks.has(key)) ranks.set(key, rank++);
       }
     };
 
-    for (const [runtimeServerKey, group] of this.discoveredConnectionGroups) addGroup(runtimeServerKey, group);
-    for (const [runtimeServerKey, group] of this.connectionGroups) addGroup(runtimeServerKey, group);
+    // Manual JSON MCPs preserve legacy behavior and must win public-name
+    // conflicts over marketplace/gateway contributions. Marketplace order then
+    // remains deterministic for gateway-vs-gateway conflicts.
+    for (const [runtimeServerKey, group] of groups) addGroup(runtimeServerKey, group, true);
+    for (const [runtimeServerKey, group] of groups) addGroup(runtimeServerKey, group, false);
     return ranks;
   }
 

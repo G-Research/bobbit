@@ -2447,6 +2447,12 @@ export interface McpOperationInfo {
 	name: string;
 	/** Description shown in the UI. */
 	description: string;
+	/** Public policy keys returned by /api/mcp-servers for Tools controls. */
+	policyKey?: string;
+	serverPolicyKey?: string;
+	packagePolicyKey?: string;
+	subNamespacePolicyKey?: string;
+	operationPolicyKey?: string;
 	/**
 	 * Sub-namespace for gateway-style servers (e.g. "ai-adoption" in
 	 * `mcp__gr__ai-adoption__list-articles`). undefined ⇒ flat server.
@@ -2463,6 +2469,10 @@ export interface McpServerInfo {
 	status: "connected" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	/** Public server policy key (for gateway runtimes this differs from name). */
+	serverPolicyKey?: string;
+	policyKey?: string;
+	mcpPolicyKey?: string;
 	/** Active provider sub-namespaces for grouped gateway-backed MCP servers. */
 	activeSubNamespaces?: string[];
 	tools: McpOperationInfo[];

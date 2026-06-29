@@ -9,6 +9,7 @@ const {
 } = await import("../src/server/mcp/mcp-manager.ts");
 const { parseMcpToolName } = await import("../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { gatewayMcpRuntimeKey } = await import("../src/server/agent/mcp-gateway-runtime-identity.ts");
 const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
 const { ProjectContextManager } = await import("../src/server/agent/project-context-manager.ts");
 const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
@@ -101,6 +102,30 @@ const contrib = (
 });
 
 describe("McpManager marketplace discovery primitives", () => {
+  it("generates source-qualified gateway runtime keys for identical provider fingerprints", () => {
+    const baseEntry = {
+      manifest: { name: "mcp-jira" },
+      meta: { commit: "same-provider-fingerprint", packName: "mcp-jira" },
+    } as any;
+    const mcp = { listName: "jira", serverName: "gr", subNamespace: "jira" };
+    const first = gatewayMcpRuntimeKey(baseEntry, mcp, {
+      sourceType: "mcp-gateway",
+      sourceId: "mcp-gateway-a",
+      gatewayProviderId: "jira",
+      gatewayFingerprint: "same-provider-fingerprint",
+    });
+    const second = gatewayMcpRuntimeKey(baseEntry, mcp, {
+      sourceType: "mcp-gateway",
+      sourceId: "mcp-gateway-b",
+      gatewayProviderId: "jira",
+      gatewayFingerprint: "same-provider-fingerprint",
+    });
+
+    assert.notEqual(first, second);
+    assert.match(first, /^gateway_gr_jira_mcp-gateway-a_[a-f0-9]{12}_[a-f0-9]{12}$/);
+    assert.match(second, /^gateway_gr_jira_mcp-gateway-b_[a-f0-9]{12}_[a-f0-9]{12}$/);
+  });
+
   it("groups MCP gateway read/write provider namespaces and preserves canonical call names", async () => {
     const { cwd, stateDir } = tmpDirs();
     const readTransport = { url: "https://gateway.example.test/readonly/mcp" };
@@ -287,6 +312,42 @@ describe("McpManager marketplace discovery primitives", () => {
     await mgr.callTool("mcp__gr__jira__search", { q: "winner" });
     assert.deepEqual(first.calls, [{ toolName: "jira__search", args: { q: "winner" } }]);
     assert.deepEqual(second.calls, []);
+  });
+
+  it("gives manual JSON MCP routes precedence over gateway marketplace routes with the same public name", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
+      mcpServers: { gr: { command: "manual" } },
+    }));
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("jira", "gr", { url: "https://gateway.example.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-gr",
+        contributionId: "gateway-contribution",
+        origin: { scope: "project", packName: "gateway-pack" },
+      }),
+    ];
+    const manual = new StubMcpClient("gr", { tools: [op("jira__search")] });
+    const gateway = new StubMcpClient("gw-gr", { tools: [op("jira__search")] });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["gr", manual],
+      ["gw-gr", gateway],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, runtimeServerKey: t.runtimeServerKey, contributionId: t.contributionId })), [
+      { name: "mcp__gr__jira__search", runtimeServerKey: "gr", contributionId: undefined },
+    ]);
+    assert.deepEqual(mgr.getRouteDiagnostics(), [{
+      type: "conflict",
+      toolName: "mcp__gr__jira__search",
+      keptRuntimeServerKey: "gr",
+      droppedRuntimeServerKey: "gw-gr",
+      droppedContributionId: "gateway-contribution",
+    }]);
+
+    await mgr.callTool("mcp__gr__jira__search", { q: "manual" });
+    assert.deepEqual(manual.calls, [{ toolName: "jira__search", args: { q: "manual" } }]);
+    assert.deepEqual(gateway.calls, []);
   });
 
   it("keeps conflict precedence stable when a lower-priority connection lists tools first", async () => {

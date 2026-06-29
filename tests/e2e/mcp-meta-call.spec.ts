@@ -193,8 +193,18 @@ test.describe("MCP meta-tool API E2E", () => {
 		const servers = await resp.json();
 		const first = servers.find((s: any) => s.name === "gw-a-gr");
 		const second = servers.find((s: any) => s.name === "gw-b-gr");
+		expect(first?.serverPolicyKey).toBe("mcp__gr");
+		expect(first?.policyKey).toBe("mcp__gr");
 		expect(first?.tools.map((t: any) => t.name)).toEqual(["mcp__gr__jira__search"]);
+		expect(first?.tools[0]).toMatchObject({
+			serverPolicyKey: "mcp__gr",
+			packagePolicyKey: "mcp__gr__jira",
+			subNamespacePolicyKey: "mcp__gr__jira",
+			operationPolicyKey: "mcp__gr__jira__search",
+			policyKey: "mcp__gr__jira__search",
+		});
 		expect(first?.toolCount).toBe(1);
+		expect(second?.serverPolicyKey).toBe("mcp__gr");
 		expect(second?.tools).toEqual([]);
 		expect(second?.toolCount).toBe(0);
 	});
