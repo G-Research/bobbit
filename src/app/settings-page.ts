@@ -3891,114 +3891,87 @@ function renderAppearanceTab(projectId: string) {
 
 // ── Maintenance tab state ──
 
-type ArchivedSessionWorktreeStatus = "removable" | "skipped" | "already-cleaned" | "failed";
-type ArchivedSessionWorktreeDisposition = "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
+type WorktreeInventorySource =
+	| "runtime-session"
+	| "persisted-live-session"
+	| "archived-session"
+	| "goal"
+	| "team"
+	| "delegate"
+	| "staff"
+	| "pool"
+	| "git-worktree"
+	| "filesystem";
 
-type ArchivedSessionWorktreeItem = {
-	key?: string;
-	sessionId: string;
-	title?: string;
-	archivedAt?: number;
+type WorktreeInventoryClassification =
+	| "ready-to-clean"
+	| "protected-in-use"
+	| "archived-owned"
+	| "unowned-git-worktree"
+	| "pool-entry"
+	| "already-cleaned"
+	| "stale-filesystem-only"
+	| "scan-error";
+
+type WorktreeInventoryDisposition = "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
+
+type WorktreeInventoryOwner = { type: string; id: string; title?: string; archived?: boolean };
+
+type WorktreeMaintenanceItem = {
+	id: string;
+	classification: WorktreeInventoryClassification;
+	disposition: WorktreeInventoryDisposition;
+	actionable: boolean;
+	selectable: boolean;
+	defaultSelected: boolean;
 	projectId?: string;
 	projectName?: string;
-	goalId?: string;
-	teamGoalId?: string;
-	delegateOf?: string;
-	parentSessionId?: string;
-	childKind?: string;
-	sandboxed?: boolean;
-	repo: string;
-	repoPath: string;
+	componentName?: string;
+	repo?: string;
+	repoPath?: string;
 	repoDisplayName?: string;
+	worktreeRoot?: string;
 	path: string;
 	branch?: string;
-	source?: string;
+	sources: WorktreeInventorySource[];
+	owners?: WorktreeInventoryOwner[];
+	reason: string;
+	detail: string;
 	pathExists?: boolean;
 	gitWorktreeMetadataExists?: boolean;
 	localBranchExists?: boolean;
-	status: ArchivedSessionWorktreeStatus;
-	disposition?: ArchivedSessionWorktreeDisposition;
-	reason: string;
-	reasonCategory?: string;
-	detail: string;
-	actionable?: boolean;
-	selectable?: boolean;
-	defaultSelected?: boolean;
-	selectionCategories?: string[];
 	willDeleteBranch: boolean;
 	branchDeleteBlockedReason?: string;
+	legacy?: Record<string, unknown>;
 };
 
-type ArchivedSessionWorktreeSession = {
-	id: string;
-	title: string;
-	archivedAt?: number;
-	projectId?: string;
-	projectName?: string;
-	goalId?: string;
-	teamGoalId?: string;
-	delegateOf?: string;
-	parentSessionId?: string;
-	childKind?: string;
-	sandboxed?: boolean;
-	branch?: string;
-	repoPath?: string;
-	worktreePath?: string;
-	worktrees: ArchivedSessionWorktreeItem[];
+type WorktreeMaintenanceCounts = {
+	total: number;
+	readyToClean: number;
+	protectedInUse: number;
+	archivedOwned: number;
+	unownedGitWorktrees: number;
+	poolEntries: number;
+	alreadyCleaned: number;
+	needsAttention: number;
+	scanErrors: number;
+	defaultSelected: number;
+	byClassification: Record<string, number>;
+	byReason: Record<string, number>;
+	bySource: Record<string, number>;
 };
 
-type ArchivedSessionWorktreeGroup = {
-	id?: string;
-	key?: string;
-	status?: string;
-	disposition?: ArchivedSessionWorktreeDisposition;
-	reason?: string;
-	reasonCategory?: string;
-	category?: string;
-	label?: string;
-	detail?: string;
-	description?: string;
-	count: number;
-	itemKeys?: string[];
-	sampleKeys?: string[];
-	items?: ArchivedSessionWorktreeItem[];
-	sampleItems?: ArchivedSessionWorktreeItem[];
+type WorktreeInventoryReport = {
+	items: WorktreeMaintenanceItem[];
+	counts: WorktreeMaintenanceCounts;
+	generatedAt: number;
+	scanned?: { projects?: number; repos?: number; worktreeRoots?: number };
+	projectCount?: number;
+	repoCount?: number;
+	worktreeRootCount?: number;
 };
 
-type ArchivedSessionWorktreeSelectionPreset = {
-	id: string;
-	label: string;
-	category?: string;
-	count?: number;
-	itemKeys?: string[];
-};
-
-type ArchivedSessionWorktreeScanResponse = {
-	sessions: ArchivedSessionWorktreeSession[];
-	items?: ArchivedSessionWorktreeItem[];
-	groups?: ArchivedSessionWorktreeGroup[];
-	selectionPresets?: ArchivedSessionWorktreeSelectionPreset[];
-	generatedAt?: number;
-	counts: {
-		archivedSessions: number;
-		sessionsWithWorktrees: number;
-		removableWorktrees: number;
-		skippedWorktrees: number;
-		alreadyCleanedWorktrees: number;
-		totalItems?: number;
-		readyToClean?: number;
-		defaultSelected?: number;
-		alreadyCleaned?: number;
-		ineligible?: number;
-		needsAttention?: number;
-		failed?: number;
-		byDisposition?: Record<string, number>;
-		byReason?: Record<string, number>;
-		bySelectionCategory?: Record<string, number>;
-	};
-};
-
-type ArchivedSessionWorktreeCleanupResponse = {
+type WorktreeCleanupResponse = {
 	counts: {
 		requested: number;
 		cleaned: number;
@@ -4007,33 +3980,35 @@ type ArchivedSessionWorktreeCleanupResponse = {
 		alreadyCleaned: number;
 		failed: number;
 	};
-	results: Array<{
-		key: string;
-		sessionId: string;
-		title?: string;
-		repo?: string;
-		repoPath?: string;
+	results?: Array<{
+		id?: string;
+		itemId?: string;
 		path?: string;
 		branch?: string;
-		status: "cleaned" | "skipped" | "already-cleaned" | "failed";
+		repo?: string;
+		repoPath?: string;
+		projectId?: string;
+		projectName?: string;
+		classification?: string;
+		disposition?: WorktreeInventoryDisposition;
+		status?: "cleaned" | "skipped" | "already-cleaned" | "failed";
 		reason?: string;
 		detail?: string;
 		error?: string;
-		worktreeRemoved: boolean;
-		branchDeleted: boolean;
+		worktreeRemoved?: boolean;
+		branchDeleted?: boolean;
 	}>;
 };
 
-let maintenanceWorktrees: Array<{ path: string; branch: string }> | null = null;
 let maintenanceSessions: Array<{ id: string; title: string; createdAt: number }> | null = null;
 let maintenanceArchives: { count: number; totalSizeBytes: number } | null = null;
-let maintenanceLoading: "worktrees" | "sessions" | "archives" | "search" | "orphanRows" | "archivedWorktrees" | null = null;
-let archivedSessionWorktreeScan: ArchivedSessionWorktreeScanResponse | null = null;
-let archivedSessionWorktreeSelection = new Set<string>();
-let archivedSessionWorktreeCleanup: ArchivedSessionWorktreeCleanupResponse | null = null;
-let archivedSessionWorktreeError: string | null = null;
-let archivedSessionWorktreeShowSkipped = false;
-const archivedSessionWorktreeExpandedGroups = new Set<string>();
+let maintenanceLoading: "worktreeInventory" | "sessions" | "archives" | "search" | "orphanRows" | null = null;
+let worktreeInventoryReport: WorktreeInventoryReport | null = null;
+let worktreeInventorySelection = new Set<string>();
+let worktreeInventoryCleanup: WorktreeCleanupResponse | null = null;
+let worktreeInventoryError: string | null = null;
+let worktreeInventoryShowDiagnostics = false;
+const worktreeInventoryExpandedGroups = new Set<string>();
 
 // Search Index panel state
 let searchIndexStats: SearchStats | null = null;
@@ -4204,357 +4179,314 @@ async function cleanupOrphanRows(): Promise<void> {
 	await scanOrphanIndexRows();
 }
 
-async function scanWorktrees(): Promise<void> {
-	maintenanceLoading = "worktrees";
+function emptyWorktreeMaintenanceCounts(): WorktreeMaintenanceCounts {
+	return {
+		total: 0,
+		readyToClean: 0,
+		protectedInUse: 0,
+		archivedOwned: 0,
+		unownedGitWorktrees: 0,
+		poolEntries: 0,
+		alreadyCleaned: 0,
+		needsAttention: 0,
+		scanErrors: 0,
+		defaultSelected: 0,
+		byClassification: {},
+		byReason: {},
+		bySource: {},
+	};
+}
+
+function emptyWorktreeInventoryReport(): WorktreeInventoryReport {
+	return { items: [], counts: emptyWorktreeMaintenanceCounts(), generatedAt: Date.now() };
+}
+
+function isWorktreeInventoryActionable(item: WorktreeMaintenanceItem): boolean {
+	return item.actionable !== false && item.selectable !== false && item.disposition === "ready-to-clean";
+}
+
+function worktreeReasonDetail(reason: string): string {
+	const details: Record<string, string> = {
+		"safe-archived-session-worktree": "Archived-session-owned worktrees that the server classified as safe to remove.",
+		"safe-unowned-session-worktree": "Git metadata contains Bobbit session worktrees that no durable Bobbit record owns.",
+		"safe-pool-entry": "Pool-owned worktrees are shown for audit and reclaim diagnostics, not selected by maintenance by default.",
+		"pool-entry": "Pool-owned worktrees are shown for audit and reclaim diagnostics, not selected by maintenance by default.",
+		"already-cleaned": "Bobbit remembers metadata for this worktree, but no host cleanup remains.",
+		"filesystem-only-needs-attention": "A directory exists under a worktree root without enough Bobbit/Git provenance for automatic cleanup. Inspect it manually.",
+		"stale-filesystem-only": "A filesystem-only directory needs manual inspection before deletion.",
+		"sandbox-container-path": "This path is inside a sandbox/container and is not a host cleanup target.",
+		"scan-error": "The server could not safely classify one or more worktrees.",
+		"git-scan-error": "Git worktree metadata could not be scanned for this repo.",
+		"fs-scan-error": "A worktree-root directory could not be scanned.",
+		"cleanup-failed": "Cleanup was requested, but Git or filesystem operations did not complete for this record.",
+	};
+	return details[reason] ?? "These records are shown for troubleshooting and audit only.";
+}
+
+function normalizeWorktreeInventoryReport(data: Partial<WorktreeInventoryReport> | null | undefined): WorktreeInventoryReport {
+	const items = Array.isArray(data?.items) ? data!.items.map((item, index) => ({
+		...item,
+		id: String(item.id || `${item.projectId || "unknown"}:${item.repo || "."}:${item.path || item.branch || index}`),
+		path: item.path || "",
+		sources: Array.isArray(item.sources) ? item.sources : [],
+		owners: Array.isArray(item.owners) ? item.owners : [],
+		reason: item.reason || item.classification || "unknown",
+		detail: item.detail || worktreeReasonDetail(item.reason || item.classification || "unknown"),
+		actionable: Boolean(item.actionable),
+		selectable: item.selectable !== false,
+		defaultSelected: item.defaultSelected !== false,
+		willDeleteBranch: Boolean(item.willDeleteBranch),
+	})) : [];
+	const raw = data?.counts ?? emptyWorktreeMaintenanceCounts();
+	const counts: WorktreeMaintenanceCounts = {
+		...emptyWorktreeMaintenanceCounts(),
+		...raw,
+		total: raw.total ?? items.length,
+		readyToClean: raw.readyToClean ?? items.filter(isWorktreeInventoryActionable).length,
+		protectedInUse: raw.protectedInUse ?? items.filter(item => item.disposition === "protected" || item.classification === "protected-in-use").length,
+		archivedOwned: raw.archivedOwned ?? items.filter(item => item.classification === "archived-owned").length,
+		unownedGitWorktrees: raw.unownedGitWorktrees ?? items.filter(item => item.classification === "unowned-git-worktree").length,
+		poolEntries: raw.poolEntries ?? items.filter(item => item.classification === "pool-entry").length,
+		alreadyCleaned: raw.alreadyCleaned ?? items.filter(item => item.disposition === "already-cleaned" || item.classification === "already-cleaned").length,
+		needsAttention: raw.needsAttention ?? items.filter(item => item.disposition === "needs-attention" || item.disposition === "failed" || item.classification === "stale-filesystem-only" || item.classification === "scan-error").length,
+		scanErrors: raw.scanErrors ?? items.filter(item => item.classification === "scan-error").length,
+		defaultSelected: raw.defaultSelected ?? items.filter(item => isWorktreeInventoryActionable(item) && item.defaultSelected !== false).length,
+		byClassification: raw.byClassification ?? {},
+		byReason: raw.byReason ?? {},
+		bySource: raw.bySource ?? {},
+	};
+	return {
+		items,
+		counts,
+		generatedAt: data?.generatedAt ?? Date.now(),
+		scanned: data?.scanned,
+		projectCount: data?.projectCount,
+		repoCount: data?.repoCount,
+		worktreeRootCount: data?.worktreeRootCount,
+	};
+}
+
+function worktreeInventoryActionableRows(): WorktreeMaintenanceItem[] {
+	return (worktreeInventoryReport?.items ?? []).filter(isWorktreeInventoryActionable);
+}
+
+function selectedWorktreeInventoryItemIds(): string[] {
+	const ids = new Set(worktreeInventoryActionableRows().map(item => item.id));
+	return Array.from(worktreeInventorySelection).filter(id => ids.has(id));
+}
+
+function toggleWorktreeInventorySelection(id: string, checked: boolean): void {
+	if (checked) worktreeInventorySelection.add(id);
+	else worktreeInventorySelection.delete(id);
+	renderApp();
+}
+
+function setWorktreeInventorySelection(items: WorktreeMaintenanceItem[]): void {
+	worktreeInventorySelection = new Set(items.filter(isWorktreeInventoryActionable).map(item => item.id));
+	renderApp();
+}
+
+async function scanWorktreeInventory(options: { preserveCleanupResult?: boolean } = {}): Promise<void> {
+	maintenanceLoading = "worktreeInventory";
+	worktreeInventoryError = null;
+	if (!options.preserveCleanupResult) worktreeInventoryCleanup = null;
+	const previousScan = worktreeInventoryReport;
+	const previousSelection = new Set(worktreeInventorySelection);
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/maintenance/orphaned-worktrees");
+		const res = await gatewayFetch("/api/maintenance/worktrees");
 		if (res.ok) {
-			const data = await res.json();
-			maintenanceWorktrees = data.worktrees ?? [];
+			const data = await res.json() as WorktreeInventoryReport;
+			worktreeInventoryReport = normalizeWorktreeInventoryReport(data);
+			const actionable = worktreeInventoryActionableRows();
+			worktreeInventorySelection = previousScan
+				? new Set(actionable.filter(item => previousSelection.has(item.id)).map(item => item.id))
+				: new Set(actionable.filter(item => item.defaultSelected !== false).map(item => item.id));
+			worktreeInventoryExpandedGroups.clear();
+			if (!options.preserveCleanupResult) worktreeInventoryShowDiagnostics = false;
 		} else {
-			maintenanceWorktrees = [];
-		}
-	} catch {
-		maintenanceWorktrees = [];
-	}
-	maintenanceLoading = null;
-	renderApp();
-}
-
-async function cleanupWorktrees(): Promise<void> {
-	maintenanceLoading = "worktrees";
-	renderApp();
-	try {
-		await gatewayFetch("/api/maintenance/cleanup-worktrees", { method: "POST" });
-	} catch { /* ignore */ }
-	maintenanceLoading = null;
-	await scanWorktrees();
-}
-
-function emptyArchivedSessionWorktreeScan(): ArchivedSessionWorktreeScanResponse {
-	return {
-		sessions: [],
-		items: [],
-		groups: [],
-		selectionPresets: [],
-		generatedAt: Date.now(),
-		counts: {
-			archivedSessions: 0,
-			sessionsWithWorktrees: 0,
-			removableWorktrees: 0,
-			skippedWorktrees: 0,
-			alreadyCleanedWorktrees: 0,
-			totalItems: 0,
-			readyToClean: 0,
-			defaultSelected: 0,
-			alreadyCleaned: 0,
-			ineligible: 0,
-			needsAttention: 0,
-			failed: 0,
-			byDisposition: {},
-			byReason: {},
-			bySelectionCategory: {},
-		},
-	};
-}
-
-function archivedSessionWorktreeKey(item: ArchivedSessionWorktreeItem): string {
-	return item.key || `${item.sessionId}:${item.repo || ""}:${item.path || ""}`;
-}
-
-function archivedSessionWorktreeDisposition(item: ArchivedSessionWorktreeItem): ArchivedSessionWorktreeDisposition {
-	if (item.disposition) return item.disposition;
-	if (item.status === "removable") return "ready-to-clean";
-	if (item.status === "already-cleaned") return "already-cleaned";
-	if (item.status === "failed") return "failed";
-	return "ineligible";
-}
-
-function isArchivedSessionWorktreeActionable(item: ArchivedSessionWorktreeItem): boolean {
-	if (item.actionable === false || item.selectable === false) return false;
-	return item.status === "removable" || archivedSessionWorktreeDisposition(item) === "ready-to-clean";
-}
-
-function archivedSessionWorktreeRows(): Array<{ session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> {
-	const scan = archivedSessionWorktreeScan;
-	if (!scan) return [];
-	const sessionsById = new Map((scan.sessions ?? []).map(session => [session.id, session] as const));
-	if ((scan.items ?? []).length > 0) {
-		return (scan.items ?? []).map(item => {
-			const existing = sessionsById.get(item.sessionId);
-			const session: ArchivedSessionWorktreeSession = existing ?? {
-				id: item.sessionId,
-				title: item.title || "Untitled archived session",
-				archivedAt: item.archivedAt,
-				projectId: item.projectId,
-				projectName: item.projectName,
-				goalId: item.goalId,
-				teamGoalId: item.teamGoalId,
-				delegateOf: item.delegateOf,
-				parentSessionId: item.parentSessionId,
-				childKind: item.childKind,
-				sandboxed: item.sandboxed,
-				repoPath: item.repoPath,
-				worktreePath: item.path,
-				branch: item.branch,
-				worktrees: [],
-			};
-			return {
-				session,
-				item: {
-					...item,
-					title: item.title ?? session.title,
-					archivedAt: item.archivedAt ?? session.archivedAt,
-					projectId: item.projectId ?? session.projectId,
-					projectName: item.projectName ?? session.projectName,
-					goalId: item.goalId ?? session.goalId,
-					teamGoalId: item.teamGoalId ?? session.teamGoalId,
-					delegateOf: item.delegateOf ?? session.delegateOf,
-					parentSessionId: item.parentSessionId ?? session.parentSessionId,
-					childKind: item.childKind ?? session.childKind,
-					sandboxed: item.sandboxed ?? session.sandboxed,
-				},
-			};
-		});
-	}
-	return (scan.sessions ?? []).flatMap(session =>
-		(session.worktrees ?? []).map(item => ({
-			session,
-			item: {
-				...item,
-				title: item.title ?? session.title,
-				archivedAt: item.archivedAt ?? session.archivedAt,
-				projectId: item.projectId ?? session.projectId,
-				projectName: item.projectName ?? session.projectName,
-				goalId: item.goalId ?? session.goalId,
-				teamGoalId: item.teamGoalId ?? session.teamGoalId,
-				delegateOf: item.delegateOf ?? session.delegateOf,
-				parentSessionId: item.parentSessionId ?? session.parentSessionId,
-				childKind: item.childKind ?? session.childKind,
-				sandboxed: item.sandboxed ?? session.sandboxed,
-			},
-		}))
-	);
-}
-
-function archivedSessionWorktreeActionableRows(): Array<{ session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> {
-	return archivedSessionWorktreeRows().filter(({ item }) => isArchivedSessionWorktreeActionable(item));
-}
-
-function selectedArchivedSessionWorktrees(): Array<{ sessionId: string; repo?: string; path?: string; key?: string }> {
-	return archivedSessionWorktreeActionableRows()
-		.filter(({ item }) => archivedSessionWorktreeSelection.has(archivedSessionWorktreeKey(item)))
-		.map(({ item }) => ({ sessionId: item.sessionId, repo: item.repo, path: item.path, key: archivedSessionWorktreeKey(item) }));
-}
-
-function toggleArchivedSessionWorktreeSelection(key: string, checked: boolean): void {
-	if (checked) archivedSessionWorktreeSelection.add(key);
-	else archivedSessionWorktreeSelection.delete(key);
-	renderApp();
-}
-
-function setArchivedSessionWorktreeSelection(rows: Array<{ item: ArchivedSessionWorktreeItem }>): void {
-	archivedSessionWorktreeSelection = new Set(rows.map(({ item }) => archivedSessionWorktreeKey(item)));
-	renderApp();
-}
-
-function archivedSessionWorktreeSelectionCategories(item: ArchivedSessionWorktreeItem): string[] {
-	return Array.isArray(item.selectionCategories) ? item.selectionCategories : [];
-}
-
-function isArchivedSessionOnlyWorktree(session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem): boolean {
-	const categories = archivedSessionWorktreeSelectionCategories(item);
-	if (categories.some(category => /goal|team|delegate/i.test(category))) return false;
-	return !item.goalId && !session.goalId && !item.teamGoalId && !session.teamGoalId && !item.delegateOf && !session.delegateOf && !item.parentSessionId && !session.parentSessionId && !item.childKind && !session.childKind;
-}
-
-function isGoalTeamDelegateWorktree(session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem): boolean {
-	const categories = archivedSessionWorktreeSelectionCategories(item);
-	return categories.some(category => /goal|team|delegate/i.test(category)) || !!item.goalId || !!session.goalId || !!item.teamGoalId || !!session.teamGoalId || !!item.delegateOf || !!session.delegateOf || !!item.parentSessionId || !!session.parentSessionId || !!item.childKind || !!session.childKind;
-}
-
-function archivedSessionWorktreeCounts(rows = archivedSessionWorktreeRows()): { readyToClean: number; alreadyCleaned: number; needsAttention: number; failed: number; totalItems: number } {
-	const counts = archivedSessionWorktreeScan?.counts;
-	const failed = counts?.failed ?? rows.filter(({ item }) => archivedSessionWorktreeDisposition(item) === "failed" || item.status === "failed").length;
-	return {
-		readyToClean: counts?.readyToClean ?? counts?.removableWorktrees ?? rows.filter(({ item }) => isArchivedSessionWorktreeActionable(item)).length,
-		alreadyCleaned: counts?.alreadyCleaned ?? counts?.alreadyCleanedWorktrees ?? rows.filter(({ item }) => archivedSessionWorktreeDisposition(item) === "already-cleaned").length,
-		needsAttention: counts?.needsAttention ?? ((counts?.skippedWorktrees ?? rows.filter(({ item }) => !isArchivedSessionWorktreeActionable(item) && archivedSessionWorktreeDisposition(item) !== "already-cleaned").length) + failed),
-		failed,
-		totalItems: counts?.totalItems ?? rows.length,
-	};
-}
-
-function normalizeArchivedSessionWorktreeScan(data: ArchivedSessionWorktreeScanResponse): ArchivedSessionWorktreeScanResponse {
-	const empty = emptyArchivedSessionWorktreeScan();
-	const rawCounts = data.counts ?? empty.counts;
-	const mergedCounts = {
-		...empty.counts,
-		...rawCounts,
-		readyToClean: rawCounts.readyToClean ?? rawCounts.removableWorktrees ?? 0,
-		alreadyCleaned: rawCounts.alreadyCleaned ?? rawCounts.alreadyCleanedWorktrees ?? 0,
-		failed: rawCounts.failed ?? 0,
-		ineligible: rawCounts.ineligible ?? rawCounts.skippedWorktrees ?? 0,
-		needsAttention: rawCounts.needsAttention ?? ((rawCounts.skippedWorktrees ?? 0) + (rawCounts.failed ?? 0)),
-		totalItems: rawCounts.totalItems ?? (rawCounts.removableWorktrees ?? 0) + (rawCounts.skippedWorktrees ?? 0) + (rawCounts.alreadyCleanedWorktrees ?? 0),
-	};
-	return {
-		sessions: data.sessions ?? [],
-		items: data.items ?? [],
-		groups: data.groups ?? [],
-		selectionPresets: data.selectionPresets ?? [],
-		generatedAt: data.generatedAt ?? Date.now(),
-		counts: mergedCounts,
-	};
-}
-
-async function scanArchivedSessionWorktrees(options: { preserveCleanupResult?: boolean } = {}): Promise<void> {
-	maintenanceLoading = "archivedWorktrees";
-	archivedSessionWorktreeError = null;
-	if (!options.preserveCleanupResult) archivedSessionWorktreeCleanup = null;
-	renderApp();
-	try {
-		const res = await gatewayFetch("/api/maintenance/archived-session-worktrees");
-		if (res.ok) {
-			const data = await res.json() as ArchivedSessionWorktreeScanResponse;
-			archivedSessionWorktreeScan = normalizeArchivedSessionWorktreeScan(data);
-			archivedSessionWorktreeSelection = new Set(
-				archivedSessionWorktreeActionableRows()
-					.filter(({ item }) => item.defaultSelected !== false)
-					.map(({ item }) => archivedSessionWorktreeKey(item))
-			);
-			archivedSessionWorktreeExpandedGroups.clear();
-			if (!options.preserveCleanupResult) archivedSessionWorktreeShowSkipped = false;
-		} else {
-			archivedSessionWorktreeScan = emptyArchivedSessionWorktreeScan();
-			archivedSessionWorktreeSelection = new Set();
-			archivedSessionWorktreeError = `Scan failed (HTTP ${res.status})`;
+			worktreeInventoryReport = emptyWorktreeInventoryReport();
+			worktreeInventorySelection = new Set();
+			worktreeInventoryError = `Worktree scan failed (HTTP ${res.status})`;
 		}
 	} catch (err) {
-		archivedSessionWorktreeScan = emptyArchivedSessionWorktreeScan();
-		archivedSessionWorktreeSelection = new Set();
-		archivedSessionWorktreeError = (err as Error).message || "Scan failed";
+		worktreeInventoryReport = emptyWorktreeInventoryReport();
+		worktreeInventorySelection = new Set();
+		worktreeInventoryError = `Worktree scan failed: ${(err as Error).message || "Scan failed"}`;
 	}
 	maintenanceLoading = null;
 	renderApp();
 }
 
-async function cleanupArchivedSessionWorktrees(mode: "selected" | "all" = "selected"): Promise<void> {
-	const worktrees = selectedArchivedSessionWorktrees();
-	const readyToClean = archivedSessionWorktreeCounts().readyToClean;
-	if (mode === "selected" && worktrees.length === 0) return;
-	if (mode === "all" && readyToClean === 0) return;
-	if (mode === "all") {
+function normalizeWorktreeCleanupResponse(data: Partial<WorktreeCleanupResponse> | null | undefined): WorktreeCleanupResponse {
+	return {
+		counts: {
+			requested: data?.counts?.requested ?? 0,
+			cleaned: data?.counts?.cleaned ?? 0,
+			branchDeleted: data?.counts?.branchDeleted ?? 0,
+			skipped: data?.counts?.skipped ?? 0,
+			alreadyCleaned: data?.counts?.alreadyCleaned ?? 0,
+			failed: data?.counts?.failed ?? 0,
+		},
+		results: Array.isArray(data?.results) ? data!.results : [],
+	};
+}
+
+async function cleanupWorktreeInventory(mode: "selected" | "all-safe" = "selected"): Promise<void> {
+	const itemIds = selectedWorktreeInventoryItemIds();
+	const readyToClean = worktreeInventoryReport?.counts.readyToClean ?? 0;
+	if (mode === "selected" && itemIds.length === 0) return;
+	if (mode === "all-safe" && readyToClean === 0) return;
+	if (mode === "all-safe") {
 		const confirmed = await confirmAction(
-			`Clean ${readyToClean} archived-session worktree${readyToClean === 1 ? "" : "s"}?`,
-			"This removes only git worktrees and eligible branches. Archived sessions, transcripts, proposals, and archive visibility are preserved.",
+			`Clean ${readyToClean} worktree${readyToClean === 1 ? "" : "s"}?`,
+			"Bobbit will rescan before deleting and will remove only server-classified safe candidates. Transcripts, archived sessions, goals, proposals, prompts, and search records are preserved.",
 			"Clean worktrees",
 			true,
 		);
 		if (!confirmed) return;
 	}
-	maintenanceLoading = "archivedWorktrees";
-	archivedSessionWorktreeError = null;
+	maintenanceLoading = "worktreeInventory";
+	worktreeInventoryError = null;
 	let shouldRescan = false;
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/maintenance/cleanup-archived-session-worktrees", {
+		const res = await gatewayFetch("/api/maintenance/cleanup-worktrees", {
 			method: "POST",
-			body: JSON.stringify(mode === "all" ? { mode: "all" } : { mode: "selected", worktrees }),
+			body: JSON.stringify(mode === "all-safe" ? { mode: "all-safe" } : { mode: "selected", itemIds }),
 		});
 		if (res.ok) {
-			archivedSessionWorktreeCleanup = await res.json() as ArchivedSessionWorktreeCleanupResponse;
-			archivedSessionWorktreeShowSkipped = (archivedSessionWorktreeCleanup.counts.failed + archivedSessionWorktreeCleanup.counts.skipped) > 0;
+			worktreeInventoryCleanup = normalizeWorktreeCleanupResponse(await res.json());
+			worktreeInventoryShowDiagnostics = (worktreeInventoryCleanup.counts.failed + worktreeInventoryCleanup.counts.skipped) > 0;
 			shouldRescan = true;
 		} else {
-			archivedSessionWorktreeCleanup = null;
-			archivedSessionWorktreeError = `Cleanup failed (HTTP ${res.status})`;
+			worktreeInventoryCleanup = null;
+			worktreeInventoryError = `Cleanup failed (HTTP ${res.status})`;
 		}
 	} catch (err) {
-		archivedSessionWorktreeCleanup = null;
-		archivedSessionWorktreeError = (err as Error).message || "Cleanup failed";
+		worktreeInventoryCleanup = null;
+		worktreeInventoryError = (err as Error).message || "Cleanup failed";
 	}
 	maintenanceLoading = null;
-	if (shouldRescan) await scanArchivedSessionWorktrees({ preserveCleanupResult: true });
+	if (shouldRescan) await scanWorktreeInventory({ preserveCleanupResult: true });
 	else renderApp();
 }
 
-function archivedSessionWorktreeStatusClass(status: ArchivedSessionWorktreeStatus | string, disposition?: ArchivedSessionWorktreeDisposition): string {
-	if (status === "removable" || disposition === "ready-to-clean") return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20";
-	if (status === "already-cleaned" || disposition === "already-cleaned") return "bg-secondary text-muted-foreground border border-border";
-	if (status === "failed" || disposition === "failed") return "bg-destructive/10 text-destructive border border-destructive/20";
+function worktreeStatusClass(itemOrDisposition: WorktreeMaintenanceItem | WorktreeInventoryDisposition | string): string {
+	const disposition = typeof itemOrDisposition === "string" ? itemOrDisposition : itemOrDisposition.disposition;
+	if (disposition === "ready-to-clean") return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20";
+	if (disposition === "already-cleaned") return "bg-secondary text-muted-foreground border border-border";
+	if (disposition === "failed") return "bg-destructive/10 text-destructive border border-destructive/20";
 	return "bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20";
 }
 
-function archivedSessionWorktreeStatusLabel(status: ArchivedSessionWorktreeStatus | string, disposition?: ArchivedSessionWorktreeDisposition): string {
-	if (status === "removable" || disposition === "ready-to-clean") return "Ready to clean";
-	if (status === "already-cleaned" || disposition === "already-cleaned") return "Already cleaned";
-	if (status === "failed" || disposition === "failed") return "Cleanup failed";
-	return "Skipped";
+function worktreeStatusLabel(item: WorktreeMaintenanceItem): string {
+	if (item.disposition === "ready-to-clean") return "Ready to clean";
+	if (item.classification === "pool-entry") return "Pool entry";
+	if (item.disposition === "protected") return "Protected/in use";
+	if (item.disposition === "already-cleaned") return "Already cleaned";
+	if (item.disposition === "failed") return "Cleanup failed";
+	return "Needs attention";
 }
 
-function archivedSessionWorktreeReasonLabel(reason: string): string {
+function humanizeWorktreeToken(value: string): string {
+	return (value || "unknown").replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function worktreeClassificationLabel(value: string): string {
 	const labels: Record<string, string> = {
-		"safe-archived-session-worktree": "Ready to clean",
+		"ready-to-clean": "Ready to clean",
+		"protected-in-use": "Protected/in use",
+		"archived-owned": "Archived-owned",
+		"unowned-git-worktree": "Unowned Git worktree",
+		"pool-entry": "Pool entry",
 		"already-cleaned": "Already cleaned",
-		"no-worktree-path": "Missing worktree path",
-		"missing-repo-path": "Missing repo path",
-		"sandbox-container-path": "Sandbox/container path",
-		"delegate-shared-worktree": "Delegate/shared worktree",
-		"stale-worktree-directory": "Stale worktree directory",
+		"stale-filesystem-only": "Filesystem-only",
+		"scan-error": "Scan error",
+	};
+	return labels[value] ?? humanizeWorktreeToken(value);
+}
+
+function worktreeReasonLabel(reason: string): string {
+	const labels: Record<string, string> = {
+		"safe-archived-session-worktree": "Archived cleanup target",
+		"safe-unowned-session-worktree": "Unowned Git worktree",
+		"safe-pool-entry": "Pool entry",
 		"referenced-by-live-session": "Referenced by live session",
 		"referenced-by-live-goal": "Referenced by live goal",
 		"referenced-by-live-team": "Referenced by live team",
+		"referenced-by-delegate": "Referenced by delegate",
 		"referenced-by-staff": "Referenced by staff",
-		"scan-error": "Scan error",
+		"referenced-by-pool": "Referenced by pool",
+		"branch-referenced-by-live-record": "Branch referenced by live record",
+		"branch-referenced-by-archived-record": "Branch referenced by archived record",
+		"git-worktree-metadata-missing": "Git metadata missing",
+		"filesystem-only-needs-attention": "Filesystem-only needs attention",
+		"sandbox-container-path": "Sandbox/container path",
+		"primary-worktree": "Primary worktree",
+		"missing-repo-path": "Missing repo path",
+		"missing-worktree-path": "Missing worktree path",
+		"git-scan-error": "Git scan error",
+		"fs-scan-error": "Filesystem scan error",
 		"cleanup-failed": "Cleanup failed",
-		"invalid-selection": "Invalid selection",
+		"pool-entry": "Pool entries",
+		"already-cleaned": "Already cleaned",
+		"scan-error": "Scan errors",
 	};
-	return labels[reason] ?? reason.replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+	return labels[reason] ?? humanizeWorktreeToken(reason);
 }
 
-function archivedSessionWorktreeReasonDetail(reason: string): string {
-	const details: Record<string, string> = {
-		"already-cleaned": "The archive still remembers the old path, but the worktree and git metadata are already gone.",
-		"no-worktree-path": "These archived sessions have no host worktree path recorded, so there is nothing for this tool to remove.",
-		"missing-repo-path": "The archived record does not include a repo path that can be checked on this host.",
-		"sandbox-container-path": "The path belongs to a sandbox/container context, not a host worktree that this maintenance action can remove.",
-		"delegate-shared-worktree": "Protected because another delegate or related record shares this worktree.",
-		"referenced-by-live-session": "Protected because a live session still references this path or branch.",
-		"referenced-by-live-goal": "Protected because another durable goal record still points at this path or branch.",
-		"referenced-by-live-team": "Protected because a team member record still references this path or branch.",
-		"referenced-by-staff": "Protected because a staff agent record still references this path or branch.",
-		"scan-error": "The server could not safely classify these records during the scan.",
-		"cleanup-failed": "Cleanup was requested, but git or filesystem operations did not complete for these records.",
+function worktreeSourceLabel(source: string): string {
+	const labels: Record<string, string> = {
+		"runtime-session": "Runtime session",
+		"persisted-live-session": "Live session",
+		"archived-session": "Archived session",
+		goal: "Goal",
+		team: "Team",
+		delegate: "Delegate",
+		staff: "Staff",
+		pool: "Pool",
+		"git-worktree": "Git metadata",
+		filesystem: "Filesystem",
 	};
-	return details[reason] ?? "These records are shown for troubleshooting and audit only.";
+	return labels[source] ?? humanizeWorktreeToken(source);
 }
 
-function archivedSessionWorktreeSafeReason(item: ArchivedSessionWorktreeItem): string {
-	if (isArchivedSessionWorktreeActionable(item)) return "Safe to remove: no live session, goal, team, staff, or sibling worktree references this path.";
-	return item.detail || archivedSessionWorktreeReasonDetail(item.reason || item.reasonCategory || archivedSessionWorktreeDisposition(item));
+function worktreeSourcesLabel(sources: string[]): string {
+	return sources.length > 0 ? sources.map(worktreeSourceLabel).join(", ") : "Unknown";
 }
 
-function sanitizeArchivedWorktreeGroupId(value: string): string {
+function sanitizeWorktreeGroupId(value: string): string {
 	return (value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
 
-function shortArchivedSessionId(id: string): string {
+function shortWorktreeId(id: string): string {
 	return id.length > 12 ? id.slice(0, 8) : id;
 }
 
-function archivedWorktreeProjectLabel(session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem): string {
-	return item.projectName || session.projectName || item.projectId || session.projectId || "No project";
+function worktreeItemTitle(item: WorktreeMaintenanceItem): string {
+	const ownerTitle = item.owners?.find(owner => owner.title)?.title;
+	if (ownerTitle) return ownerTitle;
+	if (item.branch) return item.branch;
+	const path = item.path || "Worktree";
+	return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
-function archivedWorktreeBranchOutcome(item: ArchivedSessionWorktreeItem): string {
+function worktreeRepoLabel(item: WorktreeMaintenanceItem): string {
+	return item.repoDisplayName || item.componentName || item.repo || ".";
+}
+
+function worktreeProjectLabel(item: WorktreeMaintenanceItem): string {
+	return item.projectName || item.projectId || "No project";
+}
+
+function worktreeBranchOutcome(item: WorktreeMaintenanceItem): string {
 	if (item.willDeleteBranch) return "Branch will be deleted";
 	if (item.branchDeleteBlockedReason) return `Branch will be kept: ${item.branchDeleteBlockedReason}`;
 	return item.branch ? "Branch will be kept" : "No branch recorded";
 }
 
-function focusArchivedWorktreeElement(id: string): void {
+function focusWorktreeCleanupElement(id: string): void {
 	window.setTimeout(() => {
 		const el = document.getElementById(id) as HTMLElement | null;
 		el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -4562,243 +4494,174 @@ function focusArchivedWorktreeElement(id: string): void {
 	}, 0);
 }
 
-function showArchivedWorktreeTroubleshootingAndFocus(reason?: string): void {
-	archivedSessionWorktreeShowSkipped = true;
+function showWorktreeDiagnosticsAndFocus(groupId?: string): void {
+	worktreeInventoryShowDiagnostics = true;
 	renderApp();
-	focusArchivedWorktreeElement(reason ? `archived-worktree-group-${sanitizeArchivedWorktreeGroupId(reason)}` : "archived-worktree-troubleshooting-panel");
+	focusWorktreeCleanupElement(groupId ? `worktree-cleanup-group-${sanitizeWorktreeGroupId(groupId)}` : "worktree-cleanup-troubleshooting-panel");
 }
 
-function renderArchivedWorktreeSummaryChip(label: string, value: number, testId: string, onClick?: () => void) {
+function renderWorktreeSummaryChip(label: string, value: number, testId: string, onClick?: () => void) {
 	const content = html`
 		<span class="text-[11px] text-muted-foreground">${label}:</span>
 		<span class="text-sm font-semibold text-foreground">${value}</span>
 	`;
 	const classes = "flex min-w-[8rem] flex-col gap-0.5 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left";
 	return onClick && value > 0 ? html`
-		<button type="button" class="${classes} hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-ring" data-testid=${testId} @click=${onClick}>${content}</button>
+		<button type="button" class="${classes} hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-ring" data-testid=${testId} aria-controls="worktree-cleanup-actionable-list worktree-cleanup-troubleshooting-panel" @click=${onClick}>${content}</button>
 	` : html`
 		<div class="${classes}" data-testid=${testId}>${content}</div>
 	`;
 }
 
-function renderArchivedWorktreeRow(session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem, options: { selectable: boolean }) {
-	const key = archivedSessionWorktreeKey(item);
-	const selected = archivedSessionWorktreeSelection.has(key);
-	const disposition = archivedSessionWorktreeDisposition(item);
-	const reason = item.reason || item.reasonCategory || disposition;
-	const category = item.selectionCategories?.[0] || disposition;
-	const status = item.status || (disposition === "ready-to-clean" ? "removable" : "skipped");
-	const title = item.title || session.title || "Untitled archived session";
-	const repoLabel = item.repoDisplayName || item.repo || ".";
-	const path = item.path || session.worktreePath || "No worktree path recorded";
-	const checkboxLabel = `Select archived worktree ${title} ${shortArchivedSessionId(session.id)} repo ${repoLabel} path ${path}`;
+function renderWorktreeCleanupRow(item: WorktreeMaintenanceItem, options: { selectable: boolean }) {
+	const selected = worktreeInventorySelection.has(item.id);
+	const repoLabel = worktreeRepoLabel(item);
+	const title = worktreeItemTitle(item);
+	const checkboxLabel = `Select worktree ${title} repo ${repoLabel} branch ${item.branch || "none"} path ${item.path || "none"}`;
+	const ownerIds = (item.owners ?? []).map(owner => `${owner.type}:${owner.id}`).join(", ");
 	const body = html`
 		<div class="min-w-0 flex-1 flex flex-col gap-1">
 			<div class="flex flex-wrap items-center gap-1.5">
-				<span class="text-[10px] px-1.5 py-0.5 rounded ${archivedSessionWorktreeStatusClass(status, disposition)}">${archivedSessionWorktreeStatusLabel(status, disposition)}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded ${worktreeStatusClass(item)}">${worktreeStatusLabel(item)}</span>
 				<span class="font-medium text-foreground truncate max-w-full">${title}</span>
-				<span class="font-mono text-[10px] text-muted-foreground">${shortArchivedSessionId(session.id)}</span>
-				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${archivedWorktreeProjectLabel(session, item)}</span>
-				${item.sandboxed || session.sandboxed ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-background text-muted-foreground border border-border">sandboxed</span>` : ""}
+				<span class="font-mono text-[10px] text-muted-foreground">${shortWorktreeId(item.id)}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${worktreeProjectLabel(item)}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${repoLabel}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-background text-muted-foreground border border-border">${worktreeClassificationLabel(item.classification)}</span>
 			</div>
-			<div class="text-muted-foreground">${archivedSessionWorktreeSafeReason(item)}</div>
+			<div class="text-muted-foreground">${item.detail || worktreeReasonDetail(item.reason)}</div>
 			<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-muted-foreground">
 				<div class="break-all">repo: ${repoLabel}</div>
 				<div class="break-all">branch: ${item.branch || "none"}</div>
-				<div class="sm:col-span-2 break-all">worktree: ${path}</div>
+				<div class="sm:col-span-2 break-all">worktree: ${item.path || "No worktree path recorded"}</div>
 				${item.repoPath ? html`<div class="sm:col-span-2 break-all">repo path: ${item.repoPath}</div>` : ""}
+				<div class="sm:col-span-2 break-all">sources: ${worktreeSourcesLabel(item.sources)}</div>
+				${ownerIds ? html`<div class="sm:col-span-2 break-all">owners: ${ownerIds}</div>` : ""}
 			</div>
-			<div class="text-muted-foreground">${archivedWorktreeBranchOutcome(item)}</div>
+			<div class="text-muted-foreground">${worktreeBranchOutcome(item)}</div>
 			<details class="mt-1">
 				<summary class="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">Technical details</summary>
 				<div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
-					<div>status: ${status}</div>
-					<div>reason: ${reason}</div>
-					<div>disposition: ${disposition}</div>
-					<div>source: ${item.source || "session"}</div>
-					<div class="sm:col-span-2 break-all">key: ${key}</div>
-					${item.detail ? html`<div class="sm:col-span-2 break-all">detail: ${item.detail}</div>` : ""}
+					<div>classification: ${item.classification}</div>
+					<div>disposition: ${item.disposition}</div>
+					<div>reason: ${item.reason}</div>
+					<div>sources: ${item.sources.join(", ") || "none"}</div>
+					<div class="sm:col-span-2 break-all">item id: ${item.id}</div>
+					${ownerIds ? html`<div class="sm:col-span-2 break-all">owner ids: ${ownerIds}</div>` : ""}
 				</div>
 			</details>
 		</div>
 	`;
-	const attrs = {
-		key,
-		status,
-		reason,
-		category,
-	};
 	return options.selectable ? html`
 		<label
 			class="flex items-start gap-2 rounded border border-border bg-background/70 p-2 text-xs cursor-pointer"
-			data-testid="archived-worktree-row"
-			data-status=${attrs.status}
-			data-reason=${attrs.reason}
-			data-category=${attrs.category}
-			data-archived-worktree-key=${attrs.key}
-			data-archived-worktree-status=${attrs.status}
-			data-archived-worktree-reason=${attrs.reason}
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${item.id}
+			data-disposition=${item.disposition}
+			data-classification=${item.classification}
+			data-reason=${item.reason}
 		>
 			<input
 				type="checkbox"
 				class="mt-0.5 w-4 h-4 rounded border-input accent-primary shrink-0"
 				aria-label=${checkboxLabel}
 				.checked=${selected}
-				?disabled=${maintenanceLoading === "archivedWorktrees"}
-				@change=${(e: Event) => toggleArchivedSessionWorktreeSelection(key, (e.target as HTMLInputElement).checked)}
+				?disabled=${maintenanceLoading === "worktreeInventory"}
+				@change=${(e: Event) => toggleWorktreeInventorySelection(item.id, (e.target as HTMLInputElement).checked)}
 			/>
 			${body}
 		</label>
 	` : html`
 		<div
 			class="flex items-start gap-2 rounded border border-border bg-background/70 p-2 text-xs opacity-90"
-			data-testid="archived-worktree-row"
-			data-status=${attrs.status}
-			data-reason=${attrs.reason}
-			data-category=${attrs.category}
-			data-archived-worktree-key=${attrs.key}
-			data-archived-worktree-status=${attrs.status}
-			data-archived-worktree-reason=${attrs.reason}
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${item.id}
+			data-disposition=${item.disposition}
+			data-classification=${item.classification}
+			data-reason=${item.reason}
 		>
 			${body}
 		</div>
 	`;
 }
 
-type ArchivedWorktreeExample = {
+type WorktreeDiagnosticExample = {
 	key: string;
-	status: string;
-	disposition: ArchivedSessionWorktreeDisposition;
-	reason: string;
-	category: string;
-	title: string;
-	sessionId: string;
-	project: string;
-	repo?: string;
-	branch?: string;
+	groupKey: string;
+	label: string;
+	detail: string;
+	item?: WorktreeMaintenanceItem;
+	status?: "skipped" | "already-cleaned" | "failed";
 	path?: string;
-	detail?: string;
-	row?: { session: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem };
+	branch?: string;
+	repo?: string;
 };
 
-function archivedWorktreeExamplesByReason(): Array<{ reason: string; label: string; detail: string; count: number; examples: ArchivedWorktreeExample[] }> {
-	type GroupBucket = { label?: string; detail?: string; count?: number; examples: ArchivedWorktreeExample[]; keys: Set<string> };
-	const groups = new Map<string, GroupBucket>();
-	const bucketFor = (reason: string): GroupBucket => {
-		let bucket = groups.get(reason);
-		if (!bucket) {
-			bucket = { examples: [], keys: new Set() };
-			groups.set(reason, bucket);
-		}
-		return bucket;
-	};
-	const addRowExample = (session: ArchivedSessionWorktreeSession, item: ArchivedSessionWorktreeItem, preferredReason?: string, bucketMeta?: { label?: string; detail?: string; count?: number }): void => {
-		if (isArchivedSessionWorktreeActionable(item)) return;
-		const disposition = archivedSessionWorktreeDisposition(item);
-		const reason = preferredReason || item.reason || item.reasonCategory || disposition;
-		const key = archivedSessionWorktreeKey(item);
-		const bucket = bucketFor(reason);
-		if (bucketMeta?.label) bucket.label = bucketMeta.label;
-		if (bucketMeta?.detail) bucket.detail = bucketMeta.detail;
-		if (bucketMeta?.count !== undefined) bucket.count = Math.max(bucket.count ?? 0, bucketMeta.count);
-		if (bucket.keys.has(key)) return;
-		bucket.keys.add(key);
-		bucket.examples.push({
-			key,
-			status: item.status,
-			disposition,
-			reason,
-			category: item.selectionCategories?.[0] || disposition,
-			title: item.title || session.title || "Untitled archived session",
-			sessionId: session.id,
-			project: archivedWorktreeProjectLabel(session, item),
-			repo: item.repoDisplayName || item.repo,
-			branch: item.branch,
-			path: item.path,
-			detail: item.detail || archivedSessionWorktreeReasonDetail(reason),
-			row: { session, item },
-		});
-	};
-	for (const row of archivedSessionWorktreeRows()) addRowExample(row.session, row.item);
-	for (const group of archivedSessionWorktreeScan?.groups ?? []) {
-		const sampleItems = group.items ?? group.sampleItems ?? [];
-		if (sampleItems.length === 0) continue;
-		const disposition = group.disposition ?? sampleItems[0]?.disposition ?? archivedSessionWorktreeDisposition(sampleItems[0]);
-		if (disposition === "ready-to-clean") continue;
-		const reason = group.reason || group.reasonCategory || disposition;
-		const meta = { label: group.label, detail: group.detail || group.description, count: group.count };
-		for (const item of sampleItems) {
-			const session: ArchivedSessionWorktreeSession = {
-				id: item.sessionId,
-				title: item.title || "Untitled archived session",
-				archivedAt: item.archivedAt,
-				projectId: item.projectId,
-				projectName: item.projectName,
-				goalId: item.goalId,
-				teamGoalId: item.teamGoalId,
-				delegateOf: item.delegateOf,
-				parentSessionId: item.parentSessionId,
-				childKind: item.childKind,
-				sandboxed: item.sandboxed,
-				repoPath: item.repoPath,
-				worktreePath: item.path,
-				branch: item.branch,
-				worktrees: [item],
-			};
-			addRowExample(session, item, reason, meta);
-		}
-	}
-	for (const result of archivedSessionWorktreeCleanup?.results ?? []) {
-		if (result.status !== "failed" && result.status !== "skipped" && result.status !== "already-cleaned") continue;
-		const reason = result.status === "failed" ? "cleanup-failed" : (result.reason || result.status);
-		const bucket = bucketFor(reason);
-		if (bucket.keys.has(result.key)) continue;
-		bucket.keys.add(result.key);
-		bucket.examples.push({
-			key: result.key,
-			status: result.status,
-			disposition: result.status === "failed" ? "failed" : result.status === "already-cleaned" ? "already-cleaned" : "needs-attention",
-			reason,
-			category: result.status,
-			title: result.title || "Archived session worktree",
-			sessionId: result.sessionId,
-			project: "Cleanup result",
-			repo: result.repo,
-			branch: result.branch,
-			path: result.path,
-			detail: result.error || result.detail || result.reason,
-		});
-	}
-	return Array.from(groups.entries()).map(([reason, bucket]) => ({
-		reason,
-		label: bucket.label || archivedSessionWorktreeReasonLabel(reason),
-		detail: bucket.detail || archivedSessionWorktreeReasonDetail(reason),
-		count: bucket.count ?? bucket.examples.length,
-		examples: bucket.examples,
-	})).filter(group => group.examples.length > 0).sort((a, b) => a.label.localeCompare(b.label));
+function worktreeTroubleshootingGroupKey(item: WorktreeMaintenanceItem): string {
+	if (item.classification === "pool-entry") return "pool-entry";
+	if (item.classification === "already-cleaned" || item.disposition === "already-cleaned") return "already-cleaned";
+	if (item.classification === "scan-error" || item.disposition === "failed") return "scan-error";
+	return item.reason || item.classification;
 }
 
-function renderArchivedWorktreeExample(example: ArchivedWorktreeExample) {
-	if (example.row) return renderArchivedWorktreeRow(example.row.session, example.row.item, { selectable: false });
-	const groupStatus = example.status === "failed" ? "failed" : example.status === "already-cleaned" ? "already-cleaned" : "skipped";
+function worktreeDiagnosticsByGroup(): Array<{ key: string; label: string; detail: string; count: number; examples: WorktreeDiagnosticExample[] }> {
+	const buckets = new Map<string, WorktreeDiagnosticExample[]>();
+	const add = (example: WorktreeDiagnosticExample) => {
+		buckets.set(example.groupKey, [...(buckets.get(example.groupKey) || []), example]);
+	};
+	for (const item of worktreeInventoryReport?.items ?? []) {
+		if (isWorktreeInventoryActionable(item)) continue;
+		const groupKey = worktreeTroubleshootingGroupKey(item);
+		add({ key: item.id, groupKey, label: worktreeItemTitle(item), detail: item.detail || worktreeReasonDetail(groupKey), item });
+	}
+	for (const result of worktreeInventoryCleanup?.results ?? []) {
+		if (result.status !== "failed" && result.status !== "skipped" && result.status !== "already-cleaned") continue;
+		const groupKey = result.status === "failed" ? "cleanup-failed" : (result.reason || result.status);
+		add({
+			key: result.itemId || result.id || `${groupKey}:${result.path || "unknown"}`,
+			groupKey,
+			label: result.path || result.itemId || result.id || "Cleanup result",
+			detail: result.error || result.detail || result.reason || worktreeReasonDetail(groupKey),
+			status: result.status === "already-cleaned" ? "already-cleaned" : result.status === "failed" ? "failed" : "skipped",
+			path: result.path,
+			branch: result.branch,
+			repo: result.repo,
+		});
+	}
+	const order = (key: string): number => {
+		if (/referenced|protected|branch-referenced|primary-worktree/.test(key)) return 1;
+		if (key === "pool-entry" || /pool/.test(key)) return 2;
+		if (/filesystem|missing|sandbox|needs-attention|metadata/.test(key)) return 3;
+		if (key === "already-cleaned") return 4;
+		if (/scan-error|cleanup-failed|failed|error/.test(key)) return 5;
+		return 6;
+	};
+	return Array.from(buckets.entries()).map(([key, examples]) => ({
+		key,
+		label: worktreeReasonLabel(key),
+		detail: worktreeReasonDetail(key),
+		count: examples.length,
+		examples,
+	})).sort((a, b) => order(a.key) - order(b.key) || a.label.localeCompare(b.label));
+}
+
+function renderWorktreeDiagnosticExample(example: WorktreeDiagnosticExample) {
+	if (example.item) return renderWorktreeCleanupRow(example.item, { selectable: false });
+	const disposition = example.status === "failed" ? "failed" : example.status === "already-cleaned" ? "already-cleaned" : "needs-attention";
 	return html`
 		<div
 			class="rounded border border-border bg-background/70 p-2 text-xs"
-			data-testid="archived-worktree-row"
-			data-status=${groupStatus}
-			data-reason=${example.reason}
-			data-category=${example.category}
-			data-archived-worktree-key=${example.key}
-			data-archived-worktree-status=${groupStatus}
-			data-archived-worktree-reason=${example.reason}
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${example.key}
+			data-disposition=${disposition}
+			data-classification="cleanup-result"
+			data-reason=${example.groupKey}
 		>
 			<div class="flex flex-wrap items-center gap-1.5">
-				<span class="text-[10px] px-1.5 py-0.5 rounded ${archivedSessionWorktreeStatusClass(groupStatus, example.disposition)}">${archivedSessionWorktreeStatusLabel(groupStatus, example.disposition)}</span>
-				<span class="font-medium text-foreground">${example.title}</span>
-				<span class="font-mono text-[10px] text-muted-foreground">${shortArchivedSessionId(example.sessionId)}</span>
-				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${example.project}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded ${worktreeStatusClass(disposition)}">${example.status === "already-cleaned" ? "Already cleaned" : example.status === "failed" ? "Cleanup failed" : "Needs attention"}</span>
+				<span class="font-medium text-foreground">${example.label}</span>
 			</div>
-			<div class="mt-1 text-muted-foreground">${example.detail || archivedSessionWorktreeReasonDetail(example.reason)}</div>
+			<div class="mt-1 text-muted-foreground">${example.detail}</div>
 			<div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-muted-foreground">
 				${example.repo ? html`<div class="break-all">repo: ${example.repo}</div>` : ""}
 				${example.branch ? html`<div class="break-all">branch: ${example.branch}</div>` : ""}
@@ -4808,24 +4671,23 @@ function renderArchivedWorktreeExample(example: ArchivedWorktreeExample) {
 	`;
 }
 
-function renderArchivedWorktreeTroubleshooting() {
-	const groups = archivedWorktreeExamplesByReason();
+function renderWorktreeTroubleshooting() {
+	const groups = worktreeDiagnosticsByGroup();
 	if (groups.length === 0) return html``;
 	return html`
-		<div id="archived-worktree-troubleshooting-panel" tabindex="-1" class="flex flex-col gap-2 rounded-md border border-border bg-secondary/20 p-3" data-testid="archived-worktree-troubleshooting">
+		<div id="worktree-cleanup-troubleshooting-panel" tabindex="-1" class="flex flex-col gap-2 rounded-md border border-border bg-secondary/20 p-3" data-testid="worktree-cleanup-troubleshooting">
 			<p class="text-xs text-muted-foreground">These records are not cleanup actions. They are shown for troubleshooting and audit only.</p>
 			${groups.map(group => {
-				const id = sanitizeArchivedWorktreeGroupId(group.reason);
-				const expanded = archivedSessionWorktreeExpandedGroups.has(id);
+				const id = sanitizeWorktreeGroupId(group.key);
+				const expanded = worktreeInventoryExpandedGroups.has(id);
 				const visible = expanded ? group.examples : group.examples.slice(0, 5);
 				return html`
 					<section
-						id="archived-worktree-group-${id}"
+						id="worktree-cleanup-group-${id}"
 						tabindex="-1"
 						class="flex flex-col gap-1 rounded-md border border-border bg-background/60 p-2"
-						data-testid="archived-worktree-group-${id}"
-						data-reason=${group.reason}
-						data-category=${id}
+						data-testid="worktree-cleanup-group-${id}"
+						data-reason=${group.key}
 					>
 						<div class="flex flex-wrap items-start justify-between gap-2">
 							<div>
@@ -4836,19 +4698,19 @@ function renderArchivedWorktreeTroubleshooting() {
 								<button
 									type="button"
 									class="px-2 py-1 text-[11px] rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors"
-									data-testid="archived-worktree-show-all-${id}"
-									data-action="show-all-archived-worktree-examples"
-									data-reason=${group.reason}
+									data-testid="worktree-cleanup-show-all-${id}"
+									data-action="show-all-worktree-cleanup-examples"
+									data-reason=${group.key}
 									@click=${() => {
-										if (expanded) archivedSessionWorktreeExpandedGroups.delete(id);
-										else archivedSessionWorktreeExpandedGroups.add(id);
+										if (expanded) worktreeInventoryExpandedGroups.delete(id);
+										else worktreeInventoryExpandedGroups.add(id);
 										renderApp();
 									}}
 								>${expanded ? "Show first 5" : `Show all (${group.examples.length})`}</button>
 							` : ""}
 						</div>
 						<div class="flex flex-col gap-1 mt-1">
-							${visible.map(renderArchivedWorktreeExample)}
+							${visible.map(renderWorktreeDiagnosticExample)}
 						</div>
 					</section>
 				`;
@@ -4857,151 +4719,147 @@ function renderArchivedWorktreeTroubleshooting() {
 	`;
 }
 
-function renderArchivedWorktreeCleanupResult() {
-	const cleanup = archivedSessionWorktreeCleanup;
+function renderWorktreeCleanupResult() {
+	const cleanup = worktreeInventoryCleanup;
 	if (!cleanup) return html``;
 	const attention = cleanup.counts.failed + cleanup.counts.skipped;
 	return html`
-		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground mt-1" data-testid="archived-worktree-cleanup-result" aria-live=${attention > 0 ? "assertive" : "polite"}>
+		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground mt-1" data-testid="worktree-cleanup-result" aria-live=${attention > 0 ? "assertive" : "polite"}>
 			<div class="text-foreground font-medium">${attention > 0 ? "Cleanup finished with attention needed" : "Cleanup complete"}</div>
 			<div>
 				Cleaned: ${cleanup.counts.cleaned}, branches deleted: ${cleanup.counts.branchDeleted}, skipped: ${cleanup.counts.skipped}, already cleaned: ${cleanup.counts.alreadyCleaned}, failed: ${cleanup.counts.failed}.
 			</div>
-			${attention > 0 ? html`
-				<div class="mt-1 text-muted-foreground">Open skipped / ineligible items to inspect skipped or failed cleanup examples.</div>
-			` : ""}
+			${attention > 0 ? html`<div class="mt-1 text-muted-foreground">Open diagnostics to inspect skipped or failed cleanup examples.</div>` : ""}
 		</div>
 	`;
 }
 
-function renderArchivedSessionWorktreeMaintenance(scanBtnClass: string, actionBtnClass: string) {
-	const rows = archivedSessionWorktreeRows();
-	const actionableRows = rows.filter(({ item }) => isArchivedSessionWorktreeActionable(item));
-	const counts = archivedSessionWorktreeCounts(rows);
-	const selectedCount = selectedArchivedSessionWorktrees().length;
-	const hasScan = !!archivedSessionWorktreeScan;
-	const loading = maintenanceLoading === "archivedWorktrees";
-	const currentProjectRows = state.activeProjectId
-		? actionableRows.filter(({ item }) => item.projectId === state.activeProjectId)
-		: [];
-	const archivedOnlyRows = actionableRows.filter(({ session, item }) => isArchivedSessionOnlyWorktree(session, item));
-	const goalTeamDelegateRows = actionableRows.filter(({ session, item }) => isGoalTeamDelegateWorktree(session, item));
+function renderWorktreeCleanupMaintenance(scanBtnClass: string, actionBtnClass: string) {
+	const actionableRows = worktreeInventoryActionableRows();
+	const counts = worktreeInventoryReport?.counts ?? emptyWorktreeMaintenanceCounts();
+	const selectedCount = selectedWorktreeInventoryItemIds().length;
+	const hasScan = !!worktreeInventoryReport;
+	const loading = maintenanceLoading === "worktreeInventory";
+	const currentProjectRows = state.activeProjectId ? actionableRows.filter(item => item.projectId === state.activeProjectId) : [];
+	const archivedOwnedRows = actionableRows.filter(item => item.classification === "archived-owned" || item.sources.includes("archived-session"));
+	const gitOrphanRows = actionableRows.filter(item => item.classification === "unowned-git-worktree");
+	const diagnosticsGroups = worktreeDiagnosticsByGroup();
 	const cleanupHelper = !hasScan
-		? "Scan first to find safe candidates."
+		? "Scan first to find safe cleanup candidates."
 		: counts.readyToClean === 0
 			? "Cleanup is disabled because there are 0 safe candidates."
 			: selectedCount === 0
-				? "Select at least one safe candidate."
-				: "Cleanup removes only git worktrees and eligible branches; archived sessions stay visible.";
+				? "Select at least one safe candidate. Bobbit will rescan before deleting anything."
+				: "Bobbit will rescan before deleting and remove only server-classified safe candidates; records and transcripts are preserved.";
 	const scanLabel = loading && !hasScan ? "Scanning..." : hasScan ? "Rescan" : "Scan";
+	const scannedProjects = worktreeInventoryReport?.scanned?.projects ?? worktreeInventoryReport?.projectCount;
+	const scannedRepos = worktreeInventoryReport?.scanned?.repos ?? worktreeInventoryReport?.repoCount;
+	const scannedRoots = worktreeInventoryReport?.scanned?.worktreeRoots ?? worktreeInventoryReport?.worktreeRootCount;
+	const metadataParts = [
+		scannedProjects !== undefined ? `${scannedProjects} projects` : "known projects",
+		scannedRepos !== undefined ? `${scannedRepos} repos` : "component repos",
+		scannedRoots !== undefined ? `${scannedRoots} worktree-root directories` : "worktree-root directories",
+	];
 	return html`
-		<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="archived-session-worktrees" data-testid="archived-worktree-maintenance" role="region" aria-labelledby="archived-worktree-maintenance-title">
+		<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="worktree-cleanup" data-testid="worktree-cleanup-maintenance" role="region" aria-labelledby="worktree-cleanup-title">
 			<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
 				<div>
-					<h3 id="archived-worktree-maintenance-title" class="text-sm font-semibold text-foreground">Archived Session Worktrees</h3>
+					<h3 id="worktree-cleanup-title" class="text-sm font-semibold text-foreground" data-testid="worktree-cleanup-title">Worktree Cleanup</h3>
 					<p class="text-xs text-muted-foreground">
-						Reclaim git worktrees from archived sessions while keeping transcripts, proposals, and archive visibility intact.
+						Reclaim safe Bobbit worktrees from archived sessions, orphaned Git metadata, and known worktree roots while surfacing pool entries and protected paths for troubleshooting.
 					</p>
 				</div>
 				<div class="flex flex-wrap items-center gap-2">
 					<button
 						class="${scanBtnClass}"
 						?disabled=${loading}
-						@click=${() => scanArchivedSessionWorktrees()}
-						data-testid="archived-worktree-scan"
-						data-action="scan-archived-session-worktrees"
+						@click=${() => scanWorktreeInventory()}
+						data-testid="worktree-cleanup-scan"
+						data-action="scan-worktrees"
 					>${scanLabel}</button>
 					<button
 						class="${actionBtnClass}"
 						?disabled=${loading || !hasScan || counts.readyToClean === 0}
-						@click=${() => cleanupArchivedSessionWorktrees("all")}
-						data-testid="archived-worktree-clean-all"
-						data-action="cleanup-all-archived-session-worktrees"
+						@click=${() => cleanupWorktreeInventory("all-safe")}
+						data-testid="worktree-cleanup-clean-all"
+						data-action="cleanup-all-worktrees"
 					>${loading && hasScan ? "Cleaning..." : `Clean all safe candidates${counts.readyToClean > 0 ? ` (${counts.readyToClean})` : ""}`}</button>
 				</div>
 			</div>
 
 			<div aria-live="polite" class="flex flex-col gap-2">
 				${hasScan ? html`
-					<div class="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-1" aria-controls="archived-worktree-actionable-list archived-worktree-troubleshooting-panel">
-						${renderArchivedWorktreeSummaryChip("Ready to clean", counts.readyToClean, "archived-worktree-summary-ready", counts.readyToClean > 0 ? () => focusArchivedWorktreeElement("archived-worktree-actionable-list") : undefined)}
-						${renderArchivedWorktreeSummaryChip("Selected", selectedCount, "archived-worktree-summary-selected")}
-						${renderArchivedWorktreeSummaryChip("Already cleaned", counts.alreadyCleaned, "archived-worktree-summary-already-cleaned", counts.alreadyCleaned > 0 ? () => showArchivedWorktreeTroubleshootingAndFocus("already-cleaned") : undefined)}
-						${renderArchivedWorktreeSummaryChip("Needs attention", counts.needsAttention, "archived-worktree-summary-needs-attention", counts.needsAttention > 0 ? () => showArchivedWorktreeTroubleshootingAndFocus(archivedWorktreeExamplesByReason().find(group => group.reason !== "already-cleaned")?.reason) : undefined)}
+					<div class="grid grid-cols-2 lg:grid-cols-5 gap-2 mt-1" aria-controls="worktree-cleanup-actionable-list worktree-cleanup-troubleshooting-panel">
+						${renderWorktreeSummaryChip("Ready to clean", counts.readyToClean, "worktree-cleanup-summary-ready", counts.readyToClean > 0 ? () => focusWorktreeCleanupElement("worktree-cleanup-actionable-list") : undefined)}
+						${renderWorktreeSummaryChip("Selected", selectedCount, "worktree-cleanup-summary-selected")}
+						${renderWorktreeSummaryChip("Protected/in use", counts.protectedInUse, "worktree-cleanup-summary-protected", counts.protectedInUse > 0 ? () => showWorktreeDiagnosticsAndFocus(diagnosticsGroups.find(group => /referenced|protected|branch-referenced|primary-worktree/.test(group.key))?.key) : undefined)}
+						${renderWorktreeSummaryChip("Already cleaned", counts.alreadyCleaned, "worktree-cleanup-summary-already-cleaned", counts.alreadyCleaned > 0 ? () => showWorktreeDiagnosticsAndFocus("already-cleaned") : undefined)}
+						${renderWorktreeSummaryChip("Needs attention", counts.needsAttention, "worktree-cleanup-summary-needs-attention", counts.needsAttention > 0 ? () => showWorktreeDiagnosticsAndFocus(diagnosticsGroups.find(group => !/referenced|protected|already-cleaned/.test(group.key))?.key) : undefined)}
 					</div>
-					<p class="text-[11px] text-muted-foreground" data-testid="archived-worktree-metadata-count">
-						Scanned ${archivedSessionWorktreeScan?.counts.archivedSessions ?? 0} archived sessions. Has worktree metadata: ${archivedSessionWorktreeScan?.counts.sessionsWithWorktrees ?? 0} — historical records, not necessarily removable.
+					<p class="text-[11px] text-muted-foreground" data-testid="worktree-cleanup-metadata-count">
+						Scanned ${metadataParts.join(", ")}. Last scanned ${formatTimestamp(worktreeInventoryReport?.generatedAt ?? null)}. Pool entries: ${counts.poolEntries}. Default selected: ${counts.defaultSelected}.
 					</p>
 				` : ""}
 
-				${renderArchivedWorktreeCleanupResult()}
+				${renderWorktreeCleanupResult()}
 
-				${archivedSessionWorktreeError ? html`
-					<p class="text-xs text-destructive mt-1" aria-live="assertive">${archivedSessionWorktreeError}</p>
+				${worktreeInventoryError ? html`
+					<p class="text-xs text-destructive mt-1" data-testid="worktree-cleanup-error" aria-live="assertive">${worktreeInventoryError}</p>
 				` : ""}
 
-				<p class="text-xs text-muted-foreground" data-testid="archived-worktree-cleanup-helper">${cleanupHelper}</p>
+				<p class="text-xs text-muted-foreground" data-testid="worktree-cleanup-helper">${cleanupHelper}</p>
 
 				${hasScan && counts.readyToClean === 0 ? html`
-					<div class="rounded-md border border-border bg-secondary/20 p-3 text-xs" data-testid="archived-worktree-empty-state">
-						<h4 class="text-sm font-semibold text-foreground">Nothing safe to clean right now</h4>
-						<p class="mt-1 text-muted-foreground">Archived sessions were scanned, but no removable host worktrees are currently safe to delete.</p>
-						<p class="mt-1 text-muted-foreground">Common reasons: the worktree is already gone, the archived record has no host worktree path, the path belongs to a sandbox/container, or another live session, goal, team member, or staff agent still references it.</p>
+					<div class="rounded-md border border-border bg-secondary/20 p-3 text-xs" data-testid="worktree-cleanup-empty-state">
+						<h4 class="text-sm font-semibold text-foreground">${counts.total === counts.alreadyCleaned && counts.total > 0 ? "Worktree inventory is clean" : "Nothing safe to clean right now"}</h4>
+						<p class="mt-1 text-muted-foreground">Bobbit scanned known sessions, archives, goals, teams, delegates, staff, pool entries, Git worktree metadata, and worktree-root directories. No server-classified safe worktree cleanup candidates were found.</p>
 					</div>
 				` : ""}
 
 				${hasScan && counts.readyToClean > 0 ? html`
-					<div id="archived-worktree-actionable-list" tabindex="-1" class="flex flex-col gap-2 mt-1">
+					<div id="worktree-cleanup-actionable-list" tabindex="-1" class="flex flex-col gap-2 mt-1" data-testid="worktree-cleanup-actionable-list">
 						<div class="flex flex-wrap items-center gap-2">
-							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="archived-worktree-select-all-removable" data-action="select-all-removable-archived-worktrees" @click=${() => setArchivedSessionWorktreeSelection(actionableRows)}>Select all removable (${actionableRows.length})</button>
-							${archivedOnlyRows.length > 0 ? html`<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="archived-worktree-select-archived-sessions" data-action="select-archived-session-worktrees-only" @click=${() => setArchivedSessionWorktreeSelection(archivedOnlyRows)}>Archived sessions only (${archivedOnlyRows.length})</button>` : ""}
-							${currentProjectRows.length > 0 ? html`<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="archived-worktree-select-current-project" data-action="select-current-project-archived-worktrees" @click=${() => setArchivedSessionWorktreeSelection(currentProjectRows)}>Current project (${currentProjectRows.length})</button>` : ""}
-							${goalTeamDelegateRows.length > 0 ? html`<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="archived-worktree-select-goal-team-delegate" data-action="select-goal-team-delegate-archived-worktrees" @click=${() => setArchivedSessionWorktreeSelection(goalTeamDelegateRows)}>Goal/team/delegate worktrees (${goalTeamDelegateRows.length})</button>` : ""}
-							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${selectedCount === 0} data-testid="archived-worktree-clear-selection" data-action="clear-archived-worktree-selection" @click=${() => setArchivedSessionWorktreeSelection([])}>Clear selection</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="worktree-cleanup-select-all-safe" data-action="select-all-safe-worktrees" @click=${() => setWorktreeInventorySelection(actionableRows)}>Select all safe (${actionableRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${currentProjectRows.length === 0} data-testid="worktree-cleanup-select-current-project" data-action="select-current-project-worktrees" @click=${() => setWorktreeInventorySelection(currentProjectRows)}>Current project (${currentProjectRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${archivedOwnedRows.length === 0} data-testid="worktree-cleanup-select-archived-owned" data-action="select-archived-owned-worktrees" @click=${() => setWorktreeInventorySelection(archivedOwnedRows)}>Archived-owned (${archivedOwnedRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${gitOrphanRows.length === 0} data-testid="worktree-cleanup-select-git-orphan" data-action="select-git-orphan-worktrees" @click=${() => setWorktreeInventorySelection(gitOrphanRows)}>Git orphan (${gitOrphanRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${selectedCount === 0} data-testid="worktree-cleanup-clear-selection" data-action="clear-worktree-cleanup-selection" @click=${() => setWorktreeInventorySelection([])}>Clear selection</button>
 						</div>
 						<div class="flex flex-col gap-1 max-h-96 overflow-y-auto">
-							${actionableRows.map(({ session, item }) => renderArchivedWorktreeRow(session, item, { selectable: true }))}
+							${actionableRows.map(item => renderWorktreeCleanupRow(item, { selectable: true }))}
 						</div>
 						<div class="flex items-center gap-2">
 							<button
 								class="${actionBtnClass}"
 								?disabled=${loading || selectedCount === 0}
-								@click=${() => cleanupArchivedSessionWorktrees("selected")}
-								data-testid="archived-worktree-clean-selected"
-								data-action="cleanup-archived-session-worktrees"
+								@click=${() => cleanupWorktreeInventory("selected")}
+								data-testid="worktree-cleanup-clean-selected"
+								data-action="cleanup-selected-worktrees"
 							>${loading ? "Cleaning..." : `Clean selected (${selectedCount})`}</button>
 							<span class="text-xs text-muted-foreground">${selectedCount} selected</span>
 						</div>
 					</div>
-				` : hasScan ? html`
-					<button
-						type="button"
-						class="self-start px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors"
-						data-testid="archived-worktree-clean-selected"
-						data-action="cleanup-archived-session-worktrees"
-						?disabled=${true}
-					>Clean selected (0)</button>
 				` : html`
 					<button
 						type="button"
 						class="self-start px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
-						data-testid="archived-worktree-clean-selected"
-						data-action="cleanup-archived-session-worktrees"
+						data-testid="worktree-cleanup-clean-selected"
+						data-action="cleanup-selected-worktrees"
 						?disabled=${true}
-					>Clean selected</button>
+					>Clean selected${hasScan ? " (0)" : ""}</button>
 				`}
 
-				${hasScan && archivedWorktreeExamplesByReason().length > 0 ? html`
+				${hasScan && diagnosticsGroups.length > 0 ? html`
 					<div class="flex flex-col gap-2 mt-1">
 						<button
 							type="button"
 							class="self-start px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors"
-							aria-expanded=${archivedSessionWorktreeShowSkipped ? "true" : "false"}
-							aria-controls="archived-worktree-troubleshooting-panel"
-							data-testid="archived-worktree-show-skipped"
-							@click=${() => { archivedSessionWorktreeShowSkipped = !archivedSessionWorktreeShowSkipped; renderApp(); }}
-						>${archivedSessionWorktreeShowSkipped ? "Hide skipped / ineligible items" : counts.readyToClean === 0 ? "Show why not removable" : "Show skipped / ineligible items"}</button>
-						${archivedSessionWorktreeShowSkipped ? renderArchivedWorktreeTroubleshooting() : ""}
+							aria-expanded=${worktreeInventoryShowDiagnostics ? "true" : "false"}
+							aria-controls="worktree-cleanup-troubleshooting-panel"
+							data-testid="worktree-cleanup-show-diagnostics"
+							@click=${() => { worktreeInventoryShowDiagnostics = !worktreeInventoryShowDiagnostics; renderApp(); }}
+						>${worktreeInventoryShowDiagnostics ? "Hide diagnostics" : counts.readyToClean === 0 ? "Show why not removable" : "Show protected, already cleaned, and needs-attention diagnostics"}</button>
+						${worktreeInventoryShowDiagnostics ? renderWorktreeTroubleshooting() : ""}
 					</div>
 				` : ""}
 			</div>
@@ -5511,40 +5369,8 @@ function renderMaintenanceTab() {
 				</div>
 			</div>
 
-			<!-- Orphaned Worktrees -->
-			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
-				<h3 class="text-sm font-semibold text-foreground">Orphaned Worktrees</h3>
-				<p class="text-xs text-muted-foreground">
-					Session worktrees with no matching active session.
-				</p>
-				${maintenanceWorktrees !== null && maintenanceWorktrees.length > 0 ? html`
-					<div class="flex flex-col gap-1 mt-1 max-h-40 overflow-y-auto">
-						${maintenanceWorktrees.map(wt => html`
-							<div class="flex items-center gap-2 text-xs font-mono text-muted-foreground px-2 py-1 rounded bg-secondary/30">
-								<span class="truncate flex-1">${wt.path}</span>
-								<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground shrink-0">${wt.branch}</span>
-							</div>
-						`)}
-					</div>
-				` : maintenanceWorktrees !== null ? html`
-					<p class="text-xs text-muted-foreground italic mt-1">No orphaned worktrees found.</p>
-				` : ""}
-				<div class="flex items-center gap-2 mt-2">
-					<button
-						class="${scanBtnClass}"
-						?disabled=${maintenanceLoading === "worktrees"}
-						@click=${scanWorktrees}
-					>${maintenanceLoading === "worktrees" && maintenanceWorktrees === null ? "Scanning..." : "Scan"}</button>
-					<button
-						class="${actionBtnClass}"
-						?disabled=${maintenanceLoading === "worktrees" || !maintenanceWorktrees || maintenanceWorktrees.length === 0}
-						@click=${cleanupWorktrees}
-					>${maintenanceLoading === "worktrees" && maintenanceWorktrees !== null ? "Cleaning..." : `Clean Up${maintenanceWorktrees && maintenanceWorktrees.length > 0 ? ` (${maintenanceWorktrees.length})` : ""}`}</button>
-				</div>
-			</div>
-
-			<!-- Archived Session Worktrees -->
-			${renderArchivedSessionWorktreeMaintenance(scanBtnClass, actionBtnClass)}
+			<!-- Worktree Cleanup -->
+			${renderWorktreeCleanupMaintenance(scanBtnClass, actionBtnClass)}
 
 			<!-- Orphaned Sessions -->
 			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
