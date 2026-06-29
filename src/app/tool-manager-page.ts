@@ -797,11 +797,14 @@ function renderMcpSection(): TemplateResult {
 													const packagePolicyKey = mcpPackagePolicyKey(sub, ops, serverPolicyKey);
 													const packagePolicy = packagePolicyKey ? groupPolicies[packagePolicyKey] || "" : "";
 													const packageEmptyPolicyLabel = inheritedMcpPolicyLabel([serverPolicyKey, "mcp__"]);
+													const toolPolicyKey = packagePolicyKey ?? serverPolicyKey;
+													const toolPolicy = packagePolicyKey ? packagePolicy : serverPolicy;
+													const toolEmptyPolicyLabel = packagePolicyKey ? packageEmptyPolicyLabel : serverEmptyPolicyLabel;
 													const toolKey = `${server.name}::${sub}`;
 													const toolExpanded = expandedMcpTools.has(toolKey);
 													const toolLabel = hasSub ? sub : server.name;
 													return html`
-														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${packagePolicyKey ?? serverPolicyKey}>
+														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${toolPolicyKey}>
 															<div class="tool-group-header"
 																data-testid="mcp-tool-toggle"
 																tabindex="0" role="button"
@@ -811,10 +814,8 @@ function renderMcpSection(): TemplateResult {
 																<span style="display:inline-flex;transform:rotate(${toolExpanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
 																<span class="tool-group-name">${toolLabel}</span>
 																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
-																${hasSub && packagePolicyKey ? html`
-																	<span class="tool-group-policy-label">Package Policy:</span>
-																	${renderMcpPolicySelect(packagePolicyKey, packagePolicy, "mcp-tool-policy", packageEmptyPolicyLabel)}
-																` : html`<span class="tools-note">Uses server policy</span>`}
+																<span class="tool-group-policy-label">${hasSub ? "Package" : "Tool"} Policy:</span>
+																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel)}
 															</div>
 															${toolExpanded
 																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
