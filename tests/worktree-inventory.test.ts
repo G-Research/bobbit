@@ -74,6 +74,30 @@ describe("worktree inventory classifier", () => {
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 
+	it("preserves archived delegate shared-worktree disposition through the legacy adapter", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const wt = path.join(root, "repo-wt", "delegate-shared");
+			const archived = {
+				key: "delegate1:.:x", sessionId: "delegate1", title: "Archived delegate", projectId: "p1", projectName: "Project", repo: ".", repoPath: repo, repoDisplayName: "repo", path: wt, branch: undefined, source: "sessionWorktree",
+				pathExists: false, gitWorktreeMetadataExists: false, localBranchExists: false, status: "skipped", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree.", willDeleteBranch: false,
+				disposition: "ineligible", reasonCategory: "shared-delegate", actionable: false, selectable: false, defaultSelected: false, selectionCategories: ["delegate-session", "single-repo"],
+			};
+			const service = makeService(makeCtx(repo), `worktree ${repo}\nbranch refs/heads/master\n`, [archived]);
+			const report = await service.scan();
+			const inventoryItem = report.items.find(candidate => candidate.legacy?.archivedSession?.sessionId === "delegate1")!;
+			assert.equal(inventoryItem.classification, "protected-in-use");
+			assert.equal(inventoryItem.reason, "delegate-shared-worktree");
+			const legacy = await service.legacyArchivedSessionWorktrees(true);
+			const item = legacy.items.find(candidate => candidate.sessionId === "delegate1")!;
+			assert.equal(item.status, "skipped");
+			assert.equal(item.reason, "delegate-shared-worktree");
+			assert.equal(item.disposition, "ineligible");
+			assert.equal(item.reasonCategory, "shared-delegate");
+			assert.equal(item.actionable, false);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
 	it("reports unowned session git worktrees through the legacy adapter", async () => {
 		const { root, repo } = tmpProject();
 		try {

@@ -52,6 +52,7 @@ export type WorktreeInventoryReason =
 	| "git-worktree-metadata-missing"
 	| "filesystem-only-needs-attention"
 	| "sandbox-container-path"
+	| "delegate-shared-worktree"
 	| "primary-worktree"
 	| "missing-repo-path"
 	| "missing-worktree-path"
@@ -533,6 +534,7 @@ export class WorktreeInventoryService {
 			case "missing-worktree-path": return "no-worktree-path";
 			case "missing-repo-path": return "missing-repo-path";
 			case "sandbox-container-path": return "sandbox-container-path";
+			case "delegate-shared-worktree": return "delegate-shared-worktree";
 			case "filesystem-only-needs-attention": return "stale-worktree-directory";
 			case "referenced-by-live-goal": return "referenced-by-live-goal";
 			case "referenced-by-live-team": return "referenced-by-live-team";
@@ -840,6 +842,7 @@ export class WorktreeInventoryService {
 			"no-worktree-path": "missing-worktree-path",
 			"missing-repo-path": "missing-repo-path",
 			"sandbox-container-path": "sandbox-container-path",
+			"delegate-shared-worktree": "delegate-shared-worktree",
 			"stale-worktree-directory": "filesystem-only-needs-attention",
 			"referenced-by-live-session": "referenced-by-live-session",
 			"referenced-by-live-goal": "referenced-by-live-goal",
