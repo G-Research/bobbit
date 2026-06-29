@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse, stringify } from "yaml";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
@@ -70,15 +71,15 @@ function writeSseRpcResult(res: http.ServerResponse, id: unknown, result: Record
 
 function gatewayTools(): Array<Record<string, unknown>> {
 	return [
-		gatewayTool("confluence__confluence_get_page", "Confluence", "Confluence docs tools", "Get a Confluence page"),
-		gatewayTool("jira__jira_search", "Jira", "Jira issue tools", "Search Jira issues"),
-		gatewayTool("jira__jira_get_issue", "Jira", "Jira issue tools", "Get a Jira issue"),
-		gatewayTool("jira-readonly__jira_search", "Jira readonly", "Read-only Jira tools", "Search Jira issues read-only"),
+		gatewayTool("confluence_get_page", "confluence", "Confluence", "Confluence docs tools", "Get a Confluence page"),
+		gatewayTool("jira_search", "jira", "Jira", "Jira issue tools", "Search Jira issues"),
+		gatewayTool("jira_get_issue", "jira", "Jira", "Jira issue tools", "Get a Jira issue"),
+		gatewayTool("jira_search", "jira-readonly", "Jira readonly", "Read-only Jira tools", "Search Jira issues read-only"),
 	];
 }
 
-function gatewayTool(name: string, providerLabel: string, providerDescription: string, description: string): Record<string, unknown> {
-	return { name, providerLabel, providerDescription, description, inputSchema: { type: "object", properties: {} } };
+function gatewayTool(name: string, provider: string, providerLabel: string, providerDescription: string, description: string): Record<string, unknown> {
+	return { name, provider, providerLabel, providerDescription, description, inputSchema: { type: "object", properties: {} } };
 }
 
 function findGatewayServer(servers: any[], subNamespace = "jira"): any | undefined {
@@ -113,6 +114,17 @@ async function browseRemoteGatewayPack(sourceId: string): Promise<any> {
 	const pack = packs.find((p: any) => p.gatewayProviderId === "jira");
 	expect(pack).toBeTruthy();
 	return pack;
+}
+
+function removeGatewayOperationMetadata(packRoot: string, listName: string): void {
+	const metaPath = path.join(packRoot, ".pack-meta.yaml");
+	const meta = parse(fs.readFileSync(metaPath, "utf-8")) as Record<string, unknown>;
+	delete meta.gatewayOperations;
+	fs.writeFileSync(metaPath, stringify(meta), "utf-8");
+	const mcpPath = path.join(packRoot, "mcp", `${listName}.yaml`);
+	const mcp = parse(fs.readFileSync(mcpPath, "utf-8")) as Record<string, unknown>;
+	delete mcp.operations;
+	fs.writeFileSync(mcpPath, stringify(mcp), "utf-8");
 }
 
 function writeAuthoredMcpPack(repo: string): void {
@@ -233,6 +245,7 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(gr?.tools).toEqual(expect.arrayContaining([
 				expect.objectContaining({ name: "mcp__gr__jira__jira_get_issue", subNamespace: "jira", op: "jira_get_issue" }),
 			]));
+			expect(gr?.tools?.map((tool: any) => tool.name).sort()).toEqual(["mcp__gr__jira__jira_get_issue"]);
 			expect(gr?.tools?.some((tool: any) => tool.name === "mcp__gr__jira__jira_search")).toBe(false);
 
 			const disable = await apiFetch("/api/marketplace/pack-activation", {
@@ -266,6 +279,49 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(del.status).toBe(204);
 			mcp = await apiFetch("/api/mcp-servers");
 			expect(hasGatewaySubNamespace(await mcp.json())).toBe(false);
+		} finally {
+			await cleanup(sourceId, undefined, packName ? [packName] : []);
+			await gatewaySource.close();
+		}
+	});
+
+	test("gateway activation falls back to connected runtime operations when installed metadata is missing", async ({ gateway }) => {
+		await gateway.sessionManager.initMcp(gateway.bobbitDir);
+		const gatewaySource = await startGateway();
+		let sourceId: string | undefined;
+		let packName: string | undefined;
+		try {
+			const add = await apiFetch("/api/marketplace/sources", {
+				method: "POST",
+				body: JSON.stringify({ url: gatewaySource.url, type: "mcp-gateway" }),
+			});
+			expect(add.status).toBe(201);
+			sourceId = (await add.json()).source.id;
+			const pack = await browseRemoteGatewayPack(sourceId!);
+			packName = pack.name;
+
+			const install = await apiFetch("/api/marketplace/install", {
+				method: "POST",
+				body: JSON.stringify({ sourceId, dirName: pack.dirName, scope: "server" }),
+			});
+			expect(install.status).toBe(201);
+			expect((await install.json()).mcpReload?.status).toBeTruthy();
+
+			const packRoot = path.join(gateway.bobbitDir, ".bobbit", "config", "market-packs", pack.name);
+			removeGatewayOperationMetadata(packRoot, "jira");
+
+			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(pack.name)}`);
+			expect(activation.status).toBe(200);
+			const activationBody = await activation.json();
+			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: "jira", contributionId: expect.stringMatching(/^mcp:[a-f0-9]{16}$/), totalOperationCount: 2, selectedOperationCount: 2 });
+			expect(activationBody.catalogue.mcp[0].operations.map((op: any) => op.name).sort()).toEqual(["jira_get_issue", "jira_search"]);
+
+			const disable = await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "server", packName: pack.name, disabled: { mcpOperations: { [activationBody.catalogue.mcp[0].contributionId]: ["retired_op"] } } }),
+			});
+			expect(disable.status).toBe(200);
+			expect((await disable.json()).catalogue.mcp[0].staleDisabledOperations).toEqual(["retired_op"]);
 		} finally {
 			await cleanup(sourceId, undefined, packName ? [packName] : []);
 			await gatewaySource.close();

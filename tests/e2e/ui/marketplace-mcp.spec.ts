@@ -65,7 +65,7 @@ function providerPack(provider: Provider) {
 async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSource: unknown[]; activation: unknown[] } }> {
 	let sourceAdded = false;
 	let installed = false;
-	let disabled: Disabled = { mcp: [] };
+	let disabled: Disabled = { mcp: [], mcpOperations: { [JIRA_REF]: ["retired_op"] } };
 	const posts = { addSource: [] as unknown[], activation: [] as unknown[] };
 
 	const source = (): Source => ({
@@ -107,7 +107,7 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 				transport: "http",
 				status: disabled.mcp?.includes(JIRA_REF) ? "disabled" : "active-owner",
 				totalOperationCount: jiraProvider().ops.length,
-				selectedOperationCount: jiraProvider().ops.length - (disabled.mcpOperations?.[JIRA_REF]?.length ?? 0),
+				selectedOperationCount: jiraProvider().ops.filter((op) => !(disabled.mcpOperations?.[JIRA_REF] ?? []).includes(op.op)).length,
 				operations: jiraProvider().ops.map((op) => ({
 					name: op.op,
 					description: op.description,
@@ -170,7 +170,7 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 	await page.route(/\/api\/marketplace\/install(?:\?.*)?$/, async (route) => {
 		if (route.request().method() !== "POST") return route.fallback();
 		installed = true;
-		disabled = { mcp: [] };
+		disabled = { mcp: [], mcpOperations: { [JIRA_REF]: ["retired_op"] } };
 		return fulfillJson(route, { installed: installedPack() }, 201);
 	});
 	await page.route(/\/api\/marketplace\/pack-activation\/mcp-operation(?:\?.*)?$/, async (route) => {
@@ -263,6 +263,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	const toggle = installedCard.locator(`[data-testid="market-toggle-mcp-${JIRA_REF}"]`);
 	await expect(toggle).toBeChecked({ timeout: 15_000 });
 	await expect(installedCard.locator(`[data-testid="market-mcp-status-${JIRA_REF}"]`)).toContainText("Connected", { timeout: 15_000 });
+	await expect(installedCard.locator('[data-testid="market-operation-row-retired_op"]')).toHaveCount(1, { timeout: 15_000 });
 	await expect(installedCard.locator('[data-testid="market-toggle-operation-jira_search"]')).toBeChecked({ timeout: 15_000 });
 	await installedCard.locator('[data-testid="market-toggle-operation-jira_search"]').click();
 	await expect.poll(() => posts.activation.some((body) => JSON.stringify(body).includes('"operationName":"jira_search"') && JSON.stringify(body).includes('"disabled":true')), { timeout: 10_000 }).toBe(true);

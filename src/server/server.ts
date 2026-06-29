@@ -472,7 +472,7 @@ import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.j
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
-import type { MarketplaceMcpResolver, McpReloadResult, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -529,6 +529,43 @@ function safeString(value: unknown): string | undefined {
 
 function stableGatewayContributionId(fields: Record<string, unknown>): string {
 	return `mcp:${createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 16)}`;
+}
+
+type McpOperationMetadataEntry = { name: string; label?: string; description?: string; inputSchema?: unknown };
+
+function normaliseMcpOperationMetadata(raw: unknown): McpOperationMetadataEntry[] {
+	if (!Array.isArray(raw)) return [];
+	const out: McpOperationMetadataEntry[] = [];
+	const seen = new Set<string>();
+	for (const item of raw) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+		const obj = item as Record<string, unknown>;
+		const name = safeString(obj.name ?? obj.operation ?? obj.id);
+		if (!name || seen.has(name)) continue;
+		seen.add(name);
+		out.push({
+			name,
+			...(safeString(obj.label ?? obj.title ?? obj.displayName) ? { label: safeString(obj.label ?? obj.title ?? obj.displayName) } : {}),
+			...(safeString(obj.description) ? { description: safeString(obj.description) } : {}),
+			...(obj.inputSchema !== undefined ? { inputSchema: obj.inputSchema } : {}),
+		});
+	}
+	return out;
+}
+
+function operationMetadataForMcpContribution(
+	mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown },
+	metaDetails: Record<string, unknown>,
+): McpOperationMetadataEntry[] {
+	const gatewayOps = metaDetails.gatewayOperations;
+	if (gatewayOps && typeof gatewayOps === "object" && !Array.isArray(gatewayOps)) {
+		const normalised = normaliseMcpOperationMetadata((gatewayOps as Record<string, unknown>)[mcp.listName]);
+		if (normalised.length > 0) return normalised;
+	}
+	const fromContribution = normaliseMcpOperationMetadata(mcp.operationMetadata);
+	if (fromContribution.length > 0) return fromContribution;
+	const raw = mcp.sourceFile ? readYamlMapping(mcp.sourceFile)?.operations : undefined;
+	return normaliseMcpOperationMetadata(raw);
 }
 
 function activationMcpContributionId(
@@ -1830,11 +1867,17 @@ export function createGateway(config: GatewayConfig) {
 					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
 					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
 					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
+					const disabledOpsSet = new Set(disabledOps);
+					const operationMetadata = operationMetadataForMcpContribution(mcp, metaDetails);
+					const selectedOperations = metaDetails.sourceType === "mcp-gateway" && operationMetadata.length > 0
+						? operationMetadata.map((op) => op.name).filter((name) => !disabledOpsSet.has(name))
+						: (mcp.selectedOperations ? mcp.selectedOperations.filter((name) => !disabledOpsSet.has(name)) : undefined);
 					contributions.push({
 						listName: mcp.listName,
 						serverName: mcp.serverName,
 						...(metaDetails.sourceType === "mcp-gateway" ? { runtimeServerKey: gatewayMcpRuntimeKey(entry, mcp, metaDetails), contributionId } : (mcp.runtimeServerKey ? { runtimeServerKey: mcp.runtimeServerKey } : {})),
 						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
+						...(selectedOperations !== undefined ? { selectedOperations } : {}),
 						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
 						config: mcp.config,
 						origin: {
@@ -8091,25 +8134,6 @@ async function handleApiRoute(
 			disabledByActivation: boolean;
 			inputSchema?: unknown;
 		};
-		const normaliseOperationMetadata = (raw: unknown): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> => {
-			if (!Array.isArray(raw)) return [];
-			const out: Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> = [];
-			const seen = new Set<string>();
-			for (const item of raw) {
-				if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-				const obj = item as Record<string, unknown>;
-				const name = safeString(obj.name ?? obj.operation ?? obj.id);
-				if (!name || seen.has(name)) continue;
-				seen.add(name);
-				out.push({
-					name,
-					...(safeString(obj.label ?? obj.title ?? obj.displayName) ? { label: safeString(obj.label ?? obj.title ?? obj.displayName) } : {}),
-					...(safeString(obj.description) ? { description: safeString(obj.description) } : {}),
-					...(obj.inputSchema !== undefined ? { inputSchema: obj.inputSchema } : {}),
-				});
-			}
-			return out;
-		};
 		const mcpPolicyKey = (serverName: string, subNamespace: string | undefined, operationName?: string): string => {
 			const parts = ["mcp", serverName];
 			if (subNamespace) parts.push(subNamespace);
@@ -8119,15 +8143,37 @@ async function handleApiRoute(
 		const activationMcpRef = (entry: PackEntry, mcp: ResolvedMcpContribution | { listName: string; serverName: string; subNamespace?: string; config?: any; sourceFile?: string }, metaDetails: Record<string, unknown>): string => {
 			return activationMcpContributionId(entry, mcp, metaDetails, sourceStore.getByUrl(String(entry.meta?.sourceUrl ?? ""))?.id);
 		};
-		const operationsForMcp = (mcp: { listName: string; sourceFile?: string }, metaDetails: Record<string, unknown>): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> => {
-			const gatewayOps = metaDetails.gatewayOperations;
-			if (gatewayOps && typeof gatewayOps === "object" && !Array.isArray(gatewayOps)) {
-				const byList = (gatewayOps as Record<string, unknown>)[mcp.listName];
-				const normalised = normaliseOperationMetadata(byList);
-				if (normalised.length > 0) return normalised;
+		const operationsForMcp = (mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown }, metaDetails: Record<string, unknown>): McpOperationMetadataEntry[] => {
+			return operationMetadataForMcpContribution(mcp, metaDetails);
+		};
+		const runtimeOperationsForMcp = (
+			mcp: { listName: string; serverName: string; subNamespace?: string },
+			contributionId: string,
+			routes: McpToolRouteSnapshot[],
+		): McpOperationMetadataEntry[] => {
+			const out: McpOperationMetadataEntry[] = [];
+			const seen = new Set<string>();
+			for (const route of routes) {
+				const routeContributionId = safeString(route.contributionId);
+				const routeListName = safeString(route.listName);
+				const routeServerName = safeString(route.serverName ?? route.publicServerName);
+				const routeSubNamespace = safeString(route.subNamespace);
+				const belongsToContribution = routeContributionId
+					? routeContributionId === contributionId
+					: routeListName === mcp.listName && routeServerName === mcp.serverName && routeSubNamespace === mcp.subNamespace;
+				if (!belongsToContribution) continue;
+				const parsed = typeof route.name === "string" ? parseMcpToolName(route.name) : undefined;
+				const rawName = safeString(route.mcpToolName);
+				const name = parsed?.sub && parsed.sub === mcp.subNamespace && parsed.op ? parsed.op : rawName;
+				if (!name || seen.has(name)) continue;
+				seen.add(name);
+				out.push({
+					name,
+					...(safeString(route.description) ? { description: safeString(route.description) } : {}),
+					...(route.inputSchema !== undefined ? { inputSchema: route.inputSchema } : {}),
+				});
 			}
-			const raw = mcp.sourceFile ? readYamlMapping(mcp.sourceFile)?.operations : undefined;
-			return normaliseOperationMetadata(raw);
+			return out;
 		};
 
 		const buildActivationCatalogue = (
@@ -8171,7 +8217,9 @@ async function handleApiRoute(
 				for (const ep of contributions.entrypoints) {
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
-				const statuses = (scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager())?.getServerStatuses() ?? [];
+				const mcpManager = scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+				const statuses = mcpManager?.getServerStatuses() ?? [];
+				const runtimeRoutes = mcpManager?.getToolRouteSnapshots?.() ?? [];
 				for (const mcp of contributions.mcp ?? []) {
 					const transport = mcp.config.url ? "http" : "stdio";
 					const contributionId = activationMcpRef(entry, mcp, metaDetails);
@@ -8183,7 +8231,10 @@ async function handleApiRoute(
 						: undefined;
 					const disabledOps = [...new Set(disabledMcpOperations[contributionId] ?? [])];
 					const disabledOpsSet = new Set(disabledOps);
-					const operationMetadata = operationsForMcp(mcp, metaDetails);
+					const staticOperationMetadata = operationsForMcp(mcp, metaDetails);
+					const operationMetadata = staticOperationMetadata.length > 0
+						? staticOperationMetadata
+						: runtimeOperationsForMcp(mcp, contributionId, runtimeRoutes);
 					const knownOperationNames = new Set(operationMetadata.map((op) => op.name));
 					const operations = operationMetadata.map((op): PackActivationMcpOperationEntry => {
 						const policyKey = mcpPolicyKey(mcp.serverName, mcp.subNamespace, op.name);

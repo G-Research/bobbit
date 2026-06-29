@@ -753,10 +753,16 @@ function mcpOperationRows(activation: PackActivationResponse, entry: PackActivat
 	}));
 	const existing = new Set(rows.map((op) => op.name));
 	for (const name of entry.staleDisabledOperations ?? []) {
-		if (!existing.has(name)) rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "No longer provided by this source" });
+		if (!existing.has(name)) {
+			rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "No longer provided by this source" });
+			existing.add(name);
+		}
 	}
 	for (const name of disabled) {
-		if (!existing.has(name)) rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "Disabled by name" });
+		if (!existing.has(name)) {
+			rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "Disabled by name" });
+			existing.add(name);
+		}
 	}
 	return rows;
 }
