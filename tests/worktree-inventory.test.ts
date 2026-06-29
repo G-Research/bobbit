@@ -166,6 +166,48 @@ describe("worktree inventory classifier", () => {
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 
+	it("scans the actual git root for nested single-repo projects", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const nestedProjectRoot = path.join(repo, "packages", "app");
+			fs.mkdirSync(nestedProjectRoot, { recursive: true });
+			const wt = path.join(root, "repo-wt", "session-nested");
+			fs.mkdirSync(wt, { recursive: true });
+			const service = makeService(makeCtx(nestedProjectRoot), (repoPath) => {
+				assert.equal(repoPath, repo);
+				return `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/nested\n`;
+			});
+			const report = await service.scan();
+			const item = report.items.find(i => i.path === wt)!;
+			assert.equal(item.repoPath, repo);
+			assert.equal(item.worktreeRoot, path.join(root, "repo-wt"));
+			assert.equal(item.classification, "unowned-git-worktree");
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("protects durable multi-repo team-agent component worktrees", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const apiRepo = path.join(repo, "api");
+			const webRepo = path.join(repo, "web");
+			fs.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(webRepo, ".git"), { recursive: true });
+			const container = path.join(root, "repo-wt", "session-team-agent");
+			const apiWt = path.join(container, "api");
+			fs.mkdirSync(apiWt, { recursive: true });
+			const components = [{ name: "api", repo: "api" }, { name: "web", repo: "web" }];
+			const teams = [{ id: "team1", agents: [{ sessionId: "agent1", branch: "session/team-agent", worktreePath: container }] }];
+			const service = makeService(makeCtx(repo, { components, teams }), (repoPath) => repoPath === apiRepo
+				? `worktree ${apiRepo}\nbranch refs/heads/master\n\nworktree ${apiWt}\nbranch refs/heads/session/team-agent\n`
+				: `worktree ${repoPath}\nbranch refs/heads/master\n`);
+			const report = await service.scan();
+			const item = report.items.find(i => i.path === apiWt)!;
+			assert.equal(item.classification, "protected-in-use");
+			assert.equal(item.reason, "referenced-by-live-team");
+			assert.equal(item.actionable, false);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
 	it("keeps pool candidates diagnostic and guards container paths", async () => {
 		assert.equal(isContainerInternalWorktreePath("/workspace-wt/session-x"), true);
 		const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: "/tmp/repo-wt", candidatePath: "/tmp/repo-wt/pool-_pool-a", branch: "pool/_pool-a", gitMetadataExists: true });

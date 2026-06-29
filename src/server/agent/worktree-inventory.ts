@@ -657,12 +657,14 @@ export class WorktreeInventoryService {
 		};
 		for (const ctx of this.deps.projectContextManager.visible()) {
 			const components = ctx.projectConfigStore.getComponents();
-			const worktreeRoot = resolveWorktreeRoot({ rootPath: ctx.project.rootPath, worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined });
+			const configuredWorktreeRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+			const multiRepo = components.some(c => c.repo !== ".");
+			const worktreeRoot = resolveWorktreeRoot({ rootPath: multiRepo ? ctx.project.rootPath : this.resolveSingleRepoRoot(ctx.project.rootPath), worktreeRoot: configuredWorktreeRoot });
 			const repoNames = new Set<string>();
-			if (components.length === 0 || !components.some(c => c.repo !== ".")) repoNames.add(".");
+			if (components.length === 0 || !multiRepo) repoNames.add(".");
 			else for (const component of components) repoNames.add(component.repo);
 			for (const repo of repoNames) {
-				const repoPath = repo === "." ? ctx.project.rootPath : path.join(ctx.project.rootPath, repo);
+				const repoPath = repo === "." ? this.resolveSingleRepoRoot(ctx.project.rootPath) : path.join(ctx.project.rootPath, repo);
 				addRepo({ projectId: ctx.project.id, projectName: ctx.project.name, repo, componentName: components.find(c => c.repo === repo)?.name, repoPath, worktreeRoot, components, primary: repo === "." });
 			}
 			for (const session of ctx.sessionStore.getArchived() as PersistedSession[]) {
@@ -683,6 +685,32 @@ export class WorktreeInventoryService {
 			}
 		}
 		return repos;
+	}
+
+	private contextRepoPaths(ctx: { project: { rootPath: string }; projectConfigStore: { getComponents: () => Component[] } }): string[] {
+		const components = ctx.projectConfigStore.getComponents();
+		const multiRepo = components.some(c => c.repo !== ".");
+		if (!multiRepo) return [this.resolveSingleRepoRoot(ctx.project.rootPath)];
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const component of components) {
+			if (seen.has(component.repo)) continue;
+			seen.add(component.repo);
+			out.push(component.repo === "." ? this.resolveSingleRepoRoot(ctx.project.rootPath) : path.join(ctx.project.rootPath, component.repo));
+		}
+		return out;
+	}
+
+	private resolveSingleRepoRoot(projectRoot: string): string {
+		let current = path.resolve(projectRoot);
+		for (;;) {
+			try {
+				if (this.exists(path.join(current, ".git"))) return current;
+			} catch { /* keep walking */ }
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(projectRoot);
+			current = parent;
+		}
 	}
 
 	private addFilesystemCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {
@@ -837,7 +865,7 @@ export class WorktreeInventoryService {
 				set.add(branch); guards.liveBranches.set(rk, set);
 			}
 		};
-		const addRecord = (record: { id: string; title?: string; repoPath?: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string>; archived?: boolean }, type: WorktreeInventorySource) => {
+		const addRecord = (record: { id: string; title?: string; repoPath?: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string>; archived?: boolean }, type: WorktreeInventorySource, branchRepoPaths?: string[]) => {
 			const owner = { type, id: record.id, archived: record.archived, title: record.title };
 			addPath(record.worktreePath, owner); addCwd(record.cwd, owner);
 			if (record.repoWorktrees) {
@@ -845,15 +873,18 @@ export class WorktreeInventoryService {
 					addPath(wt, owner);
 					addBranch(record.repoPath ? (repo === "." ? record.repoPath : path.join(record.repoPath, repo)) : undefined, record.branch, !!record.archived, `${record.id}:${repo}:${norm(wt) ?? ""}`);
 				}
+			} else if (branchRepoPaths && branchRepoPaths.length > 0) {
+				for (const repoPath of branchRepoPaths) addBranch(repoPath, record.branch, !!record.archived, `${record.id}:${repoKey(repoPath)}:${norm(record.worktreePath) ?? ""}`);
 			} else addBranch(record.repoPath, record.branch, !!record.archived, `${record.id}:.:${norm(record.worktreePath) ?? ""}`);
 		};
 		for (const session of this.deps.sessionManager.listSessions()) addRecord(session, session.delegateOf || session.parentSessionId || session.childKind ? "delegate" : "runtime-session");
 		for (const ctx of this.deps.projectContextManager.all()) {
+			const ctxRepoPaths = this.contextRepoPaths(ctx);
 			for (const session of ctx.sessionStore.getLive()) addRecord(session, session.delegateOf || session.parentSessionId || session.childKind ? "delegate" : "persisted-live-session");
 			for (const session of ctx.sessionStore.getArchived()) addRecord(session, "archived-session");
 			for (const goal of ctx.goalStore.getAll() as PersistedGoal[]) addRecord({ ...goal, archived: goal.archived }, "goal");
 			for (const team of ctx.teamStore.getAll() as PersistedTeamEntry[]) {
-				for (const agent of team.agents) addRecord({ id: agent.sessionId, repoPath: ctx.project.rootPath, branch: agent.branch, worktreePath: agent.worktreePath }, "team");
+				for (const agent of team.agents) addRecord({ id: agent.sessionId, branch: agent.branch, worktreePath: agent.worktreePath }, "team", ctxRepoPaths);
 				const lead = team.teamLeadSessionId && typeof ctx.sessionStore.get === "function" ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
 				if (lead) addRecord({ ...lead, archived: false }, "team");
 			}
@@ -874,7 +905,12 @@ export class WorktreeInventoryService {
 		const seen = new Set(candidate.owners.map(o => `${o.type}:${o.id}`));
 		const add = (owner: { type: WorktreeInventorySource; id: string; archived?: boolean; title?: string }) => { const key = `${owner.type}:${owner.id}`; if (!seen.has(key)) { candidate.owners.push(owner); seen.add(key); candidate.sources.add(owner.type); } };
 		const n = norm(candidate.path);
-		if (n) for (const owner of guards.pathOwners.get(n) ?? []) add(owner);
+		if (n) {
+			for (const owner of guards.pathOwners.get(n) ?? []) add(owner);
+			for (const [ownerPath, owners] of guards.pathOwners) {
+				if (ownerPath !== n && n.startsWith(`${ownerPath}/`)) for (const owner of owners) add(owner);
+			}
+		}
 		if (n) for (const cwd of guards.cwdOwners) if (cwd.path === n || cwd.path.startsWith(`${n}/`)) add(cwd.owner);
 	}
 

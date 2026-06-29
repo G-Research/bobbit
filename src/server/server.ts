@@ -2930,9 +2930,15 @@ export function createGateway(config: GatewayConfig) {
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
 							const repoNames = ctx.projectConfigStore.repoNames();
+							const components = ctx.projectConfigStore.getComponents();
+							const isMultiRepoProject = components.some(c => c.repo !== ".");
+							let sweepRootPath = ctx.project.rootPath;
+							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath).catch(() => false)) {
+								sweepRootPath = await getRepoRoot(ctx.project.rootPath);
+							}
 							sweepProjects.push({
 								id: ctx.project.id,
-								rootPath: ctx.project.rootPath,
+								rootPath: sweepRootPath,
 								repos: repoNames.length > 0 ? repoNames : undefined,
 								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});

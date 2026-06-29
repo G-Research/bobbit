@@ -97,6 +97,16 @@ type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
 const normalize = normalizeWorktreeHostPath;
 
+function resolveSingleRepoRoot(projectRoot: string): string {
+	let current = path.resolve(projectRoot);
+	for (;;) {
+		if (fs.existsSync(path.join(current, ".git"))) return current;
+		const parent = path.dirname(current);
+		if (parent === current) return path.resolve(projectRoot);
+		current = parent;
+	}
+}
+
 /**
  * Sweep orphaned worktrees across all projects.
  *
@@ -126,20 +136,29 @@ export async function sweepOrphanedWorktrees(opts: {
 	let repaired = 0;
 
 	try {
-		// Build the set of branches/paths owned by live (non-archived) records.
+		// Build the set of branches/paths owned by live records plus durable
+		// archived branch references that must survive orphan worktree cleanup.
 		const ownedBranches = new Set<string>();
 		const ownedPaths = new Set<string>();
+		const archivedBranches = new Set<string>();
+		const teamContainerPaths = new Set<string>();
 		const branchToExpectedPath = new Map<string, string>();
 		const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
 		const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
 		for (const rec of allRecords) {
-			if (rec.archived) continue;
+			if (rec.archived) {
+				if (rec.branch) archivedBranches.add(rec.branch);
+				continue;
+			}
 			if (rec.branch) ownedBranches.add(rec.branch);
 			const np = normalize(rec.worktreePath);
 			if (np) ownedPaths.add(np);
 			const cwd = normalize(rec.cwd);
 			if (cwd) ownedPaths.add(cwd);
 			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+			// Durable team-agent records store the branch container, not per-repo
+			// worktrees. Protect component worktrees underneath that container.
+			if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
 			// Multi-repo: each per-repo worktree is separately owned. The branch is
 			// shared across repos so we only add to ownedPaths.
 			if (rec.repoWorktrees) {
@@ -152,14 +171,16 @@ export async function sweepOrphanedWorktrees(opts: {
 
 		for (const project of opts.projects) {
 			if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
-			const resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: project.rootPath, worktreeRoot: project.worktreeRoot });
+			const singleRepoRoot = resolveSingleRepoRoot(project.rootPath);
+			const isMultiRepo = !!project.repos?.some(r => r !== ".");
+			const resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: isMultiRepo ? project.rootPath : singleRepoRoot, worktreeRoot: project.worktreeRoot });
 
 			// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
 			// is reconciled against the goal/session/staff record map. Single-repo
-			// projects have one entry with `repoPath === project.rootPath`.
+			// projects use the actual git root, which may be above project.rootPath.
 			const repoList = (project.repos && project.repos.length > 0)
-				? project.repos.map(r => r === "." ? project.rootPath : path.join(project.rootPath, r))
-				: [project.rootPath];
+				? project.repos.map(r => r === "." ? singleRepoRoot : path.join(project.rootPath, r))
+				: [singleRepoRoot];
 
 			const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
 			for (const repoPath of repoList) {
@@ -210,7 +231,8 @@ export async function sweepOrphanedWorktrees(opts: {
 
 				// Active record owns this worktree (by branch or path).
 				const ownedByBranch = !!(branch && ownedBranches.has(branch));
-				const ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
+				let ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
+				if (!ownedByPath) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
 
 				if (ownedByBranch || ownedByPath) {
 					// Multi-repo: a per-repo path explicitly listed in any record's
@@ -246,7 +268,7 @@ export async function sweepOrphanedWorktrees(opts: {
 				if (!branch) continue; // detached worktree; leave alone.
 
 				try {
-					await cleanupWorktree(wt.repoPath, wt.path, branch, true);
+					await cleanupWorktree(wt.repoPath, wt.path, branch, !archivedBranches.has(branch));
 					cleaned++;
 					if (diagCounters) diagCounters.cleaned++;
 					console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
@@ -280,6 +302,7 @@ export function classifyWorktrees(opts: {
 	const all = parseGitWorktreeList(opts.porcelainStdout);
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
+	const teamContainerPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
 	const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
 	const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
@@ -291,6 +314,7 @@ export function classifyWorktrees(opts: {
 		const cwd = normalize(rec.cwd);
 		if (cwd) ownedPaths.add(cwd);
 		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
 		if (rec.repoWorktrees) {
 			for (const wp of Object.values(rec.repoWorktrees)) {
 				const n = normalize(wp);
@@ -311,7 +335,8 @@ export function classifyWorktrees(opts: {
 			continue;
 		}
 		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
-		const ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
+		let ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
+		if (!ownedByPath && wtPathNorm) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
 		if (ownedByBranch || ownedByPath) {
 			// Multi-repo: a per-repo path explicitly listed in any record's
 			// `repoWorktrees` map is active even if it differs from the record's
