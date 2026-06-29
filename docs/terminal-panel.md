@@ -12,6 +12,19 @@ xterm.js requires more than the visible rows and canvas styles. Its internal hel
 
 The terminal panel must install those xterm-required layout/hiding rules before any Bobbit-specific styling. Bobbit theme rules are overrides only: panel sizing, background, focus outline, toolbar/buttons, and token-based colors. Do not replace the required xterm rules with a small handcrafted subset; missing helper/accessibility styles can make xterm internals participate in layout and appear as repeated or partial glyphs at the top of the viewport.
 
+## Scrollback and touch pan
+
+Scrollback stays inside xterm's own viewport semantics. `.xterm-viewport` remains the scroll container, xterm's buffer owns the scrollback, and Bobbit does not create a separate outer scroller or mirrored output buffer.
+
+On touch/coarse-pointer devices, a vertical pan that starts over terminal output (`.xterm-screen`, rows, or the viewport) scrolls the xterm scrollback when scrollback exists. Horizontal gestures are ignored by the terminal scroll bridge so selection, input focus, and surrounding panel behavior are not treated as vertical scroll intent.
+
+Follow-output uses the same bottom-state contract for touch and desktop scrolling:
+
+- when the user touch-scrolls upward, follow-output pauses so newly arriving output does not force the viewport back to the bottom;
+- when the user returns to the bottom, follow-output resumes and later output is kept visible.
+
+This preserves xterm layout, selection, keyboard input, resize/fit, and reload/reattach replay behavior while making touch scrollback match mouse wheel scrollback.
+
 ## Windows ConPTY reproducer
 
 `tests/e2e/ui/terminal-pack.spec.ts` includes a targeted browser E2E test tagged `@terminal-repro` for the Windows `cmd.exe`/ConPTY startup artifact. It injects a deterministic synthetic startup stream shaped like the observed Windows PTY output:
@@ -38,7 +51,13 @@ Assertions check both CSS/layout invariants and visible behavior: no repeated to
 
 ## Validation commands
 
-Use the targeted reproducer first when changing terminal rendering:
+Use the touch regression when changing terminal scrollback or follow-output behavior:
+
+```bash
+npm run test:e2e -- tests/e2e/ui/terminal-pack.spec.ts --grep "touch pan over xterm-screen"
+```
+
+Use the broader targeted reproducer when changing terminal rendering:
 
 ```bash
 npm run test:e2e -- tests/e2e/ui/terminal-pack.spec.ts --grep @terminal-repro
