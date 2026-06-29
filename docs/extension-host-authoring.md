@@ -480,10 +480,14 @@ own routes, session reads are own-session. That identity must not be forgeable, 
 **server-derived, never caller-supplied**:
 
 - When the trusted app constructs a surface's Host API it asks the server to mint a
-  **surface-binding token** (`POST /api/ext/surface-token`). For a **renderer/action** it
-  passes `{ sessionId, tool }`; for a **panel/entrypoint/route** it passes
-  `{ sessionId, contributionKind, contributionId, packId }`. The server resolves the winning
-  contribution and returns an opaque, HMAC-signed token bound to
+  **surface-binding token** through the sanctioned transport for that surface kind:
+  - **renderer/action** surfaces use REST `POST /api/ext/surface-token` with
+    `{ sessionId, tool }`.
+  - **panel/entrypoint/route** surfaces use the app-owned session WebSocket frame
+    `ext_surface_token` via `mintPackSurfaceTokenOverWs`, with
+    `{ packId, contributionKind, contributionId }`; the authenticated WS supplies the
+    session. REST rejects pack-bound surface-token bodies.
+  The server resolves the winning contribution and returns an opaque, HMAC-signed token bound to
   `{sessionId, packId, contributionId, tool?}`.
 - The token is held by the Host API implementation and is not part of the author-facing
   contract — **your sanctioned pack code never sets or supplies it.** It is echoed

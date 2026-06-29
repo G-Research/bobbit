@@ -385,8 +385,10 @@ segment is `market-packs`). **Never** read a trusted `packId` from request input
 
 ### 4.3 Mint validation for pack-bound surfaces
 
-`POST /api/ext/surface-token` (§6.5) must accept both shapes. The pack-bound validation, performed
-server-side against the session's project-scoped pack-contribution registry (§5):
+Pack-bound surface tokens are minted over the app-owned session WebSocket frame
+`ext_surface_token` (§6.5). REST `POST /api/ext/surface-token` is tool-only and rejects pack-bound
+bodies. The pack-bound validation is performed server-side against the session's project-scoped
+pack-contribution registry (§5):
 
 1. The pack named by the client ref is **installed** in the resolved scope for the session's project.
 2. The pack is **active** — installed in the resolved scope and not disabled by an activation override
@@ -395,9 +397,10 @@ server-side against the session's project-scoped pack-contribution registry (§5
    - `panel` → a `PanelContribution` with `id === contributionId-without-prefix` in that pack;
    - `entrypoint` → an `EntrypointContribution` with that `id` in that pack;
    - `route` → a route `name` present in the pack's `routes.names` (registered route).
-4. The requested session is the caller's own session (header-canonical session match).
+4. The authenticated session WebSocket is the caller's own session; the frame does not carry a
+   trusted `sessionId` field.
 
-On success mint `{ sessionId, packId, contributionId }` (no `tool`). On any failure, **403**.
+On success mint `{ sessionId, packId, contributionId }` (no `tool`). On any failure, deny the mint.
 
 ### 4.4 `resolveSurfaceIdentity` for both shapes
 
@@ -752,34 +755,44 @@ Notes:
   (reconcile-on-uninstall keys off the row disappearing, not off it becoming empty). Pinned by the
   API/E2E tests (§11).
 
-### 6.5 `POST /api/ext/surface-token` — tool OR pack ref
+### 6.5 Surface-token mint transports — REST tool ref, WS pack ref
 
-Accept both ref shapes. Request body (one of):
+Tool-bound and pack-bound surfaces use different sanctioned mint transports.
+
+REST `POST /api/ext/surface-token` accepts only the tool-bound renderer/action shape:
 
 ```jsonc
-// tool-bound (renderer / action surfaces) — UNCHANGED shape
 { "sessionId": "<sid>", "tool": "artifact_demo" }
+```
 
-// pack-bound (panel / entrypoint / route surfaces) — NEW
+Pack-bound REST bodies with `contributionKind` are rejected. Pack-bound panel/entrypoint/route
+surfaces mint over the app-owned authenticated session WebSocket using `ext_surface_token` (called by
+`mintPackSurfaceTokenOverWs`):
+
+```jsonc
 {
-  "sessionId": "<sid>",
-  "contributionKind": "panel",        // "panel" | "entrypoint" | "route"
-  "contributionId": "artifacts.viewer", // bare id (panelId / entrypointId / routeName)
-  "packId": "artifacts"
+  "type": "ext_surface_token",
+  "requestId": "<request>",
+  "surfaceTokenKey": "<app-owned key>",
+  "packId": "artifacts",
+  "contributionKind": "panel",          // "panel" | "entrypoint" | "route"
+  "contributionId": "artifacts.viewer"  // bare id (panelId / entrypointId / routeName)
 }
 ```
 
-Response (unchanged): `{ "token": "<opaque>" }`.
+REST response: `{ "token": "<opaque>" }`. WS response: `ext_surface_token_result` with
+`{ ok: true, token }` or `{ ok: false, error }`.
 
 Server logic:
 
-- **tool-bound** (`tool` present): unchanged — `authorizeScopedRequest` (session + `tool ∈
+- **tool-bound REST** (`tool` present): unchanged — `authorizeScopedRequest` (session + `tool ∈
   allowedTools`), `resolvePackIdentityForTool`, reject non-pack, mint `{ sessionId, packId,
   contributionId: "${groupDir}/${tool}", tool }`.
-- **pack-bound** (`contributionKind` present): header-canonical session + `sessionId` body===header;
-  validate per §4.3 against the `PackContributionRegistry` (installed + active + contribution exists);
-  build `contributionId` = `${contributionKind}:${contributionId}`; mint `{ sessionId, packId,
-  contributionId }` (no `tool`). No `allowedTools` gate (new trust boundary, §4.5).
+- **pack-bound WS** (`contributionKind` present): use the authenticated WS session plus app-owned
+  `surfaceTokenKey`; validate per §4.3 against the `PackContributionRegistry` (installed + active +
+  contribution exists); build `contributionId` = `${contributionKind}:${contributionId}`; mint
+  `{ sessionId, packId, contributionId }` (no `tool`). No `allowedTools` gate (new trust boundary,
+  §4.5).
 
 ### 6.6 Scoped endpoints resolve by token `packId`
 
@@ -957,8 +970,9 @@ export function getHostApi(
 - **Panel surfaces** (`pack-panels.ts` factory) mint via `{ kind: "pack", packId, contributionKind:
   "panel", contributionId: panelId }`. The panel host factory (`setPanelHostFactory`, `host-api.ts:73`)
   is updated to pass the panel's `{packId, panelId}` (from the registered panel) instead of a `packTool`.
-- The `getSurfaceToken()` closure (`host-api.ts:~95`) posts the matching body shape to
-  `/api/ext/surface-token` (§6.5). The token stays opaque + closure-held; pack code never sees it.
+- The `getSurfaceToken()` closure uses REST `/api/ext/surface-token` for tool-bound surfaces and
+  `mintPackSurfaceTokenOverWs` / `ext_surface_token` for pack-bound surfaces (§6.5). The token stays
+  opaque + closure-held; pack code never sees it.
 - `host.ui.openPanel` / `host.callRoute` / `host.store.*` / `host.session.*` are otherwise unchanged —
   they thread the closure token via `scopedFetch`.
 
@@ -1075,7 +1089,7 @@ tools.
 | activation filtering | disabled tool/role/skill dropped from resolved list (shadow reappears); disabled entrypoint omitted from registry/`/api/ext/contributions`; panel/route stay present |
 | no-tools pack | a pack with `contents.tools: []` loads, registers panels/entrypoints/routes |
 | confinement `../lib` import (§3) | `actions.mjs`/`routes.mjs` importing `../lib/helper.mjs` loads; outside-root import rejected |
-| surface-token pack-bound (§4) | pack-bound token for uninstalled/disabled pack/contribution rejected; cross-session token rejected |
+| surface-token pack-bound (§4) | WS pack-bound token mint for uninstalled/disabled pack/contribution rejected; cross-session token rejected |
 
 ### 11.2 E2E
 
@@ -1137,9 +1151,11 @@ Owns all of `src/server/**`:
   `confinement-loader.ts` — widen confinement root to pack root (§3); rebuild `RouteRegistry` off
   pack-level routes (§5.3).
 - `server.ts` — `/api/tools` strip (§6.1); replace panel endpoint (§6.3); add `/api/ext/contributions`
-  (§6.4); extend `/api/ext/surface-token` (§6.5); pack-bound scoped-endpoint auth (§6.6); activation
-  REST (§6.7); wire `PackContributionRegistry` + `invalidateResolverCaches` (§5.5).
-- `ws/handler.ts` — pass `contributions` resolver into `resolveSurfaceIdentity`; pack-bound auth.
+  (§6.4); keep `/api/ext/surface-token` tool-only and reject pack-bound REST bodies (§6.5);
+  pack-bound scoped-endpoint auth (§6.6); activation REST (§6.7); wire `PackContributionRegistry` +
+  `invalidateResolverCaches` (§5.5).
+- `ws/handler.ts` — pass `contributions` resolver into `resolveSurfaceIdentity`; pack-bound
+  `ext_surface_token` minting and auth.
 - `agent/project-config-store.ts` — `pack_activation` migrated field + accessors (§6.7).
 - Server unit tests in `tests/*.test.ts`.
 
