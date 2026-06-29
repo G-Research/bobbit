@@ -946,7 +946,7 @@ export function renderSessionRow(session: GatewaySession) {
 			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session))}
+					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
 				<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
@@ -1022,7 +1022,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 				title="${expanded ? "Collapse" : "Expand"}"
 			><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
-				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
+				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory, false, false, true)}
 			</div>
 			<div class="flex-1 min-w-0 font-normal truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderHighlightedText(displayTitle, state.searchQuery)}</div>
 			${session.archivedAt ? html`<span class="shrink-0 text-muted-foreground" style="${mobile ? "font-size: 1em;" : "font-size: 0.8333em;"}">${terseRelativeTime(session.archivedAt)}</span>` : ""}
@@ -1093,7 +1093,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
+					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory, false, false, true)}
 			</div>
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal" style="${mobile ? "font-size: 1.3333em;" : ""}"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile

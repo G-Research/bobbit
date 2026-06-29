@@ -26,6 +26,7 @@ const SOURCES = [
 	ENTRY,
 	path.resolve("src/ui/bobbit-render.ts"),
 	path.resolve("src/ui/bobbit-sprite-data.ts"),
+	path.resolve("src/app/session-colors.ts"),
 ];
 
 function fileUrl(file: string): string {
@@ -68,6 +69,105 @@ async function installSpyAndLoad(page: import("@playwright/test").Page): Promise
 }
 
 test.describe("Sidebar bobbit data-URL memoization", () => {
+	test("default idle preview bobbits keep the breathing animation", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			api.renderDefaultPreviewInto(host, {
+				status: "idle",
+				accessory: api.ACCESSORY_DEFS["crown"],
+			});
+			const outer = host.firstElementChild as HTMLElement;
+			return {
+				style: outer.getAttribute("style") ?? "",
+				animation: outer.style.animation,
+				filter: outer.style.filter,
+				width: outer.style.width,
+				height: outer.style.height,
+				accessoryLayerCount: host.querySelectorAll("img").length - 1,
+			};
+		});
+
+		expect(result.style).toContain("bobbit-breathe");
+		expect(result.animation).toContain("bobbit-breathe");
+		expect(result.filter).toBe("saturate(0.4)");
+		expect(result.width).toBe("20px");
+		expect(result.height).toBe("19px");
+		expect(result.accessoryLayerCount).toBe(1);
+	});
+
+	test("explicit static sidebar idle bobbits render without inline animation while preserving idle styling", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			api.renderStaticSidebarStatusInto(host, "idle", false, false, false, "crown");
+			const outer = host.querySelector(".sidebar-bobbit-status-test > span") as HTMLElement;
+			return {
+				style: outer.getAttribute("style") ?? "",
+				animation: outer.style.animation,
+				inlineAnimations: Array.from(host.querySelectorAll<HTMLElement>("[style]")).map(el => el.style.animation).filter(Boolean),
+				filter: outer.style.filter,
+				width: outer.style.width,
+				height: outer.style.height,
+				accessoryLayerCount: host.querySelectorAll("img").length - 1,
+			};
+		});
+
+		expect(result.style).not.toContain("bobbit-breathe");
+		expect(result.animation).toBe("");
+		expect(result.inlineAnimations).toEqual([]);
+		expect(result.filter).toBe("saturate(0.4)");
+		expect(result.width).toBe("20px");
+		expect(result.height).toBe("19px");
+		expect(result.accessoryLayerCount).toBe(1);
+	});
+
+	test("static sidebar status rendering preserves busy and unread animations without idle breathing", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			const capture = () => {
+				const outer = host.querySelector(".sidebar-bobbit-status-test > span") as HTMLElement;
+				return {
+					style: outer.getAttribute("style") ?? "",
+					animation: outer.style.animation,
+					blinkCount: host.querySelectorAll(".bobbit-sidebar-unread-blink").length,
+					pulseCount: host.querySelectorAll(".bobbit-unread-pulse").length,
+				};
+			};
+
+			api.renderStaticSidebarStatusInto(host, "streaming");
+			const streaming = capture();
+			api.renderStaticSidebarStatusInto(host, "busy");
+			const busy = capture();
+			api.renderStaticSidebarStatusInto(host, "idle", false, false, false, "bandana", false, true);
+			const unreadIdle = capture();
+			api.renderStaticSidebarStatusInto(host, "idle");
+			const plainIdle = capture();
+
+			return { streaming, busy, unreadIdle, plainIdle };
+		});
+
+		expect(result.streaming.style).toContain("bobbit-bob");
+		expect(result.streaming.style).not.toContain("bobbit-breathe");
+		expect(result.busy.style).toContain("bobbit-bob");
+		expect(result.busy.style).not.toContain("bobbit-breathe");
+		expect(result.unreadIdle.style).not.toContain("bobbit-breathe");
+		expect(result.unreadIdle.animation).toBe("");
+		expect(result.unreadIdle.blinkCount).toBe(1);
+		expect(result.unreadIdle.pulseCount).toBe(1);
+		expect(result.plainIdle.style).not.toContain("bobbit-breathe");
+		expect(result.plainIdle.animation).toBe("");
+		expect(result.plainIdle.blinkCount).toBe(0);
+		expect(result.plainIdle.pulseCount).toBe(0);
+	});
+
 	test("identical opts: toDataURL runs once on first render, never again", async ({ page }) => {
 		await installSpyAndLoad(page);
 

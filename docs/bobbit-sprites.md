@@ -324,7 +324,7 @@ The second bubble is offset by 1s delay for a staggered effect.
 | Keyframe | Duration | Description |
 |----------|----------|-------------|
 | `bobbit-bob` | 1.8s | Gentle vertical bounce for streaming sessions — subtle scaleY compression |
-| `bobbit-breathe` | 4s | Slow scaleY pulse (1 → 1.06) for idle sessions |
+| `bobbit-breathe` | 4s | Legacy slow scaleY pulse; idle sidebar bobbits do not apply it |
 | `bobbit-cancel-fade` | 1.2s | Opacity pulse (1 → 0.35) during abort |
 | `bobbit-squish` | 1.5s | ScaleX/scaleY oscillation during compaction |
 | `bobbit-eyes` | 6s | Blink + look right cycle for selected sessions |
@@ -343,7 +343,7 @@ The `statusBobbit()` function generates a self-contained `html` template literal
 
 **Structure**:
 ```
-<span container>          ← flex container, filter (hue-rotate + saturation), bob/breathe/cancel animation
+<span container>          ← flex container, filter (hue-rotate + saturation), non-idle status animation
   <span sprite>           ← box-shadow pixel art, base transform, shimmer animation
   <span eyeLayer?>        ← separate eye overlay for selected sessions (enables independent eye animation)
   <span accessoryLayer?>  ← counter-hue-rotated accessory overlay
@@ -352,10 +352,11 @@ The `statusBobbit()` function generates a self-contained `html` template literal
 
 **Key behaviors**:
 - Scale: 1.6× via `transform: scale(1.6)`
-- Idle sessions: `saturate(0.4)` filter + `bobbit-breathe` animation
+- Idle sessions: `saturate(0.4)` filter and sleeping/idle styling, but no continuous `bobbit-breathe` animation
 - Streaming sessions: `bobbit-bob` animation + `blob-shimmer`
 - Compacting: `bobbit-squish` animation with squash transform
 - Selected session: Eye layer shown with `bobbit-eyes` animation (blink + look right)
+- Unread inactive rows: the outer row wrapper may still run the unread pulse/tap animation, even when the bobbit itself is idle
 - Aborting: `saturate(0.3)` + `bobbit-cancel-fade` opacity pulse
 - Status colors: Yellow for starting, red for terminated (applied via different box-shadow colors, not hue-rotate)
 
