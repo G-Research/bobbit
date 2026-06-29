@@ -191,6 +191,9 @@ export function getHostApi(
 		}
 		return surfaceTokenPromise;
 	};
+	const invalidateSurfaceToken = (): void => {
+		surfaceTokenPromise = undefined;
+	};
 	// Run a scoped fetch with the surface token threaded by `build`. On a 403 (e.g. a
 	// token that expired on a long-lived tab) the memo is dropped and the call re-mints
 	// + retries ONCE — so a stale token self-heals without surfacing to the pack.
@@ -394,6 +397,7 @@ export function getHostApi(
 		channels: createHostChannelsApi({
 			sessionId,
 			getSurfaceToken,
+			invalidateSurfaceToken,
 			consumeOpenGesture: consumeGesture,
 		}) as HostChannelsApi,
 	} as HostApi & { channels: HostChannelsApi };

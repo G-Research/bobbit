@@ -89,7 +89,7 @@ export interface ChannelInfo {
 
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
-	| { type: "auth"; token: string }
+	| { type: "auth"; token: string; clientKind?: "extension-channel" }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[] }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
@@ -115,7 +115,7 @@ export type ClientMessage =
 	| { type: "restart_agent" }
 	| { type: "resume"; fromSeq: number }
 	| { type: "status_resync" }
-	| { type: "ext_surface_token"; requestId: string; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string }
+	| { type: "ext_surface_token"; requestId: string; surfaceTokenKey?: string; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string }
 	| { type: "ext_channel_open_grant"; requestId: string; surfaceToken: string; name: string; singletonKey?: string }
 	| { type: "ext_channel_open"; requestId: string; surfaceToken: string; name: string; init?: HostChannelOpenInit; openGrant: string }
 	| { type: "ext_channel_attach"; requestId: string; surfaceToken: string; channelId: string }
@@ -167,7 +167,7 @@ export interface SnapshotServerTiming {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok" }
+	| { type: "auth_ok"; surfaceTokenKey?: string }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }

@@ -197,4 +197,78 @@ import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "../../
 	}
 };
 
+(window as any).__channelOpenRemintsStaleSurfaceToken = async () => {
+	const OriginalWebSocket = window.WebSocket;
+	const tokens: string[] = [];
+	let mintCount = 0;
+	class MockWebSocket {
+		static readonly CONNECTING = 0;
+		static readonly OPEN = 1;
+		static readonly CLOSING = 2;
+		static readonly CLOSED = 3;
+		readyState = MockWebSocket.CONNECTING;
+		onopen: ((event: Event) => void) | null = null;
+		onmessage: ((event: MessageEvent) => void) | null = null;
+		onerror: ((event: Event) => void) | null = null;
+		onclose: ((event: CloseEvent) => void) | null = null;
+
+		constructor(_url: string) {
+			setTimeout(() => {
+				this.readyState = MockWebSocket.OPEN;
+				this.onopen?.(new Event("open"));
+			}, 0);
+		}
+
+		send(data: string): void {
+			const msg = JSON.parse(data);
+			if (msg.type === "auth") {
+				this.emit({ type: "auth_ok" });
+			} else if (msg.type === "ext_channel_open_grant") {
+				tokens.push(msg.surfaceToken);
+				if (tokens.length === 1) this.emit({ type: "ext_channel_open_grant_result", requestId: msg.requestId, ok: false, error: "missing or invalid surface token" });
+				else this.emit({ type: "ext_channel_open_grant_result", requestId: msg.requestId, ok: true, openGrant: "grant-retry" });
+			} else if (msg.type === "ext_channel_open") {
+				this.emit({
+					type: "ext_channel_result",
+					requestId: msg.requestId,
+					ok: true,
+					channel: {
+						id: "chan-retry",
+						name: msg.name,
+						packId: "terminal",
+						sessionId: "sess-channel-stale-token",
+						state: "open",
+						createdAt: 1,
+						lastActiveAt: 2,
+						attached: true,
+					},
+				});
+			}
+		}
+
+		close(): void {
+			this.readyState = MockWebSocket.CLOSED;
+			this.onclose?.(new CloseEvent("close"));
+		}
+
+		private emit(message: unknown): void {
+			setTimeout(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent), 0);
+		}
+	}
+
+	registerSurfaceTokenMinter("sess-channel-stale-token", async () => {
+		mintCount += 1;
+		return mintCount === 1 ? "stale-surface-token" : "fresh-surface-token";
+	});
+	(window as any).WebSocket = MockWebSocket;
+	try {
+		const h: any = getHostApi("sess-channel-stale-token", undefined, { kind: "pack", packId: "terminal", contributionKind: "panel", contributionId: "terminal" } as any);
+		const channel = await h.channels.open("terminal", { singletonKey: "main" });
+		return { id: channel.id, mintCount, tokens };
+	} finally {
+		window.WebSocket = OriginalWebSocket;
+		unregisterSurfaceTokenMinter("sess-channel-stale-token");
+	}
+};
+
 (window as any).__ready = true;

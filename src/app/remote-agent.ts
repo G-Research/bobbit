@@ -273,6 +273,7 @@ export class RemoteAgent {
 	// In-flight trusted pack-bound surface-token MINT requests, settled by
 	// `ext_surface_token_result`.
 	private _pendingExtSurfaceTokens = new Map<string, { resolve: (token: string) => void; reject: (e: Error) => void }>();
+	private _surfaceTokenAuthorityKey: string | undefined;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _gatewayUrl = "";
@@ -782,6 +783,7 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
+						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
 						// Register the trusted WS poster for `host.session.postMessage` (C2 session
 						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
 						// agent's private WS; pack code has no handle to it and cannot import this
@@ -918,6 +920,7 @@ export class RemoteAgent {
 		// session leaves no stale transport (re-registered on the next auth_ok).
 		unregisterSessionPoster(this._sessionId);
 		unregisterSurfaceTokenMinter(this._sessionId);
+		this._surfaceTokenAuthorityKey = undefined;
 		this._rejectPendingExtPosts("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
@@ -1429,6 +1432,10 @@ export class RemoteAgent {
 				reject(new Error("pack surface-token mint: WebSocket not connected"));
 				return;
 			}
+			if (!this._surfaceTokenAuthorityKey) {
+				reject(new Error("pack surface-token mint: trusted app surface authority unavailable"));
+				return;
+			}
 			const requestId = `extsurface_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 			const timer = setTimeout(() => {
 				if (this._pendingExtSurfaceTokens.delete(requestId)) {
@@ -1443,6 +1450,7 @@ export class RemoteAgent {
 				this.ws.send(JSON.stringify({
 					type: "ext_surface_token",
 					requestId,
+					surfaceTokenKey: this._surfaceTokenAuthorityKey,
 					packId: surface.packId,
 					contributionKind: surface.contributionKind,
 					contributionId: surface.contributionId,

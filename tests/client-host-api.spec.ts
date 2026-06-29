@@ -101,6 +101,16 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		});
 	});
 
+	test("host.channels.open remints a stale pack surface token once", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__channelOpenRemintsStaleSurfaceToken());
+		expect(result).toEqual({
+			id: "chan-retry",
+			mintCount: 2,
+			tokens: ["stale-surface-token", "fresh-surface-token"],
+		});
+	});
+
 	test("no Phase-2 member is a frozen 'reserved for Phase 2' stub anymore", async ({ page }) => {
 		await gotoAndWait(page);
 		// Slices B1/B2/B3/B4/C1 implemented store.* / session.read* / callRoute / ui.*

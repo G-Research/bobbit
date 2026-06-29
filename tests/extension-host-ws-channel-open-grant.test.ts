@@ -86,7 +86,7 @@ function channelInfo(overrides: Partial<ChannelInfo> = {}): ChannelInfo {
 	};
 }
 
-async function authenticatedHarness(opts: { channelRegistry?: any; permits?: ChannelOpenPermitStore } = {}): Promise<{ ws: FakeWebSocket; permits: ChannelOpenPermitStore }> {
+async function authenticatedHarness(opts: { channelRegistry?: any; permits?: ChannelOpenPermitStore; trustedApp?: boolean } = {}): Promise<{ ws: FakeWebSocket; permits: ChannelOpenPermitStore }> {
 	const ws = new FakeWebSocket();
 	const permits = opts.permits ?? new ChannelOpenPermitStore({ now: () => 1_000, randomToken: () => "grant-1" });
 	handleWebSocketConnection(
@@ -106,7 +106,7 @@ async function authenticatedHarness(opts: { channelRegistry?: any; permits?: Cha
 		opts.channelRegistry,
 		permits,
 	);
-	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
+	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored", ...(opts.trustedApp ? {} : { clientKind: "extension-channel" }) }));
 	await Promise.resolve();
 	return { ws, permits };
 }
@@ -115,8 +115,13 @@ function extMessages(ws: FakeWebSocket): any[] {
 	return ws.sent.filter((msg) => typeof msg?.type === "string" && msg.type.startsWith("ext_"));
 }
 
-async function requestSurfaceToken(ws: FakeWebSocket, requestId: string, packId: string, contributionKind: "panel" | "entrypoint" | "route", contributionId: string): Promise<any> {
-	ws.emit("message", JSON.stringify({ type: "ext_surface_token", requestId, packId, contributionKind, contributionId }));
+function surfaceTokenAuthorityKey(ws: FakeWebSocket): string | undefined {
+	const authOk = ws.sent.find((msg) => msg?.type === "auth_ok");
+	return typeof authOk?.surfaceTokenKey === "string" ? authOk.surfaceTokenKey : undefined;
+}
+
+async function requestSurfaceToken(ws: FakeWebSocket, requestId: string, packId: string, contributionKind: "panel" | "entrypoint" | "route", contributionId: string, surfaceTokenKey?: string): Promise<any> {
+	ws.emit("message", JSON.stringify({ type: "ext_surface_token", requestId, ...(surfaceTokenKey ? { surfaceTokenKey } : {}), packId, contributionKind, contributionId }));
 	await Promise.resolve();
 	return extMessages(ws).find((msg) => msg.type === "ext_surface_token_result" && msg.requestId === requestId);
 }
@@ -128,9 +133,11 @@ async function requestOpenGrant(ws: FakeWebSocket, requestId: string, surfaceTok
 }
 
 describe("WebSocket extension channel open grants", () => {
-	it("mints a legitimate pack-bound panel surface token over the trusted session websocket", async () => {
-		const { ws } = await authenticatedHarness();
-		const result = await requestSurfaceToken(ws, "surface", "terminal", "panel", "terminal");
+	it("mints a legitimate pack-bound panel surface token over the trusted app websocket", async () => {
+		const { ws } = await authenticatedHarness({ trustedApp: true });
+		const key = surfaceTokenAuthorityKey(ws);
+		assert.equal(typeof key, "string");
+		const result = await requestSurfaceToken(ws, "surface", "terminal", "panel", "terminal", key);
 		assert.equal(result.type, "ext_surface_token_result");
 		assert.equal(result.requestId, "surface");
 		assert.equal(result.ok, true);
@@ -138,6 +145,32 @@ describe("WebSocket extension channel open grants", () => {
 
 		const grant = await requestOpenGrant(ws, "grant", result.token, "terminal");
 		assert.deepEqual(grant, { type: "ext_channel_open_grant_result", requestId: "grant", ok: true, openGrant: "grant-1" });
+		ws.close();
+	});
+
+	it("rejects raw same-session websocket attempts to mint a victim pack surface token", async () => {
+		const main = await authenticatedHarness({ trustedApp: true });
+		assert.equal(typeof surfaceTokenAuthorityKey(main.ws), "string");
+		const raw = await authenticatedHarness();
+		assert.equal(surfaceTokenAuthorityKey(raw.ws), undefined);
+
+		const forged = await requestSurfaceToken(raw.ws, "surface", "terminal", "panel", "terminal");
+		assert.deepEqual(forged, {
+			type: "ext_surface_token_result",
+			requestId: "surface",
+			ok: false,
+			error: "pack-bound surface-token mint requires trusted app surface authority",
+		});
+
+		const grant = await requestOpenGrant(raw.ws, "grant", forged.token, "terminal");
+		assert.deepEqual(grant, {
+			type: "ext_channel_open_grant_result",
+			requestId: "grant",
+			ok: false,
+			error: "missing or invalid surface token",
+		});
+		main.ws.close();
+		raw.ws.close();
 	});
 
 	it("mints and uses a declared panel channel permit without prior launcher activation", async () => {
