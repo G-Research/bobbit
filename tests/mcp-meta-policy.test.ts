@@ -7,8 +7,9 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
-const { mcpPolicyPrefix, resolveGrantPolicy, computeEffectiveAllowedTools } = await import(
+const { mcpPolicyPrefix, resolveGrantPolicy, computeEffectiveAllowedTools, writeMcpProxyExtensions } = await import(
 	"../src/server/agent/tool-activation.ts"
 );
 
@@ -36,9 +37,11 @@ function mockGroupPolicyStore(policies: Record<string, string> = {}) {
 	};
 }
 
-function mockMcpManager(infos: Array<{ name: string; serverName: string; group: string }>) {
+function mockMcpManager(infos: Array<{ name: string; serverName: string; group: string; mcpToolName?: string; description?: string; inputSchema?: unknown }>) {
 	return {
 		getToolInfos: () => infos,
+		getServerStatuses: () => [],
+		getScopeKey: () => "default",
 	};
 }
 
@@ -180,6 +183,40 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 		const role = { toolPolicies: { mcp__pw: "ask" as const } };
 		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any).map(e => e.name);
 		assert.ok(allowed.includes("mcp_pw"));
+	});
+
+	it("operation-level persisted never prevents MCP registration despite broader role allows", () => {
+		const tm = mockToolManager({});
+		const role = { toolPolicies: { "mcp__gr": "allow" as const, "mcp__gr__jira": "allow" as const } };
+		const gps = mockGroupPolicyStore({ "mcp__gr__jira__delete_issue": "never" });
+		const infos = [
+			{
+				name: "mcp__gr__jira__delete_issue",
+				serverName: "gr",
+				mcpToolName: "jira__delete_issue",
+				group: "MCP: gr",
+				description: "Delete an issue.",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{
+				name: "mcp__gr__jira__get_issue",
+				serverName: "gr",
+				mcpToolName: "jira__get_issue",
+				group: "MCP: gr",
+				description: "Get an issue.",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mcpManager = mockMcpManager(infos) as any;
+
+		const allowed = computeEffectiveAllowedTools(tm as any, role, gps, mcpManager).map(e => e.name);
+		assert.ok(allowed.includes("mcp_gr__jira"));
+
+		const extensionPaths = writeMcpProxyExtensions(mcpManager, allowed, role, tm as any, gps);
+		assert.equal(extensionPaths.length, 1);
+		const source = fs.readFileSync(extensionPaths[0], "utf-8");
+		assert.match(source, /get_issue/);
+		assert.doesNotMatch(source, /delete_issue/);
 	});
 
 	it("no MCP servers configured → no meta-tools and no mcp_describe", () => {

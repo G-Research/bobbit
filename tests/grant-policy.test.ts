@@ -278,6 +278,34 @@ describe("resolveGrantPolicy — tool-key beats group-key", () => {
 		);
 	});
 
+	it("group-store operation-level never beats broader role server/package allows", () => {
+		const tm = mockToolManager({ "mcp__gr__ai-adoption__delete-article": { grantPolicy: "allow" } });
+		const gps = mockGroupPolicyStore({
+			"mcp__gr__ai-adoption__delete-article": "never",
+		});
+
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr": "allow" as const } },
+				tm,
+				gps,
+			),
+			"never",
+		);
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr__ai-adoption": "allow" as const } },
+				tm,
+				gps,
+			),
+			"never",
+		);
+	});
+
 	it("flat server: legacy `mcp__playwright` still applies as group key", () => {
 		const role = {};
 		const tm = mockToolManager({});

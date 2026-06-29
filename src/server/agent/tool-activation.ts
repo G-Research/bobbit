@@ -174,6 +174,25 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
 	return policy === 'never';
 }
 
+function hasMoreSpecificPersistedMcpNever(
+	mcpKeys: McpPolicyKeys,
+	groupPolicyStore: GroupPolicyProvider,
+	broaderThanSpecificity: number,
+): boolean {
+	const candidates: Array<{ key: string | undefined; specificity: number }> = [
+		{ key: mcpKeys.operation, specificity: 4 },
+		{ key: mcpKeys.package, specificity: 3 },
+		{ key: mcpKeys.server, specificity: 2 },
+		{ key: "mcp__", specificity: 1 },
+	];
+	for (const { key, specificity } of candidates) {
+		if (!key || specificity <= broaderThanSpecificity) continue;
+		const policy = groupPolicyStore.getGroupPolicy(key);
+		if (policy && isNeverPolicy(normalizePolicy(policy))) return true;
+	}
+	return false;
+}
+
 /**
  * Resolve the effective grant policy for a tool.
  * Priority: role tool-specific > role group-level > tool YAML default > group default > system fallback.
@@ -198,21 +217,36 @@ export function resolveGrantPolicy(
 	}
 
 	const mcpKeys = mcpPolicyKeys(toolName);
+	const denyIfMoreSpecificPersistedMcpNever = (policy: GrantPolicy, broaderThanSpecificity: number): GrantPolicy => {
+		if (!mcpKeys || !groupPolicyStore || isNeverPolicy(policy)) return policy;
+		if (hasMoreSpecificPersistedMcpNever(mcpKeys, groupPolicyStore, broaderThanSpecificity)) return 'never';
+		return policy;
+	};
 
 	// 1. Role-level tool-specific override (exact tool name match)
 	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
 	// 2. Role-level MCP hierarchy: exact/operation/package/server/wildcard.
+	// A broader role allow/ask must not bypass a more-specific persisted/group
+	// MCP `never`; operation-level denials are enforced at registration and call time.
 	if (mcpKeys) {
 		if (mcpKeys.operation && mcpKeys.operation !== toolName && role?.toolPolicies?.[mcpKeys.operation]) {
 			return normalizePolicy(role.toolPolicies[mcpKeys.operation]);
 		}
-		if (mcpKeys.package && role?.toolPolicies?.[mcpKeys.package]) return normalizePolicy(role.toolPolicies[mcpKeys.package]);
-		if (role?.toolPolicies?.[mcpKeys.server]) return normalizePolicy(role.toolPolicies[mcpKeys.server]);
+		if (mcpKeys.package && role?.toolPolicies?.[mcpKeys.package]) {
+			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[mcpKeys.package]), 3);
+		}
+		if (role?.toolPolicies?.[mcpKeys.server]) {
+			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[mcpKeys.server]), 2);
+		}
 		// Wildcard MCP key: a bare `mcp__` role key matches EVERY MCP server at once.
-		if (role?.toolPolicies?.["mcp__"]) return normalizePolicy(role.toolPolicies["mcp__"]);
+		if (role?.toolPolicies?.["mcp__"]) {
+			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies["mcp__"]), 1);
+		}
 	}
-	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
+	if (toolGroup && role?.toolPolicies?.[toolGroup]) {
+		return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[toolGroup]), 0);
+	}
 
 	// 3. Persisted/group MCP hierarchy. This intentionally precedes tool YAML
 	// defaults so an operation-level `never` is authoritative for runtime MCP ops.

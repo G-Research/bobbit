@@ -587,4 +587,68 @@ test.describe("MCP meta-tool API E2E", () => {
 			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
+
+	test("POST /api/internal/mcp-call denies persisted per-op `never` despite broader role allow", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		await seedFakeScopedMcpManager(gateway, projectId!);
+		const token = readE2EToken();
+		const roleName = "mcp-meta-broad-allow-role";
+		const opPolicyKey = "mcp__fake-server__echo";
+
+		await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+			method: "PUT",
+			body: JSON.stringify({ policy: null }),
+		}).catch(() => {});
+		const createResp = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({ name: roleName, label: "MCP Broad Allow Test" }),
+		});
+		expect([200, 201]).toContain(createResp.status);
+
+		const roleResp = await apiFetch(`/api/roles/${roleName}`, {
+			method: "PUT",
+			body: JSON.stringify({
+				toolPolicies: { "mcp__fake-server": "allow" },
+			}),
+		});
+		expect(roleResp.status).toBe(200);
+		const policyResp = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+			method: "PUT",
+			body: JSON.stringify({ policy: "never" }),
+		});
+		expect(policyResp.status).toBe(200);
+
+		try {
+			const sessionId = await createSession({ projectId });
+			const assignResp = await apiFetch(`/api/sessions/${sessionId}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId: roleName }),
+			});
+			expect([200, 204]).toContain(assignResp.status);
+
+			const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+					"X-Bobbit-Session-Id": sessionId,
+				},
+				body: JSON.stringify({
+					tool: "mcp__fake-server__echo",
+					args: { message: "should be blocked by persisted policy" },
+				}),
+			});
+			expect(callResp.status).toBe(403);
+			const callBody = await callResp.json();
+			expect(callBody.error).toMatch(/denied by policy/);
+			expect(callBody.reason).toBe("policy=never");
+		} finally {
+			await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+				method: "PUT",
+				body: JSON.stringify({ policy: null }),
+			}).catch(() => {});
+			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
 });
