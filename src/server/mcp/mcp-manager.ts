@@ -142,6 +142,14 @@ export interface McpToolInfo {
   inputSchema: Record<string, unknown>;
 }
 
+export interface McpToolRouteSnapshot extends McpToolInfo {
+  runtimeServerKey: string;
+  publicServerName: string;
+  contributionId?: string;
+  listName: string;
+  subNamespace?: string;
+}
+
 /**
  * Discovery and lifecycle management for MCP servers.
  *
@@ -867,6 +875,30 @@ export class McpManager {
     return this._routeDiagnostics.map((d) => ({ ...d }));
   }
 
+  getToolRouteSnapshots(): McpToolRouteSnapshot[] {
+    this._ensureRouteMapFresh();
+    return [...this._toolRouteMap.values()].map((route) => {
+      const summary = this._summaryCache.get(route.runtimeServerKey)?.get(route.mcpToolName);
+      const paramNames = this._getParamNames(route.tool);
+      const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
+      return {
+        name: route.name,
+        description: route.tool.description || `MCP tool ${route.mcpToolName} from ${route.publicServerName}`,
+        group: route.group,
+        docs,
+        summary,
+        serverName: route.publicServerName,
+        mcpToolName: route.mcpToolName,
+        inputSchema: route.tool.inputSchema as Record<string, unknown>,
+        runtimeServerKey: route.runtimeServerKey,
+        publicServerName: route.publicServerName,
+        ...(route.contribution.contributionId ? { contributionId: route.contribution.contributionId } : {}),
+        listName: route.contribution.listName,
+        ...(route.contribution.subNamespace ? { subNamespace: route.contribution.subNamespace } : {}),
+      };
+    });
+  }
+
   private _markRouteMapDirty(): void {
     this._routeMapDirty = true;
   }
@@ -881,36 +913,90 @@ export class McpManager {
     this._toolNameMap.clear();
     this._routeDiagnostics = [];
 
+    const precedence = this._buildRoutePrecedenceRanks();
+    const candidates: Array<{ route: McpToolRoute; rank: number; ownerIndex: number; toolIndex: number }> = [];
+
     for (const [runtimeServerKey, tools] of this.toolDefs) {
-      const group = this.connectionGroups.get(runtimeServerKey);
+      const group = this.connectionGroups.get(runtimeServerKey) ?? this.discoveredConnectionGroups.get(runtimeServerKey);
       const owners = this._routeOwnersForRuntimeGroup(runtimeServerKey, group);
-      for (const tool of tools) {
-        for (const contribution of owners) {
+      tools.forEach((tool, toolIndex) => {
+        owners.forEach((contribution, ownerIndex) => {
           const route = this._routeForContributionTool(runtimeServerKey, contribution, tool);
-          if (!route) continue;
-          const existing = this._toolRouteMap.get(route.name);
-          if (existing) {
-            const diagnostic: McpRouteDiagnostic = {
-              type: "conflict",
-              toolName: route.name,
-              keptRuntimeServerKey: existing.runtimeServerKey,
-              droppedRuntimeServerKey: route.runtimeServerKey,
-              ...(existing.contribution.contributionId ? { keptContributionId: existing.contribution.contributionId } : {}),
-              ...(route.contribution.contributionId ? { droppedContributionId: route.contribution.contributionId } : {}),
-            };
-            this._routeDiagnostics.push(diagnostic);
-            console.warn(
-              `[mcp] tool route conflict for "${route.name}" — keeping ${existing.runtimeServerKey}, dropping ${route.runtimeServerKey}`,
-            );
-            continue;
-          }
-          this._toolRouteMap.set(route.name, route);
-          this._toolNameMap.set(route.name, { serverName: runtimeServerKey, mcpToolName: tool.name });
-        }
+          if (!route) return;
+          candidates.push({
+            route,
+            rank: precedence.get(this._contributionPrecedenceKey(runtimeServerKey, contribution)) ?? Number.MAX_SAFE_INTEGER,
+            ownerIndex,
+            toolIndex,
+          });
+        });
+      });
+    }
+
+    candidates.sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      const runtime = a.route.runtimeServerKey.localeCompare(b.route.runtimeServerKey);
+      if (runtime !== 0) return runtime;
+      if (a.ownerIndex !== b.ownerIndex) return a.ownerIndex - b.ownerIndex;
+      if (a.toolIndex !== b.toolIndex) return a.toolIndex - b.toolIndex;
+      return a.route.name.localeCompare(b.route.name);
+    });
+
+    for (const { route } of candidates) {
+      const existing = this._toolRouteMap.get(route.name);
+      if (existing) {
+        const diagnostic: McpRouteDiagnostic = {
+          type: "conflict",
+          toolName: route.name,
+          keptRuntimeServerKey: existing.runtimeServerKey,
+          droppedRuntimeServerKey: route.runtimeServerKey,
+          ...(existing.contribution.contributionId ? { keptContributionId: existing.contribution.contributionId } : {}),
+          ...(route.contribution.contributionId ? { droppedContributionId: route.contribution.contributionId } : {}),
+        };
+        this._routeDiagnostics.push(diagnostic);
+        console.warn(
+          `[mcp] tool route conflict for "${route.name}" — keeping ${existing.runtimeServerKey}, dropping ${route.runtimeServerKey}`,
+        );
+        continue;
       }
+      this._toolRouteMap.set(route.name, route);
+      this._toolNameMap.set(route.name, { serverName: route.runtimeServerKey, mcpToolName: route.mcpToolName });
     }
 
     this._routeMapDirty = false;
+  }
+
+  private _buildRoutePrecedenceRanks(): Map<string, number> {
+    const ranks = new Map<string, number>();
+    let rank = 0;
+    const addGroup = (runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined) => {
+      if (!group?.ownerContributions?.length) return;
+      for (const contribution of group.ownerContributions) {
+        const key = this._contributionPrecedenceKey(runtimeServerKey, contribution);
+        if (!ranks.has(key)) ranks.set(key, rank++);
+      }
+    };
+
+    for (const [runtimeServerKey, group] of this.discoveredConnectionGroups) addGroup(runtimeServerKey, group);
+    for (const [runtimeServerKey, group] of this.connectionGroups) addGroup(runtimeServerKey, group);
+    return ranks;
+  }
+
+  private _contributionPrecedenceKey(runtimeServerKey: string, contribution: ResolvedMcpContribution): string {
+    const origin = contribution.origin ?? { scope: "manual" };
+    return [
+      contribution.contributionId ?? "",
+      runtimeServerKey,
+      contribution.runtimeServerKey ?? "",
+      contribution.serverName,
+      contribution.listName,
+      contribution.subNamespace ?? "",
+      origin.scope ?? "",
+      origin.packId ?? "",
+      origin.packName ?? "",
+      origin.sourceUrl ?? "",
+      origin.path ?? "",
+    ].join("\0");
   }
 
   private _routeOwnersForRuntimeGroup(runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined): ResolvedMcpContribution[] {

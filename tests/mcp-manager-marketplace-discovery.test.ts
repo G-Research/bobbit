@@ -29,6 +29,7 @@ class StubMcpClient {
     private opts: {
       tools?: McpToolDef[];
       connectImpl?: () => Promise<void>;
+      listToolsImpl?: () => Promise<McpToolDef[]>;
     } = {},
   ) {}
 
@@ -44,6 +45,7 @@ class StubMcpClient {
   }
 
   async listTools(): Promise<McpToolDef[]> {
+    if (this.opts.listToolsImpl) return this.opts.listToolsImpl();
     return this.opts.tools ?? [];
   }
 
@@ -270,6 +272,9 @@ describe("McpManager marketplace discovery primitives", () => {
 
     await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
     assert.deepEqual(mgr.getToolInfos().map((t: any) => t.name), ["mcp__gr__jira__search"]);
+    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, runtimeServerKey: t.runtimeServerKey, contributionId: t.contributionId })), [
+      { name: "mcp__gr__jira__search", runtimeServerKey: "gw-a-gr", contributionId: "first-contribution" },
+    ]);
     assert.deepEqual(mgr.getRouteDiagnostics(), [{
       type: "conflict",
       toolName: "mcp__gr__jira__search",
@@ -279,6 +284,48 @@ describe("McpManager marketplace discovery primitives", () => {
       droppedContributionId: "second-contribution",
     }]);
 
+    await mgr.callTool("mcp__gr__jira__search", { q: "winner" });
+    assert.deepEqual(first.calls, [{ toolName: "jira__search", args: { q: "winner" } }]);
+    assert.deepEqual(second.calls, []);
+  });
+
+  it("keeps conflict precedence stable when a lower-priority connection lists tools first", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("first", "gr", { url: "https://gateway-a.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-a-gr",
+        contributionId: "first-contribution",
+      }),
+      contrib("second", "gr", { url: "https://gateway-b.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-b-gr",
+        contributionId: "second-contribution",
+      }),
+    ];
+    const events: string[] = [];
+    const first = new StubMcpClient("gw-a-gr", {
+      listToolsImpl: async () => {
+        events.push("first-start");
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        events.push("first-done");
+        return [op("jira__search")];
+      },
+    });
+    const second = new StubMcpClient("gw-b-gr", {
+      listToolsImpl: async () => {
+        events.push("second-done");
+        return [op("jira__search")];
+      },
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["gw-a-gr", first],
+      ["gw-b-gr", second],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.ok(events.indexOf("second-done") < events.indexOf("first-done"));
+    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, runtimeServerKey: t.runtimeServerKey })), [
+      { name: "mcp__gr__jira__search", runtimeServerKey: "gw-a-gr" },
+    ]);
     await mgr.callTool("mcp__gr__jira__search", { q: "winner" });
     assert.deepEqual(first.calls, [{ toolName: "jira__search", args: { q: "winner" } }]);
     assert.deepEqual(second.calls, []);

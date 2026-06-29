@@ -14529,17 +14529,18 @@ async function handleApiRoute(
 			return;
 		}
 		const statuses = mcpManager.getServerStatuses();
-		const toolInfos = mcpManager.getToolInfos();
+		const routeSnapshots = mcpManager.getToolRouteSnapshots();
 		const result = statuses.map(s => {
-			const publicServerNames = new Set([s.name, ...(s.ownerContributions ?? []).map((c) => c.serverName)]);
+			const ownedRoutes = routeSnapshots.filter(t => t.runtimeServerKey === s.name);
 			return {
 				...s,
-				tools: toolInfos.filter(t => publicServerNames.has(t.serverName)).map(t => {
+				toolCount: ownedRoutes.length,
+				tools: ownedRoutes.map(t => {
 					const parsed = parseMcpToolName(t.name);
 					return {
 						name: t.name,
 						description: t.description,
-						subNamespace: parsed?.sub,
+						subNamespace: t.subNamespace ?? parsed?.sub,
 						op: parsed?.op ?? t.mcpToolName,
 					};
 				}),
@@ -14715,19 +14716,25 @@ async function handleApiRoute(
 			}
 
 			const statuses = mcpManager.getServerStatuses();
-			const status = statuses.find(s => s.name === server);
-			if (!status || status.status !== "connected") {
-				const reason = status?.error ?? (status ? status.status : "unknown server");
+			const directStatus = statuses.find(s => s.name === server);
+			const ownerStatuses = statuses.filter(s => (s.ownerContributions ?? []).some((c) => c.serverName === server));
+			const connectedRuntimeKeys = new Set(
+				statuses.filter(s => s.status === "connected").map(s => s.name),
+			);
+			const serverIsConnected = directStatus?.status === "connected" || ownerStatuses.some(s => s.status === "connected");
+			if (!serverIsConnected) {
+				const statusForReason = directStatus ?? ownerStatuses.find(s => s.error || s.status !== "connected");
+				const reason = statusForReason?.error ?? (statusForReason ? statusForReason.status : "unknown server");
 				json({ error: `server ${server} not connected: ${reason}` }, 503);
 				return;
 			}
 
-			const infos = mcpManager.getToolInfos().filter(i => i.serverName === server);
-			const activeSubNamespaces = new Set(status.activeSubNamespaces ?? []);
+			const infos = mcpManager.getToolRouteSnapshots()
+				.filter(i => i.publicServerName === server && connectedRuntimeKeys.has(i.runtimeServerKey));
 			const describeNameFor = (info: (typeof infos)[number]): { name: string; subNamespace?: string } => {
 				const parsedName = parseMcpToolName(info.name);
-				if (parsedName?.server === server && parsedName.sub && activeSubNamespaces.has(parsedName.sub)) {
-					return { name: parsedName.op, subNamespace: parsedName.sub };
+				if (parsedName?.server === server && info.subNamespace && parsedName.sub === info.subNamespace) {
+					return { name: parsedName.op, subNamespace: info.subNamespace };
 				}
 				return { name: info.mcpToolName };
 			};
