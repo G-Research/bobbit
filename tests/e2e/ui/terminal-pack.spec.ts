@@ -175,6 +175,52 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
+	test("touch pan over xterm-screen scrolls the xterm viewport @terminal-repro", async ({ page, browserName }) => {
+		test.skip(browserName !== "chromium", "CDP touch event dispatch is Chromium-only");
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1220, height: 620 });
+		const client = await page.context().newCDPSession(page);
+		await client.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+		await installChannelFrameSpy(page);
+
+		await openApp(page);
+		sessionId = await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await waitForTerminalReadyForInput(page);
+
+		const run = `bobbit_touch_scroll_${Date.now()}`;
+		const ready = `${run}_READY`;
+		await typeCommand(page, `echo ${ready}`);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, ready),
+			{ message: "touch scroll setup: terminal PTY should be past startup before creating scrollback", timeout: 20_000 },
+		).toBe(true);
+
+		const burstDone = `${run}_BURST_DONE`;
+		const burstCommand = [
+			...Array.from({ length: 95 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abcdefghijklmnopqrstuvwxyz`),
+			`echo ${burstDone}`,
+		].join(" && ");
+		await typeCommand(page, burstCommand);
+		await expect.poll(
+			() => receivedTerminalTextIncludes(page, burstDone),
+			{ message: "touch scroll setup: terminal should emit deterministic scrollback", timeout: 20_000 },
+		).toBe(true);
+		await expect(page.locator(terminalHost()), "touch scroll setup: burst completion should render at the terminal bottom before the touch pan").toContainText(burstDone, { timeout: 10_000 });
+
+		const before = await terminalScrollMetricsAfterAnimationFrames(page);
+		await dispatchTouchDragOverXtermScreen(page, client);
+		const after = await terminalScrollMetricsAfterAnimationFrames(page);
+
+		expect(
+			before.maxScrollTop > 80 && before.atBottom && after.scrollTop < before.scrollTop - 8,
+			`TERMINAL_TOUCH_SCROLL: vertical touch pan over .xterm-screen should decrease .xterm-viewport.scrollTop from a scrollable bottom-starting viewport; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+		).toBe(true);
+	});
+
 	test("reproduces Windows cmd ConPTY startup xterm layout artifact @terminal-repro", async ({ page }, testInfo) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1220, height: 620 });
@@ -379,6 +425,57 @@ async function waitForTerminalAnimationFrames(page: import("@playwright/test").P
 		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 	});
+}
+
+type TerminalScrollMetrics = { scrollTop: number; scrollHeight: number; clientHeight: number; maxScrollTop: number; atBottom: boolean; scrollAreaHeight: string; rowCount: number };
+
+async function terminalScrollMetrics(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
+	return page.evaluate(() => {
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const viewport = host?.querySelector(".xterm-viewport") as HTMLElement | null;
+		const scrollArea = host?.querySelector(".xterm-scroll-area") as HTMLElement | null;
+		const scrollTop = viewport?.scrollTop ?? 0;
+		const scrollHeight = viewport?.scrollHeight ?? 0;
+		const clientHeight = viewport?.clientHeight ?? 0;
+		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+		return {
+			scrollTop,
+			scrollHeight,
+			clientHeight,
+			maxScrollTop,
+			atBottom: Math.abs(maxScrollTop - scrollTop) <= 2,
+			scrollAreaHeight: scrollArea?.style.height || getComputedStyle(scrollArea ?? document.body).height,
+			rowCount: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+		};
+	});
+}
+
+async function terminalScrollMetricsAfterAnimationFrames(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
+	await waitForTerminalAnimationFrames(page);
+	return terminalScrollMetrics(page);
+}
+
+async function dispatchTouchDragOverXtermScreen(
+	page: import("@playwright/test").Page,
+	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },
+): Promise<void> {
+	const screen = page.locator(`${terminalHost()} .xterm-screen`).first();
+	await expect(screen, "touch scroll reproducer needs a visible .xterm-screen target").toBeVisible({ timeout: 10_000 });
+	const rect = await screen.boundingBox();
+	if (!rect) throw new Error("touch scroll reproducer could not resolve .xterm-screen bounds");
+	const x = Math.round(rect.x + rect.width / 2);
+	const startY = Math.round(rect.y + Math.min(rect.height - 10, Math.max(30, rect.height * 0.35)));
+	const endY = Math.round(Math.min(rect.y + rect.height - 6, startY + Math.max(80, Math.min(220, rect.height * 0.45))));
+	const point = (y: number) => ({ x, y, id: 1, radiusX: 2, radiusY: 2, force: 1 });
+	await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point(startY)] });
+	const steps = 8;
+	for (let i = 1; i <= steps; i += 1) {
+		const y = Math.round(startY + ((endY - startY) * i) / steps);
+		await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [point(y)] });
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+	}
+	await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+	await waitForTerminalAnimationFrames(page);
 }
 
 async function latestTerminalChannelId(page: import("@playwright/test").Page): Promise<string> {
