@@ -197,10 +197,11 @@ giving delegates the two things workers always had: a **durable task** and **liv
    task (not an empty goal/role prompt).
 3. **Re-run + reminded.** The respawned delegate is re-driven by the shared boot-resume
    drain (the same mechanism that resumes a mid-turn worker). When a restored parent has
-   live children, the core injects a **system reminder** (`remindOwnersWithLiveChildren`)
-   enumerating them and pointing at `team_wait`; the parent re-collects through the shared
-   wait, which now re-attaches to a **live** child and returns a **real** result instead of a
-   `terminated` placeholder.
+   collectable live children, the core injects a **system reminder**
+   (`remindOwnersWithLiveChildren`) enumerating them and pointing at `team_wait`; the parent
+   re-collects through the shared wait, which now re-attaches to a **live** child and returns
+   a **real** result instead of a `terminated` placeholder. Regular delegate children remain
+   in this generic collection flow.
 4. **Orphans still reaped.** A child is reaped on boot **only** if its parent is gone or
    archived, **or** if the child carries a generic terminal marker (see below) — the
    generalized `shouldReapChildOnBoot`, covering delegate, `host.agents`, and future kinds.
@@ -222,6 +223,15 @@ giving delegates the two things workers always had: a **durable task** and **liv
 > the owner-gone/archived rule below or explicit user termination — never by a terminal
 > marker (see [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md)).
 
+> **Restart collection reminder policy.** The generic post-restart `team_wait` reminder is
+> only for child kinds that the owning agent can collect directly. It includes regular
+> collectable delegates and deliberately excludes non-collectable child kinds handled by
+> other workflows: `team` (handled by `TeamManager`), `host-agents` (polled/managed by the
+> extension workflow), and the legacy `pr-walkthrough` kind. Current PR Walkthrough reviewers
+> are `host-agents` children with role `pr-reviewer` and title `PR Walkthrough`, so they are
+> restored and kept visible without asking the owning agent to collect them via generic
+> `team_wait`.
+>
 > **Why reuse the worker machinery?** Delegates and workers now share **one** restart path —
 > durable task + live restore + prompt rebuild + re-nudge — with no parallel registry. The
 > earlier "delegates stay dormant" carve-out is what lost work and dropped the task; folding
