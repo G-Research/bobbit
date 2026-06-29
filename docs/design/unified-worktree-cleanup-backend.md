@@ -157,7 +157,7 @@ export type WorktreeInventoryReason =
   | "fs-scan-error";
 
 export interface WorktreeInventoryItem {
-  id: string;                     // stable key: projectId:repo:path or record-specific archived key
+  id: string;                     // stable public item id: projectId:repo:path or record-specific archived id
   projectId: string;
   projectName: string;
   componentName?: string;
@@ -167,11 +167,13 @@ export interface WorktreeInventoryItem {
   path: string;
   branch?: string;
   sources: WorktreeInventorySource[];
-  owners: Array<{ type: WorktreeInventorySource; id: string; archived?: boolean }>;
+  owners: Array<{ type: WorktreeInventorySource; id: string; archived?: boolean; title?: string }>;
   classification: WorktreeInventoryClassification;
+  disposition: "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
   reason: WorktreeInventoryReason;
   detail: string;
   actionable: boolean;
+  selectable: boolean;
   defaultSelected: boolean;
   pathExists: boolean;
   gitWorktreeMetadataExists: boolean;
@@ -199,10 +201,13 @@ export interface WorktreeInventoryReport {
     defaultSelected: number;
     byClassification: Partial<Record<WorktreeInventoryClassification, number>>;
     byReason: Partial<Record<WorktreeInventoryReason, number>>;
+    bySource: Partial<Record<WorktreeInventorySource, number>>;
   };
   generatedAt: number;
 }
 ```
+
+This is also the canonical public REST DTO returned by `GET /api/maintenance/worktrees`. The unified UI must use `id`, `classification`, detailed `sources`, `owners`, `reason`, and `detail` directly. Any coarser display labels such as “Bobbit state” or “Git metadata” are presentation-only and must not change the cleanup request contract.
 
 ### Cleanup API
 
@@ -434,7 +439,8 @@ Update `src/server/agent/worktree-pool.ts` to stop hardcoding `<repo>-wt` in `re
 
 Short-term implementation:
 
-- Use `worktreeRoot({ rootPath: this.repoPath, worktreeRoot: this.worktreeRoot })` from `src/server/skills/worktree-paths.ts`.
+- Do not re-resolve a relative project `worktree_root` against a component repo path. The pool constructor should retain either the project root plus component repo path, or preferably a pre-resolved `resolvedWorktreeRoot` computed once from `worktreeRoot({ rootPath: project.rootPath, worktreeRoot: project.worktreeRoot })` by the project/session setup code.
+- `reclaimOrphaned()` should scan `this.resolvedWorktreeRoot` (or the constructor-supplied equivalent) and never fall back to hardcoded `<repo>-wt`.
 - For multi-repo entries, recognize branch containers and per-repo `.git` files from `PoolEntry.worktrees` layout.
 - Add a read-only `snapshotEntries()` method returning ready pool entries:
 
@@ -468,7 +474,7 @@ Add tests around pure helpers in `tests/worktree-inventory.test.ts` or equivalen
 - Archived-session-owned git worktree is `ready-to-clean` and maps to legacy `removable`.
 - Git-known orphan `session/*` worktree is `unowned-git-worktree` and legacy orphan adapter includes it.
 - Pool branch/worktree entry is classified as `pool-entry` and not default-selected by maintenance.
-- Configured `worktree_root` is honored via `worktreeRoot()` for filesystem discovery.
+- Configured `worktree_root` is honored via `worktreeRoot()` for filesystem discovery, including a relative `worktree_root` in a multi-repo project where the pool repo path is a component subdirectory.
 - Filesystem-only directory under a worktree root is `stale-filesystem-only` and not actionable.
 - Multi-repo/polyrepo component repos produce separate repo-scoped candidates under one branch container.
 - Branch deletion is blocked by live session/goal/team/staff references.

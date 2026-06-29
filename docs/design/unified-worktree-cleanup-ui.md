@@ -89,7 +89,7 @@ Minimum row fields needed:
 
 ```ts
 type WorktreeMaintenanceItem = {
-  key: string;
+  id: string;
   classification:
     | "ready-to-clean"
     | "protected-in-use"
@@ -97,7 +97,7 @@ type WorktreeMaintenanceItem = {
     | "unowned-git-worktree"
     | "pool-entry"
     | "already-cleaned"
-    | "filesystem-only-needs-attention"
+    | "stale-filesystem-only"
     | "scan-error";
   disposition: "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
   actionable: boolean;
@@ -110,14 +110,16 @@ type WorktreeMaintenanceItem = {
   repoDisplayName?: string;
   path: string;
   branch?: string;
-  sources: Array<"bobbit-state" | "git" | "filesystem" | "pool">;
-  owners?: Array<{ kind: string; id: string; title?: string }>;
+  sources: Array<"runtime-session" | "persisted-live-session" | "archived-session" | "goal" | "team" | "delegate" | "staff" | "pool" | "git-worktree" | "filesystem">;
+  owners?: Array<{ type: string; id: string; title?: string; archived?: boolean }>;
   reason: string;
   detail: string;
   willDeleteBranch: boolean;
   branchDeleteBlockedReason?: string;
 };
 ```
+
+This is the public REST DTO consumed by the UI. The UI may group sources into display labels such as “Bobbit state” or “Git metadata”, but it must keep the server-provided `classification`, `reason`, `id`, and owner/source provenance intact for cleanup requests and troubleshooting.
 
 Counts should be additive and stable for summary chips:
 
@@ -179,7 +181,7 @@ Safe row content:
   - “Branch will be deleted” when `willDeleteBranch` is true.
   - “Branch will be kept: {reason}” when blocked.
   - “No branch recorded” when absent.
-- `<details>` technical section with classification, disposition, reason, source list, key, and raw owner ids.
+- `<details>` technical section with classification, disposition, reason, source list, item id, and raw owner ids.
 
 Selection behavior:
 
@@ -187,7 +189,7 @@ Selection behavior:
 - Keep row checkboxes enabled only for safe candidates.
 - Hidden/protected rows are never selectable.
 - “Clean selected” disabled when selected count is 0.
-- Preserve selection by `key` across a rescan when the row still exists and remains selectable; drop stale keys.
+- Preserve selection by `id` across a rescan when the row still exists and remains selectable; drop stale ids.
 
 ## Cleanup flows
 
@@ -214,7 +216,7 @@ Selection behavior:
   - Title: `Clean N worktree(s)?`
   - Body: `Bobbit will rescan before deleting and will remove only server-classified safe candidates. Transcripts, archived sessions, goals, proposals, prompts, and search records are preserved.`
   - Confirm label: `Clean worktrees`.
-- POST body: `{ mode: "all" }`.
+- POST body: `{ mode: "all-safe" }`.
 - Server must rescan before deleting; UI should say this explicitly in helper text.
 - After success, immediately rescan and keep the cleanup result banner visible.
 
@@ -227,13 +229,11 @@ Selection behavior:
 ```json
 {
   "mode": "selected",
-  "worktrees": [
-    { "key": "..." }
-  ]
+  "itemIds": ["..."]
 }
 ```
 
-Prefer key-only selectors if the unified API supports them. If the compatibility adapter requires path details, include `key`, `repoPath`, `path`, and `branch`, but the server remains authoritative.
+The canonical UI must use item ids from the fresh inventory. Legacy `{ worktrees: [...] }` selectors are reserved for compatibility adapters and should not be used by the unified card.
 
 After success:
 
@@ -358,7 +358,7 @@ Use new IDs for the canonical card. Keep old IDs only in compatibility tests if 
 | Empty state | `worktree-cleanup-empty-state` |
 | Actionable list | `worktree-cleanup-actionable-list` |
 | Row | `worktree-cleanup-row` |
-| Row key | `data-worktree-key` |
+| Row item id | `data-worktree-id` |
 | Row disposition | `data-disposition` |
 | Row classification | `data-classification` |
 | Row reason | `data-reason` |
@@ -380,7 +380,7 @@ Use new IDs for the canonical card. Keep old IDs only in compatibility tests if 
 
 Also set stable action attributes for fixture tests:
 
-- `data-action="scan-worktree-cleanup"`
+- `data-action="scan-worktrees"`
 - `data-action="cleanup-all-worktrees"`
 - `data-action="cleanup-selected-worktrees"`
 
@@ -444,7 +444,7 @@ Add/replace browser E2E coverage for Settings → Maintenance.
    - Uncheck one ready row.
    - Assert selected chip and `Clean selected (N)` update.
    - Click clean selected.
-   - Assert POST body uses `{ mode: "selected", worktrees: [...] }` with only selected keys.
+   - Assert POST body uses `{ mode: "selected", itemIds: [...] }` with only selected item ids.
    - Assert UI rescans and removed rows disappear.
    - Assert cleanup result banner remains visible.
 
@@ -452,7 +452,7 @@ Add/replace browser E2E coverage for Settings → Maintenance.
    - Mixed fixture with two ready rows.
    - Click clean all.
    - Confirm dialog.
-   - Assert POST body `{ mode: "all" }`.
+   - Assert POST body `{ mode: "all-safe" }`.
    - Assert rescan occurs and ready count becomes zero.
    - Assert cleanup buttons disabled.
 
