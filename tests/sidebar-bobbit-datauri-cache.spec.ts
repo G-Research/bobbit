@@ -68,6 +68,69 @@ async function installSpyAndLoad(page: import("@playwright/test").Page): Promise
 }
 
 test.describe("Sidebar bobbit data-URL memoization", () => {
+	test("idle sidebar bobbits render statically while preserving idle styling", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			api.renderInto(host, {
+				status: "idle",
+				accessory: api.ACCESSORY_DEFS["crown"],
+			});
+			const outer = host.firstElementChild as HTMLElement;
+			return {
+				style: outer.getAttribute("style") ?? "",
+				animation: outer.style.animation,
+				filter: outer.style.filter,
+				width: outer.style.width,
+				height: outer.style.height,
+				accessoryLayerCount: host.querySelectorAll("img").length - 1,
+			};
+		});
+
+		expect(result.style).not.toContain("bobbit-breathe");
+		expect(result.animation).toBe("");
+		expect(result.filter).toBe("saturate(0.4)");
+		expect(result.width).toBe("20px");
+		expect(result.height).toBe("19px");
+		expect(result.accessoryLayerCount).toBe(1);
+	});
+
+	test("statusBobbit preserves active and unread sidebar animations without idle breathing", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			const capture = () => {
+				const outer = host.firstElementChild as HTMLElement;
+				return {
+					style: outer.getAttribute("style") ?? "",
+					animation: outer.style.animation,
+					blinkCount: host.querySelectorAll(".bobbit-sidebar-unread-blink").length,
+				};
+			};
+
+			api.renderStatusInto(host, "streaming");
+			const streaming = capture();
+			api.renderStatusInto(host, "idle", false, false, false, "bandana", false, true);
+			const unreadIdle = capture();
+			api.renderStatusInto(host, "idle");
+			const plainIdle = capture();
+
+			return { streaming, unreadIdle, plainIdle };
+		});
+
+		expect(result.streaming.style).toContain("bobbit-bob");
+		expect(result.streaming.style).not.toContain("bobbit-breathe");
+		expect(result.unreadIdle.style).not.toContain("bobbit-breathe");
+		expect(result.unreadIdle.animation).toBe("");
+		expect(result.unreadIdle.blinkCount).toBe(1);
+		expect(result.plainIdle.style).not.toContain("bobbit-breathe");
+		expect(result.plainIdle.animation).toBe("");
+	});
+
 	test("identical opts: toDataURL runs once on first render, never again", async ({ page }) => {
 		await installSpyAndLoad(page);
 

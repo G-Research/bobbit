@@ -9,13 +9,30 @@ import {
 	NO_ACCESSORY,
 	type SidebarBobbitOptions,
 } from "../../src/ui/bobbit-render.js";
+import { statusBobbit } from "../../src/app/session-colors.js";
 
 function renderInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
 	render(renderSidebarBobbitCanvas(opts), host);
 }
 
+function renderStatusInto(
+	host: HTMLElement,
+	status: string,
+	isCompacting = false,
+	isSelected = false,
+	isAborting = false,
+	accessory?: string,
+	noDesaturate = false,
+	unread = false,
+): void {
+	// Keep sessionId undefined so this fixture exercises statusBobbit's argument
+	// forwarding without touching persisted session color assignment.
+	render(statusBobbit(status, isCompacting, undefined, isSelected, isAborting, false, false, accessory, noDesaturate, unread), host);
+}
+
 (window as any).__sidebarBobbit = {
 	renderInto,
+	renderStatusInto,
 	ACCESSORY_DEFS,
 	NO_ACCESSORY,
 };
