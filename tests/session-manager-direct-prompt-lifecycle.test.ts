@@ -56,6 +56,9 @@ function cleanupManager(manager: any): void {
 		clearInterval(manager._statusHeartbeatTimer);
 		manager._statusHeartbeatTimer = null;
 	}
+	for (const session of manager.sessions?.values?.() ?? []) {
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+	}
 	manager.sessionsWithConnectedClients?.clear();
 	manager.sessions?.clear();
 }
@@ -81,6 +84,13 @@ function putSession(manager: any, overrides: Record<string, any> = {}): any {
 	};
 	manager.sessions.set(session.id, session);
 	return { session, client };
+}
+
+function autoRetryPendingEvents(session: any): any[] {
+	return session.eventBuffer
+		.getAll()
+		.map((entry: any) => entry.event)
+		.filter((event: any) => event?.type === "auto_retry_pending");
 }
 
 afterEach(() => {
@@ -129,6 +139,34 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-1).type, "queue_update");
 		assert.equal(client.sent.at(-2).type, "session_status");
 		assert.equal(client.sent.at(-2).status, "idle");
+	});
+
+	it("schedules visible auto retry when direct prompt delivery rejects with fetch failed before message_end", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry transport prompt"),
+			/fetch failed/,
+		);
+
+		assert.equal(prompt.mock.callCount(), 1, "expected one failed prompt delivery before auto retry timer fires");
+		assert.equal(session.status, "idle", "expected dispatch failure recovery to restore idle status");
+		assert.equal(session.promptQueue.length, 1, "expected recovered prompt queue after fetch failed");
+		assert.equal(session.promptQueue.peek()?.text, "retry transport prompt", "expected recovered prompt text after fetch failed");
+		assert.ok(
+			session.pendingAutoRetryTimer,
+			"expected pendingAutoRetryTimer for dispatch-time fetch failed",
+		);
+		const pending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(pending, "expected auto_retry_pending for dispatch-time fetch failed");
+		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for dispatch-time fetch failed");
+		assert.equal(pending.attempt, 1, "expected first bounded retry attempt for dispatch-time fetch failed");
+		assert.equal(client.sent.some((msg) => msg.type === "auto_retry_pending"), true, "expected client-visible auto_retry_pending for dispatch-time fetch failed");
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
