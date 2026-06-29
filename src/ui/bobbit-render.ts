@@ -814,7 +814,8 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else if (status === "terminated") filters.push("saturate(0)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
-	const idleAnim = isIdle ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
+	// Idle sidebar bobbits are intentionally static; keep visual styling via
+	// filters/sleeping eyes, but do not run the old continuous breathe animation.
 	const bobAnim = isBusy && !isCancelling && !isCompacting ? "animation:bobbit-bob 1.8s cubic-bezier(0.34,1.2,0.64,1) infinite;" : "";
 	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
 	const compactSquish = isCompacting && !isCancelling;
@@ -874,5 +875,5 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		? html`<img src="${accUrl}" style="position:absolute;left:0;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
 }
