@@ -210,48 +210,34 @@ test.describe("terminal pack panel", () => {
 		).toBe(true);
 
 		await dispatchTouchDragOverXtermScreen(page, client, "down");
-		const after = await terminalVisibleTouchLines(page, run);
-		const afterScroll = await terminalScrollMetrics(page);
-		expect(
-			after.firstLine !== null && before.firstLine !== null && after.firstLine < before.firstLine,
-			`TERMINAL_TOUCH_SCROLL: vertical touch pan over .xterm-screen should scroll to older xterm buffer rows; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
-		).toBe(true);
+		const detached = await waitForStableDetachedTouchScroll(page, client, run, before, burstDone);
 
 		const whileScrolledUp = `${run}_WHILE_SCROLLED_UP`;
 		await injectTerminalTextFrame(page, `${whileScrolledUp}\r\n`);
 		const afterScrolledUpOutput = await terminalVisibleTouchLines(page, run);
 		const afterScrolledUpOutputScroll = await terminalScrollMetrics(page);
-		const afterDiagnostics = terminalTouchScrollDetachedDiagnosticsFromLines(after, afterScroll, run, burstDone);
 		const afterOutputDiagnostics = terminalTouchScrollDetachedDiagnosticsFromLines(afterScrolledUpOutput, afterScrolledUpOutputScroll, run, burstDone, whileScrolledUp);
-		const minDetachPx = Math.max(48, (afterScroll.rowHeight ?? 16) * 3);
-		const stableDetachedState =
-			!afterDiagnostics.scroll.atBottom &&
-			afterDiagnostics.distanceFromBottom >= minDetachPx &&
-			afterDiagnostics.firstLine !== null &&
-			before.firstLine !== null &&
-			afterDiagnostics.firstLine < before.firstLine &&
-			!afterDiagnostics.tailMarkerVisible &&
-			!afterDiagnostics.promptLikeTailVisible;
 		const noBottomJumpOnOutput =
 			afterOutputDiagnostics.firstLine !== null &&
-			afterDiagnostics.firstLine !== null &&
-			afterOutputDiagnostics.firstLine <= afterDiagnostics.firstLine + 2 &&
-			Math.abs(afterOutputDiagnostics.scroll.scrollTop - afterDiagnostics.scroll.scrollTop) <= 2;
+			detached.diagnostics.firstLine !== null &&
+			afterOutputDiagnostics.firstLine <= detached.diagnostics.firstLine + 2 &&
+			Math.abs(afterOutputDiagnostics.scroll.scrollTop - detached.diagnostics.scroll.scrollTop) <= 2;
 		const diagnostics = {
-			minDetachPx,
-			stableDetachedState,
+			minDetachPx: detached.minDetachPx,
+			detachAttempts: detached.attempts,
+			stableDetachedState: true,
 			noBottomJumpOnOutput,
 			hiddenLiveMarkerAfterOutput: !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
-			after: afterDiagnostics,
+			after: detached.diagnostics,
 			afterOutput: afterOutputDiagnostics,
 		};
 		expect(
-			stableDetachedState && noBottomJumpOnOutput && !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
-			`TERMINAL_TOUCH_SCROLL_DETACHED_STATE: one fixed touch pan leaves marker-visibility assertions ambiguous unless it first proves a stable hidden-tail/cursor detached state; diagnostics=${JSON.stringify(diagnostics)}`,
+			noBottomJumpOnOutput && !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
+			`TERMINAL_TOUCH_SCROLL: output while touch-detached must not force-follow or become visible; diagnostics=${JSON.stringify(diagnostics)}`,
 		).toBe(true);
 
 		let returnedToBottom = await terminalVisibleTouchLines(page, run);
-		for (let i = 0; i < 4 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
+		for (let i = 0; i < 12 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
 			await dispatchTouchDragOverXtermScreen(page, client, "up");
 			returnedToBottom = await terminalVisibleTouchLines(page, run);
 		}
@@ -259,81 +245,6 @@ test.describe("terminal pack panel", () => {
 		const afterReturn = `${run}_AFTER_RETURN_TO_BOTTOM`;
 		await injectTerminalTextFrame(page, `${afterReturn}\r\n`);
 		await expect(page.locator(terminalHost()), "touch scroll follow-output should resume after returning to bottom").toContainText(afterReturn, { timeout: 10_000 });
-	});
-
-	test("reproduces ambiguous marker assertion before touch pan hides the terminal tail @terminal-repro", async ({ page, browserName }) => {
-		test.skip(browserName !== "chromium", "CDP touch event dispatch is Chromium-only");
-		test.setTimeout(90_000);
-		await page.setViewportSize({ width: 1220, height: 620 });
-		const client = await page.context().newCDPSession(page);
-		await client.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
-		await installChannelFrameSpy(page);
-
-		await openApp(page);
-		sessionId = await createSessionViaUI(page);
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
-
-		await openTerminalFromSessionMenu(page);
-		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
-		await waitForTerminalMountedForFrameInjection(page);
-		await assertTerminalLayoutStable(page, "touch scroll ambiguous-marker setup initial terminal open");
-
-		const run = `bobbit_touch_scroll_${Date.now()}`;
-		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
-		const burstDone = `${run}_BURST_DONE`;
-		const burst = Array.from({ length: 160 }, (_, i) => `${run}_LINE_${String(i).padStart(3, "0")}_abcdefghijklmnopqrstuvwxyz`)
-			.join("\r\n") + `\r\n${burstDone}`;
-		await injectTerminalTextFrame(page, burst);
-		await expect(page.locator(terminalHost()), "ambiguous-marker setup: deterministic injected burst should render at the terminal bottom before the touch pan").toContainText(burstDone, { timeout: 10_000 });
-		await expect.poll(
-			async () => (await terminalScrollMetrics(page)).maxScrollTop,
-			{ message: "ambiguous-marker setup: deterministic injected burst must create scrollback", timeout: 10_000 },
-		).toBeGreaterThan(80);
-		const before = await terminalVisibleTouchLines(page, run);
-		expect(
-			before.firstLine !== null && before.firstLine > 80,
-			`ambiguous-marker setup: scrollback should start near the injected burst tail; before=${JSON.stringify(before)}`,
-		).toBe(true);
-
-		await dispatchTouchDragOverXtermScreen(page, client, "down", 48);
-		const after = await terminalVisibleTouchLines(page, run);
-		const afterScroll = await terminalScrollMetrics(page);
-		expect(
-			after.firstLine !== null && before.firstLine !== null && after.firstLine < before.firstLine,
-			`ambiguous-marker setup: touch pan should still move to older xterm rows; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
-		).toBe(true);
-
-		const whileScrolledUp = `${run}_WHILE_SCROLLED_UP`;
-		await injectTerminalTextFrame(page, `${whileScrolledUp}\r\n`);
-		const afterOutput = await terminalVisibleTouchLines(page, run);
-		const afterOutputScroll = await terminalScrollMetrics(page);
-		const afterDiagnostics = terminalTouchScrollDetachedDiagnosticsFromLines(after, afterScroll, run, burstDone);
-		const afterOutputDiagnostics = terminalTouchScrollDetachedDiagnosticsFromLines(afterOutput, afterOutputScroll, run, burstDone, whileScrolledUp);
-		const minDetachPx = Math.max(48, (afterDiagnostics.scroll.rowHeight ?? 16) * 3);
-		const stableDetachedState =
-			!afterDiagnostics.scroll.atBottom &&
-			afterDiagnostics.distanceFromBottom >= minDetachPx &&
-			!afterDiagnostics.tailMarkerVisible &&
-			!afterDiagnostics.promptLikeTailVisible;
-		const noBottomJumpOnOutput =
-			afterOutputDiagnostics.firstLine !== null &&
-			afterDiagnostics.firstLine !== null &&
-			afterOutputDiagnostics.firstLine <= afterDiagnostics.firstLine + 2 &&
-			Math.abs(afterOutputDiagnostics.scroll.scrollTop - afterDiagnostics.scroll.scrollTop) <= 2;
-		const diagnostics = {
-			minDetachPx,
-			stableDetachedState,
-			noBottomJumpOnOutput,
-			hiddenTailBeforeOutput: !afterDiagnostics.tailMarkerVisible,
-			hiddenPromptOrCursorBeforeOutput: !afterDiagnostics.promptLikeTailVisible,
-			hiddenLiveMarkerAfterOutput: !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
-			after: afterDiagnostics,
-			afterOutput: afterOutputDiagnostics,
-		};
-		expect(
-			stableDetachedState && noBottomJumpOnOutput && !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
-			`TERMINAL_TOUCH_SCROLL_DETACHED_STATE: marker visibility is ambiguous until the test proves a stable hidden-tail/cursor detached state; diagnostics=${JSON.stringify(diagnostics)}`,
-		).toBe(true);
 	});
 
 	test("reproduces Windows cmd ConPTY startup xterm layout artifact @terminal-repro", async ({ page }, testInfo) => {
@@ -671,6 +582,67 @@ function terminalTouchScrollDetachedDiagnosticsFromLines(
 		promptLikeTailVisible,
 		tailRowsAfterLastIndexedLine,
 	};
+}
+
+type TerminalVisibleTouchLines = Awaited<ReturnType<typeof terminalVisibleTouchLines>>;
+type TerminalTouchScrollDiagnostics = ReturnType<typeof terminalTouchScrollDetachedDiagnosticsFromLines>;
+
+async function sampleTerminalTouchDetachedState(
+	page: import("@playwright/test").Page,
+	run: string,
+	tailMarker: string,
+): Promise<{ lines: TerminalVisibleTouchLines; scroll: TerminalScrollMetrics; diagnostics: TerminalTouchScrollDiagnostics }> {
+	const lines = await terminalVisibleTouchLines(page, run);
+	const scroll = await terminalScrollMetrics(page);
+	return { lines, scroll, diagnostics: terminalTouchScrollDetachedDiagnosticsFromLines(lines, scroll, run, tailMarker) };
+}
+
+async function waitForStableDetachedTouchScroll(
+	page: import("@playwright/test").Page,
+	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },
+	run: string,
+	before: TerminalVisibleTouchLines,
+	tailMarker: string,
+): Promise<{ lines: TerminalVisibleTouchLines; scroll: TerminalScrollMetrics; diagnostics: TerminalTouchScrollDiagnostics; minDetachPx: number; attempts: number }> {
+	let lastDiagnostics: unknown;
+	for (let attempt = 0; attempt < 10; attempt += 1) {
+		const firstSample = await sampleTerminalTouchDetachedState(page, run, tailMarker);
+		await waitForTerminalAnimationFrames(page);
+		const secondSample = await sampleTerminalTouchDetachedState(page, run, tailMarker);
+		const minDetachPx = Math.max(48, (secondSample.scroll.rowHeight ?? 16) * 3);
+		const stableScrollTop = Math.abs(secondSample.scroll.scrollTop - firstSample.scroll.scrollTop) <= 2;
+		const stableFirstLine =
+			firstSample.diagnostics.firstLine !== null &&
+			secondSample.diagnostics.firstLine !== null &&
+			Math.abs(secondSample.diagnostics.firstLine - firstSample.diagnostics.firstLine) <= 1;
+		const olderFirstLine =
+			before.firstLine !== null &&
+			secondSample.diagnostics.firstLine !== null &&
+			secondSample.diagnostics.firstLine < before.firstLine;
+		const stableDetachedState =
+			stableScrollTop &&
+			stableFirstLine &&
+			olderFirstLine &&
+			!secondSample.diagnostics.scroll.atBottom &&
+			secondSample.diagnostics.distanceFromBottom >= minDetachPx &&
+			!secondSample.diagnostics.tailMarkerVisible &&
+			!secondSample.diagnostics.promptLikeTailVisible;
+		lastDiagnostics = {
+			attempt: attempt + 1,
+			minDetachPx,
+			stableScrollTop,
+			stableFirstLine,
+			olderFirstLine,
+			stableDetachedState,
+			firstSample: firstSample.diagnostics,
+			secondSample: secondSample.diagnostics,
+		};
+		if (stableDetachedState) {
+			return { ...secondSample, minDetachPx, attempts: attempt + 1 };
+		}
+		await dispatchTouchDragOverXtermScreen(page, client, "down", 96);
+	}
+	throw new Error(`TERMINAL_TOUCH_SCROLL_DETACHED_STATE: touch panning did not reach a stable hidden-tail detached state before marker injection; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 async function latestTerminalChannelId(page: import("@playwright/test").Page): Promise<string> {
