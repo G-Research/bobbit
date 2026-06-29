@@ -253,8 +253,6 @@ type ChannelOpenPermitBinding = {
 type ChannelOpenPermitService = {
 	mint(binding: ChannelOpenPermitBinding): string;
 	consume?(openPermit: string | undefined, binding: ChannelOpenPermitBinding): unknown;
-	markTrustedLauncherActivation?(binding: Omit<ChannelOpenPermitBinding, "contributionId">): void;
-	hasTrustedLauncherActivation?(binding: Omit<ChannelOpenPermitBinding, "contributionId">): boolean;
 };
 
 type ExtensionChannelClient = {
@@ -647,13 +645,6 @@ export function handleWebSocketConnection(
 				const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => unknown }) | undefined;
 				if (!resolver?.getChannel) return true; // Core schema branch supplies this; until then registry.open remains authoritative.
 				return !!resolver.getChannel(session.projectId, packId, name);
-			};
-			const canMintChannelOpenGrant = (surf: { contributionId: string; packId: string }, name: string, singletonKey?: string): boolean => {
-				if (surf.contributionId.startsWith("entrypoint:")) {
-					channelOpenPermits?.markTrustedLauncherActivation?.({ sessionId, packId: surf.packId, channelName: name, singletonKey });
-					return true;
-				}
-				return channelOpenPermits?.hasTrustedLauncherActivation?.({ sessionId, packId: surf.packId, channelName: name, singletonKey }) === true;
 			};
 			switch (msg.type) {
 				case "prompt": {
@@ -1196,10 +1187,6 @@ export function handleWebSocketConnection(
 					}
 					if (!hasChannelContribution(surf.packId, name)) {
 						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel is not declared by this pack" });
-						break;
-					}
-					if (!canMintChannelOpenGrant(surf, name, singletonKey)) {
-						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel open requires a trusted launcher activation" });
 						break;
 					}
 					const openGrant = channelOpenPermits.mint({ sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, singletonKey });
