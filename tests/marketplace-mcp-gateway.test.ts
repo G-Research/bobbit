@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
@@ -25,6 +26,78 @@ const SOURCE_URL = "http://mcp-local.t3.zone/readonly/mcp";
 
 function source(url = SOURCE_URL): any {
 	return { id: "gateway", type: "mcp-gateway", url, addedAt: "2026-01-01T00:00:00.000Z" };
+}
+
+type MockGatewayRequest = { method?: string; path?: string; rpcMethod?: string };
+
+async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>): Promise<void> {
+	const requests: MockGatewayRequest[] = [];
+	const server = http.createServer(async (req, res) => {
+		const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		requests.push({ method: req.method, path });
+		if (path === "/signin/aigateway") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (path !== "/readonly/mcp") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (req.method === "GET") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+		if (req.method !== "POST") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		const message = JSON.parse(body || "{}");
+		requests[requests.length - 1].rpcMethod = message.method;
+		if (message.method === "initialize") {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					protocolVersion: "2024-11-05",
+					capabilities: { tools: {} },
+					serverInfo: { name: "mcp-gateway", version: "0.0.0-test" },
+				},
+			}));
+			return;
+		}
+		if (message.method === "tools/list") {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					tools: [
+						{ name: "jira__jira_search", description: "Search Jira issues", inputSchema: { type: "object", properties: {} } },
+						{ name: "jira__jira_get_issue", description: "Get a Jira issue", inputSchema: { type: "object", properties: {} } },
+						{ name: "confluence__confluence_get_page", description: "Get a Confluence page", inputSchema: { type: "object", properties: {} } },
+					],
+				},
+			}));
+			return;
+		}
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const port = (server.address() as { port: number }).port;
+	try {
+		await fn({ url: `http://127.0.0.1:${port}/readonly/mcp`, requests });
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
 }
 
 describe("MCP gateway catalogue primitives", () => {
@@ -94,6 +167,20 @@ describe("MCP gateway catalogue primitives", () => {
 			}),
 			/timed out after 1ms/,
 		);
+	});
+
+	it("discovers providers from streamable HTTP MCP tools/list when no JSON catalogue exists", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			const parsed = await fetchMcpGatewayWithDiagnostics(source(url));
+			assert.deepEqual(parsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
+			const jira = parsed.providers.find((p: any) => p.id === "jira");
+			assert.deepEqual(jira.operations.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
+			const confluence = parsed.providers.find((p: any) => p.id === "confluence");
+			assert.deepEqual(confluence.operations.map((op: any) => op.name), ["confluence_get_page"]);
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "initialize"));
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
+			assert.equal(requests.some((r) => r.path === "/signin/aigateway"), false);
+		});
 	});
 
 	it("parses provider catalogues while skipping unsafe, duplicate, and non-HTTP entries", () => {
