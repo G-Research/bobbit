@@ -173,6 +173,8 @@ export interface TeamAgent {
 	 * Defaults to "worker" if missing on load.
 	 */
 	kind: "worker" | "reviewer";
+	/** In-memory marker for pre-kind reviewer records that need legacy safeguards. */
+	legacyMissingKind?: boolean;
 	worktreePath?: string;
 	branch?: string;
 	baseSha?: string;
@@ -888,18 +890,22 @@ export class TeamManager {
 			const entry: TeamEntry = {
 				goalId: p.goalId,
 				teamLeadSessionId: p.teamLeadSessionId,
-				agents: p.agents.map((a) => ({
-					sessionId: a.sessionId,
-					role: a.role,
-					// Default to "worker" for back-compat with persisted entries
-					// written before the kind field was introduced.
-					kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
-					worktreePath: a.worktreePath,
-					branch: a.branch,
-					baseSha: a.baseSha,
-					task: a.task,
-					createdAt: a.createdAt,
-				})),
+				agents: p.agents.map((a) => {
+					const hasPersistedKind = a.kind === "reviewer" || a.kind === "worker";
+					return {
+						sessionId: a.sessionId,
+						role: a.role,
+						// Default to "worker" for back-compat with persisted entries
+						// written before the kind field was introduced.
+						kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
+						legacyMissingKind: !hasPersistedKind && a.role === "reviewer" ? true : undefined,
+						worktreePath: a.worktreePath,
+						branch: a.branch,
+						baseSha: a.baseSha,
+						task: a.task,
+						createdAt: a.createdAt,
+					};
+				}),
 				maxConcurrent: p.maxConcurrent,
 			};
 			this.teams.set(p.goalId, entry);
@@ -940,7 +946,7 @@ export class TeamManager {
 		// indistinguishable from orphan team-store cleanup (endless restart loop) but
 		// triggered later in the boot sequence.
 		for (const [goalId, entry] of this.teams) {
-			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
+			const reviewers = entry.agents.filter((a) => this.isVerificationReviewerAgent(a));
 			for (const reviewer of reviewers) {
 				const session = this.sessionManager.getSession(reviewer.sessionId);
 				if (!session || session.status === "terminated") {
@@ -984,10 +990,10 @@ export class TeamManager {
 
 			// Re-subscribe to worker agent events so the team lead is notified
 			// when workers go idle (these subscriptions are lost on restart).
-			// Reviewer sessions are managed by VerificationHarness — never attach
+			// Verification reviewer sessions are managed by VerificationHarness — never attach
 			// the agent_end → notifyTeamLead listener for them.
 			for (const agent of entry.agents) {
-				if (agent.kind === "reviewer" || agent.role === "reviewer") continue;
+				if (this.isVerificationReviewerAgent(agent)) continue;
 				const workerSession = this.sessionManager.getSession(agent.sessionId);
 				if (!workerSession || workerSession.status === "terminated") continue;
 				const { role, sessionId } = agent;
@@ -1211,8 +1217,8 @@ export class TeamManager {
 		return false;
 	}
 
-	private isReviewerAgent(agent: TeamAgent): boolean {
-		return agent.kind === "reviewer" || agent.role === "reviewer";
+	private isVerificationReviewerAgent(agent: TeamAgent): boolean {
+		return agent.kind === "reviewer" || (agent.legacyMissingKind === true && agent.role === "reviewer");
 	}
 
 	private hasLiveSession(sessionId: string): boolean {
@@ -1251,7 +1257,7 @@ export class TeamManager {
 		let reaped = 0;
 		for (let i = entry.agents.length - 1; i >= 0; i--) {
 			const agent = entry.agents[i];
-			if (this.isReviewerAgent(agent)) continue;
+			if (this.isVerificationReviewerAgent(agent)) continue;
 			if (this.hasLiveSession(agent.sessionId)) continue;
 
 			this.clearReapedWorkerRuntimeState(goalId, agent);
@@ -1265,12 +1271,12 @@ export class TeamManager {
 		return reaped;
 	}
 
-	/** Get active (non-reviewer, non-terminated) workers for a goal. */
+	/** Get active workers, excluding only VerificationHarness reviewers and terminated sessions. */
 	private getActiveWorkers(goalId: string): TeamAgent[] {
 		const entry = this.teams.get(goalId);
 		if (!entry) return [];
 		return entry.agents.filter((agent) => {
-			if (this.isReviewerAgent(agent)) return false;
+			if (this.isVerificationReviewerAgent(agent)) return false;
 			return this.hasLiveSession(agent.sessionId);
 		});
 	}
@@ -2103,11 +2109,11 @@ export class TeamManager {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;
 
-		// Defensive guard: never nudge the team lead about a reviewer session.
-		// Reviewer sessions are managed by VerificationHarness; their agent_end
-		// is part of the verification flow, not a worker-finished signal.
+		// Defensive guard: never nudge the team lead about a verification reviewer session.
+		// Reviewer sessions managed by VerificationHarness have kind="reviewer"; legacy
+		// pre-kind reviewer records carry an in-memory marker from restore.
 		const firingAgent = entry.agents.find((a) => a.sessionId === workerSessionId);
-		if (firingAgent && (firingAgent.kind === "reviewer" || firingAgent.role === "reviewer")) {
+		if (firingAgent && this.isVerificationReviewerAgent(firingAgent)) {
 			return;
 		}
 
