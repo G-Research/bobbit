@@ -392,18 +392,24 @@ export class McpClient {
       ...this._config!.headers,
     };
 
-    // Notifications don't expect responses, but still drain the response body.
-    // Leaving undici responses unread can keep HTTP handles alive after short-lived
-    // test servers close, especially on Windows under the full unit suite.
+    // Notifications don't expect JSON-RPC responses, but the HTTP response still
+    // has to be fully consumed so undici can finish and release its handles.
+    // Cancelling an already-closing response body can race with socket cleanup on
+    // Windows; draining the body lets the transport close cleanly.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(notification),
+        signal: controller.signal,
       });
-      await response.body?.cancel().catch(() => undefined);
+      await response.arrayBuffer().catch(() => undefined);
     } catch {
       // Ignore errors for notifications
+    } finally {
+      clearTimeout(timer);
     }
   }
 

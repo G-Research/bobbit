@@ -65,7 +65,7 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 		const message = JSON.parse(body || "{}");
 		requests[requests.length - 1].rpcMethod = message.method;
 		if (message.method === "notifications/initialized") {
-			res.writeHead(202, { "content-type": "application/json" });
+			res.writeHead(202, { "content-type": "application/json", "content-length": "0" });
 			res.end();
 			return;
 		}
@@ -115,9 +115,14 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 	} finally {
 		server.closeIdleConnections?.();
 		await new Promise<void>((resolve, reject) => {
-			server.close((err) => err ? reject(err) : resolve());
-			server.closeAllConnections?.();
-			for (const socket of sockets) socket.destroy();
+			const forceCloseTimer = setTimeout(() => {
+				server.closeAllConnections?.();
+				for (const socket of sockets) socket.destroy();
+			}, 1000);
+			server.close((err) => {
+				clearTimeout(forceCloseTimer);
+				err ? reject(err) : resolve();
+			});
 		});
 	}
 }
