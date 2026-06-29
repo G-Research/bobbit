@@ -111,35 +111,30 @@ describe("MCP gateway catalogue primitives", () => {
 		assert.equal(isLegacyMcpRegistrySource({ id: "reg", type: "mcp-registry", url: SOURCE_URL, addedAt: "now" } as any), true);
 	});
 
-	it("derives catalogue URL candidates from read and write MCP endpoints", () => {
-		assert.deepEqual(candidateGatewayCatalogueUrls("http://mcp-local.t3.zone/readonly/mcp/"), [
-			"http://mcp-local.t3.zone/signin/aigateway",
-			"http://mcp-local.t3.zone/readonly/mcp",
-		]);
-		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/write/mcp"), [
-			"https://mcp.example.com/signin/aigateway",
-			"https://mcp.example.com/write/mcp",
-		]);
+	it("keeps catalogue fallback candidates on the provided URL only", () => {
+		assert.deepEqual(candidateGatewayCatalogueUrls("http://mcp-local.t3.zone/readonly/mcp/"), ["http://mcp-local.t3.zone/readonly/mcp"]);
+		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/write/mcp"), ["https://mcp.example.com/write/mcp"]);
 		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/catalogue"), ["https://mcp.example.com/catalogue"]);
 		assert.throws(() => candidateGatewayCatalogueUrls("https://user:pass@mcp.example.com/readonly/mcp"), /must not contain credentials/);
 		assert.throws(() => candidateGatewayCatalogueUrls("file:///tmp/catalogue.json"), /must use http or https/);
 	});
 
-	it("fetches bounded JSON, falls back from derived candidate to original, and reports malformed responses", async () => {
+	it("fetches bounded JSON only in explicit catalogue discovery mode", async () => {
 		const fetched: string[] = [];
 		const parsed = await fetchMcpGatewayWithDiagnostics(source(), {
+			discoveryMode: "catalogue",
 			fetchFn: async (input: RequestInfo | URL) => {
 				const url = String(input);
 				fetched.push(url);
-				if (url.endsWith("/signin/aigateway")) return new Response(JSON.stringify({ unsupported: true }));
 				return new Response(JSON.stringify({ providers: [{ id: "jira", label: "Jira" }] }));
 			},
 		});
-		assert.deepEqual(fetched, ["http://mcp-local.t3.zone/signin/aigateway", SOURCE_URL]);
+		assert.deepEqual(fetched, [SOURCE_URL]);
 		assert.deepEqual(parsed.providers.map((p: any) => p.id), ["jira"]);
 
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				maxBodyBytes: 10,
 				fetchFn: async () => new Response("{}", { headers: { "content-length": "11" } }),
 			}),
@@ -147,6 +142,7 @@ describe("MCP gateway catalogue primitives", () => {
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				maxBodyBytes: 20,
 				fetchFn: async () => new Response(JSON.stringify({ providers: [] }).repeat(3)),
 			}),
@@ -154,12 +150,14 @@ describe("MCP gateway catalogue primitives", () => {
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				fetchFn: async () => new Response("not json"),
 			}),
 			/not valid JSON/,
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				timeoutMs: 1,
 				fetchFn: (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
 					init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
