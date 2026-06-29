@@ -29,8 +29,12 @@ function source(url = SOURCE_URL): any {
 	return { id: "gateway", type: "mcp-gateway", url, addedAt: "2026-01-01T00:00:00.000Z" };
 }
 
-type MockGatewayRequest = { method?: string; path?: string; rpcMethod?: string };
-type MockGatewayOptions = { toolsListError?: { code: number; message: string; data?: unknown } };
+type MockGatewayRequest = { method?: string; path?: string; rpcMethod?: string; sessionIdHeader?: string };
+type MockGatewayOptions = { toolsListError?: { code: number; message: string; data?: unknown }; requiredSessionId?: string };
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+	return Array.isArray(value) ? value.join(", ") : value;
+}
 
 async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>, opts: MockGatewayOptions = {}): Promise<void> {
 	const requests: MockGatewayRequest[] = [];
@@ -38,7 +42,7 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 	const server = http.createServer(async (req, res) => {
 		res.setHeader("connection", "close");
 		const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-		requests.push({ method: req.method, path });
+		requests.push({ method: req.method, path, sessionIdHeader: headerValue(req.headers["mcp-session-id"]) });
 		if (path === "/signin/aigateway") {
 			res.writeHead(404, { "content-type": "text/plain" });
 			res.end("not found");
@@ -64,13 +68,18 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 		for await (const chunk of req) body += chunk;
 		const message = JSON.parse(body || "{}");
 		requests[requests.length - 1].rpcMethod = message.method;
+		if (opts.requiredSessionId && message.method !== "initialize" && headerValue(req.headers["mcp-session-id"]) !== opts.requiredSessionId) {
+			res.writeHead(400, { "content-type": "application/json" });
+			res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: "missing MCP session header" } }));
+			return;
+		}
 		if (message.method === "notifications/initialized") {
 			res.writeHead(202, { "content-type": "application/json", "content-length": "0" });
 			res.end();
 			return;
 		}
 		if (message.method === "initialize") {
-			res.writeHead(200, { "content-type": "application/json" });
+			res.writeHead(200, { "content-type": "application/json", ...(opts.requiredSessionId ? { "Mcp-Session-Id": opts.requiredSessionId } : {}) });
 			res.end(JSON.stringify({
 				jsonrpc: "2.0",
 				id: message.id,
@@ -206,6 +215,16 @@ describe("MCP gateway catalogue primitives", () => {
 			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
 			assert.equal(requests.some((r) => r.path === "/signin/aigateway"), false);
 		});
+	});
+
+	it("carries streamable HTTP MCP session id from initialize into later discovery requests", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			const parsed = await fetchMcpGatewayWithDiagnostics(source(url));
+			assert.deepEqual(parsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
+			assert.equal(requests.find((r) => r.rpcMethod === "initialize")?.sessionIdHeader, undefined);
+			assert.equal(requests.find((r) => r.rpcMethod === "notifications/initialized")?.sessionIdHeader, "session-123");
+			assert.equal(requests.find((r) => r.rpcMethod === "tools/list")?.sessionIdHeader, "session-123");
+		}, { requiredSessionId: "session-123" });
 	});
 
 	it("rejects streamable HTTP MCP tools/list JSON-RPC errors", async () => {
