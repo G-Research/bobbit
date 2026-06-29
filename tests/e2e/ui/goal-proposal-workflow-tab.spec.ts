@@ -110,6 +110,24 @@ async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> 
 	expect(editResp.status, `replace library workflow with inline workflow: ${editText}`).toBe(200);
 }
 
+async function seedInlineOnlyWorkflowGoalProposal(sessionId: string): Promise<void> {
+	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
+		method: "POST",
+		body: JSON.stringify({
+			args: {
+				title: "Inline Workflow Seed Only Goal",
+				inlineWorkflow: INLINE_WORKFLOW,
+				spec: "A goal proposal seeded with only an inline workflow and no registered workflow id.",
+			},
+		}),
+	});
+	const seedText = await seedResp.text();
+	expect(
+		seedResp.status,
+		`BESPOKE_INLINE_UI_SEED_ONLY: inlineWorkflow-only seed should create a normal proposal, not fail workflow validation: ${seedText}`,
+	).toBe(200);
+}
+
 async function seedConflictingInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
 	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
@@ -163,6 +181,91 @@ async function ensureSubgoals(value: boolean): Promise<void> {
 
 test.describe("Goal proposal — Workflow tab", () => {
 	test.afterEach(async () => { await ensureSubgoals(true); });
+
+	test("inline-only bespoke workflow proposal opens normally and submits workflow body", async ({ page }) => {
+		test.setTimeout(90_000);
+		await ensureSubgoals(true);
+		await openApp(page);
+		const sessionId = await createSessionViaUI(page);
+		await seedInlineOnlyWorkflowGoalProposal(sessionId);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("Inline Workflow Seed Only Goal", { timeout: 10_000 });
+		await expect.poll(
+			() => page.evaluate(() => {
+				const slot = (window as any).bobbitState?.activeProposals?.goal;
+				const fields = slot?.fields;
+				return {
+					workflow: fields?.workflow ?? null,
+					inlineId: fields?.inlineWorkflow?.id ?? null,
+					gateCount: fields?.inlineWorkflow?.gates?.length ?? 0,
+					validationCode: slot?.workflowValidationError?.code ?? null,
+				};
+			}),
+			{ timeout: 10_000, message: "inline-only proposal should hydrate as a normal proposal without workflow-validation failure state" },
+		).toEqual({ workflow: null, inlineId: INLINE_WORKFLOW_ID, gateCount: INLINE_WORKFLOW_GATE_COUNT, validationCode: null });
+		await expect(page.locator("[data-testid='goal-proposal-workflow-error']")).toHaveCount(0);
+		await expect(page.getByText(/MISSING_WORKFLOW|UNKNOWN_WORKFLOW/)).toHaveCount(0);
+
+		const goalSelect = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+		await expect(goalSelect).toBeVisible({ timeout: 10_000 });
+		const goalLabel = await selectedOptionText(goalSelect);
+		const goalValue = await goalSelect.inputValue();
+
+		await page.locator("[data-testid='goal-proposal-tab-workflow']").click();
+		const workflowSelect = page.locator("[data-testid='goal-proposal-workflow-select']");
+		await expect(workflowSelect).toBeVisible({ timeout: 10_000 });
+		expect(
+			{
+				goal: goalLabel,
+				workflow: await selectedOptionText(workflowSelect),
+				goalValue,
+				workflowValue: await workflowSelect.inputValue(),
+			},
+			"BESPOKE_INLINE_UI_PICKERS: inline-only proposal must show exactly Bespoke (N Gates) in both pickers",
+		).toEqual({
+			goal: INLINE_WORKFLOW_LABEL,
+			workflow: INLINE_WORKFLOW_LABEL,
+			goalValue: INLINE_WORKFLOW_ID,
+			workflowValue: INLINE_WORKFLOW_ID,
+		});
+
+		await page.locator("[data-testid='goal-proposal-tab-goal']").click();
+		const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+		await expect(createBtn).toBeVisible({ timeout: 5_000 });
+		await expect(createBtn, "inline-only bespoke workflow proposals should be creatable").toBeEnabled();
+
+		const createPromise = page.waitForResponse(
+			(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST",
+			{ timeout: 15_000 },
+		).catch((err: Error) => err);
+		await createBtn.click();
+		const createResp = await createPromise;
+		if (createResp instanceof Error) throw createResp;
+		const body = createResp.request().postDataJSON?.() ?? JSON.parse(createResp.request().postData() || "{}");
+		expect(
+			body,
+			"BESPOKE_INLINE_UI_SUBMIT: Create Goal must submit the inline workflow body instead of workflowId",
+		).toMatchObject({
+			workflow: {
+				id: INLINE_WORKFLOW_ID,
+				gates: expect.arrayContaining([
+					expect.objectContaining({ id: "issue-analysis" }),
+					expect.objectContaining({ id: "implementation" }),
+					expect.objectContaining({ id: "ready-to-merge" }),
+				]),
+			},
+		});
+		expect(body.workflow.gates).toHaveLength(INLINE_WORKFLOW_GATE_COUNT);
+		expect(body.workflowId).toBeUndefined();
+		expect(createResp.status()).toBe(201);
+		const created = await createResp.json();
+		expect(created?.id).toBeTruthy();
+		await deleteGoal(created.id);
+	});
 
 	test("live assistant proposals prefer a distinct inline workflow over the project workflow id", async ({ page }) => {
 		test.setTimeout(90_000);
