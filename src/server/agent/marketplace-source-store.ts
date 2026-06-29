@@ -28,14 +28,15 @@ export function isValidSourceId(id: unknown): id is string {
 	);
 }
 
-export type MarketplaceSourceType = "pack" | "mcp-registry";
+export type MarketplaceSourceType = "pack" | "mcp-gateway";
+type StoredMarketplaceSourceType = MarketplaceSourceType | "mcp-registry";
 
 export interface MarketplaceSource {
 	/** Stable id ([a-z0-9-]+, unique). Also the cache subdir name. */
 	id: string;
 	/** Source kind. Absent means the legacy/default pack source type. */
-	type?: MarketplaceSourceType;
-	/** Git remote URL OR absolute local directory path; registry discovery URL for MCP registry sources. */
+	type?: StoredMarketplaceSourceType;
+	/** Git remote URL OR absolute local directory path; MCP endpoint URL for MCP gateway sources. */
 	url: string;
 	/** Branch/tag. Optional for pack sources only (defaults to the remote HEAD on clone). */
 	ref?: string;
@@ -44,6 +45,8 @@ export interface MarketplaceSource {
 	trustedAt?: string;
 	lastSyncedAt?: string; // ISO-8601
 	lastCommit?: string;
+	/** Response-only migration note for tolerated legacy source rows. */
+	unsupportedReason?: string;
 	/**
 	 * Response-only flag marking the synthetic, non-persisted built-in source
 	 * (built-in-first-party-packs §4.4). NEVER written to disk by
@@ -61,10 +64,25 @@ function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
 
-function normalizeSourceType(v: unknown): MarketplaceSourceType | null {
+export const LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON = "mcp-registry sources are no longer supported; remove and re-add this source as an MCP Gateway source";
+
+function normalizeStoredSourceType(v: unknown): StoredMarketplaceSourceType | null {
 	if (v === undefined || v === "pack") return "pack";
+	if (v === "mcp-gateway") return "mcp-gateway";
 	if (v === "mcp-registry") return "mcp-registry";
 	return null;
+}
+
+function normalizeNewSourceType(v: unknown): MarketplaceSourceType | null {
+	if (v === undefined || v === "pack") return "pack";
+	if (v === "mcp-gateway") return "mcp-gateway";
+	return null;
+}
+
+function publicSource(s: MarketplaceSource): MarketplaceSource {
+	const out = { ...s };
+	if (out.type === "mcp-registry") out.unsupportedReason = LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON;
+	return out;
 }
 
 function parseSource(raw: unknown): MarketplaceSource | null {
@@ -72,7 +90,7 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 	const r = raw as Record<string, unknown>;
 	if (!isValidSourceId(r.id)) return null;
 	if (!nonEmptyString(r.url)) return null;
-	const type = normalizeSourceType(r.type);
+	const type = normalizeStoredSourceType(r.type);
 	if (!type) return null;
 	// §4.1/§4.4 — the built-in source is synthetic and composed only at the API
 	// layer. Reject any disk-authored row that would duplicate or shadow it so a
@@ -84,8 +102,8 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 		addedAt: nonEmptyString(r.addedAt) ? (r.addedAt as string) : new Date().toISOString(),
 	};
 	if (type !== "pack") s.type = type;
-	// Registry sources do not support refs. Ignore a legacy malformed on-disk ref
-	// rather than preserving it across the next save.
+	// Non-pack sources do not support refs. Ignore malformed on-disk refs rather
+	// than preserving them across the next save.
 	if (type === "pack" && nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
 	if (nonEmptyString(r.trustedAt)) s.trustedAt = r.trustedAt as string;
 	if (nonEmptyString(r.lastSyncedAt)) s.lastSyncedAt = r.lastSyncedAt as string;
@@ -96,7 +114,7 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 function serializeSource(s: MarketplaceSource): Record<string, unknown> {
 	const out: Record<string, unknown> = { id: s.id, url: s.url };
 	if (s.type && s.type !== "pack") out.type = s.type;
-	if (s.type !== "mcp-registry" && s.ref) out.ref = s.ref;
+	if ((!s.type || s.type === "pack") && s.ref) out.ref = s.ref;
 	out.addedAt = s.addedAt;
 	if (s.trustedAt) out.trustedAt = s.trustedAt;
 	if (s.lastSyncedAt) out.lastSyncedAt = s.lastSyncedAt;
@@ -176,18 +194,18 @@ export class MarketplaceSourceStore {
 
 	/** All registered sources (defensive copies), in registration order. */
 	list(): MarketplaceSource[] {
-		return this.sources.map((s) => ({ ...s }));
+		return this.sources.map(publicSource);
 	}
 
 	get(id: string): MarketplaceSource | undefined {
 		const s = this.sources.find((x) => x.id === id);
-		return s ? { ...s } : undefined;
+		return s ? publicSource(s) : undefined;
 	}
 
 	getByUrl(url: string): MarketplaceSource | undefined {
 		const norm = url.trim();
 		const s = this.sources.find((x) => x.url === norm);
-		return s ? { ...s } : undefined;
+		return s ? publicSource(s) : undefined;
 	}
 
 	/**
@@ -195,12 +213,13 @@ export class MarketplaceSourceStore {
 	 * url. Returns the created record (sync metadata is filled in later by the
 	 * install engine after a successful git sync).
 	 */
-	add(input: { url: string; ref?: string; type?: MarketplaceSourceType }): MarketplaceSource {
+	add(input: { url: string; ref?: string; type?: MarketplaceSourceType | "mcp-registry" }): MarketplaceSource {
 		const url = input.url.trim();
 		if (!nonEmptyString(url)) throw new Error("source url is required");
-		const type = normalizeSourceType(input.type);
+		if (input.type === "mcp-registry") throw new Error("mcp-registry sources are no longer supported; use type mcp-gateway");
+		const type = normalizeNewSourceType(input.type);
 		if (!type) throw new Error(`invalid source type: ${String(input.type)}`);
-		if (type === "mcp-registry" && nonEmptyString(input.ref)) throw new Error("mcp-registry sources do not support ref");
+		if (type === "mcp-gateway" && nonEmptyString(input.ref)) throw new Error("mcp-gateway sources do not support ref");
 		// Reject the reserved built-in url scheme (§4.4): the built-in source is
 		// synthetic and must never be user-registered/persisted.
 		if (url === BUILTIN_SOURCE_URL || url.toLowerCase().startsWith("builtin:")) {
@@ -221,7 +240,7 @@ export class MarketplaceSourceStore {
 		if (type === "pack" && nonEmptyString(input.ref)) source.ref = input.ref!.trim();
 		this.sources.push(source);
 		this.save();
-		return { ...source };
+		return publicSource(source);
 	}
 
 	/** Patch sync metadata after a sync. No-op if id unknown. */
@@ -229,14 +248,14 @@ export class MarketplaceSourceStore {
 		const s = this.sources.find((x) => x.id === id);
 		if (!s) return undefined;
 		if (patch.ref !== undefined) {
-			if (s.type === "mcp-registry" && patch.ref) throw new Error("mcp-registry sources do not support ref");
+			if (s.type && s.type !== "pack" && patch.ref) throw new Error(`${s.type} sources do not support ref`);
 			s.ref = patch.ref || undefined;
 		}
 		if (patch.trustedAt !== undefined) s.trustedAt = patch.trustedAt || undefined;
 		if (patch.lastSyncedAt !== undefined) s.lastSyncedAt = patch.lastSyncedAt;
 		if (patch.lastCommit !== undefined) s.lastCommit = patch.lastCommit;
 		this.save();
-		return { ...s };
+		return publicSource(s);
 	}
 
 	/** Remove a source. Returns true if it existed. */
