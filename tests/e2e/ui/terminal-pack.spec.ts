@@ -739,22 +739,106 @@ async function waitForTerminalMountedForFrameInjection(page: import("@playwright
 	await expect(page.locator(`${terminalHost()} .xterm-helper-textarea`), "xterm input textarea must be mounted before typing").toHaveCount(1, { timeout: 10_000 });
 }
 
+type TerminalFocusDiagnostics = {
+	panelState: string | null;
+	activeTag: string | null;
+	activeClass: string;
+	activeInTerminal: boolean;
+	textareaExists: boolean;
+	textareaDisabled: boolean;
+	textareaReadOnly: boolean;
+	xtermVisible: boolean;
+	screenVisible: boolean;
+	hostRect: { width: number; height: number } | null;
+	xtermRect: { width: number; height: number } | null;
+	screenRect: { width: number; height: number } | null;
+	renderedRows: number;
+};
+
 async function focusTerminal(page: import("@playwright/test").Page): Promise<void> {
 	const xterm = page.locator(`${terminalHost()} .xterm`).first();
+	const helperTextarea = page.locator(`${terminalHost()} .xterm-helper-textarea`).first();
 	await expect(xterm, "xterm must be visible and focusable before typing").toBeVisible({ timeout: 10_000 });
-	await xterm.click({ position: { x: 24, y: 24 } });
-	await page.locator(`${terminalHost()} .xterm-helper-textarea`).focus();
-	await page.evaluate(() => {
-		(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus();
+
+	let lastDiagnostics: TerminalFocusDiagnostics | undefined;
+	let lastFocusError = "";
+	try {
+		await expect.poll(async () => {
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			if (lastDiagnostics.panelState !== "attached" || !lastDiagnostics.textareaExists || !lastDiagnostics.xtermVisible || !lastDiagnostics.screenVisible) {
+				return false;
+			}
+			try {
+				await xterm.click({ position: { x: 24, y: 24 }, timeout: 2_000 });
+				await helperTextarea.focus({ timeout: 2_000 });
+				await page.evaluate(() => {
+					(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus({ preventScroll: true });
+				});
+				lastFocusError = "";
+			} catch (error) {
+				lastFocusError = error instanceof Error ? error.message : String(error);
+			}
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			return terminalFocusedForInput(lastDiagnostics);
+		}, {
+			message: "terminal xterm should become focused/ready for input",
+			timeout: 20_000,
+			intervals: [100, 250, 500],
+		}).toBe(true);
+	} catch (error) {
+		const detail = JSON.stringify(lastDiagnostics ?? await terminalFocusDiagnostics(page), null, 2);
+		throw new Error(`terminal xterm did not become focused/ready for input within 20s; lastFocusError=${lastFocusError || "none"}; diagnostics=${detail}; assertion=${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function terminalFocusedForInput(diagnostics: TerminalFocusDiagnostics): boolean {
+	return diagnostics.panelState === "attached"
+		&& diagnostics.textareaExists
+		&& !diagnostics.textareaDisabled
+		&& diagnostics.xtermVisible
+		&& diagnostics.screenVisible
+		&& diagnostics.renderedRows > 0
+		&& diagnostics.activeInTerminal;
+}
+
+async function terminalFocusDiagnostics(page: import("@playwright/test").Page): Promise<TerminalFocusDiagnostics> {
+	return page.evaluate(() => {
+		const panel = document.querySelector('[data-testid="terminal-panel"]') as HTMLElement | null;
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const xterm = host?.querySelector(".xterm") as HTMLElement | null;
+		const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
+		const textarea = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+		const active = document.activeElement as HTMLElement | null;
+		const rectSize = (element: HTMLElement | null) => {
+			if (!element) return null;
+			const rect = element.getBoundingClientRect();
+			return { width: rect.width, height: rect.height };
+		};
+		const visible = (element: HTMLElement | null) => {
+			if (!element) return false;
+			const rect = element.getBoundingClientRect();
+			const css = getComputedStyle(element);
+			return rect.width > 0 && rect.height > 0 && css.display !== "none" && css.visibility !== "hidden";
+		};
+		return {
+			panelState: panel?.getAttribute("data-terminal-state") ?? null,
+			activeTag: active?.tagName ?? null,
+			activeClass: active?.className ? String(active.className) : "",
+			activeInTerminal: active?.classList.contains("xterm-helper-textarea") === true
+				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null,
+			textareaExists: !!textarea,
+			textareaDisabled: textarea?.disabled === true,
+			textareaReadOnly: textarea?.readOnly === true,
+			xtermVisible: visible(xterm),
+			screenVisible: visible(screen),
+			hostRect: rectSize(host),
+			xtermRect: rectSize(xterm),
+			screenRect: rectSize(screen),
+			renderedRows: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+		};
 	});
-	await expect.poll(
-		() => page.evaluate(() => {
-			const active = document.activeElement as HTMLElement | null;
-			return active?.classList.contains("xterm-helper-textarea") === true
-				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null;
-		}),
-		{ timeout: 10_000 },
-	).toBe(true);
 }
 
 async function typeCommand(page: import("@playwright/test").Page, command: string): Promise<void> {
