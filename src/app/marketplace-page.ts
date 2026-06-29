@@ -612,20 +612,25 @@ function scopeLabel(scope: MarketScope): string {
 	return "Project";
 }
 
-function sourceType(src: MarketplaceSource | undefined): MarketplaceSourceType {
-	return src?.type === "mcp-registry" ? "mcp-registry" : "pack";
+type MarketplaceSourceKind = MarketplaceSourceType | "mcp-registry";
+
+function sourceType(src: MarketplaceSource | undefined): MarketplaceSourceKind {
+	if (src?.type === "mcp-gateway") return "mcp-gateway";
+	if (src?.type === "mcp-registry") return "mcp-registry";
+	return "pack";
 }
 
-function selectedSourceType(): MarketplaceSourceType {
+function selectedSourceType(): MarketplaceSourceKind {
 	return sourceType(sources.find((s) => s.id === selectedSourceId));
 }
 
 function sourceMcpCount(src: MarketplaceSource): number | undefined {
-	return typeof src.mcpServerCount === "number"
-		? src.mcpServerCount
-		: typeof src.discoveredMcpServers === "number"
-			? src.discoveredMcpServers
-			: undefined;
+	if (typeof src.mcpProviderCount === "number") return src.mcpProviderCount;
+	if (typeof src.discoveredMcpProviders === "number") return src.discoveredMcpProviders;
+	if (typeof src.gatewayProviderCount === "number") return src.gatewayProviderCount;
+	if (typeof src.mcpServerCount === "number") return src.mcpServerCount;
+	if (typeof src.discoveredMcpServers === "number") return src.discoveredMcpServers;
+	return undefined;
 }
 
 function packMcpRefs(pack: BrowsePackWire | InstalledPackWire): string[] {
@@ -867,6 +872,26 @@ function renderEntityDetails(packName: string, descriptions: PackEntityDescripti
 }
 
 function renderSourcesPanel(): TemplateResult {
+	const isGateway = newSourceType === "mcp-gateway";
+	const urlInput = html`
+		<input
+			type="text"
+			data-testid="market-source-url"
+			class="market-input ${isGateway ? "flex-1" : ""}"
+			placeholder=${isGateway ? "http://mcp-local.t3.zone/readonly/mcp" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
+			.value=${newSourceUrl}
+			@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
+		/>
+	`;
+	const addButton = html`
+		<button
+			class="market-btn market-btn--primary"
+			data-testid="market-add-source"
+			?disabled=${!newSourceUrl.trim() || addingSource}
+			@click=${handleAddSource}
+		>${icon(Plus, "xs")} ${addingSource ? "Adding…" : "Add"}</button>
+	`;
 	return html`
 		<section class="market-panel" data-testid="market-sources-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Sources</h2>
@@ -886,15 +911,15 @@ function renderSourcesPanel(): TemplateResult {
 					>Pack repo / local dir</button>
 					<button
 						type="button"
-						class="market-source-kind-option ${newSourceType === "mcp-registry" ? "market-source-kind-option--active" : ""}"
-						data-testid="market-source-kind-mcp-registry"
-						@click=${() => { newSourceType = "mcp-registry"; newSourceRef = ""; renderApp(); }}
-					>Official MCP registry URL</button>
+						class="market-source-kind-option ${isGateway ? "market-source-kind-option--active" : ""}"
+						data-testid="market-source-kind-mcp-gateway"
+						@click=${() => { newSourceType = "mcp-gateway"; newSourceRef = ""; renderApp(); }}
+					>MCP Gateways</button>
 				</div>
 				<div class="market-trust-warning" data-testid="market-trust-warning">
 					${icon(AlertTriangle, "xs")}
 					<div class="flex flex-col gap-1.5">
-						<span>Only add sources you trust. Packs, MCP servers, registry entries, and pi extensions can run code, connect to remote services, or instruct agents on your machine.</span>
+						<span>Only add sources you trust. Packs, MCP gateway providers, MCP servers, and pi extensions can run code, connect to remote services, or instruct agents on your machine.</span>
 						<details class="market-trust-why" data-testid="market-trust-why">
 							<summary>Why?</summary>
 							<div class="market-trust-why-body">
@@ -907,35 +932,26 @@ function renderSourcesPanel(): TemplateResult {
 						</details>
 					</div>
 				</div>
-				<input
-					type="text"
-					data-testid="market-source-url"
-					class="market-input"
-					placeholder=${newSourceType === "mcp-registry" ? "https://registry.modelcontextprotocol.io/v0/servers" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
-					.value=${newSourceUrl}
-					@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
-					@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
-				/>
-				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper" data-testid="market-mcp-source-helper">Bobbit reads official MCP Registry <code>servers[].server</code> entries, shows supported remote/package servers, and skips unsupported transports or packages with diagnostics. Installing a stdio package may start a host process.</div>` : ""}
-				<div class="flex items-center gap-2">
-					<input
-						type="text"
-						data-testid="market-source-ref"
-						class="market-input flex-1"
-						placeholder=${newSourceType === "mcp-registry" ? "Registry sources do not use refs" : "ref (branch/tag, optional)"}
-						.value=${newSourceRef}
-						?disabled=${newSourceType === "mcp-registry"}
-						@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; renderApp(); }}
-						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
-					/>
-					<button
-						class="market-btn market-btn--primary"
-						data-testid="market-add-source"
-						?disabled=${!newSourceUrl.trim() || addingSource}
-						@click=${handleAddSource}
-					>${icon(Plus, "xs")} ${addingSource ? "Adding…" : "Add"}</button>
-				</div>
-				${newSourceType === "mcp-registry" ? html`<div class="market-source-helper">Official registry sources are synced from their URL; refs apply only to git sources.</div>` : ""}
+				${isGateway
+					? html`
+						<div class="flex items-center gap-2">${urlInput}${addButton}</div>
+						<div class="market-source-helper" data-testid="market-mcp-source-helper">Bobbit discovers providers from an MCP gateway and installs one provider pack per namespace. Fine-grained operation policy is managed on the Tools page.</div>
+					`
+					: html`
+						${urlInput}
+						<div class="flex items-center gap-2">
+							<input
+								type="text"
+								data-testid="market-source-ref"
+								class="market-input flex-1"
+								placeholder="ref (branch/tag, optional)"
+								.value=${newSourceRef}
+								@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; renderApp(); }}
+								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
+							/>
+							${addButton}
+						</div>
+					`}
 			</div>
 		</section>
 	`;
@@ -951,6 +967,9 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	const isBuiltin = src.builtin === true;
 	const kind = sourceType(src);
 	const mcpCount = sourceMcpCount(src);
+	const chip = kind === "mcp-gateway" ? "MCP gateway" : kind === "mcp-registry" ? "Legacy MCP registry" : "Pack source";
+	const urlPrefix = kind === "mcp-gateway" ? "Gateway URL: " : kind === "mcp-registry" ? "Legacy registry URL: " : "";
+	const syncedSuffix = src.lastSyncedAt ? ` · synced ${new Date(src.lastSyncedAt).toLocaleString()}` : "";
 	return html`
 		<div
 			class="market-source-row ${isSelected ? "market-source-row--selected" : ""}"
@@ -960,15 +979,17 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 			<button class="flex-1 min-w-0 text-left" @click=${() => { activeTab = "browse"; loadBrowse(src.id); }} title="Browse packs">
 				<div class="flex items-center gap-1.5">
 					<span class="text-sm font-medium truncate">${src.id}</span>
-					<span class="market-source-type-chip" data-kind=${kind} data-testid="market-source-type-chip">${kind === "mcp-registry" ? "MCP registry" : "Pack source"}</span>
+					<span class="market-source-type-chip" data-kind=${kind} data-testid="market-source-type-chip">${chip}</span>
 					${isBuiltin ? html`<span class="market-builtin-badge" data-testid="market-source-builtin-badge">Built-in</span>` : ""}
 				</div>
-				<div class="text-[11px] text-muted-foreground truncate">${kind === "mcp-registry" ? "Registry URL: " : ""}${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
+				<div class="text-[11px] text-muted-foreground truncate">${urlPrefix}${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
 				${isBuiltin
 					? html`<div class="text-[10px] text-muted-foreground/80">Shipped core features — always available, enable/disable per pack.</div>`
-					: kind === "mcp-registry"
-						? html`<div class="text-[10px] text-muted-foreground/80">${mcpCount === undefined ? "MCP registry source" : `${mcpCount} MCP servers discovered`}${src.lastSyncedAt ? ` · synced ${new Date(src.lastSyncedAt).toLocaleString()}` : ""}</div>`
-						: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
+					: kind === "mcp-gateway"
+						? html`<div class="text-[10px] text-muted-foreground/80">${mcpCount === undefined ? "MCP gateway source" : `${mcpCount} provider${mcpCount === 1 ? "" : "s"} discovered`}${syncedSuffix}</div>`
+						: kind === "mcp-registry"
+							? html`<div class="text-[10px] text-muted-foreground/80">${src.unsupportedReason || "Legacy MCP registry sources are unsupported. Remove and re-add as an MCP Gateway source."}</div>`
+							: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
 			</button>
 			${isBuiltin
 				? ""
@@ -1030,11 +1051,11 @@ function renderBrowsePanel(): TemplateResult {
 			${!selectedSourceId
 				? html`<p class="text-sm text-muted-foreground italic">Select a source to browse its packs.</p>`
 				: browseLoading
-					? html`<p class="text-sm text-muted-foreground">${selectedSourceType() === "mcp-registry" ? "Loading MCP servers…" : "Loading packs…"}</p>`
+					? html`<p class="text-sm text-muted-foreground">${selectedSourceType() === "mcp-gateway" ? "Loading MCP providers…" : "Loading packs…"}</p>`
 					: browseError
 						? html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`
 						: browsePacks.length === 0
-							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-registry" ? "This registry has no supported MCP servers." : "This source has no packs."}</p>`
+							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-gateway" ? "This gateway has no supported MCP providers." : selectedSourceType() === "mcp-registry" ? "This legacy MCP registry source is unsupported. Remove it and add an MCP Gateway source." : "This source has no packs."}</p>`
 							: html`<div class="flex flex-col gap-2">${browsePacks.map(renderBrowsePackCard)}</div>`}
 		</section>
 	`;

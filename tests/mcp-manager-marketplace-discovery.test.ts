@@ -7,6 +7,7 @@ import path from "node:path";
 const {
   McpManager,
 } = await import("../src/server/mcp/mcp-manager.ts");
+const { parseMcpToolName } = await import("../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
 const { ProjectContextManager } = await import("../src/server/agent/project-context-manager.ts");
@@ -21,6 +22,7 @@ class StubMcpClient {
   public connected = false;
   public connectCount = 0;
   public disconnectCount = 0;
+  public calls: Array<{ toolName: string; args: Record<string, unknown> }> = [];
 
   constructor(
     public name: string,
@@ -45,7 +47,8 @@ class StubMcpClient {
     return this.opts.tools ?? [];
   }
 
-  async callTool(toolName: string, _args: Record<string, unknown>): Promise<McpToolResult> {
+  async callTool(toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
+    this.calls.push({ toolName, args });
     return { content: [{ type: "text", text: toolName }] };
   }
 }
@@ -94,6 +97,87 @@ const contrib = (
 });
 
 describe("McpManager marketplace discovery primitives", () => {
+  it("groups MCP gateway read/write provider namespaces and preserves canonical call names", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const readTransport = { url: "https://gateway.example.test/readonly/mcp" };
+    const writeTransport = { url: "https://gateway.example.test/write/mcp" };
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("jira", "gr", { ...readTransport }, "jira"),
+      contrib("confluence", "gr", { ...readTransport }, "confluence"),
+      contrib("jira-write", "gr-write", { ...writeTransport }, "jira"),
+      contrib("confluence-write", "gr-write", { ...writeTransport }, "confluence"),
+    ];
+    const readStub = new StubMcpClient("gr", {
+      tools: [
+        op("jira__jira_search"),
+        op("confluence__page_search"),
+        op("jira_search"),
+        op("slack__hidden"),
+      ],
+    });
+    const writeStub = new StubMcpClient("gr-write", {
+      tools: [
+        op("jira__jira_create"),
+        op("confluence__page_update"),
+        op("slack__hidden_write"),
+      ],
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["gr", readStub],
+      ["gr-write", writeStub],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    assert.deepEqual(parseMcpToolName("mcp__gr__jira__jira_search"), {
+      server: "gr",
+      sub: "jira",
+      op: "jira_search",
+    });
+    assert.deepEqual(parseMcpToolName("mcp__gr__jira_search"), {
+      server: "gr",
+      op: "jira_search",
+    });
+
+    const groups = mgr.resolveMarketplaceConnectionGroups();
+    assert.equal(groups.length, 2);
+    assert.deepEqual(groups.map((g: any) => g.serverName).sort(), ["gr", "gr-write"]);
+    assert.deepEqual([...groups.find((g: any) => g.serverName === "gr").activeSubNamespaces].sort(), [
+      "confluence",
+      "jira",
+    ]);
+    assert.deepEqual([...groups.find((g: any) => g.serverName === "gr-write").activeSubNamespaces].sort(), [
+      "confluence",
+      "jira",
+    ]);
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    assert.equal(readStub.connectCount, 1);
+    assert.equal(writeStub.connectCount, 1);
+
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => t.name).sort(), [
+      "mcp__gr-write__confluence__page_update",
+      "mcp__gr-write__jira__jira_create",
+      "mcp__gr__confluence__page_search",
+      "mcp__gr__jira__jira_search",
+    ]);
+    assert.deepEqual(
+      mgr.getServerStatuses().map((s: any) => ({ name: s.name, activeSubNamespaces: s.activeSubNamespaces })).sort((a: any, b: any) => a.name.localeCompare(b.name)),
+      [
+        { name: "gr", activeSubNamespaces: ["confluence", "jira"] },
+        { name: "gr-write", activeSubNamespaces: ["confluence", "jira"] },
+      ],
+    );
+
+    await mgr.callTool("mcp__gr__jira__jira_search", { query: "BUG-1" });
+    await mgr.callTool("mcp__gr-write__jira__jira_create", { summary: "create" });
+    assert.deepEqual(readStub.calls, [{ toolName: "jira__jira_search", args: { query: "BUG-1" } }]);
+    assert.deepEqual(writeStub.calls, [{ toolName: "jira__jira_create", args: { summary: "create" } }]);
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr__slack__hidden", {}),
+      /sub-namespace is not active/,
+    );
+  });
+
   it("groups same-config subNamespace contributions and filters tool infos", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "stub" };
