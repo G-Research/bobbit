@@ -66,31 +66,85 @@ const GOAL_FRONTMATTER_KEYS = [
  * when valid (or when the field is absent — both are optional). Returns a
  * STRUCTURAL_VALIDATION_FAILED ParseError when present but malformed.
  */
-function validateGoalInlineFields(fields: Record<string, unknown>): ParseError | null {
-	const iw = fields.inlineWorkflow;
-	if (iw !== undefined && iw !== null) {
-		if (!isPlainObject(iw)) {
+export function validateGoalInlineWorkflow(iw: unknown): ParseError | null {
+	if (iw === undefined || iw === null) return null;
+	if (!isPlainObject(iw)) {
+		return {
+			ok: false,
+			code: "STRUCTURAL_VALIDATION_FAILED",
+			message: "inlineWorkflow must be an object with `id`, `name`, and `gates[]`",
+		};
+	}
+	if (typeof iw.id !== "string" || iw.id.trim() === "") {
+		return {
+			ok: false,
+			code: "STRUCTURAL_VALIDATION_FAILED",
+			message: "inlineWorkflow.id must be a non-empty string",
+		};
+	}
+	if (typeof iw.name !== "string" || iw.name.trim() === "") {
+		return {
+			ok: false,
+			code: "STRUCTURAL_VALIDATION_FAILED",
+			message: "inlineWorkflow.name must be a non-empty string",
+		};
+	}
+	if (!Array.isArray(iw.gates)) {
+		return {
+			ok: false,
+			code: "STRUCTURAL_VALIDATION_FAILED",
+			message: "inlineWorkflow.gates must be an array",
+		};
+	}
+	for (let i = 0; i < iw.gates.length; i++) {
+		const gate = iw.gates[i];
+		if (!isPlainObject(gate)) {
 			return {
 				ok: false,
 				code: "STRUCTURAL_VALIDATION_FAILED",
-				message: "inlineWorkflow must be an object with `id`, `name`, and `gates[]`",
+				message: `inlineWorkflow.gates[${i}] must be an object`,
 			};
 		}
-		if (typeof iw.id !== "string" || iw.id.trim() === "") {
+		if (typeof gate.id !== "string" || gate.id.trim() === "") {
 			return {
 				ok: false,
 				code: "STRUCTURAL_VALIDATION_FAILED",
-				message: "inlineWorkflow.id must be a non-empty string",
+				message: `inlineWorkflow.gates[${i}].id must be a non-empty string`,
 			};
 		}
-		if (!Array.isArray(iw.gates)) {
+		if (gate.verify !== undefined && gate.verify !== null && !Array.isArray(gate.verify)) {
 			return {
 				ok: false,
 				code: "STRUCTURAL_VALIDATION_FAILED",
-				message: "inlineWorkflow.gates must be an array",
+				message: `inlineWorkflow.gates[${i}].verify must be an array when present`,
 			};
+		}
+		if (Array.isArray(gate.verify)) {
+			for (let j = 0; j < gate.verify.length; j++) {
+				const step = gate.verify[j];
+				if (!isPlainObject(step)) {
+					return {
+						ok: false,
+						code: "STRUCTURAL_VALIDATION_FAILED",
+						message: `inlineWorkflow.gates[${i}].verify[${j}] must be an object`,
+					};
+				}
+				if (step.optional === true && (typeof step.name !== "string" || step.name.trim() === "")) {
+					return {
+						ok: false,
+						code: "STRUCTURAL_VALIDATION_FAILED",
+						message: `inlineWorkflow.gates[${i}].verify[${j}].name must be a non-empty string for optional steps`,
+					};
+				}
+			}
 		}
 	}
+	return null;
+}
+
+function validateGoalInlineFields(fields: Record<string, unknown>): ParseError | null {
+	const inlineWorkflowErr = validateGoalInlineWorkflow(fields.inlineWorkflow);
+	if (inlineWorkflowErr) return inlineWorkflowErr;
 	const ir = fields.inlineRoles;
 	if (ir !== undefined && ir !== null) {
 		if (!isPlainObject(ir)) {
