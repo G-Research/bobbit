@@ -25,6 +25,49 @@ Follow-output uses the same bottom-state contract for touch and desktop scrollin
 
 This preserves xterm layout, selection, keyboard input, resize/fit, and reload/reattach replay behavior while making touch scrollback match mouse wheel scrollback.
 
+## Touch-scroll E2E invariant
+
+`tests/e2e/ui/terminal-pack.spec.ts` contains the touch-scroll regression test:
+
+`touch pan over xterm-screen scrolls the xterm viewport; reproduces ambiguous marker assertion before touch pan hides the terminal tail @terminal-repro`
+
+What changed:
+
+- The test injects deterministic terminal channel frames instead of depending on live shell timing.
+- It proves the injected burst created scrollback before any pan assertion.
+- It performs a CDP touch drag over `.xterm-screen`, then waits for a stable detached viewport before injecting output that should remain hidden.
+- It treats marker visibility as meaningful only after the terminal tail is already hidden.
+
+The previous assertion asked whether a newly injected marker was absent immediately after one touch gesture. That was ambiguous under load: the marker could arrive while the terminal was still at, or settling near, the tail, making a test failure indistinguishable from real follow-output breakage. Detached now means the user has intentionally left the bottom, not merely that a transient render frame happens not to show the tail.
+
+The decisive detached-state metrics are:
+
+- `scroll.atBottom === false`.
+- `distanceFromBottom = maxScrollTop - scrollTop` is at least `minDetachPx` (`max(48px, 3 * rowHeight)`).
+- `firstLine` is older than the pre-pan `firstLine`, proving visible content moved up into scrollback.
+- The burst tail marker and prompt-like tail rows are hidden (`tailMarkerVisible === false`, `promptLikeTailVisible === false`).
+- Two samples separated by animation frames are stable: `scrollTop` changes by at most 2 px and `firstLine` by at most one indexed line.
+
+Only after that predicate passes does the test inject `*_WHILE_SCROLLED_UP`. The follow-output assertion then checks that the viewport did not jump to bottom: `firstLine` remains within two lines of the detached sample, `scrollTop` remains within 2 px, and the live marker is still hidden. Finally, touch-panning back down must reveal that marker, and later output must follow again.
+
+## Diagnosing touch-scroll failures
+
+Touch-scroll failures include structured diagnostics in the assertion message. Start with the prefix:
+
+- `TERMINAL_TOUCH_SCROLL_DETACHED_STATE` — setup or touch panning never reached a stable hidden-tail detached state before live output was injected.
+- `TERMINAL_TOUCH_SCROLL` — the detached predicate passed, but output arriving while detached either force-followed or became visible.
+
+Use the reported metrics to narrow the cause:
+
+- `maxScrollTop` too small: the deterministic burst did not create enough scrollback, or xterm layout/fit is broken.
+- `olderFirstLine === false`: the touch drag did not move the xterm viewport; inspect the `.xterm-screen` target, touch emulation, and pan direction.
+- `scroll.atBottom === true` or low `distanceFromBottom`: the viewport is still in the follow band, so marker visibility is not a valid detached-state signal.
+- `stableScrollTop === false` or `stableFirstLine === false`: the renderer is still settling; look for rAF/layout races rather than product follow-output behavior.
+- `tailMarkerVisible === true` or `promptLikeTailVisible === true`: the pan did not hide the terminal tail, so injecting the live marker would reintroduce the old ambiguous assertion.
+- After-output `scrollTop` or `firstLine` jumps, or `whileScrolledUpMarkerVisible === true`: follow-output resumed while the user was still scrolled up.
+
+If the test flakes only in the full suite, preserve these outcome predicates instead of adding retries or larger sleeps. The invariant is that output injected after a stable, hidden-tail detached state must not force-follow until the user returns to bottom.
+
 ## Windows ConPTY reproducer
 
 `tests/e2e/ui/terminal-pack.spec.ts` includes a targeted browser E2E test tagged `@terminal-repro` for the Windows `cmd.exe`/ConPTY startup artifact. It injects a deterministic synthetic startup stream shaped like the observed Windows PTY output:
@@ -51,10 +94,16 @@ Assertions check both CSS/layout invariants and visible behavior: no repeated to
 
 ## Validation commands
 
-Use the touch regression when changing terminal scrollback or follow-output behavior:
+Use the focused touch regression when changing terminal scrollback or follow-output behavior:
 
 ```bash
-npm run test:e2e -- tests/e2e/ui/terminal-pack.spec.ts --grep "touch pan over xterm-screen"
+npx playwright test tests/e2e/ui/terminal-pack.spec.ts -g "touch pan over xterm-screen scrolls the xterm viewport" --reporter=line
+```
+
+Run the full terminal-pack browser E2E file before handing off terminal panel changes:
+
+```bash
+npx playwright test tests/e2e/ui/terminal-pack.spec.ts --reporter=line
 ```
 
 Use the broader targeted reproducer when changing terminal rendering:
@@ -68,7 +117,6 @@ Then run the usual project checks for the touched area:
 ```bash
 npm run check
 npm run test:unit
-npm run test:e2e -- tests/e2e/ui/terminal-pack.spec.ts
 ```
 
 Relevant context:
