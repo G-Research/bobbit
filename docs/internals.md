@@ -176,6 +176,23 @@ This distinction matters because `autoStartTeam` is a creation/setup affordance,
 
 Regression coverage pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and that start → teardown → restart leaves the goal teamless until manual start.
 
+#### Worker liveness, spawn capacity, and stale reap
+
+Team worker capacity is based on **live active workers**, not the raw `entry.agents` array persisted in `team-state.json`. A team-agent record counts as an active worker only when it is not a `VerificationHarness` reviewer and `SessionManager` still has a backing session whose status is not `terminated`. This keeps the cap aligned with the sidebar/team-listing view, which treats missing or terminated sessions as inactive.
+
+`TeamManager.spawnRole()` runs a stale-worker reap before checking `maxConcurrent`, then compares the cap against `getActiveWorkers(goalId).length`. A goal whose persisted team state contains only missing or terminated worker records can therefore spawn a new worker instead of being blocked by historical rows.
+
+The same reap runs during restart resubscribe, after `SessionManager.restoreSessions()` has rebuilt the live-session map and before worker event subscriptions are reattached. Reaped worker records are removed from the in-memory team entry and persisted back to `team-state.json`, so stale rows do not accumulate indefinitely.
+
+The reap is intentionally passive. It clears runtime tracking that could otherwise fire later (`sessionToGoal`, worker event subscriptions, pending idle-notify timers, notify debounce state, and the best-effort `OrchestrationCore` child index), but it does **not** terminate, archive, purge, broadcast `team_agent_finished`, nudge the team lead, or clean up worktrees. Explicit `team_dismiss`, `completeTeam()`, and `teardownTeam()` still own archive metadata and worktree cleanup semantics.
+
+Reviewer handling stays separate:
+
+- `VerificationHarness` reviewer/QA sessions are stored as `kind: "reviewer"`, excluded from worker capacity, and cleaned up through the reviewer unregister/zombie-reviewer sweep path.
+- A normal team-spawned worker whose role name is `reviewer` is still stored as `kind: "worker"`; it counts against worker capacity and is eligible for stale-worker reap like any coder/tester worker.
+
+Regression coverage lives in `tests/team-manager-ghost-workers.test.ts`, alongside the existing reviewer-resume coverage in `tests/team-manager-reviewer-resume.test.ts`.
+
 ### Verification architecture
 
 The verification system is split into two modules:
