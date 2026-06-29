@@ -6984,45 +6984,16 @@ async function handleApiRoute(
 		};
 		const contributionKind = (body as { contributionKind?: unknown }).contributionKind;
 
-		// ── Pack-bound surface (panel / entrypoint / route) — pack-schema-v1 §6.5.
-		//    No carrier tool, so NO allowedTools gate; the trust boundary is
-		//    installed + active in the session's scope + caller's own session (§4.5).
+		// ── Pack-bound surfaces (panel / entrypoint / route) are deliberately NOT
+		// minted from this public REST body: a same-session caller could choose another
+		// active pack's id. The trusted app mints these over the session WebSocket it
+		// owns; pack code receives only the resulting HostApi closure.
 		if (typeof contributionKind === "string") {
 			if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") {
 				json({ error: "invalid contributionKind" }, 400);
 				return;
 			}
-			const bodySid = (body as { sessionId?: unknown }).sessionId;
-			if (!mintHeaderSid || typeof bodySid !== "string" || bodySid !== mintHeaderSid) {
-				json({ error: "session mismatch" }, 403);
-				return;
-			}
-			if (!resolveSession(mintHeaderSid)) {
-				json({ error: "unknown session" }, 403);
-				return;
-			}
-			const packId = typeof (body as { packId?: unknown }).packId === "string" ? (body as { packId: string }).packId : "";
-			const contributionRef = typeof (body as { contributionId?: unknown }).contributionId === "string" ? (body as { contributionId: string }).contributionId : "";
-			if (!packId || !contributionRef) {
-				json({ error: "packId and contributionId are required" }, 400);
-				return;
-			}
-			// Validate the pack is installed + active in scope AND the contribution exists.
-			const pack = packContributionRegistry.getPack(mintSessionProjectId, packId);
-			let exists = false;
-			if (pack) {
-				if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(mintSessionProjectId, packId, contributionRef);
-				else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(mintSessionProjectId, packId, contributionRef);
-				else exists = packContributionRegistry.hasRoute(mintSessionProjectId, packId, contributionRef);
-			}
-			if (!pack || !exists) {
-				json({ error: "surface tokens are available only to installed, active pack contributions" }, 403);
-				return;
-			}
-			const contributionId = `${contributionKind}:${contributionRef}`;
-			const token = mintSurfaceToken({ sessionId: mintHeaderSid, packId, contributionId });
-			console.log(`[ext-surface-token] kind=${contributionKind} contribution=${contributionRef} packId=${packId} session=${mintHeaderSid} outcome=ok`);
-			json({ token });
+			json({ error: "pack-bound surface tokens must be minted over the trusted session WebSocket" }, 403);
 			return;
 		}
 

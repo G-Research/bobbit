@@ -12,6 +12,7 @@
 // Loaded under a file:// fixture so the real `getHostApi` (which transitively
 // imports lit/renderer-registry/state) runs in a browser context.
 import { getHostApi } from "../../src/app/host-api.js";
+import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "../../src/app/surface-token-bridge.js";
 
 (window as any).__getHostApi = () => getHostApi("sess-1", "tu-1");
 
@@ -67,10 +68,11 @@ import { getHostApi } from "../../src/app/host-api.js";
 
 (window as any).__callRouteHttpError = async () => {
 	const originalFetch = window.fetch;
+	registerSurfaceTokenMinter("sess-1", async () => "surface-token");
 	window.fetch = async (input: RequestInfo | URL) => {
 		const url = String(input);
 		if (url.includes("/api/ext/surface-token")) {
-			return new Response(JSON.stringify({ token: "surface-token" }), { status: 200, headers: { "content-type": "application/json" } });
+			return new Response("unexpected pack-bound REST mint", { status: 500 });
 		}
 		if (url.includes("/api/ext/route/publish")) {
 			return new Response(JSON.stringify({
@@ -89,6 +91,29 @@ import { getHostApi } from "../../src/app/host-api.js";
 		return { message: e?.message, status: e?.status, code: e?.code, routeError: e?.routeError, details: e?.details };
 	} finally {
 		window.fetch = originalFetch;
+		unregisterSurfaceTokenMinter("sess-1");
+	}
+};
+
+(window as any).__packSurfaceTokenMintUsesTrustedBridge = async () => {
+	const originalFetch = window.fetch;
+	let fetchMinted = false;
+	let bridgeMinted = false;
+	registerSurfaceTokenMinter("sess-bridge", async (surface) => {
+		bridgeMinted = surface.packId === "terminal" && surface.contributionKind === "panel" && surface.contributionId === "terminal";
+		return "surface-token";
+	});
+	window.fetch = async (input: RequestInfo | URL) => {
+		if (String(input).includes("/api/ext/surface-token")) fetchMinted = true;
+		return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+	};
+	try {
+		const h: any = getHostApi("sess-bridge", undefined, { kind: "pack", packId: "terminal", contributionKind: "panel", contributionId: "terminal" } as any);
+		await h.store.stats();
+		return { bridgeMinted, fetchMinted };
+	} finally {
+		window.fetch = originalFetch;
+		unregisterSurfaceTokenMinter("sess-bridge");
 	}
 };
 
@@ -152,10 +177,11 @@ import { getHostApi } from "../../src/app/host-api.js";
 		}
 	}
 
+	registerSurfaceTokenMinter("sess-channel-no-gesture", async () => "surface-token");
 	window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = String(input);
 		if (url.includes("/api/ext/surface-token")) {
-			return new Response(JSON.stringify({ token: "surface-token" }), { status: 200, headers: { "content-type": "application/json" } });
+			return new Response("unexpected pack-bound REST mint", { status: 500 });
 		}
 		return originalFetch(input, init);
 	};
@@ -167,6 +193,7 @@ import { getHostApi } from "../../src/app/host-api.js";
 	} finally {
 		window.fetch = originalFetch;
 		window.WebSocket = OriginalWebSocket;
+		unregisterSurfaceTokenMinter("sess-channel-no-gesture");
 	}
 };
 

@@ -31,7 +31,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
-import { resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
+import { mintSurfaceToken, resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
@@ -630,6 +630,23 @@ export function handleWebSocketConnection(
 		}
 
 		try {
+			const mintTrustedPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
+				const packId = typeof tokenMsg.packId === "string" ? tokenMsg.packId : "";
+				const contributionKind = typeof tokenMsg.contributionKind === "string" ? tokenMsg.contributionKind : "";
+				const contributionRef = typeof tokenMsg.contributionId === "string" ? tokenMsg.contributionId : "";
+				if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") return { ok: false, error: "invalid contributionKind" };
+				if (!packId || !contributionRef) return { ok: false, error: "packId and contributionId are required" };
+				if (!packContributionRegistry) return { ok: false, error: "surface tokens are available only to installed, active pack contributions" };
+				const pack = packContributionRegistry.getPack(session.projectId, packId);
+				let exists = false;
+				if (pack) {
+					if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(session.projectId, packId, contributionRef);
+					else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(session.projectId, packId, contributionRef);
+					else exists = packContributionRegistry.hasRoute(session.projectId, packId, contributionRef);
+				}
+				if (!pack || !exists) return { ok: false, error: "surface tokens are available only to installed, active pack contributions" };
+				return { ok: true, token: mintSurfaceToken({ sessionId, packId, contributionId: `${contributionKind}:${contributionRef}` }) };
+			};
 			const resolveExtChannelSurface = (surfaceToken: unknown): ReturnType<typeof resolveSurfaceIdentity> => {
 				const projectTm = session.projectId && projectContextManager
 					? projectContextManager.getOrCreate(session.projectId)?.toolManager
@@ -647,6 +664,14 @@ export function handleWebSocketConnection(
 				return !!resolver.getChannel(session.projectId, packId, name);
 			};
 			switch (msg.type) {
+				case "ext_surface_token": {
+					const tokenMsg = msg as Extract<ClientMessage, { type: "ext_surface_token" }>;
+					const requestId = typeof tokenMsg.requestId === "string" ? tokenMsg.requestId : "";
+					const minted = mintTrustedPackSurfaceToken(tokenMsg);
+					if (minted.ok) send(ws, { type: "ext_surface_token_result", requestId, ok: true, token: minted.token });
+					else send(ws, { type: "ext_surface_token_result", requestId, ok: false, error: minted.error });
+					break;
+				}
 				case "prompt": {
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);

@@ -112,7 +112,13 @@ async function authenticatedHarness(opts: { channelRegistry?: any; permits?: Cha
 }
 
 function extMessages(ws: FakeWebSocket): any[] {
-	return ws.sent.filter((msg) => typeof msg?.type === "string" && msg.type.startsWith("ext_channel_"));
+	return ws.sent.filter((msg) => typeof msg?.type === "string" && msg.type.startsWith("ext_"));
+}
+
+async function requestSurfaceToken(ws: FakeWebSocket, requestId: string, packId: string, contributionKind: "panel" | "entrypoint" | "route", contributionId: string): Promise<any> {
+	ws.emit("message", JSON.stringify({ type: "ext_surface_token", requestId, packId, contributionKind, contributionId }));
+	await Promise.resolve();
+	return extMessages(ws).find((msg) => msg.type === "ext_surface_token_result" && msg.requestId === requestId);
 }
 
 async function requestOpenGrant(ws: FakeWebSocket, requestId: string, surfaceToken: string, name: string): Promise<any> {
@@ -122,6 +128,18 @@ async function requestOpenGrant(ws: FakeWebSocket, requestId: string, surfaceTok
 }
 
 describe("WebSocket extension channel open grants", () => {
+	it("mints a legitimate pack-bound panel surface token over the trusted session websocket", async () => {
+		const { ws } = await authenticatedHarness();
+		const result = await requestSurfaceToken(ws, "surface", "terminal", "panel", "terminal");
+		assert.equal(result.type, "ext_surface_token_result");
+		assert.equal(result.requestId, "surface");
+		assert.equal(result.ok, true);
+		assert.equal(typeof result.token, "string");
+
+		const grant = await requestOpenGrant(ws, "grant", result.token, "terminal");
+		assert.deepEqual(grant, { type: "ext_channel_open_grant_result", requestId: "grant", ok: true, openGrant: "grant-1" });
+	});
+
 	it("mints and uses a declared panel channel permit without prior launcher activation", async () => {
 		let now = 1_000;
 		const permits = new ChannelOpenPermitStore({ now: () => now, randomToken: () => "grant-1" });
@@ -155,7 +173,7 @@ describe("WebSocket extension channel open grants", () => {
 		now = 1_001;
 		ws.emit("message", JSON.stringify({ type: "ext_channel_open", requestId: "replay", surfaceToken, name: "terminal", init: { singletonKey: "main" }, openGrant: "grant-1" }));
 		await Promise.resolve();
-		assert.deepEqual(extMessages(ws).slice(-3), [
+		assert.deepEqual(extMessages(ws).filter((msg) => msg.type.startsWith("ext_channel_")).slice(-3), [
 			{ type: "ext_channel_open_grant_result", requestId: "grant", ok: true, openGrant: "grant-1" },
 			{ type: "ext_channel_result", requestId: "open", ok: true, channel: channelInfo() },
 			{ type: "ext_channel_result", requestId: "replay", ok: false, error: "invalid_open_permit", message: "channel open permit rejected: replayed", status: 403 },

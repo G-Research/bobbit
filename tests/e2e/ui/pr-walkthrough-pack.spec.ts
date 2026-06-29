@@ -287,13 +287,13 @@ async function expectRuntimePrwTools(enabled: readonly string[], disabled: reado
 	}, { timeout: 10_000 }).toBe(PRW_TOOL_NAMES.map((name) => `${name}:${expected.get(name) ? "on" : "off"}`).join(","));
 }
 
-/** Mint a server-minted pack-bound surface token for the pack's PANEL (no carrier
- *  tool). Used only by the path-traversal probe below. */
+/** Mint a server-minted tool-bound surface token for the pack. Used only by the
+ *  path-traversal probe below; pack-bound panel tokens are app-WS-only. */
 async function mintSurfaceToken(sid: string): Promise<string> {
 	const res = await apiFetch("/api/ext/surface-token", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
-		body: JSON.stringify({ sessionId: sid, packId: PACK, contributionKind: "panel", contributionId: PANEL_ID }),
+		body: JSON.stringify({ sessionId: sid, tool: "read_pr_walkthrough_bundle" }),
 	});
 	const body = await res.text();
 	expect(res.status, `surface-token mint failed: ${body}`).toBe(200);

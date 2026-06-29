@@ -83,6 +83,14 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(err.message).toContain("reviews/job/final/payload: maxTotalBytes exceeded");
 	});
 
+	test("pack-bound surface tokens use the trusted app bridge instead of REST", async ({ page }) => {
+		await gotoAndWait(page);
+		await expect(page.evaluate(() => (window as any).__packSurfaceTokenMintUsesTrustedBridge())).resolves.toEqual({
+			bridgeMinted: true,
+			fetchMinted: false,
+		});
+	});
+
 	test("host.channels.open does not require user activation", async ({ page }) => {
 		await gotoAndWait(page);
 		const result = await page.evaluate(() => (window as any).__channelOpenWithoutGesture());
