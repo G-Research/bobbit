@@ -55,6 +55,8 @@ export interface SidebarBobbitOptions {
 	/** Session has unread/unseen activity. Overrides the sleeping pose with
 	 *  right-gazing open eyes that periodically blink. */
 	unread?: boolean;
+	/** Disable the idle breathing loop for actual sidebar session/staff rows. */
+	disableIdleBreathing?: boolean;
 }
 
 // ============================================================================
@@ -655,7 +657,7 @@ function sidebarStatusBucket(status: string): "starting" | "terminated" | "canon
  * Animations (bob, shimmer, eye blink) still use CSS on the container.
  */
 export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
-	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false } = opts;
+	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false, disableIdleBreathing = false } = opts;
 	const acc = opts.accessory ?? NO_ACCESSORY;
 	const hasAccessory = acc.id !== "none";
 	const addsHeight = acc.addsHeight;
@@ -814,8 +816,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else if (status === "terminated") filters.push("saturate(0)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
-	// Idle sidebar bobbits are intentionally static; keep visual styling via
-	// filters/sleeping eyes, but do not run the old continuous breathe animation.
+	const idleAnim = isIdle && !disableIdleBreathing ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
 	const bobAnim = isBusy && !isCancelling && !isCompacting ? "animation:bobbit-bob 1.8s cubic-bezier(0.34,1.2,0.64,1) infinite;" : "";
 	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
 	const compactSquish = isCompacting && !isCancelling;
@@ -875,5 +876,5 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		? html`<img src="${accUrl}" style="position:absolute;left:0;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
 }
