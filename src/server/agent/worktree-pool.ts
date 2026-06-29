@@ -630,6 +630,39 @@ export class WorktreePool {
 		});
 	}
 
+	private async inspectMultiRepoPoolCandidate(container: string, components: Component[]): Promise<{ branch: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> } | null> {
+		const worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
+		const seenRepos = new Set<string>();
+		let expectedBranch: string | undefined;
+
+		for (const component of components) {
+			const repo = component.repo;
+			if (seenRepos.has(repo)) continue;
+			seenRepos.add(repo);
+
+			const repoPath = path.join(this.repoPath, repo === "." ? "" : repo);
+			if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
+
+			const wtPath = repo === "." ? container : path.join(container, repo);
+			if (!fs.existsSync(path.join(wtPath, ".git"))) return null;
+
+			let branch: string;
+			try {
+				const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wtPath, timeout: 5_000 });
+				branch = stdout.trim();
+			} catch {
+				return null;
+			}
+
+			if (!expectedBranch) expectedBranch = branch;
+			if (branch !== expectedBranch) return null;
+			worktrees.push({ repo, repoPath, worktreePath: wtPath });
+		}
+
+		if (!expectedBranch || worktrees.length === 0) return null;
+		return { branch: expectedBranch, worktrees };
+	}
+
 	/**
 	 * Scan for orphaned pool worktrees from a previous server instance and reclaim them.
 	 * An orphaned pool worktree is a directory under `<repo>-wt/` whose branch is still
@@ -660,22 +693,13 @@ export class WorktreePool {
 
 				try {
 					if (multi) {
-						const worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
-						let branch: string | undefined;
-						for (const component of components) {
-							if (component.repo === ".") continue;
-							const wtPath = path.join(container, component.repo);
-							if (!fs.existsSync(path.join(wtPath, ".git"))) continue;
-							const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wtPath, timeout: 5_000 });
-							branch = branch ?? stdout.trim();
-							worktrees.push({ repo: component.repo, repoPath: path.join(this.repoPath, component.repo), worktreePath: wtPath });
-						}
-						const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: worktrees.length > 0 });
-						if (!verdict.eligible || !branch) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; if (worktrees.length === 0 && counters) counters.gitMissing++; continue; }
-						if (this.hasPoolEntry(branch, container, worktrees)) continue;
-						this.pool.push({ branchName: branch, worktreePath: container, worktrees, createdAt: Date.now() });
+						const candidate = await this.inspectMultiRepoPoolCandidate(container, components);
+						const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch: candidate?.branch, activeWorktreePaths, gitMetadataExists: !!candidate });
+						if (!verdict.eligible || !candidate) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; if (!candidate && counters) counters.gitMissing++; continue; }
+						if (this.hasPoolEntry(candidate.branch, container, candidate.worktrees)) continue;
+						this.pool.push({ branchName: candidate.branch, worktreePath: container, worktrees: candidate.worktrees, createdAt: Date.now() });
 						if (counters) counters.reclaimed++;
-						console.log(`[worktree-pool] Reclaimed orphaned multi-repo: ${branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);
+						console.log(`[worktree-pool] Reclaimed orphaned multi-repo: ${candidate.branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);
 						continue;
 					}
 

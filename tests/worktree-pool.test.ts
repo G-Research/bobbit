@@ -41,6 +41,14 @@ async function rmRepo(repoPath: string) {
 	try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
+async function initGitRepo(dir: string): Promise<void> {
+	fs.mkdirSync(dir, { recursive: true });
+	await execFile("git", ["init", "--initial-branch=master"], { cwd: dir });
+	await execFile("git", ["config", "user.email", "test@test"], { cwd: dir });
+	await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
+	await execFile("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
+}
+
 describe("WorktreePool — Phase 3 claim sequence", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
@@ -253,6 +261,40 @@ describe("WorktreePool — orphan reclaim", () => {
 			assert.equal(snapshot.entries[0].worktreePath, wtPath);
 		} finally {
 			await rmRepo(repo);
+		}
+	});
+
+	it("does not reclaim a multi-repo pool container with mixed component branches", async () => {
+		const root = makeTmpDir("bobbit-pool-mixed-branch-");
+		try {
+			const apiRepo = path.join(root, "api");
+			const webRepo = path.join(root, "web");
+			await initGitRepo(apiRepo);
+			await initGitRepo(webRepo);
+
+			const configuredRoot = path.join(root, "configured-wt");
+			const container = path.join(configuredRoot, "pool-_pool-mixed");
+			fs.mkdirSync(container, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-mixed", path.join(container, "api"), "HEAD"], { cwd: apiRepo });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-other", path.join(container, "web"), "HEAD"], { cwd: webRepo });
+
+			const components: Component[] = [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			];
+			const pool = new WorktreePool({
+				repoPath: root,
+				projectRoot: root,
+				targetSize: 1,
+				worktreeRoot: configuredRoot,
+				componentsResolver: () => components,
+			});
+			await (pool as any).reclaimOrphaned();
+
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 0, "mixed-branch multi-repo containers must not become ready pool entries");
+		} finally {
+			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 });
