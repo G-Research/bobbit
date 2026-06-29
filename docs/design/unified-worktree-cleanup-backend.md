@@ -320,7 +320,7 @@ For each resolved `worktreeRoot`:
 Apply rules in this order. First safety match wins unless a later rule only adds provenance.
 
 1. **Scan error**: git or filesystem source failed in a way that prevents safe evaluation → `scan-error`, not actionable.
-2. **Container-internal path**: `/workspace`, `/workspace/*`, `/workspace-wt`, `/workspace-wt/*` → `protected-in-use` or `scan-error` with `sandbox-container-path`, not actionable as host cleanup.
+2. **Container-internal path**: use the existing sandbox/container guard helper (promote `isContainerInternalWorktreePath()` out of `SessionManager` if needed) as the authoritative check. `/workspace`, `/workspace/*`, `/workspace-wt`, and `/workspace-wt/*` are examples, not an exhaustive implementation. Matches classify as `protected-in-use` or `scan-error` with `sandbox-container-path`, never actionable as host cleanup.
 3. **Primary worktree**: candidate path equals a component repo path → protected, not actionable.
 4. **Live/durable owner**:
    - Any non-archived session, runtime session, live goal, team, delegate, or staff path/cwd/repoWorktrees match → `protected-in-use`, not actionable.
@@ -438,11 +438,12 @@ Startup in `server.ts` should pass resolved project/component repo metadata and 
 
 Update `src/server/agent/worktree-pool.ts` to stop hardcoding `<repo>-wt` in `reclaimOrphaned()`.
 
-Short-term implementation:
+Required implementation for this goal:
 
 - Do not re-resolve a relative project `worktree_root` against a component repo path. The pool constructor should retain either the project root plus component repo path, or preferably a pre-resolved `resolvedWorktreeRoot` computed once from `worktreeRoot({ rootPath: project.rootPath, worktreeRoot: project.worktreeRoot })` by the project/session setup code.
 - `reclaimOrphaned()` should scan `this.resolvedWorktreeRoot` (or the constructor-supplied equivalent) and never fall back to hardcoded `<repo>-wt`.
-- For multi-repo entries, recognize branch containers and per-repo `.git` files from `PoolEntry.worktrees` layout.
+- Move the pool branch/path eligibility logic into shared inventory/classifier helpers, e.g. `classifyPoolReclaimCandidate()` or a common `classifyWorktreeCandidate()` mode. `WorktreePool.reclaimOrphaned()` must call those helpers before mutating `this.pool`; it may not keep an independent directory-name + `isPoolBranch()` classifier.
+- For multi-repo entries, the shared helper should recognize branch containers and per-repo `.git` files from `PoolEntry.worktrees` layout, using the same `branchToSlug()`, `worktreeRoot()`, active-path, and container-path guard rules as maintenance inventory.
 - Add a read-only `snapshotEntries()` method returning ready pool entries:
 
 ```ts
@@ -458,10 +459,10 @@ interface WorktreePoolSnapshot {
 }
 ```
 
-Long-term integration:
+Implementation boundary:
 
-- Let `WorktreeInventoryService` classify pool-shaped filesystem/git entries.
-- Keep `WorktreePool.reclaimOrphaned()` responsible for mutating the in-memory pool, but feed it candidates from shared classification helpers so pool and maintenance agree on branch/root/path rules.
+- `WorktreeInventoryService` and `WorktreePool.reclaimOrphaned()` must share the same pool candidate classification helpers in this PR so branch/root/path rules cannot drift.
+- `WorktreePool.reclaimOrphaned()` remains responsible for mutating the in-memory pool, but candidate discovery/classification must come from shared helpers.
 - Pool reclaim may absorb safe pool entries; maintenance cleanup should not steal pool entries that the pool can reuse unless the user explicitly asks to clean pool-owned residue in a future mode.
 
 ## Test seams
@@ -474,7 +475,7 @@ Add tests around pure helpers in `tests/worktree-inventory.test.ts` or equivalen
 - Live referenced worktree is protected when `cwd` is inside the candidate.
 - Archived-session-owned git worktree is `ready-to-clean` and maps to legacy `removable`.
 - Git-known orphan `session/*` worktree is `unowned-git-worktree` and legacy orphan adapter includes it.
-- Pool branch/worktree entry is classified as `pool-entry` and not default-selected by maintenance.
+- Pool branch/worktree entry is classified as `pool-entry`, not default-selected by maintenance, and `WorktreePool.reclaimOrphaned()` uses the same shared helper result to reclaim it.
 - Configured `worktree_root` is honored via `worktreeRoot()` for filesystem discovery, including a relative `worktree_root` in a multi-repo project where the pool repo path is a component subdirectory.
 - Filesystem-only directory under a worktree root is `stale-filesystem-only` and not actionable.
 - Multi-repo/polyrepo component repos produce separate repo-scoped candidates under one branch container.
