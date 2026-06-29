@@ -954,6 +954,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		}
 		return rows;
 	};
+	const inlinePeerMap = (lines) => {
+		const peers = new Map();
+		for (const pair of sidePairs(lines)) {
+			if (pair.left && pair.right && normKind(pair.left) === "del" && normKind(pair.right) === "add") {
+				peers.set(pair.left, pair.right);
+				peers.set(pair.right, pair.left);
+			}
+		}
+		return peers;
+	};
 	const renderSplitHunk = (entry, host, paramKey, card, block, hunk, hunkIndex) => html`${diffEntries(entry, card, block, hunk, hunkIndex).map((part, index, entries) => {
 		if (part.kind === "context") return nothing;
 		const prev = entries[index - 1] && entries[index - 1].kind === "context" ? entries[index - 1] : undefined;
@@ -968,7 +978,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const next = entries[index + 1] && entries[index + 1].kind === "context" ? entries[index + 1] : undefined;
 		const above = prev && prev.canExpandAbove ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, prev, "above") : nothing;
 		const below = next && next.canExpandBelow ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, next, "below") : nothing;
-		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${part.lines.map((line) => html`${renderDiffLine(entry, host, paramKey, card, block, line, "inline")}${renderLineDetails(entry, host, paramKey, card, block, line)}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
+		const peers = inlinePeerMap(part.lines);
+		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${part.lines.map((line) => html`${renderDiffLine(entry, host, paramKey, card, block, line, "inline", peers.get(line))}${renderLineDetails(entry, host, paramKey, card, block, line)}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
 	})}`;
 	const renderSplitDiff = (entry, host, paramKey, card, block) => html`<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll"><div class="split-grid">${arrayOf(block && block.hunks).map((hunk, index) => renderSplitHunk(entry, host, paramKey, card, block, hunk, index))}</div></div>`;
 	const renderInlineDiff = (entry, host, paramKey, card, block) => html`<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll"><div class="inline-lines">${arrayOf(block && block.hunks).map((hunk, index) => renderInlineHunk(entry, host, paramKey, card, block, hunk, index))}</div></div>`;
