@@ -414,6 +414,91 @@
 	color: var(--negative, var(--destructive));
 }
 
+.market-source-warning {
+	font-size: 0.75rem;
+	padding: 0.5rem 0.625rem;
+	border-radius: 0.375rem;
+	border: 1px solid color-mix(in oklch, var(--warning, var(--chart-4)) 35%, transparent);
+	background: color-mix(in oklch, var(--warning, var(--chart-4)) 8%, transparent);
+	color: var(--foreground);
+}
+
+.market-browse-controls {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.market-search-wrap {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.market-search-input {
+	width: 100%;
+	padding-right: 1.75rem;
+}
+
+.market-search-clear {
+	position: absolute;
+	right: 0.375rem;
+	font-size: 0.875rem;
+	line-height: 1;
+	color: var(--muted-foreground);
+	cursor: pointer;
+}
+
+.market-search-clear:hover {
+	color: var(--foreground);
+}
+
+.market-source-chips,
+.market-browse-provenance {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.375rem;
+}
+
+.market-source-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.25rem 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--muted);
+	color: var(--muted-foreground);
+	font-size: 0.6875rem;
+	font-weight: 600;
+	line-height: 1.2;
+	cursor: pointer;
+}
+
+.market-source-chip--active {
+	border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	background: color-mix(in oklch, var(--primary) 12%, transparent);
+	color: var(--primary);
+}
+
+.market-source-chip--off {
+	opacity: 0.62;
+}
+
+.market-source-chip--error {
+	border-color: color-mix(in oklch, var(--warning, var(--chart-4)) 45%, var(--border));
+}
+
+.market-source-chip:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+
+.market-browse-provenance {
+	margin-top: 0.375rem;
+}
+
 /* ── Activation controls (pack schema V1 §9) ─────────────────────────────────
  * Per-pack toggles for user-facing entities only (roles/tools/skills/entrypoints).
  * Support surfaces (panels/routes/stores/renderers/actions/lib) are NOT toggled. */
@@ -696,6 +781,87 @@
 	font-size: 0.6875rem;
 	line-height: 1.35;
 	color: var(--muted-foreground);
+}
+
+.market-mcp-contribution {
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+	min-width: min(100%, 28rem);
+	max-width: 100%;
+}
+
+.market-mcp-operation-summary {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+	margin-left: 0.125rem;
+}
+
+.market-mcp-operation-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	padding: 0.375rem;
+	border: 1px dashed var(--border);
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--muted) 45%, transparent);
+}
+
+.market-mcp-operation-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto auto;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.25rem 0.375rem;
+	border-radius: 0.375rem;
+	color: var(--foreground);
+	font-size: 0.6875rem;
+	cursor: pointer;
+}
+
+.market-mcp-operation-row:hover {
+	background: color-mix(in oklch, var(--primary) 6%, transparent);
+}
+
+.market-mcp-operation-row--disabled {
+	color: var(--muted-foreground);
+}
+
+.market-mcp-operation-row--stale {
+	border: 1px dashed color-mix(in oklch, var(--warning, var(--chart-4)) 35%, transparent);
+}
+
+.market-mcp-operation-main {
+	display: flex;
+	flex-direction: column;
+	gap: 0.0625rem;
+	min-width: 0;
+}
+
+.market-mcp-operation-name,
+.market-mcp-operation-desc {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.market-mcp-operation-name code {
+	font-size: 0.625rem;
+	padding: 0 0.1875rem;
+	border-radius: 0.1875rem;
+	background: var(--muted);
+	color: var(--foreground);
+}
+
+.market-mcp-operation-desc,
+.market-mcp-operation-policy {
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+}
+
+.market-mcp-operation-policy {
+	white-space: nowrap;
 }
 
 /* ── Per-entity description disclosure (R3) ──────────────────────────────────

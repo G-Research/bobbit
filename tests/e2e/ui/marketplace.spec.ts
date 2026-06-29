@@ -243,10 +243,10 @@ async function registerSource(page: Page, repoPath: string): Promise<void> {
 	await expect(urlInput).toHaveValue(repoPath);
 	await expect(addSourceBtn).toBeEnabled({ timeout: 15_000 });
 	await addSourceBtn.click();
-	// handleAddSource auto-switches to the Browse tab and browses the new source
-	// → poll until the pack cards render (browse is async after the POST; a single
-	// visibility check can race it).
-	await expect(page.locator('[data-testid="market-browse-panel"]')).toBeVisible({ timeout: 15_000 });
+	// Source actions stay on Sources; switch explicitly to Browse and poll until
+	// union-browse pack cards render (browse refresh is async after the POST).
+	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+	await goToTab(page, "browse");
 	await expect
 		.poll(async () => page.locator('[data-testid="market-browse-pack"]').count(), { timeout: 15_000 })
 		.toBeGreaterThan(0);
@@ -349,7 +349,7 @@ test.describe("Marketplace UI", () => {
 		await openMarket(page);
 		await registerSource(page, repo);
 
-		// registerSource auto-lands on the Browse tab → pack card is visible.
+		// registerSource switches explicitly to Browse → pack card is visible.
 		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="browse-pack"]');
 		await expect(card).toBeVisible({ timeout: 15_000 });
 		await expect(card).toContainText("Browseable demo pack");
