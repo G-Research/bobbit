@@ -1622,15 +1622,21 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info) 10%, transparent); color: var(--muted-foreground); }
 					.prw-root .context-toggle:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 18%, transparent); }
 					.prw-root .context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.prw-root .diff-line { position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: transparent; }
+					.prw-root .diff-line { --diff-line-bg: transparent; --diff-gutter-bg: transparent; position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: var(--diff-line-bg); }
 					.prw-root .diff-line.empty { pointer-events: none; color: transparent; }
-					.prw-root .diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
-					.prw-root .diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
-					.prw-root .diff-line:hover, .prw-root .diff-line:focus-visible { outline: none; background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
+					.prw-root .diff-line.add { --diff-line-bg: color-mix(in oklch, var(--positive) 12%, transparent); --diff-gutter-bg: color-mix(in oklch, var(--positive) 30%, transparent); }
+					.prw-root .diff-line.del { --diff-line-bg: color-mix(in oklch, var(--negative) 12%, transparent); --diff-gutter-bg: color-mix(in oklch, var(--negative) 30%, transparent); }
+					.prw-root .diff-line:hover, .prw-root .diff-line:focus-visible { outline: none; --diff-line-bg: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
 					.prw-root .diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary); font-size: 8px; }
 					.prw-root .line-no, .prw-root .prefix, .prw-root .comment-cue { padding: 3px 6px; color: var(--muted-foreground); user-select: none; }
+					.prw-root .line-no, .prw-root .prefix { background: var(--diff-gutter-bg); }
+					.prw-root .diff-line.add .line-no, .prw-root .diff-line.add .prefix, .prw-root .diff-line.del .line-no, .prw-root .diff-line.del .prefix { color: var(--foreground); }
 					.prw-root .line-no { position: relative; text-align: right; }
-					.prw-root .line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+					.prw-root .line-text { min-width: 0; padding: 3px 8px; color: var(--foreground); background: var(--diff-line-bg); white-space: pre-wrap; overflow-wrap: anywhere; }
+					.prw-root .diff-line.add .line-text { background: color-mix(in oklch, var(--positive) 12%, transparent); }
+					.prw-root .diff-line.add .line-no, .prw-root .diff-line.add .prefix { background: color-mix(in oklch, var(--positive) 30%, transparent); }
+					.prw-root .diff-line.del .line-text { background: color-mix(in oklch, var(--negative) 12%, transparent); }
+					.prw-root .diff-line.del .line-no, .prw-root .diff-line.del .prefix { background: color-mix(in oklch, var(--negative) 30%, transparent); }
 					.prw-root .comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary); color: var(--primary-foreground); line-height: 18px; font-weight: 800; opacity: 0; font-family: inherit; }
 					.prw-root .diff-line:hover .comment-cue, .prw-root .diff-line:focus-visible .comment-cue, .prw-root .diff-line.editing .comment-cue, .prw-root .diff-line.commented .comment-cue { opacity: 1; }
 					.prw-root .line-comments, .prw-root .line-editor, .prw-root .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, var(--background)); }
@@ -1703,7 +1709,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .header-meta { min-width: 0; max-width: 100%; display: flex; gap: 8px; margin-top: 3px; overflow: hidden; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 					.prw-root .header-meta span { flex: 0 0 auto; }
 					.prw-root .header-meta span:last-child { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
-					.prw-root .add { color: var(--positive); } .del { color: var(--negative); }
+					.prw-root :where(.header-meta, .guide-stats, .diff-breakdown-row, .diff-counts) .add { color: var(--positive); }
+					.prw-root :where(.header-meta, .guide-stats, .diff-breakdown-row, .diff-counts) .del { color: var(--negative); }
 					.prw-root .github-link { display: none; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
 					.prw-root .github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 					.prw-root .progress-wrap { grid-area: progress; align-self: stretch; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }
