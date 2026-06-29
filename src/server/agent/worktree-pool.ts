@@ -641,10 +641,20 @@ export class WorktreePool {
 			seenRepos.add(repo);
 
 			const repoPath = path.join(this.repoPath, repo === "." ? "" : repo);
-			if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
+			try {
+				fs.accessSync(repoPath, fs.constants.R_OK);
+				fs.accessSync(path.join(repoPath, ".git"), fs.constants.R_OK);
+			} catch {
+				return null;
+			}
 
 			const wtPath = repo === "." ? container : path.join(container, repo);
-			if (!fs.existsSync(path.join(wtPath, ".git"))) return null;
+			try {
+				fs.accessSync(wtPath, fs.constants.R_OK);
+				fs.accessSync(path.join(wtPath, ".git"), fs.constants.R_OK);
+			} catch {
+				return null;
+			}
 
 			let branch: string;
 			try {

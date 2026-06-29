@@ -297,6 +297,38 @@ describe("WorktreePool — orphan reclaim", () => {
 			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
+
+	it("does not reclaim a multi-repo pool container when a declared component repo is incomplete", async () => {
+		const root = makeTmpDir("bobbit-pool-incomplete-component-");
+		try {
+			const apiRepo = path.join(root, "api");
+			await initGitRepo(apiRepo);
+			fs.mkdirSync(path.join(root, "web"), { recursive: true });
+
+			const configuredRoot = path.join(root, "configured-wt");
+			const container = path.join(configuredRoot, "pool-_pool-incomplete");
+			fs.mkdirSync(container, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-incomplete", path.join(container, "api"), "HEAD"], { cwd: apiRepo });
+
+			const components: Component[] = [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			];
+			const pool = new WorktreePool({
+				repoPath: root,
+				projectRoot: root,
+				targetSize: 1,
+				worktreeRoot: configuredRoot,
+				componentsResolver: () => components,
+			});
+			await (pool as any).reclaimOrphaned();
+
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 0, "incomplete multi-repo containers must not become ready pool entries");
+		} finally {
+			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
 });
 
 describe("WorktreePool — components[*].worktreeSetupCommand is the source of truth", () => {
