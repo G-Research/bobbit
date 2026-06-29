@@ -6,6 +6,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -146,9 +147,75 @@ branch refs/heads/session/new-session-deadbeef
 		assert.equal(out.active[0].path, "/tmp/repo-wt/session-cwd-owned");
 		assert.equal(out.orphan.length, 0);
 	});
+
+	it("protects durable team-owned worktrees and branches", () => {
+		const out = classifyWorktrees({
+			porcelainStdout: `worktree /tmp/repo-wt/team-agent\nbranch refs/heads/session/team-agent\n\nworktree /tmp/repo-wt/team-lead\nbranch refs/heads/goal/team-lead\n`,
+			repoPath: REPO,
+			goals: [],
+			sessions: [],
+			teams: [
+				{ id: "agent", branch: "session/team-agent", worktreePath: "/tmp/repo-wt/team-agent" },
+				{ id: "lead", branch: "goal/team-lead", worktreePath: "/tmp/repo-wt/team-lead", archived: true },
+			],
+			staff: [],
+		});
+		assert.equal(out.active.length, 2);
+		assert.deepEqual(out.orphan.map(w => w.branch), []);
+	});
+
+	it("protects durable team-agent branch containers for multi-repo component worktrees", () => {
+		const out = classifyWorktrees({
+			porcelainStdout: `worktree /tmp/proj/api\nbranch refs/heads/master\n\nworktree /tmp/proj-wt/session-team-agent/api\nbranch refs/heads/session/team-agent\n`,
+			repoPath: "/tmp/proj/api",
+			goals: [],
+			sessions: [],
+			teams: [
+				{ id: "agent", branch: "session/team-agent", worktreePath: "/tmp/proj-wt/session-team-agent" },
+			],
+			staff: [],
+		});
+		assert.equal(out.active.length, 1);
+		assert.equal(out.active[0].path, "/tmp/proj-wt/session-team-agent/api");
+		assert.equal(out.repair.length, 0);
+		assert.equal(out.orphan.length, 0);
+	});
 });
 
 describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
+	function git(repo: string, args: string[]): string {
+		return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+	}
+
+	it("removes archived-owned orphan worktrees without deleting durable archived branches", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-archived-branch-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-arch");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/arch", wt, "HEAD"]);
+
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "p1", rootPath: repo }],
+				goals: [],
+				sessions: [{ id: "archived", branch: "session/arch", worktreePath: wt, archived: true }],
+				staff: [],
+			});
+
+			assert.equal(result.cleaned, 1);
+			assert.equal(fs.existsSync(wt), false, "archived worktree should be removed");
+			assert.doesNotThrow(() => git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/session/arch"]), "durable archived branch must remain");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("skips a project whose rootPath has no .git (does not walk upward)", async () => {
 		// Regression: when rootPath is a directory inside another git repo,
 		// `git worktree list` walks upward and returns the parent's worktrees.

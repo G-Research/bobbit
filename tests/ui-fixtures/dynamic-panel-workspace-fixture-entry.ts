@@ -290,6 +290,8 @@ function resetState(options: { clearPersisted?: boolean; selectedSessionId?: str
 		activePanelTabId: CHAT_PANEL_TAB_ID,
 		panelWorkspaceActiveBySession: {},
 		panelWorkspacePreviewKeyBySession: {},
+		sidePanelWorkspaceBySession: {},
+		lastWorkspaceRevisionBySession: {},
 		previewVersionsBySession: {},
 		previewPanelTab: "chat",
 		previewPanelActiveTab: "preview",
@@ -369,6 +371,14 @@ function setLivePreview(preview: LivePreviewInput): void {
 	});
 	registerPreviewVersion(state, currentSessionId(), preview.entry, preview.contentHash, { current: true });
 	applyWorkspace(currentSessionId());
+	// A stale empty server-authoritative mirror from hydration/previous fixture state
+	// must not block the file:// fixture from deriving the new live preview tab.
+	const sid = workspaceKey(currentSessionId());
+	const existingWorkspace = state.sidePanelWorkspaceBySession?.[sid];
+	if (existingWorkspace && existingWorkspace.tabs.length === 0) {
+		delete state.sidePanelWorkspaceBySession[sid];
+		delete state.lastWorkspaceRevisionBySession[sid];
+	}
 	setActivePanelTabIdForSession(state, currentSessionId(), LIVE_PREVIEW_PANEL_TAB_ID);
 	renderNow();
 }
