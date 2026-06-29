@@ -4,13 +4,21 @@ import { ChannelOpenPermitStore } from "../src/server/extension-host/channel-ope
 import { mintSurfaceToken } from "../src/server/extension-host/surface-binding.ts";
 import { mintScopedExtensionChannelOpenPermit } from "../src/server/server.ts";
 
-function makeSurfaceToken(overrides: Partial<{ sessionId: string; packId: string; contributionId: string }> = {}): string {
+function makeSurfaceToken(overrides: Partial<{ sessionId: string; packId: string; contributionId: string; tool: string }> = {}): string {
 	return mintSurfaceToken({
 		sessionId: "sess-1",
 		packId: "terminal",
 		contributionId: "panel:terminal",
 		...overrides,
 	});
+}
+
+function makeToolResolver() {
+	return {
+		resolveToolLocation: (tool: string) => tool === "allowed-tool"
+			? { baseDir: "/tmp/market-packs/terminal/tools", groupDir: "tools" }
+			: undefined,
+	};
 }
 
 function makeContributionRegistry() {
@@ -78,6 +86,23 @@ describe("REST extension channel open permit policy", () => {
 			ok: false,
 			status: 403,
 			error: "surface token session mismatch",
+		});
+	});
+
+	it("rejects tool-bound tokens for channel permit minting", async () => {
+		const toolBoundToken = makeSurfaceToken({
+			contributionId: "tools/allowed-tool",
+			tool: "allowed-tool",
+		});
+
+		assert.deepEqual(await mintRoutePermit({
+			surfaceToken: toolBoundToken,
+			resolver: makeToolResolver() as any,
+			resolveSession: (id: string) => id === "sess-1" ? { allowedTools: ["allowed-tool"] } : undefined,
+		}), {
+			ok: false,
+			status: 403,
+			error: "channel open permits require a pack-bound surface token",
 		});
 	});
 });

@@ -308,9 +308,10 @@ export async function mintScopedExtensionChannelOpenPermit(input: {
 		projectId: input.projectId,
 	});
 	if (!surf.ok) return { ok: false, status: surf.status, error: surf.error };
-	const guard = surf.tool !== undefined
-		? authorizeScopedRequest({ tool: surf.tool, headerSessionId: input.rawHeaderSessionId ?? input.headerSessionId, bodySessionId: input.bodySessionId, resolveSession: input.resolveSession })
-		: authorizePackBoundScopedChannelOpenRequest(input.headerSessionId, input.bodySessionId, input.resolveSession);
+	if (surf.tool !== undefined) {
+		return { ok: false, status: 403, error: "channel open permits require a pack-bound surface token" };
+	}
+	const guard = authorizePackBoundScopedChannelOpenRequest(input.headerSessionId, input.bodySessionId, input.resolveSession);
 	if (!guard.ok) return { ok: false, status: guard.status, error: guard.error };
 	const name = typeof input.name === "string" ? input.name.trim() : "";
 	if (!name) return { ok: false, status: 400, error: "missing channel name" };
@@ -7025,8 +7026,8 @@ async function handleApiRoute(
 	}
 
 	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
-	// `ext_channel_open`. This is a typed, scoped server path: identity is derived
-	// from the surface token and channel name is resolved inside that pack only.
+	// `ext_channel_open`. This scoped path accepts only pack-bound surface tokens
+	// (panel / entrypoint / route); channel name is resolved inside that pack only.
 	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
 		if (!extensionChannelServices?.openPermits) {
 			json({ error: "extension channels are not available" }, 503);
