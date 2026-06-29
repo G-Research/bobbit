@@ -53,6 +53,44 @@ async function persistedGoalProposalFields(sid: string): Promise<Record<string, 
 	return proposal!.fields!;
 }
 
+const INLINE_WORKFLOW = {
+	id: "bespoke-seed-inline-e2e",
+	name: "Bespoke Seed Inline E2E",
+	description: "Inline workflow snapshot supplied directly to propose_goal seed validation.",
+	gates: [
+		{
+			id: "issue-analysis",
+			name: "Issue Analysis",
+			dependsOn: [],
+			verify: [{ name: "issue-check", type: "command", run: "echo issue" }],
+		},
+		{
+			id: "implementation",
+			name: "Implementation",
+			dependsOn: ["issue-analysis"],
+			verify: [
+				{ name: "implementation-check", type: "command", run: "echo implementation" },
+				{ name: "Inline QA", type: "command", run: "echo inline qa", optional: true, optionalLabel: "Enable Inline QA" },
+			],
+		},
+		{
+			id: "ready-to-merge",
+			name: "Ready to Merge",
+			dependsOn: ["implementation"],
+			verify: [{ name: "merge-check", type: "command", run: "echo merge" }],
+		},
+	],
+};
+
+async function expectSeedOk(r: Response, message: string): Promise<Record<string, unknown>> {
+	const text = await r.text();
+	expect(r.status, `${message}: ${text}`).toBe(200);
+	expect(text, message).not.toContain("UNKNOWN_WORKFLOW");
+	const body = JSON.parse(text) as Record<string, unknown>;
+	expect(body.ok).toBe(true);
+	return body;
+}
+
 async function expectMissingWorkflow(r: Response): Promise<void> {
 	expect(r.status).toBe(400);
 	const b = await r.json();
@@ -177,6 +215,74 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 		expect(ids).toContain("feature");
 		expect(ids).toContain("general");
 		expect(String(b.message)).toMatch(/feature/);
+	});
+
+	test("valid inlineWorkflow only → 200 and persists inline workflow fields", async () => {
+		const r = await seedGoal(sid, {
+			title: "Inline Only Goal",
+			spec: "body\n",
+			inlineWorkflow: INLINE_WORKFLOW,
+		});
+		await expectSeedOk(r, "BESPOKE_INLINE_SEED_ONLY: inlineWorkflow should satisfy the workflow requirement");
+
+		const fields = await persistedGoalProposalFields(sid);
+		expect(fields.workflow).toBeUndefined();
+		expect(fields.inlineWorkflow).toMatchObject({
+			id: INLINE_WORKFLOW.id,
+			name: INLINE_WORKFLOW.name,
+			gates: expect.arrayContaining([
+				expect.objectContaining({ id: "issue-analysis" }),
+				expect.objectContaining({ id: "implementation" }),
+				expect.objectContaining({ id: "ready-to-merge" }),
+			]),
+		});
+		expect((fields.inlineWorkflow as any).gates).toHaveLength(INLINE_WORKFLOW.gates.length);
+	});
+
+	test("valid inlineWorkflow plus stale workflow → 200 without UNKNOWN_WORKFLOW", async () => {
+		const r = await seedGoal(sid, {
+			title: "Inline Plus Stale Workflow Goal",
+			spec: "body\n",
+			workflow: "stale-workflow",
+			inlineWorkflow: INLINE_WORKFLOW,
+		});
+		await expectSeedOk(r, "BESPOKE_INLINE_STALE_WORKFLOW: inlineWorkflow should take precedence over stale workflow ids");
+
+		const fields = await persistedGoalProposalFields(sid);
+		expect(fields.workflow).toBe("stale-workflow");
+		expect(fields.inlineWorkflow).toMatchObject({ id: INLINE_WORKFLOW.id, name: INLINE_WORKFLOW.name });
+	});
+
+	test("inlineWorkflow options are validated against inline optional step names", async () => {
+		const r = await seedGoal(sid, {
+			title: "Inline Optional Step Goal",
+			spec: "body\n",
+			workflow: "feature",
+			inlineWorkflow: INLINE_WORKFLOW,
+			options: "Inline QA",
+		});
+		await expectSeedOk(r, "BESPOKE_INLINE_OPTIONS: inline optional step names should be accepted even when absent from the project workflow");
+
+		const fields = await persistedGoalProposalFields(sid);
+		expect(fields.workflow).toBe("feature");
+		expect(fields.options).toBe("Inline QA");
+		expect(fields.inlineWorkflow).toMatchObject({ id: INLINE_WORKFLOW.id });
+	});
+
+	test("inlineWorkflow options reject names that are not optional in the inline snapshot", async () => {
+		const r = await seedGoal(sid, {
+			title: "Inline Invalid Optional Step Goal",
+			spec: "body\n",
+			inlineWorkflow: INLINE_WORKFLOW,
+			options: "QA testing",
+		});
+		expect(r.status).toBe(400);
+		const b = await r.json();
+		expect(b.ok).toBe(false);
+		expect(b.code).toBe("UNKNOWN_OPTIONAL_STEP");
+		expect(b.validOptionalSteps).toEqual(["Inline QA"]);
+		expect(String(b.message)).toMatch(/Inline QA/);
+		expect(String(b.message)).not.toMatch(/feature/);
 	});
 
 	test("valid workflow + unknown optional step → 400 UNKNOWN_OPTIONAL_STEP", async () => {
