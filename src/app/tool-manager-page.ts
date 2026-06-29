@@ -275,39 +275,47 @@ const POLICY_LABELS: Record<string, string> = {
 };
 
 interface McpPolicyKeys {
-	group: string;
-	tool: string;
+	server: string;
+	package?: string;
+	operation?: string;
 }
 
 function mcpPolicyKeysLocal(toolName: string): McpPolicyKeys | undefined {
 	if (!toolName) return undefined;
 	if (toolName.startsWith("mcp__")) {
-		const remainder = toolName.slice(5);
-		const serverSep = remainder.indexOf("__");
-		if (serverSep <= 0) return undefined;
-		const server = remainder.slice(0, serverSep);
-		const afterServer = remainder.slice(serverSep + 2);
-		if (!server || !afterServer) return undefined;
-		const subSep = afterServer.indexOf("__");
-		const group = `mcp__${server}`;
-		const sub = subSep === -1 ? "" : afterServer.slice(0, subSep);
-		return sub ? { group, tool: `mcp__${server}__${sub}` } : { group, tool: group };
+		const parts = toolName.slice(5).split("__").filter(Boolean);
+		if (parts.length === 0) return undefined;
+		const server = `mcp__${parts[0]}`;
+		const packageKey = parts.length >= 3 ? `${server}__${parts[1]}` : undefined;
+		const operation = parts.length >= 2 ? toolName : undefined;
+		return { server, package: packageKey, operation };
 	}
+	// Legacy MCP meta-tool names (`mcp_<server>` or `mcp_<server>__<sub>`) are
+	// controls for the server/package prefix, not individual operations.
 	if (toolName.startsWith("mcp_") && !toolName.startsWith("mcp__")) {
 		const rest = toolName.slice(4);
 		if (!rest) return undefined;
 		const subSep = rest.indexOf("__");
 		if (subSep === -1) {
-			const group = `mcp__${rest}`;
-			return { group, tool: group };
+			const server = `mcp__${rest}`;
+			return { server };
 		}
-		const server = rest.slice(0, subSep);
+		const serverName = rest.slice(0, subSep);
 		const sub = rest.slice(subSep + 2);
-		if (!server || !sub) {
-			const group = `mcp__${rest}`;
-			return { group, tool: group };
+		if (!serverName || !sub) {
+			const server = `mcp__${rest}`;
+			return { server };
 		}
-		return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+		const server = `mcp__${serverName}`;
+		const packageKey = `${server}__${sub}`;
+		return { server, package: packageKey };
+	}
+	return undefined;
+}
+
+function firstPolicyMatch(keys: Array<string | undefined>, policies: Record<string, string>): { policy: string; source: string } | undefined {
+	for (const key of keys) {
+		if (key && policies[key]) return { policy: policies[key], source: key };
 	}
 	return undefined;
 }
@@ -315,53 +323,70 @@ function mcpPolicyKeysLocal(toolName: string): McpPolicyKeys | undefined {
 function mcpGroupPolicyDefault(toolName: string, toolGroup: string): { policy: string; source: string } {
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
 	if (mcpKeys) {
-		if (mcpKeys.tool !== mcpKeys.group && groupPolicies[mcpKeys.tool]) {
-			return { policy: groupPolicies[mcpKeys.tool], source: mcpKeys.tool };
-		}
-		if (groupPolicies[mcpKeys.group]) return { policy: groupPolicies[mcpKeys.group], source: mcpKeys.group };
+		const mcpMatch = firstPolicyMatch([mcpKeys.operation, mcpKeys.package, mcpKeys.server, "mcp__"], groupPolicies);
+		if (mcpMatch) return mcpMatch;
 	}
 	if (groupPolicies[toolGroup]) return { policy: groupPolicies[toolGroup], source: toolGroup };
 	return { policy: "allow", source: "system default" };
 }
 
-/** Resolve effective policy for a tool using the layered resolution order */
+/** Resolve effective policy for a tool using the layered resolution order. */
 function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
-	// 1. Role + tool override
-	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
-	// 2. Role + group override (MCP tool > MCP server > MCP wildcard > display group)
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
+	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
 	if (roleToolPolicies) {
 		if (mcpKeys) {
-			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return roleToolPolicies[mcpKeys.tool];
-			if (roleToolPolicies[mcpKeys.group]) return roleToolPolicies[mcpKeys.group];
-			if (roleToolPolicies["mcp__"]) return roleToolPolicies["mcp__"];
+			const roleMcpMatch = firstPolicyMatch([
+				mcpKeys.operation && mcpKeys.operation !== toolName ? mcpKeys.operation : undefined,
+				mcpKeys.package,
+				mcpKeys.server,
+				"mcp__",
+			], roleToolPolicies);
+			if (roleMcpMatch) return roleMcpMatch.policy;
 		}
-		// Check display group name (e.g. "Browser")
 		if (roleToolPolicies[toolGroup]) return roleToolPolicies[toolGroup];
 	}
-	// 3. Tool default
+
 	const tool = tools.find(t => t.name === toolName);
+	if (mcpKeys) {
+		// Persisted/group MCP prefix policies must be authoritative over tool YAML defaults.
+		const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+		if (groupDefault.source !== "system default") return groupDefault.policy;
+		if (tool?.grantPolicy) return tool.grantPolicy;
+		return "allow";
+	}
+
 	if (tool?.grantPolicy) return tool.grantPolicy;
-	// 4. Group default
 	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
 	if (groupDefault.source !== "system default") return groupDefault.policy;
-	// 5. System fallback
 	return "allow";
 }
 
-/** Describe where a resolved policy came from */
+/** Describe where a resolved policy came from. */
 function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
-	if (roleToolPolicies?.[toolName]) return "tool override";
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
+	if (roleToolPolicies?.[toolName]) return "tool override";
 	if (roleToolPolicies) {
 		if (mcpKeys) {
-			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return `from ${mcpKeys.tool} role override`;
-			if (roleToolPolicies[mcpKeys.group]) return `from ${mcpKeys.group} role override`;
-			if (roleToolPolicies["mcp__"]) return "from mcp__ role override";
+			const roleMcpMatch = firstPolicyMatch([
+				mcpKeys.operation && mcpKeys.operation !== toolName ? mcpKeys.operation : undefined,
+				mcpKeys.package,
+				mcpKeys.server,
+				"mcp__",
+			], roleToolPolicies);
+			if (roleMcpMatch) return `from ${roleMcpMatch.source} role override`;
 		}
 		if (roleToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
 	}
+
 	const tool = tools.find(t => t.name === toolName);
+	if (mcpKeys) {
+		const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+		if (groupDefault.source !== "system default") return `from ${groupDefault.source} group default`;
+		if (tool?.grantPolicy) return "tool default";
+		return "system default";
+	}
+
 	if (tool?.grantPolicy) return "tool default";
 	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
 	if (groupDefault.source !== "system default") return `from ${groupDefault.source} group default`;
@@ -622,6 +647,43 @@ function parseMcpNameLocal(serverName: string, opInfo: McpOperationInfo): { sub?
 	return { sub: rest.slice(0, sepIdx), op: rest.slice(sepIdx + 2) };
 }
 
+function stringField(record: unknown, names: string[]): string | undefined {
+	const data = record && typeof record === "object" ? record as Record<string, unknown> : undefined;
+	if (!data) return undefined;
+	const nested = data.policyKeys && typeof data.policyKeys === "object" ? data.policyKeys as Record<string, unknown> : undefined;
+	for (const name of names) {
+		const value = data[name] ?? nested?.[name];
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
+}
+
+function mcpServerPolicyKey(server: McpServerInfo): string {
+	const supplied = stringField(server, ["serverPolicyKey", "policyKey", "mcpPolicyKey", "server"]);
+	return supplied?.startsWith("mcp__") ? supplied : `mcp__${server.name}`;
+}
+
+function mcpPackagePolicyKey(sub: string, ops: McpOperationInfo[], serverPolicyKey: string): string | undefined {
+	if (!sub) return undefined;
+	const supplied = stringField(ops[0], ["packagePolicyKey", "subNamespacePolicyKey", "namespacePolicyKey", "package", "subNamespace"]);
+	return supplied?.startsWith("mcp__") ? supplied : `${serverPolicyKey}__${sub}`;
+}
+
+function mcpOperationPolicyKey(server: McpServerInfo, opInfo: McpOperationInfo, serverPolicyKey: string, packagePolicyKey?: string): string {
+	const supplied = stringField(opInfo, ["operationPolicyKey", "fullPolicyKey", "canonicalPolicyKey", "policyKey", "toolPolicyKey", "operation"]);
+	if (supplied?.startsWith("mcp__")) return supplied;
+	if (opInfo.name?.startsWith("mcp__")) return opInfo.name;
+	const parsed = parseMcpNameLocal(server.name, opInfo);
+	const prefix = packagePolicyKey ?? serverPolicyKey;
+	return `${prefix}__${parsed.op}`;
+}
+
+function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
+	const inherited = firstPolicyMatch(keys, groupPolicies);
+	if (!inherited) return "Allow (default)";
+	return `${POLICY_LABELS[inherited.policy] || inherited.policy} (inherited from ${inherited.source})`;
+}
+
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
 	await updateGroupPolicy(key, value || null);
 	groupPolicies = await fetchGroupPolicies();
@@ -632,6 +694,7 @@ function renderMcpPolicySelect(key: string, current: string, testid: string, emp
 	return html`
 		<select class="tool-group-select"
 			data-testid=${testid}
+			data-policy-key=${key}
 			.value=${current}
 			@click=${(e: Event) => e.stopPropagation()}
 			@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
@@ -645,6 +708,28 @@ function renderMcpPolicySelect(key: string, current: string, testid: string, emp
 			<option value="ask" ?selected=${current === "ask"}>Ask</option>
 			<option value="never" ?selected=${current === "never"}>Never</option>
 		</select>
+	`;
+}
+
+function renderMcpOperationRow(tool: ToolInfo, policyKey: string, emptyPolicyLabel: string): TemplateResult {
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
+	const inherited = isInherited(origin);
+	const currentPolicy = groupPolicies[policyKey] || "";
+	return html`
+		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
+			data-testid="mcp-operation-row" data-tool-name=${tool.name} data-policy-key=${policyKey}
+			@click=${() => showEdit(tool)}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
+			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)}</span>
+			<span class="tool-row-desc">${tool.description}</span>
+			<div class="tool-row-actions">
+				<span class="tool-group-policy-label">Operation Policy:</span>
+				${renderMcpPolicySelect(policyKey, currentPolicy, "mcp-operation-policy", emptyPolicyLabel)}
+				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
+					${icon(Pencil, "sm")}
+				</button>
+			</div>
+		</div>
 	`;
 }
 
@@ -668,12 +753,12 @@ function renderMcpSection(): TemplateResult {
 						: server.status === "error"
 							? "text-red-600"
 							: "text-muted-foreground";
-					const serverPolicyKey = `mcp__${server.name}`;
+					const serverPolicyKey = mcpServerPolicyKey(server);
 					const serverPolicy = groupPolicies[serverPolicyKey] || "";
+					const serverEmptyPolicyLabel = inheritedMcpPolicyLabel(["mcp__"]);
 
-					// Group ops by sub-namespace. Flat servers — ops with no
-					// `subNamespace` — collapse into a single bucket keyed by `""`,
-					// which renders as one tool row whose name = the server.
+					// Group ops by sub-namespace. Flat servers with no
+					// `subNamespace` collapse into a single bucket keyed by `""`.
 					const bySub = new Map<string, McpOperationInfo[]>();
 					for (const op of server.tools) {
 						const parsed = parseMcpNameLocal(server.name, op);
@@ -685,7 +770,7 @@ function renderMcpSection(): TemplateResult {
 					const subKeys = Array.from(bySub.keys()).sort();
 
 					return html`
-						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name}>
+						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name} data-policy-key=${serverPolicyKey}>
 							<div class="tool-group-header"
 								data-testid="mcp-server-toggle"
 								tabindex="0" role="button"
@@ -696,8 +781,8 @@ function renderMcpSection(): TemplateResult {
 								<span class="tool-group-name">${server.name}</span>
 								<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
 								<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
-								<span class="tool-group-policy-label">Group Policy:</span>
-								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy")}
+								<span class="tool-group-policy-label">Server Policy:</span>
+								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
 							</div>
 							${server.status === "error" && server.error
 								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
@@ -709,17 +794,14 @@ function renderMcpSection(): TemplateResult {
 											: subKeys.map((sub) => {
 													const ops = bySub.get(sub)!;
 													const hasSub = sub.length > 0;
-													const toolPolicyKey = hasSub ? `mcp__${server.name}__${sub}` : `mcp__${server.name}`;
-													const toolPolicy = groupPolicies[toolPolicyKey] || "";
-													const inheritedPolicy = hasSub && !toolPolicy ? groupPolicies[serverPolicyKey] : "";
-													const emptyPolicyLabel = inheritedPolicy
-														? `${POLICY_LABELS[inheritedPolicy] || inheritedPolicy} (inherited from ${serverPolicyKey})`
-														: "Allow (default)";
+													const packagePolicyKey = mcpPackagePolicyKey(sub, ops, serverPolicyKey);
+													const packagePolicy = packagePolicyKey ? groupPolicies[packagePolicyKey] || "" : "";
+													const packageEmptyPolicyLabel = inheritedMcpPolicyLabel([serverPolicyKey, "mcp__"]);
 													const toolKey = `${server.name}::${sub}`;
 													const toolExpanded = expandedMcpTools.has(toolKey);
 													const toolLabel = hasSub ? sub : server.name;
 													return html`
-														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel}>
+														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${packagePolicyKey ?? serverPolicyKey}>
 															<div class="tool-group-header"
 																data-testid="mcp-tool-toggle"
 																tabindex="0" role="button"
@@ -729,14 +811,18 @@ function renderMcpSection(): TemplateResult {
 																<span style="display:inline-flex;transform:rotate(${toolExpanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
 																<span class="tool-group-name">${toolLabel}</span>
 																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
-																<span class="tool-group-policy-label">Tool Policy:</span>
-																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", emptyPolicyLabel)}
+																${hasSub && packagePolicyKey ? html`
+																	<span class="tool-group-policy-label">Package Policy:</span>
+																	${renderMcpPolicySelect(packagePolicyKey, packagePolicy, "mcp-tool-policy", packageEmptyPolicyLabel)}
+																` : html`<span class="tools-note">Uses server policy</span>`}
 															</div>
 															${toolExpanded
 																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
 																		${ops.map((op) => {
+																			const operationPolicyKey = mcpOperationPolicyKey(server, op, serverPolicyKey, packagePolicyKey);
+																			const operationEmptyPolicyLabel = inheritedMcpPolicyLabel([packagePolicyKey, serverPolicyKey, "mcp__"]);
 																			const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
-																			return renderToolRow(tool);
+																			return renderMcpOperationRow(tool, operationPolicyKey, operationEmptyPolicyLabel);
 																		})}
 																	</div>`
 																: nothing}
