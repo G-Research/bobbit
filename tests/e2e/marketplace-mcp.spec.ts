@@ -72,12 +72,21 @@ function gatewayTools(): Array<Record<string, unknown>> {
 	return [
 		gatewayTool("confluence__confluence_get_page", "Confluence", "Confluence docs tools", "Get a Confluence page"),
 		gatewayTool("jira__jira_search", "Jira", "Jira issue tools", "Search Jira issues"),
+		gatewayTool("jira__jira_get_issue", "Jira", "Jira issue tools", "Get a Jira issue"),
 		gatewayTool("jira-readonly__jira_search", "Jira readonly", "Read-only Jira tools", "Search Jira issues read-only"),
 	];
 }
 
 function gatewayTool(name: string, providerLabel: string, providerDescription: string, description: string): Record<string, unknown> {
 	return { name, providerLabel, providerDescription, description, inputSchema: { type: "object", properties: {} } };
+}
+
+function findGatewayServer(servers: any[], subNamespace = "jira"): any | undefined {
+	return servers.find((s: any) => s.name === "gr" || s.ownerContributions?.some((c: any) => c.serverName === "gr" && c.subNamespace === subNamespace));
+}
+
+function hasGatewaySubNamespace(servers: any[], subNamespace = "jira"): boolean {
+	return Boolean(findGatewayServer(servers, subNamespace)?.activeSubNamespaces?.includes(subNamespace));
 }
 
 async function cleanup(sourceId?: string, projectId?: string, packNames: string[] = []): Promise<void> {
@@ -205,11 +214,12 @@ test.describe("Marketplace MCP API integration", () => {
 			let mcp = await apiFetch("/api/mcp-servers");
 			expect(mcp.status).toBe(200);
 			let servers = await mcp.json();
-			let gr = servers.find((s: any) => s.name === "gr");
+			let gr = findGatewayServer(servers);
 			expect(gr?.activeSubNamespaces).toContain("jira");
 			expect(gr?.tools).toEqual(expect.arrayContaining([
-				expect.objectContaining({ name: "mcp__gr__jira__jira_search", subNamespace: "jira", op: "jira_search" }),
+				expect.objectContaining({ name: "mcp__gr__jira__jira_get_issue", subNamespace: "jira", op: "jira_get_issue" }),
 			]));
+			expect(gr?.tools?.some((tool: any) => tool.name === "mcp__gr__jira__jira_search")).toBe(false);
 
 			const disable = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
@@ -222,7 +232,7 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(disableBody.catalogue.mcp[0].staleDisabledOperations).toEqual(["retired_op"]);
 			mcp = await apiFetch("/api/mcp-servers");
 			servers = await mcp.json();
-			gr = servers.find((s: any) => s.name === "gr");
+			gr = findGatewayServer(servers);
 			expect(gr?.activeSubNamespaces ?? []).not.toContain("jira");
 
 			const enable = await apiFetch("/api/marketplace/pack-activation", {
@@ -232,7 +242,7 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(enable.status).toBe(200);
 			mcp = await apiFetch("/api/mcp-servers");
 			servers = await mcp.json();
-			gr = servers.find((s: any) => s.name === "gr");
+			gr = findGatewayServer(servers);
 			expect(gr?.activeSubNamespaces).toContain("jira");
 
 			const del = await apiFetch("/api/marketplace/installed", {
@@ -241,7 +251,7 @@ test.describe("Marketplace MCP API integration", () => {
 			});
 			expect(del.status).toBe(204);
 			mcp = await apiFetch("/api/mcp-servers");
-			expect((await mcp.json()).some((s: any) => s.name === "gr" && s.activeSubNamespaces?.includes("jira"))).toBe(false);
+			expect(hasGatewaySubNamespace(await mcp.json())).toBe(false);
 		} finally {
 			await cleanup(sourceId, undefined, packName ? [packName] : []);
 			await gatewaySource.close();
@@ -331,7 +341,7 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const scoped = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
 			expect(scoped.status).toBe(200);
-			const scopedGr = (await scoped.json()).find((s: any) => s.name === "gr");
+			const scopedGr = findGatewayServer(await scoped.json());
 			expect(scopedGr?.activeSubNamespaces).toContain("jira");
 			expect(scopedGr?.tools).toEqual(expect.arrayContaining([
 				expect.objectContaining({ name: "mcp__gr__jira__jira_search", subNamespace: "jira", op: "jira_search" }),
@@ -339,7 +349,7 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const global = await apiFetch("/api/mcp-servers");
 			expect(global.status).toBe(200);
-			expect((await global.json()).some((s: any) => s.name === "gr" && s.activeSubNamespaces?.includes("jira"))).toBe(false);
+			expect(hasGatewaySubNamespace(await global.json())).toBe(false);
 
 			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(projectId!)}&packName=${encodeURIComponent(pack.name)}`);
 			expect(activation.status).toBe(200);

@@ -522,6 +522,39 @@ function readYamlMapping(file: string): Record<string, unknown> | null {
 	}
 }
 
+function safeString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function stableGatewayContributionId(fields: Record<string, unknown>): string {
+	return `mcp:${createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 16)}`;
+}
+
+function gatewayMcpRuntimeKey(entry: PackEntry, mcp: { serverName: string; subNamespace?: string }, metaDetails: Record<string, unknown>): string {
+	const fingerprint = safeString(entry.meta?.commit) ?? safeString(metaDetails.gatewayFingerprint) ?? "unknown";
+	return `gateway_${mcp.serverName}_${mcp.subNamespace ?? "default"}_${fingerprint.slice(0, 16)}`;
+}
+
+function activationMcpContributionId(
+	entry: PackEntry,
+	mcp: { listName: string; serverName: string; subNamespace?: string },
+	metaDetails: Record<string, unknown>,
+	fallbackSourceId?: string,
+): string {
+	if (metaDetails.sourceType === "mcp-gateway") {
+		return stableGatewayContributionId({
+			sourceId: safeString(metaDetails.sourceId) ?? fallbackSourceId ?? safeString(entry.meta?.sourceUrl) ?? "unknown-source",
+			installedPackName: entry.manifest?.name ?? entry.meta?.packName,
+			gatewayProviderId: safeString(metaDetails.gatewayProviderId) ?? mcp.subNamespace,
+			listName: mcp.listName,
+			serverName: mcp.serverName,
+			subNamespace: mcp.subNamespace,
+			runtimeKey: gatewayMcpRuntimeKey(entry, mcp, metaDetails),
+		});
+	}
+	return mcp.listName;
+}
+
 /**
  * Expand manifest-declared tool GROUP directories into concrete tool names.
  * Runtime tool loading scans `.yaml` files only, so activation uses the same
@@ -1791,14 +1824,22 @@ export function createGateway(config: GatewayConfig) {
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (entry.scope === "builtin" || !entry.manifest || (entry.manifest.contents.mcp ?? []).length === 0) continue;
 			const store = packActivationStore(entry.scope, projectId);
-			const disabled = new Set(store?.getPackActivation(entry.scope as PackOrderScope, entry.manifest.name).mcp ?? []);
+			const activation = store?.getPackActivation(entry.scope as PackOrderScope, entry.manifest.name) ?? {};
+			const disabled = new Set(activation.mcp ?? []);
+			const disabledOperations = activation.mcpOperations ?? {};
+			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
+			const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
 			try {
 				for (const mcp of loadPackContributions(entry.path, entry.manifest).mcp ?? []) {
-					if (disabled.has(mcp.listName)) continue;
+					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
+					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
+					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
 					contributions.push({
 						listName: mcp.listName,
 						serverName: mcp.serverName,
+						...(metaDetails.sourceType === "mcp-gateway" ? { runtimeServerKey: gatewayMcpRuntimeKey(entry, mcp, metaDetails), contributionId } : (mcp.runtimeServerKey ? { runtimeServerKey: mcp.runtimeServerKey } : {})),
 						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
+						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
 						config: mcp.config,
 						origin: {
 							scope: entry.scope,
@@ -8054,7 +8095,6 @@ async function handleApiRoute(
 			disabledByActivation: boolean;
 			inputSchema?: unknown;
 		};
-		const safeString = (value: unknown): string | undefined => typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 		const normaliseOperationMetadata = (raw: unknown): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> => {
 			if (!Array.isArray(raw)) return [];
 			const out: Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> = [];
@@ -8074,7 +8114,6 @@ async function handleApiRoute(
 			}
 			return out;
 		};
-		const stableGatewayContributionId = (fields: Record<string, unknown>): string => `mcp:${createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 16)}`;
 		const mcpPolicyKey = (serverName: string, subNamespace: string | undefined, operationName?: string): string => {
 			const parts = ["mcp", serverName];
 			if (subNamespace) parts.push(subNamespace);
@@ -8082,18 +8121,7 @@ async function handleApiRoute(
 			return parts.join("__");
 		};
 		const activationMcpRef = (entry: PackEntry, mcp: ResolvedMcpContribution | { listName: string; serverName: string; subNamespace?: string; config?: any; sourceFile?: string }, metaDetails: Record<string, unknown>): string => {
-			if (metaDetails.sourceType === "mcp-gateway") {
-				return stableGatewayContributionId({
-					sourceId: safeString(metaDetails.sourceId) ?? sourceStore.getByUrl(String(entry.meta?.sourceUrl ?? ""))?.id ?? safeString(entry.meta?.sourceUrl) ?? "unknown-source",
-					installedPackName: entry.manifest?.name ?? entry.meta?.packName,
-					gatewayProviderId: safeString(metaDetails.gatewayProviderId) ?? mcp.subNamespace,
-					listName: mcp.listName,
-					serverName: mcp.serverName,
-					subNamespace: mcp.subNamespace,
-					runtimeKey: `${mcp.serverName}:${mcp.subNamespace ?? ""}:${safeString(entry.meta?.commit) ?? safeString(metaDetails.gatewayFingerprint) ?? ""}`,
-				});
-			}
-			return mcp.listName;
+			return activationMcpContributionId(entry, mcp, metaDetails, sourceStore.getByUrl(String(entry.meta?.sourceUrl ?? ""))?.id);
 		};
 		const operationsForMcp = (mcp: { listName: string; sourceFile?: string }, metaDetails: Record<string, unknown>): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }> => {
 			const gatewayOps = metaDetails.gatewayOperations;
@@ -8150,12 +8178,13 @@ async function handleApiRoute(
 				const statuses = (scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager())?.getServerStatuses() ?? [];
 				for (const mcp of contributions.mcp ?? []) {
 					const transport = mcp.config.url ? "http" : "stdio";
-					const status = statuses.find((s) => s.name === mcp.serverName);
-					const owner = status?.ownerContributions?.find((c) => c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope);
+					const contributionId = activationMcpRef(entry, mcp, metaDetails);
+					const status = statuses.find((s) => s.ownerContributions?.some((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope)))
+						?? statuses.find((s) => s.name === mcp.serverName);
+					const owner = status?.ownerContributions?.find((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope));
 					const overriddenBy = status && !owner
 						? (status.origin?.scope === "manual" ? "overridden-by-manual" : "overridden-by-marketplace")
 						: undefined;
-					const contributionId = activationMcpRef(entry, mcp, metaDetails);
 					const disabledOps = [...new Set(disabledMcpOperations[contributionId] ?? [])];
 					const disabledOpsSet = new Set(disabledOps);
 					const operationMetadata = operationsForMcp(mcp, metaDetails);
@@ -8194,7 +8223,7 @@ async function handleApiRoute(
 						...(mcp.config.env ? { env: Object.keys(mcp.config.env) } : {}),
 						...(mcp.config.url ? { url: mcp.config.url } : {}),
 						...(mcp.config.headers ? { headers: Object.keys(mcp.config.headers) } : {}),
-						...(status ? { status: status.status, ownerStatus: overriddenBy ?? (owner ? status.status : status.status), toolCount: status.toolCount } : {}),
+						...(status ? { status: status.status, ownerStatus: overriddenBy ?? (owner ? status.status : status.status), toolCount: operations.length > 0 ? operations.filter((op) => op.selected).length : status.toolCount } : {}),
 						...(operations.length > 0 ? { operations, selectedOperationCount: operations.filter((op) => op.selected).length, totalOperationCount: operations.length } : { selectedOperationCount: undefined, totalOperationCount: undefined }),
 						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
 						...(staleDisabledOperations.length > 0 ? { staleDisabledOperations } : {}),
@@ -14501,18 +14530,21 @@ async function handleApiRoute(
 		}
 		const statuses = mcpManager.getServerStatuses();
 		const toolInfos = mcpManager.getToolInfos();
-		const result = statuses.map(s => ({
-			...s,
-			tools: toolInfos.filter(t => t.serverName === s.name).map(t => {
-				const parsed = parseMcpToolName(t.name);
-				return {
-					name: t.name,
-					description: t.description,
-					subNamespace: parsed?.sub,
-					op: parsed?.op ?? t.mcpToolName,
-				};
-			}),
-		}));
+		const result = statuses.map(s => {
+			const publicServerNames = new Set([s.name, ...(s.ownerContributions ?? []).map((c) => c.serverName)]);
+			return {
+				...s,
+				tools: toolInfos.filter(t => publicServerNames.has(t.serverName)).map(t => {
+					const parsed = parseMcpToolName(t.name);
+					return {
+						name: t.name,
+						description: t.description,
+						subNamespace: parsed?.sub,
+						op: parsed?.op ?? t.mcpToolName,
+					};
+				}),
+			};
+		});
 		json(result);
 		return;
 	}

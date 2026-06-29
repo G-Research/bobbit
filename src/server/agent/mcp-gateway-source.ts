@@ -502,8 +502,14 @@ function mcpContributionYaml(provider: McpGatewayProvider, listName: string, con
 		subNamespace: provider.id,
 		label: listName.endsWith("-write") ? writeLabel(provider) : provider.label,
 		description: listName.endsWith("-write") ? writeDescription(provider) : provider.description,
+		operations: operationMetadataForMcpYaml(provider.operations),
 		transport: stripUndefined({ type: "http", url: connection.url, headers: connection.headers }),
 	});
+}
+
+function operationMetadataForMcpYaml(operations: GatewayOperation[] | undefined): Array<Record<string, unknown>> | undefined {
+	if (!operations || operations.length === 0) return undefined;
+	return operations.map((op) => stripUndefined({ name: op.name, label: op.label, description: op.description }));
 }
 
 export function gatewayPackNameForProvider(providerId: string): string {
