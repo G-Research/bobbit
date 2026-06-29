@@ -41,8 +41,21 @@ export class ProviderKeyInput extends LitElement {
 
 	private async checkKeyStatus() {
 		try {
+			// Server preferences are authoritative for user-saved API keys. The
+			// client provider-keys store may contain the `gateway-managed` sentinel
+			// used to suppress direct-mode prompts for a remote session; that is not a
+			// real API key and must not make Settings show a key as configured.
+			const res = await gatewayFetch("/api/provider-keys");
+			if (res.ok) {
+				const data = await res.json() as { providers?: unknown };
+				this.hasKey = Array.isArray(data.providers) && data.providers.includes(this.provider);
+				return;
+			}
+		} catch { /* fall back to the legacy local store below */ }
+
+		try {
 			const key = await getAppStorage().providerKeys.get(this.provider);
-			this.hasKey = !!key;
+			this.hasKey = !!key && key !== "gateway-managed";
 		} catch (error) {
 			console.error("Failed to check key status:", error);
 		}
@@ -73,13 +86,15 @@ export class ProviderKeyInput extends LitElement {
 
 		if (success) {
 			try {
-				await getAppStorage().providerKeys.set(this.provider, this.keyInput);
-				// Also store server-side for unified model registry auth detection
-				gatewayFetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
+				// Store server-side first so Settings only reports a key as configured
+				// once the runtime's authoritative preference store has it.
+				const res = await gatewayFetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ key: this.keyInput }),
-				}).catch(() => {});
+				});
+				if (!res.ok) throw new Error(`Failed to save provider key: HTTP ${res.status}`);
+				await getAppStorage().providerKeys.set(this.provider, this.keyInput);
 				this.hasKey = true;
 				this.inputChanged = false;
 				this.requestUpdate();
@@ -109,7 +124,7 @@ export class ProviderKeyInput extends LitElement {
 						this.testing
 							? Badge({ children: i18n("Testing..."), variant: "secondary" })
 							: this.hasKey
-								? html`<span class="text-green-600 dark:text-green-400">✓</span>`
+								? html`<span class="text-green-600 dark:text-green-400" data-testid="provider-key-present">✓</span>`
 								: ""
 					}
 					${this.failed ? Badge({ children: i18n("✗ Invalid"), variant: "destructive" }) : ""}
