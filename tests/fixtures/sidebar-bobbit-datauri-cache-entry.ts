@@ -11,11 +11,6 @@ import {
 } from "../../src/ui/bobbit-render.js";
 import { getAccessory, statusBobbit } from "../../src/app/session-colors.js";
 
-type StaticSidebarBobbitOptions = SidebarBobbitOptions & {
-	/** Sidebar/status call sites opt idle sprites out of the default breathe animation. */
-	staticIdle?: boolean;
-};
-
 function renderInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
 	render(renderSidebarBobbitCanvas(opts), host);
 }
@@ -25,7 +20,7 @@ function renderDefaultPreviewInto(host: HTMLElement, opts: SidebarBobbitOptions)
 }
 
 function renderStaticSidebarInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
-	render(renderSidebarBobbitCanvas({ ...opts, staticIdle: true } as StaticSidebarBobbitOptions), host);
+	render(renderSidebarBobbitCanvas({ ...opts, disableIdleBreathing: true }), host);
 }
 
 function renderStatusInto(
@@ -61,8 +56,8 @@ function renderStaticSidebarStatusInto(
 		accessory: getAccessory(accessory),
 		noDesaturate,
 		unread,
-		staticIdle: true,
-	} as StaticSidebarBobbitOptions);
+		disableIdleBreathing: true,
+	});
 	render(html`<span class="sidebar-bobbit-status-test ${unread ? "bobbit-unread-pulse" : ""}">${sprite}</span>`, host);
 }
 
