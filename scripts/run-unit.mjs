@@ -110,6 +110,13 @@ const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(default
 
 const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FAILURE_TAIL_LINES || "240", 10) || 240);
 const exitCloseGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_EXIT_CLOSE_GRACE_MS || "5000", 10) || 5000);
+// Keep the unit wrapper inside the workflow/gate timeout even when a child runner
+// never exits (for example a leaked handle that survives --test-force-exit). The
+// timeout must be long enough for legitimate slow Windows runs but shorter than
+// the gate's 1200s watchdog so failures include the runner tail instead of an
+// opaque outer timeout.
+const runnerTimeoutMs = Math.max(60_000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_TIMEOUT_MS || "900000", 10) || 900_000);
+const runnerKillGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_KILL_GRACE_MS || "10000", 10) || 10_000);
 
 function appendTail(tail, chunk) {
 	for (const line of String(chunk).split(/\r?\n/)) {
@@ -127,6 +134,9 @@ function run(label, args) {
 		let exitCode = null;
 		let exitSignal = null;
 		let closeGraceTimer;
+		let runnerTimeoutTimer;
+		let runnerKillGraceTimer;
+		let timedOut = false;
 		const child = spawn(npx, args, {
 			cwd: projectRoot,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -140,10 +150,45 @@ function run(label, args) {
 			if (settled) return;
 			settled = true;
 			if (closeGraceTimer) clearTimeout(closeGraceTimer);
+			if (runnerTimeoutTimer) clearTimeout(runnerTimeoutTimer);
+			if (runnerKillGraceTimer) clearTimeout(runnerKillGraceTimer);
 			const secs = ((Date.now() - start) / 1000).toFixed(1);
-			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${code ?? signal ?? "?"})`);
-			res({ label, code: code ?? (signal ? 1 : 0), tail });
+			const resultCode = timedOut ? 1 : (code ?? (signal ? 1 : 0));
+			const exitLabel = timedOut ? `timeout/${code ?? signal ?? "?"}` : (code ?? signal ?? "?");
+			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${exitLabel})`);
+			res({ label, code: resultCode, tail });
 		};
+
+		const terminateTimedOutRunner = () => {
+			if (!child.pid) return;
+			if (isWin) {
+				try {
+					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+				} catch {
+					try { child.kill("SIGTERM"); } catch { /* ignore */ }
+				}
+			} else {
+				try { child.kill("SIGTERM"); } catch { /* ignore */ }
+			}
+		};
+
+		runnerTimeoutTimer = setTimeout(() => {
+			if (settled) return;
+			timedOut = true;
+			const warning = `[run-unit] ${label} timed out after ${runnerTimeoutMs}ms; terminating the runner so the unit phase reports diagnostics before the outer gate timeout.`;
+			console.error(`\n${warning}`);
+			appendTail(tail, warning);
+			terminateTimedOutRunner();
+			runnerKillGraceTimer = setTimeout(() => {
+				if (settled) return;
+				const killWarning = `[run-unit] ${label} did not exit within ${runnerKillGraceMs}ms after timeout termination; closing stdio readers and failing the runner.`;
+				console.error(killWarning);
+				appendTail(tail, killWarning);
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				settle(1, null);
+			}, runnerKillGraceMs);
+		}, runnerTimeoutMs);
 
 		child.stdout?.on("data", (chunk) => {
 			process.stdout.write(chunk);
@@ -179,6 +224,8 @@ function run(label, args) {
 			if (settled) return;
 			settled = true;
 			if (closeGraceTimer) clearTimeout(closeGraceTimer);
+			if (runnerTimeoutTimer) clearTimeout(runnerTimeoutTimer);
+			if (runnerKillGraceTimer) clearTimeout(runnerKillGraceTimer);
 			console.error(`[run-unit] ${label} failed to start:`, err);
 			res({ label, code: 1, tail: [String(err?.stack || err)] });
 		});

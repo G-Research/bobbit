@@ -175,6 +175,66 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
+	test("touch pan over xterm-screen scrolls the xterm viewport @terminal-repro", async ({ page, browserName }) => {
+		test.skip(browserName !== "chromium", "CDP touch event dispatch is Chromium-only");
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1220, height: 620 });
+		const client = await page.context().newCDPSession(page);
+		await client.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+		await installChannelFrameSpy(page);
+
+		await openApp(page);
+		sessionId = await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+
+		await openTerminalFromSessionMenu(page);
+		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
+		await waitForTerminalMountedForFrameInjection(page);
+		await assertTerminalLayoutStable(page, "touch scroll setup initial terminal open");
+
+		const run = `bobbit_touch_scroll_${Date.now()}`;
+		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
+		const burstDone = `${run}_BURST_DONE`;
+		const burst = Array.from({ length: 160 }, (_, i) => `${run}_LINE_${String(i).padStart(3, "0")}_abcdefghijklmnopqrstuvwxyz`)
+			.join("\r\n") + `\r\n${burstDone}`;
+		await injectTerminalTextFrame(page, burst);
+		await expect(page.locator(terminalHost()), "touch scroll setup: deterministic injected burst should render at the terminal bottom before the touch pan").toContainText(burstDone, { timeout: 10_000 });
+		await expect.poll(
+			async () => (await terminalScrollMetrics(page)).maxScrollTop,
+			{ message: "touch scroll setup: deterministic injected burst must create scrollback", timeout: 10_000 },
+		).toBeGreaterThan(80);
+		const before = await terminalVisibleTouchLines(page, run);
+		expect(
+			before.firstLine !== null && before.firstLine > 80,
+			`touch scroll setup: deterministic scrollback should start near the injected burst tail; before=${JSON.stringify(before)}`,
+		).toBe(true);
+
+		await dispatchTouchDragOverXtermScreen(page, client, "down");
+		const after = await terminalVisibleTouchLines(page, run);
+		expect(
+			after.firstLine !== null && before.firstLine !== null && after.firstLine < before.firstLine,
+			`TERMINAL_TOUCH_SCROLL: vertical touch pan over .xterm-screen should scroll to older xterm buffer rows; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+		).toBe(true);
+
+		const whileScrolledUp = `${run}_WHILE_SCROLLED_UP`;
+		await injectTerminalTextFrame(page, `${whileScrolledUp}\r\n`);
+		const afterScrolledUpOutput = await terminalVisibleTouchLines(page, run);
+		expect(
+			afterScrolledUpOutput.firstLine !== null && after.firstLine !== null && afterScrolledUpOutput.firstLine <= after.firstLine + 2 && !afterScrolledUpOutput.compactText.includes(whileScrolledUp),
+			`TERMINAL_TOUCH_SCROLL: follow-output should stay disabled when output arrives while touch-scrolled up; after=${JSON.stringify(after)} afterOutput=${JSON.stringify(afterScrolledUpOutput)}`,
+		).toBe(true);
+
+		let returnedToBottom = await terminalVisibleTouchLines(page, run);
+		for (let i = 0; i < 4 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
+			await dispatchTouchDragOverXtermScreen(page, client, "up");
+			returnedToBottom = await terminalVisibleTouchLines(page, run);
+		}
+		expect(returnedToBottom.compactText, `TERMINAL_TOUCH_SCROLL: returning to bottom should show output that arrived while scrolled up; returned=${JSON.stringify(returnedToBottom)}`).toContain(whileScrolledUp);
+		const afterReturn = `${run}_AFTER_RETURN_TO_BOTTOM`;
+		await injectTerminalTextFrame(page, `${afterReturn}\r\n`);
+		await expect(page.locator(terminalHost()), "touch scroll follow-output should resume after returning to bottom").toContainText(afterReturn, { timeout: 10_000 });
+	});
+
 	test("reproduces Windows cmd ConPTY startup xterm layout artifact @terminal-repro", async ({ page }, testInfo) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1220, height: 620 });
@@ -379,6 +439,85 @@ async function waitForTerminalAnimationFrames(page: import("@playwright/test").P
 		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 	});
+}
+
+type TerminalScrollMetrics = { scrollTop: number; scrollHeight: number; clientHeight: number; maxScrollTop: number; atBottom: boolean; scrollAreaHeight: string; rowCount: number; scrollElementClass: string };
+
+async function terminalScrollMetrics(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
+	return page.evaluate(() => {
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const scrollElement = (host?.querySelector(".xterm-scrollable-element") ?? host?.querySelector(".xterm-viewport")) as HTMLElement | null;
+		const scrollArea = host?.querySelector(".xterm-scroll-area") as HTMLElement | null;
+		const scrollTop = scrollElement?.scrollTop ?? 0;
+		const scrollHeight = scrollElement?.scrollHeight ?? 0;
+		const clientHeight = scrollElement?.clientHeight ?? 0;
+		const scrollAreaHeight = scrollArea?.style.height || getComputedStyle(scrollArea ?? document.body).height;
+		const scrollAreaHeightPx = Number.parseFloat(scrollAreaHeight) || 0;
+		const effectiveScrollHeight = Math.max(scrollHeight, scrollAreaHeightPx, scrollTop + clientHeight);
+		const maxScrollTop = Math.max(0, effectiveScrollHeight - clientHeight);
+		return {
+			scrollTop,
+			scrollHeight,
+			clientHeight,
+			maxScrollTop,
+			atBottom: Math.abs(maxScrollTop - scrollTop) <= 2,
+			scrollAreaHeight,
+			rowCount: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+			scrollElementClass: scrollElement?.className ?? "",
+		};
+	});
+}
+
+async function terminalScrollMetricsAfterAnimationFrames(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
+	await waitForTerminalAnimationFrames(page);
+	return terminalScrollMetrics(page);
+}
+
+async function dispatchTouchDragOverXtermScreen(
+	page: import("@playwright/test").Page,
+	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },
+	direction: "down" | "up" = "down",
+): Promise<void> {
+	const screen = page.locator(`${terminalHost()} .xterm-screen`).first();
+	await expect(screen, "touch scroll reproducer needs a visible .xterm-screen target").toBeVisible({ timeout: 10_000 });
+	const rect = await screen.boundingBox();
+	if (!rect) throw new Error("touch scroll reproducer could not resolve .xterm-screen bounds");
+	const x = Math.round(rect.x + rect.width / 2);
+	const travel = Math.max(80, Math.min(220, rect.height * 0.45));
+	const lowY = Math.round(rect.y + Math.min(rect.height - 10, Math.max(30, rect.height * 0.35)));
+	const highY = Math.round(Math.min(rect.y + rect.height - 6, lowY + travel));
+	const startY = direction === "down" ? lowY : highY;
+	const endY = direction === "down" ? highY : lowY;
+	const point = (y: number) => ({ x, y, id: 1, radiusX: 2, radiusY: 2, force: 1 });
+	await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point(startY)] });
+	const steps = 8;
+	for (let i = 1; i <= steps; i += 1) {
+		const y = Math.round(startY + ((endY - startY) * i) / steps);
+		await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [point(y)] });
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+	}
+	await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+	await waitForTerminalAnimationFrames(page);
+}
+
+async function terminalVisibleTouchLines(page: import("@playwright/test").Page, run: string): Promise<{ firstLine: number | null; lastLine: number | null; text: string; compactText: string; rows: string[] }> {
+	await waitForTerminalAnimationFrames(page);
+	return page.evaluate((prefix) => {
+		const rows = Array.from(document.querySelectorAll('[data-testid="terminal-xterm"] .xterm-rows > div'))
+			.map((row) => (row.textContent ?? "").trimEnd());
+		const text = rows.join("\n");
+		const lineNumbers = rows.flatMap((row) => {
+			const match = row.match(new RegExp(`${prefix}_LINE_(\\d{3})`));
+			return match ? [Number(match[1])] : [];
+		});
+		return {
+			firstLine: lineNumbers.length > 0 ? lineNumbers[0] : null,
+			lastLine: lineNumbers.length > 0 ? lineNumbers[lineNumbers.length - 1] : null,
+			text,
+			compactText: rows.join(""),
+			rows,
+		};
+	}, run);
 }
 
 async function latestTerminalChannelId(page: import("@playwright/test").Page): Promise<string> {
