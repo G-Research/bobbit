@@ -10,14 +10,50 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 
 async function startGateway(): Promise<{ url: string; close: () => Promise<void> }> {
-	const server = http.createServer((req, res) => {
-		if (req.url === "/signin/aigateway" || req.url === "/readonly/mcp") {
-			res.writeHead(200, { "content-type": "application/json" });
-			res.end(JSON.stringify(gatewayCatalogueBody()));
+	const server = http.createServer(async (req, res) => {
+		const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		if (pathname === "/signin/aigateway") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
 			return;
 		}
-		res.writeHead(404, { "content-type": "text/plain" });
-		res.end("not found");
+		if (pathname !== "/readonly/mcp") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (req.method === "GET") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+		if (req.method !== "POST") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		const message = JSON.parse(body || "{}");
+		if (message.method === "notifications/initialized") {
+			res.writeHead(202, { "content-type": "text/plain" });
+			res.end();
+			return;
+		}
+		if (message.method === "initialize") {
+			writeSseRpcResult(res, message.id, {
+				protocolVersion: "2024-11-05",
+				capabilities: { tools: {} },
+				serverInfo: { name: "mcp-gateway", version: "0.0.0-test" },
+			});
+			return;
+		}
+		if (message.method === "tools/list") {
+			writeSseRpcResult(res, message.id, { tools: gatewayTools() });
+			return;
+		}
+		writeSseRpcResult(res, message.id, {});
 	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = (server.address() as any).port;
@@ -27,14 +63,21 @@ async function startGateway(): Promise<{ url: string; close: () => Promise<void>
 	};
 }
 
-function gatewayCatalogueBody(): Record<string, unknown> {
-	return {
-		providers: [
-			{ id: "confluence", label: "Confluence", description: "Confluence docs tools", operations: [{ name: "confluence_search" }] },
-			{ id: "jira", label: "Jira", description: "Jira issue tools", operations: [{ name: "jira_search" }] },
-			{ id: "jira-readonly", label: "Jira readonly", description: "Read-only Jira tools", operations: [{ name: "jira_search" }] },
-		],
-	};
+function writeSseRpcResult(res: http.ServerResponse, id: unknown, result: Record<string, unknown>): void {
+	res.writeHead(200, { "content-type": "text/event-stream" });
+	res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id, result })}\n\n`);
+}
+
+function gatewayTools(): Array<Record<string, unknown>> {
+	return [
+		gatewayTool("confluence__confluence_get_page", "Confluence", "Confluence docs tools", "Get a Confluence page"),
+		gatewayTool("jira__jira_search", "Jira", "Jira issue tools", "Search Jira issues"),
+		gatewayTool("jira-readonly__jira_search", "Jira readonly", "Read-only Jira tools", "Search Jira issues read-only"),
+	];
+}
+
+function gatewayTool(name: string, providerLabel: string, providerDescription: string, description: string): Record<string, unknown> {
+	return { name, providerLabel, providerDescription, description, inputSchema: { type: "object", properties: {} } };
 }
 
 async function cleanup(sourceId?: string, projectId?: string, packNames: string[] = []): Promise<void> {
@@ -145,6 +188,9 @@ test.describe("Marketplace MCP API integration", () => {
 			let servers = await mcp.json();
 			let gr = servers.find((s: any) => s.name === "gr");
 			expect(gr?.activeSubNamespaces).toContain("jira");
+			expect(gr?.tools).toEqual(expect.arrayContaining([
+				expect.objectContaining({ name: "mcp__gr__jira__jira_search", subNamespace: "jira", op: "jira_search" }),
+			]));
 
 			const disable = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
@@ -263,7 +309,11 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const scoped = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
 			expect(scoped.status).toBe(200);
-			expect((await scoped.json()).find((s: any) => s.name === "gr")?.activeSubNamespaces).toContain("jira");
+			const scopedGr = (await scoped.json()).find((s: any) => s.name === "gr");
+			expect(scopedGr?.activeSubNamespaces).toContain("jira");
+			expect(scopedGr?.tools).toEqual(expect.arrayContaining([
+				expect.objectContaining({ name: "mcp__gr__jira__jira_search", subNamespace: "jira", op: "jira_search" }),
+			]));
 
 			const global = await apiFetch("/api/mcp-servers");
 			expect(global.status).toBe(200);
