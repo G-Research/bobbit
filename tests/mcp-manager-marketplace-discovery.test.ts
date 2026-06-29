@@ -88,12 +88,14 @@ const contrib = (
   serverName: string,
   config: McpServerConfig,
   subNamespace?: string,
+  extra: Partial<ResolvedMcpContribution> = {},
 ): ResolvedMcpContribution => ({
   listName,
   serverName,
   ...(subNamespace ? { subNamespace } : {}),
+  ...extra,
   config,
-  origin: { scope: "project", packName: `pack-${listName}` },
+  origin: { scope: "project", packName: `pack-${listName}`, ...(extra.origin ?? {}) },
 });
 
 describe("McpManager marketplace discovery primitives", () => {
@@ -203,6 +205,83 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(mgr.getServerStatuses()[0].activeSubNamespaces, ["alpha", "beta"]);
     assert.equal(mgr.getToolDocsRelativePath("gateway", "alpha"), mgr.getToolDocsRelativePath("gateway"));
     assert.ok(fs.existsSync(path.join(stateDir, ...mgr.getToolDocsRelativePath("gateway", "alpha").split("/"))));
+  });
+
+  it("exposes gateway union across distinct runtime keys and routes calls by public names", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("jira-a", "gr-a", { url: "https://gateway-a.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-a-gr",
+        contributionId: "source-a:jira",
+        selectedOperations: ["jira_search"],
+      }),
+      contrib("confluence-b", "gr-b", { url: "https://gateway-b.test/mcp" }, "confluence", {
+        runtimeServerKey: "gw-b-gr",
+        contributionId: "source-b:confluence",
+        selectedOperations: ["page_search"],
+      }),
+    ];
+    const aStub = new StubMcpClient("gw-a-gr", {
+      tools: [op("jira__jira_search"), op("jira__jira_delete")],
+    });
+    const bStub = new StubMcpClient("gw-b-gr", {
+      tools: [op("confluence__page_search")],
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["gw-a-gr", aStub],
+      ["gw-b-gr", bStub],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => t.name).sort(), [
+      "mcp__gr-a__jira__jira_search",
+      "mcp__gr-b__confluence__page_search",
+    ]);
+
+    await mgr.callTool("mcp__gr-a__jira__jira_search", { q: "A" });
+    await mgr.callTool("mcp__gr-b__confluence__page_search", { q: "B" });
+    assert.deepEqual(aStub.calls, [{ toolName: "jira__jira_search", args: { q: "A" } }]);
+    assert.deepEqual(bStub.calls, [{ toolName: "confluence__page_search", args: { q: "B" } }]);
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr-a__jira__jira_delete", {}),
+      /not available or is disabled/,
+    );
+  });
+
+  it("keeps deterministic first contribution on public tool-name conflicts and records diagnostics", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("first", "gr", { url: "https://gateway-a.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-a-gr",
+        contributionId: "first-contribution",
+      }),
+      contrib("second", "gr", { url: "https://gateway-b.test/mcp" }, "jira", {
+        runtimeServerKey: "gw-b-gr",
+        contributionId: "second-contribution",
+      }),
+    ];
+    const first = new StubMcpClient("gw-a-gr", { tools: [op("jira__search")] });
+    const second = new StubMcpClient("gw-b-gr", { tools: [op("jira__search")] });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([
+      ["gw-a-gr", first],
+      ["gw-b-gr", second],
+    ]), { marketplaceResolver: resolver }) as any;
+
+    await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => t.name), ["mcp__gr__jira__search"]);
+    assert.deepEqual(mgr.getRouteDiagnostics(), [{
+      type: "conflict",
+      toolName: "mcp__gr__jira__search",
+      keptRuntimeServerKey: "gw-a-gr",
+      droppedRuntimeServerKey: "gw-b-gr",
+      keptContributionId: "first-contribution",
+      droppedContributionId: "second-contribution",
+    }]);
+
+    await mgr.callTool("mcp__gr__jira__search", { q: "winner" });
+    assert.deepEqual(first.calls, [{ toolName: "jira__search", args: { q: "winner" } }]);
+    assert.deepEqual(second.calls, []);
   });
 
   it("redacts secret-bearing config values in server statuses", async () => {
