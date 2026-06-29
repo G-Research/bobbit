@@ -52,7 +52,7 @@ import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } f
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
-import { RoleStore } from "./agent/role-store.js";
+import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
@@ -1654,6 +1654,11 @@ export function createGateway(config: GatewayConfig) {
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
+	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
+		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
+		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	(roleManager as RoleManager & { resolveRoleForProject?: typeof resolveRoleForProject }).resolveRoleForProject = resolveRoleForProject;
 
 	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
 	// Sources are global to the server; the cache + sources file live under
@@ -2050,7 +2055,7 @@ export function createGateway(config: GatewayConfig) {
 			const ps = sessionManager.getPersistedSession(sessionId);
 			const roleName = session?.role ?? ps?.role
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
-			const role = roleManager.getRole(roleName);
+			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
 			if (!role) return undefined;
 			const mcpManager = sessionManager.getMcpManagerForSession(sessionId)
 				?? ((session?.projectId ?? ps?.projectId ?? session?.cwd ?? ps?.cwd) ? null : sessionManager.getMcpManager());
@@ -2064,8 +2069,7 @@ export function createGateway(config: GatewayConfig) {
 		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
 		// the resolveEffectiveTools grant pipeline above.
 		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
-			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
-			const role = cascadeRole ?? roleManager.getRole(roleName);
+			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
 			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
@@ -3310,6 +3314,16 @@ async function handleApiRoute(
 		// so roles/tools match the skills wire shape (finding #3).
 		originPackId: r.originPackId ?? null,
 		originPackName: r.originPackName ?? null,
+	});
+	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
+		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
+		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	const roleCreateOptions = (role: Role): { rolePrompt?: string; roleName: string; role: string; accessory?: string } => ({
+		rolePrompt: role.promptTemplate,
+		roleName: role.name,
+		role: role.name,
+		accessory: role.accessory,
 	});
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
@@ -5457,23 +5471,9 @@ async function handleApiRoute(
 
 		const args = body?.args;
 
-		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
+		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
 		const roleId = body?.roleId;
 		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
-
-		if (roleId && typeof roleId === "string") {
-			const role = roleManager.getRole(roleId);
-			if (!role) {
-				json({ error: `Role "${roleId}" not found` }, 404);
-				return;
-			}
-			createOpts = {
-				rolePrompt: role.promptTemplate,
-				roleName: role.name,
-				role: role.name,
-				accessory: role.accessory,
-			};
-		}
 
 		// ── Worktree support ──
 		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
@@ -5585,6 +5585,15 @@ async function handleApiRoute(
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
 			resolvedProjectId = resolved.projectId;
+		}
+
+		if (roleId && typeof roleId === "string") {
+			const role = resolveRoleForProject(roleId, resolvedProjectId);
+			if (!role) {
+				json({ error: `Role "${roleId}" not found` }, 404);
+				return;
+			}
+			createOpts = roleCreateOptions(role);
 		}
 
 		// Now that `resolvedProjectId` is known, resolve `worktreeOpts`.
@@ -8770,10 +8779,9 @@ async function handleApiRoute(
 
 		if (req.method === "GET") {
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const resolved = configCascade.resolveRoles(qProjectId);
-				const found = resolved.find(r => r.item.name === name);
-				if (!found) { json({ error: "Role not found" }, 404); return; }
+			const resolved = configCascade.resolveRoles(qProjectId);
+			const found = resolved.find(r => r.item.name === name);
+			if (found) {
 				json(withOrigin(found as any));
 			} else {
 				const role = roleManager.getRole(name);
@@ -10924,17 +10932,14 @@ async function handleApiRoute(
 
 		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
 		if (staff) {
-			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager);
+			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
 			createOpts.roleName = staff.roleId;
 			createOpts.accessory = staff.accessory;
 			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
 		} else {
-			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
 			if (role) {
-				createOpts.rolePrompt = role.promptTemplate;
-				createOpts.roleName = role.name;
-				createOpts.role = role.name;
-				createOpts.accessory = role.accessory;
+				Object.assign(createOpts, roleCreateOptions(role));
 			} else if (ps.role) {
 				createOpts.role = ps.role;
 				createOpts.roleName = ps.role;
@@ -11406,7 +11411,7 @@ async function handleApiRoute(
 			console.warn(`[continue-archived] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
-		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const role = ps.role ? resolveRoleForProject(ps.role, ps.projectId) : undefined;
 		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
 			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
@@ -11429,10 +11434,7 @@ async function handleApiRoute(
 			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		}
 		if (role) {
-			createOpts.rolePrompt = role.promptTemplate;
-			createOpts.roleName = role.name;
-			createOpts.role = role.name;
-			createOpts.accessory = role.accessory;
+			Object.assign(createOpts, roleCreateOptions(role));
 		} else if (ps.role) {
 			// Persisted role name without a registered Role definition (e.g. the
 			// generic "assistant" role assigned to assistant sessions). Propagate
@@ -11533,7 +11535,9 @@ async function handleApiRoute(
 		}
 
 		if (typeof body.roleId === "string" && body.roleId !== "") {
-			const role = roleManager.getRole(body.roleId);
+			const session = sessionManager.getSession(id);
+			const ps = sessionManager.getPersistedSession(id);
+			const role = resolveRoleForProject(body.roleId, session?.projectId ?? ps?.projectId);
 			if (!role) { json({ error: `Role "${body.roleId}" not found` }, 404); return; }
 			try {
 				const ok = await sessionManager.assignRole(id, role);
@@ -13886,12 +13890,6 @@ async function handleApiRoute(
 			json({ error: "roleId must be a string or null" }, 400);
 			return;
 		}
-		// Validate the referenced role exists (when provided). roleId omitted or
-		// null/empty is allowed — staff with no role behave as before.
-		if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
-			json({ error: "Role not found" }, 404);
-			return;
-		}
 		// Validate goal-* triggers carry a non-empty prompt (push-based
 		// dispatcher has no fallback; the prompt is mandatory).
 		try {
@@ -13924,6 +13922,12 @@ async function handleApiRoute(
 		}
 		const cwd = explicitCwd ?? resolved.project.rootPath;
 		const projectId = resolved.projectId;
+		// Validate the referenced role exists in the selected project's cascade.
+		// roleId omitted or null/empty is allowed — staff with no role behave as before.
+		if (typeof body.roleId === "string" && body.roleId.length > 0 && !resolveRoleForProject(body.roleId, projectId)) {
+			json({ error: "Role not found" }, 404);
+			return;
+		}
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
@@ -13991,9 +13995,11 @@ async function handleApiRoute(
 				json({ error: "roleId must be a string or null" }, 400);
 				return;
 			}
-			// Validate the referenced role exists (when provided). roleId: null
-			// (clear) and omitted are allowed.
-			if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+			const existingStaff = staffManager.getStaff(id);
+			if (!existingStaff) { json({ error: "Staff agent not found" }, 404); return; }
+			// Validate the referenced role exists in the staff agent's project cascade.
+			// roleId: null (clear) and omitted are allowed.
+			if (typeof body.roleId === "string" && body.roleId.length > 0 && !resolveRoleForProject(body.roleId, existingStaff.projectId)) {
 				json({ error: "Role not found" }, 404);
 				return;
 			}
@@ -14011,8 +14017,7 @@ async function handleApiRoute(
 
 			let cwdUpdate: string | undefined;
 			if (Object.prototype.hasOwnProperty.call(body, "cwd")) {
-				const staff = staffManager.getStaff(id);
-				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				const staff = existingStaff;
 				if (typeof body.cwd !== "string" || body.cwd.trim().length === 0) {
 					json({ error: "cwd must be a non-empty string" }, 400);
 					return;
@@ -14356,7 +14361,7 @@ async function handleApiRoute(
 			// after the meta-tool is granted wholesale.
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
-				const role = roleName ? roleManager.getRole(roleName) : undefined;
+				const role = roleName ? resolveRoleForProject(roleName, mcpSession?.projectId ?? (persistedSession as any)?.projectId) : undefined;
 				const parsed = parseMcpToolName(toolStr);
 				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
 				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);

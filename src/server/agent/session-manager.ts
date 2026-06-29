@@ -56,7 +56,7 @@ import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-sk
 import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
-import type { GrantPolicy } from "./role-store.js";
+import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
@@ -4168,9 +4168,10 @@ export class SessionManager {
 		if (!session) throw new Error("Session not found");
 		if (!this.roleManager) throw new Error("No role manager available");
 
-		// Use explicit role, or fall back to "general" role (implicit default for all sessions)
+		// Use explicit role, or fall back to "general" role (implicit default for all sessions).
+		// Resolve cascade-first so pack-contributed roles keep their policies here too.
 		const roleName = session.role || "general";
-		const role = this.roleManager.getRole(roleName);
+		const role = this.resolveSessionRole(roleName, undefined, session.projectId);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(role).map(e => e.name);
@@ -4230,15 +4231,20 @@ export class SessionManager {
 			resultTools = session.allowedTools;
 
 		} else {
-			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
+			// Persistent grant (default): update toolPolicies on role YAML when the
+			// role is locally writable. Pack roles are read-only through RoleManager,
+			// so keep the grant effective for this session without writing to the pack.
 			const updatedPolicies = { ...role.toolPolicies };
 			for (const t of newTools) {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
-			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
-			// Re-read role and recompute effective allowed tools
-			const updatedRole = this.roleManager.getRole(role.name);
-			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role).map(e => e.name);
+			const writableRole = this.roleManager.getRole(role.name);
+			let effectiveRole: Role = { ...role, toolPolicies: updatedPolicies };
+			if (writableRole) {
+				this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
+				effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+			}
+			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole).map(e => e.name);
 			session.allowedTools = updatedEffective;
 			await this._restartSessionWithUpdatedRole(session);
 
@@ -6900,8 +6906,9 @@ export class SessionManager {
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
-		// Look up the full role (with toolPolicies) from roleManager if available
-		const fullRole = this.roleManager?.getRole(role.name);
+		// Look up the full role (with toolPolicies) cascade-first so pack-contributed
+		// roles keep their policies during role reassignment.
+		const fullRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? (role as Role);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
 		// session's effective goal so the reassembled prompt, the activation args,
 		// and the persisted allowedTools all agree after a role reassignment.
