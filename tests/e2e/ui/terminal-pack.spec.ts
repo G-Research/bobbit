@@ -334,6 +334,8 @@ test.describe("terminal pack panel", () => {
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
+		const liveChannelId = await latestTerminalChannelId(page);
+		expect(liveChannelId, "gateway restart setup should have a live terminal channel before the crash").toBeTruthy();
 		const marker = `bobbit_terminal_restart_${Date.now()}`;
 		await typeCommand(page, `echo ${marker}`);
 		await expect(page.locator(terminalHost())).toContainText(marker, { timeout: 20_000 });
@@ -348,6 +350,24 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /disconnected/, { timeout: 30_000 });
 		await expect(page.locator(terminalPanel())).toContainText(/disconnected|closed|Restart/i, { timeout: 10_000 });
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 5_000 }).toBe(0);
+
+		const openBeforeRestart = await channelSendCount(page, "ext_channel_open");
+		const startButton = page.locator(terminalPanel()).getByRole("button", { name: "Start or restart terminal" });
+		await expect(startButton, "restored disconnected terminal should offer an explicit Restart/Start action").toBeEnabled({ timeout: 20_000 });
+		await startButton.click();
+		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(openBeforeRestart);
+		await waitForTerminalReadyForInput(page);
+		await expect.poll(
+			async () => {
+				const restartedChannelId = await latestTerminalChannelId(page);
+				return Boolean(restartedChannelId && restartedChannelId !== liveChannelId);
+			},
+			{ message: "Restart after gateway restart should attach a newly opened terminal channel", timeout: 20_000 },
+		).toBe(true);
+
+		const restartMarker = `${marker}_after_restart`;
+		await typeCommand(page, `echo ${restartMarker}`);
+		await expect(page.locator(terminalHost())).toContainText(restartMarker, { timeout: 20_000 });
 	});
 });
 
