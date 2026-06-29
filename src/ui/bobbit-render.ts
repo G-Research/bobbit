@@ -667,7 +667,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else if (status === "terminated") p = TERMINATED_PALETTE;
 	else p = CANONICAL_PALETTE;
 
-	const isBusy = status === "streaming" || isCompacting;
+	const isBusy = status === "streaming" || status === "busy" || isCompacting;
 	// Idle / not-currently-viewed sessions render with sleeping eyes (closed)
 	// to match the chat blob's sleeping pose. noDesaturate previews (role
 	// manager etc.) keep awake eyes so the bobbit looks alive in selection UI.
