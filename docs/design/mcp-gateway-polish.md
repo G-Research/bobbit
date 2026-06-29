@@ -236,19 +236,32 @@ export interface DisabledRefs {
   tools?: string[];
   skills?: string[];
   entrypoints?: string[];
-  mcp?: string[]; // whole MCP contribution/listName disabled
-  mcpOperations?: Record<string, string[]>; // listName -> disabled op names
+  mcp?: string[]; // whole MCP contribution disabled by contributionId/ref
+  mcpOperations?: Record<string, string[]>; // contributionId -> disabled op names
   // existing fields...
 }
 ```
 
+Introduce a stable installed MCP contribution identity and expose it anywhere activation is read or written:
+
+```ts
+type InstalledMcpContributionId = string; // e.g. hash(sourceId + installedPackName + gatewayProviderId + listName + runtimeServerKey)
+```
+
+Identity requirements:
+
+- Gateway contribution ids must include source id, installed/materialized pack name, gateway provider id, MCP `listName`, public `serverName`/`subNamespace`, and runtime server key/fingerprint as available.
+- Manual MCP contribution ids can remain compatible aliases based on existing server/list refs; manual behavior must not change.
+- Model-facing policy keys stay readable (`mcp__gr__confluence__op`), but they are never storage ownership keys because the same public key can exist in multiple gateway installs before precedence is applied.
+
 Normalization:
 
 - `mcpOperations` is optional.
-- Keys are MCP `listName` values declared by the pack.
+- Keys are stable installed MCP contribution ids, not plain `listName` values.
 - Values are operation names as returned by gateway/MCP tools/list after stripping provider prefix into the package operation identity.
 - Store disabled operation names rather than enabled-only lists. This is the selected product behavior: newly discovered operations after a source/package update default enabled unless the user disables them later, while existing disabled operations remain visible and disabled.
-- Drop unknown listNames and unknown operation names on PUT, just like current activation normalization drops unknown entity refs.
+- Preserve unknown operation names for known installed contribution ids as stale/retired disabled refs. Do not drop them on PUT merely because metadata is temporarily unavailable or a gateway/source refresh omitted them.
+- Drop only unknown contribution ids whose owning installed contribution no longer exists, or operation refs the user explicitly clears/re-enables.
 
 ### Operation metadata source
 
@@ -288,20 +301,50 @@ interface PackActivationMcpOperationEntry {
 
 interface PackActivationMcpEntry {
   ref: string;
+  contributionId: string; // stable InstalledMcpContributionId used for disabled.mcp and disabled.mcpOperations
   listName?: string;
   serverName?: string;
   subNamespace?: string;
+  sourceId?: string;
+  installedPackName?: string;
+  gatewayProviderId?: string;
+  runtimeServerKey?: string;
   selectedOperationCount?: number;
   totalOperationCount?: number;
   operations?: PackActivationMcpOperationEntry[];
   disabledOperations?: string[];
+  staleDisabledOperations?: string[]; // disabled names not currently present in metadata/runtime list
   // existing fields...
 }
 ```
 
-`GET /api/marketplace/pack-activation` should derive `selectedOperationCount` and `totalOperationCount` from the package entry's own operation list and disabled operations, not from server-wide `status.toolCount`.
+`GET /api/marketplace/pack-activation` should derive `selectedOperationCount` and `totalOperationCount` from the package entry's own operation list and disabled operations, not from server-wide `status.toolCount`. Stale disabled names for a known contribution should be returned separately so the UI can show them as re-enableable/removable without counting them as currently available operations.
 
-`PUT /api/marketplace/pack-activation` continues to accept whole-pack disabled arrays and additionally accepts `disabled.mcpOperations`. A whole MCP contribution disabled in `disabled.mcp` does not erase its `mcpOperations`; re-enabling the contribution restores the previous operation subset.
+`PUT /api/marketplace/pack-activation` continues to accept whole-pack disabled arrays and additionally accepts `disabled.mcpOperations` keyed by `contributionId`. A whole MCP contribution disabled in `disabled.mcp` does not erase its `mcpOperations`; re-enabling the contribution restores the previous operation subset.
+
+Add an atomic per-operation merge endpoint for UI toggles and bulk operation actions:
+
+```http
+PATCH /api/marketplace/pack-activation/mcp-operation
+Content-Type: application/json
+
+{
+  "scope": "project" | "global-user" | "server",
+  "projectId": "... optional ...",
+  "contributionId": "...",
+  "operationName": "confluence_add_comment",
+  "disabled": true,
+  "expectedRevision": "optional activation revision/etag"
+}
+```
+
+Server semantics:
+
+- Validate `contributionId` belongs to the selected install scope.
+- Merge only that operation name into/out of `disabled.mcpOperations[contributionId]`; do not replace unrelated disabled refs or whole-MCP state.
+- Preserve unknown operation names for known contribution ids so toggles are durable through metadata outages.
+- Return the updated activation catalogue/revision or enough data for the client to refresh.
+- Keep the broad PUT for compatibility/import flows, but Marketplace operation toggles should use the atomic endpoint to avoid clobbering concurrent whole-MCP toggles, bulk actions, source refreshes, or other UI saves.
 
 ### UI
 
@@ -311,7 +354,7 @@ Installed pack view:
 - Add an expandable operation list under each MCP contribution with one switch per operation.
 - Disabled operations remain visible and unchecked because they are rendered from activation catalogue metadata.
 - Counts should read from `selectedOperationCount / totalOperationCount` for the package contribution.
-- If operation metadata is unavailable, show `Operation list unavailable until the server connects` and keep already-disabled operation refs in a small `Disabled by name` list so users can re-enable stale refs.
+- If operation metadata is unavailable, show `Operation list unavailable until the server connects` and keep already-disabled operation refs in a small `Disabled by name` list keyed by `contributionId` so users can re-enable stale refs without affecting same-listName packages from other sources.
 
 Runtime reload:
 
@@ -544,6 +587,7 @@ Backwards compatibility is not required for previous experimental MCP gateway so
 - Add source metadata to `BrowsePack` rows or ensure the server route wraps rows consistently.
 - Add helper for all-source browse if not route-local.
 - Update gateway install/update lookup for source-qualified gateway pack names.
+- Generate and persist stable installed MCP contribution ids for gateway package MCP entries; use them for `disabled.mcp` and `disabled.mcpOperations` ownership instead of plain `listName`.
 - Preserve normal pack-source update detection by existing `sourceUrl`/`packName` behavior.
 
 ### `src/server/server.ts`
@@ -556,7 +600,8 @@ Backwards compatibility is not required for previous experimental MCP gateway so
   - compute selected/total counts from package contribution + disabled operations;
   - include policy keys and current policy where cheap;
   - include conflict/overridden diagnostics from new route map/status.
-- Update `PUT /api/marketplace/pack-activation` normalization for `disabled.mcpOperations`.
+- Update `PUT /api/marketplace/pack-activation` normalization for `disabled.mcpOperations` keyed by stable contribution id, preserving stale disabled operations for known contributions.
+- Add atomic `PATCH /api/marketplace/pack-activation/mcp-operation` merge endpoint for one operation toggle/bulk merge semantics; UI operation toggles should not replace the entire activation document.
 - Ensure operation changes call MCP reload/refresh logic.
 - Update `/api/mcp-servers` payload with policy/model names and owner metadata needed by Tools UI.
 - Update `/api/internal/mcp-call` to enforce operation-level policy and activation-selected operation routing through `McpManager`.
@@ -594,7 +639,7 @@ Backwards compatibility is not required for previous experimental MCP gateway so
 - Render source provenance on each card.
 - Install/update cards using `pack.source.id` and `pack.browseKey`.
 - Render per-source errors/warnings.
-- Render installed MCP operation toggles under each MCP contribution and persist via `disabled.mcpOperations`.
+- Render installed MCP operation toggles under each MCP contribution and persist via the atomic operation endpoint / `disabled.mcpOperations[contributionId]`.
 
 ### `src/app/tool-manager-page.ts`
 
