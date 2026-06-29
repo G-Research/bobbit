@@ -8,7 +8,7 @@
 Research targets: `src/app/pack-panels.ts`, `src/app/pack-entrypoints.ts`, `src/app/side-panel-workspace.ts`, `src/app/session-actions.ts`, `src/ui/components/MessageEditor.ts`, `market-packs/pr-walkthrough/entrypoints/*.yaml`, `market-packs/artifacts/src/ArtifactViewerPanel.ts`.
 
 - **Panels are pack-scoped side-panel tabs.** A pack panel is opened through `host.ui.openPanel({ panelId, params, sessionId? })`, mounted as a `kind:"pack"` side-panel tab, and restored from per-session panel workspace state. Terminal must follow this model, not add a bespoke core panel path.
-- **Entrypoints are explicit user launchers.** `session-menu` launchers render in the session actions overflow; `composer-slash` launchers render as synthetic slash menu rows and dispatch only after send. Selecting/clicking the launcher lets Bobbit-owned launcher code mint the required one-shot channel open grant; the server never trusts a client-only gesture flag.
+- **Entrypoints are explicit user launchers.** `session-menu` launchers render in the session actions overflow; `composer-slash` launchers render as synthetic slash menu rows and dispatch only after send. Selecting/clicking the launcher is the product provenance for starting a terminal. The channel open itself is authorized server-side from the pack/session surface token plus the declared `terminal` channel, then protected by a one-shot open grant; the server never trusts a client-only gesture flag.
 - **Open means focus.** Existing `openPackPanel` mounts/focuses the tab and, when `sessionId` is supplied, switches through the canonical session switcher. Terminal should reuse that open/focus behavior.
 - **Panels rehydrate by stable identity.** Existing pack panels receive small typed params and rehydrate via Host APIs/stores. Terminal should rehydrate by `{ protocol:"terminal", channelName:"terminal", sessionId }`/channel id, never by raw URL or token.
 - **Styling should match pack panels.** Use compact header rows, `border-border`, `bg-background`, `text-foreground`, `text-muted-foreground`, and small rounded action buttons, matching the artifact viewer and side-panel shell.
@@ -57,10 +57,9 @@ Header control rules:
 - Render as a normal session-menu entry in the existing session actions overflow, near other session-level actions.
 - Label: `Open Terminal`.
 - On click:
-  1. Consume the click in Bobbit-owned launcher code and mint a server-verifiable one-shot channel open grant bound to the selected session and terminal singleton.
-  2. Resolve/open the session-persistent terminal channel for the selected session using that grant.
-  3. Open or focus the terminal side-panel tab for that same session.
-  4. If a terminal already exists, attach/focus it instead of creating a second session terminal.
+  1. Open or focus the terminal side-panel tab for the selected session.
+  2. Resolve/open the session-persistent terminal channel for that session. The bridge asks the server for a one-shot open grant, and the server mints it only after validating the surface token and the pack's declared `terminal` channel.
+  3. If a terminal already exists, attach/focus it instead of creating a second session terminal.
 
 ### Optional composer slash: `/terminal`
 
@@ -89,7 +88,7 @@ Header control rules:
 Design notes:
 
 - Do not infer failure from lack of output. State comes from channel close/status frames.
-- Gateway restart survival is not required for v1; the UX must make the old PTY clearly gone and offer `Restart`.
+- Gateway restart survival is not required for v1; the UX must make the old PTY clearly gone and offer `Restart`. The restored panel's `Restart` button opens a fresh terminal directly from its scoped panel surface; it must not depend on process-local launcher activation surviving the restart.
 - `Close panel` causes a detach/hide only. Reopening attaches to the same channel if it still exists.
 - `Kill`, `Restart` from a terminal state, session termination, gateway shutdown, idle cleanup, or typing `exit` are the actions that terminate or replace the PTY/channel.
 - Browser reload/remount should restore the side-panel tab from workspace state, call `host.channels.attach(id)` or find the session terminal via `list`, and show attached/reconnecting/disconnected accordingly.
@@ -141,7 +140,7 @@ Use Bobbit tokens directly; do not hardcode palettes in the panel or pack CSS.
 
 ## Empty, error, and quota states
 
-- **No channel yet:** shown only before launcher completes; prefer `Connecting terminal…` rather than a manual `Start` button because launch already minted a one-shot server open grant from the user action.
+- **No channel yet:** shown only before launcher completes; prefer `Connecting terminal…` rather than a manual `Start` button because launch already started the scoped channel-open flow.
 - **Quota denied:** explain the limit and next step: `Terminal limit reached for this session. Close or kill another terminal, then retry.` If v1 supports only one terminal per session, say so directly.
 - **Read-only/sandbox constraints:** show a non-blocking note only when behavior differs from a normal shell. The PTY itself should already run in the correct session/worktree/sandbox context.
 - **Channel closed remotely:** keep scrollback visible; replace prompt interaction with a status strip and `Restart`.
@@ -165,4 +164,4 @@ Minimum browser coverage:
 
 ## Consistency rationale
 
-This design deliberately reuses the current Extension Host launcher and side-panel grammar: `session-menu` and `composer-slash` are the only trusted launchers; `host.ui.openPanel` owns focus and session switching; panel workspace state owns remount/reload restoration; and the pack panel rehydrates from a small typed identity through Host APIs. The only new user-facing pattern is the terminal-specific distinction between hiding the panel and killing the PTY, made explicit through labels, status copy, and separate `Close panel`, `Kill`, and `Restart` controls.
+This design deliberately reuses the current Extension Host launcher and side-panel grammar: `session-menu` and `composer-slash` provide visible user provenance; `host.ui.openPanel` owns focus and session switching; panel workspace state owns remount/reload restoration; and the pack panel rehydrates from a small typed identity through Host APIs. Channel authority comes from scoped pack/session identity plus the declared channel, matching the broader trusted-pack Host API model. The only new user-facing pattern is the terminal-specific distinction between hiding the panel and killing the PTY, made explicit through labels, status copy, and separate `Close panel`, `Kill`, and `Restart` controls.

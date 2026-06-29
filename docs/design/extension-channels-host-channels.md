@@ -154,9 +154,12 @@ This lets a terminal launcher create or focus a session-persistent terminal with
 1. WS handler receives `ext_channel_open` on an authenticated session connection.
 2. Resolve the surface token with `resolveSurfaceIdentity({ headerSessionId: sessionId, ... })`.
 3. Reject if the surface token session does not match the WS session.
-4. Require a server-verifiable one-shot `openGrant` bound to this session, pack, contribution, channel name, and singleton key. The grant may have been minted from a synchronous direct user gesture or by trusted Bobbit platform launcher code, but the WS open path never accepts bare gesture claims.
-5. Reject missing, forged, expired, replayed, or mismatched grants; never accept a client-supplied launcher-trust boolean.
-6. Resolve `name` against `PackContributionRegistry.getChannel(projectId, packId, name)`.
+4. Resolve `name` against `PackContributionRegistry.getChannel(projectId, packId, name)`.
+5. Require a server-verifiable one-shot `openGrant` bound to this session, pack, contribution,
+   channel name, and singleton key. The grant is minted from the validated surface token plus the
+   declared pack channel, not from browser user activation or process-local launcher state.
+6. Reject missing, forged, expired, replayed, or mismatched grants; never accept a client-supplied
+   launcher-trust boolean.
 7. Enforce quotas and singleton reuse.
 8. Allocate the channel and start the pack handler.
 9. Attach the current WS connection and return `ChannelInfo`.
@@ -218,7 +221,7 @@ All channel authority derives from the same existing surface-token path:
 Cross-pack rejection examples:
 
 - Pack A calls `attach(channelIdFromPackB)` → reject.
-- Pack A calls `open("terminal")` when only Pack B declares `terminal` → reject `CHANNEL_NOT_FOUND`.
+- Pack A calls `open("terminal")` when only Pack B declares `terminal` → reject `channel is not declared by this pack`.
 - Session A token used on Session B WebSocket → reject `surface token session mismatch`.
 - A stale token after pack uninstall or precedence change → reject on re-resolution.
 
@@ -305,7 +308,8 @@ Validation rules:
 - `module` resolves relative to the channel YAML and must stay inside the pack root using `isPackPathWithinRoot`.
 - `handler` is an export member name; default is `name`.
 - `protocol` is metadata only; it does not affect dispatch.
-- `capabilities` accepts only known privileged capability tokens. `sessionPty` is authorized only for built-in/first-party packs or an explicit reviewed allowlist; unauthorized declarations are rejected or loaded without the helper and surfaced as a validation problem.
+- `capabilities` accepts only known privileged capability tokens. `sessionPty` is a declared trusted-pack channel capability: a handler receives `ctx.host.pty` only when its resolved channel contribution declares `capabilities: [sessionPty]`. Runtime PTY policy still enforces read-only, sandbox, cwd/worktree, env allowlist, quota, audit, and cleanup constraints.
+- `requiresUserGesture`, when present, is UX/authoring metadata for process-like channels; it does not authorize or deny `host.channels.open`.
 - Quota keys are exactly the canonical names above. Values are integers clamped by server global minimum/maximum bounds; omitted values use server defaults from §9. Legacy aliases such as `maxChannelsPerSession` or `maxBufferedBytes` are not part of v1 and should be rejected or warned/dropped rather than silently interpreted.
 - Unknown fields are tolerated for forward compatibility, retained only as inert metadata/diagnostics, and never grant authority or quota changes.
 - Malformed channel files are warned and dropped; duplicate channel names are a hard pack-contribution conflict.
@@ -407,27 +411,52 @@ Minimum fields: timestamp, event, sessionId, projectId, packId, channelName, cha
 
 The immediate implementation can use the existing server logger/console style, but should centralize event construction in `channel-registry.ts` so it can later route to a durable audit sink.
 
-## 11. User gesture, open grants, and trusted launcher requirement
+## 11. Open grants and scoped channel authority
 
-Interactive channel creation can create durable processes. Therefore every `ext_channel_open` requires a server-verifiable one-shot `openGrant`; a bare WS open with only a surface token must be rejected even if the client claims a gesture.
+Interactive channel creation can create durable processes, so every `ext_channel_open` still
+requires a server-verifiable one-shot `openGrant`. The grant is a replay/protocol-integrity check,
+not a browser-gesture security boundary. A bare WS open with only a surface token is rejected, and
+so is any made-up, expired, replayed, or binding-mismatched grant.
 
-Grant minting has two allowed sources:
+Grant minting is authorized by scoped pack/session authority:
 
-- **Direct pack call from a real user gesture:** `host.channels.open()` synchronously consumes browser user activation (same prologue pattern as `host.session.postMessage`), asks the gateway to mint a short-lived open grant bound to `{ sessionId, packId, contributionId, channelName, singletonKey }`, then sends `ext_channel_open` with that grant. If user activation is absent, grant minting fails and no open frame is sent.
-- **Trusted Bobbit platform launcher:** launcher-owned app code asks the gateway to mint the same bound one-shot grant as part of the click/slash dispatch. The grant is opaque to pack code and is never a pack-callable bypass.
+1. `host.channels.open()` asks the gateway to mint an `ext_channel_open_grant` over the existing
+   authenticated session WebSocket.
+2. The server resolves the surface token and verifies it is bound to the WebSocket session.
+3. The server resolves the channel name inside the caller's pack declarations
+   (`PackContributionRegistry.getChannel(projectId, packId, name)`). Undeclared channel names fail
+   before a permit is minted.
+4. The permit is minted for `{ sessionId, packId, contributionId, channelName, singletonKey }` and
+   returned to the client bridge.
+5. The bridge immediately sends `ext_channel_open` with the permit. The open path re-resolves the
+   surface token and channel declaration, then consumes the permit exactly once before handler or
+   PTY creation.
 
-`attach()` and `list()` do not require a grant; they are needed for remount/reload recovery and do not create a new process.
+This means a restored panel after a gateway restart can click **Restart** and open the declared
+terminal channel with its valid surface identity; no process-local launcher state needs to survive
+the restart. The durable authorization checks are installed/enabled pack identity,
+pack-local channel declaration, same-session binding, quotas, lifecycle cleanup, audit, and the
+one-shot permit.
+
+User gestures still matter for product UX: launchers and terminal Restart buttons should be visible,
+intentional user actions when they create processes. They are not the channel authorization boundary.
+That differs from `host.session.postMessage`, where a fresh user gesture is kept as a
+user-provenance guard because the API visibly speaks into the active transcript as the user.
+
+`attach()` and `list()` do not require a grant; they are needed for remount/reload recovery and do
+not create a new process.
 
 For terminal, the preferred flow is:
 
 1. User clicks a session-menu entrypoint such as **Open Terminal**.
-2. `runLauncherEntrypoint()` recognizes a structured channel-panel target, e.g. `{ action: "open-channel-panel", channel: "terminal", panelId: "terminal.panel", singletonKey: "default" }`.
-3. Bobbit-owned launcher code asks the gateway to mint a short-lived open grant bound to `{ sessionId, packId, contributionId, channelName: "terminal", singletonKey: "default" }`. The grant is stored/validated server-side or encoded as an opaque signed nonce; it expires quickly and is consumed once.
-4. The launcher calls `host.channels.open("terminal", { singletonKey: "default" })` through the bridge with that opaque `openGrant`. The server independently validates the grant against the surface token, WS session, channel name, singleton key, and contribution before creating any process. Direct user-gesture opens use the same grant-mint-and-consume sequence.
-5. It opens/focuses the pack panel with `{ channelId }` params.
-6. Closing the panel tab detaches UI only. Kill/Restart are explicit terminal actions.
+2. `runLauncherEntrypoint()` recognizes a structured channel-panel target, e.g. `{ action:
+   "open-channel-panel", channel: "terminal", panelId: "terminal.panel", singletonKey:
+   "default" }`.
+3. Bobbit-owned app code opens/focuses the pack panel and the bridge opens or reuses the declared
+   `terminal` channel through the grant-mint-and-consume sequence above.
+4. Closing the panel tab detaches UI only. Kill/Restart are explicit terminal actions.
 
-An `ext_channel_open` with no grant, or with a made-up, expired, replayed, or mismatched `openGrant`, must be rejected. There is no accepted `trustedLauncher` field. This avoids the anti-pattern where a panel auto-opens a process on mount without a gesture, while also avoiding a client-asserted trust bypass.
+There is no accepted `trustedLauncher` field and no client-trusted gesture flag.
 
 ## 12. Terminal protocol convention
 
@@ -450,7 +479,7 @@ Server to client:
 { kind: "json", data: { op: "exit", code?: number, signal?: string, reason?: string } }
 ```
 
-The built-in panel sends a kill JSON frame to request PTY termination. Restart after exit/kill is a new `open("terminal", { singletonKey: "default" })` from a trusted launcher or terminal panel button click.
+The built-in panel sends a kill JSON frame to request PTY termination. Restart after exit, kill, or gateway-restart disconnect is a new `open("terminal", { singletonKey: "default" })` from the terminal panel button or launcher; the permit is minted from the scoped surface token plus the declared `terminal` channel.
 
 ### PTY helper
 
@@ -481,7 +510,7 @@ PTY eligibility is declared in `channels/<name>.yaml` and validated by the dispa
 capabilities: [sessionPty]
 ```
 
-`sessionPty` is a privileged channel capability. V1 should restrict it to built-in/first-party packs or an explicit reviewed allowlist in the pack registry; third-party generic channels do not receive `ctx.host.pty` by default. A handler without an authorized `sessionPty` declaration sees no `ctx.host.pty`, and attempts to invoke PTY helper paths fail closed.
+`sessionPty` is a privileged declared trusted-pack channel capability, not a first-party-only hard gate. A handler without a resolved `sessionPty` declaration sees no `ctx.host.pty`, and attempts to invoke PTY helper paths fail closed. A handler with the declaration still passes through the helper's runtime checks: read-only sessions are denied, sandboxed sessions must run in equivalent sandbox context or fail closed, cwd/worktree resolution is bounded to the session, environment variables are allowlisted, quotas are enforced, and spawn/exit/cleanup is audited.
 
 The helper, not the pack, resolves:
 
@@ -534,15 +563,15 @@ UI behavior:
 4. **Server substrate:** add `channel-registry.ts`, `channel-dispatcher.ts`, `channel-module-host.ts`, and channel quota/error types under `src/server/extension-host/`.
 5. **WS transport:** extend `src/server/ws/protocol.ts` and `src/server/ws/handler.ts`; add `src/app/channel-bridge.ts`; wire `host.channels` in `src/app/host-api.ts`.
 6. **Lifecycle hooks:** thread the registry into server bootstrap, `handleWebSocketConnection`, resolver invalidation, gateway shutdown, and `SessionManager.terminateSession()` cleanup.
-7. **Open-grant support:** extend `src/app/pack-entrypoints.ts`, `src/app/session-actions.ts`, and `src/ui/components/MessageEditor.ts` only as needed for channel-panel launcher targets plus server-minted one-shot open grants for both direct gestures and trusted launchers; never allow bare WS opens or introduce a client-trusted `trustedLauncher` flag.
-8. **PTY helper:** add `src/server/extension-host/pty-helper.ts` and proxy support in the channel module host. Gate `ctx.host.pty` on an authorized `capabilities: [sessionPty]` channel declaration restricted to first-party/reviewed packs. Ensure sandboxed sessions fail closed unless launched inside the sandbox.
+7. **Open-grant support:** extend `src/app/pack-entrypoints.ts`, `src/app/session-actions.ts`, and `src/ui/components/MessageEditor.ts` only as needed for channel-panel launcher targets plus server-minted one-shot open grants from validated surface token + declared channel authority; never allow bare WS opens or introduce a client-trusted `trustedLauncher` flag.
+8. **PTY helper:** add `src/server/extension-host/pty-helper.ts` and proxy support in the channel module host. Gate `ctx.host.pty` on a resolved `capabilities: [sessionPty]` channel declaration, then enforce read-only/sandbox/cwd/env/quota/cleanup rules at runtime.
 9. **Built-in terminal pack:** add `market-packs/terminal/` with channel, panel, entrypoint, xterm UI, and terminal handler.
 10. **Docs/tests follow-up:** update authoring docs and add unit/API/browser E2E tests for registry auth, open/send/attach/close, quota denial, session cleanup, reload reattach, restart disconnected state, and terminal UX.
 
 ## 15. Test plan to hand to implementers
 
 - Unit: channel frame validation, inbound/outbound quota and backpressure, singleton reuse, idle close, `PackContributionRegistry.getChannel`, duplicate channel rejection.
-- Unit: surface token auth rejects wrong session, wrong pack, stale pack, missing handler, caller-supplied pack identity attempts, generic channel handlers without `sessionPty`, and `sessionPty` declarations from packs outside the first-party/reviewed allowlist.
+- Unit: surface token auth rejects wrong session, wrong pack, stale pack, missing handler, caller-supplied pack identity attempts, generic channel handlers without `sessionPty`, and declared `sessionPty` handlers in read-only/sandbox/cwd/env/quota failure cases.
 - API/WS E2E: open, send both directions, attach from remount, detach on WS close without handler close, explicit close, session termination cleanup, quota denial, sustained client input backpressure, sustained handler output backpressure, and missing/forged/expired/replayed/mismatched open-grant rejection before handler/PTY creation.
 - Restart E2E: open channel, restart gateway, reload/attach shows closed/disconnected and allows a new open.
 - Browser E2E: Open Terminal from session menu, run a simple command, resize, reload and reattach, type `exit`, Kill, Restart, Close panel detach.
