@@ -488,7 +488,7 @@ export class MarketplaceInstaller {
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
 		const diagnostics = mcpGatewayDiagnostics(parsed.skipped);
 		return parsed.providers.map((provider): McpGatewayBrowsePack => {
-			const pack = gatewayProviderToVirtualPack(provider);
+			const pack = gatewayProviderToVirtualPack(provider, { sourceId: source.id });
 			if (diagnostics) pack.mcpGatewayDiagnostics = diagnostics;
 			return pack;
 		});
@@ -624,9 +624,9 @@ export class MarketplaceInstaller {
 		if (!isSafeDirName(args.dirName)) throw new MarketplaceError("unsafe_name", `unsafe source dir name: ${JSON.stringify(args.dirName)}`);
 
 		const parsed = await fetchMcpGatewayWithDiagnostics(source);
-		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id) === args.dirName || p.id === args.dirName);
+		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id, source.id) === args.dirName || gatewayPackNameForProvider(p.id) === args.dirName || p.id === args.dirName);
 		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(args.dirName, parsed.skipped));
-		const manifest = gatewayProviderToVirtualPack(provider);
+		const manifest = gatewayProviderToVirtualPack(provider, { sourceId: source.id });
 		const packName = manifest.name;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in gateway: ${JSON.stringify(packName)}`);
 
@@ -649,7 +649,7 @@ export class MarketplaceInstaller {
 			scope: args.scope as PackScope,
 		};
 		try {
-			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(staging, dest);
 		} catch (err) {
@@ -745,15 +745,19 @@ export class MarketplaceInstaller {
 		if (!fs.existsSync(dest)) throw new MarketplaceError("not_installed", `not installed at ${scope}: ${packName}`);
 		const oldMeta = readMeta(dest);
 		if (!oldMeta) throw new MarketplaceError("invalid_pack", `installed pack is corrupt (missing .pack-meta.yaml): ${packName}`);
-		const source = this.opts.sourceStore.getByUrl(oldMeta.sourceUrl);
+		const oldMetaDetails = readYamlMapping(path.join(dest, ".pack-meta.yaml")) ?? {};
+		const storedSourceId = typeof oldMetaDetails.sourceId === "string" ? oldMetaDetails.sourceId : undefined;
+		const source = (storedSourceId ? this.opts.sourceStore.get(storedSourceId) : undefined) ?? this.opts.sourceStore.getByUrl(oldMeta.sourceUrl);
 		if (!source) return this.updatePack(args);
 		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
 		if (!isMcpGatewaySource(source)) return this.updatePack(args);
 
 		const parsed = await fetchMcpGatewayWithDiagnostics(source);
-		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id) === packName);
-		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(packName, parsed.skipped, source.url));
-		const manifest = gatewayProviderToVirtualPack(provider);
+		const storedProviderId = typeof oldMetaDetails.gatewayProviderId === "string" ? oldMetaDetails.gatewayProviderId : undefined;
+		const provider = parsed.providers.find((p) => p.id === storedProviderId)
+			?? parsed.providers.find((p) => gatewayPackNameForProvider(p.id, source.id) === packName || gatewayPackNameForProvider(p.id) === packName);
+		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(storedProviderId ?? packName, parsed.skipped, source.url));
+		const manifest = gatewayProviderToVirtualPack(provider, { sourceId: source.id, installedPackName: packName });
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
 			sourceUrl: source.url,
@@ -768,7 +772,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		try {
-			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(dest, backup);
 			try {

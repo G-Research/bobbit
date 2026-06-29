@@ -19,7 +19,7 @@ type Provider = { id: string; label: string; description: string; ops: Array<{ o
 const GATEWAY_URL = "http://mcp-local.t3.zone/readonly/mcp";
 const SOURCE_ID = "mcp-gateway-1";
 const JIRA_REF = "jira";
-const JIRA_PACK = "mcp-jira";
+const JIRA_PACK = `mcp-jira-${SOURCE_ID}`;
 const RUNTIME_SERVER = "gr";
 
 const PROVIDERS: Provider[] = [
@@ -34,16 +34,17 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 
 function providerPack(provider: Provider) {
 	const source = { id: SOURCE_ID, name: "mcp-local.t3.zone/readonly/mcp", type: "mcp-gateway" };
+	const packName = `mcp-${provider.id}-${SOURCE_ID}`;
 	return {
-		name: `mcp-${provider.id}`,
-		dirName: `mcp-${provider.id}`,
+		name: packName,
+		dirName: packName,
 		description: provider.description,
 		version: "2025.1.1",
 		hasTools: false,
 		virtual: true,
 		sourceType: "mcp-gateway",
 		gatewayProviderId: provider.id,
-		browseKey: `${SOURCE_ID}:mcp-${provider.id}`,
+		browseKey: `${SOURCE_ID}:${packName}`,
 		source,
 		contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: [provider.id] },
 		descriptions: { mcp: { [provider.id]: provider.description } },
@@ -240,7 +241,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 
 	await goToTab(page, "browse");
 	for (const provider of PROVIDERS) {
-		await expect(page.locator(`[data-testid="market-browse-pack"][data-pack-name="mcp-${provider.id}"]`), provider.label).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(`[data-testid="market-browse-pack"][data-pack-name="mcp-${provider.id}-${SOURCE_ID}"]`), provider.label).toBeVisible({ timeout: 15_000 });
 	}
 	const browseCard = page.locator(`[data-testid="market-browse-pack"][data-pack-name="${JIRA_PACK}"]`);
 	await expect(browseCard.locator('[data-kind="mcp"]')).toContainText(`mcp: ${JIRA_REF}`);

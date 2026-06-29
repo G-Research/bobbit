@@ -68,9 +68,15 @@ export type McpGatewayBrowsePack = PackManifest & {
 	mcpGatewayDiagnostics?: { skippedEntries: McpGatewaySkippedEntry[] };
 };
 
-export interface MaterializeGatewayProviderPackOptions {
-	sourceUrl?: string;
+export interface GatewayProviderPackIdentityOptions {
+	/** Source-qualified installed identity. Omit for legacy/direct materialization. */
 	sourceId?: string;
+	/** Existing installed pack name to preserve during updates/migrations. */
+	installedPackName?: string;
+}
+
+export interface MaterializeGatewayProviderPackOptions extends GatewayProviderPackIdentityOptions {
+	sourceUrl?: string;
 	sourceName?: string;
 	materializedAt?: string;
 }
@@ -400,8 +406,8 @@ function normalizeHeaders(raw: unknown, where: string): Record<string, string> |
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
-export function gatewayProviderToVirtualPack(provider: McpGatewayProvider): McpGatewayBrowsePack {
-	const packName = gatewayPackNameForProvider(provider.id);
+export function gatewayProviderToVirtualPack(provider: McpGatewayProvider, opts: GatewayProviderPackIdentityOptions = {}): McpGatewayBrowsePack {
+	const packName = opts.installedPackName ?? gatewayPackNameForProvider(provider.id, opts.sourceId);
 	const mcpEntries = providerMcpWireEntries(provider);
 	const contentsMcp = mcpEntries.map((entry) => entry.ref as string);
 	const mcpDescriptions: Record<string, string> = {};
@@ -450,7 +456,7 @@ function connectionToMcpWire(provider: McpGatewayProvider, listName: string, con
 
 export function materializeGatewayProviderPack(provider: McpGatewayProvider, destOrStagingDir: string, opts: MaterializeGatewayProviderPackOptions = {}): PackManifest {
 	const root = path.resolve(destOrStagingDir);
-	const manifest = gatewayProviderToVirtualPack(provider);
+	const manifest = gatewayProviderToVirtualPack(provider, opts);
 	fs.mkdirSync(root, { recursive: true });
 	const mcpDir = path.join(root, "mcp");
 	const packYamlPath = path.join(root, "pack.yaml");
@@ -512,9 +518,18 @@ function operationMetadataForMcpYaml(operations: GatewayOperation[] | undefined)
 	return operations.map((op) => stripUndefined({ name: op.name, label: op.label, description: op.description }));
 }
 
-export function gatewayPackNameForProvider(providerId: string): string {
+export function gatewayPackNameForProvider(providerId: string, sourceId?: string): string {
 	try {
-		return mcpGeneratedPackNameForId(providerId);
+		const base = mcpGeneratedPackNameForId(providerId);
+		if (!sourceId) return base;
+		const sourceSlug = sourceId
+			.toLowerCase()
+			.replace(/[^a-z0-9-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.replace(/-{2,}/g, "-");
+		const qualified = `${base}-${sourceSlug || "source"}`;
+		if (!/^[a-z0-9][a-z0-9-]*$/.test(qualified)) throw new McpGatewayError(`unsafe gateway source id: ${sourceId}`);
+		return qualified;
 	} catch (err) {
 		throw new McpGatewayError(err instanceof Error ? err.message : String(err));
 	}

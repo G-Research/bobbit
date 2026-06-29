@@ -306,12 +306,13 @@ describe("MCP gateway catalogue primitives", () => {
 				writeHeaders: { "X-Gateway": "write" },
 			}],
 		}, SOURCE_URL).providers;
-		const dest = path.join(dir, "mcp-jira");
+		const packName = "mcp-jira-gateway";
+		const dest = path.join(dir, packName);
 		const manifest = materializeGatewayProviderPack(provider, dest, { sourceUrl: SOURCE_URL, sourceId: "gateway", sourceName: "mcp-local.t3.zone/readonly/mcp", materializedAt: "2026-06-29T00:00:00.000Z" });
-		assert.equal(manifest.name, "mcp-jira");
+		assert.equal(manifest.name, packName);
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "pack.yaml"), "utf-8")), {
 			schema: 2,
-			name: "mcp-jira",
+			name: packName,
 			description: "Jira issue tools",
 			version: "0.0.0",
 			contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: ["jira", "jira-write"] },

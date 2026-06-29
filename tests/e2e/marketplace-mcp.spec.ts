@@ -177,7 +177,7 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const pack = await browseRemoteGatewayPack(sourceId!);
 			packName = pack.name;
-			expect(pack.name).toBe("mcp-jira");
+			expect(pack.name).toMatch(/^mcp-jira-/);
 			expect(pack).toMatchObject({
 				virtual: true,
 				sourceType: "mcp-gateway",
@@ -201,10 +201,24 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(contributionId).toMatch(/^mcp:[a-f0-9]{16}$/);
 			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: "jira", contributionId, serverName: "gr", subNamespace: "jira", label: "Jira", transport: "http", totalOperationCount: 2, selectedOperationCount: 2 });
 			expect(activationBody.catalogue.mcp[0].operations.map((op: any) => op.name)).toEqual(["jira_search", "jira_get_issue"]);
+			expect(activationBody.revision).toMatch(/^act:/);
+
+			const stalePatch = await apiFetch("/api/marketplace/pack-activation/mcp-operation", {
+				method: "PATCH",
+				body: JSON.stringify({ scope: "server", contributionId, operationName: "jira_search", disabled: true, expectedRevision: "act:stale" }),
+			});
+			expect(stalePatch.status).toBe(409);
+			expect((await stalePatch.json()).code).toBe("STALE_REVISION");
+
+			const invalidPatch = await apiFetch("/api/marketplace/pack-activation/mcp-operation", {
+				method: "PATCH",
+				body: JSON.stringify({ scope: "server", contributionId, operationName: "missing_op", disabled: true, expectedRevision: activationBody.revision }),
+			});
+			expect(invalidPatch.status).toBe(400);
 
 			const patchOp = await apiFetch("/api/marketplace/pack-activation/mcp-operation", {
 				method: "PATCH",
-				body: JSON.stringify({ scope: "server", contributionId, operationName: "jira_search", disabled: true }),
+				body: JSON.stringify({ scope: "server", contributionId, operationName: "jira_search", disabled: true, expectedRevision: activationBody.revision }),
 			});
 			expect(patchOp.status).toBe(200);
 			const patchOpBody = await patchOp.json();

@@ -241,11 +241,12 @@ describe("Marketplace MCP gateway integration", () => {
 			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
 
 			const packs = await inst.browseSourcePacks(source.id);
-			assert.deepEqual(packs.map((p: any) => p.name).sort(), ["mcp-confluence", "mcp-jira"]);
 			const jira = packs.find((p: any) => p.gatewayProviderId === "jira")!;
+			const confluence = packs.find((p: any) => p.gatewayProviderId === "confluence")!;
+			assert.ok(jira.name.startsWith("mcp-jira-"));
+			assert.ok(confluence.name.startsWith("mcp-confluence-"));
 			assert.equal(jira.virtual, true);
 			assert.equal(jira.sourceType, "mcp-gateway");
-			assert.equal(jira.name, "mcp-jira");
 			assert.deepEqual(jira.contents.mcp, ["jira"]);
 			assert.equal(jira.serverName, "gr");
 			const { operations, ...jiraMcp } = jira.mcp[0];
@@ -295,8 +296,9 @@ describe("Marketplace MCP gateway integration", () => {
 
 			const pack = (await inst.browseSourcePacks(source.id)).find((p: any) => p.gatewayProviderId === "jira")!;
 			assert.ok(pack);
+			assert.ok(pack.name.startsWith("mcp-jira-"));
 			const installed = await inst.installMarketplacePack({ sourceId: source.id, dirName: pack.dirName, scope: "server" });
-			assert.equal(installed.packName, "mcp-jira");
+			assert.equal(installed.packName, pack.name);
 			assert.deepEqual(installed.manifest.contents.mcp, ["jira"]);
 			let row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === pack.name);
 			assert.equal(row?.sourceStatus, "ok");
@@ -328,7 +330,7 @@ describe("Marketplace MCP gateway integration", () => {
 		});
 	});
 
-	it("rejects installing the same provider pack name from two gateway sources", async () => {
+	it("installs the same gateway provider from two sources under source-qualified pack names", async () => {
 		const root = fs.mkdtempSync(path.join(TMP, "mcp-cross-source-"));
 		await withStreamableMcpGateway(gatewayTools(), async (url1) => {
 			await withStreamableMcpGateway(gatewayTools(), async (url2) => {
@@ -339,15 +341,16 @@ describe("Marketplace MCP gateway integration", () => {
 
 				const pack1 = (await inst.browseSourcePacks(source1.id)).find((p: any) => p.gatewayProviderId === "jira")!;
 				const pack2 = (await inst.browseSourcePacks(source2.id)).find((p: any) => p.gatewayProviderId === "jira")!;
-				assert.equal(pack1.name, "mcp-jira");
-				assert.equal(pack2.name, "mcp-jira");
+				assert.notEqual(pack1.name, pack2.name);
+				assert.ok(pack1.name.startsWith("mcp-jira-"));
+				assert.ok(pack2.name.startsWith("mcp-jira-"));
 
 				const installed1 = await inst.installMarketplacePack({ sourceId: source1.id, dirName: pack1.dirName, scope: "server" });
-				assert.equal(installed1.packName, "mcp-jira");
-				await assert.rejects(
-					() => inst.installMarketplacePack({ sourceId: source2.id, dirName: pack2.dirName, scope: "server" }),
-					(e: any) => e instanceof MarketplaceError && e.code === "already_installed",
-				);
+				const installed2 = await inst.installMarketplacePack({ sourceId: source2.id, dirName: pack2.dirName, scope: "server" });
+				assert.equal(installed1.packName, pack1.name);
+				assert.equal(installed2.packName, pack2.name);
+				const installedNames = inst.listInstalled([{ scope: "server" }]).map((p) => p.packName).sort();
+				assert.deepEqual(installedNames, [pack1.name, pack2.name].sort());
 			});
 		});
 	});
