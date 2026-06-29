@@ -31,6 +31,7 @@ import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -3002,7 +3003,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -4299,7 +4300,7 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -14648,12 +14649,23 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
+
+	// GET /api/maintenance/worktrees
+	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
+		const include = url.searchParams.get("include");
+		if (include && include !== "all" && include !== "actionable" && include !== "troubleshooting") {
+			json({ error: "include must be all, actionable, or troubleshooting" }, 400);
+			return;
+		}
+		json(await worktreeInventory().scan({ include: (include as any) || "all" }));
+		return;
+	}
 
 	// GET /api/maintenance/archived-session-worktrees
 	if (url.pathname === "/api/maintenance/archived-session-worktrees" && req.method === "GET") {
 		const includeAlreadyCleaned = url.searchParams.get("includeAlreadyCleaned") === "1";
-		const result = await sessionManager.listArchivedSessionWorktrees(includeAlreadyCleaned);
-		json(result);
+		json(await worktreeInventory().legacyArchivedSessionWorktrees(includeAlreadyCleaned));
 		return;
 	}
 
@@ -14672,158 +14684,53 @@ async function handleApiRoute(
 		const hasPresetId = Object.prototype.hasOwnProperty.call(body, "presetId");
 		const hasProjectId = Object.prototype.hasOwnProperty.call(body, "projectId");
 		const hasRepoPath = Object.prototype.hasOwnProperty.call(body, "repoPath");
-		const cleanup = async (request: any) => {
-			try {
-				const result = await sessionManager.cleanupArchivedSessionWorktrees(request);
-				json(result);
-			} catch (err) {
-				if (err instanceof Error && (err.name === "CleanupArchivedSessionWorktreesRequestError" || (err as any).statusCode === 400)) {
-					json({ error: err.message }, 400);
-					return;
-				}
-				throw err;
-			}
-		};
-		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") {
-			json({ error: "Invalid cleanup mode" }, 400);
-			return;
-		}
-		if (mode === "all") {
-			if (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath) {
-				json({ error: "mode=all does not accept selectors" }, 400);
-				return;
-			}
-			await cleanup({ mode: "all" });
-			return;
-		}
+		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") { json({ error: "Invalid cleanup mode" }, 400); return; }
+		if (mode === "all" && (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath)) { json({ error: "mode=all does not accept selectors" }, 400); return; }
 		if (mode === "selected") {
-			if (hasCategories || hasPresetId) {
-				json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400);
-				return;
-			}
-			if (hasSessionIds && hasWorktrees) {
-				json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400);
-				return;
-			}
-			if (hasSessionIds) {
-				const sessionIds = rec.sessionIds;
-				if (!Array.isArray(sessionIds) || sessionIds.some((id: unknown) => typeof id !== "string")) {
-					json({ error: "sessionIds must be an array of strings" }, 400);
-					return;
-				}
-				await cleanup({ mode: "selected", sessionIds });
-				return;
-			}
-			if (hasWorktrees) {
-				const worktrees = rec.worktrees;
-				if (!Array.isArray(worktrees) || worktrees.some((wt: unknown) => {
-					if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
-					const selector = wt as Record<string, unknown>;
-					return typeof selector.sessionId !== "string"
-						|| (selector.repo !== undefined && typeof selector.repo !== "string")
-						|| (selector.path !== undefined && typeof selector.path !== "string")
-						|| (selector.key !== undefined && typeof selector.key !== "string");
-				})) {
-					json({ error: "worktrees must be an array of selector objects with string fields" }, 400);
-					return;
-				}
-				await cleanup({ mode: "selected", worktrees });
-				return;
-			}
-			await cleanup({ mode: "selected" });
-			return;
+			if (hasCategories || hasPresetId) { json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400); return; }
+			if (hasSessionIds && hasWorktrees) { json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400); return; }
+			if (hasSessionIds && (!Array.isArray(rec.sessionIds) || rec.sessionIds.some((id: unknown) => typeof id !== "string"))) { json({ error: "sessionIds must be an array of strings" }, 400); return; }
+			if (hasWorktrees && (!Array.isArray(rec.worktrees) || rec.worktrees.some((wt: unknown) => {
+				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
+				const selector = wt as Record<string, unknown>;
+				return typeof selector.sessionId !== "string" || (selector.repo !== undefined && typeof selector.repo !== "string") || (selector.path !== undefined && typeof selector.path !== "string") || (selector.key !== undefined && typeof selector.key !== "string");
+			}))) { json({ error: "worktrees must be an array of selector objects with string fields" }, 400); return; }
 		}
 		if (mode === "category") {
-			if (hasSessionIds || hasWorktrees || hasPresetId) {
-				json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400);
-				return;
-			}
-			const categories = rec.categories;
 			const validCategories = new Set(["archived-session", "goal-session", "team-session", "delegate-session", "child-session", "single-repo", "multi-repo"]);
-			if (!Array.isArray(categories) || categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) {
-				json({ error: "categories must be an array of supported category strings" }, 400);
-				return;
-			}
-			if (rec.projectId !== undefined && typeof rec.projectId !== "string") {
-				json({ error: "projectId must be a string" }, 400);
-				return;
-			}
-			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") {
-				json({ error: "repoPath must be a string" }, 400);
-				return;
-			}
-			await cleanup({ mode: "category", categories, projectId: rec.projectId, repoPath: rec.repoPath });
-			return;
+			if (hasSessionIds || hasWorktrees || hasPresetId) { json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400); return; }
+			if (!Array.isArray(rec.categories) || rec.categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) { json({ error: "categories must be an array of supported category strings" }, 400); return; }
+			if (rec.projectId !== undefined && typeof rec.projectId !== "string") { json({ error: "projectId must be a string" }, 400); return; }
+			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") { json({ error: "repoPath must be a string" }, 400); return; }
 		}
-		if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) {
-			json({ error: "mode=preset accepts presetId only" }, 400);
-			return;
+		if (mode === "preset") {
+			if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) { json({ error: "mode=preset accepts presetId only" }, 400); return; }
+			if (typeof rec.presetId !== "string") { json({ error: "presetId must be a string" }, 400); return; }
 		}
-		if (typeof rec.presetId !== "string") {
-			json({ error: "presetId must be a string" }, 400);
-			return;
-		}
-		await cleanup({ mode: "preset", presetId: rec.presetId });
+		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
+		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
 		return;
 	}
 
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
-		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
-		// Hidden contexts (synthetic system project) have no worktrees and
-		// resolving their repoPath can leak into an unrelated host repo.
-		for (const ctx of projectContextManager.visible()) {
-			try {
-				const repoPath = ctx.project.rootPath;
-				if (await isGitRepo(repoPath)) {
-					const orphans = await sessionManager.listOrphanedSessionWorktrees(repoPath);
-					for (const o of orphans) {
-						allOrphans.push({ ...o, repoPath });
-					}
-				}
-			} catch { /* best-effort */ }
-		}
-		json({ worktrees: allOrphans });
+		json(await worktreeInventory().legacyOrphanedWorktrees());
 		return;
 	}
 
 	// POST /api/maintenance/cleanup-worktrees
 	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
 		const body = await readBody(req);
-		let cleaned = 0;
-		if (body?.worktrees && Array.isArray(body.worktrees)) {
-			// Clean specific worktrees — validate each against registered projects and orphan list
-			const validRepoPaths = new Set([...projectContextManager.visible()].map(ctx => ctx.project.rootPath));
-			for (const wt of body.worktrees) {
-				if (wt.path && wt.branch && wt.repoPath) {
-					// Validate repoPath is a registered project
-					if (!validRepoPaths.has(wt.repoPath)) continue;
-					// Validate this worktree is actually orphaned
-					try {
-						const orphans = await sessionManager.listOrphanedSessionWorktrees(wt.repoPath);
-						const isOrphan = orphans.some(o => o.path === wt.path && o.branch === wt.branch);
-						if (!isOrphan) continue;
-					} catch { continue; }
-					try {
-						const { cleanupWorktree } = await import("./skills/git.js");
-						await cleanupWorktree(wt.repoPath, wt.path, wt.branch, true);
-						cleaned++;
-					} catch { /* best-effort */ }
-				}
+		if (body && typeof body === "object" && !Array.isArray(body) && ((body as any).mode === "all-safe" || (body as any).mode === "selected")) {
+			if ((body as any).mode === "selected" && (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string"))) {
+				json({ error: "itemIds must be an array of strings" }, 400);
+				return;
 			}
-		} else {
-			// Clean all orphans across all projects (hidden contexts excluded).
-			for (const ctx of projectContextManager.visible()) {
-				try {
-					const repoPath = ctx.project.rootPath;
-					if (await isGitRepo(repoPath)) {
-						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
-						cleaned++; // count projects cleaned, not individual worktrees
-					}
-				} catch { /* best-effort */ }
-			}
+			json(await worktreeInventory().cleanup(body as any));
+			return;
 		}
-		json({ cleaned });
+		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: body?.worktrees });
+		json({ cleaned: result.counts.cleaned });
 		return;
 	}
 

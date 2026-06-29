@@ -205,6 +205,39 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 	});
 });
 
+describe("WorktreePool — orphan reclaim", () => {
+	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
+	before(() => {
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+	});
+			after(() => {
+		if (originalNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
+		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
+		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("reclaims pool branches from the configured worktree root through the shared classifier", async () => {
+		const repo = await makeRepo();
+		try {
+			const configuredRoot = path.join(path.dirname(repo), "configured-wt");
+			const wtPath = path.join(configuredRoot, "pool-_pool-reclaim1");
+			fs.mkdirSync(configuredRoot, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-reclaim1", wtPath, "HEAD"], { cwd: repo });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 1, worktreeRoot: configuredRoot });
+			await (pool as any).reclaimOrphaned();
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 1);
+			assert.equal(snapshot.entries[0].branchName, "pool/_pool-reclaim1");
+			assert.equal(snapshot.entries[0].worktreePath, wtPath);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+});
+
 describe("WorktreePool — components[*].worktreeSetupCommand is the source of truth", () => {
 	// These tests must NOT set BOBBIT_SKIP_NPM_CI — we're asserting the setup
 	// hook actually fires. Keep BOBBIT_TEST_NO_PUSH so we don't touch any remote.

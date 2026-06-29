@@ -35,6 +35,8 @@ import { runComponentSetups, resolveSetupTimeoutMs } from "../skills/worktree-se
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
+import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
+import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, type WorktreePoolSnapshot } from "./worktree-inventory.js";
 
 const execFile = promisify(execFileCb);
 
@@ -134,16 +136,10 @@ export interface PoolComponent {
 }
 
 const POOL_BRANCH_PREFIX = "pool/_pool-";
-const LEGACY_POOL_BRANCH_PREFIX = "session/_pool-";
 
 /** Whether a branch name belongs to a pool entry (current or legacy form). */
 export function isPoolBranch(branch: string): boolean {
-	return branch.startsWith(POOL_BRANCH_PREFIX) || branch.startsWith(LEGACY_POOL_BRANCH_PREFIX);
-}
-
-/** Flatten a branch name into a directory-safe slug (matches createWorktree's convention). */
-function branchToSlug(branch: string): string {
-	return branch.replace(/\//g, "-");
+	return isBobbitPoolBranch(branch);
 }
 
 /**
@@ -269,6 +265,8 @@ export class WorktreePool {
 
 	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
 	private worktreeRoot?: string;
+	/** Resolved once from the project root; never re-resolved against component repo paths. */
+	private resolvedWorktreeRoot: string;
 
 	/**
 	 * Construct a worktree pool.
@@ -280,13 +278,14 @@ export class WorktreePool {
 	 * construction, `this.repoPath` is always the git root (or, when the
 	 * supplied path isn't a git working tree at all, the original input).
 	 */
-	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string }) {
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string; projectRoot?: string }) {
 		this.repoPath = resolveRepoToplevel(opts.repoPath);
 		this.targetSize = opts.targetSize ?? 2;
 		this.componentsResolver = opts.componentsResolver;
 		this.baseRefResolver = opts.baseRefResolver;
 		this.setupTimeoutResolver = opts.setupTimeoutResolver;
 		this.worktreeRoot = opts.worktreeRoot;
+		this.resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: opts.projectRoot ?? opts.repoPath, worktreeRoot: opts.worktreeRoot });
 	}
 
 	/** Whether the given components list implies multi-repo fill. */
@@ -308,6 +307,20 @@ export class WorktreePool {
 		return {
 			enabled: this.targetSize > 0,
 			ready: this.pool.length,
+			target: this.targetSize,
+			filling: this.filling,
+		};
+	}
+
+	/** Read-only inventory snapshot for unified maintenance. */
+	snapshotEntries(): WorktreePoolSnapshot {
+		return {
+			entries: this.pool.map(entry => ({
+				branchName: entry.branchName,
+				worktreePath: entry.worktreePath,
+				worktrees: entry.worktrees?.map(w => ({ ...w })),
+				createdAt: entry.createdAt,
+			})),
 			target: this.targetSize,
 			filling: this.filling,
 		};
@@ -616,34 +629,47 @@ export class WorktreePool {
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? { scans: 1, rootMissing: 0, entriesScanned: 0, activeSkipped: 0, gitMissing: 0, reclaimed: 0, errors: 0 } : undefined;
 		try {
-			const wtRoot = path.resolve(this.repoPath, "..", `${path.basename(this.repoPath)}-wt`);
+			const wtRoot = this.resolvedWorktreeRoot;
 			if (!fs.existsSync(wtRoot)) { if (counters) counters.rootMissing = 1; return; }
-
 			const entries = fs.readdirSync(wtRoot, { withFileTypes: true });
+			const components = this.componentsResolver?.() ?? [];
+			const multi = this.isMultiRepo(components);
 			for (const entry of entries) {
 				if (counters) counters.entriesScanned++;
 				if (this.pool.length >= this.targetSize) break;
 				if (!entry.isDirectory()) continue;
-				// Match new (`pool-_pool-*`) and legacy (`session-_pool-*`) flattened slugs.
-				if (!entry.name.startsWith("pool-_pool-") && !entry.name.startsWith("session-_pool-")) continue;
-
-				const wtPath = path.join(wtRoot, entry.name);
-				if (activeWorktreePaths?.has(wtPath)) { if (counters) counters.activeSkipped++; continue; }
-
-				const gitFile = path.join(wtPath, ".git");
-				if (!fs.existsSync(gitFile)) { if (counters) counters.gitMissing++; continue; }
+				const container = path.join(wtRoot, entry.name);
+				if (isContainerInternalWorktreePath(container)) { if (counters) counters.activeSkipped++; continue; }
 
 				try {
-					const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], {
-						cwd: wtPath,
-						timeout: 5_000,
-					});
-					const branch = stdout.trim();
-					if (!isPoolBranch(branch)) continue;
+					if (multi) {
+						const worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
+						let branch: string | undefined;
+						for (const component of components) {
+							if (component.repo === ".") continue;
+							const wtPath = path.join(container, component.repo);
+							if (!fs.existsSync(path.join(wtPath, ".git"))) continue;
+							const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wtPath, timeout: 5_000 });
+							branch = branch ?? stdout.trim();
+							worktrees.push({ repo: component.repo, repoPath: path.join(this.repoPath, component.repo), worktreePath: wtPath });
+						}
+						const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: worktrees.length > 0 });
+						if (!verdict.eligible || !branch) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; if (worktrees.length === 0 && counters) counters.gitMissing++; continue; }
+						this.pool.push({ branchName: branch, worktreePath: container, worktrees, createdAt: Date.now() });
+						if (counters) counters.reclaimed++;
+						console.log(`[worktree-pool] Reclaimed orphaned multi-repo: ${branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);
+						continue;
+					}
 
-					this.pool.push({ branchName: branch, worktreePath: wtPath, createdAt: Date.now() });
+					const gitFile = path.join(container, ".git");
+					if (!fs.existsSync(gitFile)) { if (counters) counters.gitMissing++; continue; }
+					const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: container, timeout: 5_000 });
+					const branch = stdout.trim();
+					const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: true });
+					if (!verdict.eligible) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; continue; }
+					this.pool.push({ branchName: branch, worktreePath: container, createdAt: Date.now() });
 					if (counters) counters.reclaimed++;
-					console.log(`[worktree-pool] Reclaimed orphaned: ${branch} at ${wtPath} (pool: ${this.pool.length}/${this.targetSize})`);
+					console.log(`[worktree-pool] Reclaimed orphaned: ${branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);
 				} catch {
 					continue;
 				}

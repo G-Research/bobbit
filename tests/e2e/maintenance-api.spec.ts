@@ -326,6 +326,31 @@ async function getArchivedWorktreeScan(query = ""): Promise<any> {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/maintenance/worktrees
+// ---------------------------------------------------------------------------
+test("GET /api/maintenance/worktrees returns canonical inventory shape", async () => {
+	const resp = await apiFetch("/api/maintenance/worktrees");
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	expect(Array.isArray(body.items)).toBe(true);
+	expectNumberCounts(body, ["total", "readyToClean", "protectedInUse", "archivedOwned", "unownedGitWorktrees", "poolEntries", "alreadyCleaned", "needsAttention", "scanErrors", "defaultSelected"]);
+	expectNumberMap(body.counts.byClassification, "counts.byClassification");
+	expectNumberMap(body.counts.byReason, "counts.byReason");
+	expectNumberMap(body.counts.bySource, "counts.bySource");
+	expect(typeof body.generatedAt).toBe("number");
+	for (const item of body.items as any[]) {
+		expect(typeof item.id).toBe("string");
+		expect(typeof item.classification).toBe("string");
+		expect(Array.isArray(item.sources)).toBe(true);
+		expect(Array.isArray(item.owners)).toBe(true);
+		expect(typeof item.reason).toBe("string");
+		expect(typeof item.detail).toBe("string");
+		expect(typeof item.actionable).toBe("boolean");
+		expect(typeof item.defaultSelected).toBe("boolean");
+	}
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/maintenance/orphaned-worktrees
 // ---------------------------------------------------------------------------
 test("GET /api/maintenance/orphaned-worktrees returns list", async () => {
