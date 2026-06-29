@@ -963,6 +963,14 @@ export class TeamManager {
 		}
 
 		for (const [goalId, entry] of this.teams) {
+			try {
+				this.reapStaleWorkers(goalId, entry);
+			} catch (err) {
+				console.error(`[team-manager] Stale-worker reap failed for goal=${goalId}:`, err);
+			}
+		}
+
+		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
@@ -1203,14 +1211,67 @@ export class TeamManager {
 		return false;
 	}
 
+	private isReviewerAgent(agent: TeamAgent): boolean {
+		return agent.kind === "reviewer" || agent.role === "reviewer";
+	}
+
+	private hasLiveSession(sessionId: string): boolean {
+		const session = this.sessionManager.getSession(sessionId);
+		return !!session && session.status !== "terminated";
+	}
+
+	private clearReapedWorkerRuntimeState(goalId: string, agent: TeamAgent): void {
+		try {
+			agent.unsubscribeEvent?.();
+		} catch (err) {
+			console.warn(
+				`[team-manager] Failed to unsubscribe stale worker ${agent.sessionId} for goal ${goalId}:`,
+				err,
+			);
+		}
+		agent.unsubscribeEvent = undefined;
+
+		this.sessionToGoal.delete(agent.sessionId);
+		this.lastNotifyTime.delete(agent.sessionId);
+		const pending = this.pendingIdleNotify.get(agent.sessionId);
+		if (pending) {
+			clearTimeout(pending);
+			this.pendingIdleNotify.delete(agent.sessionId);
+		}
+		try { this.config.orchestrationCore?.forgetChild(agent.sessionId); } catch { /* best-effort */ }
+	}
+
+	/**
+	 * Remove non-reviewer worker records whose backing session is missing or terminated.
+	 * This is a passive reap only: it updates tracking state and never terminates,
+	 * archives, broadcasts, or cleans up worktrees for already-dead sessions.
+	 */
+	private reapStaleWorkers(goalId: string, entry: TeamEntry | undefined = this.teams.get(goalId)): number {
+		if (!entry) return 0;
+		let reaped = 0;
+		for (let i = entry.agents.length - 1; i >= 0; i--) {
+			const agent = entry.agents[i];
+			if (this.isReviewerAgent(agent)) continue;
+			if (this.hasLiveSession(agent.sessionId)) continue;
+
+			this.clearReapedWorkerRuntimeState(goalId, agent);
+			entry.agents.splice(i, 1);
+			reaped++;
+			console.log(
+				`[team-manager] Reaped stale worker ${agent.sessionId} (${agent.role}) from goal ${goalId}`,
+			);
+		}
+		if (reaped > 0) this.persistEntry(goalId);
+		return reaped;
+	}
+
 	/** Get active (non-reviewer, non-terminated) workers for a goal. */
 	private getActiveWorkers(goalId: string): TeamAgent[] {
 		const entry = this.teams.get(goalId);
 		if (!entry) return [];
-		return entry.agents.filter((a) => {
-			if (a.role === 'reviewer') return false;
-			const s = this.sessionManager.getSession(a.sessionId);
-			return s && s.status !== "terminated";
+		return entry.agents.filter((agent) => {
+			if (this.isReviewerAgent(agent)) return false;
+			return this.hasLiveSession(agent.sessionId);
 		});
 	}
 
@@ -1778,10 +1839,12 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Check concurrency limit
-		if (entry.agents.length >= entry.maxConcurrent) {
+		// Check concurrency limit using the same live-worker semantics as sidebar/listing.
+		this.reapStaleWorkers(goalId, entry);
+		const activeWorkerCount = this.getActiveWorkers(goalId).length;
+		if (activeWorkerCount >= entry.maxConcurrent) {
 			throw new Error(
-				`Team for goal ${goalId} already has ${entry.agents.length} agents (max: ${entry.maxConcurrent})`,
+				`Team for goal ${goalId} already has ${activeWorkerCount} agents (active workers; max: ${entry.maxConcurrent})`,
 			);
 		}
 
