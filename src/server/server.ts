@@ -14762,6 +14762,10 @@ async function handleApiRoute(
 			json(await worktreeInventory().cleanup(body as any));
 			return;
 		}
+		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
+			json({ error: "mode is required when itemIds is provided" }, 400);
+			return;
+		}
 		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
 			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
 			return;

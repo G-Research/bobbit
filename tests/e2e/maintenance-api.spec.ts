@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId, registerProject } from "./e2e-setup.js";
 
 let token: string;
 
@@ -395,6 +395,48 @@ test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanu
 	});
 	expect(legacyShape.status).toBe(200);
 	expect(await legacyShape.json()).toHaveProperty("cleaned");
+});
+
+test("POST /api/maintenance/cleanup-worktrees rejects itemIds without mode without cleaning legacy orphans", async () => {
+	test.slow();
+	const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-cleanup-itemids-"));
+	const repoPath = join(baseDir, "repo");
+	const worktreePath = join(baseDir, "orphan-worktree");
+	const branch = `session/malformed-itemids-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+	let projectId: string | undefined;
+	try {
+		initGitRepo(repoPath);
+		const project = await registerProject({ name: `cleanup itemIds ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
+		projectId = project.id;
+		git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+
+		const beforeResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(beforeResp.status).toBe(200);
+		const before = await beforeResp.json();
+		const beforeItem = (before.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(beforeItem).toMatchObject({ branch, repoPath });
+
+		const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
+			method: "POST",
+			body: JSON.stringify({ itemIds: ["canonical-selector-without-mode"] }),
+		});
+		expect(malformed.status).toBe(400);
+
+		expect(existsSync(worktreePath)).toBe(true);
+		expect(branchExists(repoPath, branch)).toBe(true);
+		expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(worktreePath));
+
+		const afterResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(afterResp.status).toBe(200);
+		const after = await afterResp.json();
+		const afterItem = (after.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(afterItem).toMatchObject({ branch, repoPath });
+	} finally {
+		tryRemoveWorktree(repoPath, worktreePath);
+		tryDeleteBranch(repoPath, branch);
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		rmSync(baseDir, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------
