@@ -8,7 +8,7 @@
 ### Goals
 
 - Add an additive client Host API namespace, `host.channels`, for long-lived bidirectional framed communication.
-- Keep pack identity server-derived through surface tokens; callers never choose a pack id, URL, WebSocket, bearer token, or transport.
+- Keep pack identity server-derived through surface tokens; Host API callers never choose a pack id, URL, WebSocket, bearer token, or transport.
 - Resolve channel names only inside the calling pack's declared `channels/<name>.yaml` handlers.
 - Support detach/remount/reload reattach while the gateway process is alive.
 - Define clear lifecycle, quotas, backpressure, idle-timeout, error, cleanup, and audit semantics.
@@ -17,7 +17,7 @@
 ### Non-goals for v1
 
 - No binary frames. V1 supports only text and JSON frames.
-- No raw WebSocket endpoint, signed URL, bearer URL, `gateway.fetch`, caller-supplied transport, or arbitrary gateway path.
+- No raw WebSocket endpoint, signed URL, bearer URL, `gateway.fetch`, caller-supplied transport, or arbitrary gateway path in the Host API contract.
 - No `host.terminal` namespace. Terminal is a blessed channel protocol convention owned by a pack.
 - No live PTY survival across gateway restart. Restart closes all in-memory channels; UI must render a clear disconnected/closed state and offer restart.
 
@@ -32,7 +32,7 @@ Relevant current pieces:
 - **Pack contribution registry:** `src/server/agent/pack-contributions.ts` and `src/server/extension-host/pack-contribution-registry.ts` load pack-scoped panels, entrypoints, providers, and routes. Channels should extend this registry rather than create a second pack-discovery path.
 - **Pack-scoped metadata:** `/api/ext/contributions` in `src/server/server.ts` feeds client registries from `PackContributionRegistry`; it should expose channel names only as metadata/diagnostics, never handler module paths.
 - **Panels and entrypoints:** `src/app/pack-panels.ts`, `src/app/pack-entrypoints.ts`, `src/app/session-actions.ts`, and `src/ui/components/MessageEditor.ts` already implement pack-local panels and user-gesture launcher dispatch.
-- **Session WebSocket:** `src/server/ws/protocol.ts`, `src/server/ws/handler.ts`, and app-side bridges such as `src/app/session-write-bridge.ts` provide an existing Bobbit-owned authenticated channel that pack code cannot directly access.
+- **Session WebSocket:** `src/server/ws/protocol.ts`, `src/server/ws/handler.ts`, and app-side bridges such as `src/app/session-write-bridge.ts` provide an existing authenticated channel owned by app infrastructure. The Host API does not expose it as a raw transport handle; this is a contract boundary, not a same-origin anti-spoofing boundary.
 - **Server module isolation:** `src/server/extension-host/module-host-worker.ts` runs pack server modules in worker threads for resource/crash isolation. Long-lived channels need a sibling persistent worker model, not the current per-invocation `ModuleHost.invoke()` lifecycle.
 - **Session termination cleanup:** `src/server/agent/session-manager.ts::terminateSession()` already has cleanup seams for session-owned resources such as background processes and sandbox tokens. Channel cleanup should be called from the same termination path.
 
@@ -99,7 +99,8 @@ Implement `src/app/channel-bridge.ts` as the only client-side transport owner.
 - `host.channels.open/attach/list` in `src/app/host-api.ts` calls into `channel-bridge.ts`.
 - The bridge obtains the surface token through the same closure path as `host.store`, `host.callRoute`, and `host.session`.
 - The bridge sends typed request/response frames over the existing authenticated session WebSocket, similar to `session-write-bridge.ts`.
-- Pack code receives only a `HostChannel` object. It never sees:
+- Through the sanctioned Host API, pack code receives only a `HostChannel` object. The
+  contract does not expose:
   - a WebSocket object,
   - a URL,
   - an Authorization header,
@@ -124,7 +125,7 @@ Proposed WS protocol additions in `src/server/ws/protocol.ts`:
 | { type: "ext_channel_close"; channelId: string; reason?: string; error?: string };
 ```
 
-`openGrant` is an opaque, one-shot, server-minted permit, not a client assertion, and it is required for every process-creating `ext_channel_open`. Direct user-gesture opens and trusted Bobbit launcher opens both first mint a server-verifiable grant bound to `{ sessionId, packId, contributionId, channelName, singletonKey }`, then consume it on `ext_channel_open`. The server rejects missing, unknown, expired, mismatched, or replayed grants before handler or PTY creation. There is no `trustedLauncher` boolean or equivalent authority-bearing client flag.
+`openGrant` is an opaque, one-shot, server-minted permit, not a client assertion, and it is required for every process-creating `ext_channel_open`. A declared pack channel open first mints a server-verifiable grant from validated session/pack/channel authority, bound to `{ sessionId, packId, contributionId, channelName, singletonKey }`, then consumes it on `ext_channel_open`. The server rejects missing, unknown, expired, mismatched, or replayed grants before handler or PTY creation. There is no `trustedLauncher` boolean or equivalent authority-bearing client flag.
 
 `ext_channel_send` and close frames do not carry a surface token. The server only accepts them from a WebSocket connection that has already successfully opened or attached that `{ sessionId, packId, channelId }` tuple; otherwise it rejects with `UNAUTHORIZED` or `CHANNEL_NOT_FOUND`.
 
