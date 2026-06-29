@@ -237,6 +237,31 @@ describe("isTransientReviewError", () => {
 			`Expected socket/runtime variants transient: ${missed.join(" | ")}`,
 		);
 	});
+
+	it("treats fetch failed and undici transport variants as transient", () => {
+		const variants = [
+			{
+				output: "LLM review failed: fetch failed",
+				message: "fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed",
+				message: "TypeError: fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_SOCKET other side closed",
+				message: "UND_ERR_SOCKET should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_HEADERS_TIMEOUT headers timeout",
+				message: "UND_ERR_HEADERS_TIMEOUT should be classified as transient",
+			},
+		];
+
+		for (const { output, message } of variants) {
+			assert.equal(isTransientReviewError(output), true, message);
+		}
+	});
 });
 
 // ===================================================================
@@ -275,10 +300,47 @@ describe("llm-review retry decisions", () => {
 		}
 	});
 
-	it("does not retry deterministic auth/config/API-key/policy failures", () => {
+	it("retries fetch failed and undici transport failures through the llm-review decision path", () => {
+		const transportFailures = [
+			{
+				output: "LLM review failed: fetch failed",
+				message: "fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed",
+				message: "TypeError: fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_SOCKET other side closed",
+				message: "UND_ERR_SOCKET should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_HEADERS_TIMEOUT headers timeout",
+				message: "UND_ERR_HEADERS_TIMEOUT should be classified as transient",
+			},
+		];
+
+		for (const { output, message } of transportFailures) {
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient: isTransientReviewError,
+				}),
+				"retry",
+				message,
+			);
+		}
+	});
+
+	it("does not retry deterministic auth/config/API-key/policy/unsupported provider failures", () => {
 		const deterministicFailures = [
 			"LLM review failed: missing API key for provider",
 			"LLM review failed: configuration error: review model is not configured",
+			"LLM review failed: unsupported provider bobbit-llm",
+			"LLM review failed: unsupported model bobbit-preview-404",
 			"LLM review failed: content policy violation blocked the request",
 			"LLM review failed: schema validation failed for invalid request",
 			"LLM review failed: user aborted the turn",
@@ -298,6 +360,22 @@ describe("llm-review retry decisions", () => {
 				`Expected deterministic failure not to retry: ${output}`,
 			);
 		}
+	});
+
+	it("does not treat unknown internal model errors as unsupported model configuration", () => {
+		const output = "LLM review failed: model returned an unknown internal error";
+
+		assert.equal(isRetryableGenericAgentError(output), true);
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false,
+				output,
+				attempt: 1,
+				maxBoundedAttempts: 3,
+				isTransient: (text) => isTransientReviewError(text) || isRetryableGenericAgentError(text),
+			}),
+			"retry",
+		);
 	});
 });
 

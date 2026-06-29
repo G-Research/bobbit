@@ -262,6 +262,12 @@ export class TeamManager {
 	private noWorkersNudgeCount = new Map<string, number>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
+	/** goalId → callbacks for an attempted auto-nudge that has not yet started a lead turn. */
+	private pendingNudgeAccounting = new Map<string, { onStarted?: () => void; onNoStart?: () => void }>();
+	/** goalId → consecutive no-workers nudge attempts used only for no-start backoff. */
+	private noWorkersNudgeAttemptCount = new Map<string, number>();
+	/** goalId → consecutive workers-nudge attempts used only for no-start backoff. */
+	private idleNudgeAttemptCount = new Map<string, number>();
 	/** goalId → last spec-edit nudge ms (throttle). */
 	private lastSpecNudgeTs = new Map<string, number>();
 	/** Spec-edit nudge throttle window. */
@@ -1051,29 +1057,31 @@ export class TeamManager {
 		message: string,
 		opts: { isSteered: true; source?: PromptSource; coldStart?: boolean },
 		label: string,
+		accounting?: { onStarted?: () => void; onNoStart?: () => void },
 	): boolean {
 		this.nudgePending.set(goalId, true);
+		if (accounting) this.pendingNudgeAccounting.set(goalId, accounting);
 
 		let delivery: unknown;
 		try {
 			delivery = this.sessionManager.enqueuePrompt(sessionId, message, opts);
 		} catch (err) {
-			this.nudgePending.delete(goalId);
+			this.clearPendingNudgeNoStart(goalId);
 			console.error(`[team-manager] ${label} enqueuePrompt failed for goal ${goalId}:`, err);
 			return false;
 		}
 
-		this.clearNudgePendingIfDeliveryDidNotStart(goalId, delivery);
+		this.handleNudgeDeliveryResult(goalId, delivery);
 		if (this.isThenable(delivery)) {
 			// A parked/capped enqueue returns a resolved promise while the lead stays idle.
 			// Clear on the next macrotask if no agent_start/status transition happened.
 			setTimeout(() => {
-				if (this.isTeamLeadIdle(goalId)) this.nudgePending.delete(goalId);
+				if (this.isTeamLeadIdle(goalId)) this.clearPendingNudgeNoStart(goalId);
 			}, 0);
 			void delivery.then(
-				(result) => this.clearNudgePendingIfDeliveryDidNotStart(goalId, result),
+				(result) => this.handleNudgeDeliveryResult(goalId, result),
 				(err) => {
-					this.nudgePending.delete(goalId);
+					this.clearPendingNudgeNoStart(goalId);
 					console.error(`[team-manager] ${label} failed for goal ${goalId}:`, err);
 				},
 			);
@@ -1082,12 +1090,30 @@ export class TeamManager {
 		return true;
 	}
 
-	private clearNudgePendingIfDeliveryDidNotStart(goalId: string, delivery: unknown): void {
+	private handleNudgeDeliveryResult(goalId: string, delivery: unknown): void {
 		if (!delivery || typeof delivery !== "object") return;
 		const result = delivery as { status?: unknown; parked?: unknown };
-		if (result.parked === true || (result.status === "queued" && this.isTeamLeadIdle(goalId))) {
-			this.nudgePending.delete(goalId);
+		if (result.status === "dispatched") {
+			this.confirmPendingNudgeStarted(goalId);
+		} else if (result.parked === true || (result.status === "queued" && this.isTeamLeadIdle(goalId))) {
+			this.clearPendingNudgeNoStart(goalId);
 		}
+	}
+
+	private confirmPendingNudgeStarted(goalId: string): void {
+		this.nudgePending.delete(goalId);
+		const accounting = this.pendingNudgeAccounting.get(goalId);
+		if (!accounting) return;
+		this.pendingNudgeAccounting.delete(goalId);
+		accounting.onStarted?.();
+	}
+
+	private clearPendingNudgeNoStart(goalId: string): void {
+		this.nudgePending.delete(goalId);
+		const accounting = this.pendingNudgeAccounting.get(goalId);
+		if (!accounting) return;
+		this.pendingNudgeAccounting.delete(goalId);
+		accounting.onNoStart?.();
 	}
 
 	private isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -1140,7 +1166,10 @@ export class TeamManager {
 			this.noWorkersNudgeTimers.delete(goalId);
 		}
 		this.noWorkersNudgeCount.delete(goalId);
+		this.noWorkersNudgeAttemptCount.delete(goalId);
+		this.idleNudgeAttemptCount.delete(goalId);
 		this.nudgePending.delete(goalId);
+		this.pendingNudgeAccounting.delete(goalId);
 	}
 
 	private formatElapsed(sinceMs: number): string {
@@ -1221,7 +1250,9 @@ export class TeamManager {
 	 * the timer fires — the workers-nudge takes over that case.
 	 */
 	private scheduleNoWorkersNudge(goalId: string): void {
-		const count = this.noWorkersNudgeCount.get(goalId) ?? 0;
+		const successCount = this.noWorkersNudgeCount.get(goalId) ?? 0;
+		const attemptCount = this.noWorkersNudgeAttemptCount.get(goalId) ?? successCount;
+		const count = Math.max(successCount, attemptCount);
 		const delay = Math.min(
 			TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count),
 			TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
@@ -1246,18 +1277,25 @@ export class TeamManager {
 				`If there's more work to do, spawn agents or do it yourself. ` +
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
 
-			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "No-workers nudge")) return;
-			this.noWorkersNudgeCount.set(goalId, count + 1);
-			const nextDelay = Math.min(
-				TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count + 1),
-				TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
-			);
-			console.log(
-				`[team-manager] Sent no-workers nudge #${count + 1} to team lead for goal ${goalId}; ` +
-				`next nudge in ${Math.round(nextDelay / 60000)}m`,
-			);
-
-			this.scheduleNoWorkersNudge(goalId);
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "No-workers nudge", {
+				onStarted: () => {
+					const nextSuccess = (this.noWorkersNudgeCount.get(goalId) ?? 0) + 1;
+					this.noWorkersNudgeCount.set(goalId, nextSuccess);
+					this.noWorkersNudgeAttemptCount.set(goalId, Math.max(this.noWorkersNudgeAttemptCount.get(goalId) ?? 0, count + 1));
+					const nextDelay = Math.min(
+						TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, Math.max(nextSuccess, count + 1)),
+						TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
+					);
+					console.log(
+						`[team-manager] Sent no-workers nudge #${nextSuccess} to team lead for goal ${goalId}; ` +
+						`next nudge in ${Math.round(nextDelay / 60000)}m`,
+					);
+				},
+				onNoStart: () => {
+					this.noWorkersNudgeAttemptCount.set(goalId, count + 1);
+					this.scheduleNoWorkersNudge(goalId);
+				},
+			})) return;
 		}, delay);
 
 		this.noWorkersNudgeTimers.set(goalId, timer);
@@ -1268,7 +1306,9 @@ export class TeamManager {
 	 * Delay = IDLE_NUDGE_DELAY_MS * 2^count, capped at MAX_IDLE_NUDGE_DELAY_MS.
 	 */
 	private scheduleWorkersNudge(goalId: string): void {
-		const count = this.idleNudgeCount.get(goalId) ?? 0;
+		const successCount = this.idleNudgeCount.get(goalId) ?? 0;
+		const attemptCount = this.idleNudgeAttemptCount.get(goalId) ?? successCount;
+		const count = Math.max(successCount, attemptCount);
 		const delay = Math.min(
 			TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count),
 			TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
@@ -1329,19 +1369,25 @@ export class TeamManager {
 				`If an agent is idle and their work looks complete, mark their task as done and dismiss them. ` +
 				`If idle agents have more to do, prompt them to continue.`;
 
-			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "Idle nudge")) return;
-			this.idleNudgeCount.set(goalId, count + 1);
-			const nextDelay = Math.min(
-				TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count + 1),
-				TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
-			);
-			console.log(
-				`[team-manager] Sent idle nudge #${count + 1} to team lead for goal ${goalId}; ` +
-				`next nudge in ${Math.round(nextDelay / 60000)}m`,
-			);
-
-			// Reschedule with the incremented counter
-			this.scheduleWorkersNudge(goalId);
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "Idle nudge", {
+				onStarted: () => {
+					const nextSuccess = (this.idleNudgeCount.get(goalId) ?? 0) + 1;
+					this.idleNudgeCount.set(goalId, nextSuccess);
+					this.idleNudgeAttemptCount.set(goalId, Math.max(this.idleNudgeAttemptCount.get(goalId) ?? 0, count + 1));
+					const nextDelay = Math.min(
+						TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, Math.max(nextSuccess, count + 1)),
+						TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
+					);
+					console.log(
+						`[team-manager] Sent idle nudge #${nextSuccess} to team lead for goal ${goalId}; ` +
+						`next nudge in ${Math.round(nextDelay / 60000)}m`,
+					);
+				},
+				onNoStart: () => {
+					this.idleNudgeAttemptCount.set(goalId, count + 1);
+					this.scheduleWorkersNudge(goalId);
+				},
+			})) return;
 		}, delay);
 
 		this.idleNudgeTimers.set(goalId, timer);
@@ -1419,10 +1465,11 @@ export class TeamManager {
 				this.leadIdleSinceByGoal.set(goalId, Date.now());
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
-				this.nudgePending.delete(goalId);
 				this.leadIdleSinceByGoal.delete(goalId);
 				const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
 				const lastSource = tl?.lastPromptSource ?? "user";
+				if (lastSource !== "user" && lastSource !== "system") this.confirmPendingNudgeStarted(goalId);
+				else this.clearPendingNudgeNoStart(goalId);
 				if (lastSource === "user" || lastSource === "system") {
 					// External signal — fresh idle cycle starts from base delay.
 					this.clearIdleNudgeTimer(goalId);

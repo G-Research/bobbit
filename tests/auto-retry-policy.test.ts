@@ -329,6 +329,30 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 		assert.equal(session.status, "streaming");
 	});
 
+	it("schedules fetch failed transport errors through the visible bounded auto-retry path", () => {
+		for (const message of ["fetch failed", "TypeError: fetch failed"]) {
+			const manager = makeManager();
+			const { session } = putRetryStateSession(manager, {
+				lastTurnErrorMessage: message,
+			});
+
+			manager.maybeAutoRetryTransient(session);
+
+			assert.ok(
+				session.pendingAutoRetryTimer,
+				`expected pendingAutoRetryTimer for ${message}`,
+			);
+			const pending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(pending, `expected auto_retry_pending for ${message}`);
+			assert.equal(pending.retryDelayMs, 1000, `expected first bounded retry delay for ${message}`);
+			assert.equal(pending.attempt, 1, `expected first bounded retry attempt for ${message}`);
+			assert.equal(session.lastTurnErrored, true, `expected Retry affordance preserved for ${message}`);
+
+			clearTimeout(session.pendingAutoRetryTimer);
+			session.pendingAutoRetryTimer = undefined;
+		}
+	});
+
 	it("stops after the third generic unexpected retry and leaves manual Retry available", () => {
 		const manager = makeManager();
 		const { session } = putRetryStateSession(manager);

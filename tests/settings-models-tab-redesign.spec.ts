@@ -255,6 +255,29 @@ test.describe("Settings Models tab redesign", () => {
 		expect(dialogExists).toBe(true);
 	});
 
+	test("Provider API Keys ignores gateway-managed session sentinel", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(async () => {
+			await (window as any).__seedProviderKey("anthropic", "gateway-managed");
+			(window as any).__setNextFetchResponse((url: string) => {
+				if (url === "/api/provider-keys") return { ok: true, body: { providers: [] } };
+				if (url === "/api/aigw/status") return { ok: true, body: { configured: false, url: "", models: [] } };
+				if (url === "/api/models") return { ok: true, body: [] };
+				if (url === "/api/image-models") return { ok: true, body: [] };
+				return { ok: true, body: {} };
+			});
+			(window as any).__clearFetchLog();
+		});
+		await page.evaluate((opts) => (window as any).__resetModelsTab(opts), {
+			aigwConfigured: false,
+			allModels: ALL_MODELS,
+		});
+
+		await page.waitForFunction(() => (window as any).__getFetchLog().filter((e: any) => e.url === "/api/provider-keys").length >= 4);
+		const anthropicKey = page.locator('[data-testid="provider-key-input-anthropic"]');
+		await expect(anthropicKey.locator('[data-testid="provider-key-present"]')).toHaveCount(0);
+	});
+
 	// Settings-drift acceptance: the live Models tab must expose a Provider API
 	// Keys entry point (the API-key fallback) so users are not directed to a
 	// nonexistent screen. The Google AI Studio key path (`google`) must be present.

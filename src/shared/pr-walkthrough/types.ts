@@ -78,6 +78,14 @@ export interface PrWalkthroughOrientationVerdict {
 	summary?: string;
 }
 
+export interface PrWalkthroughDiffBreakdownItem {
+	label: string;
+	files?: number;
+	additions?: number;
+	deletions?: number;
+	note?: string;
+}
+
 /** A single-idea "beat" in the orientation guided step-through. */
 export interface PrWalkthroughCardSection {
 	id: string;
@@ -89,6 +97,7 @@ export interface PrWalkthroughCardSection {
 	verdict?: PrWalkthroughOrientationVerdict;
 	concerns?: PrWalkthroughOrientationConcern[];
 	fileRoles?: PrWalkthroughOrientationFileRole[];
+	diffBreakdown?: PrWalkthroughDiffBreakdownItem[];
 	showStats?: boolean;
 	showOriginalDescription?: boolean;
 }

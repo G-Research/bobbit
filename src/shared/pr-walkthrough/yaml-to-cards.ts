@@ -13,6 +13,7 @@ import type {
 	PrWalkthroughCardSection,
 	PrWalkthroughChangesetRef,
 	PrWalkthroughDiffBlock,
+	PrWalkthroughDiffBreakdownItem,
 	PrWalkthroughDiffLine,
 	PrWalkthroughHunk,
 	PrWalkthroughOrientationConcern,
@@ -112,6 +113,7 @@ export interface PrWalkthroughYamlWalkthrough {
 		merge_concerns: string;
 		author_intent: string;
 		reviewer_map: string;
+		diff_breakdown?: PrWalkthroughYamlDiffBreakdown;
 	};
 	merge_assessment: {
 		recommendation: "approve" | "comment" | "request_changes" | "unknown";
@@ -188,6 +190,20 @@ export interface PrWalkthroughYamlOmission {
 	severity: "blocking" | "non_blocking" | "question";
 }
 
+export interface PrWalkthroughYamlDiffBreakdownCounts {
+	files?: number;
+	additions?: number;
+	deletions?: number;
+	note?: string;
+}
+
+export interface PrWalkthroughYamlDiffBreakdown {
+	prod_executable_code: PrWalkthroughYamlDiffBreakdownCounts;
+	test_code: PrWalkthroughYamlDiffBreakdownCounts;
+	code_and_comments: PrWalkthroughYamlDiffBreakdownCounts;
+	docs_only: PrWalkthroughYamlDiffBreakdownCounts;
+}
+
 export interface MapYamlToWalkthroughPayloadOptions {
 	changesetId?: string;
 	target?: PrWalkthroughYamlLaunchTarget;
@@ -221,7 +237,6 @@ const PHASES = new Set(["orientation", "design", "significant", "other", "audit"
 const CONCERN_SEVERITIES = new Set(["blocking", "non_blocking", "question", "nit"]);
 const OMISSION_SEVERITIES = new Set(["blocking", "non_blocking", "question"]);
 const OMISSION_CATEGORIES = new Set(["tests", "docs", "migration", "telemetry", "security", "performance", "compatibility", "cleanup", "other"]);
-
 export function validatePrWalkthroughYaml(yamlText: string, options: PrWalkthroughYamlValidationOptions = {}): PrWalkthroughYamlValidationResult {
 	const errors: PrWalkthroughValidationError[] = [];
 	const maxYamlBytes = options.maxYamlBytes ?? DEFAULT_MAX_YAML_BYTES;
@@ -426,6 +441,7 @@ function parseWalkthrough(root: Record<string, unknown>, errors: PrWalkthroughVa
 
 function parseContext(root: Record<string, unknown>, errors: PrWalkthroughValidationError[]): PrWalkthroughYamlWalkthrough["context"] | null {
 	const path = "$.walkthrough.context.";
+	const diffBreakdown = root.diff_breakdown === undefined ? undefined : parseDiffBreakdown(requiredRecord(root, "diff_breakdown", errors, path), errors, `${path}diff_breakdown.`);
 	const context = {
 		why_created: requiredString(root, "why_created", errors, path),
 		problem_solved: requiredString(root, "problem_solved", errors, path),
@@ -433,8 +449,36 @@ function parseContext(root: Record<string, unknown>, errors: PrWalkthroughValida
 		merge_concerns: requiredString(root, "merge_concerns", errors, path),
 		author_intent: requiredString(root, "author_intent", errors, path),
 		reviewer_map: requiredString(root, "reviewer_map", errors, path),
+		...(diffBreakdown ? { diff_breakdown: diffBreakdown } : {}),
 	};
-	return allPresent(context) ? context as PrWalkthroughYamlWalkthrough["context"] : null;
+	return allPresent(context) && diffBreakdown !== null ? context as PrWalkthroughYamlWalkthrough["context"] : null;
+}
+
+function parseDiffBreakdown(root: Record<string, unknown> | undefined, errors: PrWalkthroughValidationError[], path: string): PrWalkthroughYamlDiffBreakdown | null {
+	if (!root) return null;
+	const out = {
+		prod_executable_code: parseDiffBreakdownCounts(root, "prod_executable_code", errors, path),
+		test_code: parseDiffBreakdownCounts(root, "test_code", errors, path),
+		code_and_comments: parseDiffBreakdownCounts(root, "code_and_comments", errors, path),
+		docs_only: parseDiffBreakdownCounts(root, "docs_only", errors, path),
+	};
+	return allPresent(out) ? out as PrWalkthroughYamlDiffBreakdown : null;
+}
+
+function parseDiffBreakdownCounts(root: Record<string, unknown>, key: keyof PrWalkthroughYamlDiffBreakdown, errors: PrWalkthroughValidationError[], prefix: string): PrWalkthroughYamlDiffBreakdownCounts | undefined {
+	const value = requiredRecord(root, key, errors, prefix);
+	if (!value) return undefined;
+	const path = `${prefix}${key}.`;
+	const files = optionalNumber(value, "files", errors, path);
+	const additions = optionalNumber(value, "additions", errors, path);
+	const deletions = optionalNumber(value, "deletions", errors, path);
+	const note = optionalString(value, "note", errors, path);
+	return {
+		...(files !== undefined ? { files } : {}),
+		...(additions !== undefined ? { additions } : {}),
+		...(deletions !== undefined ? { deletions } : {}),
+		...(note ? { note } : {}),
+	};
 }
 
 function parseMergeAssessment(root: Record<string, unknown>, errors: PrWalkthroughValidationError[]): PrWalkthroughYamlWalkthrough["merge_assessment"] | null {
@@ -619,11 +663,11 @@ function validateCrossFieldRules(document: PrWalkthroughYamlDocument, target: Pr
 	for (const [index, id] of document.walkthrough.display.chunk_order.entries()) {
 		if (!reviewChunkIds.has(id)) addError(errors, `$.walkthrough.display.chunk_order[${index}]`, `Unknown review chunk id ${id}.`);
 	}
-	if (!Object.values(document.walkthrough.context).some(value => value.trim().length > 0)) {
+	if (!Object.values(document.walkthrough.context).some(value => typeof value === "string" && value.trim().length > 0)) {
 		addError(errors, "$.walkthrough.context", "At least one context field must be non-empty.");
 	}
 	if (document.walkthrough.review_chunks.length === 0 && document.walkthrough.audit.reviewer_checklist.length === 0) {
-		addError(errors, "$.walkthrough.review_chunks", "At least one review chunk or audit checklist item is required.");
+		addError(errors, "$.walkthrough.review_chunks", "At least one review chunk or reviewer checklist item is required.");
 	}
 }
 
@@ -658,8 +702,6 @@ function buildOrientationCard(document: PrWalkthroughYamlDocument): PrWalkthroug
 function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkthroughCardSection[] {
 	const context = document.walkthrough.context;
 	const assessment = document.walkthrough.merge_assessment;
-	const audit = document.walkthrough.audit;
-	const omissions = document.walkthrough.omissions_and_followups;
 
 	const concerns: PrWalkthroughOrientationConcern[] = [
 		...assessment.blocking_concerns.map((text): PrWalkthroughOrientationConcern => ({ severity: "blocking", text })),
@@ -668,26 +710,23 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 	if (context.merge_concerns.trim().length > 0) concerns.push({ severity: "question", text: context.merge_concerns });
 
 	const fileRoles = parseReviewerMapRoles(context.reviewer_map);
-	const validationItems = compactArray([
-		...audit.reviewer_checklist,
-		...omissions.map(item => `${item.expected_artifact} — checked: ${item.evidence_checked}${item.concern ? `; concern: ${item.concern}` : ""}`),
-	]);
 
 	return [
 		{
 			id: "what-changed-and-why",
-			navLabel: "What/why",
+			navLabel: "Overview",
 			eyebrow: "Purpose",
 			heading: "What changed and why",
-			body: compactJoin([context.problem_solved, context.why_created]),
+			body: compactJoin([context.problem_solved, context.why_created, context.author_intent ? `How it works: ${context.author_intent}` : undefined]),
 			showStats: true,
+			diffBreakdown: diffBreakdownForDisplay(context.diff_breakdown),
 		},
 		{
-			id: "how-it-works",
-			navLabel: "How it works",
-			eyebrow: "Implementation",
-			heading: "How it works",
-			body: context.author_intent,
+			id: "original-pr-description",
+			navLabel: "Original PR",
+			eyebrow: "Source description",
+			heading: "Original PR description",
+			showOriginalDescription: true,
 		},
 		{
 			id: "change-map",
@@ -706,13 +745,6 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 			concerns,
 		},
 		{
-			id: "validation",
-			navLabel: "Validation",
-			eyebrow: "Evidence",
-			heading: "Validation",
-			items: validationItems,
-		},
-		{
 			id: "merge-recommendation",
 			navLabel: "Merge",
 			eyebrow: "Decision",
@@ -721,6 +753,23 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 			verdict: { recommendation: assessment.recommendation, confidence: assessment.confidence, summary: assessment.summary },
 		},
 	];
+}
+
+function diffBreakdownForDisplay(breakdown: PrWalkthroughYamlDiffBreakdown | undefined): PrWalkthroughDiffBreakdownItem[] | undefined {
+	if (!breakdown) return undefined;
+	const rows: Array<[string, PrWalkthroughYamlDiffBreakdownCounts]> = [
+		["Prod executable code changes", breakdown.prod_executable_code],
+		["Test code changes", breakdown.test_code],
+		["All code + comments", breakdown.code_and_comments],
+		["Docs only counts", breakdown.docs_only],
+	];
+	return rows.map(([label, counts]) => ({
+		label,
+		...(counts.files !== undefined ? { files: counts.files } : {}),
+		...(counts.additions !== undefined ? { additions: counts.additions } : {}),
+		...(counts.deletions !== undefined ? { deletions: counts.deletions } : {}),
+		...(counts.note ? { note: counts.note } : {}),
+	}));
 }
 
 function parseReviewerMapRoles(reviewerMap: string): PrWalkthroughOrientationFileRole[] {
@@ -1063,6 +1112,11 @@ function requiredEnumArray(root: Record<string, unknown>, key: string, allowed: 
 		else out.push(item);
 	});
 	return errorsForPrefix(errors, `${prefix}${key}`) ? undefined : out;
+}
+
+function optionalNumber(root: Record<string, unknown>, key: string, errors: PrWalkthroughValidationError[], prefix: string, options: { integer?: boolean; min?: number } = {}): number | undefined {
+	if (root[key] === undefined) return undefined;
+	return requiredNumber(root, key, errors, prefix, options);
 }
 
 function requiredNumber(root: Record<string, unknown>, key: string, errors: PrWalkthroughValidationError[], prefix: string, options: { integer?: boolean; min?: number } = {}): number | undefined {
