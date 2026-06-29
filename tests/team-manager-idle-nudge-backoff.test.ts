@@ -362,6 +362,94 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — nudgePending clears when delivery does not start a turn (regression)", () => {
+	it("does not count or log an async rejected no-workers nudge as sent before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			const log = mock.method(console, "log", () => {});
+			mock.method(console, "error", () => {});
+			let rejectDelivery: ((err: Error) => void) | undefined;
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager: provenance is recorded when delivery is attempted,
+					// but no agent_start has happened yet.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return new Promise((_resolve, reject) => { rejectDelivery = reject; });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+			t.mock.timers.tick(BASE + SLACK);
+
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first no-workers nudge delivery should be attempted at the base delay");
+
+			rejectDelivery?.(new Error("fetch failed"));
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
+				"nudgePending should clear after rejected delivery before agent_start");
+			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
+				"nudge should not be counted as sent before agent_start");
+			const sentLogs = log.mock.calls.filter((call: any) =>
+				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+			);
+			assert.equal(sentLogs.length, 0,
+				"nudge should not be logged as sent before agent_start");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("does not count or log a queued parked no-workers nudge as sent before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			const log = mock.method(console, "log", () => {});
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager's cap path: provenance is recorded but the
+					// prompt is parked/queued and no agent_start event is emitted.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return Promise.resolve({ status: "queued", queued: true, parked: true, id: "parked-auto-nudge" });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+			t.mock.timers.tick(BASE + SLACK);
+			await Promise.resolve();
+			t.mock.timers.tick(0);
+			await Promise.resolve();
+
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first parked no-workers nudge delivery should be attempted at the base delay");
+			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
+				"nudgePending should clear after queued/parked delivery before agent_start");
+			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
+				"nudge should not be counted as sent before agent_start");
+			const sentLogs = log.mock.calls.filter((call: any) =>
+				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+			);
+			assert.equal(sentLogs.length, 0,
+				"nudge should not be logged as sent before agent_start");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
 	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async (t) => {
 		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
 
