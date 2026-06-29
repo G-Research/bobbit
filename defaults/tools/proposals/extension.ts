@@ -114,13 +114,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal. Name an explicit workflow when project workflows exist; prefer existing workflow/roles and inline only when needed.",
-		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. When project workflows exist, workflow is required; reuse existing workflow/roles by default.",
+		description: "Submit a goal proposal. Use registered workflows by default; use inlineWorkflow only for bespoke workflows, where it is authoritative.",
+		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. Use a registered workflow by default. With a valid bespoke inlineWorkflow, workflow is optional/non-authoritative and inlineWorkflow takes precedence.",
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
-			workflow: Type.Optional(Type.String({ description: "Workflow ID. Required when project workflows exist." })),
+			workflow: Type.Optional(Type.String({ description: "Registered workflow ID; optional with valid inlineWorkflow." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 			parentGoalId: Type.Optional(Type.String({ description: "Subgoal parent ID; team leads auto-fill only when child spawn is allowed." })),
 			subgoalsAllowed: Type.Optional(Type.Boolean({ description: "Allow the team-lead to spawn sub-goals. Default off." })),
@@ -141,7 +141,7 @@ export default function (pi: ExtensionAPI) {
 				name: Type.String(),
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
-			}, { description: "Inline workflow snapshot frozen on the goal; may reference inlineRoles." })),
+			}, { description: "Bespoke workflow snapshot; may reference inlineRoles." })),
 			metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary namespaced per-goal metadata; inherited by sub-goals." })),
 		}),
 		async execute(_id, args) {
@@ -150,11 +150,12 @@ export default function (pi: ExtensionAPI) {
 			// up against the project's workflow store, inlineWorkflow is a
 			// frozen snapshot that bypasses the store. Pass both through
 			// untouched; the proposal serializer (proposal-types.ts goalPlugin)
-			// preserves both YAML keys, and goal-proposal acceptance reads
-			// inlineWorkflow → POST /api/goals body.workflow (the snapshot
-			// path), or workflow → POST /api/goals body.workflowId (the
-			// store-lookup path). Mixing one into the other corrupts the
-			// type contract.
+			// preserves both YAML keys. When valid, inlineWorkflow is the
+			// authoritative snapshot: goal-proposal acceptance reads it as
+			// POST /api/goals body.workflow and treats workflow as optional /
+			// non-authoritative. Without inlineWorkflow, workflow is read as
+			// POST /api/goals body.workflowId (the store-lookup path). Mixing
+			// one into the other corrupts the type contract.
 			const r = await seedProposal("goal", args);
 			if (r.errorMessage) {
 				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;

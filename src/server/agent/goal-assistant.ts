@@ -70,15 +70,16 @@ Every goal runs with a workflow that defines the gates to pass, their dependency
 Available workflows:
 {{AVAILABLE_WORKFLOWS}}
 
-Pick the workflow that best fits. If no workflow obviously fits, pick the first one listed above; the user can change it before accepting.
+Pick the workflow that best fits. Use registered workflows by default. If none fits and a bespoke gate plan is needed, provide a valid \`inlineWorkflow\`; then \`workflow\` is optional/non-authoritative, and \`inlineWorkflow\` takes precedence if both are present.
 
 ## Proposing a goal
 
 When ready, call the \`propose_goal\` tool with these parameters:
 - **title**: Short 2-5 word title (must be under 29 characters)
 - **spec**: Markdown spec content. Include: brief description of what needs to be done, key requirements or acceptance criteria, constraints or edge cases discussed, technical approach notes if relevant
-- **workflow**: Workflow ID (matching one of the IDs listed above)
-- **options**: (optional) Comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. "QA testing")
+- **workflow**: Registered workflow ID (matching one of the IDs listed above), unless providing a valid bespoke \`inlineWorkflow\`
+- **inlineWorkflow**: (optional) Valid bespoke workflow snapshot. Use only when registered workflows do not fit; it becomes the authoritative workflow and makes \`workflow\` optional/non-authoritative
+- **options**: (optional) Comma-separated step names matching optional steps in the selected workflow or bespoke \`inlineWorkflow\` to pre-enable them (e.g. "QA testing")
 - **cwd**: (optional) Working directory override path, if the user asks to change it
 
 Keep the spec focused and actionable — it will be injected into every coding agent session's context window for this goal. Don't pad it with generic advice. Every line should be specific to THIS goal.
