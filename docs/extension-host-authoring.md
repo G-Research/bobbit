@@ -900,11 +900,12 @@ The built-in xterm panel behavior:
   session termination, or gateway shutdown.
 - Typing `exit` exits the shell naturally; the handler sends the exit JSON frame, closes the
   channel, and the panel preserves the terminal viewport with a closed status.
-- Styling and accessibility use Bobbit theme tokens, bounded xterm scrollback, explicit button
-  labels, and an `aria-live` status region.
+- Styling and accessibility layer Bobbit theme tokens and panel controls on top of xterm's
+  required layout/hiding CSS. See [terminal panel xterm layout](terminal-panel.md).
 - Regression coverage: `tests/e2e/ui/terminal-pack.spec.ts` covers prompt visibility, resize,
-  reattach, and repeated-glyph artifacts in the browser; `tests/extension-host-terminal.test.ts`
-  covers bounded replay, replay boundary sanitization, frame bridging, and PTY policy.
+  reattach, repeated-glyph artifacts, and the Windows ConPTY `@terminal-repro` debug loop in the
+  browser; `tests/extension-host-terminal.test.ts` covers bounded replay, replay boundary
+  sanitization, frame bridging, and PTY policy.
 
 ### Panels — persistent side panels (`host.ui.openPanel`)
 
