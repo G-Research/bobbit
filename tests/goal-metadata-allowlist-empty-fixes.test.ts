@@ -146,15 +146,27 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 			.replace(": EffectiveTool[] | undefined", "");
 	}
 	const BLOCK = extractResolveBlock();
-	// `computeEffectiveAllowedTools` and `scopedToolContext` are free identifiers;
-	// inject sentinels so a wrongful fallback and scoped context drift are observable.
-	const runBlock = new Function("plan", "ctx", "computeEffectiveAllowedTools", "scopedToolContext", BLOCK) as (
+	// `computeEffectiveAllowedTools`, `scopedToolContext`, and module-private
+	// `lookupRole` are free identifiers; inject sentinels so a wrongful fallback,
+	// scoped context drift, and lookup-role contract drift are observable.
+	const runExtractedBlock = new Function("plan", "ctx", "computeEffectiveAllowedTools", "scopedToolContext", "lookupRole", BLOCK) as (
 		plan: { effectiveAllowedTools?: unknown[]; roleName?: string; projectId?: string; cwd?: string },
 		ctx: unknown,
 		ceat: (...a: unknown[]) => unknown[],
 		scope: (projectId: string | undefined, cwd: string | undefined) => unknown,
+		lookup: (name: string, plan: unknown, ctx: unknown) => unknown,
 	) => void;
 	const defaultScope = (projectId: string | undefined, cwd: string | undefined) => ({ projectId, cwd, scopeKey: projectId ? `project:${projectId}` : cwd ? `cwd:${cwd}` : "default" });
+
+	const sentinelRole = { name: "coder" };
+	const defaultLookupRole = (name: string) => name === "coder" ? sentinelRole : undefined;
+	const runBlock = (
+		plan: { effectiveAllowedTools?: unknown[]; roleName?: string; projectId?: string; cwd?: string },
+		ctx: unknown,
+		ceat: (...a: unknown[]) => unknown[],
+		scope: (projectId: string | undefined, cwd: string | undefined) => unknown,
+		lookup = defaultLookupRole,
+	) => runExtractedBlock(plan, ctx, ceat, scope, lookup);
 
 	const sentinel = [{ name: "ROLE_FALLBACK" }];
 	const ctxWithRole = {
@@ -177,19 +189,26 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 		const scoped = { projectId: "project-a", cwd: "/tmp/project-a", scopeKey: "project:project-a" };
 		const seenScopeArgs: Array<[string | undefined, string | undefined]> = [];
 		let computeScopeArg: unknown;
+		const lookupCalls: Array<[string, unknown, unknown]> = [];
 		runBlock(
 			plan,
 			ctxWithRole,
 			(...args: unknown[]) => {
 				computeScopeArg = args[4];
+				assert.equal(args[1], sentinelRole);
 				return sentinel;
 			},
 			(projectId, cwd) => {
 				seenScopeArgs.push([projectId, cwd]);
 				return scoped;
 			},
+			(name, lookupPlan, lookupCtx) => {
+				lookupCalls.push([name, lookupPlan, lookupCtx]);
+				return sentinelRole;
+			},
 		);
 		assert.deepEqual(plan.effectiveAllowedTools, sentinel);
+		assert.deepEqual(lookupCalls, [["coder", plan, ctxWithRole]]);
 		assert.deepEqual(seenScopeArgs, [["project-a", "/tmp/project-a"]]);
 		assert.equal(computeScopeArg, scoped);
 	});
@@ -204,6 +223,8 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 	it("source: fallback guard is `=== undefined`, never `.length === 0`", () => {
 		assert.ok(/if \(effectiveAllowedTools === undefined && ctx\.roleManager\)/.test(SS_SRC),
 			"_resolveTools must only fall back when no allowlist was supplied");
+		assert.ok(/const role = lookupRole\(roleName, plan, ctx\);/.test(SS_SRC),
+			"_resolveTools must resolve fallback roles through the cascade-aware lookup helper");
 		assert.ok(!/!effectiveAllowedTools \|\| effectiveAllowedTools\.length === 0/.test(SS_SRC),
 			"explicit-empty allowlist must not trigger the role fallback");
 	});

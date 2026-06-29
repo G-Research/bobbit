@@ -1,0 +1,9 @@
+name: market-role-fixture
+description: E2E fixture pack contributing a role used to reproduce cascade role lookup regressions.
+version: 1.0.0
+schema: 2
+contents:
+  roles: [fixture-pack-nurse]
+  tools: []
+  skills: []
+  entrypoints: []

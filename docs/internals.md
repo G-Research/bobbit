@@ -367,7 +367,7 @@ On server startup, standalone stores (`roleStore`) are seeded with builtins that
 
 #### Session setup integration
 
-The session setup pipeline (`session-setup.ts`) resolves roles and tools through `ConfigCascade` when a `plan.projectId` is available. A `lookupRole()` helper in the pipeline prefers cascade-resolved roles, falling back to the standalone store. This ensures sessions see the full three-layer resolution even when project config dirs are empty.
+The session setup pipeline (`session-setup.ts`) resolves roles and tools through `ConfigCascade` when a `plan.projectId` is available. A `lookupRole()` helper in the pipeline prefers cascade-resolved roles, falling back to the standalone store. Session and staff REST paths use the same cascade-first role lookup for creation, assignment, validation, and persisted-session rehydration, so any role shown by `GET /api/roles` can run in the matching project scope. Unknown roles still fail before dispatch.
 
 #### REST API
 
@@ -857,7 +857,7 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 
 - `projectId`
 - `modelProvider`, `modelId` (applied post-create via `setModel` + persisted immediately; worktree sessions set the model once the agent is ready)
-- `role` (resolved via `roleManager.getRole()`, so prompt/accessory/tool policies are re-applied fresh)
+- `role` (resolved cascade-first, with legacy `roleManager.getRole()` fallback, so prompt/accessory/tool policies are re-applied fresh)
 - `sandboxed` flag (new container state per normal per-project sandbox rules)
 - `worktreePath` presence - if the source had a worktree, the new session requests a fresh worktree via the standard create-session pipeline against the current project repo/base ref, including normal pool claim/fallback semantics for non-sandboxed sessions
 

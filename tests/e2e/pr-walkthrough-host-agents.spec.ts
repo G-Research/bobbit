@@ -899,11 +899,12 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 
 	// ── Row A4: a reviewer surviving a gateway restart keeps its tools. ──
 	// The restore / force-respawn paths resolve the session role via
-	// `resolveSessionRole`, which the fix makes cascade-aware + projectId-scoped.
-	// Without the projectId the pack role is lost (roleManager has no `pr-reviewer`)
-	// and the regenerated guard re-blocks the three tools. This pins the restore
-	// path's resolution against the gateway's REAL group-policy store.
-	test("a restored reviewer re-resolves the pack role (cascade + projectId) and keeps its three tools", async ({ gateway }) => {
+	// `resolveSessionRole`, which is cascade-aware and projectId-scoped when a
+	// project is present. A missing projectId still resolves server-scope/built-in
+	// pack roles, while truly unknown roles continue to fail loud by resolving to
+	// undefined. This pins restore resolution against the gateway's REAL
+	// group-policy store.
+	test("a restored reviewer re-resolves the pack role (cascade + projectId) and keeps its walkthrough tools", async ({ gateway }) => {
 		const { resolveGrantPolicy } = await import("../../dist/server/agent/tool-activation.js");
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
@@ -917,15 +918,20 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			const sm: any = gateway.sessionManager;
 			const groupPolicyStore = sm.groupPolicyStore;
 
-			// The restore path now calls resolveSessionRole(ps.role, ps.assistantType, ps.projectId).
+			// The restore path calls resolveSessionRole(ps.role, ps.assistantType, ps.projectId).
 			const restoredRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, ps?.projectId);
 			expect(restoredRole?.name).toBe("pr-reviewer");
 			expect(restoredRole?.toolPolicies?.["PR Walkthrough"]).toBe("allow");
 
-			// The PRE-FIX call shape (no projectId) loses the pack role entirely —
-			// roleManager has no `pr-reviewer`, so the guard would re-block the trio.
-			const preFixRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, undefined);
-			expect(preFixRole).toBeUndefined();
+			// Server-scope/built-in market-pack roles remain resolvable even when an
+			// older persisted call shape lacks projectId.
+			const noProjectRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, undefined);
+			expect(noProjectRole?.name).toBe("pr-reviewer");
+			expect(noProjectRole?.toolPolicies?.["PR Walkthrough"]).toBe("allow");
+
+			// Truly unknown roles still do not inherit the PR Walkthrough group allow.
+			const unknownRole = sm.resolveSessionRole("prw-e2e-missing-role", ps?.assistantType, ps?.projectId);
+			expect(unknownRole).toBeUndefined();
 
 			// The restore prompt path resolves the role's promptTemplate via
 			// resolveRolePromptTemplate, which is now pack-aware — so a restored reviewer
@@ -934,13 +940,15 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(restoredTemplate).toContain("schema_version");
 			expect(restoredTemplate).toContain("merge_assessment");
 
-			// The restored allowlist (persisted) still carries the three tools, and the
-			// regenerated guard (driven by resolveGrantPolicy over the restored role)
-			// grants them — while the pre-fix undefined role would resolve them to never.
+			// The restored allowlist (persisted) still carries the walkthrough tools, and
+			// the regenerated guard (driven by resolveGrantPolicy over the restored role)
+			// grants them. The no-project role behaves the same for server-scope/built-in
+			// pack roles, while an unknown role falls back to the group default deny.
 			for (const t of REVIEWER_TOOLS) {
 				expect((ps?.allowedTools ?? []).includes(t), `restored allowlist must keep ${t}`).toBe(true);
 				expect(resolveGrantPolicy(t, "PR Walkthrough", restoredRole, undefined, groupPolicyStore)).toBe("allow");
-				expect(resolveGrantPolicy(t, "PR Walkthrough", preFixRole, undefined, groupPolicyStore)).toBe("never");
+				expect(resolveGrantPolicy(t, "PR Walkthrough", noProjectRole, undefined, groupPolicyStore)).toBe("allow");
+				expect(resolveGrantPolicy(t, "PR Walkthrough", unknownRole, undefined, groupPolicyStore)).toBe("never");
 			}
 		} finally {
 			fixture.cleanup();
