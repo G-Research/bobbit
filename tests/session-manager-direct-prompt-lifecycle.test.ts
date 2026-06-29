@@ -93,6 +93,20 @@ function autoRetryPendingEvents(session: any): any[] {
 		.filter((event: any) => event?.type === "auto_retry_pending");
 }
 
+function autoRetryCancelledEvents(session: any): any[] {
+	return session.eventBuffer
+		.getAll()
+		.map((entry: any) => entry.event)
+		.filter((event: any) => event?.type === "auto_retry_cancelled");
+}
+
+async function flushAutoRetryMicrotasks(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
 afterEach(() => {
 	while (managers.length > 0) cleanupManager(managers.pop());
 });
@@ -222,6 +236,88 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(prompt.mock.calls[1].arguments[0], "retry once without duplicate queue replay");
 		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered row before redispatching");
 		assert.equal(session.status, "streaming");
+	});
+
+	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			turnHadToolCalls: true,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry the newly failed prompt, not old tool work"),
+			/fetch failed/,
+		);
+		assert.equal(session.turnHadToolCalls, false, "pre-agent_start delivery failure should clear stale tool-call state");
+
+		t.mock.timers.tick(1000);
+		await flushAutoRetryMicrotasks();
+
+		assert.equal(prompt.mock.callCount(), 2, "expected initial failed delivery plus one auto retry");
+		assert.equal(
+			prompt.mock.calls[1].arguments[0],
+			"retry the newly failed prompt, not old tool work",
+			"auto retry should re-send the recovered failed prompt",
+		);
+		assert.doesNotMatch(
+			prompt.mock.calls[1].arguments[0],
+			/continue where you left off/i,
+			"auto retry must not use stale mid-work continuation text",
+		);
+		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered failed prompt row");
+		assert.equal(session.status, "streaming");
+	});
+
+	it("emits auto_retry_cancelled when dispatch-time auto retries exhaust before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry until transport budget exhausts"),
+			/fetch failed/,
+		);
+		assert.equal(autoRetryPendingEvents(session).length, 1, "initial dispatch failure should schedule attempt 1");
+
+		for (const expectedAttempt of [2, 3]) {
+			const pending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(pending, `expected pending retry before attempt ${expectedAttempt}`);
+			t.mock.timers.tick(pending.retryDelayMs);
+			await flushAutoRetryMicrotasks();
+
+			const latestPending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(latestPending, `expected pending retry event for attempt ${expectedAttempt}`);
+			assert.equal(latestPending.attempt, expectedAttempt);
+			assert.ok(session.pendingAutoRetryTimer, `expected timer after scheduling attempt ${expectedAttempt}`);
+		}
+
+		const finalPending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(finalPending, "expected third pending retry before exhaustion");
+		t.mock.timers.tick(finalPending.retryDelayMs);
+		await flushAutoRetryMicrotasks();
+
+		assert.equal(prompt.mock.callCount(), 4, "expected initial delivery plus three bounded auto-retry attempts");
+		assert.equal(autoRetryPendingEvents(session).length, 3, "exhaustion must not emit another pending countdown");
+		assert.equal(session.pendingAutoRetryTimer, undefined, "exhausted retries should leave no active timer");
+		assert.equal(autoRetryCancelledEvents(session).length, 1, "exhaustion should clear the last visible pending banner");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			true,
+			"expected client-visible auto_retry_cancelled event on exhausted dispatch retries",
+		);
+		assert.equal(session.promptQueue.length, 1, "failed prompt should remain queued for manual Retry after exhaustion");
+		assert.equal(session.promptQueue.peek()?.text, "retry until transport budget exhausts");
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
