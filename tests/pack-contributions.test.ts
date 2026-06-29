@@ -444,12 +444,12 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(Object.hasOwn(wire, "module"), false);
 	});
 
-	it("strips unauthorized sessionPty capabilities but retains first-party declarations", () => {
+	it("preserves declared sessionPty capabilities for trusted packs", () => {
 		const thirdPartyRoot = packRoot("reg-channel-auth-user", "third-party");
 		const builtinRoot = packRoot("reg-channel-auth-builtin", "builtin-terminal");
 		for (const [root, name] of [[thirdPartyRoot, "third-party"], [builtinRoot, "builtin-terminal"]] as const) {
 			w(path.join(root, "pack.yaml"), `name: ${name}\n`);
-			w(path.join(root, "channels", "terminal.yaml"), "name: terminal\nmodule: ../lib/channel.mjs\ncapabilities: [sessionPty]\n");
+			w(path.join(root, "channels", "terminal.yaml"), "name: terminal\nmodule: ../lib/channel.mjs\ncapabilities: [sessionPty, futurePower]\n");
 			w(path.join(root, "lib", "channel.mjs"), "export default {};\n");
 		}
 		const thirdPartyManifest = { ...manifest("third-party", { channels: ["terminal"] }), schema: 2 };
@@ -464,7 +464,7 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 			entry(thirdPartyRoot, "project", thirdPartyManifest),
 			builtinEntry,
 		]);
-		assert.equal(reg.getChannel(undefined, "third-party", "terminal")!.capabilities, undefined);
+		assert.deepEqual(reg.getChannel(undefined, "third-party", "terminal")!.capabilities, ["sessionPty"]);
 		assert.deepEqual(reg.getChannel(undefined, "builtin-terminal", "terminal")!.capabilities, ["sessionPty"]);
 	});
 
