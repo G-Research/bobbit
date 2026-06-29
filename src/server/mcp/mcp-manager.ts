@@ -840,7 +840,9 @@ export class McpManager {
 
     for (const [runtimeServerKey, tools] of this.toolDefs) {
       const group = this.connectionGroups.get(runtimeServerKey);
-      const owners = group?.ownerContributions ?? [flatManualContribution(runtimeServerKey, this.configs.get(runtimeServerKey) ?? {})];
+      const owners = group?.ownerContributions?.length
+        ? group.ownerContributions
+        : [flatManualContribution(runtimeServerKey, this.configs.get(runtimeServerKey) ?? {})];
       for (const tool of tools) {
         for (const contribution of owners) {
           const route = this._routeForContributionTool(runtimeServerKey, contribution, tool);
@@ -1081,19 +1083,45 @@ export class McpManager {
       // namespace not owned by any installed contribution.
       const parsed = parseMcpToolName(bobbitToolName);
       if (parsed) {
-        const publicServerKnown = [...this.connectionGroups.values()].some((group) =>
+        const rawMcpToolName = parsed.sub ? `${parsed.sub}__${parsed.op}` : parsed.op;
+        const marketplacePublicServerKnown = [...this.connectionGroups.values()].some((group) =>
           group.ownerContributions.some((c) => c.serverName === parsed.server),
         );
         const subNamespaceKnown = parsed.sub && [...this.connectionGroups.values()].some((group) =>
           group.ownerContributions.some((c) => c.serverName === parsed.server && c.subNamespace === parsed.sub),
         );
-        if (publicServerKnown && parsed.sub && !subNamespaceKnown) {
+        if (marketplacePublicServerKnown && parsed.sub && !subNamespaceKnown) {
           throw new Error(`MCP server "${parsed.server}" sub-namespace is not active for tool "${bobbitToolName}"`);
+        }
+
+        // Manual JSON MCPs historically forwarded unknown operation names to
+        // the MCP server and returned its tool-call-layer isError payload. Keep
+        // that compatibility without bypassing marketplace operation selection:
+        // if the raw op is known locally but absent from the route map, it was
+        // filtered out by namespace/selection/disablement and must stay denied.
+        if (this.configs.has(parsed.server)) {
+          const knownTools = this.toolDefs.get(parsed.server) ?? [];
+          if (!knownTools.some((tool) => tool.name === rawMcpToolName)) {
+            const fallbackRoute: McpToolRoute = {
+              name: bobbitToolName,
+              runtimeServerKey: parsed.server,
+              publicServerName: parsed.server,
+              mcpToolName: rawMcpToolName,
+              tool: { name: rawMcpToolName, inputSchema: { type: "object" } },
+              contribution: flatManualContribution(parsed.server, this.configs.get(parsed.server) ?? {}),
+              group: `MCP: ${parsed.server}`,
+            };
+            return this._callRouteTool(fallbackRoute, args);
+          }
         }
       }
       throw new Error(`MCP tool "${bobbitToolName}" is not available or is disabled`);
     }
 
+    return this._callRouteTool(route, args);
+  }
+
+  private async _callRouteTool(route: McpToolRoute, args: Record<string, unknown>): Promise<McpToolResult> {
     const client = this.clients.get(route.runtimeServerKey);
     if (!client) {
       throw new Error(
@@ -1110,7 +1138,7 @@ export class McpManager {
     return this._withTimeout(
       client.callTool(route.mcpToolName, args),
       this.callToolTimeoutMs,
-      `MCP tool "${bobbitToolName}"`,
+      `MCP tool "${route.name}"`,
     );
   }
 
