@@ -2,17 +2,30 @@
 // render) for file:// use, so the spec can render the same sprite opts N times
 // and observe how many times the canvas data-URL encode (toDataURL) actually
 // runs. Pins the data-URL memoization in src/ui/bobbit-render.ts.
-import { render } from "lit";
+import { html, render } from "lit";
 import {
 	renderSidebarBobbitCanvas,
 	ACCESSORY_DEFS,
 	NO_ACCESSORY,
 	type SidebarBobbitOptions,
 } from "../../src/ui/bobbit-render.js";
-import { statusBobbit } from "../../src/app/session-colors.js";
+import { getAccessory, statusBobbit } from "../../src/app/session-colors.js";
+
+type StaticSidebarBobbitOptions = SidebarBobbitOptions & {
+	/** Sidebar/status call sites opt idle sprites out of the default breathe animation. */
+	staticIdle?: boolean;
+};
 
 function renderInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
 	render(renderSidebarBobbitCanvas(opts), host);
+}
+
+function renderDefaultPreviewInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
+	render(renderSidebarBobbitCanvas(opts), host);
+}
+
+function renderStaticSidebarInto(host: HTMLElement, opts: SidebarBobbitOptions): void {
+	render(renderSidebarBobbitCanvas({ ...opts, staticIdle: true } as StaticSidebarBobbitOptions), host);
 }
 
 function renderStatusInto(
@@ -30,9 +43,35 @@ function renderStatusInto(
 	render(statusBobbit(status, isCompacting, undefined, isSelected, isAborting, false, false, accessory, noDesaturate, unread), host);
 }
 
+function renderStaticSidebarStatusInto(
+	host: HTMLElement,
+	status: string,
+	isCompacting = false,
+	isSelected = false,
+	isAborting = false,
+	accessory?: string,
+	noDesaturate = false,
+	unread = false,
+): void {
+	const sprite = renderSidebarBobbitCanvas({
+		status,
+		isCompacting,
+		isSelected,
+		isAborting,
+		accessory: getAccessory(accessory),
+		noDesaturate,
+		unread,
+		staticIdle: true,
+	} as StaticSidebarBobbitOptions);
+	render(html`<span class="sidebar-bobbit-status-test ${unread ? "bobbit-unread-pulse" : ""}">${sprite}</span>`, host);
+}
+
 (window as any).__sidebarBobbit = {
 	renderInto,
+	renderDefaultPreviewInto,
+	renderStaticSidebarInto,
 	renderStatusInto,
+	renderStaticSidebarStatusInto,
 	ACCESSORY_DEFS,
 	NO_ACCESSORY,
 };
