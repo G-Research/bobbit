@@ -1,0 +1,13 @@
+name: fixture-pack-nurse
+label: Fixture Pack Nurse
+accessory: stethoscope
+model: openai/gpt-4.1-mini
+thinkingLevel: low
+toolPolicies:
+  Shell: never
+  "File System": ask
+createdAt: 1782736000000
+updatedAt: 1782736000000
+promptTemplate: |
+  FIXTURE_PACK_ROLE_PROMPT
+  You are the isolated market-pack role fixture. Agent id: {{AGENT_ID}}.

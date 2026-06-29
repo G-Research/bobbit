@@ -496,6 +496,16 @@ The Roles (`#/roles`), Tools (`#/tools`), and Skills (`#/skills`) pages need no 
 
 Market-pack entities are read-only on those pages (manage them from the Market surface, not by editing the config page).
 
+### Runtime role lookup
+
+Any role returned by `GET /api/roles` is usable anywhere the runtime accepts a role id. Session creation (`POST /api/sessions`), session role assignment (`PATCH /api/sessions/:id`), staff create/update validation, and persisted-session rehydration paths resolve roles through `ConfigCascade.resolveRoles(projectId)` first, then fall back to the legacy `roleManager.getRole(...)` store lookup for compatibility.
+
+This keeps the API and runtime in sync: a market-pack or built-in first-party pack role shown in the Roles page can be selected for sessions and staff agents. The winning role is the same one the cascade exposes, so existing precedence still applies: project-specific entries win over server/global-user entries, and user-pack overrides win over market packs in the same scope (see [Scopes & precedence](#scopes--precedence)).
+
+Runtime resolution preserves the full role record, including `promptTemplate`, `accessory`, `model`, `thinkingLevel`, and `toolPolicies`, so pack roles can carry prompts, UI accessories, model/thinking defaults, and tool grants into sessions just like hand-written roles.
+
+Unknown role ids still fail loudly in REST validation paths, normally as `404`. Callers cannot select a pack identity directly: runtime paths only consume roles already resolved by the config cascade for the target project/scope, which preserves the marketplace security boundary and avoids trusting caller-supplied provenance.
+
 ## Scopes & precedence
 
 The base scope order is **fixed**, lowest→highest priority:
