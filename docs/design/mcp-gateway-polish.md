@@ -247,6 +247,7 @@ Normalization:
 - `mcpOperations` is optional.
 - Keys are MCP `listName` values declared by the pack.
 - Values are operation names as returned by gateway/MCP tools/list after stripping provider prefix into the package operation identity.
+- Store disabled operation names rather than enabled-only lists. This is the selected product behavior: newly discovered operations after a source/package update default enabled unless the user disables them later, while existing disabled operations remain visible and disabled.
 - Drop unknown listNames and unknown operation names on PUT, just like current activation normalization drops unknown entity refs.
 
 ### Operation metadata source
@@ -348,19 +349,22 @@ interface McpPolicyKeys {
 
 - Keep `mcpPolicyPrefix(toolName)` returning the server key for backward compatibility.
 - Add `mcpPolicyKeys()` support for both internal per-op names and meta-tool names.
-- `resolveGrantPolicy()` precedence should be:
+- `resolveGrantPolicy()` precedence should make user/persisted MCP policy more authoritative than tool YAML defaults, with specificity winning within the same policy source:
   1. exact `role.toolPolicies[toolName]`
   2. role operation key
   3. role package/subnamespace key
   4. role server key
   5. role wildcard `mcp__`
   6. non-MCP role group key
-  7. tool YAML default
-  8. group policy operation key
-  9. group policy package/subnamespace key
-  10. group policy server key
+  7. group policy operation key
+  8. group policy package/subnamespace key
+  9. group policy server key
+  10. group policy wildcard `mcp__`
   11. normal group default
-  12. system fallback `allow`
+  12. tool YAML default
+  13. system fallback `allow`
+
+For MCP tools, a persisted/group operation-level `never` such as `mcp__gr__confluence__confluence_add_comment: never` must override a permissive tool YAML default and any broader package/server/default policy. Registration and call dispatch must use this same resolver so a denied operation is neither exposed nor callable.
 
 `computeToolPolicies()`, `computeEffectiveAllowedTools()`, and `writeMcpProxyExtensions()` should continue to use `resolveGrantPolicy()` so registration and guard behavior stay aligned.
 
@@ -444,16 +448,18 @@ interface McpToolRoute {
 }
 ```
 
-`getToolInfos()` should:
+Route-map ownership is an explicit `McpManager` responsibility, not a side effect of the UI/status path. Add a `rebuildToolRouteMap()`/`ensureToolRouteMapFresh()` step that runs during MCP reload/contribution reconciliation and whenever package activation, source installs, connection tool lists, or policy-visible contribution order changes. Track a generation/fingerprint of connection groups plus selected-operation state so stale maps are rebuilt synchronously before exposure or dispatch.
+
+`rebuildToolRouteMap()` should:
 
 1. Iterate connection groups in precedence order.
 2. Build public model names from `serverName`, optional `subNamespace`, and operation name.
 3. Drop operations not selected by package activation.
 4. Insert into `routeMap` by public `modelName`.
 5. If a later contribution produces the same public `modelName`, it replaces the earlier route. The losing operation is hidden from model/tool registration but should be reported in diagnostics/status.
-6. Return the union of visible `modelName`s.
+6. Publish one authoritative map plus diagnostics for readers.
 
-`callTool(modelName, args)` should resolve through `routeMap` before falling back to legacy parsing. Legacy fallback is needed for manual MCP compatibility and for tests that manually populate tool maps.
+`getToolInfos()` should call `ensureToolRouteMapFresh()` and then read the authoritative map; it should not be the only path that populates routing. `callTool(modelName, args)` must also call `ensureToolRouteMapFresh()` before dispatch and resolve through the route map before falling back to legacy parsing. Legacy fallback is needed for manual MCP compatibility and for tests that manually populate tool maps.
 
 ### Precedence order
 

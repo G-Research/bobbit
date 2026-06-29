@@ -64,7 +64,7 @@ Each browse card must retain provenance metadata:
 - source fetch state: `loading`, `ok`, `error`, `empty`
 - install/update state for the currently selected install scope
 
-If duplicate source readable names exist, append a deterministic suffix in UI only, for example `mcp.example.com/mcp · 2`. Use the full normalized authority/path in `title` so provenance remains inspectable.
+If duplicate source readable names exist, render the server-persisted `displayName` verbatim, including its deterministic suffix, for example `mcp.example.com/mcp (2)`. The server is the source of truth for duplicate suffixing so Sources, Browse provenance, installs, persisted ids, and tests stay aligned. Use the raw normalized authority/path and URL in `title` or secondary metadata so provenance remains inspectable.
 
 ### Browse header layout
 
@@ -206,7 +206,7 @@ States:
 - No operations returned for installed gateway package: `No operations are available for this package. Sync the source or check gateway diagnostics.`
 - All operations disabled: card remains installed and visible with `All operations disabled`; runtime tools for that package should not be exposed.
 - Operation name collision: card may show `Shadowed by package order` on affected operation rows if the operation is selected but not exposed due to precedence.
-- Package update adds operations: new operations should default to enabled only if product decides package updates are opt-in compatible; otherwise show `New` and require explicit enable. The UI should support either policy by labeling new rows clearly.
+- Package update adds operations: new operations default enabled because Bobbit persists disabled operation names rather than an enabled-only allowlist. Label newly discovered rows as `New` until the user next reviews or toggles them, but expose them unless they are explicitly disabled or denied by Tools policy.
 
 Recommended test ids:
 
