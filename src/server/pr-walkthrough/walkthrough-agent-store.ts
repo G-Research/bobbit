@@ -15,6 +15,10 @@ export type PrWalkthroughJobStatus = "starting" | "waiting_for_yaml" | "validati
 export type PrWalkthroughTarget = {
 	provider: "github" | "local" | string;
 	prUrl?: string;
+	prTitle?: string;
+	prBody?: string;
+	prBodySource?: string;
+	prBodyFetchedAt?: string;
 	owner?: string;
 	repo?: string;
 	number?: number;
