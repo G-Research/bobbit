@@ -105,6 +105,13 @@ export interface McpReloadResult {
   statuses: McpServerStatus[];
 }
 
+export interface McpReloadOptions {
+  force?: boolean;
+  timeoutMs?: number;
+  /** Queue one fresh reload after the active reload. Used when activation mutates while discovery is in flight. */
+  queueIfInFlight?: boolean;
+}
+
 export interface McpToolRegistrationRefresh {
   /** Remove these external-tool prefixes before registering toolInfos. */
   removePrefixes: string[];
@@ -238,6 +245,8 @@ export class McpManager {
   private connectionGroups = new Map<string, ResolvedMcpConnectionGroup>();
   private serverFingerprints = new Map<string, string>();
   private reloadPromise: Promise<McpReloadResult> | undefined;
+  private queuedReloadPromise: Promise<McpReloadResult> | undefined;
+  private queuedReloadStarted = false;
   private marketplaceResolver: MarketplaceMcpResolver | null = null;
   private readonly discoveryScope: McpDiscoveryScope;
   /** Maps public Bobbit tool names to their authoritative runtime route. */
@@ -656,32 +665,49 @@ export class McpManager {
     }
   }
 
-  async reloadDiscoveredServers(opts?: { force?: boolean; timeoutMs?: number }): Promise<McpReloadResult> {
+  async reloadDiscoveredServers(opts?: McpReloadOptions): Promise<McpReloadResult> {
     const force = opts?.force === true;
-    if (!this.reloadPromise) {
-      this.reloadPromise = this._makeReloadPromise(force);
-    } else {
-      const previous = this.reloadPromise;
-      let chained!: Promise<McpReloadResult>;
-      chained = previous
-        .catch(() => undefined)
-        .then(() => this._reloadDiscoveredServers(force))
-        .finally(() => {
-          if (this.reloadPromise === chained) this.reloadPromise = undefined;
-        });
-      this.reloadPromise = chained;
-    }
+    const reload = this._reloadPromiseForRequest(force, opts?.queueIfInFlight === true);
 
     const timeoutMs = opts?.timeoutMs ?? 30_000;
-    if (timeoutMs <= 0) return this.reloadPromise;
+    if (timeoutMs <= 0) return reload;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Promise<McpReloadResult>((resolve) => {
       timer = setTimeout(() => resolve(this._pendingReloadResult()), timeoutMs);
     });
-    return Promise.race([this.reloadPromise, pending]).finally(() => {
+    return Promise.race([reload, pending]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+  }
+
+  private _reloadPromiseForRequest(force: boolean, queueIfInFlight: boolean): Promise<McpReloadResult> {
+    if (!this.reloadPromise) {
+      this.reloadPromise = this._makeReloadPromise(force);
+      return this.reloadPromise;
+    }
+    if (!queueIfInFlight) return this.reloadPromise;
+    if (!this.queuedReloadPromise || this.queuedReloadStarted) {
+      const previous = this.reloadPromise;
+      let queued!: Promise<McpReloadResult>;
+      queued = previous
+        .catch(() => undefined)
+        .then(() => {
+          if (this.queuedReloadPromise === queued) this.queuedReloadStarted = true;
+          return this._reloadDiscoveredServers(force);
+        })
+        .finally(() => {
+          if (this.queuedReloadPromise === queued) {
+            this.queuedReloadPromise = undefined;
+            this.queuedReloadStarted = false;
+          }
+          if (this.reloadPromise === queued) this.reloadPromise = undefined;
+        });
+      this.queuedReloadPromise = queued;
+      this.queuedReloadStarted = false;
+      this.reloadPromise = queued;
+    }
+    return this.queuedReloadPromise;
   }
 
   private _makeReloadPromise(force: boolean): Promise<McpReloadResult> {

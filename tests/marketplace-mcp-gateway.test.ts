@@ -316,11 +316,13 @@ describe("MCP gateway catalogue primitives", () => {
 			version: "0.0.0",
 			contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: ["jira", "jira-write"] },
 		});
+		const expectedOperations = [{ name: "jira_search", label: "Search", description: "Search issues" }];
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "mcp", "jira.yaml"), "utf-8")), {
 			server: "gr",
 			subNamespace: "jira",
 			label: "Jira",
 			description: "Jira issue tools",
+			operations: expectedOperations,
 			transport: { type: "http", url: SOURCE_URL },
 		});
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "mcp", "jira-write.yaml"), "utf-8")), {
@@ -328,6 +330,7 @@ describe("MCP gateway catalogue primitives", () => {
 			subNamespace: "jira",
 			label: "Jira write",
 			description: "Jira issue tools (write-capable)",
+			operations: expectedOperations,
 			transport: { type: "http", url: "http://mcp-local.t3.zone/write/mcp", headers: { "X-Gateway": "write" } },
 		});
 		const meta = parse(fs.readFileSync(path.join(dest, ".pack-meta.yaml"), "utf-8")) as Record<string, unknown>;

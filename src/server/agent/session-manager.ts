@@ -2220,7 +2220,7 @@ export class SessionManager {
 		const pendingRefreshes: Promise<unknown>[] = [];
 		for (const mgr of managers) {
 			try {
-				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000 });
+				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000, queueIfInFlight: true });
 				results.push(result);
 				if (result.status === "pending") {
 					const pending = mgr.currentReload();

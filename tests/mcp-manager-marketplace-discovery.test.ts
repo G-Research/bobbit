@@ -389,6 +389,35 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(mgr.getToolInfos(), []);
   });
 
+  it("queues one fresh reload when explicitly requested during an in-flight reload", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    let current: ResolvedMcpContribution[] = [contrib("one", "one", { command: "one" })];
+    const resolver: MarketplaceMcpResolver = () => current;
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stub = new StubMcpClient("one", { tools: [op("do")], connectImpl: () => gate });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([["one", stub]]), { marketplaceResolver: resolver }) as any;
+
+    const active = mgr.reloadDiscoveredServers({ force: true, timeoutMs: 1000 });
+    assert.equal(stub.connectCount, 1);
+    current = [];
+    const queued = mgr.reloadDiscoveredServers({ timeoutMs: 1000, queueIfInFlight: true });
+    const coalesced = mgr.reloadDiscoveredServers({ timeoutMs: 1000, queueIfInFlight: true });
+    assert.equal(stub.connectCount, 1);
+
+    release();
+    assert.equal((await active).status, "ok");
+    const [queuedResult, coalescedResult] = await Promise.all([queued, coalesced]);
+    assert.equal(queuedResult.status, "ok");
+    assert.deepEqual(queuedResult.disconnected, ["one"]);
+    assert.deepEqual(coalescedResult.disconnected, ["one"]);
+    assert.equal(stub.connectCount, 1);
+    assert.equal(stub.disconnectCount, 1);
+    assert.deepEqual(mgr.getServerStatuses(), []);
+    assert.deepEqual(mgr.getToolInfos(), []);
+  });
+
   it("updates ownership metadata for unchanged connected server configs", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "same" };
