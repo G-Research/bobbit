@@ -173,6 +173,8 @@ export interface TeamAgent {
 	 * Defaults to "worker" if missing on load.
 	 */
 	kind: "worker" | "reviewer";
+	/** In-memory marker for pre-kind reviewer records that need legacy safeguards. */
+	legacyMissingKind?: boolean;
 	worktreePath?: string;
 	branch?: string;
 	baseSha?: string;
@@ -888,18 +890,22 @@ export class TeamManager {
 			const entry: TeamEntry = {
 				goalId: p.goalId,
 				teamLeadSessionId: p.teamLeadSessionId,
-				agents: p.agents.map((a) => ({
-					sessionId: a.sessionId,
-					role: a.role,
-					// Default to "worker" for back-compat with persisted entries
-					// written before the kind field was introduced.
-					kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
-					worktreePath: a.worktreePath,
-					branch: a.branch,
-					baseSha: a.baseSha,
-					task: a.task,
-					createdAt: a.createdAt,
-				})),
+				agents: p.agents.map((a) => {
+					const hasPersistedKind = a.kind === "reviewer" || a.kind === "worker";
+					return {
+						sessionId: a.sessionId,
+						role: a.role,
+						// Default to "worker" for back-compat with persisted entries
+						// written before the kind field was introduced.
+						kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
+						legacyMissingKind: !hasPersistedKind && a.role === "reviewer" ? true : undefined,
+						worktreePath: a.worktreePath,
+						branch: a.branch,
+						baseSha: a.baseSha,
+						task: a.task,
+						createdAt: a.createdAt,
+					};
+				}),
 				maxConcurrent: p.maxConcurrent,
 			};
 			this.teams.set(p.goalId, entry);
@@ -940,7 +946,7 @@ export class TeamManager {
 		// indistinguishable from orphan team-store cleanup (endless restart loop) but
 		// triggered later in the boot sequence.
 		for (const [goalId, entry] of this.teams) {
-			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
+			const reviewers = entry.agents.filter((a) => this.isVerificationReviewerAgent(a));
 			for (const reviewer of reviewers) {
 				const session = this.sessionManager.getSession(reviewer.sessionId);
 				if (!session || session.status === "terminated") {
@@ -963,6 +969,14 @@ export class TeamManager {
 		}
 
 		for (const [goalId, entry] of this.teams) {
+			try {
+				this.reapStaleWorkers(goalId, entry);
+			} catch (err) {
+				console.error(`[team-manager] Stale-worker reap failed for goal=${goalId}:`, err);
+			}
+		}
+
+		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
@@ -976,10 +990,10 @@ export class TeamManager {
 
 			// Re-subscribe to worker agent events so the team lead is notified
 			// when workers go idle (these subscriptions are lost on restart).
-			// Reviewer sessions are managed by VerificationHarness — never attach
+			// Verification reviewer sessions are managed by VerificationHarness — never attach
 			// the agent_end → notifyTeamLead listener for them.
 			for (const agent of entry.agents) {
-				if (agent.kind === "reviewer" || agent.role === "reviewer") continue;
+				if (this.isVerificationReviewerAgent(agent)) continue;
 				const workerSession = this.sessionManager.getSession(agent.sessionId);
 				if (!workerSession || workerSession.status === "terminated") continue;
 				const { role, sessionId } = agent;
@@ -1203,14 +1217,67 @@ export class TeamManager {
 		return false;
 	}
 
-	/** Get active (non-reviewer, non-terminated) workers for a goal. */
+	private isVerificationReviewerAgent(agent: TeamAgent): boolean {
+		return agent.kind === "reviewer" || (agent.legacyMissingKind === true && agent.role === "reviewer");
+	}
+
+	private hasLiveSession(sessionId: string): boolean {
+		const session = this.sessionManager.getSession(sessionId);
+		return !!session && session.status !== "terminated";
+	}
+
+	private clearReapedWorkerRuntimeState(goalId: string, agent: TeamAgent): void {
+		try {
+			agent.unsubscribeEvent?.();
+		} catch (err) {
+			console.warn(
+				`[team-manager] Failed to unsubscribe stale worker ${agent.sessionId} for goal ${goalId}:`,
+				err,
+			);
+		}
+		agent.unsubscribeEvent = undefined;
+
+		this.sessionToGoal.delete(agent.sessionId);
+		this.lastNotifyTime.delete(agent.sessionId);
+		const pending = this.pendingIdleNotify.get(agent.sessionId);
+		if (pending) {
+			clearTimeout(pending);
+			this.pendingIdleNotify.delete(agent.sessionId);
+		}
+		try { this.config.orchestrationCore?.forgetChild(agent.sessionId); } catch { /* best-effort */ }
+	}
+
+	/**
+	 * Remove non-reviewer worker records whose backing session is missing or terminated.
+	 * This is a passive reap only: it updates tracking state and never terminates,
+	 * archives, broadcasts, or cleans up worktrees for already-dead sessions.
+	 */
+	private reapStaleWorkers(goalId: string, entry: TeamEntry | undefined = this.teams.get(goalId)): number {
+		if (!entry) return 0;
+		let reaped = 0;
+		for (let i = entry.agents.length - 1; i >= 0; i--) {
+			const agent = entry.agents[i];
+			if (this.isVerificationReviewerAgent(agent)) continue;
+			if (this.hasLiveSession(agent.sessionId)) continue;
+
+			this.clearReapedWorkerRuntimeState(goalId, agent);
+			entry.agents.splice(i, 1);
+			reaped++;
+			console.log(
+				`[team-manager] Reaped stale worker ${agent.sessionId} (${agent.role}) from goal ${goalId}`,
+			);
+		}
+		if (reaped > 0) this.persistEntry(goalId);
+		return reaped;
+	}
+
+	/** Get active workers, excluding only VerificationHarness reviewers and terminated sessions. */
 	private getActiveWorkers(goalId: string): TeamAgent[] {
 		const entry = this.teams.get(goalId);
 		if (!entry) return [];
-		return entry.agents.filter((a) => {
-			if (a.role === 'reviewer') return false;
-			const s = this.sessionManager.getSession(a.sessionId);
-			return s && s.status !== "terminated";
+		return entry.agents.filter((agent) => {
+			if (this.isVerificationReviewerAgent(agent)) return false;
+			return this.hasLiveSession(agent.sessionId);
 		});
 	}
 
@@ -1778,10 +1845,12 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Check concurrency limit
-		if (entry.agents.length >= entry.maxConcurrent) {
+		// Check concurrency limit using the same live-worker semantics as sidebar/listing.
+		this.reapStaleWorkers(goalId, entry);
+		const activeWorkerCount = this.getActiveWorkers(goalId).length;
+		if (activeWorkerCount >= entry.maxConcurrent) {
 			throw new Error(
-				`Team for goal ${goalId} already has ${entry.agents.length} agents (max: ${entry.maxConcurrent})`,
+				`Team for goal ${goalId} already has ${activeWorkerCount} agents (active workers; max: ${entry.maxConcurrent})`,
 			);
 		}
 
@@ -2040,11 +2109,11 @@ export class TeamManager {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;
 
-		// Defensive guard: never nudge the team lead about a reviewer session.
-		// Reviewer sessions are managed by VerificationHarness; their agent_end
-		// is part of the verification flow, not a worker-finished signal.
+		// Defensive guard: never nudge the team lead about a verification reviewer session.
+		// Reviewer sessions managed by VerificationHarness have kind="reviewer"; legacy
+		// pre-kind reviewer records carry an in-memory marker from restore.
 		const firingAgent = entry.agents.find((a) => a.sessionId === workerSessionId);
-		if (firingAgent && (firingAgent.kind === "reviewer" || firingAgent.role === "reviewer")) {
+		if (firingAgent && this.isVerificationReviewerAgent(firingAgent)) {
 			return;
 		}
 
