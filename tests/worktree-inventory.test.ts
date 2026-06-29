@@ -19,7 +19,7 @@ function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?
 	};
 }
 
-function makeService(ctx: any, porcelain: string, pools = new Map()) {
+function makeService(ctx: any, porcelain: string | ((repoPath: string, args: readonly string[]) => string), pools = new Map()) {
 	return new WorktreeInventoryService({
 		projectContextManager: { visible: function* () { yield ctx; }, all: function* () { yield ctx; } } as any,
 		sessionManager: {
@@ -27,7 +27,7 @@ function makeService(ctx: any, porcelain: string, pools = new Map()) {
 			getAllWorktreePools: () => pools,
 			listArchivedSessionWorktrees: async () => { throw new Error("inventory must not use legacy archived scanner"); },
 		} as any,
-		execGit: async (_repoPath, args) => args[0] === "worktree" ? porcelain : "",
+		execGit: async (repoPath, args) => args[0] === "worktree" ? (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
 		clock: () => 1,
 	});
 }
@@ -67,6 +67,41 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.classification, "archived-owned");
 			assert.equal(item.disposition, "ready-to-clean");
 			assert.equal(item.defaultSelected, true);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("scans archived session repo paths even when they are outside configured project repos", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const archivedRepo = path.join(root, "archived-repo");
+			fs.mkdirSync(path.join(archivedRepo, ".git"), { recursive: true });
+			const wt = path.join(root, "archived-repo-wt", "session-arch");
+			fs.mkdirSync(wt, { recursive: true });
+			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: archivedRepo, worktreePath: wt, branch: "session/arch", archived: true };
+			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), (repoPath) => repoPath === archivedRepo ? `worktree ${archivedRepo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n` : `worktree ${repo}\nbranch refs/heads/master\n`);
+			const report = await service.scan();
+			const item = report.items.find(i => i.legacy?.archivedSession?.sessionId === "a1")!;
+			assert.equal(item.repoPath, archivedRepo);
+			assert.equal(item.gitWorktreeMetadataExists, true);
+			assert.equal(item.classification, "archived-owned");
+			assert.equal(item.actionable, true);
+			const legacy = await service.legacyArchivedSessionWorktrees();
+			assert.equal(legacy.items.find(candidate => candidate.sessionId === "a1")?.status, "removable");
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps already-cleaned archived rows non-destructive even when the branch still exists", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const missingWt = path.join(root, "repo-wt", "missing-session-arch");
+			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: missingWt, branch: "session/arch", archived: true };
+			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n`);
+			const report = await service.scan();
+			const item = report.items.find(i => i.legacy?.archivedSession?.sessionId === "a1")!;
+			assert.equal(item.classification, "already-cleaned");
+			assert.equal(item.willDeleteBranch, false);
+			const legacy = await service.legacyArchivedSessionWorktrees(true);
+			assert.equal(legacy.items.find(candidate => candidate.sessionId === "a1")?.willDeleteBranch, false);
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 

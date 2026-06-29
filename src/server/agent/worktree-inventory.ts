@@ -163,7 +163,7 @@ export interface WorktreeInventoryDeps {
 }
 
 interface ParsedGitWorktree { path: string; branch?: string }
-interface RepoDescriptor { projectId: string; projectName: string; repo: string; componentName?: string; repoPath: string; worktreeRoot: string; components: Component[]; primary: boolean }
+interface RepoDescriptor { projectId: string; projectName: string; repo: string; componentName?: string; repoPath: string; worktreeRoot: string; components: Component[]; primary: boolean; archivedOnly?: boolean }
 interface Candidate {
 	projectId: string;
 	projectName: string;
@@ -490,9 +490,9 @@ export class WorktreeInventoryService {
 				sessionId: item?.sessionId ?? result.itemId,
 				title: row?.session?.title ?? item?.title,
 				repo: item?.repo,
-				repoPath: result.repoPath ?? item?.repoPath,
-				path: result.path ?? item?.path,
-				branch: result.branch ?? item?.branch,
+				repoPath: item?.repoPath ?? result.repoPath,
+				path: item?.path ?? result.path,
+				branch: item?.branch ?? result.branch,
 			};
 			if (result.status === "cleaned") record({ ...base, status: "cleaned", reason: result.branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned", worktreeRemoved: result.worktreeRemoved, branchDeleted: result.branchDeleted });
 			else if (result.status === "already-cleaned") record({ ...base, status: "already-cleaned", reason: "already-cleaned", detail: result.detail, worktreeRemoved: false, branchDeleted: false });
@@ -648,6 +648,13 @@ export class WorktreeInventoryService {
 
 	private discoverRepos(): RepoDescriptor[] {
 		const repos: RepoDescriptor[] = [];
+		const seen = new Set<string>();
+		const addRepo = (repo: RepoDescriptor) => {
+			const key = `${repo.projectId}|${repo.repo}|${repoKey(repo.repoPath)}`;
+			if (!repo.repoPath || seen.has(key)) return;
+			seen.add(key);
+			repos.push(repo);
+		};
 		for (const ctx of this.deps.projectContextManager.visible()) {
 			const components = ctx.projectConfigStore.getComponents();
 			const worktreeRoot = resolveWorktreeRoot({ rootPath: ctx.project.rootPath, worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined });
@@ -656,7 +663,23 @@ export class WorktreeInventoryService {
 			else for (const component of components) repoNames.add(component.repo);
 			for (const repo of repoNames) {
 				const repoPath = repo === "." ? ctx.project.rootPath : path.join(ctx.project.rootPath, repo);
-				repos.push({ projectId: ctx.project.id, projectName: ctx.project.name, repo, componentName: components.find(c => c.repo === repo)?.name, repoPath, worktreeRoot, components, primary: repo === "." });
+				addRepo({ projectId: ctx.project.id, projectName: ctx.project.name, repo, componentName: components.find(c => c.repo === repo)?.name, repoPath, worktreeRoot, components, primary: repo === "." });
+			}
+			for (const session of ctx.sessionStore.getArchived() as PersistedSession[]) {
+				for (const item of this.archivedItemsForSession(session, ctx.project.name)) {
+					if (!item.repoPath) continue;
+					addRepo({
+						projectId: item.projectId ?? ctx.project.id,
+						projectName: item.projectName ?? ctx.project.name,
+						repo: item.repo,
+						componentName: components.find(c => c.repo === item.repo)?.name,
+						repoPath: item.repoPath,
+						worktreeRoot,
+						components,
+						primary: item.repo === ".",
+						archivedOnly: true,
+					});
+				}
 			}
 		}
 		return repos;
@@ -665,6 +688,7 @@ export class WorktreeInventoryService {
 	private addFilesystemCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {
 		const reposByRoot = new Map<string, RepoDescriptor[]>();
 		for (const repo of repos) {
+			if (repo.archivedOnly) continue;
 			const arr = reposByRoot.get(repo.worktreeRoot) ?? [];
 			arr.push(repo);
 			reposByRoot.set(repo.worktreeRoot, arr);
@@ -692,7 +716,7 @@ export class WorktreeInventoryService {
 	private addPoolCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {
 		for (const [projectId, pool] of this.deps.sessionManager.getAllWorktreePools()) {
 			const snapshot = pool.snapshotEntries();
-			const projectRepos = repos.filter(repo => repo.projectId === projectId);
+			const projectRepos = repos.filter(repo => repo.projectId === projectId && !repo.archivedOnly);
 			for (const entry of snapshot.entries) {
 				if (entry.worktrees && entry.worktrees.length > 0) {
 					for (const wt of entry.worktrees) {
@@ -866,9 +890,9 @@ export class WorktreeInventoryService {
 		if (this.isArchivedDelegateSharedCandidate(candidate)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree." };
 		if (liveOwner) return { ...item, classification: "protected-in-use", disposition: "protected", reason: this.ownerReason(liveOwner.type), detail: "A live Bobbit record still references this worktree." };
 		if (candidate.sources.has("pool") || isBobbitPoolBranch(candidate.branch)) return { ...item, classification: "pool-entry", disposition: "needs-attention", reason: "safe-pool-entry", detail: "Pool entries are inventoried for troubleshooting and reclaimed by the worktree pool, not selected by maintenance cleanup." };
-		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: item.branchDeleteBlockedReason === "branch-referenced-by-archived-record" ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another archived record still references the branch." : item.branchDeleteBlockedReason ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another live record still references the branch." : "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true };
+		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: item.branchDeleteBlockedReason === "branch-referenced-by-archived-record" ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another archived record still references the branch." : item.branchDeleteBlockedReason ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another live record still references the branch." : "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, willDeleteBranch: !!candidate.branch && !!item.localBranchExists && !item.branchDeleteBlockedReason };
 		if (candidate.branch && guards.liveBranches.get(repoKey(candidate.repoPath))?.has(candidate.branch)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "branch-referenced-by-live-record", detail: "A live Bobbit record still references this branch." };
-		if (candidate.gitWorktreeMetadataExists && isBobbitOwnedBranch(candidate.branch)) return { ...item, classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", detail: "Unowned Bobbit git worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, legacy: isLegacySessionOrphanBranch(candidate.branch) ? { ...item.legacy, orphanedWorktree: true } : item.legacy };
+		if (candidate.gitWorktreeMetadataExists && isBobbitOwnedBranch(candidate.branch)) return { ...item, classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", detail: "Unowned Bobbit git worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, willDeleteBranch: !!candidate.branch && !!item.localBranchExists && !item.branchDeleteBlockedReason, legacy: isLegacySessionOrphanBranch(candidate.branch) ? { ...item.legacy, orphanedWorktree: true } : item.legacy };
 		if (archivedOwner && !candidate.pathExists && !candidate.gitWorktreeMetadataExists) return { ...item, classification: "already-cleaned", disposition: "already-cleaned", reason: "git-worktree-metadata-missing", detail: "Archived-owned worktree is already absent." };
 		return { ...item, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", detail: archivedOwner ? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories." : "Filesystem-only directory under a Bobbit worktree root requires manual attention." };
 	}
@@ -898,7 +922,7 @@ export class WorktreeInventoryService {
 			pathExists: candidate.pathExists,
 			gitWorktreeMetadataExists: candidate.gitWorktreeMetadataExists,
 			localBranchExists,
-			willDeleteBranch: !!candidate.branch && localBranchExists && !branchDeleteBlockedReason,
+			willDeleteBranch: false,
 			branchDeleteBlockedReason,
 			legacy: candidate.legacyArchived ? { archivedSession: { sessionId: candidate.legacyArchived.sessionId, repo: candidate.legacyArchived.repo, source: candidate.legacyArchived.source, selectionCategories: candidate.legacyArchived.selectionCategories, item: candidate.legacyArchived } } : undefined,
 		};
