@@ -6,6 +6,8 @@ const MAX_SCROLLBACK = 5000;
 const FIT_RETRY_DELAYS_MS = [0, 32, 80, 160, 320] as const;
 const RESIZE_SEND_DEBOUNCE_MS = 120;
 const SCROLL_BOTTOM_EPSILON = 1;
+const TOUCH_SCROLL_INTENT_PX = 8;
+const TOUCH_SCROLL_AXIS_RATIO = 1.2;
 
 type HostChannelFrame = { kind: "text"; data: string } | { kind: "json"; data: unknown };
 type HostChannel = {
@@ -180,7 +182,7 @@ function ensureTerminalMounted(state: SessionState): void {
 		void state.channel?.send({ kind: "text", data }).catch((err) => setError(state, err));
 	});
 	const scrollDisposable = term.onScroll(() => updateFollowOutputFromViewport(state));
-	state.disposers.push(() => inputDisposable.dispose(), () => scrollDisposable.dispose());
+	state.disposers.push(() => inputDisposable.dispose(), () => scrollDisposable.dispose(), installTouchScrollBridge(state));
 	state.terminalDisposerCount = state.disposers.length;
 	state.resizeObserver = new ResizeObserver(() => scheduleFitAndResize(state));
 	state.resizeObserver.observe(state.terminalHost);
@@ -490,6 +492,113 @@ function updateFollowOutputFromViewport(state: SessionState): void {
 	state.followOutput = atBottom || promptPinned;
 }
 
+function installTouchScrollBridge(state: SessionState): () => void {
+	type TouchScrollTracking = {
+		identifier: number;
+		startX: number;
+		startY: number;
+		lastY: number;
+		lineRemainder: number;
+		scrolling: boolean;
+	};
+	let tracking: TouchScrollTracking | undefined;
+	const findTouch = (touches: TouchList): Touch | undefined => {
+		if (!tracking) return undefined;
+		for (let i = 0; i < touches.length; i += 1) {
+			const touch = touches.item(i);
+			if (touch?.identifier === tracking.identifier) return touch;
+		}
+		return undefined;
+	};
+	const isScrollableTarget = (target: EventTarget | null): boolean => {
+		return target instanceof Element && !!target.closest(".xterm-screen, .xterm-rows, .xterm-viewport");
+	};
+	const stopIfEnded = (touches: TouchList): void => {
+		if (!tracking) return;
+		for (let i = 0; i < touches.length; i += 1) {
+			if (touches.item(i)?.identifier === tracking.identifier) {
+				tracking = undefined;
+				return;
+			}
+		}
+	};
+	const onTouchStart = (event: TouchEvent): void => {
+		if (event.touches.length !== 1 || !isScrollableTarget(event.target)) {
+			tracking = undefined;
+			return;
+		}
+		const touch = event.touches.item(0);
+		if (!touch) return;
+		tracking = {
+			identifier: touch.identifier,
+			startX: touch.clientX,
+			startY: touch.clientY,
+			lastY: touch.clientY,
+			lineRemainder: 0,
+			scrolling: false,
+		};
+	};
+	const onTouchMove = (event: TouchEvent): void => {
+		const touch = findTouch(event.touches);
+		if (!tracking || !touch) return;
+		const totalX = touch.clientX - tracking.startX;
+		const totalY = touch.clientY - tracking.startY;
+		if (!tracking.scrolling) {
+			const absX = Math.abs(totalX);
+			const absY = Math.abs(totalY);
+			if (absX < TOUCH_SCROLL_INTENT_PX && absY < TOUCH_SCROLL_INTENT_PX) return;
+			if (absY <= absX * TOUCH_SCROLL_AXIS_RATIO) {
+				tracking = undefined;
+				return;
+			}
+			tracking.scrolling = true;
+		}
+		const deltaY = touch.clientY - tracking.lastY;
+		tracking.lastY = touch.clientY;
+		if (deltaY === 0) return;
+		if (event.cancelable) event.preventDefault();
+		scrollTerminalByTouchDelta(state, tracking, deltaY);
+	};
+	const onTouchEnd = (event: TouchEvent): void => stopIfEnded(event.changedTouches);
+	state.terminalHost.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
+	state.terminalHost.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
+	state.terminalHost.addEventListener("touchend", onTouchEnd, { capture: true, passive: true });
+	state.terminalHost.addEventListener("touchcancel", onTouchEnd, { capture: true, passive: true });
+	return () => {
+		state.terminalHost.removeEventListener("touchstart", onTouchStart, { capture: true });
+		state.terminalHost.removeEventListener("touchmove", onTouchMove, { capture: true });
+		state.terminalHost.removeEventListener("touchend", onTouchEnd, { capture: true });
+		state.terminalHost.removeEventListener("touchcancel", onTouchEnd, { capture: true });
+	};
+}
+
+function scrollTerminalByTouchDelta(state: SessionState, tracking: { lineRemainder: number }, deltaY: number): void {
+	const term = state.term;
+	if (!term) return;
+	const rowHeight = terminalRowHeight(state);
+	const rawLines = tracking.lineRemainder - (deltaY / rowHeight);
+	const lines = rawLines < 0 ? Math.ceil(rawLines) : Math.floor(rawLines);
+	tracking.lineRemainder = rawLines - lines;
+	if (lines === 0) return;
+	try {
+		term.scrollLines(lines);
+		updateFollowOutputFromViewport(state);
+	} catch {
+		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
+	}
+}
+
+function terminalRowHeight(state: SessionState): number {
+	const termRows = state.term?.rows ?? 0;
+	const screen = state.terminalHost.querySelector(".xterm-screen") as HTMLElement | null;
+	const screenHeight = screen?.getBoundingClientRect().height ?? 0;
+	if (termRows > 0 && screenHeight > 0) return Math.max(1, screenHeight / termRows);
+	const viewport = state.terminalHost.querySelector(".xterm-viewport") as HTMLElement | null;
+	const viewportHeight = viewport?.clientHeight ?? 0;
+	if (termRows > 0 && viewportHeight > 0) return Math.max(1, viewportHeight / termRows);
+	return 16;
+}
+
 function canFitTerminal(state: SessionState): boolean {
 	if (!state.term || !state.fit || !state.root.isConnected || !state.terminalHost.isConnected) return false;
 	const rootStyle = getComputedStyle(state.root);
@@ -579,8 +688,10 @@ function installStyles(): void {
 .bb-terminal-host .xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none;}
 .bb-terminal-host .xterm .composition-view{background:var(--background);color:var(--foreground);display:none;position:absolute;white-space:nowrap;z-index:1;}
 .bb-terminal-host .xterm .composition-view.active{display:block;}
+.bb-terminal-host .xterm .xterm-viewport,.bb-terminal-host .xterm .xterm-scrollable-element{overscroll-behavior:contain;touch-action:pan-y;}
 .bb-terminal-host .xterm .xterm-viewport{background-color:var(--background);overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0;}
-.bb-terminal-host .xterm .xterm-screen{position:relative;}
+.bb-terminal-host .xterm .xterm-screen{position:relative;touch-action:pan-y;}
+.bb-terminal-host .xterm .xterm-rows,.bb-terminal-host .xterm .xterm-screen canvas{touch-action:pan-y;}
 .bb-terminal-host .xterm .xterm-screen canvas{position:absolute;left:0;top:0;}
 .bb-terminal-host .xterm-char-measure-element{display:inline-block;visibility:hidden;position:absolute;top:0;left:-9999em;line-height:normal;}
 .bb-terminal-host .xterm.enable-mouse-events{cursor:default;}
