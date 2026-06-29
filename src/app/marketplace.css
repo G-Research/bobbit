@@ -399,6 +399,7 @@
 	color: var(--muted-foreground);
 }
 
+.market-source-type-chip[data-kind="mcp-gateway"],
 .market-source-type-chip[data-kind="mcp-registry"] {
 	background: color-mix(in oklch, var(--info, var(--chart-4)) 14%, transparent);
 	color: var(--info, var(--chart-4));

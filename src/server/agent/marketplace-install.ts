@@ -24,15 +24,17 @@ import { loadPackContributions } from "./pack-contributions.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import { parseFrontmatter } from "../skills/slash-skills.js";
 import type { MarketplaceSource, MarketplaceSourceStore } from "./marketplace-source-store.js";
+import { LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON } from "./marketplace-source-store.js";
 import {
-	fetchMcpRegistryWithDiagnostics,
-	isMcpRegistrySource,
-	materializeRegistryPack,
-	registryPackNameForId,
-	registryServerToVirtualPack,
-	type McpRegistryBrowsePack,
-	type McpRegistrySkippedEntry,
-} from "./mcp-registry-source.js";
+	fetchMcpGatewayWithDiagnostics,
+	gatewayPackNameForProvider,
+	gatewayProviderToVirtualPack,
+	isLegacyMcpRegistrySource,
+	isMcpGatewaySource,
+	materializeGatewayProviderPack,
+	type McpGatewayBrowsePack,
+	type McpGatewaySkippedEntry,
+} from "./mcp-gateway-source.js";
 
 /** Install scopes — builtin is never an install target. */
 export type InstallScope = "global-user" | "server" | "project";
@@ -63,8 +65,8 @@ export interface PackEntityDescriptions {
 	mcp?: Record<string, string>;
 }
 
-export interface MarketplaceMcpRegistryDiagnostics {
-	skippedEntries: McpRegistrySkippedEntry[];
+export interface MarketplaceMcpGatewayDiagnostics {
+	skippedEntries: McpGatewaySkippedEntry[];
 }
 
 /** Browse-payload pack shape (manifest + dirName + executable-code flag). */
@@ -73,16 +75,16 @@ export interface BrowsePack extends PackManifest {
 	hasTools: boolean;
 	/** One-line per-entity descriptions for the Browse disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
-	/** Virtual browse rows are generated from non-pack sources (currently MCP registries). */
+	/** Virtual browse rows are generated from non-pack sources (currently MCP gateways). */
 	virtual?: boolean;
-	sourceType?: "mcp-registry";
-	registryId?: string;
+	sourceType?: "mcp-gateway" | "mcp-registry";
+	gatewayProviderId?: string;
 	serverName?: string;
 	/** Rich MCP transport previews used by the Market browse UI. */
 	mcp?: Array<Record<string, unknown>>;
 	mcpServers?: Array<Record<string, unknown>>;
-	/** Source-level diagnostics for registry entries skipped while preserving browse compatibility. */
-	mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics;
+	/** Source-level diagnostics for gateway entries skipped while preserving browse compatibility. */
+	mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics;
 }
 
 /** Installed-pack listing row for the REST layer. */
@@ -98,8 +100,8 @@ export interface InstalledPackWire {
 	/** `"unknown"` when the source can't be checked (removed / never-synced / no
 	 *  version data) — disambiguates "up to date" from "source unknown". */
 	sourceStatus: "ok" | "unknown";
-	/** Source-level diagnostics for registry entries skipped while preserving install/update compatibility. */
-	mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics;
+	/** Source-level diagnostics for gateway entries skipped while preserving install/update compatibility. */
+	mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics;
 }
 
 /** Coded error so the REST layer can map to HTTP statuses. */
@@ -444,9 +446,10 @@ export class MarketplaceInstaller {
 	/** Sync (if needed) then list packs in the source's top level. */
 	browsePacks(sourceId: string): BrowsePack[] {
 		const source = this.opts.sourceStore.get(sourceId);
-		if (source && isMcpRegistrySource(source)) {
-			throw new MarketplaceError("invalid_pack", "mcp-registry sources must be browsed asynchronously");
+		if (source && isMcpGatewaySource(source)) {
+			throw new MarketplaceError("invalid_pack", "mcp-gateway sources must be browsed asynchronously");
 		}
+		if (source && isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
 		const { root } = this.syncSource(sourceId);
 		let dirents: fs.Dirent[];
 		try {
@@ -470,48 +473,51 @@ export class MarketplaceInstaller {
 		return packs;
 	}
 
-	/** Browse either authored pack sources or MCP registry sources. */
+	/** Browse either authored pack sources or MCP gateway sources. */
 	async browseSourcePacks(sourceId: string): Promise<BrowsePack[]> {
 		const source = this.opts.sourceStore.get(sourceId);
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${sourceId}`);
-		if (!isMcpRegistrySource(source)) return this.browsePacks(sourceId);
-		const parsed = await fetchMcpRegistryWithDiagnostics(source);
-		const fingerprint = parsed.servers.map((s) => s.fingerprint).join(",");
+		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
+		if (!isMcpGatewaySource(source)) return this.browsePacks(sourceId);
+		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const fingerprint = parsed.providers.map((p) => p.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
-		const diagnostics = mcpRegistryDiagnostics(parsed.skipped);
-		return parsed.servers.map((server): McpRegistryBrowsePack => {
-			const pack = registryServerToVirtualPack(server);
-			if (diagnostics) pack.mcpRegistryDiagnostics = diagnostics;
+		const diagnostics = mcpGatewayDiagnostics(parsed.skipped);
+		return parsed.providers.map((provider): McpGatewayBrowsePack => {
+			const pack = gatewayProviderToVirtualPack(provider);
+			if (diagnostics) pack.mcpGatewayDiagnostics = diagnostics;
 			return pack;
 		});
 	}
 
 	/** Validate/fetch a source without necessarily cloning it. */
-	async syncMarketplaceSource(sourceId: string): Promise<MarketplaceSource & { mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics }> {
+	async syncMarketplaceSource(sourceId: string): Promise<MarketplaceSource & { mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics }> {
 		const source = this.opts.sourceStore.get(sourceId);
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${sourceId}`);
-		if (!isMcpRegistrySource(source)) return this.syncSource(sourceId).source;
-		const parsed = await fetchMcpRegistryWithDiagnostics(source);
-		const fingerprint = parsed.servers.map((s) => s.fingerprint).join(",");
+		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
+		if (!isMcpGatewaySource(source)) return this.syncSource(sourceId).source;
+		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const fingerprint = parsed.providers.map((p) => p.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
-		return withMcpRegistryDiagnostics(this.opts.sourceStore.get(sourceId)!, parsed.skipped);
+		return withMcpGatewayDiagnostics(this.opts.sourceStore.get(sourceId)!, parsed.skipped);
 	}
 
 	/**
 	 * Compute the source-update state for an installed pack WITHOUT any network
 	 * sync (R2). Resolves authored pack sources from the EXISTING local cache only:
 	 * a local-dir source is read at `localSourcePath(url)` if it exists; a git
-	 * source is read at `cacheDirFor(source.id)` if already cloned. Registry MCP
+	 * source is read at `cacheDirFor(source.id)` if already cloned. MCP gateway
 	 * sources do not have a pack-tree cache, so a still-registered source is enough
 	 * to report `sourceStatus:"ok"`; `lastCommit` fingerprints give a best-effort
-	 * stale check after the registry has been browsed/synced.
+	 * stale check after the gateway has been browsed/synced.
 	 */
 	private computeSourceState(meta: PackMeta): { updateAvailable: boolean; sourceStatus: "ok" | "unknown" } {
 		const unknown = { updateAvailable: false, sourceStatus: "unknown" as const };
 		if (!meta.sourceUrl || !meta.packName) return unknown;
 		const source = this.opts.sourceStore.getByUrl(meta.sourceUrl);
 		if (!source) return unknown;
-		if (isMcpRegistrySource(source)) {
+		if (isLegacyMcpRegistrySource(source)) return unknown;
+		if (isMcpGatewaySource(source)) {
 			const currentFingerprints = new Set((source.lastCommit ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 			const updateAvailable = Boolean(meta.commit && currentFingerprints.size > 0 && !currentFingerprints.has(meta.commit));
 			return { updateAvailable, sourceStatus: "ok" };
@@ -599,7 +605,7 @@ export class MarketplaceInstaller {
 		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
-	/** Install either an authored pack source row or a virtual MCP registry pack row. */
+	/** Install either an authored pack source row or a virtual MCP gateway pack row. */
 	async installMarketplacePack(args: {
 		sourceId: string;
 		dirName: string;
@@ -609,15 +615,16 @@ export class MarketplaceInstaller {
 	}): Promise<InstalledPackWire> {
 		const source = this.opts.sourceStore.get(args.sourceId);
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${args.sourceId}`);
-		if (!isMcpRegistrySource(source)) return this.installPack(args);
+		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
+		if (!isMcpGatewaySource(source)) return this.installPack(args);
 		if (!isSafeDirName(args.dirName)) throw new MarketplaceError("unsafe_name", `unsafe source dir name: ${JSON.stringify(args.dirName)}`);
 
-		const parsed = await fetchMcpRegistryWithDiagnostics(source);
-		const server = parsed.servers.find((s) => registryPackNameForId(s.id) === args.dirName || s.id === args.dirName);
-		if (!server) throw new MarketplaceError("unknown_pack", registryMissingMessage(args.dirName, parsed.skipped));
-		const manifest = registryServerToVirtualPack(server);
+		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id) === args.dirName || p.id === args.dirName);
+		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(args.dirName, parsed.skipped));
+		const manifest = gatewayProviderToVirtualPack(provider);
 		const packName = manifest.name;
-		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in registry: ${JSON.stringify(packName)}`);
+		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in gateway: ${JSON.stringify(packName)}`);
 
 		const ctx: ScopeContext = { scope: args.scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
 		const marketRoot = this.marketPacksRoot(ctx);
@@ -630,7 +637,7 @@ export class MarketplaceInstaller {
 		const meta: PackMeta = {
 			sourceUrl: source.url,
 			sourceRef: "",
-			commit: server.fingerprint,
+			commit: provider.fingerprint,
 			packName,
 			version: manifest.version,
 			installedAt: now,
@@ -638,16 +645,16 @@ export class MarketplaceInstaller {
 			scope: args.scope as PackScope,
 		};
 		try {
-			materializeRegistryPack(server, staging, { sourceUrl: source.url, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
 			throw err;
 		}
-		this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.servers.map((s) => s.fingerprint).join(",") });
+		this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
 		this.appendOrder(ctx, packName);
-		return withMcpRegistryDiagnostics({ scope: args.scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
+		return withMcpGatewayDiagnostics({ scope: args.scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 
 	/** Uninstall: delete the dir, drop from pack_order. */
@@ -677,8 +684,9 @@ export class MarketplaceInstaller {
 		const source = this.opts.sourceStore.getByUrl(oldMeta.sourceUrl);
 		if (!source) throw new MarketplaceError("unknown_source", `source no longer registered: ${oldMeta.sourceUrl}`);
 
-		if (isMcpRegistrySource(source)) {
-			throw new MarketplaceError("invalid_pack", "mcp-registry packs must be updated asynchronously");
+		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
+		if (isMcpGatewaySource(source)) {
+			throw new MarketplaceError("invalid_pack", "mcp-gateway packs must be updated asynchronously");
 		}
 		const { root, commit } = this.syncSource(source.id);
 		// The installed dir name is `manifest.name`, which may differ from the
@@ -723,7 +731,7 @@ export class MarketplaceInstaller {
 		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
-	/** Update either an authored pack or a virtual MCP registry pack. */
+	/** Update either an authored pack or a virtual MCP gateway pack. */
 	async updateMarketplacePack(args: { packName: string; scope: InstallScope; projectBase?: string; packOrderStore?: PackOrderStore }): Promise<InstalledPackWire> {
 		const { packName, scope } = args;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name: ${JSON.stringify(packName)}`);
@@ -734,17 +742,19 @@ export class MarketplaceInstaller {
 		const oldMeta = readMeta(dest);
 		if (!oldMeta) throw new MarketplaceError("invalid_pack", `installed pack is corrupt (missing .pack-meta.yaml): ${packName}`);
 		const source = this.opts.sourceStore.getByUrl(oldMeta.sourceUrl);
-		if (!source || !isMcpRegistrySource(source)) return this.updatePack(args);
+		if (!source) return this.updatePack(args);
+		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
+		if (!isMcpGatewaySource(source)) return this.updatePack(args);
 
-		const parsed = await fetchMcpRegistryWithDiagnostics(source);
-		const server = parsed.servers.find((s) => registryPackNameForId(s.id) === packName);
-		if (!server) throw new MarketplaceError("unknown_pack", registryMissingMessage(packName, parsed.skipped, source.url));
-		const manifest = registryServerToVirtualPack(server);
+		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id) === packName);
+		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(packName, parsed.skipped, source.url));
+		const manifest = gatewayProviderToVirtualPack(provider);
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
 			sourceUrl: source.url,
 			sourceRef: "",
-			commit: server.fingerprint,
+			commit: provider.fingerprint,
 			packName: manifest.name,
 			version: manifest.version,
 			installedAt: oldMeta.installedAt || now,
@@ -754,7 +764,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		try {
-			materializeRegistryPack(server, staging, { sourceUrl: source.url, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(dest, backup);
 			try {
@@ -769,8 +779,8 @@ export class MarketplaceInstaller {
 			fs.rmSync(backup, { recursive: true, force: true });
 			throw err;
 		}
-		this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.servers.map((s) => s.fingerprint).join(",") });
-		return withMcpRegistryDiagnostics({ scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
+		this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
+		return withMcpGatewayDiagnostics({ scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 
 	// ── listing ──────────────────────────────────────────────────
@@ -853,31 +863,35 @@ export class MarketplaceInstaller {
 }
 
 function writeMetaPreservingMaterializedDetails(dir: string, meta: PackMeta): void {
-	// Registry materialization writes official-registry provenance (sourceKey,
-	// officialName, metadata) before install provenance is known. Keep those
-	// safe diagnostic keys when writing the install record consumed by pack list.
+	// Gateway materialization writes provider provenance before install
+	// provenance is known. Keep those safe diagnostic keys when writing the
+	// install record consumed by pack list.
 	const existing = readYamlMapping(path.join(dir, ".pack-meta.yaml")) ?? {};
 	writeMeta(dir, { ...existing, ...meta } as PackMeta);
 }
 
-function mcpRegistryDiagnostics(skipped: McpRegistrySkippedEntry[]): MarketplaceMcpRegistryDiagnostics | undefined {
+function mcpGatewayDiagnostics(skipped: McpGatewaySkippedEntry[]): MarketplaceMcpGatewayDiagnostics | undefined {
 	return skipped.length > 0 ? { skippedEntries: skipped } : undefined;
 }
 
-function withMcpRegistryDiagnostics<T extends object>(value: T, skipped: McpRegistrySkippedEntry[]): T & { mcpRegistryDiagnostics?: MarketplaceMcpRegistryDiagnostics } {
-	const diagnostics = mcpRegistryDiagnostics(skipped);
-	return diagnostics ? { ...value, mcpRegistryDiagnostics: diagnostics } : value;
+function withMcpGatewayDiagnostics<T extends object>(value: T, skipped: McpGatewaySkippedEntry[]): T & { mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics } {
+	const diagnostics = mcpGatewayDiagnostics(skipped);
+	return diagnostics ? { ...value, mcpGatewayDiagnostics: diagnostics } : value;
 }
 
-function registryMissingMessage(requested: string, skipped: McpRegistrySkippedEntry[], sourceUrl?: string): string {
+function legacyMcpRegistryError(): MarketplaceError {
+	return new MarketplaceError("invalid_pack", LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON);
+}
+
+function gatewayMissingMessage(requested: string, skipped: McpGatewaySkippedEntry[], sourceUrl?: string): string {
 	const requestedId = requested.startsWith("mcp-") ? requested.slice("mcp-".length) : requested;
 	const skippedEntry = skipped.find((entry) => entry.id === requested || entry.id === requestedId || entry.name === requested);
 	if (skippedEntry) {
 		const id = skippedEntry.id ? ` id=${JSON.stringify(skippedEntry.id)}` : "";
 		const name = skippedEntry.name ? ` name=${JSON.stringify(skippedEntry.name)}` : "";
-		return `registry server ${requested} was skipped during validation:${id}${name} reason=${skippedEntry.reason}`;
+		return `gateway provider ${requested} was skipped during validation:${id}${name} reason=${skippedEntry.reason}`;
 	}
-	return sourceUrl ? `no registry server with pack name ${requested} in ${sourceUrl}` : `registry server not found: ${requested}`;
+	return sourceUrl ? `no gateway provider with pack name ${requested} in ${sourceUrl}` : `gateway provider not found: ${requested}`;
 }
 
 function synthManifest(name: string, meta: PackMeta | null): PackManifest {

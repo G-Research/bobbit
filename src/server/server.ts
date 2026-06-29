@@ -7724,7 +7724,7 @@ async function handleApiRoute(
 		};
 		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
 			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
-			if (err instanceof Error && err.name === "McpRegistryError") { json({ error: err.message }, /fetch failed|HTTP/i.test(err.message) ? 502 : 422); return; }
+			if (err instanceof Error && err.name === "McpGatewayError") { json({ error: err.message }, /fetch failed|HTTP|timed out/i.test(err.message) ? 502 : 422); return; }
 			jsonError(500, err);
 		};
 

@@ -93,11 +93,12 @@ knowledge of the meta-tool format.
 
 ## Marketplace MCP and scoped managers
 
-Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP registry entries contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above.
+Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above.
 
 Key rules:
 
 - Marketplace activation toggles server/sub-namespace ownership, not raw operations. `DisabledRefs.mcp` is keyed by the pack-local `contents.mcp` basename (`listName`).
+- MCP Gateway sources (`type: "mcp-gateway"`) materialize one provider pack per namespace. Read providers use `server: gr` + `subNamespace: <provider>`; write-capable providers add a second pack-local MCP entry using `server: gr-write` with the same sub-namespace.
 - Flat contributions own a whole server. Contributions with `subNamespace` own one `mcp_<server>__<sub>` meta-tool; identical-config sub-namespaces may share one client.
 - Existing Tools-page policy keys still decide `allow` / `ask` / `never`: `mcp__<server>` for a whole server and `mcp__<server>__<sub>` for one sub-namespace. Per-operation `never` still works at dispatch time, but Market does not expose per-operation toggles.
 - Manual MCP config discovery remains additive and higher priority. If `.mcp.json` or Claude-compatible config defines the same runtime server name, that manual definition overrides the Marketplace group.
