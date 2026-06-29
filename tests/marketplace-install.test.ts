@@ -248,7 +248,9 @@ describe("Marketplace MCP gateway integration", () => {
 			assert.equal(jira.name, "mcp-jira");
 			assert.deepEqual(jira.contents.mcp, ["jira"]);
 			assert.equal(jira.serverName, "gr");
-			assert.deepEqual(jira.mcp[0], { ref: "jira", listName: "jira", serverName: "gr", subNamespace: "jira", label: "Jira", description: "Jira issue tools", transport: "http", url });
+			const { operations, ...jiraMcp } = jira.mcp[0];
+			assert.deepEqual(jiraMcp, { ref: "jira", listName: "jira", serverName: "gr", subNamespace: "jira", label: "Jira", description: "Jira issue tools", transport: "http", url });
+			assert.deepEqual(operations, [{ name: "jira_search", description: "Search issues", inputSchema: { type: "object", properties: {} } }]);
 			assert.deepEqual(jira.mcpGatewayDiagnostics?.skippedEntries.map((entry: any) => entry.id), ["bad/id"]);
 			assert.match(jira.mcpGatewayDiagnostics!.skippedEntries[0]!.reason, /unsafe gateway provider id/i);
 
