@@ -79,13 +79,13 @@ export default function createTerminalPanel() {
 				const launcherOpening = params?.launcherOpening === true;
 				const autoStartRequested = params?.autoStart === true;
 				const startupError = typeof params?.startupError === "string" && params.startupError ? params.startupError : undefined;
-				// A ready/error marker means the trusted launcher already attempted the
-				// open. On reload/gateway restart, never replay that creation attempt from
-				// restored panel params; v1 should show disconnected and wait for Restart.
+				// A ready/error marker means the launcher already attempted the open. On
+				// reload/gateway restart, never replay that creation attempt from restored
+				// panel params; v1 should show disconnected and wait for Restart.
 				const autoStart = readyId || startupError || (!!launchId && !launcherOpening) ? false : shouldAutoStart(state, autoStartRequested, launchId);
 				const restoredAutoStart = autoStartRequested && !autoStart;
 				const restoredReadyChannel = !!readyId && !autoStart;
-				const restoredStartupFailure = !!startupError && !launcherOpening && (/trusted launcher activation/i.test(startupError) || !!launchId);
+				const restoredStartupFailure = !!startupError && !launcherOpening && !!launchId;
 				const restoredChannel = restoredAutoStart || restoredReadyChannel || restoredStartupFailure;
 				if (readyId && state.channelReadyId !== readyId) {
 					state.channelReadyId = readyId;
@@ -279,8 +279,7 @@ async function startTerminal(state: SessionState, fromButton: boolean): Promise<
 		});
 		await attachChannel(state, channel, "Terminal attached.");
 	} catch (err) {
-		const msg = messageOf(err, "Terminal failed to start.");
-		setStatus(state, /user gesture/i.test(msg) ? "Press Start to create a terminal." : msg, /user gesture/i.test(msg) ? "idle" : "error");
+		setStatus(state, messageOf(err, "Terminal failed to start."), "error");
 	} finally {
 		state.connecting = false;
 		updateButtons(state);

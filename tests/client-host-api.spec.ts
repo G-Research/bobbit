@@ -83,6 +83,16 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(err.message).toContain("reviews/job/final/payload: maxTotalBytes exceeded");
 	});
 
+	test("host.channels.open does not require user activation", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__channelOpenWithoutGesture());
+		expect(result).toEqual({
+			id: "chan-1",
+			sentTypes: ["auth", "ext_channel_open_grant", "ext_channel_open"],
+			grant: "grant-1",
+		});
+	});
+
 	test("no Phase-2 member is a frozen 'reserved for Phase 2' stub anymore", async ({ page }) => {
 		await gotoAndWait(page);
 		// Slices B1/B2/B3/B4/C1 implemented store.* / session.read* / callRoute / ui.*

@@ -92,4 +92,82 @@ import { getHostApi } from "../../src/app/host-api.js";
 	}
 };
 
+(window as any).__channelOpenWithoutGesture = async () => {
+	const originalFetch = window.fetch;
+	const OriginalWebSocket = window.WebSocket;
+	const sent: any[] = [];
+	class MockWebSocket {
+		static readonly CONNECTING = 0;
+		static readonly OPEN = 1;
+		static readonly CLOSING = 2;
+		static readonly CLOSED = 3;
+		readonly url: string;
+		readyState = MockWebSocket.CONNECTING;
+		onopen: ((event: Event) => void) | null = null;
+		onmessage: ((event: MessageEvent) => void) | null = null;
+		onerror: ((event: Event) => void) | null = null;
+		onclose: ((event: CloseEvent) => void) | null = null;
+
+		constructor(url: string) {
+			this.url = url;
+			setTimeout(() => {
+				this.readyState = MockWebSocket.OPEN;
+				this.onopen?.(new Event("open"));
+			}, 0);
+		}
+
+		send(data: string): void {
+			const msg = JSON.parse(data);
+			sent.push(msg);
+			if (msg.type === "auth") {
+				this.emit({ type: "auth_ok" });
+			} else if (msg.type === "ext_channel_open_grant") {
+				this.emit({ type: "ext_channel_open_grant_result", requestId: msg.requestId, ok: true, openGrant: "grant-1" });
+			} else if (msg.type === "ext_channel_open") {
+				this.emit({
+					type: "ext_channel_result",
+					requestId: msg.requestId,
+					ok: true,
+					channel: {
+						id: "chan-1",
+						name: msg.name,
+						packId: "terminal",
+						sessionId: "sess-channel-no-gesture",
+						state: "open",
+						createdAt: 1,
+						lastActiveAt: 2,
+						attached: true,
+					},
+				});
+			}
+		}
+
+		close(): void {
+			this.readyState = MockWebSocket.CLOSED;
+			this.onclose?.(new CloseEvent("close"));
+		}
+
+		private emit(message: unknown): void {
+			setTimeout(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent), 0);
+		}
+	}
+
+	window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = String(input);
+		if (url.includes("/api/ext/surface-token")) {
+			return new Response(JSON.stringify({ token: "surface-token" }), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		return originalFetch(input, init);
+	};
+	(window as any).WebSocket = MockWebSocket;
+	try {
+		const h: any = getHostApi("sess-channel-no-gesture", undefined, { kind: "pack", packId: "terminal", contributionKind: "panel", contributionId: "terminal" } as any);
+		const channel = await h.channels.open("terminal", { singletonKey: "main" });
+		return { id: channel.id, sentTypes: sent.map((msg) => msg.type), grant: sent.find((msg) => msg.type === "ext_channel_open")?.openGrant };
+	} finally {
+		window.fetch = originalFetch;
+		window.WebSocket = OriginalWebSocket;
+	}
+};
+
 (window as any).__ready = true;

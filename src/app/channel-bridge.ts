@@ -315,7 +315,6 @@ export function createHostChannelsApi(opts: BridgeOptions): HostChannelsApi {
 	};
 	return {
 		open(name, init) {
-			if (!opts.consumeOpenGesture()) return Promise.reject(new Error("host.channels.open requires a user gesture"));
 			if (typeof name !== "string" || !name.trim()) return Promise.reject(new Error("host.channels.open requires a channel name"));
 			return (async () => getBridge().open(await opts.getSurfaceToken(), name, init))();
 		},
