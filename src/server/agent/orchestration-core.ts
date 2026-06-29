@@ -1,5 +1,7 @@
 // src/server/agent/orchestration-core.ts
 //
+import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionPromptMode } from "./session-prompt-delivery.js";
+
 // OrchestrationCore — the ONE goal-agnostic implementation of "launch and
 // orchestrate a child agent (a new, properly-scoped principal)".
 //
@@ -617,13 +619,30 @@ export class OrchestrationCore {
 		return handle;
 	}
 
-	async prompt(ownerId: string, childId: string, message: string): Promise<{ status: "dispatched" | "queued" }> {
+	async prompt(ownerId: string, childId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
+	async prompt(
+		ownerId: string,
+		childId: string,
+		message: string,
+		opts: { mode?: SessionPromptMode; defaultMode?: SessionPromptMode },
+	): Promise<DeliverSessionPromptResult>;
+	async prompt(
+		ownerId: string,
+		childId: string,
+		message: string,
+		opts?: { mode?: SessionPromptMode; defaultMode?: SessionPromptMode },
+	): Promise<DeliverSessionPromptResult | { status: "dispatched" | "queued" }> {
 		this.requireOwnChild(ownerId, childId);
-		const result = await this.deps.sessionManager.enqueuePrompt(childId, message);
-		this.audit({ event: "prompt", ownerSessionId: ownerId, childSessionId: childId });
-		// enqueuePrompt returns run-if-idle ("dispatched"/running) or "queued".
-		const status = result?.status === "queued" ? "queued" : "dispatched";
-		return { status };
+		const result = await deliverSessionPrompt({
+			getSession: (id) => this.deps.sessionManager.getSession(id),
+			enqueuePrompt: async (id, text, promptOpts) => {
+				const queued = await this.deps.sessionManager.enqueuePrompt(id, text, promptOpts);
+				return { status: queued?.status === "queued" ? "queued" : "dispatched" };
+			},
+			deliverLiveSteer: (id, text, steerOpts) => this.deps.sessionManager.deliverLiveSteer(id, text, steerOpts),
+		}, childId, message, { mode: opts?.mode, defaultMode: opts ? (opts.defaultMode ?? "steer") : "prompt" });
+		this.audit({ event: result.mode === "steer" ? "steer" : "prompt", ownerSessionId: ownerId, childSessionId: childId });
+		return opts ? result : { status: "status" in result && result.status === "queued" ? "queued" : "dispatched" };
 	}
 
 	async steer(ownerId: string, childId: string, message: string): Promise<unknown> {
