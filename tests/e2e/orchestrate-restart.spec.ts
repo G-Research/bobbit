@@ -36,15 +36,20 @@ async function listChildren(ownerId: string): Promise<string[]> {
 	return ((await resp.json()).children ?? []).map((c: any) => c.sessionId);
 }
 
+function messageText(m: WsMsg): string {
+	const msg = m.data?.message;
+	return Array.isArray(msg?.content)
+		? msg.content.map((c: any) => c?.text ?? "").join("")
+		: "";
+}
+
 /** Predicate: parent received an [ORCHESTRATION] live-children reminder. */
 function orchestrationReminderPredicate(): (m: WsMsg) => boolean {
 	return (m) => {
 		if (m.type !== "event" || m.data?.type !== "message_end") return false;
 		const msg = m.data?.message;
 		if (msg?.role !== "user") return false;
-		const text = Array.isArray(msg.content)
-			? msg.content.map((c: any) => c?.text ?? "").join("")
-			: "";
+		const text = messageText(m);
 		return text.includes("[ORCHESTRATION]") && text.includes("team_wait");
 	};
 }
@@ -227,13 +232,75 @@ test.describe("orchestration restart survival", () => {
 		await deleteSession(child).catch(() => {});
 	});
 
+	test("restoreSessions() sends restart collection reminders only for collectable child kinds", async ({ gateway }) => {
+		const sm = gateway.sessionManager;
+		const parent = await createSession();
+		const parentProjectId = sm.getPersistedSession(parent)?.projectId;
+		const delegateChild = await spawnChild(parent, "collectable delegate restart-reminder helper");
+		const prWalkthroughInfo = await sm.createSession(
+			sm.getSession(parent)?.cwd,
+			undefined, undefined, undefined,
+			{ parentSessionId: parent, childKind: "pr-walkthrough", projectId: parentProjectId, title: "PR Walkthrough" },
+		);
+		const hostAgentsInfo = await sm.createSession(
+			sm.getSession(parent)?.cwd,
+			undefined, undefined, undefined,
+			{
+				parentSessionId: parent,
+				childKind: "host-agents",
+				projectId: parentProjectId,
+				title: "PR Walkthrough",
+				role: "pr-reviewer",
+				readOnly: true,
+			},
+		);
+		const teamInfo = await sm.createSession(
+			sm.getSession(parent)?.cwd,
+			undefined, undefined, undefined,
+			{ parentSessionId: parent, childKind: "team", projectId: parentProjectId, title: "Team Worker" },
+		);
+		const prWalkthroughChild = prWalkthroughInfo.id;
+		const hostAgentsChild = hostAgentsInfo.id;
+		const teamChild = teamInfo.id;
+		const persistedHostAgent = sm.getPersistedSession(hostAgentsChild);
+		expect(persistedHostAgent?.childKind).toBe("host-agents");
+		expect(persistedHostAgent?.title).toBe("PR Walkthrough");
+		expect(persistedHostAgent?.role).toBe("pr-reviewer");
+		expect(persistedHostAgent?.readOnly).toBe(true);
+		const parentWs = await connectWs(parent);
+
+		const origRestoreOne = (sm as any).restoreOneSession;
+		(sm as any).restoreOneSession = async () => { /* skip heavy live-session restore */ };
+
+		try {
+			const cursor = parentWs.messageCount();
+			await sm.restoreSessions();
+			const reminder = await parentWs.waitForFrom(cursor, orchestrationReminderPredicate(), 15_000);
+			const reminderText = messageText(reminder);
+
+			expect(reminderText).toContain(delegateChild);
+			expect(reminderText, "legacy PR Walkthrough child sessions must not receive generic restart team_wait reminders").not.toContain(prWalkthroughChild);
+			expect(reminderText, "PR Walkthrough host-agents reviewers must be polled by their extension workflow, not collected through team_wait").not.toContain(hostAgentsChild);
+			expect(reminderText).not.toContain(teamChild);
+			expect(reminderText).toContain("You have 1 live child agent(s)");
+		} finally {
+			parentWs.close();
+			(sm as any).restoreOneSession = origRestoreOne;
+			await deleteSession(teamChild).catch(() => {});
+			await deleteSession(hostAgentsChild).catch(() => {});
+			await deleteSession(prWalkthroughChild).catch(() => {});
+			await deleteSession(delegateChild).catch(() => {});
+			await deleteSession(parent).catch(() => {});
+		}
+	});
+
 	// The two tests above drive the boot helpers DIRECTLY. This one asserts the
 	// actual WIRING: that SessionManager.restoreSessions() invokes the rebuild +
-	// the reminder with the childKind!=="team" filter, and that its delegate
+	// the reminder with the restart collection filter, and that its delegate
 	// boot-reap archives an orphaned (owner-archived) live child. Deterministic —
 	// no real reboot, no real LLM. restoreOneSession is stubbed so re-running
 	// restore does not re-spawn already-live regular sessions.
-	test("restoreSessions() wires the rebuild + team-filtered reminder and boot-reaps an orphaned child", async ({ gateway }) => {
+	test("restoreSessions() wires the rebuild + restart collection reminder filter and boot-reaps an orphaned child", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
 		const core = gateway.orchestrationCore;
 		const parent = await createSession();
@@ -261,9 +328,11 @@ test.describe("orchestration restart survival", () => {
 			// Rebuild + reminder were actually invoked by restoreSessions().
 			expect(rebuildCalled).toBe(true);
 			expect(typeof remindFilter).toBe("function");
-			// The reminder filter skips team-managed children (team-manager nudges
-			// those separately) but covers delegate children.
+			// The reminder filter skips children handled by other workflows but covers
+			// collectable delegate children.
 			expect(remindFilter!({ childKind: "team" })).toBe(false);
+			expect(remindFilter!({ childKind: "pr-walkthrough" }), "legacy PR Walkthrough child sessions must not receive generic restart team_wait reminders").toBe(false);
+			expect(remindFilter!({ childKind: "host-agents" }), "host.agents children are polled by the owning extension workflow, not generic team_wait reminders").toBe(false);
 			expect(remindFilter!({ childKind: "delegate" })).toBe(true);
 
 			// Boot-reap: the orphaned (owner-archived) live child is archived, not left

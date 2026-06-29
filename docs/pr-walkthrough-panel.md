@@ -487,11 +487,15 @@ reaps it automatically.
 - **Restart survival.** Because no `childTerminal` marker is stamped, a finalized
   reviewer **survives a gateway restart** like any other session. Its durable
   progress is review-scoped in the pack store, and the lifecycle provider injects
-  a bounded chunk/finalization summary before prompts. It is reaped only by the
-  standard `host.agents` **owner-gone** rule (`shouldReapChildOnBoot` in
-  `OrchestrationCore` removes it when its owner is archived/gone) — never by a
-  PR-walkthrough terminal marker. See
-  [docs/orchestration.md](orchestration.md#hostagents--orchestration-for-extension-packs).
+  a bounded chunk/finalization summary before prompts. The reviewer is a
+  `host-agents` child (`role: "pr-reviewer"`, title `PR Walkthrough`), so it is
+  polled and managed by the extension workflow; the owner does **not** receive the
+  generic post-restart `team_wait` collection reminder for it. Restoration,
+  binding, submission, and visibility behavior are otherwise unchanged. It is
+  reaped only by the standard `host.agents` **owner-gone** rule
+  (`shouldReapChildOnBoot` in `OrchestrationCore` removes it when its owner is
+  archived/gone) — never by a PR-walkthrough terminal marker. See
+  [docs/orchestration.md](orchestration.md#restart-survival).
 - **Termination is the user's call.** The user terminates the reviewer through the
   existing per-session terminate/dismiss control in the sidebar (the same archive
   action exposed for `host.agents` child sessions). On reviewer shutdown/archive,

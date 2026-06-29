@@ -155,6 +155,23 @@ export interface ChildHandle {
 	blocking: boolean;
 }
 
+const RESTART_COLLECTION_REMINDER_EXCLUDED_CHILD_KINDS = new Set<ChildKind>([
+	"team",
+	"pr-walkthrough",
+	"host-agents",
+]);
+
+/**
+ * Whether a restored child belongs to the generic post-restart collection flow.
+ * Non-collectable workflows opt out by child kind; all other child kinds keep
+ * existing restart-reminder behaviour and can be collected through `team_wait`.
+ * `host-agents` children are collected/polled by their owning extension workflow
+ * (for example PR Walkthrough reviewers), not by generic `team_wait` reminders.
+ */
+export function shouldSendRestartCollectionReminder(handle: Pick<ChildHandle, "childKind">): boolean {
+	return !RESTART_COLLECTION_REMINDER_EXCLUDED_CHILD_KINDS.has(handle.childKind);
+}
+
 export interface WaitResult {
 	/** Session id of the first child that became settled (idle or terminal). */
 	firstIdle?: string;
@@ -772,8 +789,8 @@ export class OrchestrationCore {
 	 * restored child (restart survival, §4). The owner re-collects through the
 	 * shared `team_wait` path — no transparent tool-call resumption.
 	 *
-	 * `filterOwner` lets callers skip owners handled elsewhere (e.g. team-managed
-	 * children are nudged by team-manager — filter childKind!=="team").
+	 * `filterOwner` lets callers skip child kinds handled elsewhere; the boot path
+	 * uses `shouldSendRestartCollectionReminder` for that policy.
 	 */
 	async remindOwnersWithLiveChildren(filter?: (handle: ChildHandle) => boolean): Promise<number> {
 		let reminded = 0;

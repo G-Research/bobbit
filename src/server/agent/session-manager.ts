@@ -82,7 +82,7 @@ import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
 import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
-import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
+import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
@@ -4569,12 +4569,12 @@ export class SessionManager {
 		// already-persisted link fields (delegateOf / parentSessionId+childKind)
 		// — no new persisted registry — then remind any owner with live restored
 		// children to re-collect them via team_wait (restart survival, no
-		// transparent tool-call resumption). Team-managed children (childKind
-		// "team") are skipped here; team-manager nudges those in resubscribeTeamEvents.
+		// transparent tool-call resumption). Non-collectable child kinds (for
+		// example team-managed and PR Walkthrough children) are skipped here.
 		if (this.orchestrationCore) {
 			try {
 				this.orchestrationCore.rebuildIndexFromPersisted(persisted);
-				await this.orchestrationCore.remindOwnersWithLiveChildren(h => h.childKind !== "team");
+				await this.orchestrationCore.remindOwnersWithLiveChildren(shouldSendRestartCollectionReminder);
 			} catch (err) {
 				console.warn("[session-manager] OrchestrationCore boot index/reminder failed:", err);
 			}
