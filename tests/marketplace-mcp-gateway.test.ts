@@ -29,8 +29,9 @@ function source(url = SOURCE_URL): any {
 }
 
 type MockGatewayRequest = { method?: string; path?: string; rpcMethod?: string };
+type MockGatewayOptions = { toolsListError?: { code: number; message: string; data?: unknown } };
 
-async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>): Promise<void> {
+async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>, opts: MockGatewayOptions = {}): Promise<void> {
 	const requests: MockGatewayRequest[] = [];
 	const server = http.createServer(async (req, res) => {
 		const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
@@ -75,6 +76,10 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 		}
 		if (message.method === "tools/list") {
 			res.writeHead(200, { "content-type": "application/json" });
+			if (opts.toolsListError) {
+				res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: opts.toolsListError }));
+				return;
+			}
 			res.end(JSON.stringify({
 				jsonrpc: "2.0",
 				id: message.id,
@@ -179,6 +184,21 @@ describe("MCP gateway catalogue primitives", () => {
 			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
 			assert.equal(requests.some((r) => r.path === "/signin/aigateway"), false);
 		});
+	});
+
+	it("rejects streamable HTTP MCP tools/list JSON-RPC errors", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			await assert.rejects(
+				() => fetchMcpGatewayWithDiagnostics(source(url)),
+				(err: unknown) => {
+					assert.ok(err instanceof McpGatewayError);
+					assert.match((err as Error).message, /gateway MCP tools\/list failed: .*permission denied/);
+					return true;
+				},
+			);
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "initialize"));
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
+		}, { toolsListError: { code: -32000, message: "permission denied" } });
 	});
 
 	it("parses provider catalogues while skipping unsafe, duplicate, and non-HTTP entries", () => {

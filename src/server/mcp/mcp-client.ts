@@ -36,6 +36,11 @@ function expandEnvRecord(env: Record<string, string>): Record<string, string> {
   return result;
 }
 
+function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
+  if (!error) return 'unknown JSON-RPC error';
+  return error.message || JSON.stringify(error);
+}
+
 type PendingRequest = {
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
@@ -79,6 +84,9 @@ export class McpClient {
   async listTools(): Promise<McpToolDef[]> {
     this._assertConnected();
     const response = await this._sendRequest('tools/list', {});
+    if (response.error) {
+      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${jsonRpcErrorMessage(response.error)}`);
+    }
     const result = response.result as { tools?: McpToolDef[] } | undefined;
     return result?.tools ?? [];
   }
