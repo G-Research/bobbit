@@ -270,7 +270,7 @@ export class RemoteAgent {
 	// In-flight C2 write-permit MINT requests, keyed by the correlation id on the
 	// `ext_session_write_permit` frame, settled by `ext_session_write_permit_result`.
 	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
-	// In-flight trusted pack-bound surface-token MINT requests, settled by
+	// In-flight pack-bound surface-token MINT requests, settled by
 	// `ext_surface_token_result`.
 	private _pendingExtSurfaceTokens = new Map<string, { resolve: (token: string) => void; reject: (e: Error) => void }>();
 	private _surfaceTokenAuthorityKey: string | undefined;
@@ -784,11 +784,11 @@ export class RemoteAgent {
 					if (msg.type === "auth_ok") {
 						settled = true;
 						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
-						// Register the trusted WS poster for `host.session.postMessage` (C2 session
-						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
-						// agent's private WS; pack code has no handle to it and cannot import this
-						// transport, so it cannot drive the agent. No session secret is delivered
-						// to (or capturable from) the client at all — the trusted WS IS the gate.
+						// Register the sanctioned WS poster for `host.session.postMessage` (C2 session
+						// WRITE, extension-host-phase2.md §8 C2.1). Server-side session binding,
+						// surface-token resolution, and one-time content-bound permits carry the
+						// authorization/provenance checks; the app transport is not an unspoofable
+						// same-origin security boundary.
 						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
 						registerSurfaceTokenMinter(this._sessionId, (surface) => this._mintPackSurfaceToken(surface));
 						// Splits the ws-open→snapshot window into handshake vs. the
@@ -916,8 +916,8 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
-		// Drop the trusted WS poster + reject any in-flight session posts so a torn-down
-		// session leaves no stale transport (re-registered on the next auth_ok).
+		// Drop the registered WS poster + reject any in-flight session posts so a
+		// torn-down session leaves no stale transport (re-registered on the next auth_ok).
 		unregisterSessionPoster(this._sessionId);
 		unregisterSurfaceTokenMinter(this._sessionId);
 		this._surfaceTokenAuthorityKey = undefined;
@@ -1408,13 +1408,12 @@ export class RemoteAgent {
 	// ── Internal ─────────────────────────────────────────────────────
 
 	/**
-	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
-	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
-	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
-	 * involved; pack code has no handle to the WS. The server ignores `req.sessionId`
-	 * as a target and posts into its OWN authenticated session.
+	 * Drive the C2 session WRITE (`host.session.postMessage`) over this agent's
+	 * authenticated WebSocket (registered with session-write-bridge.ts on auth_ok).
+	 * The server ignores `req.sessionId` as a target and posts into its own
+	 * authenticated session.
 	 *
-	 * TWO trusted-WS round-trips (design §8 C2.1): first MINT a server-minted,
+	 * TWO permit-bound round-trips (design §8 C2.1): first MINT a server-minted,
 	 * one-time, content-bound write permit (bound to `req.contentHash`), then send the
 	 * post carrying the returned nonce. A captured/replayed post frame is rejected
 	 * (permit already consumed); a forged post without a mint has no valid nonce.
@@ -1424,8 +1423,8 @@ export class RemoteAgent {
 		return this._sendExtSessionPost(req, nonce);
 	}
 
-	/** Mint a pack-bound surface token over the trusted session WS. The frame carries
-	 *  no session id; the server binds the token to this authenticated connection. */
+	/** Mint a pack-bound surface token over the session WS. The frame carries no
+	 *  session id; the server binds the token to this authenticated connection. */
 	private _mintPackSurfaceToken(surface: PackSurfaceRef): Promise<string> {
 		return new Promise<string>((resolve, reject) => {
 			if (this.ws?.readyState !== WebSocket.OPEN) {
@@ -1433,7 +1432,7 @@ export class RemoteAgent {
 				return;
 			}
 			if (!this._surfaceTokenAuthorityKey) {
-				reject(new Error("pack surface-token mint: trusted app surface authority unavailable"));
+				reject(new Error("pack surface-token mint: app surface-token key unavailable"));
 				return;
 			}
 			const requestId = `extsurface_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -1463,7 +1462,7 @@ export class RemoteAgent {
 		});
 	}
 
-	/** Step 1: mint a content-bound write permit over the trusted WS. Resolves with
+	/** Step 1: mint a content-bound write permit over the session WS. Resolves with
 	 *  the opaque nonce; rejects on server error / timeout / not-connected. */
 	private _mintExtWritePermit(req: SessionPostRequest): Promise<string> {
 		return new Promise<string>((resolve, reject) => {

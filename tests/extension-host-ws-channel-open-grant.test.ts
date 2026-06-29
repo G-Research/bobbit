@@ -140,7 +140,7 @@ async function requestOpenGrant(ws: FakeWebSocket, requestId: string, surfaceTok
 }
 
 describe("WebSocket extension channel open grants", () => {
-	it("mints a legitimate pack-bound panel surface token over the trusted app websocket", async () => {
+	it("mints a pack-bound panel surface token over an app websocket with a surface-token key", async () => {
 		const { ws } = await authenticatedHarness({ authKind: "app" });
 		const key = surfaceTokenAuthorityKey(ws);
 		assert.equal(typeof key, "string");
@@ -155,7 +155,7 @@ describe("WebSocket extension channel open grants", () => {
 		ws.close();
 	});
 
-	it("rejects raw same-session websocket attempts to mint a victim pack surface token", async () => {
+	it("rejects surface-token mint requests that lack the app connection key", async () => {
 		const sessionManager = makeSessionManager();
 		const main = await authenticatedHarness({ authKind: "app", sessionManager });
 		assert.equal(typeof surfaceTokenAuthorityKey(main.ws), "string");
@@ -167,7 +167,7 @@ describe("WebSocket extension channel open grants", () => {
 			type: "ext_surface_token_result",
 			requestId: "surface",
 			ok: false,
-			error: "pack-bound surface-token mint requires trusted app surface authority",
+			error: "pack-bound surface-token mint requires app surface-token key",
 		});
 
 		const grant = await requestOpenGrant(raw.ws, "grant", forged.token, "terminal");
@@ -181,7 +181,7 @@ describe("WebSocket extension channel open grants", () => {
 		raw.ws.close();
 	});
 
-	it("rejects raw same-session websocket minting even when it connects before the app socket", async () => {
+	it("does not share surface-token keys from later app sockets with existing raw sockets", async () => {
 		const sessionManager = makeSessionManager();
 		const raw = await authenticatedHarness({ authKind: "raw", sessionManager });
 		assert.equal(surfaceTokenAuthorityKey(raw.ws), undefined);
@@ -191,7 +191,7 @@ describe("WebSocket extension channel open grants", () => {
 			type: "ext_surface_token_result",
 			requestId: "surface",
 			ok: false,
-			error: "pack-bound surface-token mint requires trusted app surface authority",
+			error: "pack-bound surface-token mint requires app surface-token key",
 		});
 
 		const main = await authenticatedHarness({ authKind: "app", sessionManager });
@@ -220,6 +220,24 @@ describe("WebSocket extension channel open grants", () => {
 		assert.equal(typeof firstToken.token, "string");
 		assert.equal(secondToken.ok, true);
 		assert.equal(typeof secondToken.token, "string");
+		first.ws.close();
+		second.ws.close();
+	});
+
+	it("rejects a surface-token key from a different app connection", async () => {
+		const sessionManager = makeSessionManager();
+		const first = await authenticatedHarness({ authKind: "app", sessionManager });
+		const second = await authenticatedHarness({ authKind: "app", sessionManager });
+		const firstKey = surfaceTokenAuthorityKey(first.ws);
+		assert.equal(typeof firstKey, "string");
+
+		const result = await requestSurfaceToken(second.ws, "surface", "terminal", "panel", "terminal", firstKey);
+		assert.deepEqual(result, {
+			type: "ext_surface_token_result",
+			requestId: "surface",
+			ok: false,
+			error: "pack-bound surface-token mint requires app surface-token key",
+		});
 		first.ws.close();
 		second.ws.close();
 	});

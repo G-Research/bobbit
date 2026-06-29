@@ -459,10 +459,10 @@ export function handleWebSocketConnection(
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
-			// Pack-bound surface-token minting is intentionally NOT available on arbitrary
-			// authenticated same-session WebSockets. Only the first-party RemoteAgent app
-			// transport opts in as clientKind:"app" and receives a per-connection key
-			// captured by its closure; raw/authenticated auxiliary sockets receive no key.
+			// Pack-bound surface-token minting uses an app-connection protocol key so
+			// sanctioned Host API calls bind to this authenticated session and an active
+			// pack contribution. `clientKind` is routing/product metadata, not a browser
+			// security boundary against same-origin code that already has the bearer token.
 			// Authority is per app connection, not singleton per session, so multiple tabs
 			// can each mint scoped pack surface tokens without stealing lifecycle state.
 			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
@@ -470,10 +470,11 @@ export function handleWebSocketConnection(
 				surfaceTokenAuthorityKey = randomUUID();
 			}
 
-			// The C2 session WRITE (`host.session.postMessage`) is driven over THIS trusted,
-			// authenticated connection (see the `ext_session_post` command below) — pack code
-			// has no handle to the WS and cannot send on it, so no session secret needs to be
-			// delivered to (and capturable from) the client at all.
+			// The sanctioned C2 session WRITE (`host.session.postMessage`) path is driven
+			// over this authenticated connection (see `ext_session_post` below). Server-side
+			// session binding, surface-token resolution, and one-time content-bound permits
+			// are the authorization/provenance checks; the WS client kind is not a durable
+			// same-origin security boundary.
 			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
@@ -642,9 +643,9 @@ export function handleWebSocketConnection(
 		}
 
 		try {
-			const mintTrustedPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
+			const mintPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
 				if (!surfaceTokenAuthorityKey || tokenMsg.surfaceTokenKey !== surfaceTokenAuthorityKey) {
-					return { ok: false, error: "pack-bound surface-token mint requires trusted app surface authority" };
+					return { ok: false, error: "pack-bound surface-token mint requires app surface-token key" };
 				}
 				const packId = typeof tokenMsg.packId === "string" ? tokenMsg.packId : "";
 				const contributionKind = typeof tokenMsg.contributionKind === "string" ? tokenMsg.contributionKind : "";
@@ -682,7 +683,7 @@ export function handleWebSocketConnection(
 				case "ext_surface_token": {
 					const tokenMsg = msg as Extract<ClientMessage, { type: "ext_surface_token" }>;
 					const requestId = typeof tokenMsg.requestId === "string" ? tokenMsg.requestId : "";
-					const minted = mintTrustedPackSurfaceToken(tokenMsg);
+					const minted = mintPackSurfaceToken(tokenMsg);
 					if (minted.ok) send(ws, { type: "ext_surface_token_result", requestId, ok: true, token: minted.token });
 					else send(ws, { type: "ext_surface_token_result", requestId, ok: false, error: minted.error });
 					break;
@@ -1436,12 +1437,12 @@ export function handleWebSocketConnection(
 				}
 				case "ext_session_write_permit": {
 					// C2 session-WRITE permit MINT (design extension-host-phase2.md §8 C2.1).
-					// Mints a server-minted, one-time, content-bound nonce over THIS trusted,
-					// authenticated WS. The binding's sessionId is ALWAYS this connection's OWN
-					// authenticated session; the packId is SERVER-derived from `tool` (never a
-					// frame field). The client requests this only after its synchronous
-					// transient-activation assertion passes; the matching `ext_session_post`
-					// must then carry the returned nonce. See session-write-permit.ts.
+					// Mints a server-minted, one-time, content-bound nonce over this authenticated
+					// WS. The binding's sessionId is ALWAYS this connection's OWN authenticated
+					// session; the packId is SERVER-derived from `tool` (never a frame field). The
+					// sanctioned client requests this only after its synchronous transient-
+					// activation assertion passes; the matching `ext_session_post` must then carry
+					// the returned nonce. See session-write-permit.ts.
 					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
 					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
 					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
@@ -1462,21 +1463,21 @@ export function handleWebSocketConnection(
 						break;
 					}
 					// Pack-bound surfaces (no tool) bind the permit with an empty tool
-					// surrogate — packId is the trusted scope key either way.
+					// surrogate — packId is the server-derived scope key either way.
 					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash });
 					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
 					break;
 				}
 				case "ext_session_post": {
 					// C2 session WRITE (`host.session.postMessage`) — design
-					// extension-host-phase2.md §8 C2.1. Routed over THIS trusted WS instead of a
-					// fetch precisely so no capturable session secret rides a pack-monkey-
-					// patchable `fetch`, and so pack code (no WS handle) cannot send it. The
-					// TARGET session is ALWAYS this connection's OWN authenticated `sessionId`,
-					// never a frame field — cross-session posting is structurally impossible.
-					// REQUIRES the server-minted, one-time, content-bound `nonce` from the
-					// preceding `ext_session_write_permit` mint: a replayed/forged/tampered
-					// frame fails permit consumption and is rejected with NO post.
+					// extension-host-phase2.md §8 C2.1. The sanctioned client path routes over this
+					// authenticated WS instead of a pack-callable fetch, but transport shape is not
+					// the security boundary. The TARGET session is ALWAYS this connection's OWN
+					// authenticated `sessionId`, never a frame field, and the server derives pack
+					// identity from the surface token. REQUIRES the server-minted, one-time,
+					// content-bound `nonce` from the preceding `ext_session_write_permit` mint: a
+					// replayed/forged/tampered frame fails permit consumption and is rejected with
+					// NO post.
 					const postMsg = msg as Extract<ClientMessage, { type: "ext_session_post" }>;
 					const requestId = typeof postMsg.requestId === "string" ? postMsg.requestId : "";
 					const projectTm = session.projectId && projectContextManager
@@ -1492,9 +1493,9 @@ export function handleWebSocketConnection(
 						if (persisted) return { allowedTools: persisted.allowedTools };
 						return undefined;
 					};
-					// DERIVE the trusted `tool` from the SERVER-MINTED surface token (never a
-					// caller-supplied `tool`), session-bound to THIS connection. A
-					// missing/invalid/wrong-session token is rejected with NO post.
+					// DERIVE the `tool` from the SERVER-MINTED surface token (never a caller-
+					// supplied `tool`), session-bound to THIS connection. A missing/invalid/
+					// wrong-session token is rejected with NO post.
 					const surf = extToolManager
 						? resolveSurfaceIdentity({ token: postMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
 						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
@@ -1505,7 +1506,7 @@ export function handleWebSocketConnection(
 					const result = await handleSessionPost({
 						tool: surf.tool,
 						packId: surf.packId,
-						// The TRUSTED, server-authenticated bound session of THIS connection.
+						// The server-authenticated bound session of THIS connection.
 						sessionId,
 						role: postMsg.role,
 						text: postMsg.text,
