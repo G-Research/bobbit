@@ -2599,9 +2599,10 @@ export class SessionManager {
 		// Cascade-first: pack-shipped roles (e.g. `pr-reviewer`) live in the config
 		// cascade, not the in-memory RoleManager. Resolving via roleManager alone
 		// returns `undefined` for a pack role, which on the restore / force-respawn
-		// paths drops its tools (guard falls through to group defaults). Mirror the
-		// cascade-first-then-roleManager pattern used by resolveRolePromptTemplate.
-		if (projectId && this.configCascade) {
+		// paths drops its tools (guard falls through to group defaults). Always ask
+		// the cascade, even without projectId, so server-scope/builtin market-pack
+		// roles work for system-scope sessions too.
+		if (this.configCascade) {
 			try {
 				const match = this.configCascade.resolveRoles(projectId).find(r => r.item.name === name);
 				if (match) return match.item;
@@ -6009,14 +6010,39 @@ export class SessionManager {
 	 * best-ranked model when gateway is configured, otherwise does nothing
 	 * (pi-coding-agent uses its own built-in default).
 	 */
-	/** Resolve a role-level model override for the session, if any. */
-	private resolveRoleModel(session: SessionInfo): string | undefined {
-		if (!session.role || !this.configCascade) return undefined;
+	private readRoleStringField(role: Role | undefined, field: "model" | "thinkingLevel"): string | undefined {
+		const value = role?.[field];
+		if (typeof value !== "string") return undefined;
+		return value.trim().length > 0 ? value : undefined;
+	}
+
+	private resolveRoleModelValue(roleName: string | undefined, projectId: string | undefined): string | undefined {
+		if (!roleName) return undefined;
+		const cascadeValue = this.readRoleStringField(this.resolveSessionRole(roleName, undefined, projectId), "model");
+		if (cascadeValue) return cascadeValue;
+		if (!this.configCascade) return undefined;
 		try {
-			return this.configCascade.resolveRoleModel(session.role, session.projectId);
+			return this.configCascade.resolveRoleModel(roleName, projectId);
 		} catch {
 			return undefined;
 		}
+	}
+
+	private resolveRoleThinkingLevelValue(roleName: string | undefined, projectId: string | undefined): string | undefined {
+		if (!roleName) return undefined;
+		const cascadeValue = this.readRoleStringField(this.resolveSessionRole(roleName, undefined, projectId), "thinkingLevel");
+		if (cascadeValue) return cascadeValue;
+		if (!this.configCascade) return undefined;
+		try {
+			return this.configCascade.resolveRoleThinkingLevel(roleName, projectId);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Resolve a role-level model override for the session, if any. */
+	private resolveRoleModel(session: SessionInfo): string | undefined {
+		return this.resolveRoleModelValue(session.role, session.projectId);
 	}
 
 	/**
@@ -6047,12 +6073,7 @@ export class SessionManager {
 
 	/** Resolve a role-level thinkingLevel override for the session, if any. */
 	private resolveRoleThinkingLevel(session: SessionInfo): string | undefined {
-		if (!session.role || !this.configCascade) return undefined;
-		try {
-			return this.configCascade.resolveRoleThinkingLevel(session.role, session.projectId);
-		} catch {
-			return undefined;
-		}
+		return this.resolveRoleThinkingLevelValue(session.role, session.projectId);
 	}
 
 	/**
@@ -6066,13 +6087,11 @@ export class SessionManager {
 	 */
 	resolveInitialModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		// Role override
-		if (role && this.configCascade) {
-			try {
-				const m = this.configCascade.resolveRoleModel(role, projectId);
-				// Skip models that can't run in an agent session (e.g. google-gemini-cli
-				// Code Assist) so a role override doesn't pin an unrunnable provider.
-				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
-			} catch { /* fall through */ }
+		if (role) {
+			const m = this.resolveRoleModelValue(role, projectId);
+			// Skip models that can't run in an agent session (e.g. google-gemini-cli
+			// Code Assist) so a role override doesn't pin an unrunnable provider.
+			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
@@ -6088,12 +6107,10 @@ export class SessionManager {
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
 		let candidate: string | undefined;
-		if (role && this.configCascade) {
-			try {
-				const t = this.configCascade.resolveRoleThinkingLevel(role, projectId);
-				const known = isKnownThinkingLevel(t);
-				if (known) candidate = known;
-			} catch { /* fall through */ }
+		if (role) {
+			const t = this.resolveRoleThinkingLevelValue(role, projectId);
+			const known = isKnownThinkingLevel(t);
+			if (known) candidate = known;
 		}
 		if (!candidate) {
 			const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
@@ -6122,11 +6139,9 @@ export class SessionManager {
 	 * verification-harness precedence: role override → `default.reviewModel`.
 	 */
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
-		if (role && this.configCascade) {
-			try {
-				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
-			} catch { /* fall through */ }
+		if (role) {
+			const m = this.resolveRoleModelValue(role, projectId);
+			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
 		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
@@ -6665,6 +6680,8 @@ export class SessionManager {
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
+		spawnPinnedModel?: string;
+		spawnPinnedThinkingLevel?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -6705,6 +6722,8 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
+				spawnPinnedModel: s.spawnPinnedModel,
+				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 			};
 		});
 	}

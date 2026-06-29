@@ -406,6 +406,7 @@ import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-u
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./agent/thinking-level-clamp.js";
+import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
 // `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
@@ -3319,12 +3320,21 @@ async function handleApiRoute(
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
 		return cascadeRole ?? roleManager.getRole(roleId);
 	};
-	const roleCreateOptions = (role: Role): { rolePrompt?: string; roleName: string; role: string; accessory?: string } => ({
-		rolePrompt: role.promptTemplate,
-		roleName: role.name,
-		role: role.name,
-		accessory: role.accessory,
-	});
+	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+	const roleCreateOptions = (role: Role): RoleCreateOptions => {
+		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
+			? role.model
+			: undefined;
+		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
+		return {
+			rolePrompt: role.promptTemplate,
+			roleName: role.name,
+			role: role.name,
+			accessory: role.accessory,
+			...(initialModel ? { initialModel } : {}),
+			...(initialThinkingLevel ? { initialThinkingLevel } : {}),
+		};
+	};
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
@@ -5391,6 +5401,8 @@ async function handleApiRoute(
 			// reaching into the WS state stream.
 			modelProvider: sessionPs?.modelProvider,
 			modelId: sessionPs?.modelId,
+			spawnPinnedModel: session.spawnPinnedModel,
+			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
@@ -5473,7 +5485,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
+		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
 		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
@@ -10939,7 +10951,9 @@ async function handleApiRoute(
 		} else {
 			const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
 			if (role) {
-				Object.assign(createOpts, roleCreateOptions(role));
+				const opts = roleCreateOptions(role);
+				if (createOpts.initialModel) delete opts.initialModel;
+				Object.assign(createOpts, opts);
 			} else if (ps.role) {
 				createOpts.role = ps.role;
 				createOpts.roleName = ps.role;
@@ -11434,7 +11448,9 @@ async function handleApiRoute(
 			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		}
 		if (role) {
-			Object.assign(createOpts, roleCreateOptions(role));
+			const opts = roleCreateOptions(role);
+			if (createOpts.initialModel) delete opts.initialModel;
+			Object.assign(createOpts, opts);
 		} else if (ps.role) {
 			// Persisted role name without a registered Role definition (e.g. the
 			// generic "assistant" role assigned to assistant sessions). Propagate

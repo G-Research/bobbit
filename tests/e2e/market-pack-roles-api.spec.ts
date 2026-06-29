@@ -83,6 +83,19 @@ async function createPlainSession(): Promise<string> {
 	return id;
 }
 
+async function expectLiveSessionRolePins(sessionId: string, label: string): Promise<void> {
+	const list = await apiFetch("/api/sessions");
+	const body = await readJson(list);
+	expect(list.status, `${REPRO}: ${label} failed to list sessions; body=${JSON.stringify(body)}`).toBe(200);
+	const live = (body.sessions ?? []).find((item: any) => item.id === sessionId);
+	expect(live, `${REPRO}: ${label} session should appear in live session list`).toBeTruthy();
+	expect(live.spawnPinnedModel, `${REPRO}: ${label} should pin the market-pack role model at spawn/respawn`).toBe("openai/gpt-4.1-mini");
+	// The fixture's role field is `low`, asserted on /api/roles above. Runtime
+	// spawn clamps it to `off` because gpt-4.1-mini is non-reasoning; this is the
+	// closest stable API assertion that role model/thinking reached session setup.
+	expect(live.spawnPinnedThinkingLevel, `${REPRO}: ${label} should pin the clamped market-pack role thinking level at spawn/respawn`).toBe("off");
+}
+
 async function createPlainStaff(name: string): Promise<any> {
 	const project = await defaultProject();
 	const res = await apiFetch("/api/staff", {
@@ -157,6 +170,7 @@ test.describe("market-pack roles API regression", () => {
 		const session = await readJson(get);
 		expect(session.role, `${REPRO}: created session should persist the market-pack role name`).toBe(ROLE_ID);
 		expect(session.accessory, `${REPRO}: created session should use the market-pack role accessory`).toBe("stethoscope");
+		await expectLiveSessionRolePins(created.id, "POST /api/sessions");
 	});
 
 	test("PATCH /api/sessions/:id accepts a role that is visible through the market-pack cascade", async () => {
@@ -175,6 +189,7 @@ test.describe("market-pack roles API regression", () => {
 		const session = await readJson(get);
 		expect(session.role, `${REPRO}: patched session should persist the market-pack role name`).toBe(ROLE_ID);
 		expect(session.accessory, `${REPRO}: patched session should use the market-pack role accessory`).toBe("stethoscope");
+		await expectLiveSessionRolePins(sessionId, "PATCH /api/sessions/:id");
 	});
 
 	test("POST /api/staff validates roleId through the market-pack cascade", async () => {
