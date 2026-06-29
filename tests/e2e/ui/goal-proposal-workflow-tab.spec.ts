@@ -17,7 +17,7 @@
 import type { Locator } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createSessionViaUI, activeSessionId } from "./ui-helpers.js";
 
 const INLINE_WORKFLOW_ID = "bespoke-inline-e2e";
 const INLINE_WORKFLOW_GATE_COUNT = 3;
@@ -52,6 +52,32 @@ const INLINE_WORKFLOW_FRONTMATTER = `inlineWorkflow:
           type: command
           run: echo merge`;
 
+const INLINE_WORKFLOW = {
+	id: INLINE_WORKFLOW_ID,
+	name: "Bespoke Inline E2E",
+	description: "Inline workflow seeded through a goal proposal draft.",
+	gates: [
+		{
+			id: "issue-analysis",
+			name: "Issue Analysis",
+			dependsOn: [],
+			verify: [{ name: "issue-check", type: "command", run: "echo issue" }],
+		},
+		{
+			id: "implementation",
+			name: "Implementation",
+			dependsOn: ["issue-analysis"],
+			verify: [{ name: "implementation-check", type: "command", run: "echo implementation" }],
+		},
+		{
+			id: "ready-to-merge",
+			name: "Ready to Merge",
+			dependsOn: ["implementation"],
+			verify: [{ name: "merge-check", type: "command", run: "echo merge" }],
+		},
+	],
+};
+
 async function selectedOptionText(locator: Locator): Promise<string> {
 	return locator.evaluate((el) => {
 		const select = el as HTMLSelectElement;
@@ -84,6 +110,48 @@ async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> 
 	expect(editResp.status, `replace library workflow with inline workflow: ${editText}`).toBe(200);
 }
 
+async function seedConflictingInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
+	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
+		method: "POST",
+		body: JSON.stringify({
+			args: {
+				title: "Inline Workflow Precedence Goal",
+				workflow: "general",
+				inlineWorkflow: INLINE_WORKFLOW,
+				spec: "A live assistant proposal with a library workflow id and a distinct inline workflow draft.",
+			},
+		}),
+	});
+	const seedText = await seedResp.text();
+	expect(seedResp.status, `seed goal proposal with both workflow id and inline workflow: ${seedText}`).toBe(200);
+}
+
+async function openNewGoalAssistantSession(page: import("@playwright/test").Page): Promise<string> {
+	const previousSessionId = await activeSessionId(page);
+	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
+	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
+	await newGoalBtn.click();
+	const handle = await page.waitForFunction(
+		(previous: string | null) => {
+			const selected = (window as any).bobbitState?.selectedSessionId;
+			if (typeof selected !== "string" || !selected || selected === previous) return null;
+			const routeSession = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? null;
+			if (routeSession !== selected) return null;
+			return selected;
+		},
+		previousSessionId,
+		{ timeout: 20_000 },
+	);
+	return await handle.jsonValue() as string;
+}
+
+async function selectOptionValues(locator: Locator): Promise<string[]> {
+	return locator.locator("option").evaluateAll((opts) =>
+		(opts as HTMLOptionElement[]).map((option) => option.value),
+	);
+}
+
 /** The harness may default subgoals on/off; the Workflow tab is independent. */
 async function ensureSubgoals(value: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {
@@ -95,6 +163,68 @@ async function ensureSubgoals(value: boolean): Promise<void> {
 
 test.describe("Goal proposal — Workflow tab", () => {
 	test.afterEach(async () => { await ensureSubgoals(true); });
+
+	test("live assistant proposals prefer a distinct inline workflow over the project workflow id", async ({ page }) => {
+		test.setTimeout(90_000);
+		await ensureSubgoals(true);
+		await openApp(page);
+		const sessionId = await openNewGoalAssistantSession(page);
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for cache warmup");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+		const preProposalSelect = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+		await expect(preProposalSelect).toBeVisible({ timeout: 10_000 });
+		await expect.poll(
+			() => selectOptionValues(preProposalSelect),
+			{ timeout: 10_000, message: "project workflow cache should be loaded before hydrating the inline proposal" },
+		).toContain("general");
+
+		await seedConflictingInlineWorkflowGoalProposal(sessionId);
+
+		await expect(titleInput).toHaveValue("Inline Workflow Precedence Goal", { timeout: 10_000 });
+		await expect.poll(
+			() => page.evaluate(() => {
+				const fields = (window as any).bobbitState?.activeProposals?.goal?.fields;
+				return {
+					workflow: fields?.workflow ?? null,
+					inlineId: fields?.inlineWorkflow?.id ?? null,
+					gateCount: fields?.inlineWorkflow?.gates?.length ?? 0,
+				};
+			}),
+			{ timeout: 10_000, message: "proposal should contain both a library workflow id and a distinct inline workflow" },
+		).toEqual({ workflow: "general", inlineId: INLINE_WORKFLOW_ID, gateCount: INLINE_WORKFLOW_GATE_COUNT });
+
+		const goalSelect = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+		await expect(goalSelect).toBeVisible({ timeout: 10_000 });
+		await expect.poll(
+			async () => ({
+				label: await selectedOptionText(goalSelect),
+				value: await goalSelect.inputValue(),
+			}),
+			{ timeout: 5_000, message: "BESPOKE_INLINE_WORKFLOW_PRECEDENCE: Goal tab must select the inline workflow, not the project workflow id" },
+		).toEqual({ label: INLINE_WORKFLOW_LABEL, value: INLINE_WORKFLOW_ID });
+		const goalOptions = await selectOptionValues(goalSelect);
+		expect(goalOptions, "project workflows must remain available alongside the bespoke option").toContain("general");
+		expect(goalOptions, "bespoke inline workflow option must exist in the Goal tab select").toContain(INLINE_WORKFLOW_ID);
+		expect(await goalSelect.inputValue()).not.toBe("general");
+
+		await page.locator("[data-testid='goal-proposal-tab-workflow']").click();
+		const workflowSelect = page.locator("[data-testid='goal-proposal-workflow-select']");
+		await expect(workflowSelect).toBeVisible({ timeout: 10_000 });
+		await expect.poll(
+			async () => ({
+				label: await selectedOptionText(workflowSelect),
+				value: await workflowSelect.inputValue(),
+			}),
+			{ timeout: 5_000, message: "BESPOKE_INLINE_WORKFLOW_PRECEDENCE: Workflow tab must select the inline workflow, not the project workflow id" },
+		).toEqual({ label: INLINE_WORKFLOW_LABEL, value: INLINE_WORKFLOW_ID });
+		const workflowOptions = await selectOptionValues(workflowSelect);
+		expect(workflowOptions, "project workflows must remain available in the Workflow tab select").toContain("general");
+		expect(workflowOptions, "bespoke inline workflow option must exist in the Workflow tab select").toContain(INLINE_WORKFLOW_ID);
+		expect(await workflowSelect.inputValue()).not.toBe("general");
+	});
 
 	test("inline workflow proposals show a Bespoke selected option in both workflow pickers", async ({ page }) => {
 		test.setTimeout(90_000);
