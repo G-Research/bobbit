@@ -158,6 +158,11 @@ let _creatingStaff = false;
  *  missing/unknown selections for failed workflow-validation proposals so the UI
  *  doesn't hide the server rejection by silently selecting the first workflow. */
 export function setSelectedWorkflowId(id: string): void {
+	const inlineWorkflow = selectedInlineWorkflowDraft();
+	if (inlineWorkflow) {
+		_selectedWorkflowId = inlineWorkflow.id;
+		return;
+	}
 	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !isKnownWorkflowId(id) && !shouldPreserveFailedWorkflowSelection())
 		? (_cachedWorkflows[0]?.id ?? "")
 		: id;
@@ -168,13 +173,19 @@ export function setSelectedWorkflowId(id: string): void {
  *  workflow-validation proposals keep the exact missing/unknown value so the
  *  selector remains visibly invalid until corrected. */
 function normalizeWorkflowSelections(): void {
+	const inlineWorkflow = selectedInlineWorkflowDraft();
+	if (inlineWorkflow) {
+		_selectedWorkflowId = inlineWorkflow.id;
+		_proposalWorkflowId = inlineWorkflow.id;
+		return;
+	}
 	if (_cachedWorkflows.length === 0) return;
 	const ids = new Set(_cachedWorkflows.map(w => w.id));
 	const first = _cachedWorkflows[0].id;
 	const preserveInvalid = shouldPreserveFailedWorkflowSelection();
 	if (!ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;
 	if (!ids.has(_proposalWorkflowId) && !preserveInvalid) {
-		_proposalWorkflowId = _proposalInlineWorkflow?.id || first;
+		_proposalWorkflowId = first;
 	}
 }
 
@@ -244,7 +255,7 @@ function isKnownWorkflowId(id: string): boolean {
 }
 
 function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null): boolean {
-	return _cachedWorkflows.length > 0 && !inlineWorkflow && !isKnownWorkflowId(id);
+	return _cachedWorkflows.length > 0 && !hasValidInlineWorkflowDraft(inlineWorkflow) && !isKnownWorkflowId(id);
 }
 
 function hasValidInlineWorkflowDraft(inlineWorkflow?: Workflow | null): inlineWorkflow is Workflow {
@@ -252,6 +263,10 @@ function hasValidInlineWorkflowDraft(inlineWorkflow?: Workflow | null): inlineWo
 		&& typeof inlineWorkflow.id === "string"
 		&& inlineWorkflow.id.length > 0
 		&& Array.isArray(inlineWorkflow.gates);
+}
+
+function selectedInlineWorkflowDraft(): Workflow | null {
+	return hasValidInlineWorkflowDraft(_proposalInlineWorkflow) ? _proposalInlineWorkflow : null;
 }
 
 type WorkflowSelectOption = {
@@ -268,10 +283,10 @@ function bespokeWorkflowOptionLabel(workflow: Workflow): string {
 	return `Bespoke (${workflow.gates.length} Gates)`;
 }
 
-function goalWorkflowSelectOptions(selectedId: string, inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
+function goalWorkflowSelectOptions(inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
 	const options: WorkflowSelectOption[] = [];
-	const selectedInlineId = inlineWorkflow?.id === selectedId ? inlineWorkflow.id : null;
-	if (inlineWorkflow && selectedInlineId) {
+	const selectedInlineId = hasValidInlineWorkflowDraft(inlineWorkflow) ? inlineWorkflow.id : null;
+	if (selectedInlineId) {
 		options.push({ id: selectedInlineId, label: bespokeWorkflowOptionLabel(inlineWorkflow), kind: "bespoke" });
 	}
 	for (const workflow of _cachedWorkflows) {
@@ -1000,15 +1015,17 @@ function renderGoalForm(config: GoalFormConfig) {
 	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
 	const wfState = config.workflowState ?? "ready";
-	const workflowOptions = goalWorkflowSelectOptions(config.workflowId, config.inlineWorkflow);
+	const inlineWorkflow = hasValidInlineWorkflowDraft(config.inlineWorkflow) ? config.inlineWorkflow : null;
+	const selectedWorkflowId = inlineWorkflow?.id ?? config.workflowId;
+	const workflowOptions = goalWorkflowSelectOptions(inlineWorkflow);
 	const noWorkflows = wfState === "empty" && workflowOptions.length === 0;
 	const workflowsLoading = wfState === "loading" && workflowOptions.length === 0;
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
 		: worktreePreviewPath(config.cwd, config.title);
-	const selectedLibraryWorkflow = _cachedWorkflows.find(w => w.id === config.workflowId) ?? null;
-	const wf = config.inlineWorkflow ?? selectedLibraryWorkflow;
-	const workflowInvalid = isWorkflowSelectionInvalid(config.workflowId, config.inlineWorkflow);
+	const selectedLibraryWorkflow = _cachedWorkflows.find(w => w.id === selectedWorkflowId) ?? null;
+	const wf = inlineWorkflow ?? selectedLibraryWorkflow;
+	const workflowInvalid = isWorkflowSelectionInvalid(selectedWorkflowId, inlineWorkflow);
 	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
 	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
@@ -1090,17 +1107,17 @@ function renderGoalForm(config: GoalFormConfig) {
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
 							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
-							.value=${config.workflowId}
+							.value=${selectedWorkflowId}
 							aria-invalid=${workflowProblem ? "true" : "false"}
 							@change=${config.onWorkflowChange}
 						>
 							${workflowProblem ? html`
-								<option value=${config.workflowId} ?selected=${true} disabled>
-									${config.workflowId ? `Unknown workflow: ${config.workflowId}` : "Select workflow"}
+								<option value=${selectedWorkflowId} ?selected=${true} disabled>
+									${selectedWorkflowId ? `Unknown workflow: ${selectedWorkflowId}` : "Select workflow"}
 								</option>
 							` : ""}
 							${workflowOptions.map((option) => html`
-								<option value=${option.id} ?selected=${config.workflowId === option.id}>${option.label}</option>
+								<option value=${option.id} ?selected=${selectedWorkflowId === option.id}>${option.label}</option>
 							`)}
 						</select>
 					</div>
@@ -1381,10 +1398,10 @@ function renderGoalForm(config: GoalFormConfig) {
 // `config.onInlineWorkflowChange` and NEVER mutates the project workflow store.
 // ============================================================================
 function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
-	const selectedId = config.workflowId;
 	const workflows = _cachedWorkflows;
-	const inline = config.inlineWorkflow ?? null;
-	const workflowOptions = goalWorkflowSelectOptions(selectedId, inline);
+	const inline = hasValidInlineWorkflowDraft(config.inlineWorkflow) ? config.inlineWorkflow : null;
+	const selectedId = inline?.id ?? config.workflowId;
+	const workflowOptions = goalWorkflowSelectOptions(inline);
 	const customizing = !!config.customizingWorkflow && !!inline;
 	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? null;
 	const displayWf = inline ?? selectedLibrary;
@@ -1650,11 +1667,12 @@ function goalPreviewPanel() {
 	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
-	const workflowValidationError = activeGoalWorkflowValidationError();
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	const workflowValidationError = inlineWorkflowDraft ? undefined : activeGoalWorkflowValidationError();
 	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
 	const failedWorkflowId = failedGoalWorkflowId(workflowValidationError);
-	const assistantWorkflowId = failedWorkflowId ?? _selectedWorkflowId;
-	const assistantWorkflowBlocked = !!workflowValidationError || isWorkflowSelectionInvalid(assistantWorkflowId, _proposalInlineWorkflow);
+	const assistantWorkflowId = inlineWorkflowDraft?.id ?? failedWorkflowId ?? _selectedWorkflowId;
+	const assistantWorkflowBlocked = !!workflowValidationError || isWorkflowSelectionInvalid(assistantWorkflowId, inlineWorkflowDraft);
 	const setAssistantWorkflowId = (id: string) => {
 		_selectedWorkflowId = id;
 		if (isKnownWorkflowId(_selectedWorkflowId)) clearActiveGoalWorkflowValidationError();
@@ -3425,6 +3443,12 @@ function syncProposalFormState(): void {
 		commitGoalProposalTabsState();
 	}
 
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	if (inlineWorkflowDraft) {
+		_proposalWorkflowId = inlineWorkflowDraft.id;
+		_selectedWorkflowId = inlineWorkflowDraft.id;
+	}
+
 	// Use a simple identity check to avoid re-initializing on every render
 	const workflowValidationKey = workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError());
 	const key = goalProposalFormIdentityKey(proposal, workflowValidationKey);
@@ -3436,10 +3460,9 @@ function syncProposalFormState(): void {
 	// Preserve project rootPath when proposal doesn't specify cwd
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
-	_proposalWorkflowId = proposal.workflow || "";
-	if (!_proposalWorkflowId && _proposalInlineWorkflow) {
-		_proposalWorkflowId = _proposalInlineWorkflow.id;
-	}
+	const selectedInlineWorkflow = selectedInlineWorkflowDraft();
+	_proposalWorkflowId = selectedInlineWorkflow?.id || proposal.workflow || "";
+	if (selectedInlineWorkflow) _selectedWorkflowId = selectedInlineWorkflow.id;
 	// Correct a phantom/empty proposed workflow immediately when the cache is already
 	// loaded, so the rendered option and form state agree on the same render.
 	normalizeWorkflowSelections();
@@ -3505,9 +3528,10 @@ function goalProposalPanel() {
 	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
-	const workflowValidationError = activeGoalWorkflowValidationError();
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	const workflowValidationError = inlineWorkflowDraft ? undefined : activeGoalWorkflowValidationError();
 	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
-	const workflowInvalid = isWorkflowSelectionInvalid(_proposalWorkflowId, _proposalInlineWorkflow);
+	const workflowInvalid = isWorkflowSelectionInvalid(_proposalWorkflowId, inlineWorkflowDraft);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
