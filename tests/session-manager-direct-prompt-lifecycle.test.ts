@@ -166,7 +166,62 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.ok(pending, "expected auto_retry_pending for dispatch-time fetch failed");
 		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for dispatch-time fetch failed");
 		assert.equal(pending.attempt, 1, "expected first bounded retry attempt for dispatch-time fetch failed");
-		assert.equal(client.sent.some((msg) => msg.type === "auto_retry_pending"), true, "expected client-visible auto_retry_pending for dispatch-time fetch failed");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"),
+			true,
+			"expected client-visible auto_retry_pending event for dispatch-time fetch failed",
+		);
+	});
+
+	it("schedules visible auto retry when queued drain dispatch rejects with fetch failed before message_end", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+		session.promptQueue.enqueue("queued transport prompt");
+
+		manager.drainQueue(session);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 1, "expected one failed queued dispatch before auto retry timer fires");
+		assert.equal(session.status, "idle", "expected queued dispatch failure recovery to restore idle status");
+		assert.equal(session.promptQueue.length, 1, "expected recovered queued prompt after fetch failed");
+		assert.equal(session.promptQueue.peek()?.text, "queued transport prompt", "expected queued prompt text recovered after fetch failed");
+		assert.ok(session.pendingAutoRetryTimer, "expected pendingAutoRetryTimer for queued fetch failed");
+		const pending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(pending, "expected auto_retry_pending for queued fetch failed");
+		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for queued fetch failed");
+		assert.equal(client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"), true);
+	});
+
+	it("auto retry consumes the recovered direct prompt row before redispatch", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry once without duplicate queue replay"),
+			/fetch failed/,
+		);
+		assert.equal(session.promptQueue.length, 1, "expected recovered row before auto retry fires");
+
+		t.mock.timers.tick(1000);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 2, "expected only the initial failure plus one auto retry dispatch");
+		assert.equal(prompt.mock.calls[1].arguments[0], "retry once without duplicate queue replay");
+		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered row before redispatching");
+		assert.equal(session.status, "streaming");
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
