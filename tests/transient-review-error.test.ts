@@ -35,8 +35,41 @@ describe("isTransientReviewError", () => {
 		assert.ok(isTransientReviewError("connect ECONNREFUSED 127.0.0.1:3001"));
 	});
 
+	it("detects fetch failed transport errors", () => {
+		assert.equal(
+			isTransientReviewError("LLM review failed: fetch failed"),
+			true,
+			"fetch failed should be classified as transient",
+		);
+		assert.equal(
+			isTransientReviewError("LLM review failed: TypeError: fetch failed"),
+			true,
+			"TypeError: fetch failed should be classified as transient",
+		);
+	});
+
+	it("detects undici transport errors", () => {
+		assert.equal(
+			isTransientReviewError("LLM review failed: TypeError: fetch failed: UND_ERR_SOCKET other side closed"),
+			true,
+			"UND_ERR_SOCKET should be classified as transient",
+		);
+		assert.equal(
+			isTransientReviewError("LLM review failed: TypeError: fetch failed: UND_ERR_HEADERS_TIMEOUT headers timeout"),
+			true,
+			"UND_ERR_HEADERS_TIMEOUT should be classified as transient",
+		);
+	});
+
 	it("does NOT match real review failures", () => {
 		assert.ok(!isTransientReviewError("LLM review failed: 'reviewer' role not found in role store."));
+	});
+
+	it("does NOT match deterministic auth/config/unsupported provider failures", () => {
+		assert.ok(!isTransientReviewError("LLM review failed: missing API key for provider"));
+		assert.ok(!isTransientReviewError("LLM review failed: configuration error: review model is not configured"));
+		assert.ok(!isTransientReviewError("LLM review failed: unsupported provider bobbit-llm"));
+		assert.ok(!isTransientReviewError("LLM review failed: unsupported model bobbit-preview-404"));
 	});
 
 	it("does NOT match a passing review", () => {

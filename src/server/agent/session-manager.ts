@@ -63,7 +63,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
-import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError } from "./verification-logic.js";
+import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -541,6 +541,8 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
+	recoveredPromptDispatchQueueIds?: string[];
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
 	/**
@@ -2955,6 +2957,11 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
 
+			// A fresh prompt supersedes any recovered dispatch-time copy of the
+			// failed prompt. Drop it before dispatching the new intent so a later
+			// agent_end drain cannot replay stale work after the follow-up succeeds.
+			this.consumeRecoveredPromptDispatchRows(session);
+
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
 			session.lastTurnErrored = false;
@@ -3261,6 +3268,32 @@ export class SessionManager {
 		});
 	}
 
+	private maybeAutoRetryPromptDeliveryFailure(session: SessionInfo, reason: string, source: string): boolean {
+		if (!reason || isNonRetryableAgentError(reason)) return false;
+		const isRetryable = isProviderBackoffError(reason) || isTransientReviewError(reason) || isRetryableGenericAgentError(reason);
+		if (!isRetryable) return false;
+
+		// The agent rejected the prompt before it could emit an assistant
+		// message_end, so synthesize the same error state that message_end would
+		// have established. The failed prompt never reached agent_start, so no
+		// tools ran in that turn; clear any stale flag from a previous turn so
+		// retryLastPrompt(auto:true) re-sends the recovered prompt instead of a
+		// mid-work continuation. The recovered queue row remains the single
+		// durable copy of the prompt; retryLastPrompt(auto:true) consumes it
+		// before dispatching so a later agent_end cannot replay it a second time.
+		session.lastTurnErrored = true;
+		session.lastTurnErrorMessage = reason;
+		session.turnHadToolCalls = false;
+		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+		const scheduled = this.maybeAutoRetryTransient(session);
+		if (scheduled) {
+			console.log(`[session-manager] ${source} dispatch for ${session.id} failed with retryable delivery error; auto-retry scheduled. Error: ${reason.slice(0, 200)}`);
+		} else {
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} exhausted retryable delivery auto-retries; leaving recovered row queued for manual Retry. Error: ${reason.slice(0, 200)}`);
+		}
+		return true;
+	}
+
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -3280,12 +3313,20 @@ export class SessionManager {
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
+		const recoveredIds: string[] = [];
 		for (const r of [...rows].reverse()) {
-			session.promptQueue.enqueueAtFront(r.text, {
+			const recovered = session.promptQueue.enqueueAtFront(r.text, {
 				images: r.images,
 				attachments: r.attachments,
 				isSteered: r.isSteered,
 			});
+			recoveredIds.push(recovered.id);
+		}
+		if (recoveredIds.length > 0) {
+			session.recoveredPromptDispatchQueueIds = [
+				...(session.recoveredPromptDispatchQueueIds ?? []),
+				...recoveredIds,
+			];
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
@@ -3294,6 +3335,9 @@ export class SessionManager {
 		}
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
+		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
+			return;
+		}
 		// Schedule a follow-up drain on the next tick so the rows we just
 		// re-enqueued get another chance once the bridge has finished its
 		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
@@ -3862,17 +3906,18 @@ export class SessionManager {
 	 * - Retryable generic agent/runtime errors (sanitized unexpected/internal
 	 *   system errors): bounded 3 attempts at 1s/5s/60s, then manual retry.
 	 */
-	private maybeAutoRetryTransient(session: SessionInfo): void {
+	private maybeAutoRetryTransient(session: SessionInfo): boolean {
 		const BOUNDED_MAX_ATTEMPTS = 3;
 		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
 		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
-		if (!errMsg) return;
+		if (!errMsg) return false;
+		if (isNonRetryableAgentError(errMsg)) return false;
 
 		const isBackoff = isProviderBackoffError(errMsg);
 		const isTransient = isTransientReviewError(errMsg);
 		const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
-		if (!isBackoff && !isTransient && !isGenericRetryable) return;
+		if (!isBackoff && !isTransient && !isGenericRetryable) return false;
 
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
 
@@ -3882,7 +3927,12 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} ${label} auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
-			return;
+			// Dispatch-time failures can exhaust before an agent_start arrives to
+			// clear the last visible countdown. Emit the standard cancellation
+			// frame even though the timer already fired so the UI does not keep a
+			// stale "retrying" banner while manual Retry is required.
+			this.cancelPendingAutoRetry(session, "new-prompt", { emitWithoutTimer: true });
+			return false;
 		}
 		session.transientRetryAttempts = attempt;
 
@@ -3937,6 +3987,7 @@ export class SessionManager {
 				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
 			});
 		}, delayMs);
+		return true;
 	}
 
 	/**
@@ -3947,11 +3998,13 @@ export class SessionManager {
 	private cancelPendingAutoRetry(
 		session: SessionInfo,
 		reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown",
+		opts?: { emitWithoutTimer?: boolean },
 	): void {
-		if (!session.pendingAutoRetryTimer) return;
-		clearTimeout(session.pendingAutoRetryTimer);
+		const hadTimer = !!session.pendingAutoRetryTimer;
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = undefined;
-		if (reason !== "shutdown" && session.clients.size > 0) {
+		if (!hadTimer && !opts?.emitWithoutTimer) return;
+		if (reason !== "shutdown") {
 			const cancelledEvent: AutoRetryCancelledEvent = {
 				type: "auto_retry_cancelled",
 				reason,
@@ -3984,6 +4037,18 @@ export class SessionManager {
 		if (!ps?.agentSessionFile) return undefined;
 		const restored = await this._respawnAgentInPlace(session, ps);
 		return restored ?? this.sessions.get(session.id);
+	}
+
+	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
+		const ids = session.recoveredPromptDispatchQueueIds;
+		if (!ids?.length) return false;
+		let removedAny = false;
+		for (const id of ids) {
+			removedAny = session.promptQueue.remove(id) || removedAny;
+		}
+		session.recoveredPromptDispatchQueueIds = undefined;
+		if (removedAny) this.broadcastQueue(session);
+		return removedAny;
 	}
 
 	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
@@ -4070,13 +4135,18 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			// Provider-auth dispatch failures re-enqueue the failed row for recovery.
-			// Explicit retry is the recovery dispatch, so consume that row first;
-			// otherwise the next successful agent_end drain would send it a second time.
-			this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			// Dispatch failures before agent_start re-enqueue the failed row for
+			// recovery. Explicit/auto retry is the recovery dispatch, so consume
+			// that row first; otherwise the next successful agent_end drain would
+			// send it a second time. Prefer tracked recovery row IDs; fall back to
+			// text matching for sessions created before the ID ledger existed.
+			if (!this.consumeRecoveredPromptDispatchRows(session)) {
+				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			}
 			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
+			this.consumeRecoveredPromptDispatchRows(session);
 			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"
