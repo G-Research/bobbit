@@ -11,8 +11,8 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe.configure({ mode: "serial" });
 
-type Source = { id: string; url: string; type?: "pack" | "mcp-gateway"; addedAt: string; lastSyncedAt?: string; mcpProviderCount?: number };
-type Disabled = { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[]; mcp?: string[] };
+type Source = { id: string; url: string; displayName?: string; normalizedName?: string; type?: "pack" | "mcp-gateway"; addedAt: string; lastSyncedAt?: string; mcpProviderCount?: number };
+type Disabled = { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[]; mcp?: string[]; mcpOperations?: Record<string, string[]> };
 
 type Provider = { id: string; label: string; description: string; ops: Array<{ op: string; description: string }> };
 
@@ -33,6 +33,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 }
 
 function providerPack(provider: Provider) {
+	const source = { id: SOURCE_ID, name: "mcp-local.t3.zone/readonly/mcp", type: "mcp-gateway" };
 	return {
 		name: `mcp-${provider.id}`,
 		dirName: `mcp-${provider.id}`,
@@ -42,6 +43,8 @@ function providerPack(provider: Provider) {
 		virtual: true,
 		sourceType: "mcp-gateway",
 		gatewayProviderId: provider.id,
+		browseKey: `${SOURCE_ID}:mcp-${provider.id}`,
+		source,
 		contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: [provider.id] },
 		descriptions: { mcp: { [provider.id]: provider.description } },
 		mcp: [{
@@ -53,6 +56,7 @@ function providerPack(provider: Provider) {
 			description: provider.description,
 			transport: "http",
 			url: GATEWAY_URL,
+			operations: provider.ops.map((op) => ({ name: op.op, description: op.description, policyKey: `mcp__${RUNTIME_SERVER}__${provider.id}__${op.op}` })),
 		}],
 	};
 }
@@ -66,6 +70,8 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 	const source = (): Source => ({
 		id: SOURCE_ID,
 		url: GATEWAY_URL,
+		displayName: "mcp-local.t3.zone/readonly/mcp",
+		normalizedName: "mcp-local.t3.zone/readonly/mcp",
 		type: "mcp-gateway",
 		addedAt: new Date(0).toISOString(),
 		lastSyncedAt: new Date(1000).toISOString(),
@@ -90,7 +96,27 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 			tools: [],
 			skills: [],
 			entrypoints: [],
-			mcp: [{ ref: JIRA_REF, listName: JIRA_REF, serverName: RUNTIME_SERVER, subNamespace: JIRA_REF, label: "Jira", transport: "http", status: disabled.mcp?.includes(JIRA_REF) ? "disabled" : "active-owner" }],
+			mcp: [{
+				ref: JIRA_REF,
+				contributionId: JIRA_REF,
+				listName: JIRA_REF,
+				serverName: RUNTIME_SERVER,
+				subNamespace: JIRA_REF,
+				label: "Jira",
+				transport: "http",
+				status: disabled.mcp?.includes(JIRA_REF) ? "disabled" : "active-owner",
+				totalOperationCount: jiraProvider().ops.length,
+				selectedOperationCount: jiraProvider().ops.length - (disabled.mcpOperations?.[JIRA_REF]?.length ?? 0),
+				operations: jiraProvider().ops.map((op) => ({
+					name: op.op,
+					description: op.description,
+					policyKey: `mcp__${RUNTIME_SERVER}__${JIRA_REF}__${op.op}`,
+					selected: !(disabled.mcpOperations?.[JIRA_REF] ?? []).includes(op.op),
+					disabledByActivation: (disabled.mcpOperations?.[JIRA_REF] ?? []).includes(op.op),
+				})),
+				disabledOperations: disabled.mcpOperations?.[JIRA_REF] ?? [],
+				staleDisabledOperations: (disabled.mcpOperations?.[JIRA_REF] ?? []).filter((op) => !jiraProvider().ops.some((candidate) => candidate.op === op)),
+			}],
 			descriptions: { mcp: { [JIRA_REF]: "Jira issue tools" } },
 		},
 		disabled,
@@ -123,6 +149,13 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 		}
 		return route.fallback();
 	});
+	await page.route(/\/api\/marketplace\/browse(?:\?.*)?$/, async (route) => {
+		if (route.request().method() !== "GET") return route.fallback();
+		return fulfillJson(route, {
+			sources: sourceAdded ? [{ sourceId: SOURCE_ID, sourceName: source().displayName!, sourceType: "mcp-gateway", status: "ok", lastSyncedAt: source().lastSyncedAt }] : [],
+			packs: sourceAdded ? PROVIDERS.map(providerPack) : [],
+		});
+	});
 	await page.route(new RegExp(`/api/marketplace/sources/${SOURCE_ID}/packs(?:\\?.*)?$`), async (route) => {
 		if (route.request().method() !== "GET") return route.fallback();
 		return fulfillJson(route, { packs: sourceAdded ? PROVIDERS.map(providerPack) : [] });
@@ -138,6 +171,17 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 		installed = true;
 		disabled = { mcp: [] };
 		return fulfillJson(route, { installed: installedPack() }, 201);
+	});
+	await page.route(/\/api\/marketplace\/pack-activation\/mcp-operation(?:\?.*)?$/, async (route) => {
+		const req = route.request();
+		if (req.method() !== "PATCH") return route.fallback();
+		const body = req.postDataJSON();
+		posts.activation.push(body);
+		const current = new Set(disabled.mcpOperations?.[body.contributionId] ?? []);
+		if (body.disabled) current.add(body.operationName);
+		else current.delete(body.operationName);
+		disabled = { ...disabled, mcpOperations: { ...(disabled.mcpOperations ?? {}), [body.contributionId]: [...current] } };
+		return fulfillJson(route, activation());
 	});
 	await page.route(/\/api\/marketplace\/pack-activation(?:\?.*)?$/, async (route) => {
 		const req = route.request();
@@ -192,8 +236,9 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect.poll(() => posts.addSource.length, { timeout: 10_000 }).toBe(1);
 	await expect(posts.addSource[0]).toMatchObject({ url: GATEWAY_URL, type: "mcp-gateway" });
 	await expect(JSON.stringify(posts.addSource[0])).not.toContain('"ref"');
+	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
 
-	await expect(page.locator('[data-testid="market-browse-panel"]')).toBeVisible({ timeout: 15_000 });
+	await goToTab(page, "browse");
 	for (const provider of PROVIDERS) {
 		await expect(page.locator(`[data-testid="market-browse-pack"][data-pack-name="mcp-${provider.id}"]`), provider.label).toBeVisible({ timeout: 15_000 });
 	}
@@ -205,7 +250,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await browseCard.locator('[data-testid="market-install-pack"]').click();
 
 	await goToTab(page, "sources");
-	const sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: SOURCE_ID });
+	const sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
 	await expect(sourceRow.locator('[data-testid="market-source-type-chip"]')).toHaveText("MCP gateway");
 	await expect(sourceRow).toContainText(`Gateway URL: ${GATEWAY_URL}`);
 	await expect(sourceRow).toContainText("3 providers discovered");
@@ -217,6 +262,12 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	const toggle = installedCard.locator(`[data-testid="market-toggle-mcp-${JIRA_REF}"]`);
 	await expect(toggle).toBeChecked({ timeout: 15_000 });
 	await expect(installedCard.locator(`[data-testid="market-mcp-status-${JIRA_REF}"]`)).toContainText("Connected", { timeout: 15_000 });
+	await expect(installedCard.locator('[data-testid="market-toggle-operation-jira_search"]')).toBeChecked({ timeout: 15_000 });
+	await installedCard.locator('[data-testid="market-toggle-operation-jira_search"]').click();
+	await expect.poll(() => posts.activation.some((body) => JSON.stringify(body).includes('"operationName":"jira_search"') && JSON.stringify(body).includes('"disabled":true')), { timeout: 10_000 }).toBe(true);
+	await expect(installedCard.locator('[data-testid="market-toggle-operation-jira_search"]')).not.toBeChecked({ timeout: 15_000 });
+	await installedCard.locator('[data-testid="market-toggle-operation-jira_search"]').click();
+	await expect(installedCard.locator('[data-testid="market-toggle-operation-jira_search"]')).toBeChecked({ timeout: 15_000 });
 
 	await navigateToHash(page, "#/tools");
 	const serverRow = page.locator('[data-testid="mcp-server-row"][data-server-name="gr"]');
