@@ -81,6 +81,7 @@ export class McpClient {
   private _process: ChildProcess | null = null;
   private _readline: ReadlineInterface | null = null;
   private _pendingRequests = new Map<number, PendingRequest>();
+  private _httpSessionId: string | null = null;
 
   constructor(private serverName: string) {}
 
@@ -92,6 +93,7 @@ export class McpClient {
   /** Connect to MCP server. Spawns process (stdio) or validates URL (HTTP). Sends initialize handshake. */
   async connect(config: McpServerConfig): Promise<void> {
     this._config = config;
+    this._httpSessionId = null;
 
     if (config.command) {
       await this._connectStdio(config);
@@ -166,6 +168,7 @@ export class McpClient {
     }
 
     this._config = null;
+    this._httpSessionId = null;
     this._log('Disconnected');
   }
 
@@ -403,17 +406,36 @@ export class McpClient {
     });
   }
 
-  private async _sendHttpRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
-    const url = this._config!.url!;
-    const headers: Record<string, string> = {
+  private _hasConfiguredHttpSessionHeader(): boolean {
+    const headers = this._config?.headers;
+    return !!headers && Object.keys(headers).some((name) => name.toLowerCase() === 'mcp-session-id');
+  }
+
+  private _httpRequestHeaders(): Record<string, string> {
+    const configuredSessionHeader = this._hasConfiguredHttpSessionHeader();
+    return {
       'Content-Type': 'application/json',
       // Streamable HTTP transport spec: client MUST advertise both response shapes.
       Accept: 'application/json, text/event-stream',
+      // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
+      ...(this._httpSessionId && !configuredSessionHeader ? { 'Mcp-Session-Id': this._httpSessionId } : {}),
       ...this._config!.headers,
     };
+  }
+
+  private _captureHttpSessionHeader(headers: IncomingHttpHeaders): void {
+    if (this._hasConfiguredHttpSessionHeader()) return;
+    const sessionId = responseHeader(headers, 'mcp-session-id').trim();
+    if (sessionId) this._httpSessionId = sessionId;
+  }
+
+  private async _sendHttpRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+    const url = this._config!.url!;
+    const headers = this._httpRequestHeaders();
 
     try {
       const response = await this._postHttpJson(url, headers, JSON.stringify(request), request.method);
+      this._captureHttpSessionHeader(response.headers);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw new Error(`HTTP ${response.statusCode}: ${response.body.slice(0, 500)}`);
@@ -449,14 +471,11 @@ export class McpClient {
 
   private async _sendHttpNotification(notification: JsonRpcNotification): Promise<void> {
     const url = this._config!.url!;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-      ...this._config!.headers,
-    };
+    const headers = this._httpRequestHeaders();
 
     try {
-      await this._postHttpJson(url, headers, JSON.stringify(notification), notification.method);
+      const response = await this._postHttpJson(url, headers, JSON.stringify(notification), notification.method);
+      this._captureHttpSessionHeader(response.headers);
     } catch {
       // Ignore errors for notifications
     }
