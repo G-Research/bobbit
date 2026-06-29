@@ -9,6 +9,7 @@ import {
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND,
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
 	WalkthroughAnalysisBundleStore,
+	createAnalysisBundleFromParsedDiff,
 } from "../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
 import type { PrWalkthroughAnalysisBundle } from "../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
 import type { PrWalkthroughJobRecord } from "../src/server/pr-walkthrough/walkthrough-agent-store.ts";
@@ -38,6 +39,22 @@ function jobRecord(jobId: string): PrWalkthroughJobRecord {
 		title: "Window test",
 		createdAt: "2026-06-01T00:00:00.000Z",
 		updatedAt: "2026-06-01T00:00:00.000Z",
+	} as PrWalkthroughJobRecord;
+}
+
+function jobRecordWithPrMetadata(jobId: string): PrWalkthroughJobRecord {
+	return {
+		...jobRecord(jobId),
+		title: "PR #879 Walkthrough",
+		target: {
+			provider: "github",
+			owner: "SuuBro",
+			repo: "bobbit",
+			number: 879,
+			prUrl: "https://github.com/SuuBro/bobbit/pull/879",
+			prTitle: "Terminal Touch Scroll",
+			prBody: "## Summary\nEnable touch scrolling over the terminal.",
+		},
 	} as PrWalkthroughJobRecord;
 }
 
@@ -102,6 +119,19 @@ function bundleWithMultipleHunks(jobId: string): PrWalkthroughAnalysisBundle {
 		}],
 	};
 }
+
+describe("PR walkthrough analysis bundle metadata", () => {
+	it("falls back to launch-time PR title and body when the local diff has no GitHub metadata", () => {
+		const bundle = createAnalysisBundleFromParsedDiff(jobRecordWithPrMetadata("job-pr-body"), {
+			changeset: { baseSha: "base", headSha: "head", title: "base..head", filesChanged: 0, additions: 0, deletions: 0 },
+			files: [],
+			warnings: [],
+		});
+
+		assert.equal(bundle.changeset.title, "Terminal Touch Scroll");
+		assert.equal(bundle.changeset.body, "## Summary\nEnable touch scrolling over the terminal.");
+	});
+});
 
 describe("WalkthroughAnalysisBundleStore file read windowing", () => {
 	it("bounds a 700k single-line hunk and returns truncation metadata before callers format it", () => withStore((store, job) => {

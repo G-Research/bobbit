@@ -729,6 +729,13 @@ function trustedPrFields(binding) {
 	if (target.number !== undefined) out.number = target.number;
 	if (target.prUrl) out.url = target.prUrl;
 	if (target.prTitle || target.title) out.title = target.prTitle || target.title;
+	if (typeof target.prBody === "string") {
+		out.original_description = {
+			body: target.prBody,
+			source: target.prBodySource || "gh_cli",
+			fetched_at: target.prBodyFetchedAt || new Date(0).toISOString(),
+		};
+	}
 	if (binding.baseSha) out.base_sha = binding.baseSha;
 	if (binding.headSha) out.head_sha = binding.headSha;
 	return out;
@@ -838,6 +845,7 @@ function isFinalPayload(value) {
 function decorateChangesetWithTarget(changeset, target) {
 	if (!target || typeof target !== "object" || target.provider !== "github") return changeset;
 	const prTitle = strOf(target.prTitle) || strOf(target.title);
+	const prBody = typeof target.prBody === "string" ? target.prBody : strOf(target.body);
 	const prUrl = strOf(target.prUrl) || strOf(target.url);
 	return {
 		...changeset,
@@ -848,6 +856,7 @@ function decorateChangesetWithTarget(changeset, target) {
 		number: target.number ?? target.prNumber ?? changeset.number,
 		...(prUrl ? { prUrl, externalUrl: prUrl, url: prUrl } : {}),
 		...(prTitle ? { prTitle, title: prTitle } : {}),
+		...(prBody !== undefined ? { prBody, body: prBody, description: prBody } : {}),
 	};
 }
 
@@ -1299,7 +1308,7 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 
 	let pr;
 	try {
-		const out = await io.gh(cwd, ["pr", "view", "--json", "number,title,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
+		const out = await io.gh(cwd, ["pr", "view", "--json", "number,title,body,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
 		pr = JSON.parse(String(out).trim());
 	} catch {
 		return noPr; // gh non-zero / no PR for branch / gh unavailable
@@ -1349,6 +1358,9 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 			repo,
 			prNumber: pr.number,
 			prTitle: strOf(pr.title),
+			prBody: typeof pr.body === "string" ? pr.body : undefined,
+			prBodySource: "gh_cli",
+			prBodyFetchedAt: new Date().toISOString(),
 			prUrl: strOf(pr.url),
 			baseSha,
 			headSha,
@@ -1381,15 +1393,18 @@ async function canonicalizeTarget(input, cwd) {
 	}
 
 	const prTitle = strOf(input.prTitle) || strOf(input.title);
+	const prBody = typeof input.prBody === "string" ? input.prBody : undefined;
+	const prBodySource = strOf(input.prBodySource);
+	const prBodyFetchedAt = strOf(input.prBodyFetchedAt);
 	if (owner && repo && number !== undefined) {
 		const url = prUrl || `https://${host}/${owner}/${repo}/pull/${number}`;
 		const canonicalKey = host === "github.com"
 			? `github:${owner}/${repo}#${number}`
 			: `github:${host}/${owner}/${repo}#${number}`;
-		return { provider: "github", prUrl: url, prTitle, owner, repo, number, baseSha, headSha, host, canonicalKey };
+		return { provider: "github", prUrl: url, prTitle, prBody, prBodySource, prBodyFetchedAt, owner, repo, number, baseSha, headSha, host, canonicalKey };
 	}
 	if (number !== undefined) {
-		return { provider: "github", prUrl, prTitle, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
+		return { provider: "github", prUrl, prTitle, prBody, prBodySource, prBodyFetchedAt, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
 	}
 	if (baseSha && headSha) {
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };

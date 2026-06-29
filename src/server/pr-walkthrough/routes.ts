@@ -1171,6 +1171,8 @@ async function resolveDiffForBindingTarget(
 	}
 	if (target.baseSha && target.headSha) {
 		const resolved = await resolveLocalChangeset({ cwd, baseSha: target.baseSha, headSha: target.headSha });
+		const prTitle = stringValue(target.prTitle);
+		const prBody = typeof target.prBody === "string" ? target.prBody : "";
 		return {
 			changeset: {
 				...resolved.changeset,
@@ -1178,7 +1180,9 @@ async function resolveDiffForBindingTarget(
 				externalUrl: target.prUrl,
 				prUrl: target.prUrl,
 				prNumber: target.number,
-				prBody: "",
+				prTitle,
+				prBody,
+				...(prTitle ? { title: target.number !== undefined ? `PR #${target.number}: ${prTitle}` : prTitle } : {}),
 			},
 			files: resolved.files,
 			warnings: resolved.warnings,
