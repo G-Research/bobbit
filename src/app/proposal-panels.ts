@@ -263,19 +263,15 @@ function bespokeWorkflowOptionLabel(workflow: Workflow): string {
 
 function goalWorkflowSelectOptions(selectedId: string, inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
 	const options: WorkflowSelectOption[] = [];
-	if (inlineWorkflow?.id && inlineWorkflow.id === selectedId) {
-		options.push({ id: inlineWorkflow.id, label: bespokeWorkflowOptionLabel(inlineWorkflow), kind: "bespoke" });
+	const selectedInlineId = inlineWorkflow?.id === selectedId ? inlineWorkflow.id : null;
+	if (inlineWorkflow && selectedInlineId) {
+		options.push({ id: selectedInlineId, label: bespokeWorkflowOptionLabel(inlineWorkflow), kind: "bespoke" });
 	}
 	for (const workflow of _cachedWorkflows) {
+		if (workflow.id === selectedInlineId) continue;
 		options.push({ id: workflow.id, label: projectWorkflowOptionLabel(workflow), kind: "project" });
 	}
 	return options;
-}
-
-function isSelectedWorkflowOption(option: WorkflowSelectOption, selectedId: string, options: WorkflowSelectOption[]): boolean {
-	if (option.id !== selectedId) return false;
-	const selectedBespoke = options.some((candidate) => candidate.kind === "bespoke" && candidate.id === selectedId);
-	return option.kind === "bespoke" || !selectedBespoke;
 }
 
 function workflowErrorMessageWithAvailable(error: GoalWorkflowValidationError | undefined): string {
@@ -1097,7 +1093,7 @@ function renderGoalForm(config: GoalFormConfig) {
 								</option>
 							` : ""}
 							${workflowOptions.map((option) => html`
-								<option value=${option.id} ?selected=${isSelectedWorkflowOption(option, config.workflowId, workflowOptions)}>${option.label}</option>
+								<option value=${option.id} ?selected=${config.workflowId === option.id}>${option.label}</option>
 							`)}
 						</select>
 					</div>
@@ -1411,7 +1407,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 								</option>
 							` : ""}
 							${workflowOptions.map((option) => html`
-								<option value=${option.id} ?selected=${isSelectedWorkflowOption(option, selectedId, workflowOptions)}>${option.label}</option>
+								<option value=${option.id} ?selected=${selectedId === option.id}>${option.label}</option>
 							`)}
 						</select>
 						${customizing
