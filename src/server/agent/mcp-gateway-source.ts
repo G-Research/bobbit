@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { stringify } from "yaml";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { McpClient } from "../mcp/mcp-client.js";
 import type { MarketplaceSource } from "./marketplace-source-store.js";
 import { isSafeMcpListName, isValidMcpServerName, mcpGeneratedPackNameForId } from "./pack-contributions.js";
 import type { PackManifest } from "./pack-types.js";
@@ -50,6 +51,7 @@ export interface FetchMcpGatewayOptions {
 	timeoutMs?: number;
 	maxBodyBytes?: number;
 	fetchFn?: typeof fetch;
+	discoveryMode?: "mcp" | "catalogue";
 }
 
 export type McpGatewayBrowsePack = PackManifest & {
@@ -98,31 +100,67 @@ export async function fetchMcpGatewayWithDiagnostics(source: MarketplaceSource, 
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_GATEWAY_FETCH_TIMEOUT_MS;
 	if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new McpGatewayError("gateway fetch timeout must be positive");
 
-	const errors: string[] = [];
-	for (const candidate of candidateGatewayCatalogueUrls(source.url)) {
-		try {
-			const raw = await fetchCandidateJson(candidate, { ...opts, maxBodyBytes, timeoutMs });
-			return parseMcpGatewayDocument(raw, source.url);
-		} catch (err) {
-			errors.push(`${candidate}: ${err instanceof Error ? err.message : String(err)}`);
-		}
+	if (opts.discoveryMode === "catalogue") {
+		return fetchMcpGatewayCatalogueWithDiagnostics(source.url, { ...opts, maxBodyBytes, timeoutMs });
 	}
-	throw new McpGatewayError(`gateway catalogue fetch failed: ${errors.join("; ")}`);
+	return fetchMcpGatewayViaProtocol(source.url, timeoutMs);
 }
 
 export function candidateGatewayCatalogueUrls(sourceUrl: string): string[] {
 	const source = validateHttpUrl(sourceUrl, "gateway source URL");
 	source.hash = "";
-	const original = source.toString().replace(/\/+$/, "");
-	const out: string[] = [];
-	for (const suffix of ["/readonly/mcp", "/write/mcp"]) {
-		if (original.endsWith(suffix)) {
-			out.push(`${original.slice(0, -suffix.length)}/signin/aigateway`);
-			break;
+	return [source.toString().replace(/\/+$/, "")];
+}
+
+async function fetchMcpGatewayViaProtocol(sourceUrl: string, timeoutMs: number): Promise<McpGatewayParseResult> {
+	const client = new McpClient("mcp-gateway-discovery");
+	try {
+		try {
+			await withGatewayTimeout(client.connect({ url: sourceUrl }), timeoutMs, `gateway MCP initialize timed out after ${timeoutMs}ms`);
+		} catch (err) {
+			throw new McpGatewayError(`gateway MCP initialize failed: ${errorMessage(err)}`);
+		}
+		let tools: unknown[];
+		try {
+			tools = await withGatewayTimeout(client.listTools(), timeoutMs, `gateway MCP tools/list timed out after ${timeoutMs}ms`);
+		} catch (err) {
+			throw new McpGatewayError(`gateway MCP tools/list failed: ${errorMessage(err)}`);
+		}
+		return parseMcpGatewayDocument({ tools }, sourceUrl);
+	} finally {
+		await client.disconnect().catch(() => undefined);
+	}
+}
+
+async function fetchMcpGatewayCatalogueWithDiagnostics(sourceUrl: string, opts: Required<Pick<FetchMcpGatewayOptions, "timeoutMs" | "maxBodyBytes">> & FetchMcpGatewayOptions): Promise<McpGatewayParseResult> {
+	const errors: string[] = [];
+	for (const candidate of candidateGatewayCatalogueUrls(sourceUrl)) {
+		try {
+			const raw = await fetchCandidateJson(candidate, opts);
+			return parseMcpGatewayDocument(raw, sourceUrl);
+		} catch (err) {
+			errors.push(`${candidate}: ${errorMessage(err)}`);
 		}
 	}
-	out.push(original);
-	return [...new Set(out)];
+	throw new McpGatewayError(`gateway catalogue fetch failed: ${errors.join("; ")}`);
+}
+
+async function withGatewayTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_resolve, reject) => {
+				timeout = setTimeout(() => reject(new McpGatewayError(message)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
 }
 
 async function fetchCandidateJson(url: string, opts: Required<Pick<FetchMcpGatewayOptions, "timeoutMs" | "maxBodyBytes">> & FetchMcpGatewayOptions): Promise<unknown> {

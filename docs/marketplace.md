@@ -63,13 +63,13 @@ A **Market** button sits in the sidebar config-nav row, between **Workflows** an
 A **source** is either:
 
 - a git remote URL or absolute local directory path whose top level is a collection of pack directories (never a flat `defaults/` mirror), or
-- an **MCP Gateway** endpoint (`type: "mcp-gateway"`), such as `http://mcp-local.t3.zone/readonly/mcp`, whose gateway catalogue exposes provider namespaces.
+- an **MCP Gateway** streamable-HTTP endpoint (`type: "mcp-gateway"`), such as `http://mcp-local.t3.zone/readonly/mcp`, whose MCP tools expose provider namespaces.
 
 Sources are **global to the server** — once registered, a source can be browsed and installed into any scope.
 
-In the **Sources** panel, click "Add source", choose the source type, then paste a git URL, local/`file://` path, or MCP Gateway URL. Git sources may carry an optional branch/tag `ref`; MCP Gateway sources are URL-only and do not render or accept a ref field. Adding a source immediately validates/syncs it (shallow clone for git, read-in-place for local dirs, bounded JSON catalogue fetch for MCP gateways). Per-source "Re-sync" and "Remove" actions are available.
+In the **Sources** panel, click "Add source", choose the source type, then paste a git URL, local/`file://` path, or MCP Gateway URL. Git sources may carry an optional branch/tag `ref`; MCP Gateway sources are URL-only and do not render or accept a ref field. Adding a source immediately validates/syncs it (shallow clone for git, read-in-place for local dirs, MCP `initialize` + `tools/list` discovery for gateways). Per-source "Re-sync" and "Remove" actions are available.
 
-Private repos rely on your ambient git credentials (credential helper / SSH agent) — the marketplace stores no credentials of its own. MCP Gateway URLs are fetched as trusted source metadata and materialized as trusted remote HTTP MCP endpoints. Actual gateway auth is runtime configuration: do not put secrets in marketplace source URLs or pack files.
+Private repos rely on your ambient git credentials (credential helper / SSH agent) — the marketplace stores no credentials of its own. MCP Gateway URLs are contacted as trusted streamable-HTTP MCP endpoints during source sync and then materialized as trusted remote HTTP MCP endpoints. Actual gateway auth is runtime configuration: do not put secrets in marketplace source URLs or pack files.
 
 ### Browsing packs
 
@@ -120,7 +120,7 @@ Why two fields instead of one boolean? A single "update available" flag can't di
 
 ### Updating and uninstalling
 
-- **Update** re-syncs the originating source, re-resolves the commit/fingerprint, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes. MCP Gateway packs are rebuilt from the latest provider catalogue entry.
+- **Update** re-syncs the originating source, re-resolves the commit/fingerprint, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes. MCP Gateway packs are rebuilt from the latest MCP provider discovery result.
 - **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added — no orphans. If the pack contributed MCP servers, Bobbit reloads the affected MCP managers and unregisters removed external MCP tools.
 
 **When the Update button appears (change detection).** The Update button is shown only when the source's latest **manifest version** differs from the installed `.pack-meta.yaml` version — a plain version-string comparison, not a commit-SHA or file diff. This is cheap, deterministic, and matches the semver the publisher advertises.
@@ -390,9 +390,11 @@ An MCP Gateway source is added with `type: "mcp-gateway"` and a single HTTP(S) U
 http://mcp-local.t3.zone/readonly/mcp
 ```
 
-Bobbit treats the configured URL as the MCP HTTP endpoint and derives catalogue candidates from it. For `/readonly/mcp` and `/write/mcp` endpoints, Bobbit first tries the sibling `/signin/aigateway` catalogue path, then falls back to the original URL if it returns a supported catalogue object. Fetches are bounded and diagnostic: HTTP/HTTPS only, no URL credentials or fragments, a timeout, a response-size cap, and JSON-only parsing. Malformed provider entries are skipped with diagnostics instead of hiding every valid provider.
+Bobbit treats the configured URL as the exact streamable-HTTP MCP endpoint. Discovery opens the normal `McpClient` path against that URL, sends the MCP `initialize` handshake, then calls `tools/list`. It does not probe sibling paths, perform plain `GET` JSON discovery, or call `/signin/aigateway` by default. The HTTP client advertises both JSON and SSE responses and preserves a server-assigned `Mcp-Session-Id` across `initialize`, `notifications/initialized`, and `tools/list`, so session-aware streamable-HTTP gateways work without extra marketplace configuration.
 
-Supported catalogue responses normalize into provider records. The parser accepts provider arrays (`{ providers: [...] }`, `{ data: { providers: [...] } }`) and tool arrays (`{ tools: [...] }`) that can be grouped by provider namespace. Provider ids may come from fields such as `id`, `provider`, `name`, `namespace`, or `subNamespace`; labels and descriptions are display-only; operation lists are used for preview/fingerprint metadata, not for Market-level operation toggles. Provider ids must pass the same safety guards as pack-local MCP list names and runtime `subNamespace` values. Duplicate, unsafe, non-HTTP, credentialed, secret-header, or otherwise malformed entries are skipped and reported as `mcpGatewayDiagnostics`.
+The default discovery result is the `tools` array returned by `tools/list`. Bobbit groups tools into provider records from an explicit `provider`, `namespace`, or `subNamespace` field when present, otherwise from names shaped `<provider>__<operation>`; for example, `jira__jira_search` and `confluence__confluence_get_page` produce `jira` and `confluence` provider packs. Labels and descriptions are display-only; operation lists are used for preview/fingerprint metadata, not for Market-level operation toggles. Provider ids must pass the same safety guards as pack-local MCP list names and runtime `subNamespace` values. Duplicate, unsafe, non-HTTP, credentialed, secret-header, or otherwise malformed entries are skipped and reported as `mcpGatewayDiagnostics`.
+
+JSON catalogue parsing exists only as an explicit fallback path for callers that opt into catalogue discovery. That fallback fetches the configured URL itself as bounded JSON and accepts provider arrays (`{ providers: [...] }`, `{ data: { providers: [...] } }`) or tool arrays (`{ tools: [...] }`) that can be grouped by provider namespace. It is not the default source path for MCP Gateway sources and should not be relied on for standard streamable-HTTP gateways.
 
 Each valid provider becomes one virtual provider pack:
 
@@ -423,7 +425,7 @@ transport:
   url: http://mcp-local.t3.zone/readonly/mcp
 ```
 
-If the catalogue exposes a concrete write URL for the same provider, Bobbit materializes a second MCP entry in the same pack:
+If explicit provider metadata exposes a concrete write URL for the same provider, Bobbit materializes a second MCP entry in the same pack:
 
 ```yaml
 # pack.yaml excerpt
@@ -907,7 +909,7 @@ All marketplace routes live in `server.ts::handleApiRoute()`. Full request/respo
 | `GET /api/marketplace/sources` | List registered sources. |
 | `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` (syncs immediately). `type: "mcp-gateway"` registers a URL-only MCP Gateway source; omitted/`"pack"` registers git/local pack sources. New `type: "mcp-registry"` requests are rejected as legacy/unsupported. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source and its cache dir. |
-| `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch for pack sources, bounded JSON catalogue fetch/fingerprint update for MCP gateways). |
+| `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch for pack sources, MCP `initialize` + `tools/list` discovery/fingerprint update for gateways). |
 | `GET /api/marketplace/sources/:id/packs` | Browse a source's packs or MCP Gateway provider virtual packs (`hasTools` reflects whether the pack ships tools; informational only — it no longer drives a per-pack gate). |
 | `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` — install a pack or materialize/install an MCP Gateway provider virtual pack. May return `mcpReload`. |
 | `POST /api/marketplace/update` | `{ scope, packName, projectId? }` — re-pull/re-materialize + replace. May return `mcpReload`. |
@@ -993,6 +995,6 @@ See [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md) fo
 - **Per-conflict pinning is deferred.** The only conflict-resolution mechanism is `pack_order` (plus user-pack customization). A future `pack_conflicts` schema is sketched in the design doc but not implemented, surfaced, or tested.
 - **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, MCP packs can run host stdio commands or call trusted remote endpoints, pi-extension packs load host/runtime code into agent processes, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool, MCP server, or pi extension; there is no capability concept. Pi-extension discovery is more confined than runtime loading, but it is still executable probing of trusted source after the source-level trust warning is accepted. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
 - **Git sync is synchronous.** Add-source, re-sync, and install run git inline and block until done.
-- **No hosted pack registry yet.** Generic pack sources are still git repos or local dirs. MCP Gateway sources are provider catalogues for MCP discovery, not a searchable hosted pack marketplace.
+- **No hosted pack registry yet.** Generic pack sources are still git repos or local dirs. MCP Gateway sources discover providers from MCP `tools/list`, not from a searchable hosted pack marketplace.
 - **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; staff templates are noted as a gap. (UI panels are now shipped as auto-discovered `panels/<panel>.yaml` pack contributions — see the [Extension Host](#extension-contributions-tool-renderers--server-actions) section.)
 - **Child-agent launch is pack-expressible (sandbox-inherited) via `host.agents`; goal-team `team_spawn` is not; typed inference is out of scope for v1.** A pack can launch + orchestrate child agents through `host.agents.*`, but only within the calling session's sandbox/credential scope (no escalation, no foreign-session reach) — see [What is (and isn't) pack-expressible](#what-is-and-isnt-pack-expressible-in-v1). Goal-team `team_spawn` (worktree-on-sub-branch role agents) stays agent-tool-side. There is no *typed* `host.model.*` inference method — not because the worker lacks credentials (a trusted pack has full ambient env + network, like any tool), but because a gateway-mediated inference contract is deferred. A parent-side `host.model.*` is the highest-value future additive capability — see [What is (and isn't) pack-expressible in v1](#what-is-and-isnt-pack-expressible-in-v1).
