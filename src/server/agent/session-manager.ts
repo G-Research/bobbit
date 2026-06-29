@@ -63,7 +63,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
-import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError } from "./verification-logic.js";
+import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -3261,6 +3261,28 @@ export class SessionManager {
 		});
 	}
 
+	private maybeAutoRetryPromptDeliveryFailure(session: SessionInfo, reason: string, source: string): boolean {
+		if (!reason || isNonRetryableAgentError(reason)) return false;
+		const isRetryable = isProviderBackoffError(reason) || isTransientReviewError(reason) || isRetryableGenericAgentError(reason);
+		if (!isRetryable) return false;
+
+		// The agent rejected the prompt before it could emit an assistant
+		// message_end, so synthesize the same error state that message_end would
+		// have established. The recovered queue row remains the single durable
+		// copy of the prompt; retryLastPrompt(auto:true) consumes it before
+		// dispatching so a later agent_end cannot replay it a second time.
+		session.lastTurnErrored = true;
+		session.lastTurnErrorMessage = reason;
+		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+		const scheduled = this.maybeAutoRetryTransient(session);
+		if (scheduled) {
+			console.log(`[session-manager] ${source} dispatch for ${session.id} failed with retryable delivery error; auto-retry scheduled. Error: ${reason.slice(0, 200)}`);
+		} else {
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} exhausted retryable delivery auto-retries; leaving recovered row queued for manual Retry. Error: ${reason.slice(0, 200)}`);
+		}
+		return true;
+	}
+
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -3294,6 +3316,9 @@ export class SessionManager {
 		}
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
+		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
+			return;
+		}
 		// Schedule a follow-up drain on the next tick so the rows we just
 		// re-enqueued get another chance once the bridge has finished its
 		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
@@ -3862,17 +3887,18 @@ export class SessionManager {
 	 * - Retryable generic agent/runtime errors (sanitized unexpected/internal
 	 *   system errors): bounded 3 attempts at 1s/5s/60s, then manual retry.
 	 */
-	private maybeAutoRetryTransient(session: SessionInfo): void {
+	private maybeAutoRetryTransient(session: SessionInfo): boolean {
 		const BOUNDED_MAX_ATTEMPTS = 3;
 		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
 		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
-		if (!errMsg) return;
+		if (!errMsg) return false;
+		if (isNonRetryableAgentError(errMsg)) return false;
 
 		const isBackoff = isProviderBackoffError(errMsg);
 		const isTransient = isTransientReviewError(errMsg);
 		const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
-		if (!isBackoff && !isTransient && !isGenericRetryable) return;
+		if (!isBackoff && !isTransient && !isGenericRetryable) return false;
 
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
 
@@ -3882,7 +3908,7 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} ${label} auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
-			return;
+			return false;
 		}
 		session.transientRetryAttempts = attempt;
 
@@ -3937,6 +3963,7 @@ export class SessionManager {
 				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
 			});
 		}, delayMs);
+		return true;
 	}
 
 	/**

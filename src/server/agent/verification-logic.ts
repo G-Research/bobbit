@@ -207,6 +207,8 @@ export const TRANSIENT_INFRA_ERROR_REGEXES: RegExp[] = [
 	/\bwebsocket\s+error\b/i,
 	/\bsocket\s+error\b/i,
 	/\bsocket\s+hang\s+up\b/i,
+	/\b(?:TypeError:\s*)?fetch failed\b/i,
+	/\bUND_ERR_(?:SOCKET|HEADERS_TIMEOUT|CONNECT_TIMEOUT|BODY_TIMEOUT|ABORTED|DESTROYED)\b/i,
 	/\b(?:ECONNRESET|ECONNREFUSED|ENOTCONN|EPIPE)\b/i,
 	/\bconnection\s+(?:reset|refused|closed|lost|terminated)\b/i,
 	/\bconnect\s+ECONNREFUSED\b/i,
@@ -292,12 +294,18 @@ const GENERIC_AGENT_NON_RETRYABLE_REGEXES: RegExp[] = [
 	/\b(?:invalid|missing|no) api key\b/i,
 	/\b(?:api key|token|credential)s? (?:is |are )?(?:missing|invalid|expired|not configured|required)\b/i,
 	/\b(?:configuration|config) (?:error|invalid|missing|not configured)\b/i,
+	/\b(?:unsupported|unknown|unrecognized) (?:provider|model)\b/i,
+	/\b(?:provider|model)\b.{0,80}\b(?:unsupported|not supported|unknown|unrecognized)\b/i,
 	/\b(?:permission denied|access denied|operation not permitted|eacces|eperm)\b/i,
 	/\b(?:user|human) (?:aborted|cancelled|canceled|interrupted)\b/i,
 	/\b(?:aborterror|cancelled by user|canceled by user)\b/i,
 	/\b(?:content policy|policy violation|safety policy|blocked by policy|disallowed content)\b/i,
 	/\b(?:validationerror|validation error|invalid request|bad request|schema validation)\b/i,
 ];
+
+export function isNonRetryableAgentError(output: string): boolean {
+	return !!output && GENERIC_AGENT_NON_RETRYABLE_REGEXES.some(re => re.test(output));
+}
 
 /**
  * Classify generic agent/runtime failures that are worth one short bounded
@@ -308,7 +316,7 @@ const GENERIC_AGENT_NON_RETRYABLE_REGEXES: RegExp[] = [
  */
 export function isRetryableGenericAgentError(output: string): boolean {
 	if (!output) return false;
-	if (GENERIC_AGENT_NON_RETRYABLE_REGEXES.some(re => re.test(output))) return false;
+	if (isNonRetryableAgentError(output)) return false;
 	return GENERIC_AGENT_RETRYABLE_REGEXES.some(re => re.test(output));
 }
 
@@ -336,6 +344,7 @@ export function shouldRetryVerificationStep(args: {
 	isTransient: (output: string) => boolean;
 }): RetryDecision {
 	if (args.passed) return "break";
+	if (isNonRetryableAgentError(args.output)) return "break";
 	const retryable = args.isTransient(args.output) || isRetryableGenericAgentError(args.output);
 	if (!retryable) return "break";
 	const isBackoff = isProviderBackoffError(args.output);
