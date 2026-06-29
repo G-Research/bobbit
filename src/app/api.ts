@@ -2463,6 +2463,8 @@ export interface McpServerInfo {
 	status: "connected" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	/** Active provider sub-namespaces for grouped gateway-backed MCP servers. */
+	activeSubNamespaces?: string[];
 	tools: McpOperationInfo[];
 }
 
@@ -2959,20 +2961,26 @@ export interface PackMeta {
 	scope: MarketScope;
 }
 
-export type MarketplaceSourceType = "pack" | "mcp-registry";
+export type MarketplaceSourceType = "pack" | "mcp-gateway";
+export type StoredMarketplaceSourceType = MarketplaceSourceType | "mcp-registry";
 
 export interface MarketplaceSource {
 	id: string;
 	url: string;
 	ref?: string;
-	/** Source backend type. Omitted means the original pack git/local source. */
-	type?: MarketplaceSourceType;
+	/** Source backend type. Omitted means the original pack git/local source. Legacy mcp-registry rows may still appear as unsupported. */
+	type?: StoredMarketplaceSourceType;
 	addedAt: string;
 	lastSyncedAt?: string;
 	lastCommit?: string;
-	/** Optional summary metadata for MCP registry sources. */
+	/** Optional summary metadata for MCP gateway/legacy registry sources. */
+	mcpProviderCount?: number;
+	discoveredMcpProviders?: number;
+	gatewayProviderCount?: number;
 	mcpServerCount?: number;
 	discoveredMcpServers?: number;
+	/** Response-only migration note for unsupported legacy source rows. */
+	unsupportedReason?: string;
 	/** Response-only: marks the synthetic, non-removable built-in source (§4.4). */
 	builtin?: boolean;
 }
@@ -3052,9 +3060,13 @@ export interface BrowsePackWire extends PackManifest {
 	/** Response-only: resolved in place (not copy-installed). */
 	provided?: boolean;
 	descriptions?: PackEntityDescriptions;
-	/** Optional MCP details for registry virtual packs or authored schema-2 packs. */
+	/** Optional MCP details for gateway virtual packs or authored schema-2 packs. */
 	mcp?: PackMcpContributionWire[];
 	mcpServers?: PackMcpContributionWire[];
+	/** Response-only metadata for virtual MCP gateway provider packs. */
+	sourceType?: StoredMarketplaceSourceType;
+	gatewayProviderId?: string;
+	mcpGatewayDiagnostics?: string[];
 }
 
 export interface InstalledPackWire {
@@ -3134,7 +3146,7 @@ export function addMarketplaceSource(url: string, ref?: string, type?: Marketpla
 	const body: { url: string; ref?: string; type?: MarketplaceSourceType } = { url };
 	if (ref) body.ref = ref;
 	// Preserve legacy pack-source behavior against older servers by omitting the
-	// default type; MCP registry sources need the explicit discriminator.
+	// default type; MCP gateway sources need the explicit discriminator.
 	if (type && type !== "pack") body.type = type;
 	return marketFetch("/api/marketplace/sources", jsonInit("POST", body));
 }
