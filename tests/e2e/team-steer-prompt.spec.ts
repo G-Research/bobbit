@@ -14,10 +14,38 @@ import {
 	startTeam,
 	teardownTeam,
 	waitForSessionStatus,
+	connectWs,
+	signalAndWaitForGate,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
-test.setTimeout(30_000);
+test.setTimeout(45_000);
+
+function seedTeamAgent(gateway: any, goalId: string, sessionId: string): void {
+	const entry = gateway.teamManager.teams.get(goalId) ?? {
+		goalId,
+		teamLeadSessionId: `e2e-teamlead-${goalId}`,
+		agents: [],
+		maxConcurrent: 12,
+	};
+	entry.agents = [
+		...entry.agents.filter((agent: any) => agent.sessionId !== sessionId),
+		{ sessionId, role: "coder", kind: "worker", task: "E2E seeded team agent", createdAt: Date.now() },
+	];
+	gateway.teamManager.teams.set(goalId, entry);
+	gateway.teamManager.sessionToGoal?.set?.(sessionId, goalId);
+}
+
+function unseedTeamAgent(gateway: any, goalId: string, sessionId: string): void {
+	const entry = gateway.teamManager.teams.get(goalId);
+	if (!entry) return;
+	entry.agents = entry.agents.filter((agent: any) => agent.sessionId !== sessionId);
+	gateway.teamManager.sessionToGoal?.delete?.(sessionId);
+}
+
+function messageIncludesContext(message: string, marker: string, prompt: string): boolean {
+	return message.includes(marker) && message.includes(prompt) && message.indexOf(marker) < message.indexOf(prompt);
+}
 
 // ── Validation tests ─────────────────────────────────────────────────
 
@@ -199,6 +227,143 @@ test.describe("team prompt — dispatch behavior", () => {
 		await deleteGoal(goalId);
 	});
 
+	test("POST /team/prompt defaults to steer mode for an idle team agent", async ({ gateway }) => {
+		const agentId = await createSession();
+		try {
+			seedTeamAgent(gateway, goalId, agentId);
+			await waitForSessionStatus(agentId, "idle");
+
+			const sm = gateway.sessionManager;
+			const origEnqueue = sm.enqueuePrompt.bind(sm);
+			let captured: { message: string; opts?: any } | undefined;
+			sm.enqueuePrompt = async (sessionId: string, message: string, opts?: any) => {
+				if (sessionId === agentId && message.includes("DEFAULT_STEER_IDLE")) {
+					captured = { message, opts };
+				}
+				return { status: "queued" };
+			};
+
+			try {
+				const promptResp = await apiFetch(`/api/goals/${goalId}/team/prompt`, {
+					method: "POST",
+					body: JSON.stringify({ sessionId: agentId, message: "DEFAULT_STEER_IDLE" }),
+				});
+				const data = await promptResp.json();
+				expect(promptResp.status, JSON.stringify(data)).toBe(200);
+				expect(data).toMatchObject({ ok: true, mode: "steer", status: "queued" });
+				expect(captured?.opts?.isSteered, "default team_prompt must enqueue idle targets as steered").toBe(true);
+			} finally {
+				sm.enqueuePrompt = origEnqueue;
+			}
+		} finally {
+			unseedTeamAgent(gateway, goalId, agentId);
+			await deleteSession(agentId);
+		}
+	});
+
+	test("POST /team/prompt mode=prompt preserves normal enqueue semantics", async ({ gateway }) => {
+		const agentId = await createSession();
+		try {
+			seedTeamAgent(gateway, goalId, agentId);
+			await waitForSessionStatus(agentId, "idle");
+
+			const sm = gateway.sessionManager;
+			const origEnqueue = sm.enqueuePrompt.bind(sm);
+			let captured: { message: string; opts?: any } | undefined;
+			sm.enqueuePrompt = async (sessionId: string, message: string, opts?: any) => {
+				if (sessionId === agentId && message.includes("NORMAL_PROMPT_MODE")) {
+					captured = { message, opts };
+				}
+				return { status: "dispatched" };
+			};
+
+			try {
+				const promptResp = await apiFetch(`/api/goals/${goalId}/team/prompt`, {
+					method: "POST",
+					body: JSON.stringify({ sessionId: agentId, message: "NORMAL_PROMPT_MODE", mode: "prompt" }),
+				});
+				const data = await promptResp.json();
+				expect(promptResp.status, JSON.stringify(data)).toBe(200);
+				expect(data).toMatchObject({ ok: true, mode: "prompt", status: "dispatched" });
+				expect(captured?.opts?.isSteered, "mode=prompt must not mark queue rows as steered").not.toBe(true);
+			} finally {
+				sm.enqueuePrompt = origEnqueue;
+			}
+		} finally {
+			unseedTeamAgent(gateway, goalId, agentId);
+			await deleteSession(agentId);
+		}
+	});
+
+	test("POST /team/prompt injects workflow gate context in prompt and steer modes", async ({ gateway }) => {
+		const workflowGoal = await createGoal({ title: "prompt-context-injection", team: true, workflowId: "general" });
+		const contextSessionId = await createSession({ goalId: workflowGoal.id });
+		const agentId = await createSession({ goalId: workflowGoal.id });
+		try {
+			seedTeamAgent(gateway, workflowGoal.id, agentId);
+			const conn = await connectWs(contextSessionId);
+			try {
+				const marker = `DESIGN_CONTEXT_MARKER_${Date.now()}`;
+				await signalAndWaitForGate(
+					conn,
+					workflowGoal.id,
+					"design-doc",
+					{ content: `Design content ${marker}` },
+					"passed",
+					20_000,
+				);
+
+				const sm = gateway.sessionManager;
+				const origEnqueue = sm.enqueuePrompt.bind(sm);
+				const captured: Array<{ mode: string; message: string; opts?: any }> = [];
+				sm.enqueuePrompt = async (sessionId: string, message: string, opts?: any) => {
+					if (sessionId === agentId) {
+						const mode = message.includes("CONTEXT_PROMPT_MODE") ? "prompt" : "steer";
+						captured.push({ mode, message, opts });
+					}
+					return { status: "queued" };
+				};
+
+				try {
+					for (const mode of ["prompt", "steer"] as const) {
+						const userPrompt = mode === "prompt" ? "CONTEXT_PROMPT_MODE" : "CONTEXT_STEER_MODE";
+						const promptResp = await apiFetch(`/api/goals/${workflowGoal.id}/team/prompt`, {
+							method: "POST",
+							body: JSON.stringify({
+								sessionId: agentId,
+								message: userPrompt,
+								mode,
+								workflowGateId: "implementation",
+								inputGateIds: ["design-doc"],
+							}),
+						});
+						const data = await promptResp.json();
+						expect(promptResp.status, JSON.stringify(data)).toBe(200);
+						expect(data).toMatchObject({ ok: true, mode, status: "queued" });
+					}
+
+					const promptCapture = captured.find((entry) => entry.mode === "prompt");
+					const steerCapture = captured.find((entry) => entry.mode === "steer");
+					expect(promptCapture, "prompt mode capture").toBeTruthy();
+					expect(steerCapture, "steer mode capture").toBeTruthy();
+					expect(messageIncludesContext(promptCapture!.message, marker, "CONTEXT_PROMPT_MODE")).toBe(true);
+					expect(messageIncludesContext(steerCapture!.message, marker, "CONTEXT_STEER_MODE")).toBe(true);
+					expect(promptCapture!.opts?.isSteered).not.toBe(true);
+					expect(steerCapture!.opts?.isSteered).toBe(true);
+				} finally {
+					sm.enqueuePrompt = origEnqueue;
+				}
+			} finally {
+				conn.close();
+			}
+		} finally {
+			unseedTeamAgent(gateway, workflowGoal.id, agentId);
+			await deleteSession(agentId).catch(() => {});
+			await deleteSession(contextSessionId).catch(() => {});
+			await deleteGoal(workflowGoal.id).catch(() => {});
+		}
+	});
+
 	test("POST /team/prompt succeeds for team agent", async () => {
 		const spawnResp = await apiFetch(`/api/goals/${goalId}/team/spawn`, {
 			method: "POST",
@@ -212,10 +377,11 @@ test.describe("team prompt — dispatch behavior", () => {
 				method: "POST",
 				body: JSON.stringify({ sessionId: agentId, message: "also fix the tests" }),
 			});
-			expect(promptResp.status).toBe(200);
 			const data = await promptResp.json();
+			expect(promptResp.status, JSON.stringify(data)).toBe(200);
 			expect(data.ok).toBe(true);
-			expect(["dispatched", "queued"]).toContain(data.status);
+			expect(data.mode).toBe("steer");
+			expect(data.dispatched === true || ["dispatched", "queued"].includes(data.status)).toBe(true);
 
 			await apiFetch(`/api/goals/${goalId}/team/dismiss`, {
 				method: "POST",
