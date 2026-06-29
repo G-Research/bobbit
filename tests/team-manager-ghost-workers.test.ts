@@ -170,11 +170,17 @@ describe("TeamManager ghost worker reaping", () => {
 		entry.agents.push(
 			{ sessionId: "missing-worker", role: "coder", kind: "worker", task: "missing", createdAt: Date.now() },
 			{ sessionId: "terminated-worker", role: "coder", kind: "worker", task: "terminated", createdAt: Date.now() },
+			{ sessionId: "missing-reviewer-worker", role: "reviewer", kind: "worker", task: "missing reviewer worker", createdAt: Date.now() },
+			{ sessionId: "terminated-reviewer-worker", role: "reviewer", kind: "worker", task: "terminated reviewer worker", createdAt: Date.now() },
 		);
 		sm._sessions.set("terminated-worker", makeEventSession("terminated-worker", "terminated"));
+		sm._sessions.set("terminated-reviewer-worker", makeEventSession("terminated-reviewer-worker", "terminated"));
 		team.sessionToGoal.set("missing-worker", goal.id);
 		team.sessionToGoal.set("terminated-worker", goal.id);
+		team.sessionToGoal.set("missing-reviewer-worker", goal.id);
+		team.sessionToGoal.set("terminated-reviewer-worker", goal.id);
 		team.lastNotifyTime.set("missing-worker", Date.now());
+		team.lastNotifyTime.set("missing-reviewer-worker", Date.now());
 		const pending = setTimeout(() => {}, 60_000);
 		pending.unref?.();
 		team.pendingIdleNotify.set("terminated-worker", pending);
@@ -190,14 +196,17 @@ describe("TeamManager ghost worker reaping", () => {
 		);
 		assert.equal(team.sessionToGoal.has("missing-worker"), false, "missing worker reverse index must be cleared");
 		assert.equal(team.sessionToGoal.has("terminated-worker"), false, "terminated worker reverse index must be cleared");
+		assert.equal(team.sessionToGoal.has("missing-reviewer-worker"), false, "missing reviewer-role worker reverse index must be cleared");
+		assert.equal(team.sessionToGoal.has("terminated-reviewer-worker"), false, "terminated reviewer-role worker reverse index must be cleared");
 		assert.equal(team.lastNotifyTime.has("missing-worker"), false, "stale notify debounce state must be cleared");
+		assert.equal(team.lastNotifyTime.has("missing-reviewer-worker"), false, "reviewer-role worker notify debounce state must be cleared");
 		assert.equal(team.pendingIdleNotify.has("terminated-worker"), false, "pending idle notify timer must be cleared");
 		assert.deepEqual(
 			readPersistedTeams()[0].agents.map((agent: any) => agent.sessionId),
 			[result.sessionId],
 			"team-state.json must not keep stale workers after spawn-time reaping",
 		);
-		assert.equal(forgetChild.mock.callCount(), 2, "stale worker sessions should be forgotten by orchestration core best-effort cleanup");
+		assert.equal(forgetChild.mock.callCount(), 4, "stale worker sessions should be forgotten by orchestration core best-effort cleanup");
 	});
 
 	it("restart resubscribe reaps missing and terminated workers and persists a clean team state", () => {
@@ -211,6 +220,8 @@ describe("TeamManager ghost worker reaping", () => {
 			agents: [
 				{ sessionId: "missing-worker", role: "coder", kind: "worker", task: "missing", createdAt: Date.now() },
 				{ sessionId: "terminated-worker", role: "coder", kind: "worker", task: "terminated", createdAt: Date.now() },
+				{ sessionId: "missing-reviewer-worker", role: "reviewer", kind: "worker", task: "missing reviewer worker", createdAt: Date.now() },
+				{ sessionId: "terminated-reviewer-worker", role: "reviewer", kind: "worker", task: "terminated reviewer worker", createdAt: Date.now() },
 				{ sessionId: "live-worker", role: "coder", kind: "worker", task: "live", createdAt: Date.now() },
 				{ sessionId: "missing-reviewer", role: "reviewer", kind: "reviewer", task: "review", createdAt: Date.now() },
 			],
@@ -220,6 +231,7 @@ describe("TeamManager ghost worker reaping", () => {
 		const sm = createMockSessionManager(goals);
 		sm._sessions.set("team-lead-1", makeEventSession("team-lead-1", "streaming"));
 		sm._sessions.set("terminated-worker", makeEventSession("terminated-worker", "terminated"));
+		sm._sessions.set("terminated-reviewer-worker", makeEventSession("terminated-reviewer-worker", "terminated"));
 		sm._sessions.set("live-worker", makeEventSession("live-worker", "streaming"));
 		const broadcastToGoal = mock.fn((_goalId: string, _event: any) => {});
 		const forgetChild = mock.fn((_sessionId: string) => {});
@@ -230,8 +242,12 @@ describe("TeamManager ghost worker reaping", () => {
 		const terminatedUnsubscribe = mock.fn(() => {});
 		entry.agents.find((agent: any) => agent.sessionId === "missing-worker").unsubscribeEvent = missingUnsubscribe;
 		entry.agents.find((agent: any) => agent.sessionId === "terminated-worker").unsubscribeEvent = terminatedUnsubscribe;
+		entry.agents.find((agent: any) => agent.sessionId === "missing-reviewer-worker").unsubscribeEvent = mock.fn(() => {});
+		entry.agents.find((agent: any) => agent.sessionId === "terminated-reviewer-worker").unsubscribeEvent = mock.fn(() => {});
 		team.lastNotifyTime.set("missing-worker", Date.now());
 		team.lastNotifyTime.set("terminated-worker", Date.now());
+		team.lastNotifyTime.set("missing-reviewer-worker", Date.now());
+		team.lastNotifyTime.set("terminated-reviewer-worker", Date.now());
 		const missingPending = setTimeout(() => {}, 60_000);
 		const terminatedPending = setTimeout(() => {}, 60_000);
 		missingPending.unref?.();
@@ -251,19 +267,21 @@ describe("TeamManager ghost worker reaping", () => {
 			["live-worker"],
 			"team-state.json must be rewritten without dead worker records after restart reaping",
 		);
-		for (const staleId of ["missing-worker", "terminated-worker", "missing-reviewer"]) {
+		for (const staleId of ["missing-worker", "terminated-worker", "missing-reviewer-worker", "terminated-reviewer-worker", "missing-reviewer"]) {
 			assert.equal(team.sessionToGoal.has(staleId), false, `${staleId} reverse index must be cleared`);
 		}
 		assert.equal(team.lastNotifyTime.has("missing-worker"), false, "missing worker notify debounce must be cleared");
 		assert.equal(team.lastNotifyTime.has("terminated-worker"), false, "terminated worker notify debounce must be cleared");
+		assert.equal(team.lastNotifyTime.has("missing-reviewer-worker"), false, "missing reviewer-role worker notify debounce must be cleared");
+		assert.equal(team.lastNotifyTime.has("terminated-reviewer-worker"), false, "terminated reviewer-role worker notify debounce must be cleared");
 		assert.equal(team.pendingIdleNotify.has("missing-worker"), false, "missing worker pending nudge must be cancelled");
 		assert.equal(team.pendingIdleNotify.has("terminated-worker"), false, "terminated worker pending nudge must be cancelled");
 		assert.equal(missingUnsubscribe.mock.callCount(), 1, "missing worker event subscription must be unsubscribed");
 		assert.equal(terminatedUnsubscribe.mock.callCount(), 1, "terminated worker event subscription must be unsubscribed");
 		assert.deepEqual(
 			forgetChild.mock.calls.map((call: any) => call.arguments[0]).sort(),
-			["missing-worker", "terminated-worker"],
-			"stale workers should be forgotten by orchestration core without routing reviewers through worker cleanup",
+			["missing-reviewer-worker", "missing-worker", "terminated-reviewer-worker", "terminated-worker"],
+			"stale workers, including reviewer-role workers, should be forgotten by orchestration core without routing verification reviewers through worker cleanup",
 		);
 		assert.equal(
 			broadcastToGoal.mock.calls.some((call: any) => call.arguments[1]?.type === "team_agent_finished"),
@@ -273,7 +291,7 @@ describe("TeamManager ghost worker reaping", () => {
 		assert.equal(sm._sessions.get("live-worker").rpcClient.onEvent.mock.callCount(), 1, "live workers must still be resubscribed");
 	});
 
-	it("reviewer entries are excluded from worker spawn capacity", async () => {
+	it("verification reviewer entries are excluded from worker spawn capacity", async () => {
 		clearTeamStore();
 		const goal = createMockGoal();
 		const goals = new Map([[goal.id, goal]]);
@@ -300,7 +318,40 @@ describe("TeamManager ghost worker reaping", () => {
 		assert.deepEqual(
 			entry.agents.map((agent: any) => [agent.sessionId, agent.kind]),
 			[["live-reviewer", "reviewer"], [result.sessionId, "worker"]],
-			"live reviewers stay tracked as reviewers while worker capacity is enforced separately",
+			"live verification reviewers stay tracked as reviewers while worker capacity is enforced separately",
+		);
+	});
+
+	it("spawned reviewer-role workers count against worker spawn capacity", async () => {
+		clearTeamStore();
+		const goal = createMockGoal();
+		const goals = new Map([[goal.id, goal]]);
+		const sm = createMockSessionManager(goals);
+		const team = createTeamManager(sm);
+
+		await team.startTeam(goal.id);
+		const entry = team.teams.get(goal.id);
+		entry.maxConcurrent = 1;
+		sm._sessions.set("live-reviewer-worker", makeEventSession("live-reviewer-worker", "streaming"));
+		entry.agents.push({
+			sessionId: "live-reviewer-worker",
+			role: "reviewer",
+			kind: "worker",
+			task: "regular reviewer worker",
+			createdAt: Date.now(),
+		});
+		team.sessionToGoal.set("live-reviewer-worker", goal.id);
+		team.persistEntry(goal.id);
+
+		await assert.rejects(
+			() => team.spawnRole(goal.id, "coder", "new worker"),
+			/already has 1 agents \(active workers; max: 1\)/,
+			"a normal reviewer-role worker must consume worker capacity",
+		);
+		assert.deepEqual(
+			entry.agents.map((agent: any) => [agent.sessionId, agent.role, agent.kind]),
+			[["live-reviewer-worker", "reviewer", "worker"]],
+			"reviewer-role workers remain tracked as normal workers",
 		);
 	});
 });
