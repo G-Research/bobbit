@@ -1,5 +1,8 @@
+import * as http from 'node:http';
+import * as https from 'node:https';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import type { IncomingHttpHeaders } from 'node:http';
 import type {
   McpServerConfig,
   JsonRpcRequest,
@@ -40,6 +43,25 @@ function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
   if (!error) return 'unknown JSON-RPC error';
   return error.message || JSON.stringify(error);
 }
+
+function responseHeader(headers: IncomingHttpHeaders, name: string): string {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value.join(', ');
+  return value ?? '';
+}
+
+class HttpRequestTimeoutError extends Error {
+  constructor(serverName: string, method: string) {
+    super(`[mcp:${serverName}] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${method}`);
+    this.name = 'HttpRequestTimeoutError';
+  }
+}
+
+type NativeHttpResponse = {
+  statusCode: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+};
 
 type PendingRequest = {
   resolve: (response: JsonRpcResponse) => void;
@@ -328,6 +350,59 @@ export class McpClient {
     this._log('Connected (HTTP)');
   }
 
+  private _postHttpJson(url: string, headers: Record<string, string>, body: string, method: string): Promise<NativeHttpResponse> {
+    return new Promise((resolve, reject) => {
+      const endpoint = new URL(url);
+      const requestFn = endpoint.protocol === 'https:'
+        ? https.request
+        : endpoint.protocol === 'http:'
+          ? http.request
+          : null;
+      if (!requestFn) {
+        reject(new Error(`Unsupported HTTP protocol: ${endpoint.protocol}`));
+        return;
+      }
+
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const settle = (fn: typeof resolve | typeof reject, value: NativeHttpResponse | Error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        (fn as (value: NativeHttpResponse | Error) => void)(value);
+      };
+
+      const req = requestFn(endpoint, {
+        method: 'POST',
+        headers,
+        agent: false,
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on('end', () => {
+          settle(resolve, {
+            statusCode: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+        res.on('error', (err) => settle(reject, err));
+        res.on('aborted', () => settle(reject, new Error('HTTP response aborted')));
+      });
+
+      timer = setTimeout(() => {
+        req.destroy(new HttpRequestTimeoutError(this.serverName, method));
+      }, REQUEST_TIMEOUT_MS);
+      timer.unref?.();
+
+      req.on('error', (err) => settle(reject, err));
+      req.end(body);
+    });
+  }
+
   private async _sendHttpRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
     const url = this._config!.url!;
     const headers: Record<string, string> = {
@@ -337,28 +412,18 @@ export class McpClient {
       ...this._config!.headers,
     };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
+      const response = await this._postHttpJson(url, headers, JSON.stringify(request), request.method);
 
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(`HTTP ${response.status}: ${body.slice(0, 500)}`);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`HTTP ${response.statusCode}: ${response.body.slice(0, 500)}`);
       }
 
-      const contentType = response.headers.get('content-type') || '';
+      const contentType = responseHeader(response.headers, 'content-type');
       if (contentType.includes('text/event-stream')) {
         // SSE response — parse data: lines for JSON-RPC result
-        const text = await response.text();
         let lastData: string | undefined;
-        for (const line of text.split('\n')) {
+        for (const line of response.body.split('\n')) {
           if (line.startsWith('data:')) {
             lastData = line.slice(5).trim();
           }
@@ -373,14 +438,12 @@ export class McpClient {
         return { jsonrpc: '2.0', id: request.id, error: { code: -1, message: 'Empty SSE response' } } as any;
       }
 
-      return await response.json() as JsonRpcResponse;
+      return JSON.parse(response.body) as JsonRpcResponse;
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`[mcp:${this.serverName}] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${request.method}`);
+      if (err instanceof HttpRequestTimeoutError) {
+        throw err;
       }
       throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${err}`);
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -392,24 +455,10 @@ export class McpClient {
       ...this._config!.headers,
     };
 
-    // Notifications don't expect JSON-RPC responses, but the HTTP response still
-    // has to be fully consumed so undici can finish and release its handles.
-    // Cancelling an already-closing response body can race with socket cleanup on
-    // Windows; draining the body lets the transport close cleanly.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(notification),
-        signal: controller.signal,
-      });
-      await response.arrayBuffer().catch(() => undefined);
+      await this._postHttpJson(url, headers, JSON.stringify(notification), notification.method);
     } catch {
       // Ignore errors for notifications
-    } finally {
-      clearTimeout(timer);
     }
   }
 
