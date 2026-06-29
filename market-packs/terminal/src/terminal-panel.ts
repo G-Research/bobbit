@@ -47,6 +47,7 @@ type SessionState = {
 	lastResizeSent?: string;
 	terminalDisposerCount?: number;
 	followOutput: boolean;
+	followDetachedByTouch?: boolean;
 	replayHydrating?: boolean;
 	channel?: HostChannel;
 	disposers: Array<() => void>;
@@ -78,13 +79,13 @@ export default function createTerminalPanel() {
 				const launcherOpening = params?.launcherOpening === true;
 				const autoStartRequested = params?.autoStart === true;
 				const startupError = typeof params?.startupError === "string" && params.startupError ? params.startupError : undefined;
-				// A ready/error marker means the trusted launcher already attempted the
-				// open. On reload/gateway restart, never replay that creation attempt from
-				// restored panel params; v1 should show disconnected and wait for Restart.
+				// A ready/error marker means the launcher already attempted the open. On
+				// reload/gateway restart, never replay that creation attempt from restored
+				// panel params; v1 should show disconnected and wait for Restart.
 				const autoStart = readyId || startupError || (!!launchId && !launcherOpening) ? false : shouldAutoStart(state, autoStartRequested, launchId);
 				const restoredAutoStart = autoStartRequested && !autoStart;
 				const restoredReadyChannel = !!readyId && !autoStart;
-				const restoredStartupFailure = !!startupError && !launcherOpening && (/trusted launcher activation/i.test(startupError) || !!launchId);
+				const restoredStartupFailure = !!startupError && !launcherOpening && !!launchId;
 				const restoredChannel = restoredAutoStart || restoredReadyChannel || restoredStartupFailure;
 				if (readyId && state.channelReadyId !== readyId) {
 					state.channelReadyId = readyId;
@@ -278,8 +279,7 @@ async function startTerminal(state: SessionState, fromButton: boolean): Promise<
 		});
 		await attachChannel(state, channel, "Terminal attached.");
 	} catch (err) {
-		const msg = messageOf(err, "Terminal failed to start.");
-		setStatus(state, /user gesture/i.test(msg) ? "Press Start to create a terminal." : msg, /user gesture/i.test(msg) ? "idle" : "error");
+		setStatus(state, messageOf(err, "Terminal failed to start."), "error");
 	} finally {
 		state.connecting = false;
 		updateButtons(state);
@@ -317,6 +317,7 @@ function cleanupChannelListeners(state: SessionState): void {
 
 function resetTerminalForAttach(state: SessionState): void {
 	ensureTerminalMounted(state);
+	state.followDetachedByTouch = false;
 	state.followOutput = true;
 	state.term?.reset();
 	state.term?.clear();
@@ -456,6 +457,7 @@ function scrollToBottomNow(state: SessionState): void {
 	} catch {
 		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
 	}
+	state.followDetachedByTouch = false;
 	state.followOutput = true;
 }
 
@@ -480,16 +482,28 @@ function promptPinnedViewportY(term: Terminal, buffer: Terminal["buffer"]["activ
 	return Math.max(0, Math.min(buffer.baseY, cursorLine - term.rows + 1));
 }
 
-function updateFollowOutputFromViewport(state: SessionState): void {
+function updateFollowOutputFromViewport(state: SessionState, opts: { promptPinnedCountsAsBottom?: boolean } = {}): void {
 	const term = state.term;
 	const buffer = term?.buffer?.active;
 	if (!term || !buffer) {
+		state.followDetachedByTouch = false;
 		state.followOutput = true;
 		return;
 	}
 	const atBottom = buffer.viewportY >= buffer.baseY - SCROLL_BOTTOM_EPSILON;
 	const promptPinned = Math.abs(buffer.viewportY - promptPinnedViewportY(term, buffer)) <= SCROLL_BOTTOM_EPSILON;
-	state.followOutput = atBottom || promptPinned;
+	const cursorLine = buffer.baseY + buffer.cursorY;
+	const cursorVisible = cursorLine >= buffer.viewportY && cursorLine <= buffer.viewportY + term.rows - 1;
+	if (atBottom || (opts.promptPinnedCountsAsBottom === true && (promptPinned || cursorVisible))) {
+		state.followDetachedByTouch = false;
+		state.followOutput = true;
+		return;
+	}
+	if (state.followDetachedByTouch) {
+		state.followOutput = false;
+		return;
+	}
+	state.followOutput = promptPinned;
 }
 
 function installTouchScrollBridge(state: SessionState): () => void {
@@ -581,8 +595,11 @@ function scrollTerminalByTouchDelta(state: SessionState, tracking: { lineRemaind
 	tracking.lineRemainder = rawLines - lines;
 	if (lines === 0) return;
 	try {
+		const beforeViewportY = term.buffer.active.viewportY;
 		term.scrollLines(lines);
-		updateFollowOutputFromViewport(state);
+		const afterViewportY = term.buffer.active.viewportY;
+		if (lines < 0 || afterViewportY < beforeViewportY) state.followDetachedByTouch = true;
+		updateFollowOutputFromViewport(state, { promptPinnedCountsAsBottom: lines > 0 || afterViewportY > beforeViewportY });
 	} catch {
 		// Ignore scroll failures from a terminal that is mid-dispose or not fully mounted.
 	}

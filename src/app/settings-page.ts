@@ -5214,7 +5214,7 @@ function renderAgentDirSettingsCard(scanBtnClass: string, actionBtnClass: string
 							placeholder=${s.defaultPath ? `Use default: ${s.defaultPath}` : "Use default"}
 							class="flex-1 min-w-0 px-2 py-1.5 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 							.value=${live(agentDirInput)}
-							@input=${(e: Event) => { agentDirInput = (e.target as HTMLInputElement).value; resetAgentDirFlowState(); }}
+							@input=${(e: Event) => { agentDirInput = (e.target as HTMLInputElement).value; resetAgentDirFlowState(); renderApp(); }}
 							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void saveAgentDirInput(); } }}
 							data-testid="agent-dir-path-input"
 						/>

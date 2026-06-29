@@ -97,7 +97,7 @@ export function sessionAcronym(title: string): string {
  *   When provided, overrides isTeamLead/isCoder. When absent, falls back to
  *   the legacy booleans for backward compatibility.
  */
-export function statusBobbit(status: string, isCompacting = false, sessionId?: string, isSelected = false, isAborting = false, isTeamLead = false, isCoder = false, accessory?: string, noDesaturate = false, unread = false) {
+export function statusBobbit(status: string, isCompacting = false, sessionId?: string, isSelected = false, isAborting = false, isTeamLead = false, isCoder = false, accessory?: string, noDesaturate = false, unread = false, disableIdleBreathing = false) {
 	const hueRotate = sessionId ? sessionHueRotation(sessionId) : 0;
 
 	// Resolve which accessory to render: explicit param > legacy booleans > none
@@ -114,5 +114,6 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		accessory: acc,
 		noDesaturate,
 		unread,
+		disableIdleBreathing,
 	});
 }
