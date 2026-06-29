@@ -202,57 +202,57 @@ export function resolveGrantPolicy(
 	// 1. Role-level tool-specific override (exact tool name match)
 	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
-	// 2. Role-level overrides — prefer the most specific MCP key (tool > group),
-	//    then non-MCP toolGroup. Examples:
-	//      tool name `mcp__gr__ai-adoption__list-articles`
-	//        → tool key `mcp__gr__ai-adoption` beats group key `mcp__gr`.
-	//      tool name `mcp__playwright__snap` (flat)
-	//        → tool=group=`mcp__playwright` (single lookup).
+	// 2. Role-level MCP hierarchy: exact/operation/package/server/wildcard.
 	if (mcpKeys) {
-		if (mcpKeys.tool !== mcpKeys.group && role?.toolPolicies?.[mcpKeys.tool]) {
-			return normalizePolicy(role.toolPolicies[mcpKeys.tool]);
+		if (mcpKeys.operation && mcpKeys.operation !== toolName && role?.toolPolicies?.[mcpKeys.operation]) {
+			return normalizePolicy(role.toolPolicies[mcpKeys.operation]);
 		}
-		if (role?.toolPolicies?.[mcpKeys.group]) return normalizePolicy(role.toolPolicies[mcpKeys.group]);
+		if (mcpKeys.package && role?.toolPolicies?.[mcpKeys.package]) return normalizePolicy(role.toolPolicies[mcpKeys.package]);
+		if (role?.toolPolicies?.[mcpKeys.server]) return normalizePolicy(role.toolPolicies[mcpKeys.server]);
 		// Wildcard MCP key: a bare `mcp__` role key matches EVERY MCP server at once.
-		// Dynamic per-server keys (`mcp__<server>`) use runtime names a static role
-		// file cannot enumerate, so this primitive lets a role deny (or otherwise set)
-		// all MCP servers in one entry. Exact tool/group keys above always take
-		// precedence; this is the catch-all beneath them.
 		if (role?.toolPolicies?.["mcp__"]) return normalizePolicy(role.toolPolicies["mcp__"]);
 	}
 	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
-	// 3. Tool definition default from YAML
+	// 3. Persisted/group MCP hierarchy. This intentionally precedes tool YAML
+	// defaults so an operation-level `never` is authoritative for runtime MCP ops.
+	if (groupPolicyStore && mcpKeys) {
+		if (mcpKeys.operation) {
+			const opGp = groupPolicyStore.getGroupPolicy(mcpKeys.operation);
+			if (opGp) return normalizePolicy(opGp);
+		}
+		if (mcpKeys.package) {
+			const pkgGp = groupPolicyStore.getGroupPolicy(mcpKeys.package);
+			if (pkgGp) return normalizePolicy(pkgGp);
+		}
+		const serverGp = groupPolicyStore.getGroupPolicy(mcpKeys.server);
+		if (serverGp) return normalizePolicy(serverGp);
+		const wildcardGp = groupPolicyStore.getGroupPolicy("mcp__");
+		if (wildcardGp) return normalizePolicy(wildcardGp);
+	}
+
+	// 4. Tool definition default from YAML
 	const toolDef = toolManager?.getToolByName(toolName, scopedContext);
 	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
-	// 4. Group-level default policy — same precedence (tool key > group key).
-	if (groupPolicyStore) {
-		if (mcpKeys) {
-			if (mcpKeys.tool !== mcpKeys.group) {
-				const mcpToolGp = groupPolicyStore.getGroupPolicy(mcpKeys.tool);
-				if (mcpToolGp) return normalizePolicy(mcpToolGp);
-			}
-			const mcpGp = groupPolicyStore.getGroupPolicy(mcpKeys.group);
-			if (mcpGp) return normalizePolicy(mcpGp);
-		}
-		if (toolGroup) {
-			const gp = groupPolicyStore.getGroupPolicy(toolGroup);
-			if (gp) return normalizePolicy(gp);
-		}
+	// 5. Non-MCP group-level default policy.
+	if (groupPolicyStore && !mcpKeys && toolGroup) {
+		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
+		if (gp) return normalizePolicy(gp);
 	}
 
-	// 5. System fallback — always allow
+	// 6. System fallback — always allow
 	return 'allow';
 }
 
 /**
- * Two-level MCP policy keys derived from a tool name. Used by
+ * Hierarchical MCP policy keys derived from a tool name. Used by
  * `resolveGrantPolicy` to consult the most-specific match first.
  *
- *   - `group` covers an entire MCP server (every sub-namespace under it).
- *   - `tool`  covers one sub-namespace meta-tool (or, for flat servers,
- *             equals `group`).
+ *   - `group` / `server` covers an entire MCP server.
+ *   - `package` covers one gateway package/sub-namespace.
+ *   - `operation` covers one concrete MCP operation.
+ *   - `tool` is the back-compat alias for `package ?? group`.
  *
  * Examples (all four name shapes):
  *
@@ -264,31 +264,39 @@ export function resolveGrantPolicy(
  *   | `mcp_playwright` (meta flat)                | `mcp__playwright`  | `mcp__playwright`             |
  */
 export interface McpPolicyKeys {
+	/** Whole MCP server prefix, e.g. `mcp__gr`. */
 	group: string;
+	/** Back-compat alias for `package ?? group`. */
 	tool: string;
+	server: string;
+	package?: string;
+	operation?: string;
 }
 
 /**
- * Compute the `{group, tool}` policy keys for a Bobbit tool name. Returns
+ * Compute hierarchical policy keys for a Bobbit MCP tool name. Returns
  * `undefined` for non-MCP tool names. Single source of truth — callers
  * should not parse MCP names directly.
  */
 export function mcpPolicyKeys(toolName: string): McpPolicyKeys | undefined {
 	if (typeof toolName !== "string" || toolName.length === 0) return undefined;
 
-	// Legacy per-op shape: `mcp__<server>__<rest>`. Use parseMcpToolName so
-	// gateway-style names with a sub-namespace produce the granular tool key.
+	// Per-op shape: `mcp__<server>__<op>` or
+	// `mcp__<server>__<package>__<op>`.
 	if (toolName.startsWith("mcp__")) {
 		const parsed = parseMcpToolName(toolName);
 		if (!parsed) return undefined;
 		const group = `mcp__${parsed.server}`;
-		const tool = parsed.sub ? `mcp__${parsed.server}__${parsed.sub}` : group;
-		return { group, tool };
+		const packageKey = parsed.sub ? `mcp__${parsed.server}__${parsed.sub}` : undefined;
+		const operation = parsed.sub
+			? `mcp__${parsed.server}__${parsed.sub}__${parsed.op}`
+			: `mcp__${parsed.server}__${parsed.op}`;
+		return { group, server: group, tool: packageKey ?? group, ...(packageKey ? { package: packageKey } : {}), operation };
 	}
 
-	// Meta-tool shape: `mcp_<server>` or `mcp_<server>__<sub>` (single
+	// Meta-tool shape: `mcp_<server>` or `mcp_<server>__<package>` (single
 	// underscore prefix). First char after `mcp_` must NOT be `_` — that
-	// would make it the legacy `mcp__…` form already handled above.
+	// would make it the per-op `mcp__…` form already handled above.
 	const meta = toolName.match(/^mcp_([^_][^_]*(?:_[^_][^_]*)*)((?:__.*)?)$/);
 	if (!meta) {
 		// Looser fallback: anything starting with `mcp_` followed by a non-`_` char.
@@ -298,24 +306,28 @@ export function mcpPolicyKeys(toolName: string): McpPolicyKeys | undefined {
 		const idx = rest.indexOf("__");
 		if (idx === -1) {
 			const group = `mcp__${rest}`;
-			return { group, tool: group };
+			return { group, server: group, tool: group };
 		}
 		const server = rest.slice(0, idx);
 		const sub = rest.slice(idx + 2);
 		if (server.length === 0 || sub.length === 0) {
 			const group = `mcp__${rest}`;
-			return { group, tool: group };
+			return { group, server: group, tool: group };
 		}
-		return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+		const group = `mcp__${server}`;
+		const packageKey = `mcp__${server}__${sub}`;
+		return { group, server: group, tool: packageKey, package: packageKey };
 	}
 	const server = meta[1];
 	const tail = meta[2]; // either "" or `__<sub>`
 	if (!tail) {
 		const group = `mcp__${server}`;
-		return { group, tool: group };
+		return { group, server: group, tool: group };
 	}
 	const sub = tail.slice(2);
-	return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+	const group = `mcp__${server}`;
+	const packageKey = `mcp__${server}__${sub}`;
+	return { group, server: group, tool: packageKey, package: packageKey };
 }
 
 /**

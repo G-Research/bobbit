@@ -76,14 +76,28 @@ export class McpContributionValidationError extends Error {
 	}
 }
 
+export interface McpPackOperationMetadata {
+	name: string;
+	label?: string;
+	description?: string;
+}
+
 /** A pack-owned MCP server contribution (mcp/<listName>.yaml|json). */
 export interface McpPackContribution {
 	/** Pack-local activation key from contents.mcp[] and DisabledRefs.mcp. */
 	listName: string;
-	/** Runtime MCP server key in the merged mcpServers map. */
+	/** Public/model-facing MCP server name in mcp__<server>__... tool names. */
 	serverName: string;
+	/** Runtime MCP client key in the merged connection map. Defaults to serverName. */
+	runtimeServerKey?: string;
 	/** Optional model-facing sub-namespace owner for shared MCP clients. */
 	subNamespace?: string;
+	/** Optional enabled operation allow-list after activation has been applied. */
+	selectedOperations?: string[];
+	/** Optional disabled operation list for contribution-scoped activation. */
+	disabledOperations?: string[];
+	/** Optional operation metadata from gateway catalogues. */
+	operationMetadata?: McpPackOperationMetadata[];
 	/** Optional catalogue/display metadata. */
 	label?: string;
 	description?: string;
@@ -656,7 +670,17 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 const MCP_LIST_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MCP_SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
 const WINDOWS_DEVICE_NAME_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
-const MCP_TOP_LEVEL_KEYS = new Set(["server", "label", "description", "subNamespace", "transport"]);
+const MCP_TOP_LEVEL_KEYS = new Set([
+	"server",
+	"runtimeServerKey",
+	"label",
+	"description",
+	"subNamespace",
+	"selectedOperations",
+	"disabledOperations",
+	"operations",
+	"transport",
+]);
 const MCP_STDIO_KEYS = new Set(["type", "command", "args", "env", "cwd"]);
 const MCP_HTTP_KEYS = new Set(["type", "url", "headers"]);
 
@@ -733,6 +757,45 @@ function stringRecord(value: unknown, where: string): Record<string, string> | u
 	return out;
 }
 
+function operationName(value: unknown, where: string): string {
+	if (typeof value !== "string" || value.length === 0 || value.length > 256 || value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+		failMcp(`${where} must be a non-empty operation name`);
+	}
+	return value;
+}
+
+function operationNameArray(value: unknown, where: string): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) failMcp(`${where} must be an array of operation names`);
+	return [...new Set(value.map((item, index) => operationName(item, `${where}[${index}]`)))];
+}
+
+function operationMetadataArray(value: unknown): McpPackOperationMetadata[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) failMcp("operations must be an array");
+	const out: McpPackOperationMetadata[] = [];
+	const seen = new Set<string>();
+	for (let i = 0; i < value.length; i++) {
+		const item = value[i];
+		let entry: McpPackOperationMetadata;
+		if (typeof item === "string") {
+			entry = { name: operationName(item, `operations[${i}]`) };
+		} else if (isPlainObject(item)) {
+			const allowed = new Set(["name", "label", "description"]);
+			ensureOnlyKeys(item, allowed, `operations[${i}]`);
+			entry = { name: operationName(item.name, `operations[${i}].name`) };
+			if (typeof item.label === "string" && item.label.length > 0) entry.label = item.label;
+			if (typeof item.description === "string" && item.description.length > 0) entry.description = item.description;
+		} else {
+			failMcp(`operations[${i}] must be a string or mapping`);
+		}
+		if (seen.has(entry.name)) failMcp(`operations contains duplicate operation ${JSON.stringify(entry.name)}`);
+		seen.add(entry.name);
+		out.push(entry);
+	}
+	return out;
+}
+
 function resolvePackCwd(cwd: unknown, packRoot: string): string | undefined {
 	if (cwd === undefined) return undefined;
 	if (typeof cwd !== "string" || cwd.length === 0) failMcp("transport.cwd must be a non-empty relative string");
@@ -799,10 +862,15 @@ export function normalizeMcpContribution(raw: unknown, opts: NormalizeMcpContrib
 	ensureOnlyKeys(raw, MCP_TOP_LEVEL_KEYS, "MCP contribution");
 	const serverName = raw.server === undefined ? opts.listName : raw.server;
 	if (!isValidMcpServerName(serverName)) failMcp(`invalid MCP server name ${JSON.stringify(serverName)}`);
+	const runtimeServerKey = raw.runtimeServerKey === undefined ? undefined : raw.runtimeServerKey;
+	if (runtimeServerKey !== undefined && !isValidMcpServerName(runtimeServerKey)) failMcp(`invalid MCP runtimeServerKey ${JSON.stringify(runtimeServerKey)}`);
 	const label = optionalString(raw, "label");
 	const description = optionalString(raw, "description");
 	const subNamespace = optionalString(raw, "subNamespace");
 	if (subNamespace !== undefined && !isValidMcpServerName(subNamespace)) failMcp(`invalid MCP subNamespace ${JSON.stringify(subNamespace)}`);
+	const selectedOperations = operationNameArray(raw.selectedOperations, "selectedOperations");
+	const disabledOperations = operationNameArray(raw.disabledOperations, "disabledOperations");
+	const operationMetadata = operationMetadataArray(raw.operations);
 	const contribution: McpPackContribution = {
 		listName: opts.listName,
 		serverName,
@@ -810,9 +878,13 @@ export function normalizeMcpContribution(raw: unknown, opts: NormalizeMcpContrib
 		sourceFile: opts.sourceFile,
 		packRoot: opts.packRoot,
 	};
+	if (runtimeServerKey !== undefined) contribution.runtimeServerKey = runtimeServerKey;
 	if (label !== undefined) contribution.label = label;
 	if (description !== undefined) contribution.description = description;
 	if (subNamespace !== undefined) contribution.subNamespace = subNamespace;
+	if (selectedOperations !== undefined) contribution.selectedOperations = selectedOperations;
+	if (disabledOperations !== undefined) contribution.disabledOperations = disabledOperations;
+	if (operationMetadata !== undefined) contribution.operationMetadata = operationMetadata;
 	return contribution;
 }
 
