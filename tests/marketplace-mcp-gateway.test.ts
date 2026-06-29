@@ -4,6 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import type { Socket } from "node:net";
 import { parse } from "yaml";
 
 const {
@@ -33,7 +34,9 @@ type MockGatewayOptions = { toolsListError?: { code: number; message: string; da
 
 async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>, opts: MockGatewayOptions = {}): Promise<void> {
 	const requests: MockGatewayRequest[] = [];
+	const sockets = new Set<Socket>();
 	const server = http.createServer(async (req, res) => {
+		res.setHeader("connection", "close");
 		const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
 		requests.push({ method: req.method, path });
 		if (path === "/signin/aigateway") {
@@ -61,6 +64,11 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 		for await (const chunk of req) body += chunk;
 		const message = JSON.parse(body || "{}");
 		requests[requests.length - 1].rpcMethod = message.method;
+		if (message.method === "notifications/initialized") {
+			res.writeHead(202, { "content-type": "application/json" });
+			res.end();
+			return;
+		}
 		if (message.method === "initialize") {
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(JSON.stringify({
@@ -96,12 +104,21 @@ async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockG
 		res.writeHead(200, { "content-type": "application/json" });
 		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
 	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = (server.address() as { port: number }).port;
 	try {
 		await fn({ url: `http://127.0.0.1:${port}/readonly/mcp`, requests });
 	} finally {
-		await new Promise<void>((resolve) => server.close(() => resolve()));
+		server.closeIdleConnections?.();
+		await new Promise<void>((resolve, reject) => {
+			server.close((err) => err ? reject(err) : resolve());
+			server.closeAllConnections?.();
+			for (const socket of sockets) socket.destroy();
+		});
 	}
 }
 

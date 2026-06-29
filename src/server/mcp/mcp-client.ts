@@ -392,13 +392,16 @@ export class McpClient {
       ...this._config!.headers,
     };
 
-    // Fire and forget — notifications don't expect responses
+    // Notifications don't expect responses, but still drain the response body.
+    // Leaving undici responses unread can keep HTTP handles alive after short-lived
+    // test servers close, especially on Windows under the full unit suite.
     try {
-      await fetch(url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(notification),
       });
+      await response.body?.cancel().catch(() => undefined);
     } catch {
       // Ignore errors for notifications
     }
