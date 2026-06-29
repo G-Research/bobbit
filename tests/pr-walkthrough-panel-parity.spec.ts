@@ -334,7 +334,7 @@ test.beforeAll(() => {
 });
 
 async function loadFixture(page: any) {
-	await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><title>PR Walkthrough Panel Parity</title></head><body><div id="root"></div></body></html>`);
+	await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><title>PR Walkthrough Panel Parity</title><style>:root{--background:#0d1117;--foreground:#f0f6fc;--card:#161b22;--muted-foreground:#8b949e;--border:#30363d;--primary:#2f81f7;--primary-foreground:#ffffff;--positive:#3fb950;--negative:#f85149;--warning:#d29922;--info:#58a6ff;--chart-1:#58a6ff;--chart-2:#a5d6ff;--chart-3:#d2a8ff;--chart-4:#ff7b72;--chart-5:#ffa657;--chart-6:#7ee787;}</style></head><body><div id="root"></div></body></html>`);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
 }
@@ -916,6 +916,25 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		const paired = firstBlock.locator('.split-row:has(.diff-line[data-line-id="L17"]):has(.diff-line[data-line-id="L18"])').first();
 		await expect(paired.locator('.diff-line.del .line-text')).toContainText('renderCompactDiff(block);');
 		await expect(paired.locator('.diff-line.add .line-text')).toContainText('renderReferenceDiff(block, diffMode);');
+		const diffColors = await paired.evaluate((row) => {
+			const read = (selector: string) => {
+				const el = row.querySelector(selector);
+				if (!el) throw new Error(`missing ${selector}`);
+				const style = getComputedStyle(el as HTMLElement);
+				return { color: style.color, background: style.backgroundColor };
+			};
+			return {
+				addText: read('.diff-line.add .line-text'),
+				addGutter: read('.diff-line.add .line-no'),
+				delText: read('.diff-line.del .line-text'),
+				delGutter: read('.diff-line.del .line-no'),
+			};
+		});
+		expect(diffColors.addText.color, 'added code text must keep the normal syntax foreground, not turn green').toBe(diffColors.delText.color);
+		expect(diffColors.addGutter.background, 'GitHub-style added gutter should be highlighted separately from the code cell').not.toBe(diffColors.addText.background);
+		expect(diffColors.delGutter.background, 'GitHub-style deleted gutter should be highlighted separately from the code cell').not.toBe(diffColors.delText.background);
+		await expect(paired.locator('.diff-line.add .diff-word'), 'added lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
+		await expect(paired.locator('.diff-line.del .diff-word'), 'deleted lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
 		await expect(paired.locator('.diff-line.del .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
 		await expect(paired.locator('.diff-line.add .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
 

@@ -647,14 +647,10 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	// must be preserved so lower activation sees zero tools — never widened back
 	// to the general/role default on first spawn.
 	if (effectiveAllowedTools === undefined && ctx.roleManager) {
-		// Use cascade-resolved role when a projectId is available
+		// Use cascade-resolved role first, including server-scope market-pack roles
+		// when no projectId is present.
 		const roleName = plan.roleName || "general";
-		let role = ctx.roleManager.getRole(roleName);
-		if (plan.projectId && ctx.configCascade) {
-			const resolved = ctx.configCascade.resolveRoles(plan.projectId);
-			const match = resolved.find(r => r.item.name === roleName);
-			if (match) role = match.item;
-		}
+		const role = lookupRole(roleName, plan, ctx);
 		if (role && ctx.toolManager) {
 			effectiveAllowedTools = computeEffectiveAllowedTools(
 				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
@@ -684,7 +680,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 /** Look up a role by name, preferring the cascade-resolved version when available. */
 function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext): import("./role-store.js").Role | undefined {
-	if (plan.projectId && ctx.configCascade) {
+	if (ctx.configCascade) {
 		const resolved = ctx.configCascade.resolveRoles(plan.projectId);
 		const match = resolved.find(r => r.item.name === name);
 		if (match) return match.item;

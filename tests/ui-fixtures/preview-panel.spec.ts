@@ -101,6 +101,13 @@ async function sidePanelControlTitles(page: Page): Promise<string[]> {
 	});
 }
 
+async function expectSidePanelControlTitles(page: Page, expected: string[], message: string): Promise<void> {
+	await expect.poll(async () => sidePanelControlTitles(page), {
+		timeout: 5_000,
+		message,
+	}).toEqual(expected);
+}
+
 test.describe("Preview panel fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
@@ -125,12 +132,12 @@ test.describe("Preview panel fixture", () => {
 		expect(await openLink.getAttribute("href")).not.toMatch(/[?#]mtime=/);
 		await expect(page.getByTestId("side-panel-popout"), "preview tab should not render the generic side-panel popout").toHaveCount(0);
 
-		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+		await expectSidePanelControlTitles(page, [
 			"Refresh preview",
 			"Open preview in new tab",
 			"Expand preview to fullscreen",
 			"Collapse side panel",
-		]);
+		], "preview split controls should appear in stable action order");
 
 		const refresh = page.locator('button[title="Refresh preview"]').first();
 		await expect(refresh).toBeVisible();
@@ -147,11 +154,11 @@ test.describe("Preview panel fixture", () => {
 		await expect(page.getByTestId("side-panel-restore"), "fullscreen chrome should not show a duplicate restore/collapse button").toHaveCount(0);
 		await expect(openLink, "Open-in-new-tab remains available in fullscreen chrome").toBeVisible({ timeout: 5_000 });
 		await expect(refresh, "Refresh remains available in fullscreen chrome").toBeVisible({ timeout: 5_000 });
-		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+		await expectSidePanelControlTitles(page, [
 			"Refresh preview",
 			"Open preview in new tab",
 			"Collapse to split view",
-		]);
+		], "preview fullscreen controls should appear in stable action order");
 
 		await refresh.click();
 		await expect.poll(async () => iframe.getAttribute("src"), {
@@ -162,20 +169,20 @@ test.describe("Preview panel fixture", () => {
 
 	test("uses the same action order for preview and non-preview panel tabs", async ({ page }) => {
 		await setLivePreview(page, "order.html", hashOf("e"), "preview order");
-		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+		await expectSidePanelControlTitles(page, [
 			"Refresh preview",
 			"Open preview in new tab",
 			"Expand preview to fullscreen",
 			"Collapse side panel",
-		]);
+		], "preview controls should appear in stable action order");
 
 		await page.evaluate(() => (window as any).__openDynamicReviewDoc({ title: "Review panel", markdown: "# Review panel" }));
 		await expect(page.getByTestId("side-panel-popout")).toBeVisible({ timeout: 5_000 });
-		await expect(sidePanelControlTitles(page)).resolves.toEqual([
+		await expectSidePanelControlTitles(page, [
 			"Open side panel in new tab",
 			"Expand side panel to fullscreen",
 			"Collapse side panel",
-		]);
+		], "non-preview controls should appear in stable action order");
 	});
 
 	test("visible side-panel controls move one size level at a time", async ({ page }) => {

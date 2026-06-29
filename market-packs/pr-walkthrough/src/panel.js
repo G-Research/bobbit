@@ -741,7 +741,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	const openLine = (event, entry, host, paramKey, key, draft) => { if (event) event.stopPropagation(); openLineComment(entry, host, paramKey, key, draft); };
 	const onLineKey = (event, entry, host, paramKey, key) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openLineComment(entry, host, paramKey, key); } };
 
-	const renderHighlightedLine = (text) => {
+	const renderSyntaxTokens = (text) => {
 		const source = asText(text);
 		const tokenPattern = /(\/\/.*$|`(?:\\.|[^`])*`|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\b(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\()|\b[A-Za-z_$][\w$]*(?=\??\s*:))/g;
 		const parts = [];
@@ -755,6 +755,40 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			last = index + token.length;
 		}
 		if (last < source.length) parts.push(html`${source.slice(last)}`);
+		return parts;
+	};
+	const changedRangeForPair = (line, peer) => {
+		if (!line || !peer) return [];
+		const kind = normKind(line);
+		const peerKind = normKind(peer);
+		if (!((kind === "add" && peerKind === "del") || (kind === "del" && peerKind === "add"))) return [];
+		const text = asText(line.text);
+		const other = asText(peer.text);
+		let start = 0;
+		while (start < text.length && start < other.length && text[start] === other[start]) start += 1;
+		let end = text.length;
+		let otherEnd = other.length;
+		while (end > start && otherEnd > start && text[end - 1] === other[otherEnd - 1]) {
+			end -= 1;
+			otherEnd -= 1;
+		}
+		return end > start ? [{ start, end }] : [];
+	};
+	const renderHighlightedLine = (text, ranges = []) => {
+		const source = asText(text);
+		const normalized = arrayOf(ranges)
+			.map((range) => ({ start: Math.max(0, Math.min(source.length, Number(range.start) || 0)), end: Math.max(0, Math.min(source.length, Number(range.end) || 0)) }))
+			.filter((range) => range.end > range.start)
+			.sort((a, b) => a.start - b.start);
+		if (!normalized.length) return renderSyntaxTokens(source);
+		const parts = [];
+		let cursor = 0;
+		for (const range of normalized) {
+			if (range.start > cursor) parts.push(html`${renderSyntaxTokens(source.slice(cursor, range.start))}`);
+			parts.push(html`<span class="diff-word">${renderSyntaxTokens(source.slice(range.start, range.end))}</span>`);
+			cursor = range.end;
+		}
+		if (cursor < source.length) parts.push(html`${renderSyntaxTokens(source.slice(cursor))}`);
 		return parts;
 	};
 
@@ -816,13 +850,13 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return suggestions.length || comments !== nothing ? html`${suggestions.length ? html`<div class="suggestions">${suggestions.map((suggestion) => renderSuggestion(entry, host, paramKey, key, line, suggestion))}</div>` : nothing}${comments}` : nothing;
 	};
 
-	const renderDiffLine = (entry, host, paramKey, card, block, line, side) => {
+	const renderDiffLine = (entry, host, paramKey, card, block, line, side, peer) => {
 		if (!line) return html`<div class="diff-line empty" aria-hidden="true"><span></span><span></span><span></span><span></span></div>`;
 		const key = lineKey(card, block, line);
 		const kind = normKind(line);
 		const commented = commentsForLineKey(entry, key).length > 0;
 		const number = lineNo(line, side);
-		return html`<div class=${`diff-line ${kind} ${commented ? "commented" : ""} ${(entry.lineCommentOpen || {})[key] ? "editing" : ""}`} data-testid="pr-walkthrough-diff-line" data-line-id=${lineId(line)} data-line-kind=${kind} data-line-side=${asText(line && line.side, side)} data-old-line=${asText(line && line.oldLine, "")} data-new-line=${asText(line && line.newLine, "")} role="button" tabindex="0" aria-label=${`Comment on ${asText(block && (block.filePath || block.path), "diff")} line ${number || "context"}`} @click=${() => openLineComment(entry, host, paramKey, key)} @keydown=${(event) => onLineKey(event, entry, host, paramKey, key)}><span class="line-no">${number}</span><span class="prefix">${kind === "add" ? "+" : kind === "del" ? "−" : " "}</span><span class="line-text">${renderHighlightedLine(line && line.text)}</span><button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" aria-label="Add line comment" @click=${(event) => openLine(event, entry, host, paramKey, key)}>+</button></div>`;
+		return html`<div class=${`diff-line ${kind} ${commented ? "commented" : ""} ${(entry.lineCommentOpen || {})[key] ? "editing" : ""}`} data-testid="pr-walkthrough-diff-line" data-line-id=${lineId(line)} data-line-kind=${kind} data-line-side=${asText(line && line.side, side)} data-old-line=${asText(line && line.oldLine, "")} data-new-line=${asText(line && line.newLine, "")} role="button" tabindex="0" aria-label=${`Comment on ${asText(block && (block.filePath || block.path), "diff")} line ${number || "context"}`} @click=${() => openLineComment(entry, host, paramKey, key)} @keydown=${(event) => onLineKey(event, entry, host, paramKey, key)}><span class="line-no">${number}</span><span class="prefix">${kind === "add" ? "+" : kind === "del" ? "−" : " "}</span><span class="line-text">${renderHighlightedLine(line && line.text, changedRangeForPair(line, peer))}</span><button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" aria-label="Add line comment" @click=${(event) => openLine(event, entry, host, paramKey, key)}>+</button></div>`;
 	};
 
 	const hunkSignature = (header) => {
@@ -926,7 +960,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const next = entries[index + 1] && entries[index + 1].kind === "context" ? entries[index + 1] : undefined;
 		const above = prev && prev.canExpandAbove ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, prev, "above") : nothing;
 		const below = next && next.canExpandBelow ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, next, "below") : nothing;
-		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${sidePairs(part.lines).map((pair) => html`<div class="split-row">${renderDiffLine(entry, host, paramKey, card, block, pair.left, "old")}${renderDiffLine(entry, host, paramKey, card, block, pair.right, "new")}</div>${pair.left && pair.right && lineId(pair.left) === lineId(pair.right) ? renderLineDetails(entry, host, paramKey, card, block, pair.left) : html`${renderLineDetails(entry, host, paramKey, card, block, pair.left)}${renderLineDetails(entry, host, paramKey, card, block, pair.right)}`}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
+		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${sidePairs(part.lines).map((pair) => html`<div class="split-row">${renderDiffLine(entry, host, paramKey, card, block, pair.left, "old", pair.right)}${renderDiffLine(entry, host, paramKey, card, block, pair.right, "new", pair.left)}</div>${pair.left && pair.right && lineId(pair.left) === lineId(pair.right) ? renderLineDetails(entry, host, paramKey, card, block, pair.left) : html`${renderLineDetails(entry, host, paramKey, card, block, pair.left)}${renderLineDetails(entry, host, paramKey, card, block, pair.right)}`}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
 	})}`;
 	const renderInlineHunk = (entry, host, paramKey, card, block, hunk, hunkIndex) => html`${diffEntries(entry, card, block, hunk, hunkIndex).map((part, index, entries) => {
 		if (part.kind === "context") return nothing;
@@ -1622,15 +1656,24 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info) 10%, transparent); color: var(--muted-foreground); }
 					.prw-root .context-toggle:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 18%, transparent); }
 					.prw-root .context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.prw-root .diff-line { position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: transparent; }
+					.prw-root .diff-line { --diff-line-bg: transparent; --diff-gutter-bg: transparent; position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: var(--diff-line-bg); }
 					.prw-root .diff-line.empty { pointer-events: none; color: transparent; }
-					.prw-root .diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
-					.prw-root .diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
-					.prw-root .diff-line:hover, .prw-root .diff-line:focus-visible { outline: none; background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
+					.prw-root .diff-line.add { --diff-line-bg: color-mix(in oklch, var(--positive) 12%, transparent); --diff-gutter-bg: color-mix(in oklch, var(--positive) 30%, transparent); }
+					.prw-root .diff-line.del { --diff-line-bg: color-mix(in oklch, var(--negative) 12%, transparent); --diff-gutter-bg: color-mix(in oklch, var(--negative) 30%, transparent); }
+					.prw-root .diff-line:hover, .prw-root .diff-line:focus-visible { outline: none; --diff-line-bg: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
 					.prw-root .diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary); font-size: 8px; }
 					.prw-root .line-no, .prw-root .prefix, .prw-root .comment-cue { padding: 3px 6px; color: var(--muted-foreground); user-select: none; }
+					.prw-root .line-no, .prw-root .prefix { background: var(--diff-gutter-bg); }
+					.prw-root .diff-line.add .line-no, .prw-root .diff-line.add .prefix, .prw-root .diff-line.del .line-no, .prw-root .diff-line.del .prefix { color: var(--foreground); }
 					.prw-root .line-no { position: relative; text-align: right; }
-					.prw-root .line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+					.prw-root .line-text { min-width: 0; padding: 3px 8px; color: var(--foreground); background: var(--diff-line-bg); white-space: pre-wrap; overflow-wrap: anywhere; }
+					.prw-root .diff-line.add .line-text { background: color-mix(in oklch, var(--positive) 12%, transparent); }
+					.prw-root .diff-line.add .line-no, .prw-root .diff-line.add .prefix { background: color-mix(in oklch, var(--positive) 30%, transparent); }
+					.prw-root .diff-line.del .line-text { background: color-mix(in oklch, var(--negative) 12%, transparent); }
+					.prw-root .diff-line.del .line-no, .prw-root .diff-line.del .prefix { background: color-mix(in oklch, var(--negative) 30%, transparent); }
+					.prw-root .diff-word { border-radius: 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+					.prw-root .diff-line.add .diff-word { background: color-mix(in oklch, var(--positive) 34%, transparent); }
+					.prw-root .diff-line.del .diff-word { background: color-mix(in oklch, var(--negative) 34%, transparent); }
 					.prw-root .comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary); color: var(--primary-foreground); line-height: 18px; font-weight: 800; opacity: 0; font-family: inherit; }
 					.prw-root .diff-line:hover .comment-cue, .prw-root .diff-line:focus-visible .comment-cue, .prw-root .diff-line.editing .comment-cue, .prw-root .diff-line.commented .comment-cue { opacity: 1; }
 					.prw-root .line-comments, .prw-root .line-editor, .prw-root .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, var(--background)); }
@@ -1703,7 +1746,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .header-meta { min-width: 0; max-width: 100%; display: flex; gap: 8px; margin-top: 3px; overflow: hidden; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 					.prw-root .header-meta span { flex: 0 0 auto; }
 					.prw-root .header-meta span:last-child { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
-					.prw-root .add { color: var(--positive); } .del { color: var(--negative); }
+					.prw-root :where(.header-meta, .guide-stats, .diff-breakdown-row, .diff-counts) .add { color: var(--positive); }
+					.prw-root :where(.header-meta, .guide-stats, .diff-breakdown-row, .diff-counts) .del { color: var(--negative); }
 					.prw-root .github-link { display: none; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
 					.prw-root .github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 					.prw-root .progress-wrap { grid-area: progress; align-self: stretch; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.15; }

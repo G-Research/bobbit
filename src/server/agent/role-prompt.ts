@@ -4,7 +4,17 @@ import type { RoleManager } from "./role-manager.js";
 import type { PersistedStaff } from "./staff-store.js";
 
 interface RoleLike {
+	name?: string;
 	promptTemplate?: string;
+	accessory?: string;
+}
+
+type RoleResolver = (roleName: string, projectId?: string) => RoleLike | undefined;
+type RoleManagerWithResolver = RoleManager & { resolveRoleForProject?: RoleResolver };
+
+function resolverFromRoleManager(roleManager?: RoleManager): RoleResolver | undefined {
+	const maybeResolver = (roleManager as RoleManagerWithResolver | undefined)?.resolveRoleForProject;
+	return typeof maybeResolver === "function" ? maybeResolver.bind(roleManager) : undefined;
 }
 
 interface RoleSource {
@@ -58,10 +68,12 @@ export function resolveRolePrompt(
 export function buildStaffSystemPrompt(
 	staff: PersistedStaff,
 	roleManager?: RoleManager,
+	resolveRole?: RoleResolver,
 ): string {
 	let prompt = "";
-	if (staff.roleId && roleManager) {
-		const role = roleManager.getRole(staff.roleId);
+	if (staff.roleId) {
+		const cascadeResolver = resolveRole ?? resolverFromRoleManager(roleManager);
+		const role = cascadeResolver?.(staff.roleId, staff.projectId) ?? roleManager?.getRole(staff.roleId);
 		const rolePrompt = resolveRolePrompt(role, {
 			branch: staff.branch,
 			agentId: `staff-${staff.id.slice(0, 8)}`,
@@ -101,6 +113,8 @@ export function buildRestoreRolePrompt(
 		 * view so project-scoped `promptTemplate` overrides survive a restart.
 		 */
 		resolveTemplate?: (roleName: string, projectId?: string) => string | undefined;
+		/** Optional cascade-first full-role resolver for pack-contributed roles. */
+		resolveRole?: RoleResolver;
 		/** System-scope subgoals feature flag — gates `{if:subGoalsEnabled}` blocks. */
 		subGoalsEnabled?: boolean;
 	},
@@ -108,11 +122,13 @@ export function buildRestoreRolePrompt(
 	if (ps.staffId && ctx.getStaff) {
 		const staff = ctx.getStaff(ps.staffId);
 		if (staff) {
-			return { rolePrompt: buildStaffSystemPrompt(staff, ctx.roleManager), roleName: staff.roleId };
+			return { rolePrompt: buildStaffSystemPrompt(staff, ctx.roleManager, ctx.resolveRole), roleName: staff.roleId };
 		}
 	}
+	const cascadeResolver = ctx.resolveRole ?? resolverFromRoleManager(ctx.roleManager);
 	const template = ps.role
 		? (ctx.resolveTemplate?.(ps.role, ps.projectId)
+			?? cascadeResolver?.(ps.role, ps.projectId)?.promptTemplate
 			?? (ctx.roleManager ? ctx.roleManager.getRole(ps.role)?.promptTemplate : undefined))
 		: undefined;
 	const rolePrompt = resolveRolePrompt(template ? { promptTemplate: template } : undefined, {
