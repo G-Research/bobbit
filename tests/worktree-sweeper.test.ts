@@ -146,6 +146,22 @@ branch refs/heads/session/new-session-deadbeef
 		assert.equal(out.active[0].path, "/tmp/repo-wt/session-cwd-owned");
 		assert.equal(out.orphan.length, 0);
 	});
+
+	it("protects durable team-owned worktrees and branches", () => {
+		const out = classifyWorktrees({
+			porcelainStdout: `worktree /tmp/repo-wt/team-agent\nbranch refs/heads/session/team-agent\n\nworktree /tmp/repo-wt/team-lead\nbranch refs/heads/goal/team-lead\n`,
+			repoPath: REPO,
+			goals: [],
+			sessions: [],
+			teams: [
+				{ id: "agent", branch: "session/team-agent", worktreePath: "/tmp/repo-wt/team-agent" },
+				{ id: "lead", branch: "goal/team-lead", worktreePath: "/tmp/repo-wt/team-lead", archived: true },
+			],
+			staff: [],
+		});
+		assert.equal(out.active.length, 2);
+		assert.deepEqual(out.orphan.map(w => w.branch), []);
+	});
 });
 
 describe("worktree-sweeper.sweepOrphanedWorktrees", () => {

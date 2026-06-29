@@ -8,6 +8,7 @@ import type { SessionManager, ArchivedSessionWorktreeGroup, ArchivedSessionWorkt
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedStaff } from "./staff-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
+import type { PersistedSession } from "./session-store.js";
 import type { Component } from "./project-config-store.js";
 import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
@@ -707,24 +708,90 @@ export class WorktreeInventoryService {
 	}
 
 	private async addArchivedCandidates(repos: RepoDescriptor[], candidates: Map<string, Candidate>): Promise<void> {
-		let archived: ArchivedSessionWorktreeScanResponse;
-		try { archived = await this.deps.sessionManager.listArchivedSessionWorktrees(true); } catch { return; }
-		for (const item of archived.items) {
-			const repo = repos.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) || (candidate.projectId === item.projectId && candidate.repo === item.repo))
-				?? { projectId: item.projectId ?? "", projectName: item.projectName ?? "Unknown project", repo: item.repo, repoPath: item.repoPath, worktreeRoot: item.path ? path.dirname(item.path) : undefined, components: [], primary: item.repo === "." } as RepoDescriptor;
-			const key = item.path ? `${repo.projectId}|${repo.repo}|${norm(item.path) ?? item.path}` : `archived|${item.key}`;
-			let c = candidates.get(key);
-			if (!c) {
-				c = { projectId: repo.projectId, projectName: repo.projectName, repo: repo.repo, repoPath: item.repoPath, worktreeRoot: repo.worktreeRoot, path: item.path, branch: item.branch, sources: new Set(), owners: [], pathExists: item.pathExists, gitWorktreeMetadataExists: item.gitWorktreeMetadataExists };
-				candidates.set(key, c);
+		for (const ctx of this.deps.projectContextManager.visible()) {
+			for (const session of ctx.sessionStore.getArchived() as PersistedSession[]) {
+				const projectName = ctx.project.name;
+				for (const item of this.archivedItemsForSession(session, projectName)) {
+					const repo = repos.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) || (candidate.projectId === item.projectId && candidate.repo === item.repo))
+						?? { projectId: item.projectId ?? ctx.project.id, projectName: item.projectName ?? projectName, repo: item.repo, repoPath: item.repoPath, worktreeRoot: item.path ? path.dirname(item.path) : undefined, components: [], primary: item.repo === "." } as RepoDescriptor;
+					const key = item.path ? `${repo.projectId}|${repo.repo}|${norm(item.path) ?? item.path}` : `archived|${item.key}`;
+					let c = candidates.get(key);
+					if (!c) {
+						c = { projectId: repo.projectId, projectName: item.projectName ?? projectName, repo: repo.repo, repoPath: item.repoPath, worktreeRoot: repo.worktreeRoot, path: item.path, branch: item.branch, sources: new Set(), owners: [], pathExists: this.exists(item.path), gitWorktreeMetadataExists: false };
+						candidates.set(key, c);
+					}
+					c.sources.add("archived-session");
+					c.owners.push({ type: "archived-session", id: item.sessionId, archived: true, title: item.title });
+					const gitMetadataMatchesArchivedRecord = c.gitWorktreeMetadataExists && (!item.branch || c.branch === item.branch);
+					c.branch = c.branch ?? item.branch;
+					c.pathExists = this.exists(item.path);
+					c.gitWorktreeMetadataExists = gitMetadataMatchesArchivedRecord;
+					c.legacyArchived = { ...item, pathExists: c.pathExists, gitWorktreeMetadataExists: gitMetadataMatchesArchivedRecord };
+				}
 			}
-			c.sources.add("archived-session");
-			c.owners.push({ type: "archived-session", id: item.sessionId, archived: true, title: item.title });
-			c.branch = c.branch ?? item.branch;
-			c.pathExists = item.pathExists;
-			c.gitWorktreeMetadataExists = item.gitWorktreeMetadataExists;
-			c.legacyArchived = item;
 		}
+	}
+
+	private archivedItemsForSession(ps: PersistedSession, projectName?: string): ArchivedSessionWorktreeItem[] {
+		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }> = [];
+		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
+			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) specs.push({ repo, repoPath: ps.repoPath ? (repo === "." ? ps.repoPath : path.join(ps.repoPath, repo)) : undefined, worktreePath: wt, branch: ps.branch, source: "repoWorktrees" });
+		} else {
+			specs.push({ repo: ".", repoPath: ps.repoPath, worktreePath: ps.worktreePath, branch: ps.branch, source: "sessionWorktree" });
+		}
+		return specs.map(spec => this.archivedItemSkeleton(ps, spec, projectName));
+	}
+
+	private archivedItemSkeleton(ps: PersistedSession, spec: { repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }, projectName?: string): ArchivedSessionWorktreeItem {
+		const key = this.archivedWorktreeKey(ps.id, spec.repo, spec.worktreePath);
+		const repoDisplayName = spec.repo === "." ? (projectName ?? (spec.repoPath ? path.basename(spec.repoPath) : ".")) : spec.repo;
+		return {
+			key,
+			sessionId: ps.id,
+			title: ps.title,
+			archivedAt: ps.archivedAt,
+			projectId: ps.projectId,
+			projectName,
+			goalId: ps.goalId,
+			teamGoalId: ps.teamGoalId,
+			delegateOf: ps.delegateOf,
+			parentSessionId: ps.parentSessionId,
+			childKind: ps.childKind,
+			sandboxed: ps.sandboxed,
+			repo: spec.repo,
+			repoPath: spec.repoPath ?? "",
+			repoDisplayName,
+			path: spec.worktreePath ?? "",
+			branch: spec.branch,
+			source: spec.source,
+			pathExists: this.exists(spec.worktreePath),
+			gitWorktreeMetadataExists: false,
+			localBranchExists: false,
+			status: "skipped",
+			reason: "scan-error",
+			detail: "Pending unified inventory classification.",
+			willDeleteBranch: false,
+			disposition: "ineligible",
+			reasonCategory: "error",
+			actionable: false,
+			selectable: false,
+			defaultSelected: false,
+			selectionCategories: this.archivedSelectionCategories(ps, spec.source),
+		};
+	}
+
+	private archivedWorktreeKey(sessionId: string, repo: string, worktreePath: string | undefined): string {
+		return `${sessionId}:${repo}:${norm(worktreePath) ?? ""}`;
+	}
+
+	private archivedSelectionCategories(ps: PersistedSession, source: "repoWorktrees" | "sessionWorktree"): ArchivedWorktreeSelectionCategory[] {
+		const categories: ArchivedWorktreeSelectionCategory[] = ["archived-session"];
+		if (ps.goalId) categories.push("goal-session");
+		if (ps.teamGoalId) categories.push("team-session");
+		if (ps.delegateOf) categories.push("delegate-session");
+		if (ps.parentSessionId || ps.childKind) categories.push("child-session");
+		categories.push(source === "repoWorktrees" ? "multi-repo" : "single-repo");
+		return categories;
 	}
 
 	private buildGuards(): GuardIndexes {
@@ -763,6 +830,8 @@ export class WorktreeInventoryService {
 			for (const goal of ctx.goalStore.getAll() as PersistedGoal[]) addRecord({ ...goal, archived: goal.archived }, "goal");
 			for (const team of ctx.teamStore.getAll() as PersistedTeamEntry[]) {
 				for (const agent of team.agents) addRecord({ id: agent.sessionId, repoPath: ctx.project.rootPath, branch: agent.branch, worktreePath: agent.worktreePath }, "team");
+				const lead = team.teamLeadSessionId && typeof ctx.sessionStore.get === "function" ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+				if (lead) addRecord({ ...lead, archived: false }, "team");
 			}
 			for (const staff of ctx.staffStore.getAll() as PersistedStaff[]) addRecord(staff, "staff");
 		}
@@ -794,14 +863,14 @@ export class WorktreeInventoryService {
 		if (!candidate.repoPath) return { ...item, classification: "scan-error", disposition: "failed", reason: "missing-repo-path", detail: "No repository path is recorded." };
 		if (isContainerInternalWorktreePath(candidate.path)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "sandbox-container-path", detail: "Container-internal paths are not host cleanup targets." };
 		if (candidate.primary || norm(candidate.path) === norm(candidate.repoPath)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "primary-worktree", detail: "Primary repository worktrees are never cleanup targets." };
+		if (this.isArchivedDelegateSharedCandidate(candidate)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree." };
 		if (liveOwner) return { ...item, classification: "protected-in-use", disposition: "protected", reason: this.ownerReason(liveOwner.type), detail: "A live Bobbit record still references this worktree." };
 		if (candidate.sources.has("pool") || isBobbitPoolBranch(candidate.branch)) return { ...item, classification: "pool-entry", disposition: "needs-attention", reason: "safe-pool-entry", detail: "Pool entries are inventoried for troubleshooting and reclaimed by the worktree pool, not selected by maintenance cleanup." };
+		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: item.branchDeleteBlockedReason === "branch-referenced-by-archived-record" ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another archived record still references the branch." : item.branchDeleteBlockedReason ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another live record still references the branch." : "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true };
 		if (candidate.branch && guards.liveBranches.get(repoKey(candidate.repoPath))?.has(candidate.branch)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "branch-referenced-by-live-record", detail: "A live Bobbit record still references this branch." };
-		if (candidate.legacyArchived) return this.fromLegacyArchived(item, candidate.legacyArchived);
-		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true };
 		if (candidate.gitWorktreeMetadataExists && isBobbitOwnedBranch(candidate.branch)) return { ...item, classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", detail: "Unowned Bobbit git worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, legacy: isLegacySessionOrphanBranch(candidate.branch) ? { ...item.legacy, orphanedWorktree: true } : item.legacy };
 		if (archivedOwner && !candidate.pathExists && !candidate.gitWorktreeMetadataExists) return { ...item, classification: "already-cleaned", disposition: "already-cleaned", reason: "git-worktree-metadata-missing", detail: "Archived-owned worktree is already absent." };
-		return { ...item, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", detail: "Filesystem-only directory under a Bobbit worktree root requires manual attention." };
+		return { ...item, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", detail: archivedOwner ? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories." : "Filesystem-only directory under a Bobbit worktree root requires manual attention." };
 	}
 
 	private async baseItem(candidate: Candidate, guards: GuardIndexes): Promise<WorktreeInventoryItem> {
@@ -835,26 +904,6 @@ export class WorktreeInventoryService {
 		};
 	}
 
-	private fromLegacyArchived(base: WorktreeInventoryItem, legacy: ArchivedSessionWorktreeItem): WorktreeInventoryItem {
-		const reasonMap: Partial<Record<ArchivedSessionWorktreeItem["reason"], WorktreeInventoryReason>> = {
-			"safe-archived-session-worktree": "safe-archived-session-worktree",
-			"already-cleaned": "git-worktree-metadata-missing",
-			"no-worktree-path": "missing-worktree-path",
-			"missing-repo-path": "missing-repo-path",
-			"sandbox-container-path": "sandbox-container-path",
-			"delegate-shared-worktree": "delegate-shared-worktree",
-			"stale-worktree-directory": "filesystem-only-needs-attention",
-			"referenced-by-live-session": "referenced-by-live-session",
-			"referenced-by-live-goal": "referenced-by-live-goal",
-			"referenced-by-live-team": "referenced-by-live-team",
-			"referenced-by-staff": "referenced-by-staff",
-			"scan-error": "git-scan-error",
-		};
-		const classification: WorktreeInventoryClassification = legacy.status === "removable" ? "archived-owned" : legacy.status === "already-cleaned" ? "already-cleaned" : legacy.reason === "stale-worktree-directory" ? "stale-filesystem-only" : legacy.reason === "scan-error" ? "scan-error" : "protected-in-use";
-		const disposition = legacy.disposition === "ready-to-clean" ? "ready-to-clean" : legacy.disposition === "already-cleaned" ? "already-cleaned" : legacy.disposition === "failed" ? "failed" : legacy.disposition === "needs-attention" ? "needs-attention" : "protected";
-		return { ...base, classification, disposition, reason: reasonMap[legacy.reason] ?? "git-scan-error", detail: legacy.detail, actionable: legacy.actionable, selectable: legacy.selectable, defaultSelected: legacy.defaultSelected, willDeleteBranch: legacy.willDeleteBranch, branchDeleteBlockedReason: legacy.branchDeleteBlockedReason };
-	}
-
 	private counts(items: WorktreeInventoryItem[]): WorktreeInventoryReport["counts"] {
 		const counts: WorktreeInventoryReport["counts"] = { total: items.length, readyToClean: 0, protectedInUse: 0, archivedOwned: 0, unownedGitWorktrees: 0, poolEntries: 0, alreadyCleaned: 0, needsAttention: 0, scanErrors: 0, defaultSelected: 0, byClassification: {}, byReason: {}, bySource: {} };
 		for (const item of items) {
@@ -872,6 +921,11 @@ export class WorktreeInventoryService {
 			for (const source of item.sources) counts.bySource[source] = (counts.bySource[source] ?? 0) + 1;
 		}
 		return counts;
+	}
+
+	private isArchivedDelegateSharedCandidate(candidate: Candidate): boolean {
+		const archived = candidate.legacyArchived;
+		return !!archived?.delegateOf && !archived.branch && archived.source === "sessionWorktree";
 	}
 
 	private ownerReason(type: WorktreeInventorySource): WorktreeInventoryReason {

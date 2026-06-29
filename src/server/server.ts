@@ -2924,6 +2924,7 @@ export function createGateway(config: GatewayConfig) {
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepTeams: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
@@ -2947,6 +2948,25 @@ export function createGateway(config: GatewayConfig) {
 									repoWorktrees: s.repoWorktrees,
 								});
 							}
+							for (const team of ctx.teamStore.getAll()) {
+								for (const agent of team.agents) {
+									sweepTeams.push({
+										id: agent.sessionId,
+										branch: agent.branch,
+										worktreePath: agent.worktreePath,
+									});
+								}
+								const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+								if (lead) {
+									sweepTeams.push({
+										id: lead.id,
+										branch: lead.branch,
+										worktreePath: lead.worktreePath,
+										cwd: lead.cwd,
+										repoWorktrees: lead.repoWorktrees,
+									});
+								}
+							}
 							for (const st of ctx.staffStore.getAll()) {
 								sweepStaff.push({
 									id: st.id,
@@ -2962,6 +2982,7 @@ export function createGateway(config: GatewayConfig) {
 							projects: sweepProjects,
 							goals: sweepGoals,
 							sessions: sweepSessions,
+							teams: sweepTeams,
 							staff: sweepStaff,
 						});
 						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);

@@ -1,14 +1,14 @@
 /**
  * Boot-time worktree sweeper.
  *
- * Reconciles on-disk git worktrees against persisted goal/session/staff
+ * Reconciles on-disk git worktrees against persisted goal/session/team/staff
  * records before the worktree pool fills. This catches:
  *
  *   - Pool worktrees that were left behind after a crash and aren't yet
  *     in the in-memory pool (logged for the pool to reclaim itself —
  *     `WorktreePool.reclaimOrphaned` already handles directory-based
  *     reclaim). The sweeper just counts these so they're visible in logs.
- *   - Active session/goal/staff branches with intact worktrees → keep.
+ *   - Active session/goal/team/staff branches with intact worktrees → keep.
  *   - Worktrees on a branch that no live record claims → cleanup.
  *   - A live record whose worktree path differs from git's tracking
  *     (rename-mid-shutdown) → repair via `git worktree repair`.
@@ -107,6 +107,7 @@ export async function sweepOrphanedWorktrees(opts: {
 	projects: SweepProject[];
 	goals: SweepRecord[];
 	sessions: SweepRecord[];
+	teams?: SweepRecord[];
 	staff: SweepRecord[];
 }): Promise<SweepResult> {
 	const diagEnabled = cpuDiagnosticsEnabled();
@@ -129,7 +130,8 @@ export async function sweepOrphanedWorktrees(opts: {
 		const ownedBranches = new Set<string>();
 		const ownedPaths = new Set<string>();
 		const branchToExpectedPath = new Map<string, string>();
-		const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+		const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
+		const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
 		for (const rec of allRecords) {
 			if (rec.archived) continue;
 			if (rec.branch) ownedBranches.add(rec.branch);
@@ -267,6 +269,7 @@ export function classifyWorktrees(opts: {
 	repoPath: string;
 	goals: SweepRecord[];
 	sessions: SweepRecord[];
+	teams?: SweepRecord[];
 	staff: SweepRecord[];
 }): {
 	pool: ParsedWorktree[];
@@ -278,7 +281,8 @@ export function classifyWorktrees(opts: {
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
-	const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+	const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
+	const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
 	for (const rec of allRecords) {
 		if (rec.archived) continue;
 		if (rec.branch) ownedBranches.add(rec.branch);
